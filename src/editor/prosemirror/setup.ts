@@ -12,6 +12,7 @@ import { markdownInputRules } from "./inputrules";
 import { codeHighlightPlugin } from "./code-highlight";
 import { remoteCursorsPlugin } from "./remote-cursors";
 import { richHighlightsPlugin, richSuggestingPlugin, type HighlightHandlers } from "./highlights";
+import { smartPastePlugin } from "./paste";
 import {
   toggleMark,
   setHeadingLevel,
@@ -167,6 +168,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
       markdownBindingPlugin(session.binding),
       richSuggestingPlugin(session),
       markdownInputRules(),
+      smartPastePlugin(session),
       shortcuts,
       keymap(guardedBase),
       dropCursor({ color: "#2563eb", width: 2 }),
