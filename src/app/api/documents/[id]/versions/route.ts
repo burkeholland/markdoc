@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, readJson, requireAccess } from "@/server/http";
+import { handler, json, readJson, requireAccess, actorName } from "@/server/http";
 import { addVersion, listVersions } from "@/server/documents";
 import { readLiveText } from "@/server/livedoc";
 
@@ -26,7 +26,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     kind: "named",
     title: body.title,
     createdBy: user?.id,
-    createdByName: user?.name ?? user?.login,
+    createdByName: actorName(user),
   });
   return json({ version: { ...version, createdAt: version.createdAt.toISOString() } }, { status: 201 });
 });
+

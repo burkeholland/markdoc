@@ -1,6 +1,6 @@
 import { getGitHubToken, updateDocument, addVersion, type SessionUser } from "@/server/documents";
 import type { Document } from "@/server/db/schema";
-import { HttpError } from "@/server/http";
+import { HttpError, actorName } from "@/server/http";
 import {
   githubClient,
   updateGist,
@@ -76,7 +76,7 @@ export async function publishDocument(doc: Document, user: SessionUser, message?
     content,
     kind: "publish",
     createdBy: user.id,
-    createdByName: user.name ?? user.login,
+    createdByName: actorName(user),
     title: message?.trim() || (doc.storage === "gist" ? "Published to gist" : `Committed to ${doc.repoBranch ?? "main"}`),
     commitSha,
   });
@@ -111,7 +111,7 @@ export async function pullDocument(doc: Document, user: SessionUser): Promise<{ 
       content,
       kind: "import",
       createdBy: user.id,
-      createdByName: user.name ?? user.login,
+      createdByName: actorName(user),
       title: "Pulled from GitHub",
     });
   }
@@ -178,7 +178,7 @@ export async function linkDocument(doc: Document, user: SessionUser, input: Link
       description: input.description ?? doc.title,
       isPublic: !!input.isPublic,
     });
-    await addVersion({ documentId: doc.id, content: live.clean, kind: "publish", createdBy: user.id, createdByName: user.name ?? user.login, title: "Published to new gist" });
+    await addVersion({ documentId: doc.id, content: live.clean, kind: "publish", createdBy: user.id, createdByName: actorName(user), title: "Published to new gist" });
     return (await updateDocument(doc.id, {
       storage: "gist",
       gistId: created.gistId,
@@ -216,3 +216,5 @@ function slugFile(title: string): string {
     .replace(/^-+|-+$/g, "");
   return slug || "document";
 }
+
+

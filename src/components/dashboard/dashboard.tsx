@@ -5,7 +5,7 @@ import { Avatar, Dialog, DialogContent, Menu, MenuContent, MenuItem, MenuTrigger
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FilePlus2, GitBranch, HardDrive, Loader2, LogOut, Search, FileText, Users } from "lucide-react";
+import { Bot, FilePlus2, GitBranch, HardDrive, Loader2, LogOut, Search, FileText, Users } from "lucide-react";
 import type { DocumentSummary } from "@/server/documents";
 import { api } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
@@ -93,6 +93,9 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
                   <div className="truncate text-sm font-medium text-ink">{user.name}</div>
                   {user.login && <div className="truncate text-xs text-ink-3">@{user.login}</div>}
                 </div>
+                <MenuItem icon={<Bot size={15} />} onSelect={() => router.push("/settings")}>
+                  Agents &amp; API tokens
+                </MenuItem>
                 <MenuItem icon={<LogOut size={15} />} onSelect={() => navigateTo("/api/auth/signout")}>
                   Sign out
                 </MenuItem>
@@ -187,6 +190,7 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
     </TooltipProvider>
   );
 }
+
 
 
 

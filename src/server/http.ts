@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { auth } from "@/auth";
 import { getDocumentAccess, type DocumentAccess, type SessionUser } from "@/server/documents";
+import { resolveApiToken, looksLikeApiToken } from "@/server/tokens";
 import type { Role } from "@/server/db/schema";
 
 export class HttpError extends Error {
@@ -12,7 +14,26 @@ export class HttpError extends Error {
   }
 }
 
-export async function currentUser(): Promise<SessionUser | null> {
+/** The caller: a signed-in user, or a user acting through an API token (then `agent` is set). */
+export interface Actor extends SessionUser {
+  agent?: string;
+}
+
+/**
+ * Resolve the caller from an `Authorization: Bearer mdk_…` token first, then from the
+ * session cookie. Tokens let agents and scripts act on a user's behalf.
+ */
+export async function currentUser(): Promise<Actor | null> {
+  const h = await headers();
+  const authorization = h.get("authorization");
+  if (authorization?.toLowerCase().startsWith("bearer ")) {
+    const token = authorization.slice(7).trim();
+    if (looksLikeApiToken(token)) {
+      const actor = await resolveApiToken(token);
+      if (!actor) throw new HttpError(401, "Invalid or revoked API token");
+      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent };
+    }
+  }
   const session = await auth();
   if (!session?.user?.id) return null;
   return {
@@ -23,13 +44,20 @@ export async function currentUser(): Promise<SessionUser | null> {
   };
 }
 
-export async function requireUser(): Promise<SessionUser> {
+export async function requireUser(): Promise<Actor> {
   const user = await currentUser();
   if (!user) throw new HttpError(401, "Sign in required");
   return user;
 }
 
-export async function requireAccess(docId: string, minimum: "view" | "comment" | "edit" | "own" = "view"): Promise<DocumentAccess & { user: SessionUser | null }> {
+/** Display name for attribution: "Burke" or "Burke via GitHub Copilot CLI". */
+export function actorName(actor: Actor | null | undefined): string | null {
+  if (!actor) return null;
+  const base = actor.name ?? actor.login ?? "User";
+  return actor.agent ? `${base} via ${actor.agent}` : base;
+}
+
+export async function requireAccess(docId: string, minimum: "view" | "comment" | "edit" | "own" = "view"): Promise<DocumentAccess & { user: Actor | null }> {
   const user = await currentUser();
   const access = await getDocumentAccess(docId, user);
   if (!access) throw new HttpError(user ? 404 : 401, user ? "Document not found" : "Sign in required");

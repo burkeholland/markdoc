@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
+import { handler, json, readJson, requireAccess, HttpError, actorName } from "@/server/http";
 import { addVersion, getVersion } from "@/server/documents";
 import { readLiveText, replaceLiveText } from "@/server/livedoc";
 import { getDb, schema } from "@/server/db";
@@ -45,7 +45,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       kind: "auto",
       title: "Before restore",
       createdBy: user?.id,
-      createdByName: user?.name ?? user?.login,
+      createdByName: actorName(user),
     });
   }
   await replaceLiveText(
@@ -66,7 +66,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     kind: "restore",
     title: `Restored version ${version.number}`,
     createdBy: user?.id,
-    createdByName: user?.name ?? user?.login,
+    createdByName: actorName(user),
   });
   return json({ ok: true, version: { ...restored, createdAt: restored.createdAt.toISOString() } });
 });
@@ -78,3 +78,4 @@ export const DELETE = handler(async (_req: Request, { params }: Params) => {
   await db.delete(schema.versions).where(and(eq(schema.versions.documentId, id), eq(schema.versions.id, vid)));
   return json({ ok: true });
 });
+

@@ -164,8 +164,32 @@ export const stars = pgTable(
   (t) => [primaryKey({ columns: [t.documentId, t.userId] })],
 );
 
+/** Personal access tokens so agents and scripts can act on a user's behalf. Only a hash is stored. */
+export const apiTokens = pgTable(
+  "api_token",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Human label, e.g. "GitHub Copilot CLI". Shown as the agent's name in the app. */
+    name: text("name").notNull(),
+    /** First characters of the token for identification in lists. */
+    prefix: text("prefix").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { mode: "date" }),
+    expiresAt: timestamp("expires_at", { mode: "date" }),
+    revokedAt: timestamp("revoked_at", { mode: "date" }),
+  },
+  (t) => [index("api_token_user_idx").on(t.userId)],
+);
+
+export type ApiToken = typeof apiTokens.$inferSelect;
+
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
 export type Version = typeof versions.$inferSelect;
 export type Collaborator = typeof collaborators.$inferSelect;
 export type User = typeof users.$inferSelect;
+
