@@ -220,8 +220,11 @@ body {
   border-radius: 2px;
 }
 .md-focus-block {
-  background: #eff6ff;
-  transition: background-color 0.4s;
+  box-shadow: -3px 0 0 #bfdbfe;
+  transition: box-shadow 0.3s;
+}
+.cm-editor .cm-line.md-focus-block {
+  box-shadow: inset 3px 0 0 #bfdbfe;
 }
 
 /* ---------- Rich editor (ProseMirror) ---------- */
@@ -554,11 +557,21 @@ body {
 /* remote carets in the rich editor */
 .md-remote-caret {
   border-left: 2px solid;
+  display: inline-block;
+  height: 1.15em;
   margin-left: -1px;
   margin-right: -1px;
   pointer-events: none;
   position: relative;
+  vertical-align: text-bottom;
+  width: 0;
   word-break: normal;
+}
+/* ProseMirror adds a separator + trailing <br> after a block that ends with a widget; that would add a blank line. */
+.md-rich .md-remote-caret + .ProseMirror-separator,
+.md-rich .md-remote-caret + .ProseMirror-separator + .ProseMirror-trailingBreak,
+.md-rich .md-remote-caret + .ProseMirror-trailingBreak {
+  display: none;
 }
 .md-remote-caret > .md-remote-caret-label {
   border-radius: 4px 4px 4px 0;
@@ -605,3 +618,5 @@ body {
 .animate-fade-in {
   animation: md-fade-in 0.12s ease-out;
 }
+
+

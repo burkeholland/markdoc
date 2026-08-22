@@ -62,6 +62,8 @@ await burke.waitForTimeout(600);
 await burke.locator(".cm-content").click();
 await burke.locator(".cm-line").nth(5).click();
 await burke.waitForTimeout(400);
+await burke.evaluate(() => document.querySelector("nextjs-portal")?.remove());
 await burke.screenshot({ path: "docs/screenshot.png" });
 console.log("wrote docs/screenshot.png");
 await browser.close();
+
