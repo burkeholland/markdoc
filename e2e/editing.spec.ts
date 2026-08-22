@@ -109,6 +109,27 @@ test.describe("single user editing", () => {
     await user.context.close();
   });
 
+  test("selection bubble formats text and starts a comment", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "Select some of these words please.\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+    await selectTextInRich(page, "these words");
+    await expect(page.getByTestId("selection-bubble")).toBeVisible();
+    await page.getByTestId("selection-bubble").getByRole("button", { name: "Bold" }).click();
+    await expect.poll(() => codeText(page)).toContain("Select some of **these words** please.");
+    await page.getByTestId("selection-bubble").getByRole("button", { name: "Comment" }).click();
+    await expect(page.getByTestId("pending-comment")).toBeVisible();
+    await page.getByTestId("comment-composer").fill("Bubble comment");
+    await page.getByTestId("comment-submit").click();
+    await expect(page.getByTestId("comment-thread")).toContainText("Bubble comment");
+    // Collapsing the selection hides the bubble.
+    await page.locator(".md-rich p").first().click();
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+    await user.context.close();
+  });
+
   test("insert dialogs add links, images and tables", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, "Read the docs for details.\n");

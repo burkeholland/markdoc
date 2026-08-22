@@ -1,7 +1,7 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { EditorView as CMView } from "@codemirror/view";
 import type { EditorView as PMView } from "prosemirror-view";
@@ -26,6 +26,7 @@ import { VersionsPanel, VersionDiffView } from "./versions-panel";
 import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
+import { SelectionBubble } from "./selection-bubble";
 import type { VersionSummary } from "@/lib/api";
 
 export interface EditorShellProps {
@@ -61,6 +62,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [cursor, setCursor] = useState<{ code: number | null; rich: number | null }>({ code: null, rich: null });
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
   const [viewsReady, setViewsReady] = useState(0);
+  const [richView, setRichView] = useState<PMView | null>(null);
+  const richScrollRef = useRef<HTMLDivElement>(null);
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
@@ -90,6 +93,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const onRichReady = useCallback(
     (view: PMView | null) => {
       actions.setRichView(view);
+      setRichView(view);
       setViewsReady((n) => n + 1);
     },
     [actions],
@@ -300,7 +304,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       </button>
                     </Tip>
                   </div>
-                  <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+                  <div ref={richScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
+                    <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <RichPane
                       session={session}
                       onReady={onRichReady}
@@ -383,6 +388,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     </TooltipProvider>
   );
 }
+
 
 
 
