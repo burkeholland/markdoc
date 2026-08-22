@@ -66,39 +66,63 @@ function plain(result: ParseResult) {
   };
 }
 
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${name} must be a non-negative integer, got ${JSON.stringify(raw)}`);
+  return Math.floor(n);
+}
+
+// Default run is deterministic and quick; `npm run test:fuzz` sets FUZZ_DOCS=1500.
+// Reproduce a reported failure with FUZZ_SEED=<seed> FUZZ_DOCS=<docs>.
+const FUZZ_SEED = envInt("FUZZ_SEED", 42);
+const FUZZ_DOCS = envInt("FUZZ_DOCS", 300);
+const MIN_RATIO_SAMPLE = 200;
+
 describe("reparseRange", () => {
-  it("matches a full parse for random edits", () => {
-    const rand = rng(42);
-    let attempts = 0;
-    let incremental = 0;
-    for (let i = 0; i < 1500; i++) {
-      const oldText = randomDoc(rand);
-      const prev = parseMarkdown(oldText);
-      let text = oldText;
-      let result = prev;
-      for (let e = 0; e < 3; e++) {
-        const next = randomEdit(rand, text);
-        const span = textChangeSpan(text, next);
-        if (!span) continue;
-        attempts++;
-        const full = parseMarkdown(next);
-        const inc = reparseRange(result, text, next, span);
-        if (inc) {
-          incremental++;
-          try {
-            expect(plain(inc)).toEqual(plain(full));
-          } catch (err) {
-            console.error("old:\n" + JSON.stringify(text) + "\nnew:\n" + JSON.stringify(next));
-            throw err;
+  it(
+    `matches a full parse for random edits (${FUZZ_DOCS} docs, seed ${FUZZ_SEED})`,
+    () => {
+      const rand = rng(FUZZ_SEED);
+      let attempts = 0;
+      let incremental = 0;
+      try {
+        for (let i = 0; i < FUZZ_DOCS; i++) {
+          const oldText = randomDoc(rand);
+          const prev = parseMarkdown(oldText);
+          let text = oldText;
+          let result = prev;
+          for (let e = 0; e < 3; e++) {
+            const next = randomEdit(rand, text);
+            const span = textChangeSpan(text, next);
+            if (!span) continue;
+            attempts++;
+            const full = parseMarkdown(next);
+            const inc = reparseRange(result, text, next, span);
+            if (inc) {
+              incremental++;
+              try {
+                expect(plain(inc)).toEqual(plain(full));
+              } catch (err) {
+                console.error(`doc ${i} edit ${e}\nold:\n` + JSON.stringify(text) + "\nnew:\n" + JSON.stringify(next));
+                throw err;
+              }
+            }
+            text = next;
+            result = inc ?? full;
           }
         }
-        text = next;
-        result = inc ?? full;
+        // Most ordinary edits must take the fast path. The ratio is statistical, so
+        // only assert it once the sample is large enough to be meaningful.
+        if (attempts >= MIN_RATIO_SAMPLE) expect(incremental / attempts).toBeGreaterThan(0.6);
+      } catch (err) {
+        console.error(`fuzz failed; reproduce with FUZZ_SEED=${FUZZ_SEED} FUZZ_DOCS=${FUZZ_DOCS}`);
+        throw err;
       }
-    }
-    // Most ordinary edits must take the fast path.
-    expect(incremental / attempts).toBeGreaterThan(0.6);
-  });
+    },
+    60_000,
+  );
 
   it("reuses unchanged nodes", () => {
     const oldText = "# A\n\nintro\n\nfirst\n\n- x\n- y\n\nmid\n\nlast";

@@ -10,6 +10,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:fuzz": "cross-env FUZZ_DOCS=1500 vitest run src/editor/markdown/incremental.test.ts --testTimeout=120000",
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "build:server": "node scripts/build-server.mjs",

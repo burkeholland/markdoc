@@ -54,7 +54,8 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 ## Test it
 
 ```bash
-npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (56 tests)
+npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (56 tests); incremental-parser fuzz runs 300 seeded docs
+npm run test:fuzz     # Full 1500-document incremental-parser fuzz (FUZZ_DOCS / FUZZ_SEED override; the seed is logged on failure)
 npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs (19 tests)
 npm run typecheck
 npm run lint
