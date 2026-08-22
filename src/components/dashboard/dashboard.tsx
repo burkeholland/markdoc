@@ -111,9 +111,10 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
     return () => controller.abort();
   }, [serverQuery]);
 
-  // Server results for the current query win; otherwise filter the loaded list by title/excerpt so
-  // typing feels instant while the request is in flight (or for queries too short to send).
+  // Server results for the current query win; otherwise filter the loaded list by title so typing
+  // feels instant while the request is in flight (or for queries too short to send).
   const serverResults = results && trimmed.length >= MIN_QUERY_LENGTH && results.query === trimmed ? results.documents : null;
+  const pending = trimmed.length >= MIN_QUERY_LENGTH && !serverResults && (searching || serverQuery !== trimmed);
   const filtered = useMemo<(Doc & { snippet?: string | null })[]>(() => {
     const matchesFilter = (d: Doc) => {
       if (filter === "mine" && d.ownerId !== user.id) return false;
@@ -122,7 +123,7 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
     };
     if (serverResults) return serverResults.filter(matchesFilter);
     const q = trimmed.toLowerCase();
-    return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q) || d.excerpt.toLowerCase().includes(q)));
+    return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q)));
   }, [documents, serverResults, trimmed, filter, user.id]);
 
   const create = async () => {
@@ -216,8 +217,10 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
           {filtered.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
               <FileText className="mx-auto mb-3 text-ink-4" size={28} />
-              <p className="text-sm font-medium text-ink-2">{trimmed ? `No matches for "${trimmed}"` : documents.length === 0 ? "No documents yet" : "No matches"}</p>
-              <p className="mt-1 text-sm text-ink-3">{!trimmed && documents.length === 0 ? "Create a new document or open one from GitHub." : "Try a different search."}</p>
+              <p className="text-sm font-medium text-ink-2">
+                {pending ? `Searching for "${trimmed}"…` : trimmed ? `No matches for "${trimmed}"` : documents.length === 0 ? "No documents yet" : "No matches"}
+              </p>
+              <p className="mt-1 text-sm text-ink-3">{!trimmed && documents.length === 0 ? "Create a new document or open one from GitHub." : pending ? "Looking through titles and content." : "Try a different search."}</p>
             </div>
           ) : (
             <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
