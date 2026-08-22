@@ -12,11 +12,11 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : [["list"]],
   use: {
+    ...devices["Desktop Chrome"],
     baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 1000 },
-    ...devices["Desktop Chrome"],
   },
   webServer: {
     command: "npx tsx server/index.ts",
