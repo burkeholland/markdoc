@@ -32,6 +32,7 @@ Tools:
 | --- | --- |
 | `markdoc_whoami` | Which user and agent identity the token acts as. |
 | `markdoc_list_documents` | Documents you own or that are shared with you. |
+| `markdoc_search_documents` | Find documents by title or body text (`query`, optional `limit`); each hit includes a snippet around the match. |
 | `markdoc_create_document` | New document from Markdown; returns the URL to open in the browser. |
 | `markdoc_read_document` | Current Markdown (`clean: true` excludes pending suggestions). |
 | `markdoc_replace_content` / `markdoc_append` | Direct edits, applied live as minimal diffs (collaborators keep their cursors). |
@@ -51,6 +52,7 @@ All routes accept `Authorization: Bearer mdk_…`.
 | --- | --- | --- |
 | `GET /api/me` | | Current user and agent name. |
 | `GET /api/documents` | | List documents. |
+| `GET /api/documents?q=text&limit=20` | | Search titles and content (case-insensitive, 2+ chars); `{ documents: [{ …, snippet }], query }`. |
 | `POST /api/documents` | `{ title?, content? }` | Create. |
 | `GET /api/documents/:id/content` | | `{ content, clean, title, pendingSuggestions, openComments }` |
 | `PUT /api/documents/:id/content` | `{ content, message? }` | Replace the whole text (minimal live diff; `message` names a version). |

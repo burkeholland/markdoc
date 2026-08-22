@@ -1,4 +1,4 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
@@ -86,10 +86,16 @@ function excerpt(content: string): string {
     .slice(0, 160);
 }
 
-export async function listDocumentsForUser(user: SessionUser): Promise<DocumentSummary[]> {
-  const db = await getDb();
+interface VisibleRow {
+  doc: Document;
+  owner: { name: string | null; login: string | null } | null;
+  collabRole: Role | null;
+}
+
+/** Documents the user owns or is listed as a collaborator on, with the owner and the user's collaborator role joined in. */
+function visibleDocuments(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser) {
   const login = user.login?.toLowerCase() ?? "";
-  const rows = await db
+  const query = db
     .select({
       doc: schema.documents,
       owner: { name: schema.users.name, login: schema.users.login },
@@ -100,10 +106,13 @@ export async function listDocumentsForUser(user: SessionUser): Promise<DocumentS
     .leftJoin(
       schema.collaborators,
       and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)),
-    )
-    .where(or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`))
-    .orderBy(desc(schema.documents.updatedAt));
-  return rows.map(({ doc, owner, collabRole }) => ({
+    );
+  const visible = or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`)!;
+  return { query, visible };
+}
+
+function toSummary({ doc, owner, collabRole }: VisibleRow, user: SessionUser): DocumentSummary {
+  return {
     id: doc.id,
     title: doc.title,
     storage: doc.storage,
@@ -118,7 +127,65 @@ export async function listDocumentsForUser(user: SessionUser): Promise<DocumentS
     repoName: doc.repoName,
     repoPath: doc.repoPath,
     gistId: doc.gistId,
-  }));
+  };
+}
+
+export async function listDocumentsForUser(user: SessionUser): Promise<DocumentSummary[]> {
+  const db = await getDb();
+  const { query, visible } = visibleDocuments(db, user);
+  const rows = await query.where(visible).orderBy(desc(schema.documents.updatedAt));
+  return rows.map((row) => toSummary(row, user));
+}
+
+export interface SearchResult extends DocumentSummary {
+  /** Plain text around the first content match, or null when only the title matched. */
+  snippet: string | null;
+}
+
+const SNIPPET_BEFORE = 50;
+const SNIPPET_LENGTH = 120;
+
+/** ~120 characters of whitespace-collapsed content around the first case-insensitive match of `needle`, or null. */
+export function contentSnippet(content: string, needle: string): string | null {
+  const flat = content.replace(/\s+/g, " ").trim();
+  const idx = flat.search(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  if (idx < 0) return null;
+  let start = Math.max(0, idx - SNIPPET_BEFORE);
+  let end = Math.min(flat.length, start + SNIPPET_LENGTH);
+  if (end - start < SNIPPET_LENGTH) start = Math.max(0, end - SNIPPET_LENGTH);
+  // Avoid cutting words where we can, but never cut into the match itself.
+  if (start > 0) {
+    const space = flat.indexOf(" ", start);
+    if (space >= 0 && space < idx) start = space + 1;
+  }
+  if (end < flat.length) {
+    const space = flat.lastIndexOf(" ", end);
+    if (space > idx + needle.length) end = space;
+  }
+  const text = flat.slice(start, end).trim();
+  return `${start > 0 ? "…" : ""}${text}${end < flat.length ? "…" : ""}`;
+}
+
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Case-insensitive substring search over title and content of the documents the user can see.
+ * Title matches rank first, then content matches, each by most recently updated.
+ */
+export async function searchDocumentsForUser(user: SessionUser, q: string, { limit = 20 }: { limit?: number } = {}): Promise<SearchResult[]> {
+  const needle = q.trim();
+  if (needle.length < 2) return [];
+  const db = await getDb();
+  const pattern = `%${escapeLike(needle)}%`;
+  const titleMatch = ilike(schema.documents.title, pattern);
+  const { query, visible } = visibleDocuments(db, user);
+  const rows = await query
+    .where(and(visible, or(titleMatch, ilike(schema.documents.content, pattern))))
+    .orderBy(sql`case when ${titleMatch} then 0 else 1 end`, desc(schema.documents.updatedAt))
+    .limit(limit);
+  return rows.map((row) => ({ ...toSummary(row, user), snippet: contentSnippet(row.doc.content, needle) }));
 }
 
 export interface CreateDocumentInput {
