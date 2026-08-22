@@ -1,5 +1,5 @@
 import type { DocumentDto } from "@/server/dto";
-import type { DocumentSummary } from "@/server/documents";
+import type { DocumentSummary, SearchResult } from "@/server/documents";
 import type { Role } from "@/server/db/schema";
 
 export class ApiError extends Error {
@@ -50,6 +50,11 @@ export interface CollaboratorDto {
 export const api = {
   documents: {
     list: () => request<{ documents: (Omit<DocumentSummary, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string })[] }>("/api/documents"),
+    search: (q: string, init?: RequestInit) =>
+      request<{ documents: (Omit<SearchResult, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string })[]; query: string }>(
+        `/api/documents?q=${encodeURIComponent(q)}`,
+        init,
+      ),
     create: (body: { title?: string; content?: string } = {}) =>
       request<{ document: { id: string; title: string } }>("/api/documents", { method: "POST", body: JSON.stringify(body) }),
     get: (id: string) => request<{ document: DocumentDto; role: Role }>(`/api/documents/${id}`),

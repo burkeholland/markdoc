@@ -1,9 +1,17 @@
 import { z } from "zod";
 import { handler, json, readJson, requireUser } from "@/server/http";
-import { createDocument, listDocumentsForUser } from "@/server/documents";
+import { createDocument, listDocumentsForUser, searchDocumentsForUser } from "@/server/documents";
 
-export const GET = handler(async () => {
+const querySchema = z.object({ q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(20) });
+
+export const GET = handler(async (req: Request) => {
   const user = await requireUser();
+  const params = new URL(req.url).searchParams;
+  const { q, limit } = querySchema.parse({ q: params.get("q") ?? undefined, limit: params.get("limit") ?? undefined });
+  if (q !== undefined) {
+    const documents = await searchDocumentsForUser(user, q, { limit });
+    return json({ documents, query: q });
+  }
   const documents = await listDocumentsForUser(user);
   return json({ documents });
 });

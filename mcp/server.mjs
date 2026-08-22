@@ -71,6 +71,20 @@ server.registerTool(
 );
 
 server.registerTool(
+  "markdoc_search_documents",
+  {
+    title: "Search documents",
+    description: "Search the user's documents by title or body text (case-insensitive). Returns matching documents with a short snippet around the first content match.",
+    inputSchema: { query: z.string().min(2).max(200).describe("Text to look for in titles and content"), limit: z.number().int().min(1).max(100).optional().describe("Max results (default 20)") },
+  },
+  async ({ query, limit }) => {
+    const { documents } = await api("GET", `/api/documents?q=${encodeURIComponent(query)}${limit ? `&limit=${limit}` : ""}`);
+    const lines = documents.map((d) => `- ${d.title} — id ${d.id} — edited ${d.updatedAt} — ${docUrl(d.id)}${d.snippet ? `\n    ${d.snippet}` : ""}`);
+    return ok(lines.length ? lines.join("\n") : `No documents match "${query}".`, { query, documents });
+  },
+);
+
+server.registerTool(
   "markdoc_create_document",
   {
     title: "Create document",
