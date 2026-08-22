@@ -24,7 +24,13 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role): C
         getToken: async () => (await api.documents.collabToken(docId)).token,
       }),
   );
-  useEffect(() => () => session.destroy(), [session]);
+  useEffect(() => {
+    session.keepAlive();
+    if (process.env.NODE_ENV !== "production") {
+      (window as unknown as { __markdocSession?: CollabSession }).__markdocSession = session;
+    }
+    return () => session.scheduleDestroy();
+  }, [session]);
   return session;
 }
 
@@ -43,3 +49,5 @@ export function useSessionValue<T>(session: CollabSession, select: (s: CollabSes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   return useMemo(() => select(session), [session, version]);
 }
+
+

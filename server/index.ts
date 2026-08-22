@@ -1,5 +1,9 @@
 import { createServer } from "node:http";
+import nextEnv from "@next/env";
 import next from "next";
+
+// Load .env files the same way Next.js does, so the collaboration server sees them too.
+nextEnv.loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production");
 import { createCollabServer, shutdownCollab } from "@/server/collab/hocuspocus";
 import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
@@ -14,9 +18,9 @@ async function main() {
   await getDb();
 
   const app = next({ dev, hostname, port, turbopack: dev });
+  await app.prepare();
   const handle = app.getRequestHandler();
   const upgrade = app.getUpgradeHandler();
-  await app.prepare();
 
   const hocuspocus = createCollabServer();
   registerCollab(hocuspocus);
@@ -54,4 +58,7 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+
+
 

@@ -223,20 +223,40 @@ class Converter {
   }
 
   private listItem(item: Md.ListItem): PMNode {
-    const content = this.blocks(item.children);
+    let checked: boolean | null = item.checked ?? null;
+    const children = [...item.children];
+    // GFM only recognizes a task marker when text follows it, so an item the user just
+    // created (`- [ ] `) parses as literal "[ ]". Treat it as an empty task instead.
+    if (checked === null && children[0]?.type === "paragraph") {
+      const para = children[0] as Md.Paragraph;
+      const text = para.children.length === 1 && para.children[0].type === "text" ? (para.children[0] as Md.Text).value : null;
+      const m = text !== null ? /^\[( |x|X)\]\s*$/.exec(text) : null;
+      if (m) {
+        checked = m[1].toLowerCase() === "x";
+        children.shift();
+      }
+    }
+    const content = this.blocks(children);
     if (content.length === 0 || content[0].type !== schema.nodes.paragraph) {
       content.unshift(schema.nodes.paragraph.create());
     }
-    return schema.nodes.list_item.create({ checked: item.checked ?? null }, content);
+    return schema.nodes.list_item.create({ checked }, content);
   }
 
   private table(node: Md.Table): PMNode {
     const align = node.align ?? [];
+    const cols = node.children[0]?.children.length ?? 0;
     const rows = node.children.map((row, rowIndex) => {
       const cells = row.children.map((cell, colIndex) => {
         const type = rowIndex === 0 ? schema.nodes.table_header : schema.nodes.table_cell;
         return type.create({ align: align[colIndex] ?? null }, this.inlineContent(cell, false));
       });
+      // Pad short rows so every row has the header's column count (prosemirror-tables
+      // would otherwise normalize the table itself and desynchronize the surfaces).
+      while (cells.length < cols) {
+        const type = rowIndex === 0 ? schema.nodes.table_header : schema.nodes.table_cell;
+        cells.push(type.create({ align: align[cells.length] ?? null }));
+      }
       return schema.nodes.table_row.create(null, cells);
     });
     return schema.nodes.table.create(null, rows);

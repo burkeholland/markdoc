@@ -21,6 +21,8 @@ export type TextChangeInterceptor = (ops: TextOp[], ytext: Y.Text, origin: objec
 interface PhantomRecord {
   /** Relative position of the end of the real block that precedes the phantom, or null for document start. */
   after: Y.RelativePosition | null;
+  /** Placeholder for an empty document; dropped as soon as real content exists. */
+  placeholder?: boolean;
 }
 
 export interface MarkdownBindingOptions {
@@ -112,6 +114,8 @@ export class MarkdownBinding {
   private parseCache: { text: string; result: ParseResult } | null = null;
   private inLocalHandler = false;
   private pendingSync = false;
+  /** True while a remote sync is being dispatched to the view. */
+  syncing = false;
   private destroyed = false;
 
   constructor(
@@ -449,6 +453,7 @@ export class MarkdownBinding {
     const startPhantoms: PhantomRecord[] = [];
     const targets: { offset: number; record: PhantomRecord }[] = [];
     for (const record of this.phantoms.values()) {
+      if (record.placeholder && realCount > 0) continue;
       if (record.after === null) {
         startPhantoms.push(record);
         continue;
@@ -474,7 +479,7 @@ export class MarkdownBinding {
       while (pi < targets.length && targets[pi].offset < nextFrom) pushPhantom(targets[pi++].record, range.to);
     }
     while (pi < targets.length) pushPhantom(targets[pi++].record, text.length);
-    if (children.length === 0) pushPhantom({ after: null }, 0);
+    if (children.length === 0) pushPhantom({ after: null, placeholder: true }, 0);
 
     return { doc: schema.nodes.doc.create(null, children), blocks, phantoms };
   }
@@ -497,7 +502,12 @@ export class MarkdownBinding {
       const tr = minimalReplaceTransaction(view.state, built.doc);
       tr.setMeta(markdownBindingKey, { remote: true });
       tr.setMeta("addToHistory", false);
-      view.dispatch(tr);
+      this.syncing = true;
+      try {
+        view.dispatch(tr);
+      } finally {
+        this.syncing = false;
+      }
     }
     this.options.onSync?.("remote");
   }
@@ -515,14 +525,20 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
     key: markdownBindingKey,
     state: {
       init: () => ({ remote: false }),
-      apply: (tr) => ({ remote: !!tr.getMeta(markdownBindingKey) }),
+      apply: (tr, value) => {
+        // Transactions appended by other plugins (e.g. table normalization) inherit the
+        // remote flag of the transaction they were appended to.
+        if (tr.getMeta(markdownBindingKey)) return { remote: true };
+        if (tr.getMeta("appendedTransaction")) return value;
+        return { remote: false };
+      },
     },
     view(view) {
       binding.attach(view);
       return {
         update(view, prevState) {
           const meta = markdownBindingKey.getState(view.state);
-          if (meta?.remote) return;
+          if (meta?.remote || binding.syncing) return;
           if (view.state.doc === prevState.doc) return;
           binding.handleLocalTransaction(prevState, view.state);
         },
@@ -533,4 +549,6 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
     },
   });
 }
+
+
 

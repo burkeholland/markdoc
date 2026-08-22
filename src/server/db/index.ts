@@ -44,7 +44,9 @@ async function create(): Promise<Db> {
 
   const { drizzle } = await import("drizzle-orm/pglite");
   const { PGlite } = await import("@electric-sql/pglite");
-  const dataDir = process.env.PGLITE_DATA_DIR ?? path.resolve(process.cwd(), ".data/pglite");
+  const configured = process.env.PGLITE_DATA_DIR ?? ".data/pglite";
+  const dataDir = configured === "memory://" ? configured : path.resolve(process.cwd(), configured);
+  if (dataDir !== "memory://") fs.mkdirSync(dataDir, { recursive: true });
   const client = dataDir === "memory://" ? new PGlite() : new PGlite(dataDir);
   await client.waitReady;
   const db = drizzle(client, { schema });
@@ -65,3 +67,4 @@ export function getDb(): Promise<Db> {
 }
 
 export { schema };
+

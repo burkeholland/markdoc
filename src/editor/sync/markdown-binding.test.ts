@@ -198,6 +198,22 @@ describe("MarkdownBinding", () => {
     expect(ytext.toString()).toBe("Again");
   });
 
+  it("drops the empty-document placeholder once content arrives from the server", () => {
+    const { view, binding } = editor(); // text is empty at construction time, like before the provider syncs
+    expect(view.state.doc.childCount).toBe(1);
+    ytext.insert(0, "# Title\n\nBody.");
+    expect(view.state.doc.childCount).toBe(2);
+    expect(view.state.doc.child(0).type.name).toBe("heading");
+    expect(binding.blocks).toEqual([
+      { from: 0, to: 7 },
+      { from: 9, to: 14 },
+    ]);
+    // Clearing the text brings a placeholder back.
+    ytext.delete(0, ytext.length);
+    expect(view.state.doc.childCount).toBe(1);
+    expect(binding.blocks).toEqual([{ from: 0, to: 0, phantom: true }]);
+  });
+
   it("falls back to a full re-sync when the markdown normalizes the structure", async () => {
     ytext.insert(0, "- a\n- b");
     const { view } = editor();

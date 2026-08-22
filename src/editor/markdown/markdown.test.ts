@@ -82,6 +82,21 @@ describe("parseMarkdown", () => {
     expect(para.child(3).type.name).toBe("footnote_reference");
   });
 
+  it("pads ragged table rows to the header width", () => {
+    const { doc } = parseMarkdown("| a | b |\n|---|---|\n| 1 |\n");
+    const table = doc.child(0);
+    expect(table.child(1).childCount).toBe(2);
+    expect(table.child(1).child(1).textContent).toBe("");
+  });
+
+  it("treats an empty task marker as an unchecked task item", () => {
+    const { doc } = parseMarkdown("- [ ] Real task\n- [ ] \n");
+    const list = doc.child(0);
+    expect(list.child(1).attrs.checked).toBe(false);
+    expect(list.child(1).textContent).toBe("");
+    expect(serializeMarkdown(doc)).toBe("- [ ] Real task\n- [ ] ");
+  });
+
   it("produces an empty paragraph for an empty document", () => {
     const { doc, map } = parseMarkdown("");
     expect(doc.childCount).toBe(1);

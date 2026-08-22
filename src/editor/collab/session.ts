@@ -260,7 +260,24 @@ export class CollabSession {
   /** Monotonic counter used as a React snapshot for useSyncExternalStore. */
   version = 0;
 
+  private destroyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Destroy shortly unless {@link keepAlive} is called first. React StrictMode
+   * runs effect cleanups once on mount, so the owner must be able to cancel.
+   */
+  scheduleDestroy(delayMs = 150) {
+    if (this.destroyTimer) clearTimeout(this.destroyTimer);
+    this.destroyTimer = setTimeout(() => this.destroy(), delayMs);
+  }
+
+  keepAlive() {
+    if (this.destroyTimer) clearTimeout(this.destroyTimer);
+    this.destroyTimer = null;
+  }
+
   destroy() {
+    if (this.destroyed) return;
     this.destroyed = true;
     this.listeners.clear();
     this.binding.destroy();
@@ -277,3 +294,4 @@ export function defaultWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/collab`;
 }
+

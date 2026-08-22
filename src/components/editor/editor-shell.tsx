@@ -59,9 +59,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [versionPreview, setVersionPreview] = useState<{ version: VersionSummary; content: string } | null>(null);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
   const [cursor, setCursor] = useState<{ code: number | null; rich: number | null }>({ code: null, rich: null });
-  const [format, setFormat] = useState<FormatState>(EMPTY_FORMAT);
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
-  const [richText, setRichText] = useState("");
+  const [viewsReady, setViewsReady] = useState(0);
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
@@ -74,28 +73,26 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 8000 : 4500);
   }, []);
 
-  // Refresh toolbar state whenever either editor changes.
-  const refreshFormat = useCallback(() => {
-    setFormat(actions.formatState());
-    if (actions.rich) setRichText(actions.rich.state.doc.textContent);
-  }, [actions]);
-  useEffect(() => {
-    refreshFormat();
-  }, [refreshFormat, version, activeSurface, cursor]);
+  // Toolbar state is derived from the live editors; recomputed whenever the session,
+  // the active surface, or the selection changes (no state updates in effects).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const format: FormatState = useMemo(() => (viewsReady ? actions.formatState() : EMPTY_FORMAT), [actions, version, activeSurface, cursor, viewsReady]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const richText = useMemo(() => actions.rich?.state.doc.textContent ?? "", [actions, version, viewsReady]);
 
   const onCodeReady = useCallback(
     (view: CMView | null) => {
       actions.setCodeView(view);
-      refreshFormat();
+      setViewsReady((n) => n + 1);
     },
-    [actions, refreshFormat],
+    [actions],
   );
   const onRichReady = useCallback(
     (view: PMView | null) => {
       actions.setRichView(view);
-      refreshFormat();
+      setViewsReady((n) => n + 1);
     },
-    [actions, refreshFormat],
+    [actions],
   );
 
   const onCodeSelection = useCallback(
@@ -228,11 +225,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     return () => window.removeEventListener("keydown", onKey);
   }, [startComment]);
 
-  // Keep the document title in sync with the shared title for the dashboard list.
+  // The title lives in the shared document so everyone sees renames immediately.
   const sharedTitle = useSessionValue(session, (s) => s.title);
-  useEffect(() => {
-    if (sharedTitle && sharedTitle !== doc.title) setDoc((d) => ({ ...d, title: sharedTitle }));
-  }, [sharedTitle, doc.title]);
+  const docView = useMemo(() => (sharedTitle && sharedTitle !== doc.title ? { ...doc, title: sharedTitle } : doc), [doc, sharedTitle]);
 
   const authError = useSessionValue(session, (s) => s.authError);
   const showCode = layout !== "rich" && !versionPreview;
@@ -244,7 +239,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
       <div className="flex h-screen flex-col overflow-hidden bg-surface" data-testid="editor-shell">
         <Header
           session={session}
-          doc={doc}
+          doc={docView}
           commentsOpen={sidePanel === "comments"}
           onToggleComments={() => setSidePanel((p) => (p === "comments" ? null : "comments"))}
           onShare={() => setDialog("share")}
@@ -327,7 +322,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
         </div>
         <StatusBar
           session={session}
-          doc={doc}
+          doc={docView}
           layout={layout}
           onLayout={setLayout}
           lineWrapping={lineWrapping}
@@ -338,9 +333,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           richText={richText}
         />
 
-        <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={doc} isOwner={isOwner} onDocChange={setDoc} />
-        <GitHubDialog open={dialog === "publish"} onOpenChange={(o) => setDialog(o ? "publish" : null)} doc={doc} onDocChange={(d) => { setDoc(d); setVersionsRefresh((n) => n + 1); }} githubAvailable={githubAvailable} />
-        <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={doc} onCommit={publishNow} />
+        <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
+        <GitHubDialog open={dialog === "publish"} onOpenChange={(o) => setDialog(o ? "publish" : null)} doc={docView} onDocChange={(d) => { setDoc(d); setVersionsRefresh((n) => n + 1); }} githubAvailable={githubAvailable} />
+        <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
         <LinkDialog
           open={dialog === "link"}
           onOpenChange={(o) => setDialog(o ? "link" : null)}
@@ -388,6 +383,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     </TooltipProvider>
   );
 }
+
 
 
 
