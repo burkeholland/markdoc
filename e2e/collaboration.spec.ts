@@ -129,6 +129,27 @@ test.describe("collaboration between two users", () => {
     await bob.page.getByRole("menuitemradio", { name: /^Editing/ }).click();
   });
 
+  test("commenters can comment (through the API) but not edit", async ({ browser }) => {
+    const carol = await signIn(browser, "carol-commenter");
+    await shareWith(alice.page, docId, "carol-commenter", "commenter");
+    await openDocument(carol.page, docId);
+    await expect(carol.page.locator(".md-rich")).toHaveAttribute("contenteditable", "false");
+    await expect(carol.page.getByTestId("tb-comment")).toBeVisible();
+
+    await selectTextInRich(carol.page, "First paragraph");
+    await carol.page.getByTestId("tb-comment").click();
+    await carol.page.getByTestId("comment-composer").fill("Nice section, Bob.");
+    await carol.page.getByTestId("comment-submit").click();
+    await expect(carol.page.getByTestId("comment-thread").filter({ hasText: "Nice section, Bob." })).toBeVisible();
+    await expect(carol.page.locator(".md-rich .md-comment").filter({ hasText: "First paragraph" })).toBeVisible();
+
+    // The thread reached the other collaborators through the server.
+    await ensureCommentsOpen(alice.page);
+    await alice.page.getByTestId("comments-tab-open").click();
+    await expect(alice.page.getByTestId("comment-thread").filter({ hasText: "Nice section, Bob." })).toBeVisible();
+    await carol.context.close();
+  });
+
   test("viewers get a read-only document", async ({ browser }) => {
     const carol = await signIn(browser, "carol");
     await shareWith(alice.page, docId, "carol", "viewer");
@@ -153,4 +174,5 @@ test.describe("collaboration between two users", () => {
     await dave.context.close();
   });
 });
+
 

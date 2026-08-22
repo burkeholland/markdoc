@@ -109,6 +109,34 @@ test.describe("single user editing", () => {
     await user.context.close();
   });
 
+  test("insert dialogs add links, images and tables", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "Read the docs for details.\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+
+    await selectTextInRich(page, "the docs");
+    await page.getByTestId("tb-link").click();
+    await page.getByTestId("link-url").fill("example.com/docs");
+    await page.getByTestId("link-submit").click();
+    await expect.poll(() => codeText(page)).toContain("Read [the docs](https://example.com/docs) for details.");
+
+    await focusRichEnd(page);
+    await page.keyboard.press("Enter");
+    await page.getByTestId("tb-image").click();
+    await page.getByTestId("image-url").fill("https://example.com/pic.png");
+    await page.getByTestId("image-alt").fill("A picture");
+    await page.getByTestId("image-submit").click();
+    await expect.poll(() => codeText(page)).toContain("![A picture](https://example.com/pic.png)");
+
+    await focusRichEnd(page);
+    await page.getByTestId("tb-table").click();
+    await page.getByTestId("table-grid").getByRole("button", { name: "2 by 3" }).click();
+    await expect.poll(() => codeText(page)).toContain("| Column 1 | Column 2 | Column 3 |");
+    await expect(page.locator(".md-rich table")).toBeVisible();
+    await user.context.close();
+  });
+
   test("status bar lints the Markdown and jumps to issues", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, "# Title\n\n### Jumped heading\n\nSee [missing][ref].\n");
