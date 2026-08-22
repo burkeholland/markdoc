@@ -28,9 +28,11 @@ export default defineConfig({
       AUTH_SECRET: "e2e-secret-e2e-secret-e2e-secret-e2e",
       AUTH_DEV_LOGIN: "1",
       PGLITE_DATA_DIR: "memory://",
+      NEXT_DIST_DIR: ".next-e2e",
       AUTO_VERSION_INTERVAL_MS: "1000",
       NODE_ENV: "development",
     },
   },
 });
+
 

@@ -50,3 +50,5 @@ shots/
 
 dist/
 
+.next-e2e/
+

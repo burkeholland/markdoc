@@ -13,3 +13,5 @@ e2e
 scripts/*.mts
 *.md
 !README.md
+.next-e2e
+
