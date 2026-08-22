@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "tsx server/index.ts",
     "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "start": "cross-env NODE_ENV=production tsx server/index.ts",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",
@@ -85,6 +90,7 @@
     "@types/react-dom": "^19",
     "@types/ws": "^8.18.1",
     "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
@@ -93,5 +99,6 @@
     "tsx": "^4.23.12",
     "typescript": "^5",
     "vitest": "^4.1.10"
-  }
+  },
+  "type": "module"
 }
