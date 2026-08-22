@@ -6,13 +6,13 @@ import type { CollabSession } from "@/editor/collab/session";
 import type { AgentActivity } from "@/server/agents";
 import { Tip } from "@/components/ui/primitives";
 import { relativeTime } from "@/lib/utils";
-import { useSessionValue } from "./use-session";
+import { jsonEqual, useSessionValue } from "./use-session";
 
 const SHOW_FOR_MS = 45_000;
 
 /** Small chip in the header while an agent (API token) is working on the document. */
 export function AgentActivityChip({ session }: { session: CollabSession }) {
-  const activity = useSessionValue(session, (s) => (s.meta.get("agentActivity") as AgentActivity | undefined) ?? null);
+  const activity = useSessionValue(session, (s) => (s.meta.get("agentActivity") as AgentActivity | undefined) ?? null, jsonEqual);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!activity) return;

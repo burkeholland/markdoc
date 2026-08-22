@@ -8,7 +8,7 @@ import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
-import { useSessionValue } from "./use-session";
+import { jsonEqual, useSessionValue } from "./use-session";
 
 type Tab = "open" | "resolved" | "suggestions";
 
@@ -359,13 +359,17 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
 }
 
 export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps) {
-  const { threads, suggestions, activeCommentId, activeSuggestionId, pending } = useSessionValue(session, (s) => ({
-    threads: s.comments.list(),
-    suggestions: s.suggestions.list(),
-    activeCommentId: s.activeCommentId,
-    activeSuggestionId: s.activeSuggestionId,
-    pending: s.pendingComment,
-  }));
+  const { threads, suggestions, activeCommentId, activeSuggestionId, pending } = useSessionValue(
+    session,
+    (s) => ({
+      threads: s.comments.list(),
+      suggestions: s.suggestions.list(),
+      activeCommentId: s.activeCommentId,
+      activeSuggestionId: s.activeSuggestionId,
+      pending: s.pendingComment,
+    }),
+    jsonEqual,
+  );
   const ops = useCommentOps(session);
   const [tab, setTab] = useState<Tab>("open");
   const open = threads.filter((t) => !t.resolved);

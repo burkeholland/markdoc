@@ -6,9 +6,9 @@ import { markdownBindingKey } from "../sync/markdown-binding";
 import { SUGGESTIONS_ORIGIN } from "../collab/suggestions";
 import type { TextOp } from "../sync/text-diff";
 import type { SourceHighlight } from "../codemirror/highlights";
+import { isRefresh, refreshNow, scheduleRefresh } from "./refresh";
 
 const key = new PluginKey<DecorationSet>("sourceHighlights");
-const REFRESH = "sourceHighlights/refresh";
 
 /** Highlights derived from the session's comments, suggestions and focus state. */
 export function collectHighlights(session: CollabSession, focusRange: { from: number; to: number } | null): SourceHighlight[] {
@@ -99,7 +99,10 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
     state: {
       init: (_config, state) => build(session, state.doc, getFocus),
       apply(tr, old, _oldState, newState) {
-        if (tr.getMeta(REFRESH) || tr.docChanged) return build(session, newState.doc, getFocus);
+        if (isRefresh(tr)) return build(session, newState.doc, getFocus);
+        // The text (and therefore the source map) only changes after this transaction has
+        // been applied; follow the edit for now and rebuild on the refresh that follows.
+        if (tr.docChanged) return old.map(tr.mapping, tr.doc);
         return old;
       },
     },
@@ -115,16 +118,7 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
       },
     },
     view(view) {
-      let scheduled = false;
-      const refresh = () => {
-        if (scheduled || view.isDestroyed) return;
-        scheduled = true;
-        requestAnimationFrame(() => {
-          scheduled = false;
-          if (!view.isDestroyed) view.dispatch(view.state.tr.setMeta(REFRESH, true).setMeta("addToHistory", false));
-        });
-      };
-      const unsubscribe = session.subscribe(refresh);
+      const unsubscribe = session.subscribe(() => scheduleRefresh(view));
       return { destroy: unsubscribe };
     },
   });
@@ -132,7 +126,7 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
 
 /** Ask the rich editor to refresh highlight decorations (for example after the focus source changed). */
 export function refreshRichHighlights(view: EditorView) {
-  view.dispatch(view.state.tr.setMeta(REFRESH, true).setMeta("addToHistory", false));
+  refreshNow(view);
 }
 
 /**

@@ -6,7 +6,7 @@ import type { CollabSession } from "@/editor/collab/session";
 import { createRichEditorState, setEditable } from "@/editor/prosemirror/setup";
 import { createNodeViews } from "@/editor/prosemirror/nodeviews";
 import { refreshRichHighlights } from "@/editor/prosemirror/highlights";
-import { useSessionVersion } from "./use-session";
+import { useSessionValue } from "./use-session";
 
 export interface RichPaneProps {
   session: CollabSession;
@@ -27,7 +27,6 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     handlers.current = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut };
   }, [onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut]);
   const focusRef = useRef<number | null>(null);
-  const version = useSessionVersion(session);
 
   useEffect(() => {
     if (!host.current) return;
@@ -65,15 +64,17 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  const canEdit = session.canEdit;
+  const canEdit = useSessionValue(session, (s) => s.canEdit);
   useEffect(() => {
     if (viewRef.current) setEditable(viewRef.current, canEdit);
   }, [canEdit]);
 
+  // Highlights that depend on the session refresh themselves (see richHighlightsPlugin);
+  // only the cross-pane focus block needs a push from here.
   useEffect(() => {
     focusRef.current = focusSource;
     if (viewRef.current) refreshRichHighlights(viewRef.current);
-  }, [focusSource, version]);
+  }, [focusSource]);
 
   return <div ref={host} className="relative h-full min-h-0 w-full" data-testid="rich-pane" />;
 }

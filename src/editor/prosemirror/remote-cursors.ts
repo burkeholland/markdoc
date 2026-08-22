@@ -3,9 +3,9 @@ import { Decoration, DecorationSet } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import * as Y from "yjs";
 import type { CollabSession } from "../collab/session";
+import { isRefresh, scheduleRefresh } from "./refresh";
 
 const key = new PluginKey<DecorationSet>("remoteCursors");
-const REFRESH = "remoteCursors/refresh";
 
 interface CursorState {
   anchor: unknown;
@@ -93,7 +93,9 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
     state: {
       init: (_config, state) => buildDecorations(session, state.doc),
       apply(tr, old, _oldState, newState) {
-        if (tr.getMeta(REFRESH) || tr.docChanged) return buildDecorations(session, newState.doc);
+        if (isRefresh(tr)) return buildDecorations(session, newState.doc);
+        // The source map catches up with the text after this transaction; rebuild on refresh.
+        if (tr.docChanged) return old.map(tr.mapping, tr.doc);
         return old;
       },
     },
@@ -101,13 +103,12 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
       decorations: (state) => key.getState(state),
     },
     view(view) {
+      const refresh = () => scheduleRefresh(view);
       const onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-        if (view.isDestroyed) return;
-        if ([...added, ...updated, ...removed].some((id) => id !== session.ydoc.clientID)) {
-          view.dispatch(view.state.tr.setMeta(REFRESH, true).setMeta("addToHistory", false));
-        }
+        if ([...added, ...updated, ...removed].some((id) => id !== session.ydoc.clientID)) refresh();
       };
       session.awareness.on("change", onAwareness);
+      const unsubscribe = session.subscribe(refresh);
 
       const publish = () => {
         if (!view.hasFocus()) return;
@@ -130,6 +131,7 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
         },
         destroy() {
           session.awareness.off("change", onAwareness);
+          unsubscribe();
           view.dom.removeEventListener("focus", onFocus);
         },
       };

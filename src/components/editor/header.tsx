@@ -2,7 +2,7 @@
 import { navigateTo } from "@/lib/nav";
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Check,
@@ -34,7 +34,7 @@ import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session
 import type { DocumentDto } from "@/server/dto";
 
 import { cn, shortcut } from "@/lib/utils";
-import { useSessionValue } from "./use-session";
+import { jsonEqual, useSessionValue } from "./use-session";
 import { AgentActivityChip } from "./agent-activity";
 
 export function Logo({ className }: { className?: string }) {
@@ -47,7 +47,8 @@ export function Logo({ className }: { className?: string }) {
   );
 }
 
-function SaveIndicator({ state }: { state: SaveState }) {
+function SaveIndicator({ session }: { session: CollabSession }) {
+  const state = useSessionValue(session, (s) => s.saveState);
   const map: Record<SaveState, { icon: React.ReactNode; label: string; className: string }> = {
     saved: { icon: <Check size={16} strokeWidth={2.5} />, label: "Saved", className: "text-success" },
     saving: { icon: <Loader2 size={16} className="animate-spin" />, label: "Saving…", className: "text-ink-3" },
@@ -122,7 +123,7 @@ function TitleEditor({ session, fallback }: { session: CollabSession; fallback: 
 }
 
 export function PresenceStack({ session }: { session: CollabSession }) {
-  const users = useSessionValue(session, (s) => s.presence());
+  const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const shown = users.slice(0, 3);
   const extra = users.length - shown.length;
   return (
@@ -205,9 +206,8 @@ export interface HeaderProps {
   onHome: () => void;
 }
 
-export function Header(props: HeaderProps) {
+export const Header = memo(function Header(props: HeaderProps) {
   const { session, doc } = props;
-  const saveState = useSessionValue(session, (s) => s.saveState);
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
@@ -219,7 +219,7 @@ export function Header(props: HeaderProps) {
       </Link>
       <div className="flex min-w-0 flex-1 items-center gap-4">
         <TitleEditor session={session} fallback={doc.title} />
-        <SaveIndicator state={saveState} />
+        <SaveIndicator session={session} />
       </div>
       <div className="flex shrink-0 items-center gap-3">
         <AgentActivityChip session={session} />
@@ -346,7 +346,7 @@ export function Header(props: HeaderProps) {
       </div>
     </header>
   );
-}
+});
 
 
 

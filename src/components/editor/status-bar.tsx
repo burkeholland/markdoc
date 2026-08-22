@@ -1,14 +1,14 @@
 "use client";
 import { Menu, MenuCheckboxItem, MenuContent, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, GitHubIcon } from "@/components/ui/primitives";
 
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { AlertTriangle, Check, ChevronDown, CircleHelp, FileText, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { DocumentDto } from "@/server/dto";
 import { lintMarkdown, type LintIssue } from "@/editor/markdown/lint";
 
 import { cn, countWords, formatNumber } from "@/lib/utils";
-import { useSessionValue } from "./use-session";
+import { useDebouncedSessionValue } from "./use-session";
 
 export type Layout = "split" | "code" | "rich";
 
@@ -22,13 +22,15 @@ export interface StatusBarProps {
   onIssueSelect: (issue: LintIssue) => void;
   onShortcuts: () => void;
   onStorage: () => void;
-  richText: string;
+  /** Plain text of the rendered document, for word counts (falls back to the source). */
+  getRichText: () => string;
 }
 
-export function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, onIssueSelect, onShortcuts, onStorage, richText }: StatusBarProps) {
-  const source = useSessionValue(session, (s) => s.ytext.toString());
+export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, onIssueSelect, onShortcuts, onStorage, getRichText }: StatusBarProps) {
+  // Linting re-parses the whole document and word counts walk it: wait for a pause in typing.
+  const source = useDebouncedSessionValue(session, (s) => s.ytext.toString(), 500);
   const issues = useMemo(() => lintMarkdown(source), [source]);
-  const words = useMemo(() => countWords(richText || source), [richText, source]);
+  const words = useMemo(() => countWords(getRichText() || source), [getRichText, source]);
   const errors = issues.filter((i) => i.severity === "error").length;
 
   const storageLabel =
@@ -136,7 +138,7 @@ export function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLine
       </button>
     </footer>
   );
-}
+});
 
 
 

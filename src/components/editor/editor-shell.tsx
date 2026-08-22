@@ -13,7 +13,7 @@ import type { HeadingInfo } from "@/editor/markdown/parse";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip } from "@/components/ui/primitives";
-import { useCollabSession, useSessionValue, type EditorUser } from "./use-session";
+import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
 import { EditorActions, EMPTY_FORMAT, type DialogKind, type FormatState } from "./actions";
 import { Header } from "./header";
 import { Toolbar } from "./toolbar";
@@ -67,7 +67,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
-  const version = useSessionValue(session, (s) => s.version);
   const isOwner = role === "owner";
 
   const toast = useCallback((message: string, kind: Toast["kind"] = "info", action?: Toast["action"]) => {
@@ -76,12 +75,11 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 8000 : 4500);
   }, []);
 
-  // Toolbar state is derived from the live editors; recomputed whenever the session,
-  // the active surface, or the selection changes (no state updates in effects).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const format: FormatState = useMemo(() => (viewsReady ? actions.formatState() : EMPTY_FORMAT), [actions, version, activeSurface, cursor, viewsReady]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const richText = useMemo(() => actions.rich?.state.doc.textContent ?? "", [actions, version, viewsReady]);
+  // Toolbar state is derived from the live editors. The selector also runs on every render,
+  // so selection changes (React state) are picked up as well as session changes; the shallow
+  // comparison keeps the object stable when nothing visible changed.
+  const format: FormatState = useSessionValue(session, () => (viewsReady ? actions.formatState() : EMPTY_FORMAT), shallowEqual);
+  const getRichText = useCallback(() => actions.rich?.state.doc.textContent ?? "", [actions]);
 
   const onCodeReady = useCallback(
     (view: CMView | null) => {
@@ -213,6 +211,22 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     router.push("/");
   }, [doc.id, doc.title, router]);
 
+  // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
+  const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
+  const toggleHistory = useCallback(() => setSidePanel((p) => (p === "versions" ? null : "versions")), []);
+  const openShare = useCallback(() => setDialog("share"), []);
+  const openPublish = useCallback(() => setDialog("publish"), []);
+  const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
+  const openImage = useCallback(() => setDialog("image"), []);
+  const openTable = useCallback(() => setDialog("table"), []);
+  const openVersionName = useCallback(() => setDialog("versionName"), []);
+  const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
+  const publishFromHeader = useCallback(() => (doc.storage === "gist" ? void publishNow() : setCommitOpen(true)), [doc.storage, publishNow]);
+  const pullFromHeader = useCallback(() => void pull(), [pull]);
+  const deleteFromHeader = useCallback(() => void deleteDoc(), [deleteDoc]);
+  const copyFromHeader = useCallback(() => void copyMarkdown(), [copyMarkdown]);
+  const goHome = useCallback(() => router.push("/"), [router]);
+
   // Global shortcuts that are not editor-specific.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -245,22 +259,22 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           session={session}
           doc={docView}
           commentsOpen={sidePanel === "comments"}
-          onToggleComments={() => setSidePanel((p) => (p === "comments" ? null : "comments"))}
-          onShare={() => setDialog("share")}
-          onPublish={() => setDialog("publish")}
-          onPublishNow={() => (doc.storage === "gist" ? void publishNow() : setCommitOpen(true))}
-          onPull={() => void pull()}
-          onHistory={() => setSidePanel((p) => (p === "versions" ? null : "versions"))}
-          onShortcuts={() => setDialog("shortcuts")}
-          onDelete={() => void deleteDoc()}
+          onToggleComments={toggleComments}
+          onShare={openShare}
+          onPublish={openPublish}
+          onPublishNow={publishFromHeader}
+          onPull={pullFromHeader}
+          onHistory={toggleHistory}
+          onShortcuts={openShortcuts}
+          onDelete={deleteFromHeader}
           onDownload={download}
-          onCopyMarkdown={() => void copyMarkdown()}
-          onNameVersion={() => setDialog("versionName")}
+          onCopyMarkdown={copyFromHeader}
+          onNameVersion={openVersionName}
           publishing={publishing}
           isOwner={isOwner}
-          onHome={() => router.push("/")}
+          onHome={goHome}
         />
-        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={() => setDialog("image")} onTable={() => setDialog("table")} />
+        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
         {authError && (
           <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger" role="alert">
             Could not connect to the collaboration server ({authError}).
@@ -333,9 +347,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           lineWrapping={lineWrapping}
           onLineWrapping={setLineWrapping}
           onIssueSelect={onIssueSelect}
-          onShortcuts={() => setDialog("shortcuts")}
-          onStorage={() => (isOwner ? setDialog("publish") : undefined)}
-          richText={richText}
+          onShortcuts={openShortcuts}
+          onStorage={openStorage}
+          getRichText={getRichText}
         />
 
         <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={docView} isOwner={isOwner} onDocChange={setDoc} />

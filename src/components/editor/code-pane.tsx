@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { CollabSession } from "@/editor/collab/session";
 import { createCodeEditorSetup, type CodeEditorSetup } from "@/editor/codemirror/setup";
 import { setHighlights } from "@/editor/codemirror/highlights";
 import { collectHighlights } from "@/editor/prosemirror/highlights";
-import { useSessionVersion } from "./use-session";
+import { useSessionValue } from "./use-session";
 
 export interface CodePaneProps {
   session: CollabSession;
@@ -27,7 +27,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, focu
   useEffect(() => {
     handlers.current = { onSelection, onHighlightClick };
   }, [onSelection, onHighlightClick]);
-  const version = useSessionVersion(session);
+  const focusRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!host.current) return;
@@ -52,8 +52,8 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, focu
   }, [session]);
 
   // Mode / permissions.
-  const canEdit = session.canEdit;
-  const suggesting = session.mode === "suggesting";
+  const canEdit = useSessionValue(session, (s) => s.canEdit);
+  const suggesting = useSessionValue(session, (s) => s.mode === "suggesting");
   useEffect(() => {
     if (viewRef.current && setupRef.current) setupRef.current.setMode(viewRef.current, canEdit, suggesting);
   }, [canEdit, suggesting]);
@@ -62,16 +62,22 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, focu
     if (viewRef.current && setupRef.current) setupRef.current.setLineWrapping(viewRef.current, lineWrapping);
   }, [lineWrapping]);
 
-  // Comment / suggestion / focus highlights.
-  useEffect(() => {
+  // Comment / suggestion / focus highlights follow the session directly (no React render per keystroke).
+  const applyHighlights = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
+    const focusSource = focusRef.current;
     const focus = focusSource !== null && session.activeSurface === "rich" ? { from: focusSource, to: focusSource } : null;
     const highlights = collectHighlights(session, focus).map((h) =>
       h.kind === "focus" ? { ...h, from: view.state.doc.lineAt(Math.min(h.from, view.state.doc.length)).from, to: view.state.doc.lineAt(Math.min(h.from, view.state.doc.length)).from } : h,
     );
     view.dispatch({ effects: setHighlights.of(highlights) });
-  }, [session, version, focusSource]);
+  }, [session]);
+  useEffect(() => {
+    focusRef.current = focusSource;
+    applyHighlights();
+  }, [focusSource, applyHighlights]);
+  useEffect(() => session.subscribe(applyHighlights), [session, applyHighlights]);
 
   return <div ref={host} className="h-full min-h-0 w-full" data-testid="code-pane" />;
 }

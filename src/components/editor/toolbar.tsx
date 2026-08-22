@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import {
   Bold,
   Italic,
@@ -24,7 +25,7 @@ import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
 import { Menu, MenuContent, MenuRadioGroup, MenuRadioItem, MenuTrigger, Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
-import { useSessionValue } from "./use-session";
+import { shallowEqual, useSessionValue } from "./use-session";
 
 function ToolButton({
   label,
@@ -76,7 +77,7 @@ const HEADINGS = [
   { value: "6", label: "Heading 6", className: "text-[13px] font-semibold" },
 ];
 
-export function Toolbar({
+export const Toolbar = memo(function Toolbar({
   session,
   actions,
   format,
@@ -91,12 +92,16 @@ export function Toolbar({
   onImage: () => void;
   onTable: () => void;
 }) {
-  const { canEdit, canUndo, canRedo, canComment } = useSessionValue(session, (s) => ({
-    canEdit: s.canEdit,
-    canUndo: s.canUndo,
-    canRedo: s.canRedo,
-    canComment: s.canComment,
-  }));
+  const { canEdit, canUndo, canRedo, canComment } = useSessionValue(
+    session,
+    (s) => ({
+      canEdit: s.canEdit,
+      canUndo: s.canUndo,
+      canRedo: s.canRedo,
+      canComment: s.canComment,
+    }),
+    shallowEqual,
+  );
   const dis = !canEdit;
 
   return (
@@ -193,5 +198,5 @@ export function Toolbar({
       )}
     </div>
   );
-}
+});
 

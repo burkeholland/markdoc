@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
@@ -43,11 +43,73 @@ export function useSessionVersion(session: CollabSession): number {
   );
 }
 
-/** Derive a memoized value from the session; recomputed whenever the session changes. */
-export function useSessionValue<T>(session: CollabSession, select: (s: CollabSession) => T): T {
-  const version = useSessionVersion(session);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => select(session), [session, version]);
+/** Shallow equality for plain objects and arrays of primitives. */
+export function shallowEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  const ka = Object.keys(a as object);
+  const kb = Object.keys(b as object);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false;
+  }
+  return true;
+}
+
+/** Structural equality via JSON; for small snapshots whose members are plain data. */
+export function jsonEqual(a: unknown, b: unknown): boolean {
+  return Object.is(a, b) || JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Derive a value from the session. The component only re-renders when the selected
+ * value changes (per `isEqual`), not on every session update.
+ */
+export function useSessionValue<T>(session: CollabSession, select: (s: CollabSession) => T, isEqual: (a: T, b: T) => boolean = Object.is): T {
+  const cache = useRef<{ session: CollabSession; value: T } | null>(null);
+  const getSnapshot = () => {
+    const next = select(session);
+    const prev = cache.current;
+    if (prev && prev.session === session && isEqual(prev.value, next)) return prev.value;
+    cache.current = { session, value: next };
+    return next;
+  };
+  return useSyncExternalStore(session.subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Like {@link useSessionValue} but re-selects at most once per `delayMs` after the
+ * session changes, for derived values that are expensive or not urgent.
+ */
+export function useDebouncedSessionValue<T>(
+  session: CollabSession,
+  select: (s: CollabSession) => T,
+  delayMs: number,
+  isEqual: (a: T, b: T) => boolean = Object.is,
+): T {
+  const latest = useRef({ select, isEqual });
+  useEffect(() => {
+    latest.current = { select, isEqual };
+  });
+  const [value, setValue] = useState(() => select(session));
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const update = () => {
+      timer = null;
+      const next = latest.current.select(session);
+      setValue((prev) => (latest.current.isEqual(prev, next) ? prev : next));
+    };
+    update();
+    const unsubscribe = session.subscribe(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(update, delayMs);
+    });
+    return () => {
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+    };
+  }, [session, delayMs]);
+  return value;
 }
 
 

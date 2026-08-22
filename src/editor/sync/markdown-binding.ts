@@ -2,7 +2,8 @@ import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirr
 import type { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import * as Y from "yjs";
-import { parseMarkdown, type ParseResult } from "../markdown/parse";
+import { parseMarkdown, type HeadingInfo, type ParseResult } from "../markdown/parse";
+import { reparseRange, textChangeSpan } from "../markdown/incremental";
 import { serializeBlocks } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
 import type { BlockRange, SourceMap } from "../markdown/sourcemap";
@@ -112,6 +113,7 @@ export class MarkdownBinding {
   private currentDoc: PMNode | null = null;
   private mapCache: { text: string; phantomKey: string; map: SourceMap } | null = null;
   private parseCache: { text: string; result: ParseResult } | null = null;
+  private verifyHandle: { idle: number } | { timer: ReturnType<typeof setTimeout> } | null = null;
   private inLocalHandler = false;
   private pendingSync = false;
   /** True while a remote sync is being dispatched to the view. */
@@ -137,6 +139,7 @@ export class MarkdownBinding {
 
   destroy() {
     this.destroyed = true;
+    this.cancelVerify();
     this.ytext.unobserve(this.onTextChange);
     this.view = null;
   }
@@ -161,16 +164,69 @@ export class MarkdownBinding {
   }
 
   private parse(text: string): ParseResult {
-    if (this.parseCache && this.parseCache.text === text) return this.parseCache.result;
-    const result = parseMarkdown(text);
+    const cache = this.parseCache;
+    if (cache && cache.text === text) return cache.result;
+    let result: ParseResult | null = null;
+    if (cache) {
+      const span = textChangeSpan(cache.text, text);
+      if (span) result = reparseRange(cache.result, cache.text, text, span);
+    }
+    if (result) this.scheduleVerify();
+    else result = parseMarkdown(text);
     this.parseCache = { text, result };
     return result;
+  }
+
+  /**
+   * Incremental parses are checked against a full parse once the user pauses. If the
+   * two ever disagree the full result wins and the rich editor is re-synchronized.
+   */
+  private scheduleVerify() {
+    if (this.verifyHandle !== null) return;
+    const run = () => {
+      this.verifyHandle = null;
+      this.verifyParse();
+    };
+    if (typeof requestIdleCallback === "function") {
+      this.verifyHandle = { idle: requestIdleCallback(run, { timeout: 3000 }) };
+    } else {
+      this.verifyHandle = { timer: setTimeout(run, 1500) };
+    }
+  }
+
+  private cancelVerify() {
+    const handle = this.verifyHandle;
+    this.verifyHandle = null;
+    if (!handle) return;
+    if ("idle" in handle) cancelIdleCallback(handle.idle);
+    else clearTimeout(handle.timer);
+  }
+
+  verifyParse(): boolean {
+    const cache = this.parseCache;
+    if (!cache || this.destroyed) return true;
+    const full = parseMarkdown(cache.text);
+    const same =
+      full.doc.eq(cache.result.doc) &&
+      full.map.blocks.length === cache.result.map.blocks.length &&
+      full.map.blocks.every((b, i) => b.from === cache.result.map.blocks[i].from && b.to === cache.result.map.blocks[i].to);
+    this.parseCache = { text: cache.text, result: full };
+    this.mapCache = null;
+    if (same) return true;
+    console.warn("[markdown-binding] incremental parse drifted from a full parse; resynchronizing");
+    if (!this.inLocalHandler) this.syncFromText();
+    return false;
   }
 
   private onTextChange = (_event: Y.YTextEvent, tr: Y.Transaction) => {
     if (this.destroyed || tr.origin === this) return;
     this.syncFromText();
   };
+
+  /** Headings of the current text, from the (incrementally maintained) parse. */
+  getHeadings(): HeadingInfo[] {
+    return this.parse(this.ytext.toString()).headings;
+  }
 
   /**
    * Source map for the current state. Positions account for phantom blocks so

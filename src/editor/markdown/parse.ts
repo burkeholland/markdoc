@@ -37,6 +37,67 @@ function offsets(node: Md.Node): SrcRange {
   return { from: pos?.start.offset ?? 0, to: pos?.end.offset ?? 0 };
 }
 
+function rawLength(node: Md.Node): number {
+  if ("value" in node && typeof node.value === "string") return node.value.length;
+  const children = (node as Md.Parent).children;
+  return children ? children.reduce((n, c) => n + rawLength(c), 0) : 0;
+}
+
+/**
+ * GFM autolink literals that the mdast transform (rather than the tokenizer) finds
+ * are spliced into the tree without positions. Recover them from the neighbouring
+ * siblings so the source map stays exact; `from`/`to` bound the parent's content.
+ */
+function ensurePositions(children: Md.Node[], from: number, to: number) {
+  let i = 0;
+  while (i < children.length) {
+    if (children[i].position) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < children.length && !children[j].position) j++;
+    let cursor = i > 0 ? offsets(children[i - 1]).to : from;
+    const bound = j < children.length ? offsets(children[j]).from : to;
+    for (let k = i; k < j; k++) {
+      const node = children[k];
+      const end = k === j - 1 ? Math.max(cursor, bound) : Math.min(Math.max(cursor, bound), cursor + rawLength(node));
+      node.position = { start: { line: 0, column: 0, offset: cursor }, end: { line: 0, column: 0, offset: end } };
+      const nested = (node as Md.Parent).children;
+      if (nested) ensurePositions(nested, cursor, end);
+      cursor = end;
+    }
+    i = j;
+  }
+}
+
+/** Source range of a container's content, excluding its own delimiters. */
+function contentBounds(src: string, node: Md.Node): SrcRange {
+  const { from, to } = offsets(node);
+  switch (node.type) {
+    case "heading": {
+      const m = /^ {0,3}#{1,6}[ \t]+/.exec(src.slice(from, to));
+      return m ? { from: from + m[0].length, to } : { from, to };
+    }
+    case "emphasis":
+      return { from: from + 1, to: Math.max(from + 1, to - 1) };
+    case "strong":
+      return { from: from + 2, to: Math.max(from + 2, to - 2) };
+    case "delete": {
+      const n = src.startsWith("~~", from) ? 2 : 1;
+      return { from: from + n, to: Math.max(from + n, to - n) };
+    }
+    case "link": {
+      if (src[from] === "<") return { from: from + 1, to: Math.max(from + 1, to - 1) };
+      if (src[from] !== "[") return { from, to };
+      const close = src.lastIndexOf("](", to);
+      return { from: from + 1, to: close > from ? close : to };
+    }
+    default:
+      return { from, to };
+  }
+}
+
 /**
  * Accumulates inline nodes while merging adjacent text nodes that carry the
  * same marks. Merging ourselves (instead of letting ProseMirror do it) keeps the
@@ -270,6 +331,8 @@ class Converter {
   private inlineContent(parent: Md.Paragraph | Md.Heading | Md.TableCell, topLevelParagraph: boolean): PMNode[] {
     const b = new InlineBuilder(this.leafInfo);
     const children = parent.children;
+    const bounds = contentBounds(this.src, parent);
+    ensurePositions(children, bounds.from, bounds.to);
     if (parent.type === "paragraph" && topLevelParagraph && children.length) {
       const first = offsets(children[0]).from;
       const lineStart = this.src.lastIndexOf("\n", first - 1) + 1;
@@ -294,13 +357,13 @@ class Converter {
         b.text((node as Md.Text).value.replace(/\n/g, " "), marks, range);
         return;
       case "emphasis":
-        this.inlineChildren((node as Md.Emphasis).children, schema.marks.em.create().addToSet(marks), b);
+        this.inlineChildren(node as Md.Emphasis, schema.marks.em.create().addToSet(marks), b);
         return;
       case "strong":
-        this.inlineChildren((node as Md.Strong).children, schema.marks.strong.create().addToSet(marks), b);
+        this.inlineChildren(node as Md.Strong, schema.marks.strong.create().addToSet(marks), b);
         return;
       case "delete":
-        this.inlineChildren((node as Md.Delete).children, schema.marks.strikethrough.create().addToSet(marks), b);
+        this.inlineChildren(node as Md.Delete, schema.marks.strikethrough.create().addToSet(marks), b);
         return;
       case "inlineCode": {
         const raw = this.src.slice(range.from, range.to);
@@ -320,7 +383,7 @@ class Converter {
       case "link": {
         const link = node as Md.Link;
         const mark = schema.marks.link.create({ href: link.url, title: link.title ?? null });
-        this.inlineChildren(link.children, mark.addToSet(marks), b);
+        this.inlineChildren(link, mark.addToSet(marks), b);
         return;
       }
       case "image": {
@@ -333,10 +396,10 @@ class Converter {
         const def = this.definitions.get(ref.identifier);
         if (def) {
           const mark = schema.marks.link.create({ href: def.url, title: def.title ?? null });
-          this.inlineChildren(ref.children, mark.addToSet(marks), b);
+          this.inlineChildren(ref, mark.addToSet(marks), b);
         } else {
           b.text("[", marks, { from: range.from, to: range.from + 1 });
-          this.inlineChildren(ref.children, marks, b);
+          this.inlineChildren(ref, marks, b);
           const suffix =
             ref.referenceType === "full" ? `][${ref.label ?? ref.identifier}]` : ref.referenceType === "collapsed" ? "][]" : "]";
           b.text(suffix, marks, { from: range.to - suffix.length, to: range.to });
@@ -366,16 +429,34 @@ class Converter {
     }
   }
 
-  private inlineChildren(children: Md.PhrasingContent[], marks: readonly Mark[], b: InlineBuilder) {
-    for (const child of children) this.inline(child, marks, b);
+  private inlineChildren(parent: Md.Parent, marks: readonly Mark[], b: InlineBuilder) {
+    const bounds = contentBounds(this.src, parent);
+    ensurePositions(parent.children, bounds.from, bounds.to);
+    for (const child of parent.children) this.inline(child, marks, b);
   }
 }
 
+/** Opening `---` on the first line and a closing `---` line somewhere after it. */
+const CLOSED_FRONTMATTER = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/;
+
+/**
+ * True when the text starts with complete YAML front matter. The frontmatter
+ * extension is only enabled in that case: when a document starts with a `---`
+ * that is never closed (a thematic break), the extension's failed attempt
+ * breaks list parsing for the rest of the document.
+ */
+export function hasFrontmatter(src: string): boolean {
+  return src.startsWith("---") && CLOSED_FRONTMATTER.test(src);
+}
+
 export function parseMdast(src: string): Md.Root {
-  return fromMarkdown(src, {
-    extensions: [gfm(), frontmatter(["yaml"])],
-    mdastExtensions: [gfmFromMarkdown(), frontmatterFromMarkdown(["yaml"])],
-  });
+  if (hasFrontmatter(src)) {
+    return fromMarkdown(src, {
+      extensions: [gfm(), frontmatter(["yaml"])],
+      mdastExtensions: [gfmFromMarkdown(), frontmatterFromMarkdown(["yaml"])],
+    });
+  }
+  return fromMarkdown(src, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
 }
 
 /**

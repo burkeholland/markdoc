@@ -2,7 +2,7 @@
 
 import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import { extractHeadings, type HeadingInfo } from "@/editor/markdown/parse";
+import type { HeadingInfo } from "@/editor/markdown/parse";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
 
@@ -15,8 +15,19 @@ export interface OutlineProps {
   onSelect: (heading: HeadingInfo) => void;
 }
 
+function sameHeadings(a: HeadingInfo[], b: HeadingInfo[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.from !== y.from || x.line !== y.line || x.level !== y.level || x.text !== y.text) return false;
+  }
+  return true;
+}
+
 export function useHeadings(session: CollabSession): HeadingInfo[] {
-  return useSessionValue(session, (s) => extractHeadings(s.ytext.toString()));
+  return useSessionValue(session, (s) => s.binding.getHeadings(), sameHeadings);
 }
 
 export function activeHeadingIndex(headings: HeadingInfo[], cursor: number | null): number {

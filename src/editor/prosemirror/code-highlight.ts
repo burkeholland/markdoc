@@ -1,4 +1,4 @@
-import { Plugin, PluginKey } from "prosemirror-state";
+import { Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import { Decoration, DecorationSet } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { createLowlight, common } from "lowlight";
@@ -68,23 +68,50 @@ export function highlightTokens(code: string, language: string): Token[] {
 
 const key = new PluginKey<DecorationSet>("codeHighlight");
 
+function highlightBlock(node: PMNode, pos: number): Decoration[] {
+  const language = normalizeLanguage(node.attrs.language);
+  if (!language || !node.textContent) return [];
+  let tokens: Token[];
+  try {
+    tokens = highlightTokens(node.textContent, language);
+  } catch {
+    return [];
+  }
+  const base = pos + 1;
+  return tokens.map((t) => Decoration.inline(base + t.from, base + t.to, { class: t.classes }));
+}
+
 function build(doc: PMNode): DecorationSet {
   const decorations: Decoration[] = [];
   doc.descendants((node, pos) => {
     if (node.type !== schema.nodes.code_block) return true;
-    const language = normalizeLanguage(node.attrs.language);
-    if (!language || !node.textContent) return false;
-    let tokens: Token[];
-    try {
-      tokens = highlightTokens(node.textContent, language);
-    } catch {
-      return false;
-    }
-    const base = pos + 1;
-    for (const t of tokens) decorations.push(Decoration.inline(base + t.from, base + t.to, { class: t.classes }));
+    decorations.push(...highlightBlock(node, pos));
     return false;
   });
   return DecorationSet.create(doc, decorations);
+}
+
+/** Map the old decorations through the transaction and re-highlight only the code blocks it touched. */
+function update(tr: Transaction, old: DecorationSet): DecorationSet {
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  tr.mapping.maps.forEach((map, i) => {
+    const rest = tr.mapping.slice(i + 1);
+    map.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+      lo = Math.min(lo, rest.map(newStart, -1));
+      hi = Math.max(hi, rest.map(newEnd, 1));
+    });
+  });
+  let set = old.map(tr.mapping, tr.doc);
+  if (lo > hi) return set;
+  tr.doc.nodesBetween(lo, hi, (node, pos) => {
+    if (node.type !== schema.nodes.code_block) return true;
+    set = set.remove(set.find(pos, pos + node.nodeSize));
+    const fresh = highlightBlock(node, pos);
+    if (fresh.length) set = set.add(tr.doc, fresh);
+    return false;
+  });
+  return set;
 }
 
 /** Syntax highlighting inside rich-editor code blocks (highlight.js grammars via lowlight). */
@@ -93,7 +120,7 @@ export function codeHighlightPlugin(): Plugin<DecorationSet> {
     key,
     state: {
       init: (_, state) => build(state.doc),
-      apply: (tr, old) => (tr.docChanged ? build(tr.doc) : old),
+      apply: (tr, old) => (tr.docChanged ? update(tr, old) : old),
     },
     props: {
       decorations: (state) => key.getState(state),

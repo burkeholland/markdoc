@@ -52,3 +52,8 @@ dist/
 
 .next-e2e/
 
+
+# Agent board CLI (per-directory identity)
+board.mjs
+.board-identity
+
