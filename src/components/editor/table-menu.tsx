@@ -19,6 +19,7 @@ import type { TableAlign } from "@/editor/prosemirror/commands";
 import type { EditorActions, FormatState } from "./actions";
 import { Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
+import { useSessionValue } from "./use-session";
 
 const MENU_WIDTH = 372;
 const MENU_HEIGHT = 40;
@@ -75,10 +76,12 @@ export function TableMenu({
 }) {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const raf = useRef<number | null>(null);
+  const canEdit = useSessionValue(session, (s) => s.canEdit);
+  const activeSurface = useSessionValue(session, (s) => s.activeSurface);
 
   const compute = useCallback(() => {
     const container = containerRef.current;
-    if (!view || !container || format.tablePos < 0 || !session.canEdit || session.activeSurface !== "rich") {
+    if (!view || !container || format.tablePos < 0 || !canEdit || activeSurface !== "rich") {
       setPos(null);
       return;
     }
@@ -95,7 +98,7 @@ export function TableMenu({
     // Sit above the table; if that edge is scrolled away, stick to the top of the viewport.
     const top = Math.max(container.scrollTop + 4, rect.top - host.top + container.scrollTop - MENU_HEIGHT - 8);
     setPos({ left, top });
-  }, [view, session, containerRef, format.tablePos]);
+  }, [view, canEdit, activeSurface, containerRef, format.tablePos]);
 
   const schedule = useCallback(() => {
     if (raf.current) cancelAnimationFrame(raf.current);
