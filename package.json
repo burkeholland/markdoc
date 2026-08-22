@@ -7,7 +7,7 @@
     "build": "next build && node scripts/build-server.mjs",
     "start": "cross-env NODE_ENV=production node dist/server.mjs",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
