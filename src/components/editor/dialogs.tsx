@@ -223,7 +223,10 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Line break", "Shift-Enter"],
       ["Indent / outdent list item", "Tab / Shift-Tab"],
       ["Add comment", "Mod-Alt-M"],
-      ["Find in source", "Mod-F"],
+      ["Find", "Mod-F"],
+      ["Find and replace", "Mod-H"],
+      ["Next / previous match", "Enter / Shift-Enter"],
+      ["Close find", "Esc"],
     ],
   },
   {

@@ -1,6 +1,6 @@
 "use client";
 
-import type { EditorView as CMView } from "@codemirror/view";
+import { EditorView as CMView } from "@codemirror/view";
 import type { EditorView as PMView } from "prosemirror-view";
 import { TextSelection } from "prosemirror-state";
 import type { CollabSession, Surface } from "@/editor/collab/session";
@@ -247,6 +247,97 @@ export class EditorActions {
     const sFrom = map.pmToSrc(from);
     const sTo = map.pmToSrc(to);
     return sTo > sFrom ? { from: sFrom, to: sTo } : null;
+  }
+
+  /** Selected text in the active surface, or "" when empty or spanning several lines (used to seed find). */
+  selectionText(): string {
+    const a = this.active;
+    if (!a) return "";
+    let text: string;
+    if (a.kind === "code") {
+      const { from, to } = a.view.state.selection.main;
+      text = a.view.state.sliceDoc(from, to);
+    } else {
+      const { from, to } = this.richSelection(a.view);
+      text = a.view.state.doc.textBetween(from, to, "\n");
+    }
+    return /\n/.test(text) ? "" : text;
+  }
+
+  /**
+   * The rich pane's selection, preferring the live DOM selection. ProseMirror
+   * reads keyboard selection changes on the (async) `selectionchange` event, so
+   * a shortcut fired right after Shift-Arrow would otherwise see a stale state.
+   */
+  private richSelection(view: PMView): { from: number; to: number } {
+    const state = view.state.selection;
+    if (!view.hasFocus()) return state;
+    const sel = view.dom.ownerDocument.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !sel.focusNode) return state;
+    if (!view.dom.contains(sel.anchorNode) || !view.dom.contains(sel.focusNode)) return state;
+    try {
+      const anchor = view.posAtDOM(sel.anchorNode, sel.anchorOffset);
+      const head = view.posAtDOM(sel.focusNode, sel.focusOffset);
+      return { from: Math.min(anchor, head), to: Math.max(anchor, head) };
+    } catch {
+      return state;
+    }
+  }
+
+  /** Scrollable container of the rich pane, so matches can be revealed without touching the selection. */
+  private richScroller: HTMLElement | null = null;
+
+  setRichScroller(el: HTMLElement | null) {
+    this.richScroller = el;
+  }
+
+  /** Scroll a source range into view in every mounted pane without changing the selection. */
+  revealSourceRange(range: { from: number; to: number }) {
+    if (this.code) {
+      const pos = Math.min(range.from, this.code.state.doc.length);
+      this.code.dispatch({ effects: CMView.scrollIntoView(pos, { y: "center" }) });
+    }
+    if (this.rich && this.rich.dom.isConnected) {
+      const map = this.session.binding.getSourceMap();
+      const pos = Math.min(this.rich.state.doc.content.size, Math.max(0, map.srcToPm(range.from)));
+      const scroller = this.richScroller ?? this.rich.dom.parentElement?.parentElement ?? null;
+      if (!scroller) return;
+      let coords: { top: number; bottom: number };
+      try {
+        coords = this.rich.coordsAtPos(pos);
+      } catch {
+        return;
+      }
+      const box = scroller.getBoundingClientRect();
+      if (box.height === 0) return; // pane hidden
+      const margin = 24;
+      if (coords.top < box.top + margin || coords.bottom > box.bottom - margin) {
+        scroller.scrollTop += coords.top - box.top - box.height / 2;
+      }
+    }
+  }
+
+  /** Select a source range in the active surface (and focus it). */
+  selectSourceRange(range: { from: number; to: number }, opts: { focus?: boolean } = {}) {
+    const a = this.active;
+    if (!a) return;
+    if (a.kind === "code") {
+      const len = a.view.state.doc.length;
+      a.view.dispatch({ selection: { anchor: Math.min(range.from, len), head: Math.min(range.to, len) }, scrollIntoView: true });
+      if (opts.focus) a.view.focus();
+      return;
+    }
+    const map = this.session.binding.getSourceMap();
+    const size = a.view.state.doc.content.size;
+    const from = Math.min(size, Math.max(0, map.srcToPm(range.from)));
+    const to = Math.min(size, Math.max(0, map.srcToPm(range.to)));
+    try {
+      const sel = TextSelection.between(a.view.state.doc.resolve(from), a.view.state.doc.resolve(to));
+      a.view.dispatch(a.view.state.tr.setSelection(sel).scrollIntoView());
+    } catch {
+      /* positions not valid in the rich document (e.g. inside syntax) */
+    }
+    if (opts.focus) a.view.focus();
   }
 
   /** Scroll both panes to a source offset and place the caret there in the active surface. */
