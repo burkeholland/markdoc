@@ -1,0 +1,71 @@
+import { z } from "zod";
+import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
+import { mutateLiveDoc } from "@/server/livedoc";
+import { CommentsModel } from "@/editor/collab/comments";
+import { makeCollabUser } from "@/editor/collab/shared";
+import { TEXT_KEY } from "@/server/collab/hocuspocus";
+
+type Params = { params: Promise<{ id: string }> };
+
+const schema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("add"), from: z.number().int().min(0), to: z.number().int().min(0), body: z.string().trim().min(1).max(5000) }),
+  z.object({ action: z.literal("reply"), threadId: z.string().min(1), body: z.string().trim().min(1).max(5000) }),
+  z.object({ action: z.literal("resolve"), threadId: z.string().min(1), resolved: z.boolean() }),
+  z.object({ action: z.literal("edit"), threadId: z.string().min(1), replyId: z.string().optional(), body: z.string().trim().min(1).max(5000) }),
+  z.object({ action: z.literal("delete"), threadId: z.string().min(1), replyId: z.string().optional() }),
+]);
+
+/**
+ * Comment operations for users who may comment but not edit. Editors apply
+ * these directly through the shared document; this endpoint performs the same
+ * change server-side so it is broadcast to everyone connected.
+ */
+export const POST = handler(async (req: Request, { params }: Params) => {
+  const { id } = await params;
+  const { user, role } = await requireAccess(id, "comment");
+  if (!user) throw new HttpError(401, "Sign in required");
+  const body = await readJson(req, (d) => schema.parse(d));
+  const author = makeCollabUser(user.id, user.name ?? user.login ?? "User", user.image);
+  let result: unknown = { ok: true };
+
+  await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
+    const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
+    try {
+      switch (body.action) {
+        case "add": {
+          const len = doc.getText(TEXT_KEY).length;
+          const from = Math.min(body.from, len);
+          const to = Math.min(Math.max(body.to, from), len);
+          result = { id: model.add({ from, to, body: body.body, author }) };
+          break;
+        }
+        case "reply":
+          result = { id: model.reply(body.threadId, body.body, author) };
+          break;
+        case "resolve":
+          model.setResolved(body.threadId, body.resolved, author);
+          break;
+        case "edit": {
+          const thread = model.get(body.threadId);
+          if (!thread) throw new HttpError(404, "Comment not found");
+          const ownerId = body.replyId ? thread.replies.find((r) => r.id === body.replyId)?.authorId : thread.authorId;
+          if (ownerId !== user.id && role !== "owner") throw new HttpError(403, "You can only edit your own comments");
+          model.editBody(body.threadId, body.body, body.replyId);
+          break;
+        }
+        case "delete": {
+          const thread = model.get(body.threadId);
+          if (!thread) throw new HttpError(404, "Comment not found");
+          const ownerId = body.replyId ? thread.replies.find((r) => r.id === body.replyId)?.authorId : thread.authorId;
+          if (ownerId !== user.id && role !== "owner") throw new HttpError(403, "You can only delete your own comments");
+          if (body.replyId) model.deleteReply(body.threadId, body.replyId);
+          else model.remove(body.threadId);
+          break;
+        }
+      }
+    } finally {
+      model.destroy();
+    }
+  });
+  return json(result);
+});

@@ -4,13 +4,29 @@ import { schema } from "./schema";
 
 type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMNode, index: number) => void;
 
+type SerializerOptions = { tightLists?: boolean; escapeExtraCharacters?: RegExp; hardBreakNodeName?: string; strict?: boolean };
+
+/** prosemirror-markdown marks these members @internal; we need them to build sub-states. */
+interface InternalState {
+  nodes: Record<string, NodeSerializer>;
+  marks: Record<string, unknown>;
+  options: SerializerOptions;
+  out: string;
+}
+
+const StateCtor = MarkdownSerializerState as unknown as new (
+  nodes: Record<string, NodeSerializer>,
+  marks: Record<string, unknown>,
+  options: SerializerOptions,
+) => MarkdownSerializerState;
+
 /**
  * Serializer state with a gentler escaping strategy than prosemirror-markdown's
  * default: it only escapes characters where they would otherwise change the
  * meaning of the Markdown, which keeps hand-written documents readable after a
  * round trip through the rich editor.
  */
-class State extends MarkdownSerializerState {
+class State extends StateCtor {
   inLink = false;
   inTable = false;
 
@@ -49,10 +65,11 @@ function fenceFor(text: string): string {
 }
 
 function renderCell(state: State, cell: PMNode): string {
-  const sub = new State(state.nodes, state.marks, state.options);
+  const internal = state as unknown as InternalState;
+  const sub = new State(internal.nodes, internal.marks, internal.options);
   sub.inTable = true;
   sub.renderInline(cell, false);
-  return sub.out.replace(/\n/g, "<br>").trim();
+  return (sub as unknown as InternalState).out.replace(/\n/g, "<br>").trim();
 }
 
 const nodes: Record<string, NodeSerializer> = {
@@ -254,15 +271,21 @@ const marks = {
 };
 
 class Serializer extends MarkdownSerializer {
-  serialize(content: PMNode, options: Record<string, unknown> = {}): string {
-    const opts = Object.assign({}, this.options, options);
-    const state = new State(this.nodes, this.marks, opts);
+  serialize(content: PMNode, options: SerializerOptions = {}): string {
+    const self = this as unknown as InternalState;
+    const opts = Object.assign({}, self.options, options);
+    const state = new State(self.nodes, self.marks, opts);
     state.renderContent(content);
-    return state.out;
+    return (state as unknown as InternalState).out;
   }
 }
 
-export const markdownSerializer = new Serializer(nodes, marks, { tightLists: true });
+type SerializerMarks = ConstructorParameters<typeof MarkdownSerializer>[1];
+type SerializerCtorOptions = ConstructorParameters<typeof MarkdownSerializer>[2];
+
+export const markdownSerializer = new Serializer(nodes, marks as unknown as SerializerMarks, {
+  tightLists: true,
+} as unknown as SerializerCtorOptions);
 
 /** Serialize a whole document to Markdown. */
 export function serializeMarkdown(doc: PMNode): string {
@@ -274,3 +297,4 @@ export function serializeBlocks(blocks: PMNode[]): string {
   if (blocks.length === 0) return "";
   return markdownSerializer.serialize(schema.nodes.doc.create(null, blocks));
 }
+
