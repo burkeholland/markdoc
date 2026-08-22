@@ -6,7 +6,7 @@ import { verifyCollabToken, type CollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
 
-export interface CollabContext extends CollabClaims {}
+export type CollabContext = CollabClaims;
 
 /** Interval after which a new automatic version snapshot is taken while editing. */
 export const AUTO_VERSION_INTERVAL_MS = Number(process.env.AUTO_VERSION_INTERVAL_MS ?? 10 * 60 * 1000);
@@ -123,3 +123,4 @@ export async function withDocument<T>(
     await connection.disconnect();
   }
 }
+

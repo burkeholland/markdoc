@@ -118,106 +118,121 @@ export class SuggestionsModel {
   }
 
   /**
-   * Apply an edit made in suggesting mode. Deletions become delete-suggestions
+   * Mark [from, to) as a suggested deletion. Portions that lie inside the
+   * author's own pending insertions are really removed from the text instead.
+   * Must be called inside a transaction. Returns the number of characters kept
+   * in the text (i.e. marked rather than removed).
+   */
+  markDeleted(from: number, to: number, author: CollabUser): number {
+    if (to <= from) return 0;
+    const all = this.list();
+    const ownInserts = all.filter((s) => s.type === "insert" && s.authorId === author.id && s.from < to && s.to > from);
+    let removedBeforeTo = 0;
+    for (const s of [...ownInserts].sort((a, b) => b.from - a.from)) {
+      const dFrom = Math.max(from, s.from);
+      const dTo = Math.min(to, s.to);
+      if (dTo <= dFrom) continue;
+      this.ytext.delete(dFrom, dTo - dFrom);
+      removedBeforeTo += dTo - dFrom;
+      const remaining = resolveAnchor(this.ytext, s.anchor);
+      if (!remaining || remaining.to <= remaining.from) this.ymap.delete(s.id);
+      else this.setRange(s.id, remaining.from, remaining.to);
+    }
+    to -= removedBeforeTo;
+
+    // What remains of [from, to) becomes delete-suggestions, skipping ranges already marked.
+    const existingDeletes = this.list().filter((s) => s.type === "delete");
+    const segments: { from: number; to: number }[] = [];
+    let pos = from;
+    for (const d of existingDeletes.filter((d) => d.to > from && d.from < to).sort((a, b) => a.from - b.from)) {
+      if (d.from > pos) segments.push({ from: pos, to: Math.min(d.from, to) });
+      pos = Math.max(pos, d.to);
+    }
+    if (pos < to) segments.push({ from: pos, to });
+    let kept = 0;
+    for (const seg of segments) {
+      if (seg.to <= seg.from) continue;
+      kept += seg.to - seg.from;
+      const before = existingDeletes.find((d) => d.authorId === author.id && d.to === seg.from);
+      const after = existingDeletes.find((d) => d.authorId === author.id && d.from === seg.to);
+      if (before && after) {
+        this.setRange(before.id, before.from, after.to);
+        this.ymap.delete(after.id);
+      } else if (before) {
+        this.setRange(before.id, before.from, seg.to);
+      } else if (after) {
+        this.setRange(after.id, seg.from, after.to);
+      } else {
+        this.create("delete", seg.from, seg.to, author);
+      }
+    }
+    return kept;
+  }
+
+  /**
+   * Record text that is already in the document at [pos, pos+len) as a
+   * suggested insertion, merging with the author's adjacent insertions. If the
+   * range was inserted inside another delete-suggestion, that suggestion is
+   * split around it. Must be called inside a transaction.
+   */
+  recordInserted(pos: number, len: number, author: CollabUser) {
+    if (len <= 0) return;
+    const all = this.list();
+    // A delete-suggestion that spans the inserted range (it grew when the text was inserted).
+    const spanning = all.find((d) => d.type === "delete" && d.from < pos && d.to > pos + len);
+    if (spanning) {
+      const tailFrom = pos + len;
+      const tailTo = spanning.to;
+      this.setRange(spanning.id, spanning.from, pos);
+      const tailId = this.create("delete", tailFrom, tailTo, {
+        id: spanning.authorId,
+        name: spanning.authorName,
+        avatar: spanning.authorAvatar,
+        color: "",
+        colorLight: "",
+      });
+      const tailRecord = this.ymap.get(tailId);
+      if (tailRecord) this.ymap.set(tailId, { ...tailRecord, createdAt: spanning.createdAt });
+      this.create("insert", pos, pos + len, author);
+      return;
+    }
+    const own = all.filter((s) => s.type === "insert" && s.authorId === author.id);
+    const before = own.find((s) => s.to === pos || (s.from < pos && s.to >= pos + len));
+    const after = own.find((s) => s.from === pos + len);
+    if (before) {
+      const end = after ? after.to : Math.max(before.to, pos + len);
+      this.setRange(before.id, before.from, end);
+      if (after) this.ymap.delete(after.id);
+    } else if (after) {
+      this.setRange(after.id, pos, after.to);
+    } else {
+      this.create("insert", pos, pos + len, author);
+    }
+  }
+
+  /**
+   * Apply an edit made in suggesting mode: deletions become delete-suggestions
    * (except inside the author's own pending insertions, which are really
-   * removed); insertions are inserted and recorded as insert-suggestions.
+   * removed); insertions are inserted before any kept text and recorded.
    *
    * Returns the number of characters of the requested deletion that were kept
-   * in the text, so callers can adjust subsequent positions.
+   * in the text (so callers can adjust later positions) and the cursor offset.
    */
   applyEdit(edit: EditInput, author: CollabUser, origin: object = SUGGESTIONS_ORIGIN): { kept: number; cursor: number } {
     let kept = 0;
     let cursor = edit.from;
     this.ydoc.transact(() => {
-      let { from, to } = edit;
-      if (to > from) {
-        const all = this.list();
-        // Portions inside the author's own insertions are really deleted (right to left).
-        const ownInserts = all.filter(
-          (s) => s.type === "insert" && s.authorId === author.id && s.from < to && s.to > from,
-        );
-        let removedBeforeTo = 0;
-        for (const s of [...ownInserts].sort((a, b) => b.from - a.from)) {
-          const dFrom = Math.max(from, s.from);
-          const dTo = Math.min(to, s.to);
-          if (dTo <= dFrom) continue;
-          this.ytext.delete(dFrom, dTo - dFrom);
-          removedBeforeTo += dTo - dFrom;
-          const remaining = resolveAnchor(this.ytext, s.anchor);
-          if (!remaining || remaining.to <= remaining.from) this.ymap.delete(s.id);
-          else this.setRange(s.id, remaining.from, remaining.to);
-        }
-        to -= removedBeforeTo;
-
-        // What remains of [from, to) becomes delete-suggestions, skipping ranges already marked.
-        const current = this.list();
-        const existingDeletes = current.filter((s) => s.type === "delete");
-        const segments: { from: number; to: number }[] = [];
-        let pos = from;
-        for (const d of existingDeletes.filter((d) => d.to > from && d.from < to).sort((a, b) => a.from - b.from)) {
-          if (d.from > pos) segments.push({ from: pos, to: Math.min(d.from, to) });
-          pos = Math.max(pos, d.to);
-        }
-        if (pos < to) segments.push({ from: pos, to });
-        for (const seg of segments) {
-          if (seg.to <= seg.from) continue;
-          kept += seg.to - seg.from;
-          const before = existingDeletes.find((d) => d.authorId === author.id && d.to === seg.from);
-          const after = existingDeletes.find((d) => d.authorId === author.id && d.from === seg.to);
-          if (before && after) {
-            this.setRange(before.id, before.from, after.to);
-            this.ymap.delete(after.id);
-          } else if (before) {
-            this.setRange(before.id, before.from, seg.to);
-          } else if (after) {
-            this.setRange(after.id, seg.from, after.to);
-          } else {
-            this.create("delete", seg.from, seg.to, author);
-          }
-        }
-        cursor = from;
-      }
-
-      if (edit.insert) {
-        const pos = from;
-        const len = edit.insert.length;
-        const all = this.list();
-        // Inserting strictly inside a delete-suggestion splits it so the new text isn't struck.
-        for (const d of all.filter((d) => d.type === "delete" && d.from < pos && d.to > pos)) {
-          const tail = { from: pos, to: d.to };
-          this.setRange(d.id, d.from, pos);
-          this.ytext.insert(pos, edit.insert);
-          const tailId = this.create("delete", tail.from + len, tail.to + len, {
-            id: d.authorId,
-            name: d.authorName,
-            avatar: d.authorAvatar,
-            color: "",
-            colorLight: "",
-          });
-          const tailRecord = this.ymap.get(tailId);
-          if (tailRecord) this.ymap.set(tailId, { ...tailRecord, createdAt: d.createdAt });
-          this.create("insert", pos, pos + len, author);
-          cursor = pos + len;
-          return;
-        }
-        this.ytext.insert(pos, edit.insert);
-        const own = all.filter((s) => s.type === "insert" && s.authorId === author.id);
-        const before = own.find((s) => s.to === pos);
-        const after = own.find((s) => s.from === pos);
-        if (before) {
-          const end = after ? after.to + len : pos + len;
-          this.setRange(before.id, before.from, end);
-          if (after) this.ymap.delete(after.id);
-        } else if (after) {
-          this.setRange(after.id, pos, after.to + len);
-        } else {
-          this.create("insert", pos, pos + len, author);
-        }
-        cursor = pos + len;
+      const { from, to, insert } = edit;
+      if (to > from) kept = this.markDeleted(from, to, author);
+      if (insert) {
+        this.ytext.insert(from, insert);
+        this.recordInserted(from, insert.length, author);
+        cursor = from + insert.length;
       }
     }, origin);
     return { kept, cursor };
   }
+
 
   accept(id: string, origin: object = SUGGESTIONS_ORIGIN) {
     const s = this.list().find((x) => x.id === id);

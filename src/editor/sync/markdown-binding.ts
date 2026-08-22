@@ -106,6 +106,8 @@ export class MarkdownBinding {
   /** Source range of every top-level block of the current ProseMirror document. */
   blocks: BlockRange[] = [];
   private phantoms = new Map<number, PhantomRecord>();
+  /** The ProseMirror document that locks describes. */
+  private currentDoc: PMNode | null = null;
   private mapCache: { text: string; phantomKey: string; map: SourceMap } | null = null;
   private parseCache: { text: string; result: ParseResult } | null = null;
   private inLocalHandler = false;
@@ -141,6 +143,7 @@ export class MarkdownBinding {
     const built = this.buildDoc(this.ytext.toString());
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
+    this.currentDoc = built.doc;
     this.mapCache = null;
     return built.doc;
   }
@@ -182,7 +185,7 @@ export class MarkdownBinding {
   }
 
   private adjustMapForPhantoms(map: SourceMap): SourceMap {
-    const doc = this.view?.state.doc;
+    const doc = this.currentDoc ?? this.view?.state.doc;
     if (!doc) return map;
     const starts = blockStarts(doc);
     // Phantom paragraphs each occupy 2 positions in the live doc but nothing in the parsed doc.
@@ -403,6 +406,7 @@ export class MarkdownBinding {
     }
     this.blocks = updated;
     this.phantoms = newPhantoms;
+    this.currentDoc = newDoc;
     this.mapCache = null;
 
     if (process.env.NODE_ENV !== "production") this.assertConsistent(newDoc);
@@ -486,6 +490,7 @@ export class MarkdownBinding {
     const built = this.buildDoc(this.ytext.toString());
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
+    this.currentDoc = built.doc;
     this.mapCache = null;
 
     if (view && !view.state.doc.eq(built.doc)) {
@@ -528,3 +533,4 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
     },
   });
 }
+

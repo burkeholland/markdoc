@@ -1,26 +1,607 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-ink: #111827;
+  --color-ink-2: #374151;
+  --color-ink-3: #6b7280;
+  --color-ink-4: #9ca3af;
+  --color-line: #e5e7eb;
+  --color-line-2: #d1d5db;
+  --color-surface: #ffffff;
+  --color-surface-2: #f9fafb;
+  --color-surface-3: #f3f4f6;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-soft: #eff6ff;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- Generic controls ---------- */
+
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors select-none;
+  @apply h-9 px-3.5;
+}
+.btn:disabled {
+  @apply opacity-50 pointer-events-none;
+}
+.btn-primary {
+  @apply bg-accent text-white hover:bg-accent-hover;
+}
+.btn-outline {
+  @apply border border-line-2 bg-surface text-ink hover:bg-surface-2;
+}
+.btn-ghost {
+  @apply text-ink-2 hover:bg-surface-3;
+}
+.btn-danger {
+  @apply bg-danger text-white hover:bg-red-700;
+}
+.btn-sm {
+  @apply h-8 px-3 text-[13px];
+}
+.icon-btn {
+  @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink disabled:opacity-40 disabled:pointer-events-none;
+}
+.icon-btn[data-active="true"] {
+  @apply bg-accent-soft text-accent;
+}
+.input {
+  @apply h-9 w-full rounded-lg border border-line-2 bg-surface px-3 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
+}
+.textarea {
+  @apply w-full rounded-lg border border-line-2 bg-surface px-3 py-2 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
+}
+.select {
+  @apply h-9 rounded-lg border border-line-2 bg-surface px-2 text-sm text-ink outline-none focus:border-accent;
+}
+.menu {
+  @apply z-50 min-w-48 rounded-xl border border-line bg-surface p-1.5 shadow-xl shadow-black/10;
+}
+.menu-item {
+  @apply flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ink outline-none select-none hover:bg-surface-3 focus:bg-surface-3 data-[disabled]:opacity-40 data-[disabled]:pointer-events-none;
+}
+.menu-label {
+  @apply px-2.5 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-3;
+}
+.menu-sep {
+  @apply my-1.5 h-px bg-line;
+}
+.dialog-overlay {
+  @apply fixed inset-0 z-50 bg-black/30 backdrop-blur-[1px];
+}
+.dialog {
+  @apply fixed left-1/2 top-1/2 z-50 w-[min(92vw,560px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-surface p-6 shadow-2xl shadow-black/20 outline-none;
+}
+.kbd {
+  @apply inline-flex min-w-5 items-center justify-center rounded border border-line-2 bg-surface-2 px-1.5 font-sans text-[11px] text-ink-2;
+}
+.pane-label {
+  @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-3;
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #d1d5db transparent;
+}
+
+/* ---------- Avatar stack ---------- */
+.avatar {
+  @apply inline-flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface-3 text-xs font-semibold text-ink-2 ring-2 ring-white;
+}
+
+/* ---------- Code editor (CodeMirror) ---------- */
+.cm-editor {
+  height: 100%;
+  font-size: 15px;
+  background: var(--color-surface);
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+.cm-editor .cm-scroller {
+  font-family: var(--font-mono);
+  line-height: 1.75;
+  padding: 16px 0 48px;
+}
+.cm-editor .cm-content {
+  padding: 0 24px 0 8px;
+  caret-color: var(--color-accent);
+}
+.cm-editor .cm-line {
+  padding: 0 2px;
+}
+.cm-editor .cm-gutters {
+  background: var(--color-surface);
+  border-right: none;
+  color: var(--color-ink-4);
+  font-family: var(--font-mono);
+  padding-left: 12px;
+}
+.cm-editor .cm-lineNumbers .cm-gutterElement {
+  min-width: 32px;
+  padding: 0 12px 0 0;
+  text-align: right;
+}
+.cm-editor .cm-activeLineGutter {
+  background: transparent;
+  color: var(--color-ink-2);
+}
+.cm-editor .cm-activeLine {
+  background: #f8fafc;
+}
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused .cm-selectionBackground {
+  background: #bfdbfe88 !important;
+}
+.cm-editor .cm-cursor {
+  border-left-color: var(--color-accent);
+  border-left-width: 2px;
+}
+.cm-editor .cm-matchingBracket {
+  background: #dbeafe;
+  outline: none;
+}
+
+/* remote carets in CodeMirror (y-codemirror.next) */
+.cm-ySelectionCaret {
+  border-left-width: 2px !important;
+}
+.cm-ySelectionInfo {
+  border-radius: 4px 4px 4px 0;
+  font-family: var(--font-sans) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  padding: 1px 6px !important;
+  top: -1.4em !important;
+  opacity: 1 !important;
+}
+.cm-ySelectionCaret:hover > .cm-ySelectionInfo {
+  opacity: 1 !important;
+}
+.cm-ySelectionCaret.md-caret-recent > .cm-ySelectionInfo {
+  opacity: 1;
+}
+
+/* ---------- Shared collaboration decorations (both panes) ---------- */
+.md-comment {
+  background: #fef3c7;
+  border-bottom: 2px solid #f59e0b;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.md-comment.md-comment-active,
+.md-comment:hover {
+  background: #fde68a;
+}
+.md-comment-resolved {
+  background: transparent;
+  border-bottom: 1px dotted #d1d5db;
+}
+.md-suggest-insert {
+  background: #dcfce7;
+  color: #166534;
+  text-decoration: underline;
+  text-decoration-color: #16a34a;
+  text-decoration-thickness: 1.5px;
+}
+.md-suggest-delete {
+  background: #fee2e2;
+  color: #991b1b;
+  text-decoration: line-through;
+  text-decoration-color: #dc2626;
+  text-decoration-thickness: 1.5px;
+}
+.md-suggest-active {
+  outline: 2px solid #2563eb55;
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+.md-focus-block {
+  background: #eff6ff;
+  transition: background-color 0.4s;
+}
+
+/* ---------- Rich editor (ProseMirror) ---------- */
+.md-rich {
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--color-ink-2);
+  outline: none;
+  min-height: 100%;
+  padding: 8px 40px 80px 24px;
+  max-width: 820px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  -webkit-font-variant-ligatures: none;
+  font-variant-ligatures: none;
+}
+.md-rich:focus {
+  outline: none;
+}
+.md-rich > * + * {
+  margin-top: 0.9em;
+}
+.md-rich h1,
+.md-rich h2,
+.md-rich h3,
+.md-rich h4,
+.md-rich h5,
+.md-rich h6 {
+  color: var(--color-ink);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  scroll-margin-top: 12px;
+}
+.md-rich h1 {
+  font-size: 2em;
+  margin-top: 0.2em;
+}
+.md-rich h2 {
+  font-size: 1.5em;
+  margin-top: 1.4em;
+  padding-top: 0.9em;
+  border-top: 1px solid var(--color-line);
+}
+.md-rich h2:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.md-rich h3 {
+  font-size: 1.25em;
+  margin-top: 1.3em;
+}
+.md-rich h4 {
+  font-size: 1.05em;
+}
+.md-rich h5,
+.md-rich h6 {
+  font-size: 1em;
+  color: var(--color-ink-2);
+}
+.md-rich p {
+  margin: 0;
+}
+.md-rich p + p {
+  margin-top: 0.9em;
+}
+.md-rich a {
+  color: var(--color-accent);
+  text-decoration: none;
+  cursor: text;
+}
+.md-rich a:hover {
+  text-decoration: underline;
+}
+.md-rich strong {
+  color: var(--color-ink);
+  font-weight: 700;
+}
+.md-rich s {
+  color: var(--color-ink-3);
+}
+.md-rich ul,
+.md-rich ol {
+  padding-left: 1.6em;
+}
+.md-rich ul {
+  list-style: disc;
+}
+.md-rich ol {
+  list-style: decimal;
+}
+.md-rich li {
+  margin: 0.3em 0;
+}
+.md-rich li > p {
+  margin: 0;
+}
+.md-rich li > ul,
+.md-rich li > ol {
+  margin-top: 0.3em;
+}
+.md-rich ul[data-tight="false"] > li,
+.md-rich ol[data-tight="false"] > li {
+  margin: 0.75em 0;
+}
+.md-rich li.md-task-item {
+  list-style: none;
+  position: relative;
+  padding-left: 0.25em;
+}
+.md-rich li.md-task-item > .md-task-checkbox {
+  position: absolute;
+  left: -1.55em;
+  top: 0.3em;
+  width: 1.05em;
+  height: 1.05em;
+  border: 1.5px solid #9ca3af;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  transition: background-color 0.1s;
+}
+.md-rich li.md-task-item[data-checked="true"] > .md-task-checkbox {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.md-rich li.md-task-item[data-checked="true"] > p {
+  color: var(--color-ink-3);
+}
+.md-rich blockquote {
+  border-left: 3px solid var(--color-line-2);
+  color: var(--color-ink-3);
+  margin: 0;
+  padding: 0.1em 0 0.1em 1.1em;
+}
+.md-rich pre {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  line-height: 1.6;
+  overflow-x: auto;
+  padding: 14px 16px;
+  position: relative;
+  white-space: pre;
+  color: var(--color-ink);
+}
+.md-rich pre code {
+  background: transparent;
+  border: none;
+  font-size: inherit;
+  padding: 0;
+}
+.md-rich .md-code-lang {
+  position: absolute;
+  right: 10px;
+  top: 8px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--color-ink-4);
+  text-transform: lowercase;
+  user-select: none;
+  pointer-events: none;
+}
+.md-rich .md-code-lang-input {
+  position: absolute;
+  right: 10px;
+  top: 6px;
+  width: 72px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--color-ink-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 4px;
+  text-align: right;
+  outline: none;
+}
+.md-rich .md-code-lang-input:hover,
+.md-rich .md-code-lang-input:focus {
+  border-color: var(--color-line-2);
+  background: white;
+}
+.md-rich code.md-inline-code {
+  background: var(--color-surface-3);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  padding: 0.1em 0.35em;
+  color: #be185d;
+}
+.md-rich hr {
+  border: none;
+  border-top: 1px solid var(--color-line);
+  margin: 1.6em 0;
+}
+.md-rich img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+.md-rich img.ProseMirror-selectednode {
+  outline: 2px solid var(--color-accent);
+}
+.md-rich table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+.md-rich th,
+.md-rich td {
+  border: 1px solid var(--color-line-2);
+  padding: 6px 10px;
+  position: relative;
+  vertical-align: top;
+  min-width: 40px;
+}
+.md-rich th {
+  background: var(--color-surface-2);
+  font-weight: 600;
+  text-align: left;
+  color: var(--color-ink);
+}
+.md-rich .selectedCell::after {
+  background: #2563eb22;
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+.md-rich .md-html-block,
+.md-rich .md-frontmatter {
+  border-style: dashed;
+  color: var(--color-ink-3);
+}
+.md-rich .md-frontmatter::before,
+.md-rich .md-html-block::before {
+  content: "front matter";
+  display: block;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-ink-4);
+  margin-bottom: 6px;
+}
+.md-rich .md-html-block::before {
+  content: "html";
+}
+.md-rich .md-link-definition {
+  color: var(--color-ink-4);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.md-rich .md-html-inline {
+  color: var(--color-ink-4);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.md-rich .md-footnote-ref {
+  color: var(--color-accent);
+  font-size: 0.75em;
+}
+.md-rich .md-footnote-definition {
+  border-top: 1px solid var(--color-line);
+  color: var(--color-ink-3);
+  font-size: 0.9em;
+  padding-top: 0.6em;
+}
+.md-rich .md-footnote-definition::before {
+  content: "[^" attr(data-label) "]";
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  margin-right: 0.5em;
+}
+.md-rich .ProseMirror-gapcursor:after {
+  border-top: 1px solid var(--color-ink);
+}
+.md-rich[data-placeholder]:not(.md-has-content)::before {
+  content: attr(data-placeholder);
+  color: var(--color-ink-4);
+  pointer-events: none;
+  position: absolute;
+}
+
+/* syntax highlighting inside rich code blocks (lowlight/highlight.js classes) */
+.md-rich .hljs-keyword,
+.md-rich .hljs-selector-tag,
+.md-rich .hljs-built_in,
+.md-rich .hljs-tag {
+  color: #7c3aed;
+}
+.md-rich .hljs-string,
+.md-rich .hljs-attr,
+.md-rich .hljs-template-tag {
+  color: #16a34a;
+}
+.md-rich .hljs-title,
+.md-rich .hljs-title.function_,
+.md-rich .hljs-section {
+  color: #2563eb;
+}
+.md-rich .hljs-number,
+.md-rich .hljs-literal {
+  color: #ea580c;
+}
+.md-rich .hljs-comment {
+  color: #9ca3af;
+  font-style: italic;
+}
+.md-rich .hljs-variable,
+.md-rich .hljs-params,
+.md-rich .hljs-subst {
+  color: #b45309;
+}
+.md-rich .hljs-name,
+.md-rich .hljs-attribute {
+  color: #0891b2;
+}
+
+/* remote carets in the rich editor */
+.md-remote-caret {
+  border-left: 2px solid;
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+}
+.md-remote-caret > .md-remote-caret-label {
+  border-radius: 4px 4px 4px 0;
+  color: white;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  left: -2px;
+  line-height: 1.3;
+  padding: 1px 6px;
+  position: absolute;
+  top: -1.45em;
+  user-select: none;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}
+.md-remote-selection {
+  border-radius: 2px;
+}
+
+/* diff view */
+.md-diff ins {
+  background: #dcfce7;
+  color: #166534;
+  text-decoration: none;
+}
+.md-diff del {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+@keyframes md-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-fade-in {
+  animation: md-fade-in 0.12s ease-out;
 }
