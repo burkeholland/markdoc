@@ -1,14 +1,21 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
-import { mutateLiveDoc } from "@/server/livedoc";
+import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { CommentsModel } from "@/editor/collab/comments";
-import { makeCollabUser } from "@/editor/collab/shared";
+import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 
 type Params = { params: Promise<{ id: string }> };
 
 const schema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("add"), from: z.number().int().min(0), to: z.number().int().min(0), body: z.string().trim().min(1).max(5000) }),
+  z.object({
+    action: z.literal("add"),
+    from: z.number().int().min(0).optional(),
+    to: z.number().int().min(0).optional(),
+    /** Alternative to from/to: anchor the comment on the first occurrence of this text. */
+    quote: z.string().min(1).max(2000).optional(),
+    body: z.string().trim().min(1).max(5000),
+  }),
   z.object({ action: z.literal("reply"), threadId: z.string().min(1), body: z.string().trim().min(1).max(5000) }),
   z.object({ action: z.literal("resolve"), threadId: z.string().min(1), resolved: z.boolean() }),
   z.object({ action: z.literal("edit"), threadId: z.string().min(1), replyId: z.string().optional(), body: z.string().trim().min(1).max(5000) }),
@@ -25,7 +32,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const { user, role } = await requireAccess(id, "comment");
   if (!user) throw new HttpError(401, "Sign in required");
   const body = await readJson(req, (d) => schema.parse(d));
-  const author = makeCollabUser(user.id, user.name ?? user.login ?? "User", user.image);
+  const author = collabIdentity(user);
   let result: unknown = { ok: true };
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
@@ -33,9 +40,18 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     try {
       switch (body.action) {
         case "add": {
-          const len = doc.getText(TEXT_KEY).length;
-          const from = Math.min(body.from, len);
-          const to = Math.min(Math.max(body.to, from), len);
+          const text = doc.getText(TEXT_KEY).toString();
+          let from: number;
+          let to: number;
+          if (body.quote !== undefined) {
+            const idx = text.indexOf(body.quote);
+            if (idx === -1) throw new HttpError(400, `Text not found: ${JSON.stringify(body.quote.slice(0, 80))}`);
+            from = idx;
+            to = idx + body.quote.length;
+          } else {
+            from = Math.min(body.from ?? 0, text.length);
+            to = Math.min(Math.max(body.to ?? from, from), text.length);
+          }
           result = { id: model.add({ from, to, body: body.body, author }) };
           break;
         }
@@ -66,6 +82,35 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     } finally {
       model.destroy();
     }
+    recordAgentActivity(doc, user, "commented");
   });
   return json(result);
 });
+
+/** All comment threads with their current text ranges (agents use this to read feedback). */
+export const GET = handler(async (_req: Request, { params }: Params) => {
+  const { id } = await params;
+  await requireAccess(id, "view");
+  const threads = await readLiveDoc(id, (doc) => {
+    const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
+    try {
+      const text = doc.getText(TEXT_KEY).toString();
+      return model.list().map((t) => ({
+        id: t.id,
+        body: t.body,
+        author: t.authorName,
+        authorId: t.authorId,
+        createdAt: new Date(t.createdAt).toISOString(),
+        resolved: t.resolved,
+        quote: t.quote,
+        range: t.range,
+        currentText: t.range ? text.slice(t.range.from, t.range.to) : null,
+        replies: t.replies.map((r) => ({ id: r.id, body: r.body, author: r.authorName, authorId: r.authorId, createdAt: new Date(r.createdAt).toISOString() })),
+      }));
+    } finally {
+      model.destroy();
+    }
+  });
+  return json({ comments: threads });
+});
+

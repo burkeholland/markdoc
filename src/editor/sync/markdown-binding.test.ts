@@ -6,7 +6,7 @@ import { EditorView } from "prosemirror-view";
 import { splitBlock, setBlockType } from "prosemirror-commands";
 import { MarkdownBinding, markdownBindingPlugin } from "./markdown-binding";
 import { schema } from "../markdown/schema";
-import { diffOps } from "./text-diff";
+import { diffOps, diffOpsWords, applyOps } from "./text-diff";
 
 function makeEditor(ytext: Y.Text) {
   const binding = new MarkdownBinding(ytext);
@@ -27,6 +27,22 @@ describe("diffOps", () => {
     expect(diffOps("hello world", "hello brave world", 10)).toEqual([{ index: 16, deleteCount: 0, insert: "brave " }]);
     expect(diffOps("abc", "axc")).toEqual([{ index: 1, deleteCount: 1, insert: "x" }]);
     expect(diffOps("same", "same")).toEqual([]);
+  });
+
+  it("produces word-level operations that apply cleanly", () => {
+    const oldText = "# Draft\n\nSecond version by the agent.\n\n- Ship\n";
+    const newText = "# Draft\n\nImproved version by the agent.\n\n- Ship it to everyone\n";
+    const ops = diffOpsWords(oldText, newText);
+    expect(ops).toEqual([
+      { index: 9, deleteCount: 6, insert: "Improved" },
+      { index: 47, deleteCount: 0, insert: " it to everyone" },
+    ]);
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("t");
+    ytext.insert(0, oldText);
+    applyOps(ytext, ops);
+    expect(ytext.toString()).toBe(newText);
+    expect(diffOpsWords("same", "same")).toEqual([]);
   });
 });
 
@@ -256,3 +272,4 @@ describe("MarkdownBinding", () => {
     expect(view.state.doc.textContent).toBe("Hello world. (intercepted)");
   });
 });
+

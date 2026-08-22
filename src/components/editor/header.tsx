@@ -35,6 +35,7 @@ import type { DocumentDto } from "@/server/dto";
 
 import { cn, shortcut } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
+import { AgentActivityChip } from "./agent-activity";
 
 export function Logo({ className }: { className?: string }) {
   return (
@@ -221,6 +222,7 @@ export function Header(props: HeaderProps) {
         <SaveIndicator state={saveState} />
       </div>
       <div className="flex shrink-0 items-center gap-3">
+        <AgentActivityChip session={session} />
         <ModeSwitcher session={session} />
         <PresenceStack session={session} />
         <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
@@ -345,6 +347,7 @@ export function Header(props: HeaderProps) {
     </header>
   );
 }
+
 
 
 

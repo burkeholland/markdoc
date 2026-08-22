@@ -1,8 +1,9 @@
-// Creates an API token through the settings UI, then acts as an agent with it against the running server.
+// Agent collaboration smoke: mints a token in the UI, then acts as an agent against the running server
+// while a browser watches the document. Usage: BASE_URL=http://localhost:3000 npx tsx scripts/agent-smoke.mts
 import { chromium, expect } from "@playwright/test";
 const base = process.env.BASE_URL ?? "http://localhost:3000";
 const browser = await chromium.launch();
-const page = await browser.newPage();
+const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 await page.goto(`${base}/login`);
 if (await page.getByTestId("dev-login").count()) {
   await page.getByTestId("dev-login").fill("agent-smoke");
@@ -17,23 +18,67 @@ await page.getByTestId("token-create").click();
 await page.getByTestId("token-created").waitFor();
 const token = (await page.getByTestId("copy-token").innerText()).trim();
 console.log("token prefix:", token.slice(0, 10));
-await browser.close();
 
 const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-const me = await (await fetch(`${base}/api/me`, { headers })).json();
-console.log("me:", me);
+const call = async (method: string, path: string, body?: unknown) => {
+  const res = await fetch(`${base}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status} ${text}`);
+  return data;
+};
+
+console.log("== identity");
+const me = await call("GET", "/api/me");
 expect(me.agent).toBe("Smoke agent");
-const created = await (await fetch(`${base}/api/documents`, { method: "POST", headers, body: JSON.stringify({ content: "# From an agent\n\nHello, humans.\n" }) })).json();
-console.log("created doc:", created.document);
-const list = await (await fetch(`${base}/api/documents`, { headers })).json();
-expect(list.documents.some((d: { id: string }) => d.id === created.document.id)).toBe(true);
-const named = await (await fetch(`${base}/api/documents/${created.document.id}/versions`, { method: "POST", headers, body: JSON.stringify({ title: "Agent checkpoint" }) })).json();
-console.log("version by:", named.version.createdByName);
-expect(named.version.createdByName).toBe("agent-smoke via Smoke agent");
-const bad = await fetch(`${base}/api/me`, { headers: { Authorization: "Bearer mdk_" + "z".repeat(40) } });
-expect(bad.status).toBe(401);
-const noMint = await fetch(`${base}/api/tokens`, { method: "POST", headers, body: JSON.stringify({ name: "nope" }) });
-expect(noMint.status).toBe(403);
-console.log("ALL GOOD");
 
+console.log("== create + live replace");
+const created = await call("POST", "/api/documents", { content: "# Draft\n\nFirst version by the agent.\n" });
+const id = created.document.id as string;
+await page.goto(`${base}/d/${id}`);
+await page.waitForSelector('[data-testid="save-state"][data-state="saved"]', { timeout: 30000 });
+await call("PUT", `/api/documents/${id}/content`, { content: "# Draft\n\nSecond version by the agent.\n\n## Next steps\n\n- Review\n", message: "Agent revision" });
+await expect(page.locator(".md-rich")).toContainText("Second version by the agent.");
+await expect(page.getByTestId("agent-activity")).toContainText("Smoke agent");
+console.log("live replace visible in the browser, bot chip shown");
 
+console.log("== append");
+await call("PATCH", `/api/documents/${id}/content`, { append: "- Ship" });
+await expect(page.locator(".md-rich li").last()).toHaveText("Ship");
+
+console.log("== suggestions from a revised text");
+const current = await call("GET", `/api/documents/${id}/content`);
+const revised = (current.content as string).replace("Second version", "Improved version").replace("- Ship", "- Ship it to everyone");
+const sug = await call("POST", `/api/documents/${id}/suggest`, { content: revised });
+console.log("suggestions created:", sug.suggestions);
+await expect(page.locator(".md-rich .md-suggest-insert").first()).toBeVisible();
+const list = await call("GET", `/api/documents/${id}/suggestions`);
+console.log("pending:", list.suggestions.map((s: { type: string; text: string; author: string }) => `${s.type}:${JSON.stringify(s.text)} by ${s.author}`));
+expect(list.suggestions.every((s: { author: string }) => s.author === "Smoke agent")).toBe(true);
+await call("POST", `/api/documents/${id}/suggest`, { edits: [{ find: "Review", replace: "Review with the team" }] });
+
+console.log("== comments by quote, then read them back");
+const c = await call("POST", `/api/documents/${id}/comments`, { action: "add", quote: "Next steps", body: "Should this be a numbered list?" });
+const comments = await call("GET", `/api/documents/${id}/comments`);
+expect(comments.comments.some((t: { id: string; author: string; currentText: string }) => t.id === c.id && t.author === "Smoke agent" && t.currentText === "Next steps")).toBe(true);
+await expect(page.getByTestId("comments-badge")).toHaveText("1");
+
+console.log("== human accepts everything in the UI");
+await page.getByTestId("comments-toggle").click();
+await page.getByTestId("comments-tab-suggestions").click();
+await page.screenshot({ path: "docs/agent-review.png" });
+await page.getByTestId("accept-all").click();
+await expect.poll(async () => (await call("GET", `/api/documents/${id}/suggestions`)).suggestions.length).toBe(0);
+const final = await call("GET", `/api/documents/${id}/content`);
+expect(final.content).toContain("Improved version");
+expect(final.content).toContain("Ship it to everyone");
+expect(final.content).toContain("Review with the team");
+const versions = await call("GET", `/api/documents/${id}/versions`);
+console.log("versions:", versions.versions.map((v: { kind: string; title: string | null; createdByName: string | null }) => `${v.kind}:${v.title} (${v.createdByName})`));
+expect(versions.versions.some((v: { title: string | null }) => v.title === "Agent revision")).toBe(true);
+
+console.log("== auth hygiene");
+expect((await fetch(`${base}/api/me`, { headers: { Authorization: "Bearer mdk_" + "z".repeat(40) } })).status).toBe(401);
+expect((await fetch(`${base}/api/tokens`, { method: "POST", headers, body: JSON.stringify({ name: "nope" }) })).status).toBe(403);
+await browser.close();
+console.log("ALL GOOD", `${base}/d/${id}`);

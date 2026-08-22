@@ -51,12 +51,17 @@ function summarize(doc: Y.Doc): LiveText {
 
 /** Read the current text of a document, preferring the live in-memory copy. */
 export async function readLiveText(docId: string): Promise<LiveText> {
+  return readLiveDoc(docId, summarize);
+}
+
+/** Run a read-only function against the live document (or a copy loaded from the database). */
+export async function readLiveDoc<T>(docId: string, fn: (doc: Y.Doc) => T): Promise<T> {
   const collab = getCollab();
   const live = collab?.documents.get(docId);
-  if (live) return summarize(live);
+  if (live) return fn(live);
   const doc = await loadFromDb(docId);
   try {
-    return summarize(doc);
+    return fn(doc);
   } finally {
     doc.destroy();
   }

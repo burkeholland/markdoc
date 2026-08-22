@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { CommentThread } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
@@ -11,6 +11,18 @@ import { cn, relativeTime } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
 
 type Tab = "open" | "resolved" | "suggestions";
+
+/** Avatar for a comment/suggestion author; agents (API tokens) get a bot badge. */
+function AuthorAvatar({ id, name, src, size }: { id: string; name: string; src?: string | null; size: number }) {
+  if (id.startsWith("agent:")) {
+    return (
+      <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700 ring-2 ring-white" style={{ width: size, height: size }} title={`${name} (agent)`}>
+        <Bot size={Math.round(size * 0.55)} />
+      </span>
+    );
+  }
+  return <Avatar name={name} src={src} size={size} />;
+}
 
 export interface CommentsPanelProps {
   session: CollabSession;
@@ -157,7 +169,7 @@ function ThreadCard({
         </div>
       )}
       <div className="flex items-start gap-2.5">
-        <Avatar name={thread.authorName} src={thread.authorAvatar} size={28} />
+        <AuthorAvatar id={thread.authorId} name={thread.authorName} src={thread.authorAvatar} size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-[13px] font-semibold text-ink">{thread.authorName}</span>
@@ -220,7 +232,7 @@ function ThreadCard({
         <div className="mt-3 flex flex-col gap-3 border-l border-line pl-3">
           {thread.replies.map((r) => (
             <div key={r.id} className="flex items-start gap-2.5">
-              <Avatar name={r.authorName} src={r.authorAvatar} size={24} />
+              <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
                   <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
@@ -318,7 +330,7 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
       data-suggestion-id={s.id}
     >
       <div className="flex items-start gap-2.5">
-        <Avatar name={s.authorName} src={s.authorAvatar} size={28} />
+        <AuthorAvatar id={s.authorId} name={s.authorName} src={s.authorAvatar} size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-[13px] font-semibold text-ink">{s.authorName}</span>
@@ -459,3 +471,4 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
     </aside>
   );
 }
+
