@@ -12,6 +12,7 @@ import { cn, relativeTime } from "@/lib/utils";
 
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
+import { MentionsStrip } from "@/components/dashboard/mentions-strip";
 
 type Doc = Omit<DocumentSummary, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string };
 type SearchDoc = Doc & { snippet: string | null };
@@ -173,6 +174,7 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
         </header>
 
         <section className="mx-auto max-w-6xl px-6 py-8">
+          <MentionsStrip />
           <div className="mb-8 grid gap-3 sm:grid-cols-2">
             <button
               type="button"

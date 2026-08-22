@@ -207,6 +207,28 @@ export const assets = pgTable(
 export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
+/** `@login` mentions in comments, so mentioned people can find them on the dashboard. */
+export const mentions = pgTable(
+  "mention",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    /** Thread id or reply id the mention appears in. */
+    commentId: text("comment_id").notNull(),
+    /** Lower-cased GitHub login of the mentioned person. */
+    mentionedLogin: text("mentioned_login").notNull(),
+    byLogin: text("by_login"),
+    snippet: text("snippet").notNull().default(""),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+    readAt: timestamp("read_at", { mode: "date", withTimezone: true }),
+  },
+  (t) => [uniqueIndex("mention_comment_login_idx").on(t.commentId, t.mentionedLogin), index("mention_login_idx").on(t.mentionedLogin)],
+);
+
+export type Mention = typeof mentions.$inferSelect;
+
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
 export type Version = typeof versions.$inferSelect;

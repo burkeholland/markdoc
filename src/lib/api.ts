@@ -47,6 +47,16 @@ export interface CollaboratorDto {
   image: string | null;
 }
 
+export interface MentionDto {
+  id: string;
+  documentId: string;
+  documentTitle: string;
+  commentId: string;
+  byLogin: string | null;
+  snippet: string;
+  createdAt: string;
+}
+
 export const api = {
   documents: {
     list: () => request<{ documents: (Omit<DocumentSummary, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string })[] }>("/api/documents"),
@@ -104,6 +114,10 @@ export const api = {
       request<{ files: { path: string; size?: number; sha: string }[] }>(`/api/github/repos/${owner}/${repo}/files?ref=${encodeURIComponent(ref)}`),
   },
   import: (body: Record<string, unknown>) => request<{ document: { id: string; title: string } }>("/api/import", { method: "POST", body: JSON.stringify(body) }),
+  mentions: {
+    list: () => request<{ mentions: MentionDto[] }>("/api/mentions"),
+    read: (id: string) => request<{ ok: true }>(`/api/mentions/${id}/read`, { method: "POST" }),
+  },
 };
 
 export interface UploadedAsset {

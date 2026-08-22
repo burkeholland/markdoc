@@ -1,13 +1,18 @@
 import * as Y from "yjs";
 import { createAnchor, newId, resolveAnchor, type CollabUser, type TextAnchor } from "./shared";
+import { parseMentions } from "./mentions";
 
 export interface CommentReply {
   id: string;
   authorId: string;
   authorName: string;
   authorAvatar?: string | null;
+  /** GitHub login of the author, when known. */
+  authorLogin?: string | null;
   body: string;
   createdAt: number;
+  /** Logins mentioned with `@login` in the body (lower-cased). */
+  mentions: string[];
 }
 
 export interface CommentThread {
@@ -18,11 +23,15 @@ export interface CommentThread {
   authorId: string;
   authorName: string;
   authorAvatar?: string | null;
+  /** GitHub login of the author, when known. */
+  authorLogin?: string | null;
   body: string;
   createdAt: number;
   resolved: boolean;
   resolvedBy?: string | null;
   resolvedAt?: number | null;
+  /** Logins mentioned with `@login` in the body (lower-cased). */
+  mentions: string[];
   replies: CommentReply[];
   /** Current absolute range in the text, or null when the anchored text no longer exists. */
   range: { from: number; to: number } | null;
@@ -31,6 +40,18 @@ export interface CommentThread {
 export const COMMENTS_ORIGIN = { name: "comments" };
 
 type ThreadMap = Y.Map<unknown>;
+
+/** Reply as stored in the Y.Array; older entries may lack `mentions`. */
+type StoredReply = Omit<CommentReply, "mentions"> & { mentions?: unknown };
+
+function readMentions(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+/** Normalize a stored reply so consumers always see `mentions` (old replies read as []). */
+export function readReply(r: StoredReply): CommentReply {
+  return { ...r, authorLogin: r.authorLogin ?? null, mentions: readMentions(r.mentions) };
+}
 
 /**
  * Comment threads stored in the shared Y.Doc. Each thread is a Y.Map with
@@ -66,7 +87,7 @@ export class CommentsModel {
   }
 
   private read(map: ThreadMap): CommentThread {
-    const replies = map.get("replies") as Y.Array<CommentReply> | undefined;
+    const replies = map.get("replies") as Y.Array<StoredReply> | undefined;
     const anchor = map.get("anchor") as TextAnchor;
     return {
       id: map.get("id") as string,
@@ -75,12 +96,14 @@ export class CommentsModel {
       authorId: map.get("authorId") as string,
       authorName: map.get("authorName") as string,
       authorAvatar: (map.get("authorAvatar") as string | null) ?? null,
+      authorLogin: (map.get("authorLogin") as string | null) ?? null,
       body: map.get("body") as string,
       createdAt: map.get("createdAt") as number,
       resolved: !!map.get("resolved"),
       resolvedBy: (map.get("resolvedBy") as string | null) ?? null,
       resolvedAt: (map.get("resolvedAt") as number | null) ?? null,
-      replies: replies ? replies.toArray() : [],
+      mentions: readMentions(map.get("mentions")),
+      replies: replies ? replies.toArray().map(readReply) : [],
       range: anchor ? resolveAnchor(this.ytext, anchor) : null,
     };
   }
@@ -111,10 +134,12 @@ export class CommentsModel {
       map.set("authorId", input.author.id);
       map.set("authorName", input.author.name);
       map.set("authorAvatar", input.author.avatar ?? null);
+      map.set("authorLogin", input.author.login ?? null);
       map.set("body", input.body);
+      map.set("mentions", parseMentions(input.body));
       map.set("createdAt", Date.now());
       map.set("resolved", false);
-      map.set("replies", new Y.Array<CommentReply>());
+      map.set("replies", new Y.Array<StoredReply>());
       this.ymap.set(id, map);
     }, COMMENTS_ORIGIN);
     return id;
@@ -125,13 +150,22 @@ export class CommentsModel {
     if (!map) return null;
     const replyId = newId();
     this.ydoc.transact(() => {
-      let replies = map.get("replies") as Y.Array<CommentReply> | undefined;
+      let replies = map.get("replies") as Y.Array<StoredReply> | undefined;
       if (!replies) {
-        replies = new Y.Array<CommentReply>();
+        replies = new Y.Array<StoredReply>();
         map.set("replies", replies);
       }
       replies.push([
-        { id: replyId, authorId: author.id, authorName: author.name, authorAvatar: author.avatar ?? null, body, createdAt: Date.now() },
+        {
+          id: replyId,
+          authorId: author.id,
+          authorName: author.name,
+          authorAvatar: author.avatar ?? null,
+          authorLogin: author.login ?? null,
+          body,
+          createdAt: Date.now(),
+          mentions: parseMentions(body),
+        },
       ]);
     }, COMMENTS_ORIGIN);
     return replyId;
@@ -143,13 +177,14 @@ export class CommentsModel {
     this.ydoc.transact(() => {
       if (!replyId) {
         map.set("body", body);
+        map.set("mentions", parseMentions(body));
         return;
       }
-      const replies = map.get("replies") as Y.Array<CommentReply> | undefined;
+      const replies = map.get("replies") as Y.Array<StoredReply> | undefined;
       if (!replies) return;
       const idx = replies.toArray().findIndex((r) => r.id === replyId);
       if (idx === -1) return;
-      const reply = { ...replies.get(idx), body };
+      const reply: StoredReply = { ...replies.get(idx), body, mentions: parseMentions(body) };
       replies.delete(idx, 1);
       replies.insert(idx, [reply]);
     }, COMMENTS_ORIGIN);
@@ -159,7 +194,7 @@ export class CommentsModel {
     const map = this.ymap.get(id);
     if (!map) return;
     this.ydoc.transact(() => {
-      const replies = map.get("replies") as Y.Array<CommentReply> | undefined;
+      const replies = map.get("replies") as Y.Array<StoredReply> | undefined;
       if (!replies) return;
       const idx = replies.toArray().findIndex((r) => r.id === replyId);
       if (idx !== -1) replies.delete(idx, 1);

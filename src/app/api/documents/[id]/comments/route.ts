@@ -4,6 +4,7 @@ import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { CommentsModel } from "@/editor/collab/comments";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
+import { recordMentions } from "@/server/mentions";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -84,6 +85,12 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     }
     recordAgentActivity(doc, user, "commented");
   });
+  // Editors' comments are picked up by the live-document watcher; this covers the no-collab path too (idempotent).
+  if (body.action === "add" || body.action === "reply" || body.action === "edit") {
+    const created = result as { id?: string | null };
+    const target = body.action === "edit" ? body.replyId ?? body.threadId : created.id;
+    if (target) await recordMentions(id, target, user.login, body.body);
+  }
   return json(result);
 });
 
@@ -98,6 +105,7 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
       return model.list().map((t) => ({
         id: t.id,
         body: t.body,
+        mentions: t.mentions,
         author: t.authorName,
         authorId: t.authorId,
         createdAt: new Date(t.createdAt).toISOString(),
@@ -105,7 +113,7 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
         quote: t.quote,
         range: t.range,
         currentText: t.range ? text.slice(t.range.from, t.range.to) : null,
-        replies: t.replies.map((r) => ({ id: r.id, body: r.body, author: r.authorName, authorId: r.authorId, createdAt: new Date(r.createdAt).toISOString() })),
+        replies: t.replies.map((r) => ({ id: r.id, body: r.body, mentions: r.mentions, author: r.authorName, authorId: r.authorId, createdAt: new Date(r.createdAt).toISOString() })),
       }));
     } finally {
       model.destroy();
