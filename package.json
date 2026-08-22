@@ -51,6 +51,7 @@
     "next": "16.3.1",
     "next-auth": "^5.0.0-beta.32",
     "pg": "^8.23.0",
+    "playwright-core": "^1.62.1",
     "prosemirror-commands": "^1.7.2",
     "prosemirror-dropcursor": "^1.8.3",
     "prosemirror-gapcursor": "^1.4.1",

@@ -16,6 +16,8 @@ import {
   UserPlus,
   History,
   Download,
+  FileCode2,
+  FileText,
   Copy,
   Trash2,
   Keyboard,
@@ -186,6 +188,8 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
   );
 }
 
+export type ExportFormat = "md" | "html" | "pdf";
+
 export interface HeaderProps {
   session: CollabSession;
   doc: DocumentDto;
@@ -198,7 +202,7 @@ export interface HeaderProps {
   onHistory: () => void;
   onShortcuts: () => void;
   onDelete: () => void;
-  onDownload: (withSuggestions: boolean) => void;
+  onDownload: (format: ExportFormat, withSuggestions: boolean) => void;
   onCopyMarkdown: () => void;
   onNameVersion: () => void;
   publishing: boolean;
@@ -255,8 +259,14 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             <MenuSeparator />
-            <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload(false)}>
+            <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)} data-testid="download-md">
               Download Markdown
+            </MenuItem>
+            <MenuItem icon={<FileCode2 size={15} />} onSelect={() => props.onDownload("html", false)} data-testid="download-html">
+              Download HTML
+            </MenuItem>
+            <MenuItem icon={<FileText size={15} />} onSelect={() => props.onDownload("pdf", false)} data-testid="download-pdf">
+              Download PDF
             </MenuItem>
             <MenuItem icon={<Copy size={15} />} onSelect={props.onCopyMarkdown}>
               Copy Markdown
@@ -333,7 +343,7 @@ export const Header = memo(function Header(props: HeaderProps) {
                   Gist or repository…
                 </MenuItem>
                 <MenuSeparator />
-                <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload(false)}>
+                <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
                   Download Markdown
                 </MenuItem>
                 <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
