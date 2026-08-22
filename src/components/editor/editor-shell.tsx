@@ -28,6 +28,7 @@ import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
+import { TableMenu } from "./table-menu";
 import { FindBar } from "./find-bar";
 import { useScrollSync } from "./scroll-sync";
 import type { VersionSummary } from "@/lib/api";
@@ -430,6 +431,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                   </div>
                   <div ref={setRichScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
+                    <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
                     <RichPane
                       session={session}
                       onReady={onRichReady}
