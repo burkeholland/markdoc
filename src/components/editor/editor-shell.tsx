@@ -27,6 +27,7 @@ import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
+import { useScrollSync } from "./scroll-sync";
 import type { VersionSummary } from "@/lib/api";
 
 export interface EditorShellProps {
@@ -63,7 +64,29 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
   const [viewsReady, setViewsReady] = useState(0);
   const [richView, setRichView] = useState<PMView | null>(null);
+  const [codeView, setCodeView] = useState<CMView | null>(null);
+  const [richScroller, setRichScroller] = useState<HTMLDivElement | null>(null);
+  const [syncScroll, setSyncScrollState] = useState(true);
   const richScrollRef = useRef<HTMLDivElement>(null);
+  const setRichScrollRef = useCallback((el: HTMLDivElement | null) => {
+    richScrollRef.current = el;
+    setRichScroller(el);
+  }, []);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("markdoc:syncScroll") === "0") setSyncScrollState(false);
+    } catch {
+      // Storage may be unavailable (private mode); keep the default.
+    }
+  }, []);
+  const setSyncScroll = useCallback((on: boolean) => {
+    setSyncScrollState(on);
+    try {
+      localStorage.setItem("markdoc:syncScroll", on ? "1" : "0");
+    } catch {
+      // Ignore storage errors; the setting still applies for this session.
+    }
+  }, []);
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
@@ -84,6 +107,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const onCodeReady = useCallback(
     (view: CMView | null) => {
       actions.setCodeView(view);
+      setCodeView(view);
       setViewsReady((n) => n + 1);
     },
     [actions],
@@ -251,6 +275,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const showCode = layout !== "rich" && !versionPreview;
   const showRich = layout !== "code" && !versionPreview;
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
+  useScrollSync({ session, code: codeView, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
 
   return (
     <TooltipProvider>
@@ -318,7 +343,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       </button>
                     </Tip>
                   </div>
-                  <div ref={richScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
+                  <div ref={setRichScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <RichPane
                       session={session}
@@ -346,6 +371,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onLayout={setLayout}
           lineWrapping={lineWrapping}
           onLineWrapping={setLineWrapping}
+          syncScroll={syncScroll}
+          onSyncScroll={setSyncScroll}
           onIssueSelect={onIssueSelect}
           onShortcuts={openShortcuts}
           onStorage={openStorage}

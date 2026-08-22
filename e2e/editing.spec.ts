@@ -209,4 +209,72 @@ test.describe("layout", () => {
     await expect.poll(() => richText(page)).toContain("Project Notes");
     await user.context.close();
   });
+
+  test("scrolling one pane scrolls the other to the same block", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const sections = Array.from({ length: 60 }, (_, i) => `## Section ${i}\n\n${"Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(6)}\n`).join("\n");
+    const id = await createDocument(user.page, `# Long document\n\n${sections}`);
+    await openDocument(user.page, id);
+    const { page } = user;
+    await expect(page.locator(".md-rich h2").first()).toHaveText("Section 0");
+
+    // Scroll the code pane a long way down; the preview should show the same block at its top.
+    await page.evaluate(() => {
+      const cm = document.querySelector(".cm-scroller") as HTMLElement;
+      cm.scrollTop = Math.round(cm.scrollHeight * 0.6);
+    });
+    await page.waitForTimeout(300);
+    const topLine = await page.evaluate(() => {
+      const cm = document.querySelector(".cm-scroller") as HTMLElement;
+      const edge = cm.getBoundingClientRect().top + 1;
+      const line = Array.from(document.querySelectorAll(".cm-line")).find((l) => {
+        const r = l.getBoundingClientRect();
+        return r.top <= edge && r.bottom > edge;
+      });
+      return line?.textContent ?? "";
+    });
+    expect(topLine.length).toBeGreaterThan(0);
+    const expected = topLine.replace(/^#+\s*/, "").slice(0, 40);
+    // The top-level preview block at the top edge of the preview scroller must be the same block.
+    const topRichBlock = () =>
+      page.evaluate(() => {
+        const scroller = document.querySelector('[data-testid="rich-column"] .overflow-y-auto') as HTMLElement;
+        const edge = scroller.getBoundingClientRect().top;
+        const block = Array.from(document.querySelectorAll(".md-rich > *")).find((el) => el.getBoundingClientRect().bottom > edge + 1);
+        return block ? { text: block.textContent ?? "" } : null;
+      });
+    await expect.poll(async () => (await topRichBlock())?.text.slice(0, 40), { timeout: 5_000 }).toBe(expected);
+
+    // And the other way around: scroll the preview to Section 10, the code pane follows.
+    const heading = page.locator(".md-rich h2", { hasText: /^Section 10$/ });
+    await page.evaluate(() => {
+      const scroller = document.querySelector('[data-testid="rich-column"] .overflow-y-auto') as HTMLElement;
+      const h = Array.from(document.querySelectorAll(".md-rich h2")).find((el) => el.textContent === "Section 10") as HTMLElement;
+      scroller.scrollTop += h.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    });
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const cm = document.querySelector(".cm-scroller") as HTMLElement;
+            const line = Array.from(document.querySelectorAll(".cm-line")).find((l) => l.textContent?.startsWith("## Section 10")) as HTMLElement | undefined;
+            return line ? Math.abs(line.getBoundingClientRect().top - cm.getBoundingClientRect().top) : 9999;
+          }),
+        { timeout: 5_000 },
+      )
+      .toBeLessThan(40);
+
+    // Turning sync off stops the preview from following.
+    await page.getByTestId("layout-menu").click();
+    await page.getByTestId("sync-scroll-toggle").click();
+    const before = await heading.boundingBox();
+    await page.evaluate(() => {
+      const cm = document.querySelector(".cm-scroller") as HTMLElement;
+      cm.scrollTop = 0;
+    });
+    await page.waitForTimeout(400);
+    const after = await heading.boundingBox();
+    expect(Math.abs((after?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(2);
+    await user.context.close();
+  });
 });

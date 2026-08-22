@@ -2,7 +2,7 @@
 import { Menu, MenuCheckboxItem, MenuContent, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, GitHubIcon } from "@/components/ui/primitives";
 
 import { memo, useMemo } from "react";
-import { AlertTriangle, Check, ChevronDown, CircleHelp, FileText, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText } from "lucide-react";
+import { AlertTriangle, ArrowUpDown, Check, ChevronDown, CircleHelp, FileText, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { DocumentDto } from "@/server/dto";
 import { lintMarkdown, type LintIssue } from "@/editor/markdown/lint";
@@ -19,6 +19,8 @@ export interface StatusBarProps {
   onLayout: (layout: Layout) => void;
   lineWrapping: boolean;
   onLineWrapping: (wrap: boolean) => void;
+  syncScroll: boolean;
+  onSyncScroll: (on: boolean) => void;
   onIssueSelect: (issue: LintIssue) => void;
   onShortcuts: () => void;
   onStorage: () => void;
@@ -26,7 +28,7 @@ export interface StatusBarProps {
   getRichText: () => string;
 }
 
-export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, onIssueSelect, onShortcuts, onStorage, getRichText }: StatusBarProps) {
+export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage, getRichText }: StatusBarProps) {
   // Linting re-parses the whole document and word counts walk it: wait for a pause in typing.
   const source = useDebouncedSessionValue(session, (s) => s.ytext.toString(), 500);
   const issues = useMemo(() => lintMarkdown(source), [source]);
@@ -79,6 +81,11 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
           <MenuCheckboxItem checked={lineWrapping} onCheckedChange={(v) => onLineWrapping(!!v)}>
             <span className="inline-flex items-center gap-2">
               <WrapText size={14} /> Wrap long lines
+            </span>
+          </MenuCheckboxItem>
+          <MenuCheckboxItem checked={syncScroll} onCheckedChange={(v) => onSyncScroll(!!v)} data-testid="sync-scroll-toggle">
+            <span className="inline-flex items-center gap-2">
+              <ArrowUpDown size={14} /> Sync scrolling
             </span>
           </MenuCheckboxItem>
           <MenuSeparator />
