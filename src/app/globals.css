@@ -507,6 +507,13 @@ body {
   position: relative;
   vertical-align: top;
   min-width: 40px;
+  /* Keep empty cells tall enough to show the caret and click into comfortably. */
+  min-height: 1.6em;
+}
+/* ProseMirror renders an empty cell as <td><br class="ProseMirror-trailingBreak"></td>; give it a line box. */
+.md-rich td:empty::after,
+.md-rich th:empty::after {
+  content: "\00a0";
 }
 .md-rich th {
   background: var(--color-surface-2);

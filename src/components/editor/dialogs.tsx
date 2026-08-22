@@ -283,6 +283,18 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     ],
   },
   {
+    group: "Tables",
+    items: [
+      ["Next / previous cell", "Tab / Shift-Tab"],
+      ["Row below / above", "Mod-Alt-↓ / ↑"],
+      ["Column right / left", "Mod-Alt-→ / ←"],
+      ["Delete row", "Mod-Alt-⌫"],
+      ["Delete column", "Mod-Alt-Shift-⌫"],
+      ["New row from the last cell", "Enter"],
+      ["Delete empty table", "⌫"],
+    ],
+  },
+  {
     group: "Markdown shortcuts in the preview",
     items: [
       ["Heading", "# + space"],
@@ -299,7 +311,7 @@ export function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenC
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Keyboard shortcuts" wide>
-        <div className="grid gap-6 sm:grid-cols-3">
+        <div className="grid gap-6 sm:grid-cols-2">
           {SHORTCUTS.map((g) => (
             <div key={g.group}>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-3">{g.group}</div>

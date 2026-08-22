@@ -22,6 +22,9 @@ export interface FormatState {
   quote: boolean;
   codeBlock: boolean;
   hasSelection: boolean;
+  /** Start position of the table around the rich selection, or -1 when outside a table. */
+  tablePos: number;
+  tableAlign: pm.TableAlign;
 }
 
 export const EMPTY_FORMAT: FormatState = {
@@ -37,7 +40,11 @@ export const EMPTY_FORMAT: FormatState = {
   quote: false,
   codeBlock: false,
   hasSelection: false,
+  tablePos: -1,
+  tableAlign: null,
 };
+
+export type TableCommand = "rowBefore" | "rowAfter" | "colBefore" | "colAfter" | "deleteRow" | "deleteColumn" | "deleteTable";
 
 export type DialogKind = "link" | "image" | "table" | "share" | "publish" | "shortcuts" | "versionName" | null;
 
@@ -95,10 +102,11 @@ export class EditorActions {
     if (!a) return EMPTY_FORMAT;
     if (a.kind === "code") {
       const s = cm.formatStateAt(a.view.state);
-      return { ...s, hasSelection: !a.view.state.selection.main.empty };
+      return { ...s, hasSelection: !a.view.state.selection.main.empty, tablePos: -1, tableAlign: null };
     }
     const state = a.view.state;
     const list = pm.listTypeAt(state);
+    const table = pm.tableAt(state);
     return {
       strong: pm.isMarkActive(state, schema.marks.strong),
       em: pm.isMarkActive(state, schema.marks.em),
@@ -112,6 +120,8 @@ export class EditorActions {
       quote: !!findParentNode(state.selection.$from, (n) => n.type === schema.nodes.blockquote),
       codeBlock: pm.blockTypeActive(state, schema.nodes.code_block),
       hasSelection: !state.selection.empty,
+      tablePos: table ? table.pos : -1,
+      tableAlign: table ? pm.columnAlignAt(state) : null,
     };
   }
 
@@ -221,6 +231,26 @@ export class EditorActions {
     if (!a) return;
     if (a.kind === "code") return void cm.insertTable(a.view, rows, cols);
     this.runPm(pm.insertTable(rows, cols));
+  }
+
+  /** Structural table edits; rich pane only (the code pane edits the Markdown directly). */
+  table(command: TableCommand) {
+    if (!this.guard() || !this.rich) return;
+    const cmd = {
+      rowBefore: pm.addRowBefore,
+      rowAfter: pm.addRowAfter,
+      colBefore: pm.addColumnBefore,
+      colAfter: pm.addColumnAfter,
+      deleteRow: pm.deleteRow,
+      deleteColumn: pm.deleteColumn,
+      deleteTable: pm.deleteTable,
+    }[command];
+    this.runPm(cmd);
+  }
+
+  setColumnAlign(align: pm.TableAlign) {
+    if (!this.guard() || !this.rich) return;
+    this.runPm(pm.setColumnAlign(align));
   }
 
   undo() {

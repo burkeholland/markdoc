@@ -207,7 +207,6 @@ const nodes: Record<string, NodeSerializer> = {
       out.push(line(filled));
       if (i === 0) out.push(delimiter());
     });
-    if (rows.length === 1) out.push(delimiter());
     state.text(out.join("\n"), false);
     state.closeBlock(node);
   },
