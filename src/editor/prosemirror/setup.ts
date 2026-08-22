@@ -3,7 +3,7 @@ import { keymap } from "prosemirror-keymap";
 import { baseKeymap, chainCommands, newlineInCode, createParagraphNear, liftEmptyBlock, splitBlock, exitCode } from "prosemirror-commands";
 import { dropCursor } from "prosemirror-dropcursor";
 import { gapCursor } from "prosemirror-gapcursor";
-import { tableEditing, goToNextCell } from "prosemirror-tables";
+import { tableEditing } from "prosemirror-tables";
 import * as Y from "yjs";
 import { schema } from "../markdown/schema";
 import { markdownBindingPlugin } from "../sync/markdown-binding";
@@ -25,6 +25,15 @@ import {
   liftListItem,
   insertHardBreak,
   liftEmptyListItemOnBackspace,
+  goToNextCell,
+  addRowBefore,
+  addRowAfter,
+  addColumnBefore,
+  addColumnAfter,
+  deleteRow,
+  deleteColumn,
+  addRowOnEnterAtEnd,
+  deleteEmptyTableOnBackspace,
 } from "./commands";
 
 export interface RichEditorHandlers extends HighlightHandlers {
@@ -154,12 +163,18 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     "Mod-Shift-9": guard(toggleList("task")),
     "Mod-Shift-.": guard(toggleBlockquote()),
     "Mod-Alt-c": guard(toggleCodeBlock()),
-    Enter: guard(enter),
+    "Mod-Alt-ArrowDown": guard(addRowAfter),
+    "Mod-Alt-ArrowUp": guard(addRowBefore),
+    "Mod-Alt-ArrowRight": guard(addColumnAfter),
+    "Mod-Alt-ArrowLeft": guard(addColumnBefore),
+    "Mod-Alt-Backspace": guard(deleteRow),
+    "Mod-Alt-Shift-Backspace": guard(deleteColumn),
+    Enter: guard(chainCommands(addRowOnEnterAtEnd, enter)),
     "Shift-Enter": guard(chainCommands(exitCode, insertHardBreak())),
     "Mod-Enter": guard(chainCommands(exitCode, insertHardBreak())),
     Tab: guard(chainCommands(goToNextCell(1), sinkListItem(schema.nodes.list_item))),
     "Shift-Tab": guard(chainCommands(goToNextCell(-1), liftListItem(schema.nodes.list_item))),
-    Backspace: guard(chainCommands(liftEmptyListItemOnBackspace, baseKeymap.Backspace)),
+    Backspace: guard(chainCommands(deleteEmptyTableOnBackspace, liftEmptyListItemOnBackspace, baseKeymap.Backspace)),
   });
 
   const guardedBase: Record<string, Command> = {};

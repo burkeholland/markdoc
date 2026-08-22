@@ -2,6 +2,17 @@ import { toggleMark, setBlockType, wrapIn, lift } from "prosemirror-commands";
 import { wrapInList, liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { TextSelection, NodeSelection, type Command, type EditorState, type Transaction } from "prosemirror-state";
 import { Fragment, type Attrs, type MarkType, type NodeType, type Node as PMNode } from "prosemirror-model";
+import {
+  addRowAfter as pmAddRowAfter,
+  addRowBefore as pmAddRowBefore,
+  addColumnAfter as pmAddColumnAfter,
+  addColumnBefore as pmAddColumnBefore,
+  deleteRow as pmDeleteRow,
+  deleteColumn as pmDeleteColumn,
+  goToNextCell,
+  isInTable,
+  selectedRect,
+} from "prosemirror-tables";
 import { findParentNode } from "./utils";
 import { schema } from "../markdown/schema";
 
@@ -256,6 +267,153 @@ export function insertTable(rows = 3, cols = 3): Command {
     return true;
   };
 }
+
+/* ---------- Tables ----------
+ * GFM tables always have exactly one header row, so the wrappers below keep
+ * the first row as table_header cells: new rows never go above the header and
+ * the header itself can only be removed together with the table.
+ */
+
+export type TableAlign = "left" | "center" | "right" | null;
+
+export { isInTable };
+
+/** Enclosing table node and its position, or null when the selection is outside a table. */
+export function tableAt(state: EditorState): { node: PMNode; pos: number } | null {
+  const found = findParentNode(state.selection.$anchor, (n) => n.type === schema.nodes.table);
+  if (!found) return null;
+  return { node: found.node, pos: state.selection.$anchor.before(found.depth) };
+}
+
+export const addRowBefore: Command = (state, dispatch) => {
+  if (!isInTable(state)) return false;
+  // Above the header means directly below it: the header must stay first.
+  if (selectedRect(state).top === 0) return pmAddRowAfter(state, dispatch);
+  return pmAddRowBefore(state, dispatch);
+};
+
+export const addRowAfter: Command = (state, dispatch) => {
+  if (!isInTable(state)) return false;
+  return pmAddRowAfter(state, dispatch);
+};
+
+export const addColumnBefore: Command = (state, dispatch) => {
+  if (!isInTable(state)) return false;
+  return pmAddColumnBefore(state, dispatch);
+};
+
+export const addColumnAfter: Command = (state, dispatch) => {
+  if (!isInTable(state)) return false;
+  return pmAddColumnAfter(state, dispatch);
+};
+
+/** Removes the table; when it was the only block an empty paragraph takes its place. */
+export const deleteTable: Command = (state, dispatch) => {
+  const table = tableAt(state);
+  if (!table) return false;
+  if (dispatch) {
+    const tr = state.tr;
+    const from = table.pos;
+    const to = from + table.node.nodeSize;
+    if (state.doc.childCount === 1) {
+      tr.replaceWith(from, to, schema.nodes.paragraph.create());
+      tr.setSelection(TextSelection.create(tr.doc, from + 1));
+    } else {
+      tr.delete(from, to);
+      tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(from, tr.doc.content.size)), from >= tr.doc.content.size ? -1 : 1));
+    }
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+};
+
+/** Deletes the selected body row(s). The header row is only removed with the whole table. */
+export const deleteRow: Command = (state, dispatch) => {
+  if (!isInTable(state)) return false;
+  const rect = selectedRect(state);
+  if (rect.top === 0) {
+    if (rect.bottom === rect.map.height) return deleteTable(state, dispatch);
+    return false;
+  }
+  return pmDeleteRow(state, dispatch);
+};
+
+/** Deletes the selected column(s); removing every column removes the table. */
+export const deleteColumn: Command = (state, dispatch) => {
+  if (!isInTable(state)) return false;
+  const rect = selectedRect(state);
+  if (rect.left === 0 && rect.right === rect.map.width) return deleteTable(state, dispatch);
+  return pmDeleteColumn(state, dispatch);
+};
+
+/** Sets the GFM alignment of every cell in the selected column(s). */
+export function setColumnAlign(align: TableAlign): Command {
+  return (state, dispatch) => {
+    if (!isInTable(state)) return false;
+    if (dispatch) {
+      const rect = selectedRect(state);
+      const tr = state.tr;
+      const seen = new Set<number>();
+      for (let row = 0; row < rect.map.height; row++) {
+        for (let col = rect.left; col < rect.right; col++) {
+          const pos = rect.map.map[row * rect.map.width + col];
+          if (seen.has(pos)) continue;
+          seen.add(pos);
+          const cell = rect.table.nodeAt(pos);
+          if (cell && cell.attrs.align !== align) tr.setNodeMarkup(rect.tableStart + pos, undefined, { ...cell.attrs, align });
+        }
+      }
+      if (tr.docChanged) dispatch(tr);
+    }
+    return true;
+  };
+}
+
+/** Alignment of the column at the selection anchor, or null outside a table. */
+export function columnAlignAt(state: EditorState): TableAlign {
+  if (!isInTable(state)) return null;
+  const rect = selectedRect(state);
+  const cell = rect.table.nodeAt(rect.map.map[rect.left]);
+  return (cell?.attrs.align as TableAlign) ?? null;
+}
+
+/** Enter in the last cell of the last row appends a row and moves into it. */
+export const addRowOnEnterAtEnd: Command = (state, dispatch) => {
+  if (!isInTable(state) || !state.selection.empty) return false;
+  const rect = selectedRect(state);
+  const { map } = rect;
+  if (rect.bottom !== map.height || rect.right !== map.width) return false;
+  if (dispatch) {
+    pmAddRowAfter(state, (tr) => {
+      let rowPos = rect.tableStart;
+      for (let i = 0; i < map.height; i++) rowPos += tr.doc.nodeAt(rect.tableStart - 1)!.child(i).nodeSize;
+      // The new row starts at rowPos; its first cell's content starts two tokens in.
+      tr.setSelection(TextSelection.create(tr.doc, rowPos + 2));
+      dispatch(tr.scrollIntoView());
+    });
+  }
+  return true;
+};
+
+/** Backspace inside a table whose cells are all empty removes the table. */
+export const deleteEmptyTableOnBackspace: Command = (state, dispatch) => {
+  if (!state.selection.empty) return false;
+  const table = tableAt(state);
+  if (!table || table.node.textContent.length > 0) return false;
+  let hasContent = false;
+  table.node.descendants((n) => {
+    const role = n.type.spec.tableRole;
+    if (role === "cell" || role === "header_cell") {
+      if (n.content.size > 0) hasContent = true;
+      return false;
+    }
+    return true;
+  });
+  if (hasContent) return false;
+  return deleteTable(state, dispatch);
+};
+
+export { goToNextCell };
 
 export function toggleTaskChecked(pos: number): Command {
   return (state, dispatch) => {
