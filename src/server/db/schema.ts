@@ -31,7 +31,7 @@ export const users = pgTable("user", {
     .$defaultFn(() => crypto.randomUUID()),
   name: text("name"),
   email: text("email").unique(),
-  emailVerified: timestamp("emailVerified", { mode: "date" }),
+  emailVerified: timestamp("emailVerified", { mode: "date", withTimezone: true }),
   image: text("image"),
   /** GitHub login (handle). Used for sharing by handle. */
   login: text("login"),
@@ -62,7 +62,7 @@ export const sessions = pgTable("session", {
   userId: text("userId")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
-  expires: timestamp("expires", { mode: "date" }).notNull(),
+  expires: timestamp("expires", { mode: "date", withTimezone: true }).notNull(),
 });
 
 export const verificationTokens = pgTable(
@@ -70,7 +70,7 @@ export const verificationTokens = pgTable(
   {
     identifier: text("identifier").notNull(),
     token: text("token").notNull(),
-    expires: timestamp("expires", { mode: "date" }).notNull(),
+    expires: timestamp("expires", { mode: "date", withTimezone: true }).notNull(),
   },
   (vt) => [primaryKey({ columns: [vt.identifier, vt.token] })],
 );
@@ -106,9 +106,9 @@ export const documents = pgTable(
     githubSha: text("github_sha"),
     /** Content as last published to / pulled from GitHub, to detect local changes. */
     publishedContent: text("published_content"),
-    publishedAt: timestamp("published_at", { mode: "date" }),
-    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+    publishedAt: timestamp("published_at", { mode: "date", withTimezone: true }),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     lastEditedBy: text("last_edited_by"),
   },
   (t) => [index("document_owner_idx").on(t.ownerId)],
@@ -124,7 +124,7 @@ export const collaborators = pgTable(
     login: text("login").notNull(),
     role: text("role").$type<Exclude<Role, "owner">>().notNull().default("editor"),
     addedBy: text("added_by"),
-    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.documentId, t.login] })],
 );
@@ -145,7 +145,7 @@ export const versions = pgTable(
     createdBy: text("created_by"),
     createdByName: text("created_by_name"),
     commitSha: text("commit_sha"),
-    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("version_doc_number_idx").on(t.documentId, t.number)],
 );
@@ -177,10 +177,10 @@ export const apiTokens = pgTable(
     /** First characters of the token for identification in lists. */
     prefix: text("prefix").notNull(),
     tokenHash: text("token_hash").notNull().unique(),
-    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
-    lastUsedAt: timestamp("last_used_at", { mode: "date" }),
-    expiresAt: timestamp("expires_at", { mode: "date" }),
-    revokedAt: timestamp("revoked_at", { mode: "date" }),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { mode: "date", withTimezone: true }),
+    expiresAt: timestamp("expires_at", { mode: "date", withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { mode: "date", withTimezone: true }),
   },
   (t) => [index("api_token_user_idx").on(t.userId)],
 );
@@ -192,4 +192,5 @@ export type NewDocument = typeof documents.$inferInsert;
 export type Version = typeof versions.$inferSelect;
 export type Collaborator = typeof collaborators.$inferSelect;
 export type User = typeof users.$inferSelect;
+
 

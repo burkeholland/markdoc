@@ -4,6 +4,10 @@ Google Docs for Markdown. Write Markdown together in real time, edit the **sourc
 
 ![Markdoc editor](docs/screenshot.png)
 
+*Reviewing an agent's proposal:* an agent connected through MCP proposed edits and left a comment; the human accepts or rejects them in the app.
+
+![Agent review](docs/agent-review.png)
+
 ## What it does
 
 | Area | Details |
@@ -17,6 +21,7 @@ Google Docs for Markdown. Write Markdown together in real time, edit the **sourc
 | Sharing | Add people by GitHub handle as editor, commenter or viewer. Link sharing: restricted, view, comment, or edit. |
 | Markdown quality | GitHub Flavored Markdown (tables, task lists, footnotes, strikethrough, front matter, raw HTML preserved). Built-in linter in the status bar (heading structure, broken references, unclosed fences, ragged tables, trailing whitespace) with jump-to-line. |
 | Sign in | GitHub only (OAuth). |
+| Agents | Personal access tokens plus an **MCP server** (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes, and read/answer comments. The app shows who the agent is and what it did. See [docs/agents.md](docs/agents.md). |
 
 ## Run it locally
 
@@ -118,4 +123,5 @@ infra, deploy              Bicep and deployment script
 ## License
 
 MIT
+
 

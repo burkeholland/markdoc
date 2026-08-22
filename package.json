@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
-    "build:server": "node scripts/build-server.mjs"
+    "build:server": "node scripts/build-server.mjs",
+    "mcp": "node mcp/server.mjs"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",
@@ -29,6 +30,7 @@
     "@hocuspocus/server": "^4.6.0",
     "@lezer/common": "^1.5.2",
     "@lezer/highlight": "^1.2.3",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@next/env": "^16.3.1",
     "@octokit/rest": "^22.0.1",
     "clsx": "^2.1.1",
