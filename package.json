@@ -4,14 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "tsx server/index.ts",
-    "build": "next build",
-    "start": "cross-env NODE_ENV=production tsx server/index.ts",
+    "build": "next build && node scripts/build-server.mjs",
+    "start": "cross-env NODE_ENV=production node dist/server.mjs",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "build:server": "node scripts/build-server.mjs"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",
@@ -93,6 +94,7 @@
     "concurrently": "^10.0.5",
     "cross-env": "^10.1.0",
     "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
     "jsdom": "^30.0.1",

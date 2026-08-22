@@ -1,6 +1,5 @@
 import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import * as schema from "./schema";
 
 type PgDb = import("drizzle-orm/node-postgres").NodePgDatabase<typeof schema>;
@@ -17,13 +16,9 @@ interface DbGlobal {
 const g = globalThis as typeof globalThis & { __markdocDb?: DbGlobal };
 const registry: DbGlobal = (g.__markdocDb ??= {});
 
+/** SQL migrations live in ./drizzle next to package.json (copied into the container image). */
 function migrationsFolder(): string {
-  const candidates = [
-    path.resolve(process.cwd(), "drizzle"),
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../drizzle"),
-  ];
-  for (const c of candidates) if (fs.existsSync(c)) return c;
-  return candidates[0];
+  return process.env.DRIZZLE_MIGRATIONS_DIR ?? path.join(process.cwd(), "drizzle");
 }
 
 async function create(): Promise<Db> {
