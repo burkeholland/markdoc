@@ -100,3 +100,27 @@ export const api = {
   },
   import: (body: Record<string, unknown>) => request<{ document: { id: string; title: string } }>("/api/import", { method: "POST", body: JSON.stringify(body) }),
 };
+
+export interface UploadedAsset {
+  id: string;
+  url: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** Suggested alt text (the file name without its extension). */
+  alt: string;
+}
+
+/** Upload an image for a document; the returned `url` is what goes into `![alt](url)`. */
+export async function uploadAsset(documentId: string, file: File): Promise<UploadedAsset> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`/api/documents/${documentId}/assets`, { method: "POST", body: form, credentials: "same-origin" });
+  const text = await res.text();
+  const data = text ? (JSON.parse(text) as unknown) : null;
+  if (!res.ok) {
+    const err = (data ?? {}) as { error?: string; issues?: unknown };
+    throw new ApiError(res.status, err.error ?? res.statusText, err.issues);
+  }
+  return data as UploadedAsset;
+}

@@ -185,6 +185,26 @@ export const apiTokens = pgTable(
   (t) => [index("api_token_user_idx").on(t.userId)],
 );
 
+/** Binary assets (images) embedded in documents. Bytes live in the database behind src/server/assets.ts. */
+export const assets = pgTable(
+  "asset",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    sha256: text("sha256").notNull(),
+    data: bytea("data").notNull(),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("asset_document_idx").on(t.documentId), uniqueIndex("asset_document_sha_idx").on(t.documentId, t.sha256)],
+);
+
+export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
 export type Document = typeof documents.$inferSelect;

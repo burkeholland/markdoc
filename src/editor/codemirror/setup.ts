@@ -23,11 +23,16 @@ import { codeEditorTheme } from "./theme";
 import { sourceHighlights, highlightClickHandler } from "./highlights";
 import { suggestingMode } from "./suggesting";
 import { toggleInlineMark, setHeading, toggleLinePrefix } from "./commands";
+import { codeImageUpload } from "./images";
+import type { ImageUploader } from "../prosemirror/images";
 
 export interface CodeEditorHandlers {
   onFocus?: () => void;
   onSelection?: (head: number, anchor: number) => void;
   onHighlightClick?: (kind: string, id: string | null) => void;
+  /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
+  uploadImage?: ImageUploader;
+  onImageError?: (message: string) => void;
 }
 
 export interface CodeEditorSetup {
@@ -82,6 +87,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     editable.of([EditorState.readOnly.of(!session.canEdit), EditorView.editable.of(session.canEdit)]),
     suggesting.of(session.mode === "suggesting" ? suggestingMode(session) : []),
     formattingKeymap,
+    handlers.uploadImage ? codeImageUpload(session, handlers.uploadImage, { onError: handlers.onImageError }) : [],
     // No searchKeymap: Mod-F is handled by the shared find bar in the editor shell.
     keymap.of([...yUndoManagerKeymap, ...closeBracketsKeymap, ...defaultKeymap, indentWithTab]),
     EditorView.domEventHandlers({

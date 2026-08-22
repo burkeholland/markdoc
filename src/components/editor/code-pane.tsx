@@ -5,6 +5,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { CollabSession } from "@/editor/collab/session";
 import { createCodeEditorSetup, type CodeEditorSetup } from "@/editor/codemirror/setup";
+import type { ImageUploader } from "@/editor/prosemirror/images";
 import { setHighlights } from "@/editor/codemirror/highlights";
 import { collectHighlights } from "@/editor/prosemirror/highlights";
 import { useSessionValue } from "./use-session";
@@ -14,19 +15,22 @@ export interface CodePaneProps {
   onReady: (view: EditorView | null) => void;
   onSelection: (head: number, anchor: number) => void;
   onHighlightClick: (kind: string, id: string | null) => void;
+  /** Uploads a pasted or dropped image and returns its URL. */
+  uploadImage?: ImageUploader;
+  onImageError?: (message: string) => void;
   /** Source offset of the rich pane's cursor when the rich pane is active (for the focus line). */
   focusSource: number | null;
   lineWrapping: boolean;
 }
 
-export function CodePane({ session, onReady, onSelection, onHighlightClick, focusSource, lineWrapping }: CodePaneProps) {
+export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, focusSource, lineWrapping }: CodePaneProps) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const setupRef = useRef<CodeEditorSetup | null>(null);
-  const handlers = useRef({ onSelection, onHighlightClick });
+  const handlers = useRef({ onSelection, onHighlightClick, uploadImage, onImageError });
   useEffect(() => {
-    handlers.current = { onSelection, onHighlightClick };
-  }, [onSelection, onHighlightClick]);
+    handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError };
+  }, [onSelection, onHighlightClick, uploadImage, onImageError]);
   const focusRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -35,6 +39,8 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, focu
       onFocus: () => session.setActiveSurface("code"),
       onSelection: (head, anchor) => handlers.current.onSelection(head, anchor),
       onHighlightClick: (kind, id) => handlers.current.onHighlightClick(kind, id),
+      uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
+      onImageError: (message) => handlers.current.onImageError?.(message),
     });
     const view = new EditorView({
       state: EditorState.create({ doc: session.ytext.toString(), extensions: setup.extensions }),

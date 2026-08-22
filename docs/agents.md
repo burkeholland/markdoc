@@ -63,6 +63,8 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `GET /api/documents/:id/versions` / `POST` | `{ title }` | History; name the current state. |
 | `GET /api/documents/:id/export` | | Plain Markdown (`?suggestions=1` keeps pending insertions). |
 | `POST /api/documents/:id/publish` / `pull` | `{ message? }` | GitHub publish / pull. |
+| `POST /api/documents/:id/assets` | multipart `file` field, or a raw image body with `Content-Type: image/png` and `?name=shot.png` | Upload an image (PNG, JPEG, GIF, WebP, SVG; ≤ 5 MB). Returns `{ id, url, name, mime, size, alt }`; put `![alt](url)` in the Markdown. Identical bytes within a document share one asset. |
+| `GET /api/assets/:id` | | The image bytes. Requires view access to the owning document (shared links included). |
 
 Example:
 
@@ -70,6 +72,16 @@ Example:
 curl -s -H "Authorization: Bearer $MARKDOC_TOKEN" -H "Content-Type: application/json" \
   -X POST http://localhost:3000/api/documents/abc123/suggest \
   -d '{"edits":[{"find":"We ship Friday","replace":"We ship next Friday"}]}'
+```
+
+Uploading an image and embedding it:
+
+```bash
+curl -s -H "Authorization: ******" -F file=@chart.png \
+  http://localhost:3000/api/documents/abc123/assets
+# → {"id":"…","url":"/api/assets/…","name":"chart.png","mime":"image/png","size":12345,"alt":"chart"}
+curl -s -H "Authorization: ******" -H "Content-Type: application/json" \
+  -X PATCH http://localhost:3000/api/documents/abc123/content -d '{"append":"\n![chart](/api/assets/…)\n"}'
 ```
 
 ## What people see

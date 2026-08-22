@@ -13,6 +13,7 @@ import { codeHighlightPlugin } from "./code-highlight";
 import { remoteCursorsPlugin } from "./remote-cursors";
 import { richHighlightsPlugin, richSuggestingPlugin, type HighlightHandlers } from "./highlights";
 import { smartPastePlugin } from "./paste";
+import { imageUploadPlugin, type ImageUploader } from "./images";
 import {
   toggleMark,
   setHeadingLevel,
@@ -31,6 +32,9 @@ export interface RichEditorHandlers extends HighlightHandlers {
   onSelection?: (head: number, anchor: number) => void;
   onLinkShortcut?: () => void;
   onCommentShortcut?: () => void;
+  /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
+  uploadImage?: ImageUploader;
+  onImageError?: (message: string) => void;
 }
 
 const editableKey = new PluginKey<{ canEdit: boolean }>("editable");
@@ -168,6 +172,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
       markdownBindingPlugin(session.binding),
       richSuggestingPlugin(session),
       markdownInputRules(),
+      ...(handlers.uploadImage ? [imageUploadPlugin(session, handlers.uploadImage, { onError: handlers.onImageError })] : []),
       smartPastePlugin(session),
       shortcuts,
       keymap(guardedBase),

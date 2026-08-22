@@ -444,6 +444,55 @@ body {
 .md-rich img.ProseMirror-selectednode {
   outline: 2px solid var(--color-accent);
 }
+/* Image upload placeholder: local preview dimmed with a spinner until the asset URL arrives. */
+.md-rich .md-image-upload {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+  border-radius: 8px;
+  overflow: hidden;
+  user-select: none;
+}
+.md-rich .md-image-upload img {
+  display: block;
+  opacity: 0.5;
+  filter: saturate(0.6);
+}
+.md-rich .md-image-upload-label {
+  display: inline-block;
+  padding: 0.6em 2.6em 0.6em 0.9em;
+  border: 1px dashed var(--color-line);
+  border-radius: 8px;
+  color: var(--color-ink-3);
+  font-size: 0.85em;
+}
+.md-rich .md-image-upload-spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  border: 2.5px solid rgba(255, 255, 255, 0.6);
+  border-top-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.06);
+  animation: md-spin 0.8s linear infinite;
+}
+.md-rich .md-image-upload-label + .md-image-upload-spinner {
+  left: auto;
+  right: 0.7em;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 0;
+  border-width: 2px;
+}
+@keyframes md-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .md-rich table {
   border-collapse: collapse;
   table-layout: fixed;

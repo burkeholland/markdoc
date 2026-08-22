@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { shortcut } from "@/lib/utils";
 
@@ -82,18 +82,49 @@ export function LinkDialog({
   );
 }
 
-export function ImageDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (src: string, alt: string) => void }) {
+export function ImageDialog({
+  open,
+  onOpenChange,
+  onSubmit,
+  onUpload,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (src: string, alt: string) => void;
+  /** Uploads a chosen file and returns the URL to use; when absent the Upload button is hidden. */
+  onUpload?: (file: File) => Promise<{ url: string; alt?: string }>;
+}) {
   const [src, setSrc] = useState("");
   const [alt, setAlt] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (open) {
       setSrc("");
       setAlt("");
+      setError(null);
+      setUploading(false);
     }
   }, [open]);
+  const chooseFile = async (file: File | undefined) => {
+    if (!file || !onUpload) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const result = await onUpload(file);
+      setSrc(result.url);
+      setAlt((current) => current || result.alt || file.name.replace(/\.[a-z0-9]{2,5}$/i, ""));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Insert image" description="Paste the address of an image. Alt text describes the image for people who can't see it.">
+      <DialogContent title="Insert image" description="Paste the address of an image or upload one. Alt text describes the image for people who can't see it.">
         <form
           className="flex flex-col gap-3"
           onSubmit={(e) => {
@@ -105,8 +136,30 @@ export function ImageDialog({ open, onOpenChange, onSubmit }: { open: boolean; o
         >
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             Image URL
-            <input className="input" placeholder="https://…/image.png" value={src} onChange={(e) => setSrc(e.target.value)} autoFocus data-testid="image-url" />
+            <div className="flex gap-2">
+              <input className="input flex-1" placeholder="https://…/image.png" value={src} onChange={(e) => setSrc(e.target.value)} autoFocus data-testid="image-url" />
+              {onUpload && (
+                <>
+                  <button type="button" className="btn btn-outline shrink-0" onClick={() => fileInput.current?.click()} disabled={uploading} data-testid="image-upload">
+                    {uploading ? "Uploading…" : "Upload…"}
+                  </button>
+                  <input
+                    ref={fileInput}
+                    type="file"
+                    accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                    className="hidden"
+                    onChange={(e) => void chooseFile(e.target.files?.[0])}
+                    data-testid="image-file"
+                  />
+                </>
+              )}
+            </div>
           </label>
+          {error && (
+            <div className="text-sm text-danger" role="alert" data-testid="image-upload-error">
+              {error}
+            </div>
+          )}
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             Alt text
             <input className="input" placeholder="Describe the image" value={alt} onChange={(e) => setAlt(e.target.value)} data-testid="image-alt" />

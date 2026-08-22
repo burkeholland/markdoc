@@ -11,6 +11,7 @@ import type { Role } from "@/server/db/schema";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { api } from "@/lib/api";
+import { uploadAsset } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip } from "@/components/ui/primitives";
 import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
@@ -236,6 +237,10 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     toast("Markdown copied to clipboard.", "success");
   }, [session, toast]);
 
+  // Pasted, dropped and dialog-chosen images all go through the document's asset store.
+  const uploadImage = useCallback((file: File) => uploadAsset(doc.id, file), [doc.id]);
+  const onImageError = useCallback((message: string) => toast(`Image upload failed: ${message}`, "error"), [toast]);
+
   const deleteDoc = useCallback(async () => {
     if (!confirm(`Delete “${doc.title}”? This cannot be undone.`)) return;
     await api.documents.delete(doc.id);
@@ -375,6 +380,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       onReady={onCodeReady}
                       onSelection={onCodeSelection}
                       onHighlightClick={onHighlightClick}
+                      uploadImage={uploadImage}
+                      onImageError={onImageError}
                       focusSource={activeSurface === "rich" ? cursor.rich : null}
                       lineWrapping={lineWrapping}
                     />
@@ -405,6 +412,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       onHighlightClick={onHighlightClick}
                       onLinkShortcut={openLink}
                       onCommentShortcut={startComment}
+                      uploadImage={uploadImage}
+                      onImageError={onImageError}
                       focusSource={activeSurface === "code" ? cursor.code : null}
                     />
                   </div>
@@ -442,7 +451,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onSubmit={(href, text) => actions.applyLink(href, text)}
           onRemove={() => actions.removeLink()}
         />
-        <ImageDialog open={dialog === "image"} onOpenChange={(o) => setDialog(o ? "image" : null)} onSubmit={(src, alt) => actions.insertImage(src, alt)} />
+        <ImageDialog open={dialog === "image"} onOpenChange={(o) => setDialog(o ? "image" : null)} onSubmit={(src, alt) => actions.insertImage(src, alt)} onUpload={uploadImage} />
         <TableDialog open={dialog === "table"} onOpenChange={(o) => setDialog(o ? "table" : null)} onSubmit={(r, c) => actions.insertTable(r, c)} />
         <NameVersionDialog
           open={dialog === "versionName"}
