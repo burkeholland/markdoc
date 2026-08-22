@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip } from "@/components/ui/primitives";
 import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
 import { EditorActions, EMPTY_FORMAT, type DialogKind, type FormatState } from "./actions";
-import { Header } from "./header";
+import { Header, type ExportFormat } from "./header";
 import { Toolbar } from "./toolbar";
 import { OutlinePanel } from "./outline";
 import { CodePane } from "./code-pane";
@@ -226,10 +226,35 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   }, [doc.id, toast]);
 
   const download = useCallback(
-    (withSuggestions: boolean) => {
-      navigateTo(`/api/documents/${doc.id}/export?download=1${withSuggestions ? "&suggestions=1" : ""}`);
+    async (format: ExportFormat, withSuggestions: boolean) => {
+      const href = `/api/documents/${doc.id}/export?format=${format}&download=1${withSuggestions ? "&suggestions=1" : ""}`;
+      if (format !== "pdf") {
+        navigateTo(href);
+        return;
+      }
+      // PDF rendering takes a few seconds; fetch to a blob so the toast can report failures.
+      toast("Preparing PDF…", "info");
+      try {
+        const res = await fetch(href);
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(data?.error ?? `PDF export failed (${res.status})`);
+        }
+        const blob = await res.blob();
+        const match = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "");
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = match?.[1] ?? `${doc.title || "document"}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+      } catch (e) {
+        toast(e instanceof Error ? e.message : "PDF export failed", "error");
+      }
     },
-    [doc.id],
+    [doc.id, doc.title, toast],
   );
 
   const copyMarkdown = useCallback(async () => {

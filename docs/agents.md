@@ -64,7 +64,7 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }` | Comment. |
 | `GET /api/mentions` / `POST /api/mentions/:id/read` | | Your unread `@mentions` (with document title); mark one read. |
 | `GET /api/documents/:id/versions` / `POST` | `{ title }` | History; name the current state. |
-| `GET /api/documents/:id/export` | | Plain Markdown (`?suggestions=1` keeps pending insertions). |
+| `GET /api/documents/:id/export` | `?format=md\|html\|pdf` (default `md`), `?download=1` (attachment; HTML embeds images as `data:` URIs), `?suggestions=1` keeps pending insertions | Plain Markdown, a standalone HTML page, or a Letter PDF. PDF returns `503 { error }` if Chromium is unavailable on the server. |
 | `POST /api/documents/:id/publish` / `pull` | `{ message? }` | GitHub publish / pull. |
 | `POST /api/documents/:id/assets` | multipart `file` field, or a raw image body with `Content-Type: image/png` and `?name=shot.png` | Upload an image (PNG, JPEG, GIF, WebP, SVG; ≤ 5 MB). Returns `{ id, url, name, mime, size, alt }`; put `![alt](url)` in the Markdown. Identical bytes within a document share one asset. |
 | `GET /api/assets/:id` | | The image bytes. Requires view access to the owning document (shared links included). |
