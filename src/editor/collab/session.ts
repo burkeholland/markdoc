@@ -8,10 +8,30 @@ import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
 import type { CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
+import {
+  carryActiveIndex,
+  DEFAULT_FIND_OPTIONS,
+  expandReplacement,
+  findMatches,
+  matchIndexAfter,
+  type FindMatch,
+  type FindOptions,
+} from "../find";
 
 export type EditMode = "editing" | "suggesting" | "viewing";
 export type Surface = "code" | "rich";
 export type SaveState = "saved" | "saving" | "offline" | "connecting" | "error";
+
+export interface FindState {
+  query: string;
+  options: FindOptions;
+  matches: FindMatch[];
+  /** Index into `matches`, or -1 when there are none. */
+  active: number;
+}
+
+/** Origin for direct source edits made outside the editors (find & replace); tracked by undo. */
+export const LOCAL_EDIT_ORIGIN = { name: "local-edit" };
 
 export interface PresenceUser extends CollabUser {
   clientId: number;
@@ -61,6 +81,8 @@ export class CollabSession {
   activeSuggestionId: string | null = null;
   /** Pending comment composer anchored to a selection, if any. */
   pendingComment: { from: number; to: number } | null = null;
+  /** Find & replace state while the find bar is open (matches are in source offsets). */
+  find: FindState | null = null;
   private listeners = new Set<Listener>();
   private notifyScheduled = false;
   private destroyed = false;
@@ -125,6 +147,8 @@ export class CollabSession {
     this.suggestions.subscribe(this.notify);
     this.meta.observe(this.notify);
     this.ytext.observe(this.notify);
+    this.ytext.observe(this.refreshFind);
+    this.undoManager.addTrackedOrigin(LOCAL_EDIT_ORIGIN);
   }
 
   get canEdit(): boolean {
@@ -186,6 +210,109 @@ export class CollabSession {
   setPendingComment(range: { from: number; to: number } | null) {
     this.pendingComment = range;
     this.notify();
+  }
+
+  // ---- Find & replace -------------------------------------------------------
+
+  /** Open (or update) the find bar state; matches are recomputed immediately. */
+  setFind(query: string, options: FindOptions = this.find?.options ?? DEFAULT_FIND_OPTIONS) {
+    const previous = this.find?.matches[this.find.active] ?? null;
+    const matches = findMatches(this.ytext.toString(), query, options);
+    const changedQuery = !this.find || this.find.query !== query || this.find.options !== options;
+    let active: number;
+    if (changedQuery) {
+      // Start from the match nearest the caret so the first hit is where the user is looking.
+      active = matchIndexAfter(matches, this.findAnchor());
+    } else {
+      active = carryActiveIndex(matches, previous);
+    }
+    this.find = { query, options, matches, active };
+    this.notify();
+  }
+
+  closeFind() {
+    if (!this.find) return;
+    this.find = null;
+    this.notify();
+  }
+
+  /** Move the active match by `step` (wrapping). Returns the new active match. */
+  stepFind(step: 1 | -1): FindMatch | null {
+    const f = this.find;
+    if (!f || f.matches.length === 0) return null;
+    const active = (f.active + step + f.matches.length) % f.matches.length;
+    this.find = { ...f, active };
+    this.notify();
+    return f.matches[active];
+  }
+
+  /** Source offset used as the starting point when a search begins: the local caret, if known. */
+  private findAnchor(): number {
+    const local = this.presence().find((u) => u.isLocal);
+    return local?.cursor ?? 0;
+  }
+
+  private refreshFind = () => {
+    if (!this.find) return;
+    const previous = this.find.matches[this.find.active] ?? null;
+    const matches = findMatches(this.ytext.toString(), this.find.query, this.find.options);
+    this.find = { ...this.find, matches, active: carryActiveIndex(matches, previous) };
+  };
+
+  /**
+   * Replace the active match and advance to the next one. Returns the match that
+   * becomes active afterwards (so the UI can reveal it), or null.
+   */
+  replaceActive(replacement: string): FindMatch | null {
+    const f = this.find;
+    if (!f || f.active < 0 || !this.canEdit) return null;
+    const match = f.matches[f.active];
+    const text = expandReplacement(this.ytext.toString(), match, f.query, f.options, replacement);
+    this.replaceSource([{ from: match.from, to: match.to, text }]);
+    const next = this.find;
+    if (!next || next.matches.length === 0) return null;
+    // After the edit the active index points at the match that followed the replaced one.
+    const idx = matchIndexAfter(next.matches, match.from + (this.mode === "suggesting" ? match.to - match.from + text.length : text.length));
+    this.find = { ...next, active: idx === -1 ? 0 : idx };
+    this.notify();
+    return this.find.matches[this.find.active] ?? null;
+  }
+
+  /** Replace every match. Returns how many were replaced. */
+  replaceAll(replacement: string): number {
+    const f = this.find;
+    if (!f || f.matches.length === 0 || !this.canEdit) return 0;
+    const text = this.ytext.toString();
+    const edits = f.matches.map((m) => ({ from: m.from, to: m.to, text: expandReplacement(text, m, f.query, f.options, replacement) }));
+    this.replaceSource(edits);
+    return edits.length;
+  }
+
+  /**
+   * Apply source edits (non-overlapping, any order) as one undoable step. In
+   * suggesting mode they become tracked changes instead of direct edits.
+   */
+  replaceSource(edits: { from: number; to: number; text: string }[]) {
+    if (!this.canEdit || edits.length === 0) return;
+    const sorted = [...edits].sort((a, b) => b.from - a.from);
+    if (this.mode === "suggesting") {
+      this.ydoc.transact(() => {
+        for (const e of sorted) {
+          if (e.to > e.from) this.suggestions.markDeleted(e.from, e.to, this.user);
+          if (e.text) {
+            this.ytext.insert(e.from, e.text);
+            this.suggestions.recordInserted(e.from, e.text.length, this.user);
+          }
+        }
+      }, SUGGESTIONS_ORIGIN);
+      return;
+    }
+    this.ydoc.transact(() => {
+      for (const e of sorted) {
+        if (e.to > e.from) this.ytext.delete(e.from, e.to - e.from);
+        if (e.text) this.ytext.insert(e.from, e.text);
+      }
+    }, LOCAL_EDIT_ORIGIN);
   }
 
   /** Users currently present, one entry per user (a user may have several tabs). */
