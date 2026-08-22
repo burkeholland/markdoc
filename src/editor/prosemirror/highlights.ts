@@ -35,6 +35,11 @@ export function collectHighlights(session: CollabSession, focusRange: { from: nu
       active: s.id === session.activeSuggestionId,
     });
   }
+  if (session.find) {
+    session.find.matches.forEach((m, i) => {
+      out.push({ from: m.from, to: m.to, kind: i === session.find!.active ? "find-active" : "find" });
+    });
+  }
   if (focusRange) out.push({ ...focusRange, kind: "focus" });
   return out;
 }
@@ -51,6 +56,10 @@ function classFor(h: SourceHighlight): string {
       return "md-suggest-delete" + (h.active ? " md-suggest-active" : "");
     case "focus":
       return "md-focus-block";
+    case "find":
+      return "md-find";
+    case "find-active":
+      return "md-find md-find-active";
   }
 }
 

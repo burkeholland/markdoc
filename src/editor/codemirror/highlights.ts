@@ -5,7 +5,7 @@ import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
 export interface SourceHighlight {
   from: number;
   to: number;
-  kind: "comment" | "comment-resolved" | "suggest-insert" | "suggest-delete" | "focus";
+  kind: "comment" | "comment-resolved" | "suggest-insert" | "suggest-delete" | "focus" | "find" | "find-active";
   id?: string;
   active?: boolean;
   color?: string;
@@ -25,6 +25,10 @@ function classFor(h: SourceHighlight): string {
       return "md-suggest-delete" + (h.active ? " md-suggest-active" : "");
     case "focus":
       return "md-focus-block";
+    case "find":
+      return "md-find";
+    case "find-active":
+      return "md-find md-find-active";
   }
 }
 

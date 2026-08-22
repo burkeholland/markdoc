@@ -16,7 +16,7 @@ import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches } from "@codemirror/search";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import type { CollabSession } from "../collab/session";
 import { codeEditorTheme } from "./theme";
@@ -82,7 +82,8 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     editable.of([EditorState.readOnly.of(!session.canEdit), EditorView.editable.of(session.canEdit)]),
     suggesting.of(session.mode === "suggesting" ? suggestingMode(session) : []),
     formattingKeymap,
-    keymap.of([...yUndoManagerKeymap, ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, indentWithTab]),
+    // No searchKeymap: Mod-F is handled by the shared find bar in the editor shell.
+    keymap.of([...yUndoManagerKeymap, ...closeBracketsKeymap, ...defaultKeymap, indentWithTab]),
     EditorView.domEventHandlers({
       focus: () => {
         handlers.onFocus?.();

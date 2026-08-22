@@ -219,6 +219,16 @@ body {
   outline-offset: 1px;
   border-radius: 2px;
 }
+/* Find & replace matches. Translucent colors so they read on light and dark backgrounds. */
+.md-find {
+  background: rgba(250, 204, 21, 0.35);
+  border-radius: 2px;
+}
+.md-find.md-find-active {
+  background: rgba(249, 115, 22, 0.55);
+  outline: 1px solid rgba(234, 88, 12, 0.9);
+  outline-offset: 0.5px;
+}
 .md-focus-block {
   box-shadow: -3px 0 0 #bfdbfe;
   transition: box-shadow 0.3s;

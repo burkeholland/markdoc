@@ -27,8 +27,11 @@ import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
+import { FindBar } from "./find-bar";
 import { useScrollSync } from "./scroll-sync";
 import type { VersionSummary } from "@/lib/api";
+import type { FindMatch } from "@/editor/find";
+import { isMac } from "@/lib/utils";
 
 export interface EditorShellProps {
   doc: DocumentDto;
@@ -67,6 +70,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [codeView, setCodeView] = useState<CMView | null>(null);
   const [richScroller, setRichScroller] = useState<HTMLDivElement | null>(null);
   const [syncScroll, setSyncScrollState] = useState(true);
+  const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const richScrollRef = useRef<HTMLDivElement>(null);
   const setRichScrollRef = useCallback((el: HTMLDivElement | null) => {
     richScrollRef.current = el;
@@ -91,6 +95,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
   const isOwner = role === "owner";
+  useEffect(() => {
+    actions.setRichScroller(richScroller);
+  }, [actions, richScroller]);
 
   const toast = useCallback((message: string, kind: Toast["kind"] = "info", action?: Toast["action"]) => {
     const id = Date.now() + Math.random();
@@ -251,21 +258,57 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const copyFromHeader = useCallback(() => void copyMarkdown(), [copyMarkdown]);
   const goHome = useCallback(() => router.push("/"), [router]);
 
+  // Find & replace. The model lives on the session (shared with the highlight pipeline);
+  // the shell owns focus handling and the replace-row toggle.
+  const openFind = useCallback(
+    (replace: boolean) => {
+      const seed = actions.selectionText();
+      session.setFind(seed || session.find?.query || "");
+      setFindUi((ui) => ({ replace: replace || (ui?.replace ?? false), nonce: (ui?.nonce ?? 0) + 1 }));
+      const m = session.find?.matches[session.find.active];
+      if (m) actions.revealSourceRange(m);
+    },
+    [actions, session],
+  );
+  const closeFind = useCallback(() => {
+    const m = session.find?.matches[session.find.active] ?? null;
+    session.closeFind();
+    setFindUi(null);
+    // The active match becomes the selection in the pane the user was working in.
+    if (m) actions.selectSourceRange(m, { focus: true });
+    else actions.focus();
+  }, [actions, session]);
+  const setFindReplaceVisible = useCallback((replace: boolean) => setFindUi((ui) => (ui ? { ...ui, replace } : ui)), []);
+  const revealMatch = useCallback((m: FindMatch) => actions.revealSourceRange(m), [actions]);
+
   // Global shortcuts that are not editor-specific.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.altKey && e.key.toLowerCase() === "m") {
+      const mod = e.metaKey || e.ctrlKey;
+      // Option-letter on macOS reports a symbol in `key`; fall back to the physical key there.
+      const key = isMac && e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
+      if (mod && e.altKey && key === "m") {
         e.preventDefault();
         startComment();
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === "/" ) {
+      if (mod && e.key === "/" ) {
         e.preventDefault();
         setDialog("shortcuts");
+      }
+      // Mod-F must win over the browser and both editors' default search bindings.
+      if (mod && !e.shiftKey && key === "f" && (!e.altKey || isMac)) {
+        e.preventDefault();
+        openFind(e.altKey);
+      } else if (mod && !e.shiftKey && !e.altKey && key === "h") {
+        e.preventDefault();
+        openFind(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [startComment]);
+  }, [startComment, openFind]);
+
+  const findOpen = useSessionValue(session, (s) => s.find !== null);
 
   // The title lives in the shared document so everyone sees renames immediately.
   const sharedTitle = useSessionValue(session, (s) => s.title);
@@ -300,7 +343,16 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onHome={goHome}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
-        {authError && (
+        {findOpen && (
+          <FindBar
+            session={session}
+            replaceVisible={findUi?.replace ?? false}
+            onReplaceVisible={setFindReplaceVisible}
+            focusNonce={findUi?.nonce ?? 0}
+            onReveal={revealMatch}
+            onClose={closeFind}
+          />
+        )}        {authError && (
           <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger" role="alert">
             Could not connect to the collaboration server ({authError}).
             <button type="button" className="btn btn-sm btn-outline" onClick={() => window.location.reload()}>
