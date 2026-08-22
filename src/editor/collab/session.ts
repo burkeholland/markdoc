@@ -130,6 +130,7 @@ export class CollabSession {
       color: options.user.color,
       colorLight: options.user.colorLight,
       avatar: options.user.avatar ?? null,
+      login: options.user.login ?? null,
     });
 
     this.undoManager = new Y.UndoManager(this.ytext, {
@@ -341,6 +342,7 @@ export class CollabSession {
         color: u.color ?? "#2563eb",
         colorLight: u.colorLight ?? "#2563eb33",
         avatar: u.avatar ?? null,
+        login: u.login ?? null,
         clientId,
         cursor,
         isLocal: clientId === localId,

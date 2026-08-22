@@ -5,6 +5,7 @@ import { getDb, schema } from "@/server/db";
 import { verifyCollabToken, type CollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
+import { watchDocumentMentions } from "@/server/mentions";
 
 export type CollabContext = CollabClaims;
 
@@ -56,6 +57,7 @@ export function createCollabServer() {
         .where(eq(schema.documents.id, documentName));
       if (!row) throw new Error("Document not found");
       hydrateDoc(document, row.ystate ?? null, row.content, row.title);
+      watchDocumentMentions(document, documentName);
       return document;
     },
 

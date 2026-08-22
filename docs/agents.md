@@ -60,6 +60,7 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `POST /api/documents/:id/suggestions` | `{ action: accept\|reject\|acceptAll\|rejectAll, id? }` | Review suggestions. |
 | `GET /api/documents/:id/comments` | | Threads with the text they anchor to. |
 | `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }` | Comment. |
+| `GET /api/mentions` / `POST /api/mentions/:id/read` | | Your unread `@mentions` (with document title); mark one read. |
 | `GET /api/documents/:id/versions` / `POST` | `{ title }` | History; name the current state. |
 | `GET /api/documents/:id/export` | | Plain Markdown (`?suggestions=1` keeps pending insertions). |
 | `POST /api/documents/:id/publish` / `pull` | `{ message? }` | GitHub publish / pull. |
@@ -83,6 +84,10 @@ curl -s -H "Authorization: ******" -F file=@chart.png \
 curl -s -H "Authorization: ******" -H "Content-Type: application/json" \
   -X PATCH http://localhost:3000/api/documents/abc123/content -d '{"append":"\n![chart](/api/assets/…)\n"}'
 ```
+
+### Mentioning people
+
+Agents can get someone's attention by writing `@login` (their GitHub handle) in a comment or reply body, for example `"body": "@burke the numbers in section 2 look stale"`. Mentions render as chips in the comments panel, are listed in each thread's `mentions` array from `GET /api/documents/:id/comments`, and show up on the mentioned person's dashboard until they open the document or dismiss them. E-mail addresses are not treated as mentions.
 
 ## What people see
 

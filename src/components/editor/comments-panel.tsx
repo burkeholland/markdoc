@@ -1,16 +1,82 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { CommentThread } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
-import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/primitives";
+import { mentionTriggerAt, splitMentions } from "@/editor/collab/mentions";
+import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
 
 type Tab = "open" | "resolved" | "suggestions";
+
+/** Someone who can be @mentioned: present in the document or a collaborator. */
+export interface MentionCandidate {
+  login: string;
+  name: string;
+  image: string | null;
+}
+
+/** Renders a plain-text comment body with `@login` tokens as chips. */
+export function MentionBody({ body, className }: { body: string; className?: string }) {
+  const parts = useMemo(() => splitMentions(body), [body]);
+  return (
+    <p className={className}>
+      {parts.map((p, i) =>
+        p.type === "mention" ? (
+          <span key={i} className="mention-chip rounded bg-accent-soft px-1 font-medium text-accent" title={p.value} data-testid="mention-chip">
+            @{p.value}
+          </span>
+        ) : (
+          <span key={i}>{p.value}</span>
+        ),
+      )}
+    </p>
+  );
+}
+
+/** Collaborators of the document, fetched once while the panel is open, merged with who is present. */
+function useMentionCandidates(session: CollabSession): MentionCandidate[] {
+  const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.documents
+      .collaborators(session.docId)
+      .then((res) => {
+        if (cancelled) return;
+        const list: MentionCandidate[] = [];
+        if (res.owner?.login) list.push({ login: res.owner.login, name: res.owner.name ?? res.owner.login, image: res.owner.image });
+        for (const c of res.collaborators) list.push({ login: c.login, name: c.name ?? c.login, image: c.image });
+        setCollaborators(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [session.docId]);
+  const present = useSessionValue(
+    session,
+    (s) => s.presence().filter((u) => !u.isLocal && u.login).map((u) => ({ login: u.login!, name: u.name, image: u.avatar ?? null })),
+    jsonEqual,
+  );
+  return useMemo(() => {
+    const seen = new Set<string>();
+    const out: MentionCandidate[] = [];
+    const me = session.user.login?.toLowerCase();
+    for (const c of [...present, ...collaborators]) {
+      const key = c.login.toLowerCase();
+      if (key === me || seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+    }
+    return out;
+  }, [present, collaborators, session.user.login]);
+}
+
+const MAX_SUGGESTIONS = 6;
 
 /** Avatar for a comment/suggestion author; agents (API tokens) get a bot badge. */
 function AuthorAvatar({ id, name, src, size }: { id: string; name: string; src?: string | null; size: number }) {
@@ -69,6 +135,7 @@ function Composer({
   onCancel,
   submitLabel = "Comment",
   initial = "",
+  candidates = [],
 }: {
   placeholder: string;
   autoFocus?: boolean;
@@ -76,13 +143,49 @@ function Composer({
   onCancel?: () => void;
   submitLabel?: string;
   initial?: string;
+  candidates?: MentionCandidate[];
 }) {
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
+  const [highlight, setHighlight] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
   }, [autoFocus]);
+
+  const matches = useMemo(() => {
+    if (!trigger) return [];
+    const q = trigger.query.toLowerCase();
+    return candidates.filter((c) => c.login.toLowerCase().startsWith(q) || c.name.toLowerCase().startsWith(q)).slice(0, MAX_SUGGESTIONS);
+  }, [trigger, candidates]);
+  const open = trigger !== null && matches.length > 0;
+
+  /** Re-evaluate whether the caret is in an `@` token. */
+  const syncTrigger = useCallback((el: HTMLTextAreaElement) => {
+    setHighlight(0);
+    if (el.selectionStart !== el.selectionEnd) {
+      setTrigger(null);
+      return;
+    }
+    setTrigger(mentionTriggerAt(el.value, el.selectionStart));
+  }, []);
+
+  const pick = (c: MentionCandidate) => {
+    const el = ref.current;
+    if (!el || !trigger) return;
+    const caret = el.selectionStart;
+    const insert = `@${c.login} `;
+    const next = value.slice(0, trigger.start) + insert + value.slice(caret);
+    setValue(next);
+    setTrigger(null);
+    const pos = trigger.start + insert.length;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
+  };
+
   const submit = async () => {
     const body = value.trim();
     if (!body) return;
@@ -90,27 +193,91 @@ function Composer({
     try {
       await onSubmit(body);
       setValue("");
+      setTrigger(null);
     } finally {
       setBusy(false);
     }
   };
   return (
     <div className="flex flex-col gap-2">
-      <textarea
-        ref={ref}
-        className="textarea min-h-[64px] resize-none text-[13px]"
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-            e.preventDefault();
-            void submit();
-          }
-          if (e.key === "Escape" && onCancel) onCancel();
-        }}
-        data-testid="comment-composer"
-      />
+      <Popover open={open} onOpenChange={(o) => !o && setTrigger(null)}>
+        <PopoverAnchor asChild>
+          <textarea
+            ref={ref}
+            className="textarea min-h-[64px] resize-none text-[13px]"
+            placeholder={placeholder}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              syncTrigger(e.target);
+            }}
+            onSelect={(e) => syncTrigger(e.currentTarget)}
+            onBlur={() => setTimeout(() => setTrigger(null), 120)}
+            onKeyDown={(e) => {
+              if (open) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setHighlight((h) => (h + 1) % matches.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setHighlight((h) => (h - 1 + matches.length) % matches.length);
+                  return;
+                }
+                if ((e.key === "Enter" && !e.metaKey && !e.ctrlKey) || e.key === "Tab") {
+                  e.preventDefault();
+                  pick(matches[highlight] ?? matches[0]);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setTrigger(null);
+                  return;
+                }
+              }
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                void submit();
+              }
+              if (e.key === "Escape" && onCancel) onCancel();
+            }}
+            data-testid="comment-composer"
+          />
+        </PopoverAnchor>
+        <PopoverContent
+          side="bottom"
+          align="start"
+          className="w-64 p-1.5"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => e.preventDefault()}
+          onInteractOutside={(e) => {
+            if (e.target === ref.current) e.preventDefault();
+          }}
+          data-testid="mention-suggestions"
+        >
+          <ul role="listbox" aria-label="Mention someone">
+            {matches.map((c, i) => (
+              <li
+                key={c.login}
+                role="option"
+                aria-selected={i === highlight}
+                className={cn("menu-item py-1.5", i === highlight && "bg-surface-3")}
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setHighlight(i)}
+                onClick={() => pick(c)}
+                data-testid="mention-option"
+                data-login={c.login}
+              >
+                <Avatar name={c.name} src={c.image} size={20} />
+                <span className="min-w-0 flex-1 truncate text-[13px]">{c.name}</span>
+                <span className="truncate text-xs text-ink-3">@{c.login}</span>
+              </li>
+            ))}
+          </ul>
+        </PopoverContent>
+      </Popover>
       <div className="flex items-center justify-end gap-2">
         {onCancel && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
@@ -131,12 +298,14 @@ function ThreadCard({
   active,
   onReveal,
   ops,
+  candidates,
 }: {
   thread: CommentThread;
   session: CollabSession;
   active: boolean;
   onReveal: (offset: number) => void;
   ops: ReturnType<typeof useCommentOps>;
+  candidates: MentionCandidate[];
 }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<string | null>(null); // "root" or reply id
@@ -182,6 +351,7 @@ function ThreadCard({
                 initial={thread.body}
                 autoFocus
                 submitLabel="Save"
+                candidates={candidates}
                 onSubmit={async (body) => {
                   await ops.edit(thread.id, body);
                   setEditing(null);
@@ -190,7 +360,7 @@ function ThreadCard({
               />
             </div>
           ) : (
-            <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-ink-2">{thread.body}</p>
+            <MentionBody body={thread.body} className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-ink-2" />
           )}
         </div>
         <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
@@ -245,6 +415,7 @@ function ThreadCard({
                       initial={r.body}
                       autoFocus
                       submitLabel="Save"
+                      candidates={candidates}
                       onSubmit={async (body) => {
                         await ops.edit(thread.id, body, r.id);
                         setEditing(null);
@@ -253,7 +424,7 @@ function ThreadCard({
                     />
                   </div>
                 ) : (
-                  <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-ink-2">{r.body}</p>
+                  <MentionBody body={r.body} className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-ink-2" />
                 )}
               </div>
               {(r.authorId === me || canModerate) && (
@@ -289,6 +460,7 @@ function ThreadCard({
               placeholder="Reply…"
               autoFocus
               submitLabel="Reply"
+              candidates={candidates}
               onSubmit={async (body) => {
                 await ops.reply(thread.id, body);
                 setReplying(false);
@@ -371,6 +543,7 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
     jsonEqual,
   );
   const ops = useCommentOps(session);
+  const candidates = useMentionCandidates(session);
   const [tab, setTab] = useState<Tab>("open");
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
@@ -426,6 +599,7 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
             <Composer
               placeholder="Add a comment… (⌘/Ctrl+Enter to post)"
               autoFocus
+              candidates={candidates}
               onSubmit={async (body) => {
                 const id = await ops.add(pending.from, pending.to, body);
                 session.setPendingComment(null);
@@ -441,13 +615,13 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
               Select some text and press <kbd className="kbd">⌘/Ctrl</kbd>+<kbd className="kbd">Alt</kbd>+<kbd className="kbd">M</kbd> or use the Comment button.
             </EmptyState>
           ) : (
-            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} onReveal={onReveal} ops={ops} />)
+            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} onReveal={onReveal} ops={ops} candidates={candidates} />)
           ))}
         {tab === "resolved" &&
           (resolved.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
-            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} onReveal={onReveal} ops={ops} />)
+            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} onReveal={onReveal} ops={ops} candidates={candidates} />)
           ))}
         {tab === "suggestions" &&
           (suggestions.length === 0 ? (

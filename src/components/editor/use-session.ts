@@ -19,7 +19,7 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role): C
     () =>
       new CollabSession({
         docId,
-        user: makeCollabUser(user.id, user.name, user.image),
+        user: makeCollabUser(user.id, user.name, user.image, user.login),
         role,
         getToken: async () => (await api.documents.collabToken(docId)).token,
       }),

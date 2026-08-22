@@ -6,6 +6,8 @@ export interface CollabUser {
   color: string;
   colorLight: string;
   avatar?: string | null;
+  /** GitHub login, when known; used for @mentions. */
+  login?: string | null;
 }
 
 /** Palette tuned for legibility on white (Google Docs-like). */
@@ -36,8 +38,8 @@ export function colorForUser(id: string): { color: string; colorLight: string } 
   return { color, colorLight: color + "33" };
 }
 
-export function makeCollabUser(id: string, name: string, avatar?: string | null): CollabUser {
-  return { id, name, avatar: avatar ?? null, ...colorForUser(id) };
+export function makeCollabUser(id: string, name: string, avatar?: string | null, login?: string | null): CollabUser {
+  return { id, name, avatar: avatar ?? null, login: login ?? null, ...colorForUser(id) };
 }
 
 export type RelativePositionJSON = ReturnType<typeof Y.relativePositionToJSON>;

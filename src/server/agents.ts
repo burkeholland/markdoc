@@ -10,9 +10,9 @@ import { META_KEY } from "@/server/collab/hocuspocus";
  */
 export function collabIdentity(actor: Actor): CollabUser {
   if (actor.agent) {
-    return makeCollabUser(`agent:${actor.id}:${actor.agent}`, actor.agent, null);
+    return makeCollabUser(`agent:${actor.id}:${actor.agent}`, actor.agent, null, actor.login);
   }
-  return makeCollabUser(actor.id, actor.name ?? actor.login ?? "User", actor.image);
+  return makeCollabUser(actor.id, actor.name ?? actor.login ?? "User", actor.image, actor.login);
 }
 
 export interface AgentActivity {
