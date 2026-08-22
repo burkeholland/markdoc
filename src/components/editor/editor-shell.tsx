@@ -352,7 +352,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
             onReveal={revealMatch}
             onClose={closeFind}
           />
-        )}        {authError && (
+        )}
+        {authError && (
           <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger" role="alert">
             Could not connect to the collaboration server ({authError}).
             <button type="button" className="btn btn-sm btn-outline" onClick={() => window.location.reload()}>

@@ -258,10 +258,30 @@ export class EditorActions {
       const { from, to } = a.view.state.selection.main;
       text = a.view.state.sliceDoc(from, to);
     } else {
-      const { from, to } = a.view.state.selection;
+      const { from, to } = this.richSelection(a.view);
       text = a.view.state.doc.textBetween(from, to, "\n");
     }
     return /\n/.test(text) ? "" : text;
+  }
+
+  /**
+   * The rich pane's selection, preferring the live DOM selection. ProseMirror
+   * reads keyboard selection changes on the (async) `selectionchange` event, so
+   * a shortcut fired right after Shift-Arrow would otherwise see a stale state.
+   */
+  private richSelection(view: PMView): { from: number; to: number } {
+    const state = view.state.selection;
+    if (!view.hasFocus()) return state;
+    const sel = view.dom.ownerDocument.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !sel.focusNode) return state;
+    if (!view.dom.contains(sel.anchorNode) || !view.dom.contains(sel.focusNode)) return state;
+    try {
+      const anchor = view.posAtDOM(sel.anchorNode, sel.anchorOffset);
+      const head = view.posAtDOM(sel.focusNode, sel.focusOffset);
+      return { from: Math.min(anchor, head), to: Math.max(anchor, head) };
+    } catch {
+      return state;
+    }
   }
 
   /** Scrollable container of the rich pane, so matches can be revealed without touching the selection. */
