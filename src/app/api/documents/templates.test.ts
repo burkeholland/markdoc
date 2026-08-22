@@ -76,7 +76,7 @@ describe("POST /api/documents with a template", () => {
 
 describe("GET /api/templates", () => {
   it("lists the eight templates with id, name and description only", async () => {
-    const res = await GET_TEMPLATES(new Request("http://localhost:3700/api/templates"));
+    const res = await GET_TEMPLATES();
     expect(res.status).toBe(200);
     const { templates } = (await res.json()) as { templates: { id: string; name: string; description: string }[] };
     expect(templates).toHaveLength(8);

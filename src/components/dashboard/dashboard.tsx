@@ -1,6 +1,6 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
-import { Avatar, Dialog, DialogContent, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
+import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
@@ -239,18 +239,26 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
                   <span className="block text-sm text-ink-3">Start with a blank Markdown page.</span>
                 </span>
               </button>
-              <button
-                type="button"
-                onClick={() => setOpenTemplates(true)}
-                disabled={creating !== null}
-                className="flex items-center gap-1 rounded-r-2xl border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
-                aria-label="New document from template"
-                title="From template"
-                data-testid="new-from-template"
-              >
-                <LayoutTemplate size={16} />
-                <ChevronDown size={14} />
-              </button>
+              <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
+                <DialogTrigger asChild>
+                  <button
+                    type="button"
+                    disabled={creating !== null}
+                    className="flex items-center gap-1 rounded-r-2xl border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                    aria-label="New document from template"
+                    title="From template"
+                    data-testid="new-from-template"
+                  >
+                    <LayoutTemplate size={16} />
+                    <ChevronDown size={14} />
+                  </button>
+                </DialogTrigger>
+                <DialogContent title="New from template" description="Pick a starting point. Everything is plain Markdown you can change afterwards." wide>
+                  <div data-testid="template-dialog">
+                    <TemplateGrid onPick={(t) => void create(t)} busy={creating} />
+                  </div>
+                </DialogContent>
+              </Dialog>
             </div>
             <button
               type="button"
@@ -334,14 +342,6 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
         <Dialog open={openPicker} onOpenChange={setOpenPicker}>
           <DialogContent title="Open from GitHub" description="Pick a Markdown file. Markdoc keeps a live copy and publishes back when you ask it to." wide>
             <GitHubPicker mode="import" githubAvailable={githubAvailable} onImported={(id) => router.push(`/d/${id}`)} />
-          </DialogContent>
-        </Dialog>
-
-        <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
-          <DialogContent title="New from template" description="Pick a starting point. Everything is plain Markdown you can change afterwards." wide>
-            <div data-testid="template-dialog">
-              <TemplateGrid onPick={(t) => void create(t)} busy={creating} />
-            </div>
           </DialogContent>
         </Dialog>
       </main>
