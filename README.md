@@ -46,22 +46,40 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 | `AUTH_URL` | in production | Public URL, e.g. `https://markdoc.example.com`. |
 | `DATABASE_URL` | in production | Postgres connection string. Omit locally to use PGlite in `.data/pglite`. |
 | `DATABASE_SSL` | optional | Set to `1` to require TLS (Azure PostgreSQL). |
-| `AUTH_DEV_LOGIN` | dev only | `1` enables the development login (ignored when `NODE_ENV=production`). |
+| `AUTH_DEV_LOGIN` | dev only | `1` enables the development login (ignored when `NODE_ENV=production`); `force` enables it in production too, only for smoke-testing a local build. |
 | `GITHUB_TOKEN` | dev only | Personal token used for gists/repos with the development login. |
 | `PGLITE_DATA_DIR` | optional | Embedded database location; `memory://` for tests. |
 | `AUTO_VERSION_INTERVAL_MS` | optional | How often automatic versions are captured while editing (default 10 minutes). |
+| `CHROMIUM_PATH` | optional | Chromium executable for PDF export; Playwright's own download is used when unset. |
+| `DRIZZLE_MIGRATIONS_DIR` | optional | Where startup migrations are read from (default `./drizzle`). |
+| `APP_VERSION` | optional | Reported by `/api/health` (the Dockerfile sets it from the `APP_VERSION` build arg). |
 
 ## Test it
 
 ```bash
-npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (56 tests); incremental-parser fuzz runs 300 seeded docs
+npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (~200 tests); incremental-parser fuzz runs 300 seeded docs
 npm run test:fuzz     # Full 1500-document incremental-parser fuzz (FUZZ_DOCS / FUZZ_SEED override; the seed is logged on failure)
-npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs (19 tests)
+npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs, tables, templates (~50 tests)
 npm run typecheck
 npm run lint
 ```
 
 `npm run test:e2e` starts its own server on port 3100 with an in-memory database. `scripts/github-smoke.mts` exercises gist and repository publishing against the real GitHub API (needs a running server with `GITHUB_TOKEN` and a scratch repository; see the file header).
+
+### Run the production build locally
+
+The production server is `next build` plus the custom server bundled to `dist/server.mjs` (esbuild, see `scripts/build-server.mjs`). Exercise it before a deploy:
+
+```bash
+npm run build
+npm run start:local                                 # production server on :3900, throwaway PGlite in .data/pglite-prod-smoke, dev login forced on
+BASE_URL=http://localhost:3900 npm run smoke        # API smoke: health, dev login, dashboard, template doc, PNG asset round-trip, md/html/pdf export
+PROD_BASE_URL=http://localhost:3900 npx playwright test e2e/prod-smoke.spec.ts   # browser: dashboard, template doc, typing in both panes over the WebSocket
+```
+
+`start:local` sets `AUTH_DEV_LOGIN=force`, which is the only way the development login works under `NODE_ENV=production`; never set it on a real deployment. `npm run smoke` exits non-zero on the first failing check (`SMOKE_PDF_OPTIONAL=1` tolerates a 503 from PDF export on hosts without Chromium). `e2e/prod-smoke.spec.ts` is skipped when `PROD_BASE_URL` is unset, so the regular suite is unaffected. Stop the server and delete `.data/pglite-prod-smoke` when you are done.
+
+**PDF export needs Chromium.** `GET /api/documents/:id/export?format=pdf` renders with `playwright-core`; it answers `503` when no browser can be launched. Locally, `npx playwright install chromium` installs Playwright's build; on a server, point `CHROMIUM_PATH` at a system Chromium (the Dockerfile installs Alpine's and sets it).
 
 ## How it works
 
@@ -82,7 +100,7 @@ npm run lint
 
 ## Deploy to Azure
 
-The target is **Azure Container Apps** with **Azure Database for PostgreSQL Flexible Server**. Infrastructure is in `infra/main.bicep`; `deploy/azure.ps1` provisions everything and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow.
+The target is **Azure Container Apps** with **Azure Database for PostgreSQL Flexible Server**. Infrastructure is in `infra/main.bicep`; `deploy/azure.ps1` provisions everything and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
 
 ```powershell
 $env:MARKDOC_PG_PASSWORD = '<strong password>'
