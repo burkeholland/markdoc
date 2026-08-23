@@ -76,6 +76,10 @@ export interface EditorCommandContext {
   openReader: () => void;
   navigate: (href: string) => void;
   headings: () => HeadingInfo[];
+  /** Other users present in the document (for "Follow collaborator…"). */
+  collaborators?: () => { id: string; name: string }[];
+  /** Start following a collaborator's cursor. */
+  follow?: (userId: string) => void;
   recentDocuments: () => Promise<DocumentRef[]>;
   /** Optional toast for commands whose effect is not obvious from the UI. */
   notify?: (message: string) => void;
@@ -186,6 +190,24 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       group: "Navigation",
       icon: "FileText",
       children: async () => documentCommands(await ctx.recentDocuments(), ctx.navigate),
+      run: () => {},
+    },
+    {
+      id: "nav:follow",
+      title: "Follow collaborator…",
+      keywords: ["presence", "cursor", "jump", "user", "collaborator", "follow"],
+      group: "Navigation",
+      icon: "Users",
+      when: () => !!ctx.follow && (ctx.collaborators?.().length ?? 0) > 0,
+      children: () =>
+        (ctx.collaborators?.() ?? []).map((u) => ({
+          id: `follow:${u.id}`,
+          title: u.name,
+          keywords: ["follow", "collaborator"],
+          group: "Collaborators",
+          icon: "User",
+          run: () => ctx.follow?.(u.id),
+        })),
       run: () => {},
     },
     { id: "nav:dashboard", title: "Go to dashboard", keywords: ["home", "back", "documents", "list"], group: "Navigation", icon: "ArrowLeft", run: () => ctx.navigate("/") },

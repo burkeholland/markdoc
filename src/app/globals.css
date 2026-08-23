@@ -324,6 +324,17 @@ body {
 .cm-ySelectionCaret.md-caret-recent > .cm-ySelectionInfo {
   opacity: 1;
 }
+/* presence interactions: followed caret stays bright, jumped-to caret flashes, idle carets dim */
+.cm-ySelectionCaret[data-following] > .cm-ySelectionInfo {
+  opacity: 1 !important;
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px currentColor;
+}
+.cm-ySelectionCaret[data-idle]:not([data-following]) {
+  opacity: 0.35;
+}
+.cm-ySelectionCaret[data-flash] {
+  animation: md-caret-flash 1s ease-out;
+}
 
 /* ---------- Shared collaboration decorations (both panes) ---------- */
 .md-comment {
@@ -798,6 +809,30 @@ body {
 }
 .md-remote-selection {
   border-radius: 2px;
+}
+.md-remote-caret[data-following] {
+  border-left-width: 3px;
+}
+.md-remote-caret[data-following] > .md-remote-caret-label {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px currentColor;
+}
+.md-remote-caret[data-idle]:not([data-following]) {
+  opacity: 0.35;
+}
+.md-remote-caret[data-flash] {
+  animation: md-caret-flash 1s ease-out;
+}
+@keyframes md-caret-flash {
+  0%,
+  60% {
+    outline: 3px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  100% {
+    outline: 3px solid transparent;
+    outline-offset: 2px;
+  }
 }
 
 /* diff view */

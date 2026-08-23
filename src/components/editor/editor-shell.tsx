@@ -36,12 +36,14 @@ import { SelectionBubble } from "./selection-bubble";
 import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FindBar } from "./find-bar";
+import { FollowBanner } from "./follow-banner";
 import { useScrollSync } from "./scroll-sync";
 import { CommandPalette, isPaletteShortcut } from "./command-palette";
 import { buildCommands, type EditorCommandContext } from "./commands";
 import type { NotificationDto } from "@/lib/api";
 import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
+import type { PresenceUser } from "@/editor/collab/session";
 import { isMac } from "@/lib/utils";
 
 export interface EditorShellProps {
@@ -220,6 +222,24 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   }, [actions]);
 
   const reveal = useCallback((offset: number) => actions.revealSource(offset, { focus: true }), [actions]);
+
+  // Presence popover "Jump": scroll both panes to a collaborator's cursor and flash their caret.
+  const jumpToUser = useCallback(
+    (u: PresenceUser) => {
+      if (u.cursor === null) return;
+      actions.revealSource(u.cursor, { focus: false });
+      session.flashUser(u.id);
+    },
+    [actions, session],
+  );
+
+  // Following: keep the visible pane(s) centred on the followed user's cursor as it moves.
+  const followUserId = useSessionValue(session, (s) => s.followUserId);
+  const followedCursor = useSessionValue(session, (s) => (s.followUserId ? (s.presence().find((u) => u.id === s.followUserId)?.cursor ?? null) : null));
+  const followEnded = useSessionValue(session, (s) => s.followEnded, shallowEqual);
+  useEffect(() => {
+    if (followEnded) toast(`${followEnded.name} left`, "info");
+  }, [followEnded, toast]);
 
   const onOutlineSelect = useCallback(
     (h: HeadingInfo) => {
@@ -532,6 +552,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     navigate: (href) => router.push(href),
     notify: (message) => toast(message, "info"),
     headings: () => session.binding.getHeadings(),
+    collaborators: () => session.presence().filter((u) => !u.isLocal).map((u) => ({ id: u.id, name: u.name })),
+    follow: (id) => session.follow(id),
     recentDocuments: async () => {
       const res = await fetch("/api/documents?limit=8");
       if (!res.ok) throw new Error(`Could not load documents (${res.status})`);
@@ -563,6 +585,40 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const showRich = shownLayout !== "code" && !versionPreview;
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
   useScrollSync({ session, code: codeView, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
+
+  // Re-centre on the followed cursor (debounced) whenever it moves or the panes change.
+  useEffect(() => {
+    if (!followUserId || followedCursor === null) return;
+    const t = setTimeout(() => actions.scrollToSource(followedCursor, { code: showCode, rich: showRich, synced: syncScroll && showCode && showRich }), 150);
+    return () => clearTimeout(t);
+  }, [actions, followUserId, followedCursor, showCode, showRich, syncScroll]);
+
+  // Following stops on the user's own scroll (wheel/touch, not programmatic), typing in either pane, or Esc.
+  useEffect(() => {
+    if (!followUserId) return;
+    const stop = (event: "user-scroll" | "typing") => () => session.dispatchFollow({ type: event });
+    const onScroll = stop("user-scroll");
+    const onType = stop("typing");
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") session.dispatchFollow({ type: "stop" });
+    };
+    const scrollers = [richScroller, codeView?.scrollDOM ?? null].filter((el): el is HTMLElement => !!el);
+    const editors = [richView?.dom ?? null, codeView?.contentDOM ?? null].filter((el): el is HTMLElement => !!el);
+    for (const el of scrollers) {
+      el.addEventListener("wheel", onScroll, { passive: true });
+      el.addEventListener("touchmove", onScroll, { passive: true });
+    }
+    for (const el of editors) el.addEventListener("beforeinput", onType, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      for (const el of scrollers) {
+        el.removeEventListener("wheel", onScroll);
+        el.removeEventListener("touchmove", onScroll);
+      }
+      for (const el of editors) el.removeEventListener("beforeinput", onType, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [session, followUserId, richScroller, codeView, richView]);
   const closeSidePanel = useCallback(() => setSidePanel(null), []);
   const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
   const onOutlinePick = useCallback(
@@ -612,6 +668,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onLayout={setLayout}
           onOutline={toggleOutline}
           compact={isPhone}
+          onJumpToUser={jumpToUser}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
         {findOpen && (
@@ -624,6 +681,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
             onClose={closeFind}
           />
         )}
+        <FollowBanner session={session} />
         {authError && (
           <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">
             Could not connect to the collaboration server ({authError}).

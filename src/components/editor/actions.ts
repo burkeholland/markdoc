@@ -370,6 +370,55 @@ export class EditorActions {
     if (opts.focus) a.view.focus();
   }
 
+  /**
+   * Scroll the visible pane(s) so a source offset sits in the middle of the viewport, without
+   * touching the selection (used while following a collaborator). Panes whose offset already sits
+   * in the middle 60 % of the viewport are left alone. With both panes shown and scroll sync on,
+   * only the active surface is scrolled: the sync moves the other one.
+   */
+  scrollToSource(offset: number, opts: { code: boolean; rich: boolean; synced: boolean; behavior?: ScrollBehavior }) {
+    const behavior = opts.behavior ?? "smooth";
+    let code = opts.code && !!this.code;
+    let rich = opts.rich && !!this.rich && this.rich.dom.isConnected;
+    if (code && rich && opts.synced) {
+      if (this.surface === "code") rich = false;
+      else code = false;
+    }
+    if (code && this.code) {
+      const view = this.code;
+      const pos = Math.min(offset, view.state.doc.length);
+      const scroller = view.scrollDOM;
+      const box = scroller.getBoundingClientRect();
+      if (box.height > 0) {
+        const block = view.lineBlockAt(pos);
+        const top = block.top + view.documentTop - box.top; // viewport-relative
+        if (!withinMiddle(top, block.height, box.height)) {
+          scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + top + block.height / 2 - box.height / 2), behavior });
+        }
+      }
+    }
+    if (rich && this.rich) {
+      const view = this.rich;
+      const map = this.session.binding.getSourceMap();
+      const pos = Math.min(view.state.doc.content.size, Math.max(0, map.srcToPm(offset)));
+      const scroller = this.richScroller ?? view.dom.parentElement?.parentElement ?? null;
+      if (!scroller) return;
+      let coords: { top: number; bottom: number };
+      try {
+        coords = view.coordsAtPos(pos);
+      } catch {
+        return;
+      }
+      const box = scroller.getBoundingClientRect();
+      if (box.height === 0) return;
+      const top = coords.top - box.top;
+      const height = coords.bottom - coords.top;
+      if (!withinMiddle(top, height, box.height)) {
+        scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + top + height / 2 - box.height / 2), behavior });
+      }
+    }
+  }
+
   /** Scroll both panes to a source offset and place the caret there in the active surface. */
   revealSource(offset: number, opts: { focus?: boolean } = {}) {
     // Focus before dispatching: both panes only report selection changes while focused, and the
@@ -400,5 +449,11 @@ export class EditorActions {
       el?.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }
+}
+
+/** Whether a box at `top` (viewport-relative) with `height` lies inside the middle 60 % of a viewport. */
+function withinMiddle(top: number, height: number, viewport: number): boolean {
+  const margin = viewport * 0.2;
+  return top >= margin && top + height <= viewport - margin;
 }
 

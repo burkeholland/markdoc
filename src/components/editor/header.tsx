@@ -1,6 +1,6 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
-import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
+import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
 import { memo, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -39,7 +39,8 @@ import {
   PanelLeft,
   Code2,
 } from "lucide-react";
-import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session";
+import type { CollabSession, EditMode, PresenceUser, SaveState } from "@/editor/collab/session";
+import { isIdle } from "@/editor/collab/follow";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
 import { api } from "@/lib/api";
@@ -198,25 +199,91 @@ function HeaderStar({ docId }: { docId: string }) {
   );
 }
 
-export function PresenceStack({ session }: { session: CollabSession }) {
+export function PresenceStack({ session, onJump }: { session: CollabSession; onJump?: (user: PresenceUser) => void }) {
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
+  const followUserId = useSessionValue(session, (s) => s.followUserId);
+  const [open, setOpen] = useState(false);
+  // Idle dimming is time-based; re-evaluate it every 15 s while the stack is mounted.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, []);
   const shown = users.slice(0, 3);
   const extra = users.length - shown.length;
+  const others = users.filter((u) => !u.isLocal);
+  const jump = (u: PresenceUser) => {
+    if (u.cursor === null) return;
+    onJump?.(u);
+    setOpen(false);
+  };
+  const follow = (u: PresenceUser) => {
+    session.follow(followUserId === u.id ? null : u.id);
+    setOpen(false);
+  };
+  const roleLabel: Record<string, string> = { owner: "Owner", editor: "Editor", commenter: "Commenter", viewer: "Viewer" };
   return (
-    <div className="flex items-center -space-x-2" data-testid="presence">
-      {shown.map((u) => (
-        <Tip key={u.id} label={u.isLocal ? `${u.name} (you)` : u.name}>
-          <span className="inline-flex">
-            <Avatar name={u.name} src={u.avatar} color={u.color} size={36} />
-          </span>
-        </Tip>
-      ))}
-      {extra > 0 && (
-        <Tip label={users.slice(3).map((u) => u.name).join(", ")}>
-          <span className="avatar text-[13px]">+{extra}</span>
-        </Tip>
-      )}
-    </div>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button type="button" className="flex items-center -space-x-2 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" data-testid="presence" aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here`}>
+          {shown.map((u) => (
+            <Tip key={u.id} label={u.isLocal ? `${u.name} (you)` : u.name}>
+              <span className={cn("inline-flex transition-opacity", !u.isLocal && isIdle(u.idleSince, now) && "opacity-40")} data-testid="presence-avatar" data-user-id={u.id} data-idle={!u.isLocal && isIdle(u.idleSince, now) ? "" : undefined}>
+                <Avatar name={u.name} src={u.avatar} color={u.color} size={36} />
+              </span>
+            </Tip>
+          ))}
+          {extra > 0 && (
+            <Tip label={users.slice(3).map((u) => u.name).join(", ")}>
+              <span className="avatar text-[13px]">+{extra}</span>
+            </Tip>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-2" data-testid="presence-popover">
+        <div className="px-2 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">
+          {users.length === 1 ? "Only you are here" : `${users.length} people here`}
+        </div>
+        <ul className="flex flex-col gap-0.5">
+          {users.map((u) => {
+            const idle = !u.isLocal && isIdle(u.idleSince, now);
+            const following = followUserId === u.id;
+            return (
+              <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && "opacity-60")} data-testid="presence-row" data-user-id={u.id}>
+                <Avatar name={u.name} src={u.avatar} color={u.color} size={28} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                    <span className="truncate">{u.isLocal ? `${u.name} (you)` : u.name}</span>
+                    {u.role && <span className="rounded-md bg-surface-2 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-ink-3">{roleLabel[u.role] ?? u.role}</span>}
+                  </div>
+                  <div className="truncate text-xs text-ink-3" data-testid="presence-section">
+                    {idle ? "Idle · " : ""}
+                    {u.cursor === null ? "no cursor" : u.section ? `in ‘${u.section}’` : "at the top"}
+                  </div>
+                </div>
+                {!u.isLocal && (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button type="button" className="btn btn-sm btn-outline h-7 px-2 text-xs" onClick={() => jump(u)} disabled={u.cursor === null} data-testid="presence-jump">
+                      Jump
+                    </button>
+                    <button
+                      type="button"
+                      className={cn("btn btn-sm h-7 px-2 text-xs", following ? "btn-primary" : "btn-outline")}
+                      onClick={() => follow(u)}
+                      aria-pressed={following}
+                      data-testid="presence-follow"
+                    >
+                      {following ? "Following" : "Follow"}
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+        {others.length === 0 && <div className="px-2 pb-1 pt-1.5 text-xs text-ink-3">Share the document to work on it together.</div>}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -318,6 +385,8 @@ export interface HeaderProps {
   onOutline: () => void;
   /** Phone layout: icon-only save state, segmented pane control, secondary actions folded into the menu. */
   compact: boolean;
+  /** "Jump" in the presence popover: scroll both panes to a collaborator's cursor. */
+  onJumpToUser?: (user: PresenceUser) => void;
 }
 
 /** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
@@ -377,7 +446,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         <div className="hidden items-center gap-3 md:flex">
           <AgentActivityChip session={session} />
           <ModeSwitcher session={session} />
-          <PresenceStack session={session} />
+          <PresenceStack session={session} onJump={props.onJumpToUser} />
         </div>
         {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} />}
         {!compact && (

@@ -260,6 +260,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Command palette (no selection)", "Mod-K"],
       ["Document statistics and goal", "Mod-Shift-C"],
       ["Keyboard shortcuts", "Mod-/"],
+      ["Stop following a collaborator", "Esc"],
     ],
   },
   {
