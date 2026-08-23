@@ -68,6 +68,10 @@ export default defineConfig({
           NEXT_DIST_DIR: distDir,
           AUTO_VERSION_INTERVAL_MS: "1000",
           READER_POLL_MS: "2000",
+          // GitHub is an in-memory fake for the suite (e2e/github-sync.spec.ts); the header polls fast.
+          GITHUB_MOCK: "1",
+          SYNC_POLL_MS: "2000",
+          SYNC_CACHE_MS: "500",
           NODE_ENV: "development",
         },
       },

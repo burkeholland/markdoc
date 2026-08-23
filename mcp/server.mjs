@@ -27,11 +27,15 @@ async function api(method, path, body) {
   const text = await res.text();
   if (!res.ok) {
     let message = text;
+    let body = null;
     try {
-      message = JSON.parse(text).error ?? text;
+      body = JSON.parse(text);
+      message = body.error ?? text;
     } catch {
       /* plain text */
     }
+    // Sync refusals (409 with a `status`) are answers, not failures: let publish/pull surface them.
+    if (res.status === 409 && body?.status) throw Object.assign(new Error(message), { sync: body });
     throw new Error(`${method} ${path} failed (${res.status}): ${message}`);
   }
   if (res.headers.get("content-type")?.includes("application/json")) return JSON.parse(text);
@@ -280,12 +284,59 @@ server.registerTool(
   },
 );
 
+const SYNC_HINT = {
+  "remote-ahead": "GitHub has changes the document does not. Call markdoc_pull first (or publish with force: true to overwrite).",
+  diverged: "Both the document and the GitHub file changed. Call markdoc_pull with merge: true, or force one side.",
+  "local-ahead": "The document has unpublished changes; pulling would discard them. Call markdoc_publish first (or pull with force: true).",
+};
+
 server.registerTool(
   "markdoc_publish",
-  { title: "Publish to GitHub", description: "Publish the document to its linked gist or repository file (creates a commit). The document must already be connected to GitHub in the app.", inputSchema: { id: z.string(), message: z.string().optional() } },
-  async ({ id, message }) => {
-    const res = await api("POST", `/api/documents/${id}/publish`, { message });
-    return ok(res.result.skipped ? "Already up to date on GitHub." : `Published. ${res.result.url ?? ""}`, res);
+  {
+    title: "Publish to GitHub",
+    description:
+      "Publish the document to its linked gist or repository file (creates a commit). The document must already be connected to GitHub in the app. Refuses (status remote-ahead / diverged) when GitHub moved since the last sync; force: true overwrites.",
+    inputSchema: { id: z.string(), message: z.string().optional(), force: z.boolean().optional() },
+  },
+  async ({ id, message, force }) => {
+    try {
+      const res = await api("POST", `/api/documents/${id}/publish${force ? "?force=1" : ""}`, { message });
+      return ok(res.result.skipped ? "Already up to date on GitHub." : `Published. ${res.result.url ?? ""}`, res);
+    } catch (err) {
+      if (!err.sync) throw err;
+      return ok(`Not published: ${err.sync.status}. ${SYNC_HINT[err.sync.status] ?? err.message}`, err.sync);
+    }
+  },
+);
+
+server.registerTool(
+  "markdoc_pull",
+  {
+    title: "Pull from GitHub",
+    description:
+      "Bring the linked GitHub file into the document. Refuses (status local-ahead / diverged) when unpublished edits would be lost; merge: true three-way merges a diverged document (conflicts come back as status \"conflict\" with the marked text), force: true replaces the text regardless.",
+    inputSchema: { id: z.string(), merge: z.boolean().optional(), force: z.boolean().optional() },
+  },
+  async ({ id, merge, force }) => {
+    const q = [force && "force=1", merge && "merge=1"].filter(Boolean).join("&");
+    try {
+      const res = await api("POST", `/api/documents/${id}/pull${q ? `?${q}` : ""}`);
+      const r = res.result;
+      return ok(r.merged ? "Merged GitHub\u2019s changes into the document; publish to finish." : r.changed ? "Pulled the latest version from GitHub." : "Already up to date.", res);
+    } catch (err) {
+      if (!err.sync) throw err;
+      if (err.sync.status === "conflict") return ok(`Merge has ${err.sync.conflicts} conflict(s); the marked text is in \`merged\`.`, err.sync);
+      return ok(`Not pulled: ${err.sync.status}. ${SYNC_HINT[err.sync.status] ?? err.message}`, err.sync);
+    }
+  },
+);
+
+server.registerTool(
+  "markdoc_sync_status",
+  { title: "GitHub sync status", description: "Where a GitHub-linked document stands: in-sync, local-ahead (publish is safe), remote-ahead (pull is safe) or diverged (merge or force one side).", inputSchema: { id: z.string() } },
+  async ({ id }) => {
+    const s = await api("GET", `/api/documents/${id}/sync?fresh=1`);
+    return ok(`${s.status} (local ${s.lines.local} line(s) changed, GitHub ${s.lines.remote}).`, s);
   },
 );
 
