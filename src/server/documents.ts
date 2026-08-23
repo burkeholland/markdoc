@@ -74,6 +74,10 @@ export interface DocumentSummary {
   repoName: string | null;
   repoPath: string | null;
   gistId: string | null;
+  /** Whether the current user has starred this document. */
+  starred: boolean;
+  /** When the current user last opened this document, or null if never. */
+  lastOpenedAt: Date | null;
 }
 
 function excerpt(content: string): string {
@@ -90,9 +94,14 @@ interface VisibleRow {
   doc: Document;
   owner: { name: string | null; login: string | null } | null;
   collabRole: Role | null;
+  starred: boolean | null;
+  lastOpenedAt: Date | null;
 }
 
-/** Documents the user owns or is listed as a collaborator on, with the owner and the user's collaborator role joined in. */
+/**
+ * Documents the user owns or is listed as a collaborator on, with the owner, the user's collaborator
+ * role, their star and their last-opened time joined in.
+ */
 function visibleDocuments(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser) {
   const login = user.login?.toLowerCase() ?? "";
   const query = db
@@ -100,18 +109,23 @@ function visibleDocuments(db: Awaited<ReturnType<typeof getDb>>, user: SessionUs
       doc: schema.documents,
       owner: { name: schema.users.name, login: schema.users.login },
       collabRole: schema.collaborators.role,
+      starred: schema.stars.starred,
+      lastOpenedAt: schema.recents.openedAt,
     })
     .from(schema.documents)
     .leftJoin(schema.users, eq(schema.users.id, schema.documents.ownerId))
     .leftJoin(
       schema.collaborators,
       and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)),
-    );
+    )
+    .leftJoin(schema.stars, and(eq(schema.stars.documentId, schema.documents.id), eq(schema.stars.userId, user.id)))
+    .leftJoin(schema.recents, and(eq(schema.recents.documentId, schema.documents.id), eq(schema.recents.userId, user.id)));
   const visible = or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`)!;
-  return { query, visible };
+  const starredOnly = eq(schema.stars.starred, true);
+  return { query, visible, starredOnly };
 }
 
-function toSummary({ doc, owner, collabRole }: VisibleRow, user: SessionUser): DocumentSummary {
+function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow, user: SessionUser): DocumentSummary {
   return {
     id: doc.id,
     title: doc.title,
@@ -127,14 +141,55 @@ function toSummary({ doc, owner, collabRole }: VisibleRow, user: SessionUser): D
     repoName: doc.repoName,
     repoPath: doc.repoPath,
     gistId: doc.gistId,
+    starred: starred === true,
+    lastOpenedAt: lastOpenedAt ?? null,
   };
 }
 
-export async function listDocumentsForUser(user: SessionUser): Promise<DocumentSummary[]> {
+export interface ListDocumentsOptions {
+  /** Only documents the user has starred. */
+  starred?: boolean;
+}
+
+/** Most recently opened first; documents the user never opened follow, most recently edited first. */
+export async function listDocumentsForUser(user: SessionUser, { starred }: ListDocumentsOptions = {}): Promise<DocumentSummary[]> {
   const db = await getDb();
-  const { query, visible } = visibleDocuments(db, user);
-  const rows = await query.where(visible).orderBy(desc(schema.documents.updatedAt));
+  const { query, visible, starredOnly } = visibleDocuments(db, user);
+  const rows = await query
+    .where(starred ? and(visible, starredOnly) : visible)
+    .orderBy(sql`${schema.recents.openedAt} desc nulls last`, desc(schema.documents.updatedAt));
   return rows.map((row) => toSummary(row, user));
+}
+
+export async function starDocument(userId: string, docId: string): Promise<void> {
+  const db = await getDb();
+  await db
+    .insert(schema.stars)
+    .values({ documentId: docId, userId, starred: true })
+    .onConflictDoUpdate({ target: [schema.stars.documentId, schema.stars.userId], set: { starred: true } });
+}
+
+export async function unstarDocument(userId: string, docId: string): Promise<void> {
+  const db = await getDb();
+  await db.delete(schema.stars).where(and(eq(schema.stars.documentId, docId), eq(schema.stars.userId, userId)));
+}
+
+export async function isStarred(userId: string, docId: string): Promise<boolean> {
+  const db = await getDb();
+  const [row] = await db
+    .select({ starred: schema.stars.starred })
+    .from(schema.stars)
+    .where(and(eq(schema.stars.documentId, docId), eq(schema.stars.userId, userId)));
+  return row?.starred === true;
+}
+
+/** Remember that the user opened the document just now (upsert; one row per user and document). */
+export async function recordDocumentOpen(userId: string, docId: string, at = new Date()): Promise<void> {
+  const db = await getDb();
+  await db
+    .insert(schema.recents)
+    .values({ userId, documentId: docId, openedAt: at })
+    .onConflictDoUpdate({ target: [schema.recents.userId, schema.recents.documentId], set: { openedAt: at } });
 }
 
 export interface SearchResult extends DocumentSummary {

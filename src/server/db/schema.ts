@@ -165,6 +165,21 @@ export const stars = pgTable(
   (t) => [primaryKey({ columns: [t.documentId, t.userId] })],
 );
 
+/** When a user last opened a document, so the dashboard can sort by "recently opened". One row per (user, document). */
+export const recents = pgTable(
+  "recent",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    openedAt: timestamp("opened_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.documentId] }), index("recent_user_opened_idx").on(t.userId, t.openedAt.desc())],
+);
+
 /** Personal access tokens so agents and scripts can act on a user's behalf. Only a hash is stored. */
 export const apiTokens = pgTable(
   "api_token",

@@ -32,10 +32,12 @@ import {
   RefreshCw,
   UploadCloud,
   Link2,
+  Star,
 } from "lucide-react";
 import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
+import { api } from "@/lib/api";
 
 import { cn, shortcut } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
@@ -145,6 +147,49 @@ function TitleEditor({ session, fallback }: { session: CollabSession; fallback: 
   );
 }
 
+/**
+ * Personal star for the open document. Stars live on the dashboard, so the header asks the API for
+ * the current state on mount and stays hidden for anonymous visitors (who cannot star).
+ */
+function HeaderStar({ docId }: { docId: string }) {
+  const [starred, setStarred] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setStarred(null);
+    api.documents
+      .starred(docId)
+      .then((r) => !cancelled && setStarred(r.starred))
+      .catch(() => !cancelled && setStarred(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+  if (starred === null) return null;
+  const toggle = () => {
+    const next = !starred;
+    setStarred(next);
+    (next ? api.documents.star(docId) : api.documents.unstar(docId)).catch((err: unknown) => {
+      console.error(err);
+      setStarred(!next);
+    });
+  };
+  return (
+    <Tip label={starred ? "Unstar" : "Star"}>
+      <button
+        type="button"
+        onClick={toggle}
+        className={cn("icon-btn h-8 w-8 shrink-0", starred ? "text-amber-500" : "text-ink-4")}
+        aria-pressed={starred}
+        aria-label={starred ? "Unstar document" : "Star document"}
+        data-testid="header-star"
+        data-starred={starred}
+      >
+        <Star size={17} fill={starred ? "currentColor" : "none"} />
+      </button>
+    </Tip>
+  );
+}
+
 export function PresenceStack({ session }: { session: CollabSession }) {
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const shown = users.slice(0, 3);
@@ -245,6 +290,7 @@ export const Header = memo(function Header(props: HeaderProps) {
       </Link>
       <div className="flex min-w-0 flex-1 items-center gap-4">
         <TitleEditor session={session} fallback={doc.title} />
+        <HeaderStar docId={doc.id} />
         <SaveIndicator session={session} />
       </div>
       <div className="flex shrink-0 items-center gap-3">

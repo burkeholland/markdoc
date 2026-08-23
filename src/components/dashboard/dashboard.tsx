@@ -5,9 +5,8 @@ import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuIt
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, Scale, Search, FileText, Users } from "lucide-react";
-import type { DocumentSummary } from "@/server/documents";
-import { api } from "@/lib/api";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, Scale, Search, FileText, Star, Users } from "lucide-react";
+import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
 import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 
@@ -15,11 +14,45 @@ import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
 import { MentionsStrip } from "@/components/dashboard/mentions-strip";
 
-type Doc = Omit<DocumentSummary, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string };
-type SearchDoc = Doc & { snippet: string | null };
+type Doc = DocumentSummaryDto;
+type SearchDoc = SearchResultDto;
 
 const SEARCH_DEBOUNCE_MS = 250;
 const MIN_QUERY_LENGTH = 2;
+const STARRED_STRIP_MAX = 6;
+
+export type DashboardSort = "recent" | "modified" | "title" | "created";
+export const SORT_STORAGE_KEY = "markdoc:dashboardSort";
+const SORT_OPTIONS: { value: DashboardSort; label: string }[] = [
+  { value: "recent", label: "Recently opened" },
+  { value: "modified", label: "Last modified" },
+  { value: "title", label: "Title A–Z" },
+  { value: "created", label: "Created" },
+];
+
+function isDashboardSort(v: unknown): v is DashboardSort {
+  return SORT_OPTIONS.some((o) => o.value === v);
+}
+
+/** Most recently opened first; never-opened documents follow, most recently edited first. */
+export function compareDocs(sort: DashboardSort): (a: Doc, b: Doc) => number {
+  const byUpdated = (a: Doc, b: Doc) => b.updatedAt.localeCompare(a.updatedAt);
+  switch (sort) {
+    case "recent":
+      return (a, b) => {
+        if (a.lastOpenedAt && b.lastOpenedAt) return b.lastOpenedAt.localeCompare(a.lastOpenedAt) || byUpdated(a, b);
+        if (a.lastOpenedAt) return -1;
+        if (b.lastOpenedAt) return 1;
+        return byUpdated(a, b);
+      };
+    case "modified":
+      return byUpdated;
+    case "title":
+      return (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }) || byUpdated(a, b);
+    case "created":
+      return (a, b) => b.createdAt.localeCompare(a.createdAt);
+  }
+}
 
 /** Wrap each case-insensitive occurrence of `needle` in `text` in a <mark>, without touching HTML. */
 export function Highlight({ text, needle }: { text: string; needle: string }) {
@@ -100,6 +133,40 @@ export interface DashboardProps {
   githubAvailable: boolean;
 }
 
+type Filter = "all" | "mine" | "shared" | "starred";
+const FILTERS: { value: Filter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "mine", label: "Owned by me" },
+  { value: "shared", label: "Shared with me" },
+  { value: "starred", label: "Starred" },
+];
+
+/** Star toggle for a document card; hover-visible unless starred. */
+function StarButton({ starred, onToggle, className }: { starred: boolean; onToggle: () => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onToggle();
+      }}
+      aria-pressed={starred}
+      aria-label={starred ? "Unstar" : "Star"}
+      title={starred ? "Unstar" : "Star"}
+      className={cn(
+        "flex h-7 w-7 items-center justify-center rounded-md transition hover:bg-surface-3 focus-visible:opacity-100",
+        starred ? "text-amber-500" : "text-ink-4 opacity-0 group-hover:opacity-100 hover:text-ink-2",
+        className,
+      )}
+      data-testid="star-toggle"
+      data-starred={starred}
+    >
+      <Star size={15} fill={starred ? "currentColor" : "none"} />
+    </button>
+  );
+}
+
 function StorageBadge({ doc }: { doc: Doc }) {
   if (doc.storage === "repo") {
     return (
@@ -122,13 +189,47 @@ function StorageBadge({ doc }: { doc: Doc }) {
   );
 }
 
-export function Dashboard({ user, documents, githubAvailable }: DashboardProps) {
+export function Dashboard({ user, documents: initialDocuments, githubAvailable }: DashboardProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [openPicker, setOpenPicker] = useState(false);
-  const [filter, setFilter] = useState<"all" | "mine" | "shared">("all");
+  const [filter, setFilter] = useState<Filter>("all");
   const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
   const [searching, setSearching] = useState(false);
+
+  // Optimistic stars: the server list is the source of truth until the user clicks.
+  const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
+  const documents = useMemo(() => initialDocuments.map((d) => (d.id in starOverrides ? { ...d, starred: starOverrides[d.id] } : d)), [initialDocuments, starOverrides]);
+  const toggleStar = useCallback(
+    (doc: Doc) => {
+      const next = !doc.starred;
+      setStarOverrides((o) => ({ ...o, [doc.id]: next }));
+      (next ? api.documents.star(doc.id) : api.documents.unstar(doc.id)).catch((err: unknown) => {
+        console.error(err);
+        setStarOverrides((o) => ({ ...o, [doc.id]: !next }));
+      });
+    },
+    [],
+  );
+
+  // Sort is remembered per browser. Start with the default so server and client markup match, then read storage.
+  const [sort, setSort] = useState<DashboardSort>("recent");
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(SORT_STORAGE_KEY);
+      if (isDashboardSort(saved)) setSort(saved);
+    } catch {
+      // storage unavailable: keep the default
+    }
+  }, []);
+  const changeSort = (next: DashboardSort) => {
+    setSort(next);
+    try {
+      window.localStorage.setItem(SORT_STORAGE_KEY, next);
+    } catch {
+      // ignore
+    }
+  };
 
   const trimmed = query.trim();
   const serverQuery = useDebounced(trimmed.length >= MIN_QUERY_LENGTH ? trimmed : "", SEARCH_DEBOUNCE_MS);
@@ -161,12 +262,17 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
     const matchesFilter = (d: Doc) => {
       if (filter === "mine" && d.ownerId !== user.id) return false;
       if (filter === "shared" && d.ownerId === user.id) return false;
+      if (filter === "starred" && !d.starred) return false;
       return true;
     };
-    if (serverResults) return serverResults.filter(matchesFilter);
+    // Search results keep their relevance order (title matches first); the sort applies to the browsing list.
+    if (serverResults) return serverResults.map((d) => (d.id in starOverrides ? { ...d, starred: starOverrides[d.id] } : d)).filter(matchesFilter);
     const q = trimmed.toLowerCase();
-    return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q)));
-  }, [documents, serverResults, trimmed, filter, user.id]);
+    return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q))).sort(compareDocs(sort));
+  }, [documents, serverResults, trimmed, filter, sort, user.id, starOverrides]);
+
+  const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
+  const showStrip = filter === "all" && !trimmed && starred.length > 0;
 
   const [creating, setCreating] = useState<string | null>(null);
   const [openTemplates, setOpenTemplates] = useState(false);
@@ -276,14 +382,69 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
             </button>
           </div>
 
-          <div className="mb-3 flex items-center gap-2">
+          {showStrip && (
+            <div className="mb-6" data-testid="starred-strip">
+              <div className="mb-2 flex items-center gap-2">
+                <h2 className="inline-flex items-center gap-1.5 text-sm font-semibold text-ink">
+                  <Star size={14} className="text-amber-500" fill="currentColor" /> Starred
+                </h2>
+                {starred.length > STARRED_STRIP_MAX && (
+                  <button type="button" className="ml-auto text-xs font-medium text-accent hover:underline" onClick={() => setFilter("starred")} data-testid="show-all-starred">
+                    Show all starred ({starred.length})
+                  </button>
+                )}
+              </div>
+              <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                {starred.slice(0, STARRED_STRIP_MAX).map((d) => (
+                  <li key={d.id} className="group relative">
+                    <Link
+                      href={`/d/${d.id}`}
+                      className="flex h-full flex-col gap-1 rounded-xl border border-line bg-surface px-3 py-2.5 pr-9 shadow-sm transition hover:border-accent hover:shadow-md"
+                      data-testid="starred-card"
+                    >
+                      <span className="line-clamp-2 text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
+                      <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? `Opened ${relativeTime(d.lastOpenedAt)}` : `Edited ${relativeTime(d.updatedAt)}`}</span>
+                    </Link>
+                    <StarButton starred={d.starred} onToggle={() => toggleStar(d)} className="absolute right-1.5 top-1.5" />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <h2 className="text-sm font-semibold text-ink">Documents</h2>
-            <div className="ml-auto flex rounded-lg border border-line bg-surface p-0.5 text-xs">
-              {(["all", "mine", "shared"] as const).map((f) => (
-                <button key={f} type="button" className={cn("rounded-md px-2.5 py-1 capitalize", filter === f ? "bg-ink text-white" : "text-ink-3 hover:text-ink")} onClick={() => setFilter(f)}>
-                  {f === "all" ? "All" : f === "mine" ? "Owned by me" : "Shared with me"}
-                </button>
-              ))}
+            <div className="ml-auto flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-ink-3">
+                <span className="sr-only">Sort by</span>
+                <select
+                  className="h-7 rounded-lg border border-line bg-surface px-2 text-xs text-ink-2 outline-none focus-visible:border-accent"
+                  value={sort}
+                  onChange={(e) => changeSort(e.target.value as DashboardSort)}
+                  aria-label="Sort by"
+                  data-testid="sort-select"
+                >
+                  {SORT_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="flex rounded-lg border border-line bg-surface p-0.5 text-xs">
+                {FILTERS.map((f) => (
+                  <button
+                    key={f.value}
+                    type="button"
+                    className={cn("rounded-md px-2.5 py-1", filter === f.value ? "bg-ink text-white" : "text-ink-3 hover:text-ink")}
+                    onClick={() => setFilter(f.value)}
+                    aria-pressed={filter === f.value}
+                    data-testid={`filter-${f.value}`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -299,13 +460,17 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
           ) : filtered.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
               <FileText className="mx-auto mb-3 text-ink-4" size={28} />
-              <p className="text-sm font-medium text-ink-2">{pending ? `Searching for "${trimmed}"…` : trimmed ? `No matches for "${trimmed}"` : "No matches"}</p>
-              <p className="mt-1 text-sm text-ink-3">{pending ? "Looking through titles and content." : "Try a different search."}</p>
+              <p className="text-sm font-medium text-ink-2">
+                {pending ? `Searching for "${trimmed}"…` : trimmed ? `No matches for "${trimmed}"` : filter === "starred" ? "No starred documents" : "No matches"}
+              </p>
+              <p className="mt-1 text-sm text-ink-3">
+                {pending ? "Looking through titles and content." : filter === "starred" && !trimmed ? "Hover a document and click the star to keep it close." : "Try a different search."}
+              </p>
             </div>
           ) : (
             <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
               {filtered.map((d) => (
-                <li key={d.id} data-testid={trimmed ? "search-result" : undefined}>
+                <li key={d.id} className="group relative" data-testid={trimmed ? "search-result" : undefined}>
                   <Link
                     href={`/d/${d.id}`}
                     className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md"
@@ -324,8 +489,8 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
                     ) : (
                       <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
                     )}
-                    <div className="mt-3 flex items-center gap-2 text-xs text-ink-4">
-                      <span>Edited {relativeTime(d.updatedAt)}</span>
+                    <div className="mt-3 flex items-center gap-2 pr-8 text-xs text-ink-4">
+                      <span>{sort === "recent" && d.lastOpenedAt ? `Opened ${relativeTime(d.lastOpenedAt)}` : `Edited ${relativeTime(d.updatedAt)}`}</span>
                       {d.ownerId !== user.id && (
                         <span className="inline-flex items-center gap-1">
                           <Users size={11} /> {d.ownerName ?? d.ownerLogin} · {d.role}
@@ -333,6 +498,7 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
                       )}
                     </div>
                   </Link>
+                  <StarButton starred={d.starred} onToggle={() => toggleStar(d)} className="absolute bottom-3 right-3" />
                 </li>
               ))}
             </ul>

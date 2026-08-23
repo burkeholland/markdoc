@@ -16,7 +16,7 @@ export default async function HomePage() {
     return (
       <Dashboard
         user={{ id: user.id, name: user.name ?? user.login ?? "You", login: user.login, image: user.image }}
-        documents={docs.map((d) => ({ ...d, updatedAt: d.updatedAt.toISOString(), createdAt: d.createdAt.toISOString() }))}
+        documents={docs.map((d) => ({ ...d, updatedAt: d.updatedAt.toISOString(), createdAt: d.createdAt.toISOString(), lastOpenedAt: d.lastOpenedAt?.toISOString() ?? null }))}
         githubAvailable={!!token}
       />
     );
