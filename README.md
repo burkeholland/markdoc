@@ -12,7 +12,7 @@ Google Docs for Markdown. Write Markdown together in real time, edit the **sourc
 
 What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 
-**Writing**
+### Writing
 
 - Two-pane live editor: CodeMirror source and a ProseMirror rich pane side by side; type in either, the other follows instantly.
 - GitHub Flavored Markdown (tables, task lists, footnotes, front matter, raw HTML kept) with a linter in the status bar and jump-to-line.
@@ -25,7 +25,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Document statistics and a shared writing goal (`Ctrl+Shift+C`): words, sentences, reading time, selection counts.
 - Templates: meeting notes, design doc, weekly status, blog post, decision record, checklist and more.
 
-**Collaborating**
+### Collaborating
 
 - Real-time editing over Yjs and WebSockets with presence avatars and live carets in both panes.
 - Comments anchored to text that follow the words as they move; reply, edit, resolve, reopen; `@mentions` with a suggestions popover.
@@ -37,7 +37,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Reader view at `/p/<id>`: clean read-only page with a table of contents, reading time and download menu.
 - Offline editing that survives a refresh or a closed tab; edits merge on reconnect and the header shows what is unsaved.
 
-**Organising**
+### Organising
 
 - Dashboard search looks inside document content and shows a snippet around each match.
 - Stars, recently opened, and sort order that is remembered.
@@ -45,12 +45,12 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Trash with restore for 30 days, then permanent deletion.
 - Make a copy of any document you can view.
 
-**Exporting**
+### Exporting
 
 - Markdown, standalone HTML (images embedded) or a Letter PDF from the header menu or `GET /api/documents/:id/export`.
 - Publish to a GitHub gist or a repository file (a real commit on the branch you choose); import from either.
 
-**Agents**
+### Agents
 
 - Personal API tokens, a REST API, and an MCP server (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes and answer comments; the app shows who did what. See [docs/agents.md](docs/agents.md).
 
@@ -160,7 +160,7 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 ## How it works
 
-```
+```text
  browser                                               server (one Node process)
  ┌─────────────────────────────────────────┐          ┌──────────────────────────────────────┐
  │ CodeMirror ◀── y-codemirror ──▶ Y.Text   │◀── WS ──▶│ Hocuspocus (auth, persistence,       │
@@ -209,7 +209,7 @@ Expect **$40–55/month** for a small team, about **$25** with the small app siz
 
 ## Project layout
 
-```
+```text
 server/index.ts              custom server: Next.js + collaboration WebSocket on one port
 src/app                      pages: dashboard, /login, /d/[id] editor, /p/[id] reader, /settings
 src/app/api                  REST routes (documents, content, suggest, comments, versions, activity,
