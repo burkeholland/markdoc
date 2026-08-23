@@ -49,7 +49,7 @@ For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or use `/mcp ad
 
 ### MCP tools
 
-Twenty-five tools; every `id` is the document id from the URL `/d/<id>`.
+Twenty-four tools; every `id` is the document id from the URL `/d/<id>`.
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
