@@ -162,7 +162,7 @@ export function GitHubPicker({
             <button
               key={t}
               type="button"
-              className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === t ? "bg-ink text-white" : "text-ink-2 hover:bg-surface-3")}
+              className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === t ? "bg-inverse text-white" : "text-ink-2 hover:bg-surface-3")}
               onClick={() => {
                 setTab(t);
                 setFilter("");

@@ -478,7 +478,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
               className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md"
               data-testid="open-github"
             >
-              <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-ink text-white">
+              <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-inverse text-white">
                 <GitHubIcon size={22} />
               </span>
               <span>
@@ -542,7 +542,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                   <button
                     key={f.value}
                     type="button"
-                    className={cn("rounded-md px-2.5 py-1", filter === f.value ? "bg-ink text-white" : "text-ink-3 hover:text-ink")}
+                    className={cn("rounded-md px-2.5 py-1", filter === f.value ? "bg-inverse text-white" : "text-ink-3 hover:text-ink")}
                     onClick={() => setFilter(f.value)}
                     aria-pressed={filter === f.value}
                     data-testid={`filter-${f.value}`}

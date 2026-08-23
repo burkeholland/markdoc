@@ -4,25 +4,25 @@
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  --color-ink: #111827;
-  --color-ink-2: #374151;
-  --color-ink-3: #6b7280;
-  --color-ink-4: #9ca3af;
-  --color-line: #e5e7eb;
-  --color-line-2: #d1d5db;
-  --color-surface: #ffffff;
-  --color-surface-2: #f9fafb;
-  --color-surface-3: #f3f4f6;
-  --color-accent: #2563eb;
-  --color-accent-hover: #1d4ed8;
-  --color-accent-soft: #eff6ff;
-  --color-success: #16a34a;
-  --color-warning: #d97706;
-  --color-danger: #dc2626;
+  --color-ink: var(--p-ink);
+  --color-ink-2: var(--p-ink-2);
+  --color-ink-3: var(--p-ink-3);
+  --color-ink-4: var(--p-ink-4);
+  --color-line: var(--p-line);
+  --color-line-2: var(--p-line-2);
+  --color-surface: var(--p-surface);
+  --color-surface-2: var(--p-surface-2);
+  --color-surface-3: var(--p-surface-3);
+  --color-accent: var(--p-accent);
+  --color-accent-hover: var(--p-accent-hover);
+  --color-accent-soft: var(--p-accent-soft);
+  --color-success: var(--p-success);
+  --color-warning: var(--p-warning);
+  --color-danger: var(--p-danger);
   /* Text on a filled accent/danger control (white in light; near-black on the lighter dark accent). */
-  --color-on-accent: #ffffff;
+  --color-on-accent: var(--p-on-accent);
   /* Floating dark toolbars and tooltips (table menu, selection bubble, toasts) — always carries white text. */
-  --color-inverse: #111827;
+  --color-inverse: var(--p-inverse);
 }
 
 /* `dark:` utilities follow the html[data-theme] attribute set by the boot script, not the OS. */
@@ -30,6 +30,24 @@
 
 :root {
   color-scheme: light;
+  /* Raw palette. @theme inline above maps --color-* onto these so Tailwind utilities re-resolve when [data-theme] changes. */
+  --p-ink: #111827;
+  --p-ink-2: #374151;
+  --p-ink-3: #6b7280;
+  --p-ink-4: #9ca3af;
+  --p-line: #e5e7eb;
+  --p-line-2: #d1d5db;
+  --p-surface: #ffffff;
+  --p-surface-2: #f9fafb;
+  --p-surface-3: #f3f4f6;
+  --p-accent: #2563eb;
+  --p-accent-hover: #1d4ed8;
+  --p-accent-soft: #eff6ff;
+  --p-success: #16a34a;
+  --p-warning: #d97706;
+  --p-danger: #dc2626;
+  --p-on-accent: #ffffff;
+  --p-inverse: #111827;
   /* CodeMirror markdown/syntax palette (src/editor/codemirror/theme.ts reads these). */
   --cm-ink: #1f2937;
   --cm-strong: #111827;
@@ -78,23 +96,23 @@
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --color-ink: #e5e7eb;
-  --color-ink-2: #c9d1dc;
-  --color-ink-3: #9ca3af;
-  --color-ink-4: #6b7280;
-  --color-line: #273244;
-  --color-line-2: #354152;
-  --color-surface: #0b0f17;
-  --color-surface-2: #111827;
-  --color-surface-3: #1f2937;
-  --color-accent: #60a5fa;
-  --color-accent-hover: #93c5fd;
-  --color-accent-soft: rgba(96, 165, 250, 0.16);
-  --color-success: #4ade80;
-  --color-warning: #fbbf24;
-  --color-danger: #f87171;
-  --color-on-accent: #0b0f17;
-  --color-inverse: #374151;
+  --p-ink: #e5e7eb;
+  --p-ink-2: #c9d1dc;
+  --p-ink-3: #9ca3af;
+  --p-ink-4: #6b7280;
+  --p-line: #273244;
+  --p-line-2: #354152;
+  --p-surface: #0b0f17;
+  --p-surface-2: #111827;
+  --p-surface-3: #1f2937;
+  --p-accent: #60a5fa;
+  --p-accent-hover: #93c5fd;
+  --p-accent-soft: rgba(96, 165, 250, 0.16);
+  --p-success: #4ade80;
+  --p-warning: #fbbf24;
+  --p-danger: #f87171;
+  --p-on-accent: #0b0f17;
+  --p-inverse: #374151;
 
   --cm-ink: #d1d5db;
   --cm-strong: #f3f4f6;

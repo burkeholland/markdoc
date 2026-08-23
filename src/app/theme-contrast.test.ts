@@ -26,7 +26,7 @@ function palette(body: string): Palette {
   return out;
 }
 
-const light = palette(block("@theme inline"));
+const light = palette(block("\n:root {"));
 const dark = palette(block('\n[data-theme="dark"] {'));
 
 function luminance(hex: string): number {
@@ -41,13 +41,16 @@ export function contrast(a: string, b: string): number {
   return (l1 + 0.05) / (l2 + 0.05);
 }
 
-const TOKENS = ["color-ink", "color-ink-2", "color-ink-3", "color-ink-4", "color-line", "color-line-2", "color-surface", "color-surface-2", "color-surface-3", "color-accent", "color-accent-hover", "color-accent-soft", "color-success", "color-warning", "color-danger", "color-on-accent", "color-inverse"];
+const TOKENS = ["ink", "ink-2", "ink-3", "ink-4", "line", "line-2", "surface", "surface-2", "surface-3", "accent", "accent-hover", "accent-soft", "success", "warning", "danger", "on-accent", "inverse"];
 
 describe("theme contrast", () => {
   it("the dark block overrides every semantic colour token and sets color-scheme", () => {
+    const theme = block("@theme inline");
     for (const token of TOKENS) {
-      expect(light[token], token).toBeTruthy();
-      expect(dark[token], token).toBeTruthy();
+      expect(light[`p-${token}`], token).toBeTruthy();
+      expect(dark[`p-${token}`], token).toBeTruthy();
+      // Utilities must go through var() (not an inlined literal) so they re-resolve under [data-theme].
+      expect(theme).toContain(`--color-${token}: var(--p-${token});`);
     }
     expect(block('\n[data-theme="dark"] {')).toMatch(/color-scheme:\s*dark/);
   });
@@ -60,25 +63,25 @@ describe("theme contrast", () => {
   for (const [name, p] of [["light", light], ["dark", dark]] as const) {
     describe(`${name} palette`, () => {
       it("body text on the surface is AAA (≥ 7)", () => {
-        expect(contrast(p["color-ink"], p["color-surface"])).toBeGreaterThanOrEqual(7);
-        expect(contrast(p["color-ink"], p["color-surface-2"])).toBeGreaterThanOrEqual(7);
-        expect(contrast(p["color-ink-2"], p["color-surface"])).toBeGreaterThanOrEqual(7);
+        expect(contrast(p["p-ink"], p["p-surface"])).toBeGreaterThanOrEqual(7);
+        expect(contrast(p["p-ink"], p["p-surface-2"])).toBeGreaterThanOrEqual(7);
+        expect(contrast(p["p-ink-2"], p["p-surface"])).toBeGreaterThanOrEqual(7);
       });
       it("secondary text on the surface is AA (≥ 4.5)", () => {
-        expect(contrast(p["color-ink-3"], p["color-surface"])).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(p["color-ink-3"], p["color-surface-2"])).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(p["p-ink-3"], p["p-surface"])).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(p["p-ink-3"], p["p-surface-2"])).toBeGreaterThanOrEqual(4.5);
       });
       it("text on filled accent and danger controls is AA (≥ 4.5)", () => {
-        expect(contrast(p["color-on-accent"], p["color-accent"])).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(p["color-on-accent"], p["color-danger"])).toBeGreaterThanOrEqual(4.5);
-        expect(contrast("#ffffff", p["color-inverse"])).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(p["p-on-accent"], p["p-accent"])).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(p["p-on-accent"], p["p-danger"])).toBeGreaterThanOrEqual(4.5);
+        expect(contrast("#ffffff", p["p-inverse"])).toBeGreaterThanOrEqual(4.5);
       });
       it("accent and danger read as text on the surface (≥ 4.5); success/warning as icons and large text (≥ 3)", () => {
-        for (const token of ["color-accent", "color-danger"]) {
-          expect(contrast(p[token], p["color-surface"]), token).toBeGreaterThanOrEqual(4.5);
+        for (const token of ["p-accent", "p-danger"]) {
+          expect(contrast(p[token], p["p-surface"]), token).toBeGreaterThanOrEqual(4.5);
         }
-        for (const token of ["color-success", "color-warning"]) {
-          expect(contrast(p[token], p["color-surface"]), token).toBeGreaterThanOrEqual(3);
+        for (const token of ["p-success", "p-warning"]) {
+          expect(contrast(p[token], p["p-surface"]), token).toBeGreaterThanOrEqual(3);
         }
       });
     });
