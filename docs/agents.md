@@ -10,6 +10,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 - [2. Connect an MCP client](#2-connect-an-mcp-client)
   - [MCP tools](#mcp-tools)
   - [Requests](#requests)
+    - [Working a request, step by step](#working-a-request-step-by-step)
 - [3. Or call the REST API directly](#3-or-call-the-rest-api-directly)
   - [Access levels](#access-levels)
   - [Documents](#documents)
@@ -48,7 +49,7 @@ For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or use `/mcp ad
 
 ### MCP tools
 
-Eighteen tools; every `id` is the document id from the URL `/d/<id>`.
+Twenty-four tools; every `id` is the document id from the URL `/d/<id>`.
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
@@ -87,12 +88,65 @@ The other direction — a human asks **from the document** and an agent picks it
 
 1. In the editor, select some text (or nothing for the whole document) and press **Ask an agent** (toolbar, selection bubble or command palette). Type an instruction or pick a chip (*Tighten this*, *Fix grammar and tone*, *Turn into a checklist*), choose how the agent should answer — **tracked changes** (default), **comment only** or **rewrite directly** (edit access) — and send. A pill in the header shows *"1 request waiting"*.
 2. Your agent — GitHub Copilot CLI connected through the MCP server above, by default — calls `markdoc_list_requests` when you ask it to *"Check Markdoc for requests"*. Each request names the document, the requester, the instruction, the mode and the selected text.
-3. It calls `markdoc_claim_request`, reads the document (`markdoc_read_document`), does the work with `markdoc_suggest` / `markdoc_comment` / `markdoc_replace_content` passing the same `requestId`, and finishes with `markdoc_complete_request { summary }`.
+3. It calls `markdoc_claim_request`, reads the document (`markdoc_read_document`), does the work with `markdoc_suggest` / `markdoc_comment` (passing the same `requestId`) or `markdoc_replace_content`, and finishes with `markdoc_complete_request { summary }`.
 4. Back in the editor the pill clears, a toast says *"Copilot CLI finished: 3 suggestions"*, the Comments panel opens on **Suggestions** and the requester gets a `request.done` notification. The Activity panel shows *asked an agent* and *finished a request* rows.
 
 Requests are scoped: `markdoc_list_requests` only lists documents the token's user owns or collaborates on. Commenters can ask for comments; asking for changes needs edit access. The requester (or the document owner) can cancel from the pill's menu. Nothing runs on the Markdoc server — it only keeps the inbox; the model is whichever agent you connect.
 
 The first time someone without a token clicks **Ask an agent**, the dialog shows a one-time *Connect an agent* card with the MCP config for the server they are on (the same card sits at the top of **Settings → Agents**).
+
+#### Working a request, step by step
+
+The agent side is always the same four moves; only the middle one changes with the request's `mode`.
+
+1. **Find work.** `markdoc_list_requests` with no arguments lists `open` requests (`status` can also be `claimed`, `done` or `cancelled`; `limit` caps the list at 1–200). Each item carries `id`, `documentId`, `documentTitle`, `userName`, `instruction`, `selection` (`{ from, to, quote }`, or `null` for the whole document), `mode`, `status`, `claimedBy` and `createdAt`. There is no push channel to the agent — check when the human asks, or poll on a timer; the human's side updates live.
+2. **Claim it.** `markdoc_claim_request { documentId, requestId }`. Claiming a request you already hold is a no-op; one that another agent holds, or that was cancelled, answers `409`. Sending `markdoc_suggest` or `markdoc_comment` with the `requestId` claims it implicitly, but claim first so the pill shows your name while you read.
+3. **Do the work** with the tools you already use, matching the mode the human chose:
+   - `suggest` → `markdoc_suggest` with `requestId`.
+   - `comment` → `markdoc_comment` (`action: "add"`) with `requestId`, anchored to the selected `quote`.
+   - `rewrite` → `markdoc_replace_content` (it has no `requestId`; the result is the edit itself).
+4. **Complete it.** `markdoc_complete_request { documentId, requestId, summary }`. `summary` (one sentence, ≤ 2000 characters, clipped to 500 in the notification) is what the requester reads in the toast and the bell. The counts come from the `requestId`-linked calls; completing twice is a no-op and a cancelled request answers `409`.
+
+Quote the selection exactly as the request gives it: `markdoc_suggest` `edits[].find` must match once (or set `all: true`) and `markdoc_comment` `quote` must appear in the text, both `400` otherwise. Read the document with `markdoc_read_document { id, clean: true }` first when you need more than the selection.
+
+**Tracked changes (`mode: "suggest"`)** — the request was *"Tighten this"* on the quote *"In order to be able to ship on time we will need to"*:
+
+```json
+{ "tool": "markdoc_list_requests", "arguments": {} }
+{ "tool": "markdoc_claim_request", "arguments": { "documentId": "DOC", "requestId": "REQ" } }
+{ "tool": "markdoc_read_document", "arguments": { "id": "DOC", "clean": true } }
+{ "tool": "markdoc_suggest", "arguments": { "id": "DOC", "requestId": "REQ",
+  "edits": [{ "find": "In order to be able to ship on time we will need to", "replace": "To ship on time we must" }] } }
+{ "tool": "markdoc_complete_request", "arguments": { "documentId": "DOC", "requestId": "REQ",
+  "summary": "Tightened the opening sentence as one tracked change." } }
+```
+
+**Comment only (`mode: "comment"`)** — *"Is this claim backed by data?"* on the quote *"Most users prefer the dark theme"*:
+
+```json
+{ "tool": "markdoc_list_requests", "arguments": {} }
+{ "tool": "markdoc_claim_request", "arguments": { "documentId": "DOC", "requestId": "REQ" } }
+{ "tool": "markdoc_comment", "arguments": { "id": "DOC", "action": "add", "requestId": "REQ",
+  "quote": "Most users prefer the dark theme",
+  "body": "No source for this in the document. The settings survey in **§3** reports 41 % dark / 59 % light — either cite it or soften to *many users*." } }
+{ "tool": "markdoc_complete_request", "arguments": { "documentId": "DOC", "requestId": "REQ",
+  "summary": "Left one comment: the preference claim needs a source or softer wording." } }
+```
+
+**Rewrite directly (`mode: "rewrite"`)** — *"Turn into a checklist"* with no selection (whole document). The change lands in place for everyone, so only do this when the mode says so; `message` names the version it creates:
+
+```json
+{ "tool": "markdoc_list_requests", "arguments": {} }
+{ "tool": "markdoc_claim_request", "arguments": { "documentId": "DOC", "requestId": "REQ" } }
+{ "tool": "markdoc_read_document", "arguments": { "id": "DOC", "clean": true } }
+{ "tool": "markdoc_replace_content", "arguments": { "id": "DOC",
+  "content": "# Launch checklist\n\n- [ ] Cut the release branch\n- [ ] Run the e2e suite\n- [ ] Publish the changelog\n",
+  "message": "Rewritten as a checklist (Ask an agent)" } }
+{ "tool": "markdoc_complete_request", "arguments": { "documentId": "DOC", "requestId": "REQ",
+  "summary": "Rewrote the document as a three-item checklist; see version history to compare." } }
+```
+
+The same flow over REST is in [Recipes](#4-recipes).
 
 ## 3. Or call the REST API directly
 
@@ -158,7 +212,7 @@ Request status is also mirrored into the live document (`meta.agentRequests`), w
 | `POST /api/documents/:id/versions/:vid` | `{ action: "restore" }` or `{ action: "rename", title }` | edit | Restore (the pre-restore state is kept as a version) or rename (an `auto` version becomes `named`). |
 | `POST /api/documents/:id/versions/:vid/copy` | | view | Copy that version as a new document you own: `201 { id, title }`, titled *Copy of <title> (v<n>)*, same rules as `/duplicate` (images copied, stored in Markdoc, no collaborators, one version *Copied from v<n>*). Trashed documents and unknown versions are `404`. |
 | `DELETE /api/documents/:id/versions/:vid` | | edit | Delete a version. |
-| `GET /api/documents/:id/activity` | `?before=<iso>&limit=50` | view | Who did what, when: `{ items: [{ id, actorId, actorName, actorKind: "user" \| "agent", action, detail, createdAt }], nextBefore }`, newest first. `action` is one of `edit`, `comment.add`, `comment.resolve`, `suggestion.add`, `suggestion.accept`, `suggestion.reject`, `version.save`, `version.restore`, `publish`, `share.add`, `share.remove`, `asset.upload`, `title.change`; `detail` holds small facts (`chars`, `count`, `number`, `title`, `login`, `role`, a ≤120-char `quote`), never document text. Pass `nextBefore` as `before` for the next page. Your own API calls appear under the token's name with `actorKind: "agent"`. |
+| `GET /api/documents/:id/activity` | `?before=<iso>&limit=50` | view | Who did what, when: `{ items: [{ id, actorId, actorName, actorKind: "user" \| "agent", action, detail, createdAt }], nextBefore }`, newest first. `action` is one of `edit`, `comment.add`, `comment.resolve`, `suggestion.add`, `suggestion.accept`, `suggestion.reject`, `version.save`, `version.restore`, `publish`, `share.add`, `share.remove`, `asset.upload`, `title.change`, `agent.request` (someone asked an agent), `agent.request.done` (an agent finished one; `detail` has `requestId`, `mode`, `suggestions`, `comments`, `summary`); `detail` holds small facts (`chars`, `count`, `number`, `title`, `login`, `role`, a ≤120-char `quote`), never document text. Pass `nextBefore` as `before` for the next page. Your own API calls appear under the token's name with `actorKind: "agent"`. |
 | `GET /api/documents/:id/export` | `?format=md \| html \| pdf` (default `md`), `?download=1` (attachment; HTML embeds images as `data:` URIs), `?suggestions=1` keeps pending insertions | view | Plain Markdown, a standalone HTML page, or a Letter PDF. PDF returns `503 { error }` if Chromium is unavailable on the server. |
 
 ### Images
@@ -190,7 +244,7 @@ Sharing a document with an audience: `/p/:id` is the read-only **reader view** (
 | Method & path | Body / query | Access | Purpose |
 | --- | --- | --- | --- |
 | `GET /api/me` | | signed in | Current user and agent name. |
-| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you); `refId` is the thread, reply or suggestion id (`<docId>:<login>` for shares). |
+| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you), `request.done` (an agent finished a request you made; `actorName` is the agent, `snippet` its summary); `refId` is the thread, reply, suggestion or request id (`<docId>:<login>` for shares). |
 | `POST /api/notifications/:id/read` / `POST /api/notifications/read-all` / `POST /api/notifications/thread-read` | `{ documentId, refIds }` for thread-read | signed in | Mark one, all, or everything about the given threads/replies read. |
 | `GET /api/mentions` / `POST /api/mentions/:id/read` | | signed in | **Deprecated, removed next release**: alias of `GET /api/notifications?unread=1&kind=mention` (also returns the old `mentions` array) and of `POST /api/notifications/:id/read`. |
 | `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays? }` | session only | List your API tokens; create one (`201`, the secret is returned once). Tokens cannot call these. |
@@ -209,7 +263,7 @@ Reactions are emoji on a thread or a reply: `POST … { action: "react", threadI
 
 ### Notifications
 
-People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, or @mentions them. Emoji reactions never notify. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner.
+People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, @mentions them, or when an agent completes a request they made with **Ask an agent** (`request.done`, attributed to the agent by name). Emoji reactions never notify. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner — except `request.done`, which always reaches the requester, even when the agent's token is their own.
 
 ## 4. Recipes
 
@@ -258,6 +312,24 @@ curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/documents?starred=1" | jq '
 URL=$(curl -s -H "Authorization: Bearer $TOKEN" -F file=@chart.png "$BASE/api/documents/$ID/assets" | jq -r .url)
 curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X PATCH "$BASE/api/documents/$ID/content" \
   -d "{\"append\":\"\\n![chart]($URL)\\n\"}"
+```
+
+**Work an "Ask an agent" request over REST.** List the inbox, claim the first request, answer in the mode it asks for, complete it. `GET /api/agent/requests` needs a token (a browser session gets `403`).
+
+```bash
+REQ=$(curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/agent/requests" | jq -c '.requests[0]')
+ID=$(jq -r .documentId <<<"$REQ"); RID=$(jq -r .id <<<"$REQ"); MODE=$(jq -r .mode <<<"$REQ"); QUOTE=$(jq -r '.selection.quote // empty' <<<"$REQ")
+curl -s -H "Authorization: Bearer $TOKEN" -X POST "$BASE/api/documents/$ID/requests/$RID/claim"
+case $MODE in
+  suggest) curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X POST "$BASE/api/documents/$ID/suggest" \
+             -d "$(jq -n --arg f "$QUOTE" --arg r "To ship on time we must" --arg rid "$RID" '{edits: [{find: $f, replace: $r}], requestId: $rid}')" ;;
+  comment) curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X POST "$BASE/api/documents/$ID/comments" \
+             -d "$(jq -n --arg q "$QUOTE" --arg rid "$RID" '{action: "add", quote: $q, body: "No source for this claim — cite the survey or soften it.", requestId: $rid}')" ;;
+  rewrite) curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X PUT "$BASE/api/documents/$ID/content" \
+             -d "$(jq -n --rawfile c rewritten.md '{content: $c, message: "Rewritten (Ask an agent)"}')" ;;
+esac
+curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X POST "$BASE/api/documents/$ID/requests/$RID/complete" \
+  -d '{"summary":"Done — see the Suggestions tab."}'
 ```
 
 ## What people see
