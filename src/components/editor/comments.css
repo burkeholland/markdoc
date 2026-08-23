@@ -1,0 +1,143 @@
+/* Comment bodies (inline Markdown) and reactions. Scoped to the comments panel; nothing here leaks into the editor. */
+
+.comment-body .comment-paragraph + .comment-paragraph {
+  margin-top: 0.375rem;
+}
+
+.comment-body .comment-code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 0.92em;
+  padding: 0 0.3em;
+  border-radius: 0.25rem;
+  background: var(--color-surface-3, rgba(127, 127, 127, 0.15));
+}
+
+.comment-body .comment-link {
+  color: var(--color-accent, #2563eb);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.comment-body .comment-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.comment-body strong {
+  font-weight: 600;
+}
+
+/* Formatting hint under the composer, shown while it has focus (space is always reserved). */
+.comment-format-hint {
+  font-size: 11px;
+  line-height: 1.4;
+  min-height: 1.2rem;
+  color: var(--color-ink-4, #9ca3af);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.625rem;
+  user-select: none;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+
+.comment-format-hint[data-visible="true"] {
+  visibility: visible;
+  opacity: 1;
+}
+
+.comment-format-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  padding: 0 0.25rem;
+  border: 1px solid var(--color-line, #e5e7eb);
+  border-bottom-width: 2px;
+  border-radius: 0.25rem;
+}
+
+/* Reaction chips and the quick picker. */
+.reaction-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.375rem;
+}
+
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.5rem;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-line, #e5e7eb);
+  background: var(--color-surface-2, transparent);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-ink-2, inherit);
+  cursor: pointer;
+  transition:
+    border-color 120ms,
+    background-color 120ms;
+}
+
+.reaction-chip:hover {
+  border-color: var(--color-line-2, #d1d5db);
+}
+
+.reaction-chip[data-mine="true"] {
+  border-color: var(--color-accent, #2563eb);
+  background: var(--color-accent-soft, rgba(37, 99, 235, 0.1));
+  color: var(--color-accent, #2563eb);
+  font-weight: 600;
+}
+
+.reaction-chip .reaction-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.reaction-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 1.5rem;
+  min-width: 1.75rem;
+  padding: 0 0.375rem;
+  border-radius: 999px;
+  border: 1px dashed var(--color-line, #e5e7eb);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-ink-4, #9ca3af);
+  cursor: pointer;
+}
+
+.reaction-add:hover,
+.reaction-add[data-state="open"] {
+  color: var(--color-ink-2, inherit);
+  border-color: var(--color-line-2, #d1d5db);
+  border-style: solid;
+}
+
+.reaction-picker {
+  display: flex;
+  gap: 0.125rem;
+}
+
+.reaction-picker button {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.reaction-picker button:hover {
+  background: var(--color-surface-3, rgba(127, 127, 127, 0.15));
+}
+
+.reaction-picker button[data-mine="true"] {
+  background: var(--color-accent-soft, rgba(37, 99, 235, 0.1));
+}

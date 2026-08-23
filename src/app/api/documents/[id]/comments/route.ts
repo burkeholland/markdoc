@@ -22,6 +22,7 @@ const schema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("resolve"), threadId: z.string().min(1), resolved: z.boolean() }),
   z.object({ action: z.literal("edit"), threadId: z.string().min(1), replyId: z.string().optional(), body: z.string().trim().min(1).max(5000) }),
   z.object({ action: z.literal("delete"), threadId: z.string().min(1), replyId: z.string().optional() }),
+  z.object({ action: z.literal("react"), threadId: z.string().min(1), replyId: z.string().optional(), emoji: z.string().trim().min(1).max(16) }),
 ]);
 
 /**
@@ -95,11 +96,18 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           else model.remove(body.threadId);
           break;
         }
+        case "react": {
+          // Toggle; reactions never notify anyone (see docs/agents.md).
+          const reacted = model.toggleReaction(body.threadId, body.replyId ?? null, body.emoji, author);
+          if (reacted === null) throw new HttpError(404, "Comment not found");
+          result = { ok: true, reacted };
+          break;
+        }
       }
     } finally {
       model.destroy();
     }
-    recordAgentActivity(doc, user, "commented");
+    recordAgentActivity(doc, user, body.action === "react" ? "reacted" : "commented");
   });
   // Editors' comments are picked up by the live-document watcher; this covers the no-collab path too (idempotent).
   if (body.action === "add" || body.action === "reply" || body.action === "edit") {
@@ -131,11 +139,22 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
         author: t.authorName,
         authorId: t.authorId,
         createdAt: new Date(t.createdAt).toISOString(),
+        editedAt: t.editedAt ? new Date(t.editedAt).toISOString() : null,
         resolved: t.resolved,
         quote: t.quote,
         range: t.range,
         currentText: t.range ? text.slice(t.range.from, t.range.to) : null,
-        replies: t.replies.map((r) => ({ id: r.id, body: r.body, mentions: r.mentions, author: r.authorName, authorId: r.authorId, createdAt: new Date(r.createdAt).toISOString() })),
+        reactions: t.reactions,
+        replies: t.replies.map((r) => ({
+          id: r.id,
+          body: r.body,
+          mentions: r.mentions,
+          author: r.authorName,
+          authorId: r.authorId,
+          createdAt: new Date(r.createdAt).toISOString(),
+          editedAt: r.editedAt ? new Date(r.editedAt).toISOString() : null,
+          reactions: r.reactions,
+        })),
       }));
     } finally {
       model.destroy();

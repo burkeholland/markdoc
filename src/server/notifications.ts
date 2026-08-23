@@ -200,7 +200,7 @@ export function readThread(map: ThreadMap): ThreadInfo | null {
   const id = str(map.get("id"));
   if (!id) return null;
   const raw = map.get("replies");
-  const replies = raw instanceof Y.Array ? (raw.toArray() as Parameters<typeof readReply>[0][]).map(readReply) : [];
+  const replies = raw instanceof Y.Array ? (raw.toArray() as Parameters<typeof readReply>[0][]).map((r) => readReply(r)) : [];
   return { id, body: str(map.get("body")) ?? "", authorLogin: str(map.get("authorLogin")), replies };
 }
 

@@ -171,6 +171,63 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     actor = null;
     expect((await post(docId, { action: "add", from: 0, to: 5, body: "Nope" })).status).toBe(401);
   });
+
+  it("toggles reactions, persists them to the live document and never notifies", async () => {
+    actor = alice;
+    const { id } = (await (await post(docId, { action: "add", from: 0, to: 12, body: "React to me" })).json()) as { id: string };
+    const { id: replyId } = (await (await post(docId, { action: "reply", threadId: id, body: "and to me" })).json()) as { id: string };
+
+    actor = carol;
+    let res = await post(docId, { action: "react", threadId: id, emoji: "👍" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, reacted: true });
+    actor = alice;
+    expect(await (await post(docId, { action: "react", threadId: id, emoji: "👍" })).json()).toEqual({ ok: true, reacted: true });
+    expect(await (await post(docId, { action: "react", threadId: id, replyId, emoji: "🎉" })).json()).toEqual({ ok: true, reacted: true });
+
+    type ReactedThread = ThreadJson & { reactions: Record<string, string[]>; editedAt: string | null; replies: { id: string; reactions: Record<string, string[]> }[] };
+    let { comments } = (await (await get(docId)).json()) as { comments: ReactedThread[] };
+    let thread = comments.find((c) => c.id === id)!;
+    expect(thread.reactions).toEqual({ "👍": expect.arrayContaining([carol.id, alice.id]) });
+    expect(thread.reactions["👍"]).toHaveLength(2);
+    expect(thread.replies[0].reactions).toEqual({ "🎉": [alice.id] });
+    expect(thread.editedAt).toBeNull();
+
+    // Alice's browser sees it live.
+    await waitFor(() => {
+      const model = new CommentsModel(aliceDoc, aliceDoc.getText(TEXT_KEY));
+      try {
+        return (model.get(id)?.reactions["👍"]?.length ?? 0) === 2;
+      } finally {
+        model.destroy();
+      }
+    });
+
+    // Toggling again removes only the caller's reaction.
+    actor = carol;
+    res = await post(docId, { action: "react", threadId: id, emoji: "👍" });
+    expect(await res.json()).toEqual({ ok: true, reacted: false });
+    ({ comments } = (await (await get(docId)).json()) as { comments: ReactedThread[] });
+    thread = comments.find((c) => c.id === id)!;
+    expect(thread.reactions).toEqual({ "👍": [alice.id] });
+
+    expect((await post(docId, { action: "react", threadId: "missing", emoji: "👍" })).status).toBe(404);
+    expect((await post(docId, { action: "react", threadId: id, emoji: "" })).status).toBe(400);
+
+    // Editing marks the body; reactions do not ring anyone's bell.
+    actor = alice;
+    expect((await post(docId, { action: "edit", threadId: id, body: "React to me, please" })).status).toBe(200);
+    ({ comments } = (await (await get(docId)).json()) as { comments: ReactedThread[] });
+    expect(comments.find((c) => c.id === id)!.editedAt).toBeTruthy();
+    const db = await getDb();
+    const rows = await db.select().from(schema.notifications).where(eq(schema.notifications.refId, id));
+    expect(rows).toHaveLength(0);
+
+    actor = victor;
+    expect((await post(docId, { action: "react", threadId: id, emoji: "👍" })).status).toBe(403);
+    actor = null;
+    expect((await post(docId, { action: "react", threadId: id, emoji: "👍" })).status).toBe(401);
+  });
 });
 
 describe("POST /api/documents/:id/comments without a collaboration server", () => {
