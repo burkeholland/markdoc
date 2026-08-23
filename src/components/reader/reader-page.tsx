@@ -16,6 +16,8 @@ export interface ReaderPageProps {
   headings: RenderedHeading[];
   initialHash: string;
   updatedAt: string;
+  /** Reading time in minutes (computeStats); 0 hides the label. */
+  readingMinutes?: number;
   owner: { name: string; image: string | null } | null;
   signedIn: boolean;
   canOpenEditor: boolean;
@@ -23,7 +25,7 @@ export interface ReaderPageProps {
 }
 
 /** Read-only presentation of a document: minimal chrome, the article, and a table of contents. */
-export function ReaderPage({ docId, title, html, headings, initialHash, updatedAt, owner, signedIn, canOpenEditor, pollMs }: ReaderPageProps) {
+export function ReaderPage({ docId, title, html, headings, initialHash, updatedAt, readingMinutes = 0, owner, signedIn, canOpenEditor, pollMs }: ReaderPageProps) {
   const toc = headings.filter((h) => h.level === 2 || h.level === 3);
   // Titles usually come from the first h1; do not show it twice.
   const hideFirstH1 = headings[0]?.level === 1 && headings[0].text.trim() === title.trim() && html.startsWith("<h1 ");
@@ -65,6 +67,12 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
                 </>
               )}
               <RelativeTime date={updatedAt} prefix="Updated " />
+              {readingMinutes > 0 && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span data-testid="reader-reading-time">{readingMinutes} min read</span>
+                </>
+              )}
             </div>
           </header>
           {/* Safe to inject: `html` is the output of renderMarkdownBody, which runs rehype-sanitize

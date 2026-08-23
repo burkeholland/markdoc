@@ -5,6 +5,7 @@ import { canComment, getDocumentAccess, getUserById } from "@/server/documents";
 import { readLiveText } from "@/server/livedoc";
 import { contentHash, renderMarkdownBody } from "@/server/export/html";
 import { ReaderPage } from "@/components/reader/reader-page";
+import { computeStats } from "@/editor/stats";
 
 // Always render the latest text: the reader has no live connection, a refresh is the update.
 export const dynamic = "force-dynamic";
@@ -40,6 +41,7 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
       headings={body.headings}
       initialHash={contentHash(live.clean)}
       updatedAt={doc.updatedAt.toISOString()}
+      readingMinutes={computeStats(live.clean).readingMinutes}
       owner={owner ? { name: owner.name ?? owner.login ?? "Owner", image: owner.image ?? null } : null}
       signedIn={!!user}
       canOpenEditor={canComment(role)}
