@@ -83,10 +83,39 @@ export default async function globalSetup(config: FullConfig) {
         if (!res.ok()) throw new Error(`[e2e warm-up] ${route} -> ${res.status()}`);
       });
     }
+
+    // First-hit compiles of these write routes also exceeded the 15 s expect timeout in
+    // history.spec.ts and images.spec.ts on a loaded box, so take those hits here as well.
+    await timed("POST /api/documents/<id>/versions", async () => {
+      const res = await page.request.post(`/api/documents/${docId}/versions`, { data: { title: "warm-up" }, timeout: 120_000 });
+      if (!res.ok()) throw new Error(`[e2e warm-up] versions -> ${res.status()}`);
+    });
+    await timed("POST /api/documents/<id>/assets", async () => {
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      const res = await page.request.post(`/api/documents/${docId}/assets?name=warm.png`, {
+        headers: { "content-type": "image/png" },
+        data: png,
+        timeout: 120_000,
+      });
+      if (!res.ok()) throw new Error(`[e2e warm-up] assets -> ${res.status()}`);
+    });
+    await timed("GET /api/documents/<id>/comments", async () => {
+      const res = await page.request.get(`/api/documents/${docId}/comments`, { timeout: 120_000 });
+      if (!res.ok()) throw new Error(`[e2e warm-up] comments -> ${res.status()}`);
+    });
   } finally {
+    // Drop the collaboration socket before deleting so the server is not mid-save on this doc.
+    await page.close().catch(() => undefined);
     if (docId) {
       await timed("DELETE /api/documents/<id>", async () => {
-        await page.request.delete(`/api/documents/${docId}`).catch(() => undefined);
+        const res = await context.request.delete(`/api/documents/${docId}`, { timeout: 120_000 }).catch((err: unknown) => {
+          console.log(`[e2e warm-up] delete failed (non-fatal): ${String(err)}`);
+          return null;
+        });
+        if (res && !res.ok()) console.log(`[e2e warm-up] delete returned ${res.status()} (non-fatal)`);
       });
     }
     await context.close();
