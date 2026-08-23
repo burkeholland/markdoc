@@ -60,7 +60,16 @@ test.describe("single user editing", () => {
     await page.keyboard.type("\n\n> A quote from the source");
     await expect(page.locator(".md-rich blockquote")).toContainText("A quote from the source");
 
-    await page.keyboard.type("\n\n| a | b |\n|---|---|\n| 1 | 2 |");
+    // Enter continues the quote (`> `); Enter again on the empty marker line exits it.
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toMatch(/> A quote from the source\n> ?$/);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toMatch(/> A quote from the source\n$/);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toMatch(/> A quote from the source\n\n$/);
+
+    await page.keyboard.type("| a | b |\n|---|---|\n| 1 | 2 |");
+    await expect.poll(() => codeText(page)).not.toMatch(/^> \|/m);
     await expect(page.locator(".md-rich table")).toBeVisible();
     await expect(page.locator(".md-rich td").last()).toHaveText("2");
     await user.context.close();
