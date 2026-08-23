@@ -1,6 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { e2eDistDir, removeDistDir } from "./e2e/dist-dir";
+import { factoryRoot } from "./scripts/lib/factory-root.mjs";
 
 const PORT = Number(process.env.E2E_PORT ?? 3100);
 // PROD_BASE_URL points the suite at an already-running production build (see e2e/prod-smoke.spec.ts);
@@ -10,8 +12,9 @@ const baseURL = prodBaseURL ?? `http://localhost:${PORT}`;
 
 // Several devs share this machine. When the Tools team's load gate is installed, start the dev
 // server only once CPU is <= 70 % (it gives up and starts anyway after 300 s), so the server's
-// first compile does not race other suites. Without the tool the command is unchanged.
-const LOAD_GATE = "C:\\Dev\\ai-experiments\\FACTORY\\tools\\bin\\load.mjs";
+// first compile does not race other suites. Without the tool the command is unchanged. The tool lives
+// in the sibling `tools` checkout (FACTORY_ROOT overrides the default `..`; see scripts/lib/factory-root.mjs).
+const LOAD_GATE = path.join(factoryRoot(), "tools", "bin", "load.mjs");
 const SERVER_COMMAND = "npx tsx server/index.ts";
 const useLoadGate = !prodBaseURL && existsSync(LOAD_GATE);
 const webServerCommand = useLoadGate ? `node "${LOAD_GATE}" --wait 70 --max 300 -- ${SERVER_COMMAND}` : SERVER_COMMAND;

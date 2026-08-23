@@ -2,6 +2,15 @@
 #   . (Join-Path $PSScriptRoot 'common.ps1')
 # Compatible with Windows PowerShell 5.1 (the scheduled task runs powershell.exe).
 
+function Get-FactoryRoot {
+  # Directory the repo and its sibling checkouts (markdoc-live, markdoc-data) live in.
+  # $env:FACTORY_ROOT if set, else the parent of the repo root. This file is <repo>\scripts\live\common.ps1,
+  # so the repo root is two levels up and the factory root three. Twin of scripts/lib/factory-root.mjs.
+  if ($env:FACTORY_ROOT) { return (Resolve-Path -LiteralPath $env:FACTORY_ROOT).Path }
+  $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+  return (Split-Path $repoRoot -Parent)
+}
+
 function Write-Step {
   param([string]$Message)
   Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message)

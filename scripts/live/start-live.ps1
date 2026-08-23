@@ -4,15 +4,19 @@
 #   start `npm run dev` hidden with output appended to the log, wait for 200.
 # Exit 0 on healthy, 1 on timeout (prints the log tail).
 param(
-  [string]$Root = 'C:\Dev\ai-experiments\FACTORY\markdoc-live',
+  # Live worktree; defaults to the sibling ../markdoc-live (see Get-FactoryRoot in common.ps1).
+  [string]$Root,
   [int]$Port = 3000,
-  [string]$LogPath = 'C:\Dev\ai-experiments\FACTORY\markdoc-data\live.log',
+  # Defaults to ../markdoc-data/live.log next to the repo.
+  [string]$LogPath,
   [int]$TimeoutSec = 180,
   # Skip the "already healthy" short-circuit and always restart (used by promote.ps1).
   [switch]$Restart
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
+if (-not $LogPath) { $LogPath = Join-Path (Get-FactoryRoot) 'markdoc-data\live.log' }
 
 if (-not $Restart) {
   $health = Get-LiveHealth -Port $Port
