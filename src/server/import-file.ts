@@ -1,6 +1,6 @@
 import { unified } from "unified";
 import rehypeParse from "rehype-parse";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
 import rehypeRemark from "rehype-remark";
 import remarkGfm from "remark-gfm";
 import remarkStringify from "remark-stringify";
@@ -96,7 +96,7 @@ export function titleForImport(content: string, fileName: string): string {
 }
 
 // GitHub-style sanitising plus `input` checkboxes so task lists survive the round trip.
-const sanitizeSchema = {
+const sanitizeSchema: SanitizeSchema = {
   ...defaultSchema,
   // Drop these with their text; the default only strips <script> and would keep "<title>" and CSS as prose.
   strip: [...(defaultSchema.strip ?? []), "style", "title", "head", "noscript", "template", "svg"],
@@ -104,7 +104,7 @@ const sanitizeSchema = {
   attributes: {
     ...defaultSchema.attributes,
     input: ["type", "checked", "disabled"],
-    code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-./]],
+    code: [["className", /^language-./]],
   },
 };
 

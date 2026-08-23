@@ -221,21 +221,23 @@ describe("buildDashboardCommands", () => {
       recentDocuments: async () => [{ id: "r1", title: "Recent one" }],
       starredDocuments: async () => [],
       showTrash: () => calls.push("trash"),
+      openFile: () => calls.push("open-file"),
       navigate: (href) => calls.push(`nav:${href}`),
       signOut: () => calls.push("signout"),
     };
     const cmds = buildDashboardCommands(ctx);
     expect(new Set(ids(cmds)).size).toBe(cmds.length);
-    expect(ids(cmds)).toEqual(["dash:new", "dash:template", "dash:recent", "dash:starred", "dash:trash", "dash:settings", "dash:signout"]);
-    const templates = await cmds[1].children!();
+    expect(ids(cmds)).toEqual(["dash:new", "dash:open-file", "dash:template", "dash:recent", "dash:starred", "dash:trash", "dash:settings", "dash:signout"]);
+    const templates = await cmds[2].children!();
     expect(templates[0].title).toBe("Meeting notes");
     expect(ids(filterCommands("agenda", templates))).toEqual(["template:meeting-notes"]);
     templates[0].run();
     cmds[0].run();
-    cmds[4].run();
+    cmds[1].run();
     cmds[5].run();
-    expect(calls).toEqual(["create:meeting-notes", "create:blank", "trash", "nav:/settings"]);
-    const recent = await cmds[2].children!();
+    cmds[6].run();
+    expect(calls).toEqual(["create:meeting-notes", "create:blank", "open-file", "trash", "nav:/settings"]);
+    const recent = await cmds[3].children!();
     expect(recent[0].title).toBe("Recent one");
   });
 });

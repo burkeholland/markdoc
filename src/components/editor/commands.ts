@@ -274,6 +274,8 @@ export interface DashboardCommandContext {
   recentDocuments: () => Promise<DocumentRef[]>;
   starredDocuments: () => Promise<DocumentRef[]>;
   showTrash: () => void;
+  /** Pick local .md/.txt/.html files to import as new documents. */
+  openFile: () => void;
   navigate: (href: string) => void;
   signOut: () => void;
 }
@@ -281,6 +283,7 @@ export interface DashboardCommandContext {
 export function buildDashboardCommands(ctx: DashboardCommandContext): Command[] {
   return [
     { id: "dash:new", title: "New document", keywords: ["create", "blank", "add"], group: "Create", icon: "FilePlus2", run: () => ctx.createDocument() },
+    { id: "dash:open-file", title: "Open file…", keywords: ["import", "upload", "local", "markdown", "txt", "html", "drop"], group: "Create", icon: "UploadCloud", run: () => ctx.openFile() },
     {
       id: "dash:template",
       title: "New from template…",

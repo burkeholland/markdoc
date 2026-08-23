@@ -6,7 +6,7 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Star, Trash2, Users, X } from "lucide-react";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Star, Trash2, Users, X } from "lucide-react";
 import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -16,6 +16,7 @@ import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
+import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
 import { buildDashboardCommands } from "@/components/editor/commands";
 
@@ -361,6 +362,16 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
 
   // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Local files dropped on the page or picked with "Open file…": one file opens straight away,
+  // several stay listed in the dialog while the list behind it refreshes.
+  const fileImport = useFileImport({
+    onDone: (created) => {
+      if (created.length === 1) router.push(`/d/${created[0].id}`);
+      else if (created.length > 1) router.refresh();
+    },
+    onError: (message) => setNotice({ message, kind: "error" }),
+  });
+  const pickFile = fileImport.pick;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (paletteOpen || !isPaletteShortcut(e)) return;
@@ -390,15 +401,19 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
         recentDocuments: () => listDocs("?limit=8"),
         starredDocuments: () => listDocs("?starred=1"),
         showTrash: () => setFilter("trash"),
+        openFile: pickFile,
         navigate: (href) => router.push(href),
         signOut: () => navigateTo("/api/auth/signout"),
       }),
-    [create, listDocs, router],
+    [create, listDocs, router, pickFile],
   );
 
   return (
     <TooltipProvider>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} groupOrder={DASHBOARD_GROUPS} />
+      <ImportDropzone active={fileImport.dragging} />
+      {fileImport.input}
+      <ImportDialog open={fileImport.open} onOpenChange={fileImport.setOpen} items={fileImport.items} ignored={fileImport.ignored} />
       <main className="min-h-screen bg-surface-2">
         <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
           <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
@@ -456,7 +471,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                   <button
                     type="button"
                     disabled={creating !== null}
-                    className="flex items-center gap-1 rounded-r-2xl border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                    className="flex items-center gap-1 border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
                     aria-label="New document from template"
                     title="From template"
                     data-testid="new-from-template"
@@ -471,6 +486,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                   </div>
                 </DialogContent>
               </Dialog>
+              <button
+                type="button"
+                onClick={fileImport.pick}
+                disabled={creating !== null}
+                className="flex items-center gap-1 rounded-r-2xl border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                aria-label="Open file…"
+                title="Open file… (.md, .txt, .html)"
+                data-testid="open-file"
+              >
+                <FolderOpen size={16} />
+              </button>
             </div>
             <button
               type="button"
