@@ -5,13 +5,17 @@
 # start-live. If health never returns 200, roll back to the previous sha.
 param(
   [Parameter(Mandatory = $true)][string]$Sha,
-  [string]$Root = 'C:\Dev\ai-experiments\FACTORY\markdoc-live',
+  # Live worktree; defaults to the sibling ../markdoc-live (see Get-FactoryRoot in common.ps1).
+  [string]$Root,
   [int]$Port = 3000,
-  [string]$LogPath = 'C:\Dev\ai-experiments\FACTORY\markdoc-data\live.log',
+  # Defaults to ../markdoc-data/live.log next to the repo.
+  [string]$LogPath,
   [int]$TimeoutSec = 180
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
+if (-not $LogPath) { $LogPath = Join-Path (Get-FactoryRoot) 'markdoc-data\live.log' }
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
 
 function Invoke-Git {
@@ -54,10 +58,11 @@ function Switch-LiveTo {
 Write-Step "fetching origin in $Root"
 Invoke-Git fetch origin --quiet | Out-Null
 
-$target = (Invoke-Git rev-parse --verify "$Sha^{commit}") | Select-Object -First 1
-& git -C $Root merge-base --is-ancestor $target origin/main
-if ($LASTEXITCODE -ne 0) {
-  Write-Step "$target is not on origin/main; refusing to promote"
+$target = $null
+try { $target = (Invoke-Git rev-parse --verify --quiet "$Sha^{commit}") | Select-Object -First 1 } catch { $target = $null }
+if ($target) { & git -C $Root merge-base --is-ancestor $target origin/main }
+if (-not $target -or $LASTEXITCODE -ne 0) {
+  Write-Step "$Sha is not on origin/main; refusing to promote"
   exit 1
 }
 
