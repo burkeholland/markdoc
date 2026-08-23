@@ -54,6 +54,9 @@ export default defineConfig({
         url: baseURL,
         reuseExistingServer: false,
         timeout: webServerTimeout,
+        // E2E_SERVER_LOG=1 echoes the dev server's stdout too (browser console errors such as
+        // hydration warnings are forwarded there by Next); stderr is always echoed.
+        stdout: process.env.E2E_SERVER_LOG ? "pipe" : "ignore",
         env: {
           PORT: String(PORT),
           AUTH_SECRET: "e2e-secret-e2e-secret-e2e-secret-e2e",
