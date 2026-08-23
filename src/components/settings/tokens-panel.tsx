@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
+import { AgentConnectCard, useOrigin } from "@/components/settings/agent-connect-card";
 
 interface TokenRow {
   id: string;
@@ -45,14 +46,16 @@ function CopyField({ value, label }: { value: string; label: string }) {
   );
 }
 
-export function TokensPanel({ origin, userLogin }: { origin: string; userLogin: string }) {
+export function TokensPanel({ origin, userLogin, next }: { origin: string; userLogin: string; next?: string | null }) {
   const [tokens, setTokens] = useState<TokenRow[] | null>(null);
   const [name, setName] = useState("GitHub Copilot CLI");
   const [expires, setExpires] = useState<string>("90");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ token: string; name: string } | null>(null);
-  const base = origin || (typeof window !== "undefined" ? window.location.origin : "");
+  // The browser's origin wins (LAN access, tunnels): the config must point where the user actually is.
+  const liveOrigin = useOrigin(origin);
+  const base = liveOrigin || origin;
 
   const load = useCallback(async () => {
     try {
@@ -114,9 +117,16 @@ export function TokensPanel({ origin, userLogin }: { origin: string; userLogin: 
           suggestions. Everything they do shows up live for collaborators and is attributed to <strong>{userLogin} via &lt;token name&gt;</strong>. Tokens have
           the same access you have.
         </p>
+        {next && (
+          <a className="btn btn-outline btn-sm mt-3 gap-1.5" href={next} data-testid="settings-back-to-document">
+            <ArrowLeft size={14} /> Back to the document
+          </a>
+        )}
       </div>
 
-      <div className="rounded-2xl border border-line bg-surface p-5">
+      <AgentConnectCard origin={liveOrigin} token={created?.token ?? null} hideTokenStep />
+
+      <div className="rounded-2xl border border-line bg-surface p-5" id="tokens">
         <h2 className="mb-3 text-sm font-semibold text-ink">Create a token</h2>
         <form
           className="flex flex-wrap items-end gap-3"

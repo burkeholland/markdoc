@@ -52,6 +52,8 @@ const server = new McpServer({ name: "markdoc", version: "0.1.0" }, {
     "always give the user the returned URL.",
     "Prefer markdoc_suggest over markdoc_replace_content when revising someone else's text: suggestions show up as tracked",
     "changes the humans accept or reject. Use markdoc_comments to read feedback left for you and markdoc_comment to reply.",
+    "When the user asks you to check Markdoc for requests (or says an agent was asked for something in a document), call markdoc_list_requests,",
+    "claim a request, do what its instruction says with the requestId, and call markdoc_complete_request with a one-line summary.",
   ].join(" "),
 });
 
@@ -191,11 +193,12 @@ server.registerTool(
       id: z.string(),
       content: z.string().optional().describe("Full revised Markdown"),
       edits: z.array(z.object({ find: z.string(), replace: z.string(), all: z.boolean().optional() })).optional(),
+      requestId: z.string().optional().describe("Link to an \"Ask an agent\" request you are working on (from markdoc_list_requests)"),
     },
   },
-  async ({ id, content, edits }) => {
+  async ({ id, content, edits, requestId }) => {
     if (!content && !edits?.length) throw new Error("Provide `content` or `edits`.");
-    const res = await api("POST", `/api/documents/${id}/suggest`, content !== undefined ? { content } : { edits });
+    const res = await api("POST", `/api/documents/${id}/suggest`, { ...(content !== undefined ? { content } : { edits }), ...(requestId ? { requestId } : {}) });
     return ok(`Proposed ${res.suggestions} change(s) on ${id}. Reviewers can accept or reject them at ${docUrl(id)}`, { ...res, url: docUrl(id) });
   },
 );
@@ -250,12 +253,13 @@ server.registerTool(
       replyId: z.string().optional().describe("With `react`: react to this reply instead of the thread body"),
       body: z.string().optional().describe("Comment text"),
       emoji: z.string().optional().describe("With `react`: the emoji to toggle, e.g. 👍 ❤️ 🎉 👀 😄 🚀"),
+      requestId: z.string().optional().describe("With `add`: link the comment to an \"Ask an agent\" request you are working on"),
     },
   },
-  async ({ id, action, quote, threadId, replyId, body, emoji }) => {
+  async ({ id, action, quote, threadId, replyId, body, emoji, requestId }) => {
     if (action === "add") {
       if (!quote || !body) throw new Error("`quote` and `body` are required to add a comment.");
-      const res = await api("POST", `/api/documents/${id}/comments`, { action: "add", quote, body });
+      const res = await api("POST", `/api/documents/${id}/comments`, { action: "add", quote, body, ...(requestId ? { requestId } : {}) });
       return ok(`Commented on ${JSON.stringify(quote)} (thread ${res.id}).`, res);
     }
     if (!threadId) throw new Error("`threadId` is required.");
@@ -374,6 +378,65 @@ server.registerTool(
   async ({ id }) => {
     const res = await api("POST", `/api/documents/${id}/restore`);
     return ok(`Restored "${res.document.title}" (id ${id}). Open it: ${docUrl(id)}`, { id, title: res.document.title, url: docUrl(id) });
+  },
+);
+
+server.registerTool(
+  "markdoc_list_requests",
+  {
+    title: "List requests for me",
+    description:
+      "Check Markdoc for work humans asked for from inside the editor (\"Ask an agent\"): open requests across every document the user can see, each with the document, the selected text (if any), the instruction and the mode — suggest (propose tracked changes with markdoc_suggest), comment (reply with markdoc_comment) or rewrite (edit directly with markdoc_replace_content). Claim one with markdoc_claim_request, do the work passing its requestId, then markdoc_complete_request.",
+    inputSchema: {
+      status: z.enum(["open", "claimed", "done", "cancelled"]).optional().describe("Default: open"),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+  },
+  async ({ status, limit }) => {
+    const q = new URLSearchParams();
+    if (status) q.set("status", status);
+    if (limit) q.set("limit", String(limit));
+    const qs = q.toString();
+    const { requests } = await api("GET", `/api/agent/requests${qs ? `?${qs}` : ""}`);
+    const lines = requests.map(
+      (r) =>
+        `- [${r.id}] ${r.status}${r.claimedBy ? ` (${r.claimedBy})` : ""} · ${r.mode} · "${r.documentTitle}" (document ${r.documentId}) · from ${r.userName ?? r.userLogin ?? "someone"} · ${r.createdAt}\n    instruction: ${r.instruction}${r.selection ? `\n    selection: ${JSON.stringify(r.selection.quote)}` : "\n    selection: whole document"}`,
+    );
+    return ok(lines.length ? lines.join("\n") : `No ${status ?? "open"} requests. Nothing to do right now.`, { requests });
+  },
+);
+
+server.registerTool(
+  "markdoc_claim_request",
+  {
+    title: "Claim a request",
+    description: "Take an open request so the human sees who is working on it. Then read the document (markdoc_read_document), do the work with markdoc_suggest / markdoc_comment / markdoc_replace_content passing the same requestId, and finish with markdoc_complete_request.",
+    inputSchema: { documentId: z.string(), requestId: z.string() },
+  },
+  async ({ documentId, requestId }) => {
+    const { request } = await api("POST", `/api/documents/${documentId}/requests/${requestId}/claim`);
+    return ok(
+      `Claimed request ${request.id} (${request.mode}) on document ${documentId}.\nInstruction: ${request.instruction}\n${request.selection ? `Selected text: ${JSON.stringify(request.selection.quote)}` : "Applies to the whole document."}\nOpen it: ${docUrl(documentId)}`,
+      { request },
+    );
+  },
+);
+
+server.registerTool(
+  "markdoc_complete_request",
+  {
+    title: "Complete a request",
+    description: "Mark a request done once your suggestions/comments are in. The requester is notified and sees the result; `summary` is shown to them (one sentence on what you did).",
+    inputSchema: {
+      documentId: z.string(),
+      requestId: z.string(),
+      summary: z.string().max(2000).optional().describe("One sentence for the human: what you changed or found"),
+    },
+  },
+  async ({ documentId, requestId, summary }) => {
+    const { request } = await api("POST", `/api/documents/${documentId}/requests/${requestId}/complete`, summary ? { summary } : {});
+    const r = request.result ?? { suggestions: 0, comments: 0 };
+    return ok(`Request ${request.id} is done: ${r.suggestions} suggestion(s), ${r.comments} comment(s). The requester has been notified. ${docUrl(documentId)}`, { request });
   },
 );
 

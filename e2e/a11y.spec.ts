@@ -242,6 +242,22 @@ test.describe("axe: editor", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /share/i })).not.toBeVisible();
 
+    // Ask an agent dialog (with the first-run connect card when the user has no token), then the requests pill.
+    await page.evaluate(() => window.localStorage.removeItem("markdoc:agent-connect-dismissed"));
+    await page.getByTestId("ask-agent-button").click();
+    await expect(page.getByTestId("ask-agent-dialog")).toBeVisible();
+    await page.getByTestId("ask-agent-instruction").fill("Tighten this");
+    await scan(page, "editor + ask-agent dialog");
+    await page.getByTestId("ask-agent-send").click();
+    await expect(page.getByTestId("ask-agent-dialog")).toHaveCount(0);
+    await expect(page.getByTestId("agent-requests-pill")).toBeVisible();
+    await scan(page, "editor + agent requests pill");
+    await page.getByTestId("agent-requests-pill").click();
+    await expect(page.getByTestId("agent-requests-list")).toBeVisible();
+    await scan(page, "editor + agent requests menu");
+    await page.getByTestId("agent-request-cancel").first().click();
+    await expect(page.getByTestId("agent-requests-pill")).toHaveCount(0);
+
     // Image dialog.
     await page.getByTestId("tb-image").click();
     await expect(page.getByRole("dialog", { name: /image/i })).toBeVisible();
@@ -396,9 +412,11 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(page.getByTestId("tb-undo")).toBeDisabled();
     await expect(page.getByTestId("tb-redo")).toBeDisabled();
     await page.keyboard.press("End");
-    await expect(page.getByTestId("tb-comment")).toBeFocused();
+    await expect(page.getByTestId("ask-agent-button")).toBeFocused();
     await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("heading-menu")).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("ask-agent-button")).toBeFocused();
     await page.keyboard.press("ArrowLeft");
     await expect(page.getByTestId("tb-comment")).toBeFocused();
     // Undo/Redo sit between Horizontal rule and Comment; disabled, they are skipped.

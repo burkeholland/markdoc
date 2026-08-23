@@ -2,7 +2,7 @@ import { handler, json, requireUser } from "@/server/http";
 import { listNotifications, type NotificationItem } from "@/server/notifications";
 import type { NotificationKind } from "@/server/db/schema";
 
-const KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "share"];
+const KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "share", "request.done"];
 
 export function toDto(n: NotificationItem) {
   return { ...n, createdAt: n.createdAt.toISOString(), readAt: n.readAt ? n.readAt.toISOString() : null };

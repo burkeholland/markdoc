@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { EditorView } from "prosemirror-view";
-import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
+import { Bold, Bot, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
 import { cn } from "@/lib/utils";
@@ -58,6 +58,7 @@ export function SelectionBubble({
   format,
   containerRef,
   onComment,
+  onAskAgent,
   onLink,
 }: {
   view: EditorView | null;
@@ -66,6 +67,7 @@ export function SelectionBubble({
   format: FormatState;
   containerRef: React.RefObject<HTMLElement | null>;
   onComment: () => void;
+  onAskAgent?: () => void;
   onLink: () => void;
 }) {
   const [pos, setPos] = useState<Position | null>(null);
@@ -185,6 +187,11 @@ export function SelectionBubble({
       <BubbleButton label="Comment" disabled={!session.canComment} onClick={onComment}>
         <MessageSquarePlus size={16} />
       </BubbleButton>
+      {onAskAgent && (
+        <BubbleButton label="Ask an agent" disabled={!session.canComment} onClick={onAskAgent}>
+          <Bot size={16} />
+        </BubbleButton>
+      )}
       <span className={cn("absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-inverse", pos.below ? "-top-1" : "-bottom-1")} aria-hidden />
     </div>
   );

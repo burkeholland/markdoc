@@ -9,10 +9,14 @@ import { ThemePicker } from "@/components/ui/theme-toggle";
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ next?: string | string[] }> }) {
   const session = await auth();
   if (!session?.user?.id) redirect("/login?next=/settings");
   const origin = process.env.AUTH_URL?.replace(/\/$/, "") ?? "";
+  const rawNext = (await searchParams).next;
+  const nextParam = Array.isArray(rawNext) ? rawNext[0] : rawNext;
+  // Only relative document paths: never bounce the user off-site.
+  const next = nextParam && /^\/d\/[a-z0-9]+$/i.test(nextParam) ? nextParam : null;
   return (
     <main className="min-h-screen bg-surface-2">
       <header className="border-b border-line bg-surface">
@@ -36,7 +40,7 @@ export default async function SettingsPage() {
           </div>
           <ThemePicker />
         </div>
-        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} />
+        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} />
       </section>
     </main>
   );

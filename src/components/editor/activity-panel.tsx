@@ -90,6 +90,19 @@ export function describeActivity(item: ActivityItemDto): string {
       const title = str(d.title);
       return title ? `renamed the document to “${title}”` : "renamed the document";
     }
+    case "agent.request": {
+      const instruction = str(d.instruction);
+      return instruction ? `asked an agent: “${instruction}”` : "asked an agent for help";
+    }
+    case "agent.request.done": {
+      const parts: string[] = [];
+      const s = num(d.suggestions);
+      const c = num(d.comments);
+      if (s) parts.push(plural(s, "suggestion"));
+      if (c) parts.push(plural(c, "comment"));
+      const summary = str(d.summary);
+      return `finished a request${parts.length ? ` (${parts.join(", ")})` : ""}${summary ? `: “${summary}”` : ""}`;
+    }
     default:
       return String(item.action);
   }

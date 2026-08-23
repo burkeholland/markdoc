@@ -225,7 +225,7 @@ export const assets = pgTable(
 export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
-export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "share";
+export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "share" | "request.done";
 
 /**
  * Per-user notifications: @mentions, replies to and resolutions of threads they took part in,
@@ -272,7 +272,9 @@ export type ActivityAction =
   | "share.remove"
   | "asset.upload"
   | "mention"
-  | "title.change";
+  | "title.change"
+  | "agent.request"
+  | "agent.request.done";
 export type ActorKind = "user" | "agent";
 
 /** Per-document activity feed: who did what, when — humans and agents alike. `detail` never holds document text beyond short quotes. */
@@ -294,6 +296,49 @@ export const activity = pgTable(
 );
 
 export type Activity = typeof activity.$inferSelect;
+
+export type AgentRequestMode = "suggest" | "comment" | "rewrite";
+export type AgentRequestStatus = "open" | "claimed" | "done" | "cancelled";
+export interface AgentRequestSelection {
+  from: number;
+  to: number;
+  quote: string;
+}
+export interface AgentRequestResult {
+  suggestions: number;
+  comments: number;
+  summary?: string;
+}
+
+/**
+ * Work a human handed to agents from inside the editor ("Ask an agent"). Agents find open
+ * requests across the documents their token's user can see, claim one, do the work with
+ * the suggest/comment tools (linking by `requestId`) and complete it.
+ */
+export const agentRequests = pgTable(
+  "agent_request",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    instruction: text("instruction").notNull(),
+    selection: jsonb("selection").$type<AgentRequestSelection | null>(),
+    mode: text("mode").$type<AgentRequestMode>().notNull().default("suggest"),
+    status: text("status").$type<AgentRequestStatus>().notNull().default("open"),
+    /** Token (agent) name that claimed the request. */
+    claimedBy: text("claimed_by"),
+    result: jsonb("result").$type<AgentRequestResult | null>(),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("agent_request_document_status_idx").on(t.documentId, t.status), index("agent_request_status_created_idx").on(t.status, t.createdAt.desc())],
+);
+
+export type AgentRequest = typeof agentRequests.$inferSelect;
 
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;

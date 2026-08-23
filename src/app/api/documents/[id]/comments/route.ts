@@ -6,6 +6,7 @@ import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { notifyReply, notifyResolved, readThread, recordMentions } from "@/server/notifications";
 import { activityActor, clip, recordActivity } from "@/server/activity";
+import { attachWork } from "@/server/agent-requests";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -17,6 +18,8 @@ const schema = z.discriminatedUnion("action", [
     /** Alternative to from/to: anchor the comment on the first occurrence of this text. */
     quote: z.string().min(1).max(2000).optional(),
     body: z.string().trim().min(1).max(5000),
+    /** Link the comment to an "Ask an agent" request. */
+    requestId: z.string().min(1).optional(),
   }),
   z.object({ action: z.literal("reply"), threadId: z.string().min(1), body: z.string().trim().min(1).max(5000) }),
   z.object({ action: z.literal("resolve"), threadId: z.string().min(1), resolved: z.boolean() }),
@@ -117,7 +120,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   }
   for (const fn of after) await fn();
   if (body.action === "add") {
-    await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
+    await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
+    if (body.requestId) {
+      const threadId = (result as { id?: string }).id;
+      await attachWork(id, body.requestId, user, { comments: 1, commentIds: threadId ? [threadId] : [] });
+    }
   } else if (body.action === "resolve" && body.resolved) {
     await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
   }

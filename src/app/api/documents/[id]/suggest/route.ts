@@ -5,28 +5,35 @@ import { diffOpsWords } from "@/editor/sync/text-diff";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { activityActor, recordActivity } from "@/server/activity";
+import { attachWork } from "@/server/agent-requests";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 
 type Params = { params: Promise<{ id: string }> };
 
+const targeted = z.object({
+  /** Targeted replacements. Each `find` must occur exactly once unless `all` is set. */
+  edits: z
+    .array(
+      z.object({
+        find: z.string().min(1),
+        replace: z.string(),
+        all: z.boolean().optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+});
+/** Link the suggestions to an "Ask an agent" request so its pill shows progress. */
+const linked = z.object({ requestId: z.string().min(1).optional() });
+
 const schema = z.union([
-  z.object({
-    /** The full proposed text. Differences from the current text become suggestions. */
-    content: z.string().max(2_000_000),
-  }),
-  z.object({
-    /** Targeted replacements. Each `find` must occur exactly once unless `all` is set. */
-    edits: z
-      .array(
-        z.object({
-          find: z.string().min(1),
-          replace: z.string(),
-          all: z.boolean().optional(),
-        }),
-      )
-      .min(1)
-      .max(200),
-  }),
+  z
+    .object({
+      /** The full proposed text. Differences from the current text become suggestions. */
+      content: z.string().max(2_000_000),
+    })
+    .merge(linked),
+  targeted.merge(linked),
 ]);
 
 /**
@@ -40,6 +47,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const body = await readJson(req, (d) => schema.parse(d));
   const author = collabIdentity(user!);
   let count = 0;
+  const created: string[] = [];
 
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     const ytext = doc.getText(TEXT_KEY);
@@ -59,6 +67,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     const ops = diffOpsWords(current, proposed, 0);
     if (ops.length === 0) return;
     const model = new SuggestionsModel(doc, ytext);
+    const before = new Set(model.ymap.keys());
     try {
       doc.transact(() => {
         let shift = 0;
@@ -76,13 +85,15 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           }
         }
       }, SUGGESTIONS_ORIGIN);
+      for (const key of model.ymap.keys()) if (!before.has(key)) created.push(key);
     } finally {
       model.destroy();
     }
     recordAgentActivity(doc, user!, "suggested");
   });
 
-  if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count });
-  return json({ ok: true, suggestions: count });
+  if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(body.requestId ? { requestId: body.requestId } : {}) });
+  if (body.requestId) await attachWork(id, body.requestId, user!, { suggestions: count, suggestionIds: created });
+  return json({ ok: true, suggestions: count, suggestionIds: created });
 });
 
