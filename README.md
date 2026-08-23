@@ -263,7 +263,7 @@ e2e/                         Playwright specs; global-setup.ts health-probes and
 scripts/smoke.mts            API smoke against a running (production) server
 scripts/dev-port.mts         dev server on a private port/cache/db
 scripts/build-server.mjs     esbuild bundle of server/index.ts -> dist/server.mjs
-scripts/live/                PowerShell ops for Burke's live :3000 server (start, promote, autostart)
+scripts/live/                PowerShell ops for Burke's live :3000 server (start, promote, autostart, snapshot/restore, resume-check)
 infra, deploy                Bicep and deployment script
 ```
 
@@ -274,6 +274,10 @@ Burke's live test server runs `npm run dev` from a pinned sibling worktree `../m
 - `start-live.ps1` — idempotent start: exits 0 if `/api/health` already answers 200, otherwise kills stale `markdoc-live` node processes, deletes `.next`, starts `npm run dev` hidden (log appended to `../markdoc-data/live.log`, rotated at 20 MB) and waits up to 180 s for health.
 - `promote.ps1 -Sha <sha>` — what the lead does at every merge: verifies the sha is on `origin/main`, stops the server, `git checkout --detach <sha>`, runs `npm ci --ignore-scripts` only if `package.json`/`package-lock.json` changed, clears `.next`, restarts; rolls back to the previous sha if health never returns 200.
 - `install-autostart.ps1` — registers a per-user scheduled task "Markdoc live server" (at logon, no admin) that runs `start-live.ps1`; `-Uninstall` removes it. Re-run it from `markdoc-live` after the first promote that includes these scripts so the task points at the permanent path.
+- `snapshot-data.ps1 -Out <dir>` / `restore-data.ps1 -From <dir>` — hot backup of the PGlite database through `GET /api/admin/backup` (gated by `BACKUP_TOKEN`) as `markdoc-pglite.tar.gz` + `manifest.json`, and the matching restore via PGlite's `loadDataDir`.
+- `resume-check.ps1` (`npm run resume-check`) — checklist that exits 0 when the live server is fully back after a machine wipe, repairing what it safely can (`-DryRun` to only report).
+
+**Wipe-proofing.** [RESUME.md](RESUME.md) is the recovery document: what state Markdoc keeps on the machine and where (live worktree, `.env.local`, the PGlite data folder, the scheduled task), what the snapshot contains and how it is taken without stopping the server, how to restore it, which secrets have to be re-entered and how to regenerate them, and the `resume-check.ps1` checklist the factory's bootstrap script runs after cloning everything back from GitHub.
 
 ## License
 
