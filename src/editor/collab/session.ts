@@ -6,6 +6,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { CommentsModel, COMMENTS_ORIGIN } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
+import { openLocalPersistence, type ConnectionPhase, type LocalPersistence } from "./offline";
 import type { CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
@@ -20,7 +21,10 @@ import {
 
 export type EditMode = "editing" | "suggesting" | "viewing";
 export type Surface = "code" | "rich";
-export type SaveState = "saved" | "saving" | "offline" | "connecting" | "error";
+export type SaveState = ConnectionPhase;
+
+/** How long the "All changes saved" highlight stays after a reconnect. */
+export const RECOVERED_FLASH_MS = 2000;
 
 export interface FindState {
   query: string;
@@ -74,6 +78,16 @@ export class CollabSession {
   synced = false;
   authError: string | null = null;
   unsyncedChanges = 0;
+  /** Whether the locally persisted (IndexedDB) state has been applied; true at once when unavailable. */
+  localLoaded = false;
+  /** Resolves when {@link localLoaded} becomes true. */
+  readonly whenLocalLoaded: Promise<void>;
+  /** True for a moment after a reconnect finished syncing, so the UI can flash a confirmation. */
+  recovered = false;
+  private everConnected = false;
+  private wasOffline = false;
+  private recoveredTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly local: LocalPersistence | null;
   mode: EditMode;
   activeSurface: Surface = "rich";
   /** Currently highlighted comment thread (shared by both panes and the sidebar). */
@@ -95,6 +109,19 @@ export class CollabSession {
     this.ytext = this.ydoc.getText("content");
     this.meta = this.ydoc.getMap("meta");
 
+    // Mirror the document into IndexedDB so offline edits survive a refresh. Yjs merges
+    // the local and server states whichever arrives first, so this need not block connecting.
+    this.local = openLocalPersistence(options.docId, this.ydoc);
+    if (this.local) {
+      this.whenLocalLoaded = this.local.whenLoaded.then(() => {
+        this.localLoaded = true;
+        this.notify();
+      });
+    } else {
+      this.localLoaded = true;
+      this.whenLocalLoaded = Promise.resolve();
+    }
+
     const url = options.wsUrl ?? defaultWsUrl();
     this.provider = new HocuspocusProvider({
       url,
@@ -103,14 +130,25 @@ export class CollabSession {
       token: () => options.getToken(),
       onStatus: ({ status }) => {
         this.status = status;
+        if (status === "connected") {
+          this.everConnected = true;
+        } else {
+          // The provider resets its own synced flag on close without emitting; mirror it.
+          this.synced = false;
+          this.wasOffline = this.everConnected;
+        }
+        this.updateRecovery();
         this.notify();
       },
       onSynced: ({ state }) => {
         this.synced = state;
+        this.updateRecovery();
         this.notify();
       },
       onAuthenticationFailed: ({ reason }) => {
         this.authError = reason;
+        // Access was refused: do not keep a copy of the document on this device.
+        void this.clearLocal();
         this.notify();
       },
       onAuthenticated: () => {
@@ -119,6 +157,7 @@ export class CollabSession {
       },
       onUnsyncedChanges: ({ number }) => {
         this.unsyncedChanges = number;
+        this.updateRecovery();
         this.notify();
       },
       onAwarenessChange: () => this.notify(),
@@ -167,10 +206,32 @@ export class CollabSession {
 
   get saveState(): SaveState {
     if (this.authError) return "error";
-    if (this.status === "connecting") return "connecting";
+    if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
     if (this.status !== "connected") return "offline";
     if (!this.synced || this.unsyncedChanges > 0) return "saving";
     return "saved";
+  }
+
+  /**
+   * After a connection drop, the first time everything is synced again set
+   * {@link recovered} for {@link RECOVERED_FLASH_MS} so the header can confirm it.
+   */
+  private updateRecovery() {
+    if (!this.wasOffline || this.saveState !== "saved") return;
+    this.wasOffline = false;
+    this.recovered = true;
+    if (this.recoveredTimer) clearTimeout(this.recoveredTimer);
+    this.recoveredTimer = setTimeout(() => {
+      this.recoveredTimer = null;
+      this.recovered = false;
+      this.notify();
+    }, RECOVERED_FLASH_MS);
+  }
+
+  /** Delete this document's local (IndexedDB) copy, e.g. when it is deleted or access is lost. */
+  async clearLocal(): Promise<void> {
+    if (!this.local) return;
+    await this.local.clear();
   }
 
   get title(): string {
@@ -408,12 +469,14 @@ export class CollabSession {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    if (this.recoveredTimer) clearTimeout(this.recoveredTimer);
     this.listeners.clear();
     this.binding.destroy();
     this.comments.destroy();
     this.suggestions.destroy();
     this.undoManager.destroy();
     this.provider.destroy();
+    void this.local?.destroy();
     this.ydoc.destroy();
   }
 }

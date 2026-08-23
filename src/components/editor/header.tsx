@@ -33,6 +33,7 @@ import {
   Link2,
 } from "lucide-react";
 import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session";
+import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
 
 import { cn, shortcut } from "@/lib/utils";
@@ -51,18 +52,29 @@ export function Logo({ className }: { className?: string }) {
 
 function SaveIndicator({ session }: { session: CollabSession }) {
   const state = useSessionValue(session, (s) => s.saveState);
-  const map: Record<SaveState, { icon: React.ReactNode; label: string; className: string }> = {
-    saved: { icon: <Check size={16} strokeWidth={2.5} />, label: "Saved", className: "text-success" },
-    saving: { icon: <Loader2 size={16} className="animate-spin" />, label: "Saving…", className: "text-ink-3" },
-    connecting: { icon: <Loader2 size={16} className="animate-spin" />, label: "Connecting…", className: "text-ink-3" },
-    offline: { icon: <CloudOff size={16} />, label: "Offline — changes will sync", className: "text-warning" },
-    error: { icon: <AlertTriangle size={16} />, label: "Not connected", className: "text-danger" },
+  const unsynced = useSessionValue(session, (s) => s.unsyncedChanges);
+  const recovered = useSessionValue(session, (s) => s.recovered);
+  const map: Record<SaveState, { icon: React.ReactNode; className: string }> = {
+    saved: { icon: <Check size={16} strokeWidth={2.5} />, className: "text-success" },
+    saving: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
+    connecting: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
+    reconnecting: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-warning" },
+    offline: { icon: <CloudOff size={16} />, className: "text-warning" },
+    error: { icon: <AlertTriangle size={16} />, className: "text-danger" },
   };
   const m = map[state];
+  const flash = state === "saved" && recovered;
   return (
-    <span className={cn("inline-flex items-center gap-1.5 text-sm font-medium", m.className)} data-testid="save-state" data-state={state}>
+    <span
+      className={cn("inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors", m.className, flash && "save-state-recovered")}
+      data-testid="save-state"
+      data-state={state}
+      data-unsynced={unsynced}
+      data-recovered={flash || undefined}
+      role="status"
+    >
       {m.icon}
-      <span>{m.label}</span>
+      <span>{saveStateLabel(state, unsynced, recovered)}</span>
     </span>
   );
 }
