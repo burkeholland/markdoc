@@ -1,4 +1,28 @@
 import { chromium, type FullConfig } from "@playwright/test";
+import { e2eDistDir, removeDistDir } from "./dist-dir";
+
+/**
+ * A Next dist dir left behind by a killed run answers 404 on every API route (or EPERM on
+ * app-paths-manifest.json) and the suite then fails slowly, test by test. Probe /api/health for up
+ * to 60 s before the warm-up; if it never returns 200, delete the dist dir and fail fast.
+ */
+async function assertHealthy(baseURL: string, distDir: string) {
+  const deadline = Date.now() + 60_000;
+  let last = "no response";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseURL}/api/health`, { signal: AbortSignal.timeout(10_000) });
+      if (res.status === 200) return;
+      last = `HTTP ${res.status}`;
+    } catch (err) {
+      last = (err as Error).message;
+    }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  console.error(`[e2e warm-up] GET /api/health did not return 200 within 60 s (last: ${last}); dist dir ${distDir} may be corrupt; deleting and failing fast`);
+  removeDistDir(distDir, "health-check");
+  process.exit(1);
+}
 
 /**
  * Warm up the dev server before any spec runs.
@@ -28,6 +52,10 @@ export default async function globalSetup(config: FullConfig) {
       log(step, Date.now() - t0);
     }
   };
+
+  const distDir = e2eDistDir();
+  console.log(`[e2e warm-up] dist dir ${distDir}`);
+  await timed("GET /api/health (fast-fail probe)", () => assertHealthy(baseURL, distDir));
 
   const browser = await chromium.launch();
   const context = await browser.newContext({ baseURL });
