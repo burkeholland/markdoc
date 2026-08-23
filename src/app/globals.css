@@ -172,78 +172,84 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* ---------- Generic controls ---------- */
+/* ---------- Generic controls ----------
+   Component classes live in `@layer components` (Tailwind orders theme < base < components < utilities),
+   so a utility at the call site wins: `className="input pl-9"` gets pl-9, `className="btn hidden md:inline-flex"`
+   hides. Anything defined outside a layer would beat every utility regardless of specificity.
+   src/app/css-layers.test.ts guards this. */
 
-.btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors select-none;
-  @apply h-9 px-3.5;
-}
-.btn:disabled {
-  @apply opacity-50 pointer-events-none;
-}
-.btn-primary {
-  @apply bg-accent text-on-accent hover:bg-accent-hover;
-}
-.btn-outline {
-  @apply border border-line-2 bg-surface text-ink hover:bg-surface-2;
-}
-.btn-ghost {
-  @apply text-ink-2 hover:bg-surface-3;
-}
-.btn-danger {
-  @apply bg-danger text-on-accent hover:bg-red-700 dark:hover:bg-red-300;
-}
-.btn-sm {
-  @apply h-8 px-3 text-[13px];
-}
-.icon-btn {
-  @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink disabled:opacity-40 disabled:pointer-events-none;
-}
-.icon-btn[data-active="true"] {
-  @apply bg-accent-soft text-accent;
-}
-.input {
-  @apply h-9 w-full rounded-lg border border-line-2 bg-surface px-3 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
-}
-.textarea {
-  @apply w-full rounded-lg border border-line-2 bg-surface px-3 py-2 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
-}
-.select {
-  @apply h-9 rounded-lg border border-line-2 bg-surface px-2 text-sm text-ink outline-none focus:border-accent;
-}
-.menu {
-  @apply z-50 min-w-48 rounded-xl border border-line bg-surface p-1.5 shadow-xl shadow-black/10 dark:shadow-black/50;
-}
-.menu-item {
-  @apply flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ink outline-none select-none hover:bg-surface-3 focus:bg-surface-3 data-[disabled]:opacity-40 data-[disabled]:pointer-events-none;
-}
-.menu-label {
-  @apply px-2.5 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-3;
-}
-.menu-sep {
-  @apply my-1.5 h-px bg-line;
-}
-.dialog-overlay {
-  @apply fixed inset-0 z-50 bg-black/30 backdrop-blur-[1px] dark:bg-black/60;
-}
-.dialog {
-  @apply fixed left-1/2 top-1/2 z-50 w-[min(92vw,560px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-surface p-6 shadow-2xl shadow-black/20 outline-none dark:shadow-black/60;
-}
-.kbd {
-  @apply inline-flex min-w-5 items-center justify-center rounded border border-line-2 bg-surface-2 px-1.5 font-sans text-[11px] text-ink-2;
-}
-.pane-label {
-  @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-3;
-}
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors select-none;
+    @apply h-9 px-3.5;
+  }
+  .btn:disabled {
+    @apply opacity-50 pointer-events-none;
+  }
+  .btn-primary {
+    @apply bg-accent text-on-accent hover:bg-accent-hover;
+  }
+  .btn-outline {
+    @apply border border-line-2 bg-surface text-ink hover:bg-surface-2;
+  }
+  .btn-ghost {
+    @apply text-ink-2 hover:bg-surface-3;
+  }
+  .btn-danger {
+    @apply bg-danger text-on-accent hover:bg-red-700 dark:hover:bg-red-300;
+  }
+  .btn-sm {
+    @apply h-8 px-3 text-[13px];
+  }
+  .icon-btn {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .icon-btn[data-active="true"] {
+    @apply bg-accent-soft text-accent;
+  }
+  .input {
+    @apply h-9 w-full rounded-lg border border-line-2 bg-surface px-3 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
+  }
+  .textarea {
+    @apply w-full rounded-lg border border-line-2 bg-surface px-3 py-2 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
+  }
+  .select {
+    @apply h-9 rounded-lg border border-line-2 bg-surface px-2 text-sm text-ink outline-none focus:border-accent;
+  }
+  .menu {
+    @apply z-50 min-w-48 rounded-xl border border-line bg-surface p-1.5 shadow-xl shadow-black/10 dark:shadow-black/50;
+  }
+  .menu-item {
+    @apply flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ink outline-none select-none hover:bg-surface-3 focus:bg-surface-3 data-[disabled]:opacity-40 data-[disabled]:pointer-events-none;
+  }
+  .menu-label {
+    @apply px-2.5 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-3;
+  }
+  .menu-sep {
+    @apply my-1.5 h-px bg-line;
+  }
+  .dialog-overlay {
+    @apply fixed inset-0 z-50 bg-black/30 backdrop-blur-[1px] dark:bg-black/60;
+  }
+  .dialog {
+    @apply fixed left-1/2 top-1/2 z-50 w-[min(92vw,560px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-surface p-6 shadow-2xl shadow-black/20 outline-none dark:shadow-black/60;
+  }
+  .kbd {
+    @apply inline-flex min-w-5 items-center justify-center rounded border border-line-2 bg-surface-2 px-1.5 font-sans text-[11px] text-ink-2;
+  }
+  .pane-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-3;
+  }
 
-.scrollbar-thin {
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-}
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
 
-/* ---------- Avatar stack ---------- */
-.avatar {
-  @apply inline-flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface-3 text-xs font-semibold text-ink-2 ring-2 ring-surface;
+  /* ---------- Avatar stack ---------- */
+  .avatar {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface-3 text-xs font-semibold text-ink-2 ring-2 ring-surface;
+  }
 }
 
 /* ---------- Code editor (CodeMirror) ---------- */
@@ -867,21 +873,28 @@ body {
 }
 
 /* Left drawer (outline) and bottom sheet (comments / history / activity) used below md. */
-.drawer {
-  @apply fixed inset-y-0 left-0 z-50 flex w-[min(85vw,320px)] flex-col bg-surface shadow-2xl shadow-black/30 outline-none;
-  padding-top: env(safe-area-inset-top, 0px);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-  animation: md-slide-in-left 0.18s ease-out;
+@layer components {
+  .drawer {
+    @apply fixed inset-y-0 left-0 z-50 flex w-[min(85vw,320px)] flex-col bg-surface shadow-2xl shadow-black/30 outline-none;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    animation: md-slide-in-left 0.18s ease-out;
+  }
+  .sheet {
+    @apply fixed inset-x-0 bottom-0 z-50 flex flex-col rounded-t-2xl bg-surface-2 shadow-2xl shadow-black/30 outline-none;
+    top: max(3rem, env(safe-area-inset-top, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    animation: md-slide-in-up 0.2s ease-out;
+  }
+  .sheet-handle {
+    @apply mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-line-2;
+  }
 }
+/* Contextual overrides for the panel re-parented into a drawer/sheet. These stay OUTSIDE the layer on purpose:
+   the aside carries its desktop utilities (w-56 / w-[340px], border-r / border-l) and must lose to these. */
 .drawer > aside {
   width: 100%;
   border-right: 0;
-}
-.sheet {
-  @apply fixed inset-x-0 bottom-0 z-50 flex flex-col rounded-t-2xl bg-surface-2 shadow-2xl shadow-black/30 outline-none;
-  top: max(3rem, env(safe-area-inset-top, 0px));
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-  animation: md-slide-in-up 0.2s ease-out;
 }
 .sheet > aside {
   width: 100%;
@@ -889,9 +902,6 @@ body {
   flex: 1;
   border-left: 0;
   border-radius: inherit;
-}
-.sheet-handle {
-  @apply mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-line-2;
 }
 @keyframes md-slide-in-left {
   from {
@@ -910,6 +920,7 @@ body {
   }
 }
 
+/* Phone overrides. Deliberately unlayered so they beat per-call-site utilities (`text-[13px]`, `w-[...]`). */
 @media (max-width: 767.98px) {
   /* iOS Safari zooms the page into any focused input below 16px. */
   input,
