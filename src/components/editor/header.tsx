@@ -98,7 +98,7 @@ function SaveIndicator({ session, compact }: { session: CollabSession; compact?:
   );
 }
 
-function TitleEditor({ session, fallback }: { session: CollabSession; fallback: string }) {
+function TitleEditor({ session, fallback, compact }: { session: CollabSession; fallback: string; compact?: boolean }) {
   const title = useSessionValue(session, (s) => s.title || fallback);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
@@ -149,8 +149,8 @@ function TitleEditor({ session, fallback }: { session: CollabSession; fallback: 
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
-      <span className="truncate text-[22px] font-semibold leading-8 text-ink">{title}</span>
-      {canEdit && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
+      <span className={cn("truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-[22px]")}>{title}</span>
+      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
     </button>
   );
 }
@@ -338,7 +338,7 @@ function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: (l: Lay
             aria-checked={active}
             aria-label={o.label}
             title={o.label}
-            className={cn("inline-flex h-8 w-9 items-center justify-center rounded-md transition-colors", active ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink")}
+            className={cn("inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors", active ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink")}
             onClick={() => onLayout(o.value)}
             data-testid={`layout-segment-${o.value}`}
           >
@@ -358,18 +358,21 @@ export const Header = memo(function Header(props: HeaderProps) {
 
   return (
     <header className="safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header">
-      <Link href="/" className="icon-btn hidden h-10 w-10 shrink-0 md:inline-flex" aria-label="Back to documents" title="All documents">
-        <Logo className="h-8 w-8" />
-      </Link>
-      <button type="button" className="icon-btn h-10 w-10 shrink-0 md:hidden" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
-        <PanelLeft size={20} />
-      </button>
+      {compact ? (
+        <button type="button" className="icon-btn h-9 w-9 shrink-0" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
+          <PanelLeft size={20} />
+        </button>
+      ) : (
+        <Link href="/" className="icon-btn h-10 w-10 shrink-0" aria-label="Back to documents" title="All documents">
+          <Logo className="h-8 w-8" />
+        </Link>
+      )}
       <div className="flex min-w-0 flex-1 items-center gap-2 md:gap-4">
-        <TitleEditor session={session} fallback={doc.title} />
+        <TitleEditor session={session} fallback={doc.title} compact={compact} />
         {!compact && <HeaderStar docId={doc.id} />}
         <SaveIndicator session={session} compact={compact} />
       </div>
-      <div className="flex shrink-0 items-center gap-1.5 md:gap-3">
+      <div className="flex shrink-0 items-center gap-1 md:gap-3">
         <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
         <div className="hidden items-center gap-3 md:flex">
           <AgentActivityChip session={session} />
@@ -377,10 +380,12 @@ export const Header = memo(function Header(props: HeaderProps) {
           <PresenceStack session={session} />
         </div>
         {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} />}
-        <button type="button" className="btn btn-outline hidden md:inline-flex" onClick={props.onShare} data-testid="share-button">
-          <UserPlus size={17} />
-          Share
-        </button>
+        {!compact && (
+          <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
+            <UserPlus size={17} />
+            Share
+          </button>
+        )}
         <Tip label={props.commentsOpen ? "Hide comments" : "Show comments"} shortcut={shortcut("Mod-Alt-M")}>
           <button type="button" className="icon-btn relative" onClick={props.onToggleComments} data-active={props.commentsOpen} aria-label="Comments" data-testid="comments-toggle">
             <MessageSquare size={20} />
@@ -482,62 +487,63 @@ export const Header = memo(function Header(props: HeaderProps) {
             )}
           </MenuContent>
         </Menu>
-        <Menu>
-          <MenuTrigger asChild>
-            <button type="button" className="btn btn-primary hidden gap-1.5 pl-4 pr-3 md:inline-flex" disabled={props.publishing} data-testid="publish-button">
-              {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
-              Publish
-              <ChevronDown size={16} className="opacity-80" />
-            </button>
-          </MenuTrigger>
-          <MenuContent align="end" className="w-72">
-            {linked ? (
-              <>
-                <MenuLabel>
-                  {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
-                </MenuLabel>
-                <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
-                  {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
-                </MenuItem>
-                <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit}>
-                  Pull latest from GitHub
-                </MenuItem>
-                {doc.githubUrl && (
-                  <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
-                    Open on GitHub
+        {!compact && (
+          <Menu>
+            <MenuTrigger asChild>
+              <button type="button" className="btn btn-primary gap-1.5 pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
+                {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
+                Publish
+                <ChevronDown size={16} className="opacity-80" />
+              </button>
+            </MenuTrigger>
+            <MenuContent align="end" className="w-72">
+              {linked ? (
+                <>
+                  <MenuLabel>
+                    {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
+                  </MenuLabel>
+                  <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+                    {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
                   </MenuItem>
-                )}
-                {props.isOwner && (
-                  <>
-                    <MenuSeparator />
-                    <MenuItem icon={<Link2 size={15} />} onSelect={props.onPublish}>
-                      Change connection…
+                  <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit}>
+                    Pull latest from GitHub
+                  </MenuItem>
+                  {doc.githubUrl && (
+                    <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+                      Open on GitHub
                     </MenuItem>
-                  </>
-                )}
-              </>
-            ) : (
-              <>
-                <MenuLabel>Publish to GitHub</MenuLabel>
-                <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish} disabled={!props.isOwner}>
-                  Gist or repository…
-                </MenuItem>
-                <MenuSeparator />
-                <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
-                  Download Markdown
-                </MenuItem>
-                <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
-                  Share link…
-                </MenuItem>
-              </>
-            )}
-          </MenuContent>
-        </Menu>
+                  )}
+                  {props.isOwner && (
+                    <>
+                      <MenuSeparator />
+                      <MenuItem icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                        Change connection…
+                      </MenuItem>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <MenuLabel>Publish to GitHub</MenuLabel>
+                  <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish} disabled={!props.isOwner}>
+                    Gist or repository…
+                  </MenuItem>
+                  <MenuSeparator />
+                  <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+                    Download Markdown
+                  </MenuItem>
+                  <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
+                    Share link…
+                  </MenuItem>
+                </>
+              )}
+            </MenuContent>
+          </Menu>
+        )}
       </div>
     </header>
   );
 });
-
 
 
 
