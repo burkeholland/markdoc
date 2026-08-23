@@ -1,6 +1,6 @@
 import type { DocumentDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
-import type { Role } from "@/server/db/schema";
+import type { NotificationKind, Role } from "@/server/db/schema";
 
 export class ApiError extends Error {
   constructor(
@@ -47,14 +47,23 @@ export interface CollaboratorDto {
   image: string | null;
 }
 
-export interface MentionDto {
+export interface NotificationDto {
   id: string;
+  kind: NotificationKind;
   documentId: string;
   documentTitle: string;
-  commentId: string;
-  byLogin: string | null;
+  actorLogin: string | null;
+  actorName: string | null;
+  /** Thread, reply or suggestion id; `<docId>:<login>` for shares. */
+  refId: string;
   snippet: string;
   createdAt: string;
+  readAt: string | null;
+}
+
+export interface NotificationsPageDto {
+  items: NotificationDto[];
+  unreadCount: number;
 }
 
 export type ActivityActionDto =
@@ -173,9 +182,18 @@ export const api = {
       request<{ files: { path: string; size?: number; sha: string }[] }>(`/api/github/repos/${owner}/${repo}/files?ref=${encodeURIComponent(ref)}`),
   },
   import: (body: Record<string, unknown>) => request<{ document: { id: string; title: string } }>("/api/import", { method: "POST", body: JSON.stringify(body) }),
-  mentions: {
-    list: () => request<{ mentions: MentionDto[] }>("/api/mentions"),
-    read: (id: string) => request<{ ok: true }>(`/api/mentions/${id}/read`, { method: "POST" }),
+  notifications: {
+    list: (opts: { unread?: boolean; limit?: number } = {}) => {
+      const q = new URLSearchParams();
+      if (opts.unread) q.set("unread", "1");
+      if (opts.limit) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request<NotificationsPageDto>(`/api/notifications${qs ? `?${qs}` : ""}`);
+    },
+    read: (id: string) => request<{ ok: true }>(`/api/notifications/${id}/read`, { method: "POST" }),
+    readAll: () => request<{ ok: true; count: number }>("/api/notifications/read-all", { method: "POST" }),
+    readRefs: (documentId: string, refIds: string[]) =>
+      request<{ ok: true; count: number }>("/api/notifications/thread-read", { method: "POST", body: JSON.stringify({ documentId, refIds }) }),
   },
 };
 
