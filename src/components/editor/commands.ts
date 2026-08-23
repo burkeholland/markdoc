@@ -58,6 +58,8 @@ export interface EditorCommandContext {
   openLink: () => void;
   openImage: () => void;
   startComment: () => void;
+  /** Opens the "Ask an agent" dialog for the current selection (or the whole document). */
+  askAgent?: () => void;
   toggleComments: () => void;
   toggleHistory: () => void;
   toggleActivity: () => void;
@@ -244,6 +246,15 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
     { id: "doc:name-version", title: "Name this version", keywords: ["save", "snapshot", "tag"], group: "Document", icon: "Pencil", when: canEdit, run: () => ctx.setDialog("versionName") },
     { id: "doc:activity", title: "Activity", keywords: ["log", "changes", "who", "feed"], group: "Document", icon: "Activity", run: () => ctx.toggleActivity() },
     { id: "doc:comments", title: "Comments", keywords: ["discussion", "review", "suggestions", "panel"], group: "Document", icon: "MessageSquare", shortcut: "Mod-Alt-M", run: () => ctx.toggleComments() },
+    {
+      id: "doc:ask-agent",
+      title: "Ask an agent",
+      keywords: ["agent", "ai", "copilot", "assistant", "request", "help", "rewrite", "tighten", "review"],
+      group: "Document",
+      icon: "Bot",
+      when: () => ctx.session.canComment && !!ctx.askAgent,
+      run: () => ctx.askAgent?.(),
+    },
     { id: "doc:find", title: "Find", keywords: ["search", "locate"], group: "Document", icon: "Search", shortcut: "Mod-F", run: () => ctx.openFind(false) },
     { id: "doc:find-replace", title: "Find and replace", keywords: ["search", "substitute", "rename"], group: "Document", icon: "Replace", shortcut: "Mod-H", when: canEdit, run: () => ctx.openFind(true) },
   ];

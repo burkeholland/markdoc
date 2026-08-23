@@ -173,6 +173,10 @@ export interface CommentsPanelProps {
   onReveal: (offset: number) => void;
   /** Called when the pending (new-comment) composer is posted or cancelled, so focus can return to the editor. */
   onPendingDone?: () => void;
+  /** Opens the "Ask an agent" dialog (empty-state hint). */
+  onAskAgent?: () => void;
+  /** Switch to a tab from outside; bump `nonce` to switch again to the same tab. */
+  focusTab?: { tab: "open" | "resolved" | "suggestions"; nonce: number } | null;
 }
 
 /** Writes comment changes either to the shared doc (editors) or through the API (commenters). */
@@ -686,7 +690,7 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
   );
 }
 
-export function CommentsPanel({ session, onClose, onReveal, onPendingDone }: CommentsPanelProps) {
+export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab }: CommentsPanelProps) {
   const { threads, suggestions, activeCommentId, activeSuggestionId, revealSeq, pending } = useSessionValue(
     session,
     (s) => ({
@@ -720,6 +724,10 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone }: Com
   useEffect(() => {
     if (pending) setTab("open");
   }, [pending]);
+
+  useEffect(() => {
+    if (focusTab) setTab(focusTab.tab);
+  }, [focusTab]);
 
   const tabs: { id: Tab; label: string; count: number }[] = [
     { id: "open", label: "Open", count: open.length },
@@ -776,6 +784,14 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone }: Com
           (open.length === 0 && !pending ? (
             <EmptyState icon={<MessageSquare size={28} />} title="No open comments">
               Select some text and press <kbd className="kbd">⌘/Ctrl</kbd>+<kbd className="kbd">Alt</kbd>+<kbd className="kbd">M</kbd> or use the Comment button.
+              {onAskAgent && session.canComment && (
+                <span className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-ink-3" data-testid="comments-empty-ask-agent">
+                  Agents can review this document too —
+                  <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={onAskAgent} data-testid="comments-empty-ask-agent-button">
+                    <Bot size={13} /> Ask an agent
+                  </button>
+                </span>
+              )}
             </EmptyState>
           ) : (
             open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} />)

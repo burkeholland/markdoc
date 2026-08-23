@@ -55,6 +55,7 @@ import { jsonEqual, useSessionValue } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { AgentActivityChip } from "./agent-activity";
+import { AgentRequestsPill } from "./agent-requests-pill";
 
 export function Logo({ className }: { className?: string }) {
   return (
@@ -399,6 +400,8 @@ export interface HeaderProps {
   compact: boolean;
   /** "Jump" in the presence popover: scroll both panes to a collaborator's cursor. */
   onJumpToUser?: (user: PresenceUser) => void;
+  /** Cancel an "Ask an agent" request from the header pill; the pill is hidden when omitted. */
+  onCancelRequest?: (requestId: string) => void;
 }
 
 /** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
@@ -456,6 +459,7 @@ export const Header = memo(function Header(props: HeaderProps) {
       <div className="flex shrink-0 items-center gap-1 md:gap-3">
         <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
         <div className="hidden items-center gap-3 md:flex">
+          {props.onCancelRequest && <AgentRequestsPill session={session} onCancel={props.onCancelRequest} />}
           <AgentActivityChip session={session} />
           <ModeSwitcher session={session} />
           <PresenceStack session={session} onJump={props.onJumpToUser} />

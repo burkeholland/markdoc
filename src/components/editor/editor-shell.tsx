@@ -36,6 +36,8 @@ import { SyncDialog, type SyncActions } from "./sync-dialog";
 const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
+import { AskAgentDialog, type AskAgentMode, type AskAgentSelection } from "./ask-agent-dialog";
+import { describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests-pill";
 import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FindBar } from "./find-bar";
@@ -479,6 +481,43 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
 
+  // "Ask an agent": the dialog captures the selection when it opens; results come back through the
+  // shared document (meta.agentRequests, mirrored by the server) so the pill and toast are realtime.
+  const [askAgent, setAskAgent] = useState<{ selection: AskAgentSelection | null } | null>(null);
+  const [commentsFocus, setCommentsFocus] = useState<{ tab: "open" | "resolved" | "suggestions"; nonce: number } | null>(null);
+  const openAskAgent = useCallback(() => {
+    if (!session.canComment) return;
+    const range = actions.selectionSourceRange();
+    const quote = range ? session.ytext.toString().slice(range.from, range.to) : "";
+    setAskAgent({ selection: range && quote.trim() ? { from: range.from, to: range.to, quote: quote.slice(0, 2000) } : null });
+  }, [actions, session]);
+  const sendAskAgent = useCallback(
+    async (input: { instruction: string; mode: AskAgentMode; selection: AskAgentSelection | null }) => {
+      await api.documents.createRequest(doc.id, { instruction: input.instruction, mode: input.mode, selection: input.selection });
+      toast(input.mode === "comment" ? "Sent to agents — feedback will appear in Comments" : "Sent to agents — changes will appear as suggestions", "success");
+    },
+    [doc.id, toast],
+  );
+  const cancelAgentRequest = useCallback(
+    (requestId: string) => {
+      api.documents
+        .cancelRequest(doc.id, requestId)
+        .then(() => toast("Request cancelled.", "info"))
+        .catch((e) => toast(e instanceof Error ? e.message : "Could not cancel the request", "error"));
+    },
+    [doc.id, toast],
+  );
+  const agentRequests = useAgentRequests(session);
+  useAgentRequestsDone(session, agentRequests, (r) => {
+    const who = r.claimedBy ?? "An agent";
+    toast(`${who} finished: ${describeResult(r.result)}`, "success");
+    setSidePanel("comments");
+    setCommentsFocus({ tab: r.result?.suggestions ? "suggestions" : "open", nonce: Date.now() });
+  });
+  const goCreateToken = useCallback(() => {
+    navigateTo(`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`);
+  }, [doc.id]);
+
   /** Open the comments panel on a thread (by thread or reply id) or suggestion. Returns false when nothing matches. */
   const activateRef = useCallback(
     (refId: string) => {
@@ -624,6 +663,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     openLink,
     openImage,
     startComment,
+    askAgent: openAskAgent,
     toggleComments,
     toggleHistory,
     toggleActivity,
@@ -722,7 +762,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   const panel =
     sidePanel === "comments" ? (
-      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} />
+      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} onAskAgent={openAskAgent} focusTab={commentsFocus} />
     ) : sidePanel === "versions" ? (
       <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (
@@ -773,8 +813,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onOutline={toggleOutline}
           compact={isPhone}
           onJumpToUser={jumpToUser}
+          onCancelRequest={cancelAgentRequest}
         />
-        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
+        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onAskAgent={openAskAgent} onImage={openImage} onTable={openTable} />
         {findOpen && (
           <FindBar
             session={session}
@@ -860,7 +901,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                     </Tip>
                   </div>
                   <div ref={setRichScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
-                    <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
+                    <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onAskAgent={openAskAgent} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
                     <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} />
                     <RichPane
@@ -941,6 +982,17 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           }}
         />
         <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={(o) => setDialog(o ? "shortcuts" : null)} />
+        <AskAgentDialog
+          open={askAgent !== null}
+          onOpenChange={(o) => {
+            if (!o) setAskAgent(null);
+          }}
+          selection={askAgent?.selection ?? null}
+          canEdit={session.canEdit}
+          canComment={session.canComment}
+          onSend={sendAskAgent}
+          onCreateToken={goCreateToken}
+        />
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
 
         <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
