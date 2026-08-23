@@ -3,17 +3,17 @@ import { signIn, createDocument, openDocument, shareWith, focusRichEnd, selectTe
 
 const mod = process.platform === "darwin" ? "Meta" : "Control";
 
-// 2 heading words + 15 + 6 = 23 prose words; the fenced block is not counted.
+// 2 heading words + 15 + 7 = 24 prose words; the fenced block is not counted.
 const CONTENT = [
   "# Stats Title",
   "",
   "The quick brown fox jumps over the lazy dog. Then it sleeps for a while!",
   "",
-  "Another short paragraph follows the first one.",
-  "",
   "```js",
   "const notCounted = 'words inside code fences are excluded';",
   "```",
+  "",
+  "Another short paragraph follows the first one.",
   "",
 ].join("\n");
 
@@ -33,10 +33,10 @@ test.describe("document statistics and writing goal", () => {
 
   test("status bar shows the prose word count and selection counts", async () => {
     const { page } = alice;
-    await expect(page.getByTestId("word-count")).toHaveText("23 words");
+    await expect(page.getByTestId("word-count")).toHaveText("24 words");
 
     await selectTextInRich(page, "Another short paragraph");
-    await expect(page.getByTestId("selection-count")).toContainText("3 of 23 selected");
+    await expect(page.getByTestId("selection-count")).toContainText("3 of 24 selected");
 
     // Collapse the selection: the suffix disappears.
     await focusRichEnd(page);
@@ -65,13 +65,13 @@ test.describe("document statistics and writing goal", () => {
     await expect(popover).toBeVisible();
     await popover.getByTestId("goal-value").fill("50");
     await popover.getByTestId("goal-set").click();
-    await expect(popover.getByTestId("goal-summary")).toContainText("At least 50 words · 23 / 50 words");
+    await expect(popover.getByTestId("goal-summary")).toContainText("At least 50 words · 24 / 50 words");
     await page.keyboard.press("Escape");
 
     const ring = page.getByTestId("stats-button").getByTestId("goal-ring");
     await expect(ring).toBeVisible();
     await expect(ring).toHaveAttribute("data-state", "progress");
-    await expect(page.getByTestId("stats-button")).toHaveAttribute("title", "23 / 50 words");
+    await expect(page.getByTestId("stats-button")).toHaveAttribute("title", "24 / 50 words");
 
     // A second user on the same document sees the shared goal.
     const bob = await signIn(browser, "stats-bob");
@@ -88,7 +88,7 @@ test.describe("document statistics and writing goal", () => {
     await focusRichEnd(page);
     await page.keyboard.type(" " + Array.from({ length: 30 }, (_, i) => `word${i}`).join(" "));
     await expect(ring).toHaveAttribute("data-state", "reached", { timeout: 10_000 });
-    await expect(page.getByTestId("word-count")).toHaveText("53 words");
+    await expect(page.getByTestId("word-count")).toHaveText("54 words");
     await expect(bob.page.getByTestId("stats-button").getByTestId("goal-ring")).toHaveAttribute("data-state", "reached", { timeout: 10_000 });
 
     // Clearing removes the ring everywhere.
@@ -111,7 +111,7 @@ test.describe("document statistics and writing goal", () => {
     expect(res.ok()).toBeTruthy();
     const body = (await res.json()) as { stats: { words: number; headings: number; readingMinutes: number } };
     expect(body.stats.headings).toBe(1);
-    expect(body.stats.words).toBeGreaterThanOrEqual(23);
+    expect(body.stats.words).toBeGreaterThanOrEqual(24);
     expect(body.stats.readingMinutes).toBe(1);
   });
 });
