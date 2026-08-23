@@ -3,6 +3,7 @@
 import * as React from "react";
 import { Tooltip as RadixTooltip, DropdownMenu as RadixDropdown, Dialog as RadixDialog, Popover as RadixPopover } from "radix-ui";
 import { X } from "lucide-react";
+import { focusedElement, restoreFocus } from "@/lib/a11y";
 import { cn, initials } from "@/lib/utils";
 
 /* ---------------- Tooltip ---------------- */
@@ -130,10 +131,23 @@ export function DialogContent({
   className?: string;
   wide?: boolean;
 }) {
+  // Dialogs here open from state (no Radix Trigger), so Radix would leave focus on <body> when they
+  // close. Remember the opener — editor pane, toolbar or header button — and hand focus back to it.
+  const returnRef = React.useRef<HTMLElement | null>(null);
   return (
     <RadixDialog.Portal>
       <RadixDialog.Overlay className="dialog-overlay animate-fade-in" />
-      <RadixDialog.Content className={cn("dialog animate-fade-in", wide && "w-[min(94vw,760px)]", className)}>
+      <RadixDialog.Content
+        className={cn("dialog animate-fade-in", wide && "w-[min(94vw,760px)]", className)}
+        onOpenAutoFocus={() => {
+          returnRef.current = focusedElement();
+        }}
+        onCloseAutoFocus={(e) => {
+          e.preventDefault();
+          restoreFocus(returnRef.current);
+          returnRef.current = null;
+        }}
+      >
         <div className="mb-4 flex items-start justify-between gap-4">
           <div>
             <RadixDialog.Title className="text-lg font-semibold text-ink">{title}</RadixDialog.Title>

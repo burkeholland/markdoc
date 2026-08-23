@@ -261,6 +261,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Document statistics and goal", "Mod-Shift-C"],
       ["Keyboard shortcuts", "Mod-/"],
       ["Stop following a collaborator", "Esc"],
+      ["Toolbar: move between buttons / first, last", "← → / Home, End"],
     ],
   },
   {

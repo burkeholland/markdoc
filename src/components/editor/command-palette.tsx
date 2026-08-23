@@ -9,6 +9,7 @@ import {
   Quote, Redo2, Replace, Search, Share2, SquareCode, Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud, User, Users, type LucideIcon,
 } from "lucide-react";
 import { Kbd } from "@/components/ui/primitives";
+import { focusedElement, restoreFocus } from "@/lib/a11y";
 import { cn, shortcut } from "@/lib/utils";
 import { filterCommands, groupCommands, loadRecent, pushRecent, saveRecent, withRecentFirst, type Command } from "./commands";
 
@@ -50,6 +51,9 @@ export function CommandPalette({ open, onOpenChange, commands, groupOrder, place
   const inputRef = useRef<HTMLInputElement>(null);
   // Command picked but not yet run: it fires from onCloseAutoFocus, once the dialog has handed focus back.
   const pendingRef = useRef<Command | null>(null);
+  // Element focused before the palette opened (editor pane, header button). Radix's modal content
+  // hands focus to its Trigger on close; the palette has none, so without this focus falls to <body>.
+  const returnRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -149,11 +153,17 @@ export function CommandPalette({ open, onOpenChange, commands, groupOrder, place
           data-testid="command-palette"
           onOpenAutoFocus={(e) => {
             e.preventDefault();
+            returnRef.current = focusedElement();
             inputRef.current?.focus();
           }}
-          onCloseAutoFocus={() => {
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
             const cmd = pendingRef.current;
             pendingRef.current = null;
+            // Restore focus first so a command that opens another dialog (Share, Image, …) captures
+            // the editor — not the palette — as the element that dialog returns focus to.
+            restoreFocus(returnRef.current);
+            returnRef.current = null;
             if (cmd) setTimeout(() => void cmd.run(), 0);
           }}
         >

@@ -1,4 +1,4 @@
-/** Keyboard helpers shared by the roving-tabindex widgets (outline list, formatting toolbar). */
+/** Keyboard and focus helpers shared by the roving-tabindex widgets (outline list, toolbar) and the dialogs. */
 
 export interface RovingOptions {
   /** Which arrow pair moves focus. Default `"vertical"` (↑/↓). */
@@ -26,4 +26,24 @@ export function rovingIndex(key: string, current: number, count: number, { orien
     default:
       return -1;
   }
+}
+
+/**
+ * Move focus back to `el` (captured before a dialog or palette took focus) unless something else already
+ * has it. Radix's modal content returns focus to its Trigger on close; dialogs opened from state have
+ * none, so focus would otherwise fall to <body>. Leaves focus alone when the closing handler already
+ * focused something (e.g. the editor after inserting a link). Returns whether `el` ended up focused.
+ */
+export function restoreFocus(el: HTMLElement | null): boolean {
+  if (!el || !el.isConnected) return false;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement) return false;
+  el.focus({ preventScroll: true });
+  return document.activeElement === el;
+}
+
+/** `document.activeElement` as an HTMLElement, or null when focus is on <body> or nothing. */
+export function focusedElement(): HTMLElement | null {
+  const active = document.activeElement;
+  return active instanceof HTMLElement && active !== document.body ? active : null;
 }
