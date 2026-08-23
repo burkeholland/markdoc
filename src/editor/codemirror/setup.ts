@@ -24,6 +24,8 @@ import { sourceHighlights, highlightClickHandler } from "./highlights";
 import { suggestingMode } from "./suggesting";
 import { toggleInlineMark, setHeading, toggleLinePrefix } from "./commands";
 import { codeImageUpload } from "./images";
+import { codeMarkdownFileDrop } from "./file-drop";
+import type { MarkdownFileDropHandler } from "../prosemirror/file-drop";
 import { markdownEditingKeymap } from "./continue-markup";
 import { markdownTyping } from "./markdown-typing";
 import type { ImageUploader } from "../prosemirror/images";
@@ -35,6 +37,8 @@ export interface CodeEditorHandlers {
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** A dropped .md/.txt file with the source offset under the pointer. */
+  onMarkdownFileDrop?: MarkdownFileDropHandler;
 }
 
 export interface CodeEditorSetup {
@@ -95,6 +99,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     suggesting.of(session.mode === "suggesting" ? suggestingMode(session) : []),
     formattingKeymap,
     handlers.uploadImage ? codeImageUpload(session, handlers.uploadImage, { onError: handlers.onImageError }) : [],
+    handlers.onMarkdownFileDrop ? codeMarkdownFileDrop(handlers.onMarkdownFileDrop) : [],
     // No searchKeymap: Mod-F is handled by the shared find bar in the editor shell.
     keymap.of([...yUndoManagerKeymap, ...closeBracketsKeymap, ...defaultKeymap, indentWithTab]),
     EditorView.domEventHandlers({

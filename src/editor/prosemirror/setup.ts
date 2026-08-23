@@ -14,6 +14,7 @@ import { remoteCursorsPlugin } from "./remote-cursors";
 import { richHighlightsPlugin, richSuggestingPlugin, type HighlightHandlers } from "./highlights";
 import { smartPastePlugin } from "./paste";
 import { imageUploadPlugin, type ImageUploader } from "./images";
+import { markdownFileDropPlugin, type MarkdownFileDropHandler } from "./file-drop";
 import { slashMenuPlugin, type SlashMenuHandlers } from "./slash-menu";
 import {
   toggleMark,
@@ -45,6 +46,8 @@ export interface RichEditorHandlers extends HighlightHandlers {
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** A dropped .md/.txt file with the position under the pointer; when absent the browser handles the drop. */
+  onMarkdownFileDrop?: MarkdownFileDropHandler;
   /** Slash command menu (`/`) state and navigation; when absent the menu is disabled. */
   slashMenu?: SlashMenuHandlers;
 }
@@ -192,6 +195,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
       richSuggestingPlugin(session),
       markdownInputRules(),
       ...(handlers.uploadImage ? [imageUploadPlugin(session, handlers.uploadImage, { onError: handlers.onImageError })] : []),
+      ...(handlers.onMarkdownFileDrop ? [markdownFileDropPlugin(handlers.onMarkdownFileDrop)] : []),
       smartPastePlugin(session),
       shortcuts,
       keymap(guardedBase),

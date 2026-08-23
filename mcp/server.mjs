@@ -112,6 +112,26 @@ server.registerTool(
 );
 
 server.registerTool(
+  "markdoc_import_text",
+  {
+    title: "Import text",
+    description:
+      "Create a new document from a string in a given format: Markdown as-is, plain text as-is, or HTML converted to GFM Markdown (sanitised; headings, lists, tables, links, images, code, strikethrough). Title defaults to the front-matter title, first heading or <title>. Returns the id, warnings and the URL.",
+    inputSchema: {
+      title: z.string().optional().describe("Title; defaults to the front-matter title, the first heading or the HTML <title>"),
+      content: z.string().describe("The text to import (≤ 2 MB)"),
+      format: z.enum(["markdown", "text", "html"]).default("markdown").describe("How to read `content`"),
+    },
+  },
+  async ({ title, content, format }) => {
+    const { documents } = await api("POST", "/api/import/file", { title, content, format });
+    const [document] = documents;
+    const warn = document.warnings.length ? ` Warnings: ${document.warnings.join("; ")}` : "";
+    return ok(`Imported "${document.title}" (id ${document.id}). Open it: ${docUrl(document.id)}${warn}`, { ...document, url: docUrl(document.id) });
+  },
+);
+
+server.registerTool(
   "markdoc_list_templates",
   { title: "List templates", description: "List the document templates markdoc_create_document accepts (id, name, description).", inputSchema: {} },
   async () => {

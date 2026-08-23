@@ -19,6 +19,7 @@ import { useBreakpoint } from "@/lib/viewport-hooks";
 import { defaultLayout, LAYOUT_STORAGE_KEY, TABLET_MAX } from "@/lib/viewport";
 import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
 import { EditorActions, EMPTY_FORMAT, type DialogKind, type FormatState } from "./actions";
+import { FileDropDialog, type PendingFileDrop } from "./file-drop-dialog";
 import { Header, type ExportFormat } from "./header";
 import { Toolbar } from "./toolbar";
 import { OutlinePanel } from "./outline";
@@ -309,6 +310,23 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // Pasted, dropped and dialog-chosen images all go through the document's asset store.
   const uploadImage = useCallback((file: File) => uploadAsset(doc.id, file), [doc.id]);
   const onImageError = useCallback((message: string) => toast(`Image upload failed: ${message}`, "error"), [toast]);
+
+  // A .md/.txt file dropped on either pane: ask whether to replace, insert at the drop point or open as a new document.
+  const [fileDrop, setFileDrop] = useState<PendingFileDrop | null>(null);
+  const onCodeFileDrop = useCallback((file: File, at: number) => setFileDrop({ file, at }), []);
+  const onRichFileDrop = useCallback((file: File, pos: number) => setFileDrop({ file, at: session.binding.getSourceMap().pmToSrc(pos) }), [session]);
+  const replaceAll = useCallback((text: string) => session.replaceSource([{ from: 0, to: session.ytext.length, text }]), [session]);
+  const insertAt = useCallback(
+    (text: string, at: number) => {
+      const len = session.ytext.length;
+      const pos = Math.min(Math.max(at, 0), len);
+      const src = session.ytext.toString();
+      const before = pos > 0 && src[pos - 1] !== "\n" ? "\n" : "";
+      const after = pos < len && src[pos] !== "\n" && !text.endsWith("\n") ? "\n" : "";
+      session.replaceSource([{ from: pos, to: pos, text: before + text + after }]);
+    },
+    [session],
+  );
 
   // Set once this client has decided to leave (own delete or server eviction) so the two paths do not race.
   const leavingRef = useRef(false);
@@ -647,6 +665,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       onHighlightClick={onHighlightClick}
                       uploadImage={uploadImage}
                       onImageError={onImageError}
+                      onMarkdownFileDrop={onCodeFileDrop}
                       focusSource={activeSurface === "rich" ? cursor.rich : null}
                       lineWrapping={lineWrapping}
                     />
@@ -681,6 +700,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       onCommentShortcut={startComment}
                       uploadImage={uploadImage}
                       onImageError={onImageError}
+                      onMarkdownFileDrop={onRichFileDrop}
                       focusSource={activeSurface === "code" ? cursor.code : null}
                       slashMenu={slashMenu.handlers}
                     />
@@ -736,6 +756,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onRemove={() => actions.removeLink()}
         />
         <ImageDialog open={dialog === "image"} onOpenChange={(o) => setDialog(o ? "image" : null)} onSubmit={(src, alt) => actions.insertImage(src, alt)} onUpload={uploadImage} />
+        <FileDropDialog pending={fileDrop} onClose={() => setFileDrop(null)} canEdit={session.canEdit} onReplace={replaceAll} onInsert={insertAt} onError={(m) => toast(m, "error")} />
         <TableDialog open={dialog === "table"} onOpenChange={(o) => setDialog(o ? "table" : null)} onSubmit={(r, c) => actions.insertTable(r, c)} />
         <NameVersionDialog
           open={dialog === "versionName"}
