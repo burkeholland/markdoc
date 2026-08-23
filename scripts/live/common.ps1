@@ -68,3 +68,74 @@ function Show-LogTail {
     Write-Host "(no log at $LogPath)"
   }
 }
+
+function Read-EnvFile {
+  # KEY=value lines of a dotenv file as a hashtable (comments and blanks skipped, quotes stripped).
+  param([string]$Path)
+  $vars = @{}
+  if (-not (Test-Path -LiteralPath $Path)) { return $vars }
+  foreach ($line in Get-Content -LiteralPath $Path) {
+    $t = $line.Trim()
+    if (-not $t -or $t.StartsWith('#')) { continue }
+    $eq = $t.IndexOf('=')
+    if ($eq -lt 1) { continue }
+    $key = $t.Substring(0, $eq).Trim()
+    $value = $t.Substring($eq + 1).Trim().Trim('"').Trim("'")
+    $vars[$key] = $value
+  }
+  return $vars
+}
+
+function Resolve-BackupToken {
+  # -Token, else $env:BACKUP_TOKEN, else BACKUP_TOKEN= from <Root>\.env.local.
+  param([string]$Token, [string]$Root)
+  if ($Token) { return $Token }
+  if ($env:BACKUP_TOKEN) { return $env:BACKUP_TOKEN }
+  $vars = Read-EnvFile -Path (Join-Path $Root '.env.local')
+  if ($vars.ContainsKey('BACKUP_TOKEN')) { return $vars['BACKUP_TOKEN'] }
+  return $null
+}
+
+function New-RandomSecret {
+  # 32 random bytes as base64url (no padding): fits AUTH_SECRET and BACKUP_TOKEN.
+  $bytes = New-Object byte[] 32
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+  return ([Convert]::ToBase64String($bytes)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Get-BackupMeta {
+  # { documents, users } from GET /api/admin/backup?meta=1, or $null.
+  param([int]$Port, [string]$Token)
+  try {
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/api/admin/backup?meta=1" `
+      -Headers @{ 'X-Backup-Token' = $Token } -TimeoutSec 30
+    if ($resp.StatusCode -eq 200) { return ($resp.Content | ConvertFrom-Json) }
+  } catch {
+    $null = $_
+  }
+  return $null
+}
+
+function Get-DocumentsAsDevUser {
+  # Signs in with the development login (csrf -> /api/auth/callback/dev) and returns the parsed
+  # GET /api/documents body, or $null on any failure. Same dance as scripts/smoke.mts.
+  param([int]$Port, [string]$Login = 'resume-check')
+  $base = "http://localhost:$Port"
+  try {
+    $csrf = Invoke-RestMethod -UseBasicParsing -Uri "$base/api/auth/csrf" -SessionVariable session -TimeoutSec 30
+    $form = @{ csrfToken = $csrf.csrfToken; login = $Login; redirect = 'false' }
+    # The callback answers 302; pwsh 7 throws on that with -MaximumRedirection 0, 5.1 does not. The
+    # session cookie is in $session either way.
+    try {
+      $null = Invoke-WebRequest -UseBasicParsing -Uri "$base/api/auth/callback/dev" -Method Post -Body $form `
+        -WebSession $session -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction SilentlyContinue
+    } catch { $null = $_ }
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "$base/api/documents" -WebSession $session -TimeoutSec 30
+    if ($resp.StatusCode -eq 200) { return ($resp.Content | ConvertFrom-Json) }
+  } catch {
+    $null = $_
+  }
+  return $null
+}
+

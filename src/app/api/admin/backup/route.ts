@@ -1,5 +1,6 @@
 import { count, isNull } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { gzipSync } from "node:zlib";
 import { getDb, schema } from "@/server/db";
 import { handler, HttpError } from "@/server/http";
 
@@ -13,7 +14,7 @@ export const dynamic = "force-dynamic";
  * the variable is unset, 501 when the server uses a real Postgres (`DATABASE_URL`) — use pg_dump there.
  *
  * `?meta=1` returns only `{ documents, users }` as JSON (used to verify a restore).
- * Otherwise the body is PGlite's `dumpDataDir('gzip')`: a gzipped tar of PGDATA, the same blob its
+ * Otherwise the body is PGlite's `dumpDataDir()` (a tar of PGDATA) gzipped — the same blob its
  * `loadDataDir` option accepts. A `CHECKPOINT` first flushes dirty pages so the copy needs no WAL
  * replay; the tar walk itself is synchronous inside the single PGlite process, so no query can
  * interleave and the copy is consistent without stopping the server.
@@ -36,8 +37,10 @@ export const GET = handler(async (req: Request) => {
   }
 
   await db.execute(sql`checkpoint`);
-  const blob = await client.dumpDataDir("gzip");
-  const bytes = new Uint8Array(await blob.arrayBuffer());
+  // PGlite's own gzip is pure JS and takes ~45 s for a 40 MB PGDATA under the dev server; Node's
+  // zlib does the same in well under a second.
+  const tar = await client.dumpDataDir("none");
+  const bytes = gzipSync(new Uint8Array(await tar.arrayBuffer()), { level: 6 });
   return new Response(bytes, {
     status: 200,
     headers: {
