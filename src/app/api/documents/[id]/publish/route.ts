@@ -3,6 +3,7 @@ import { handler, json, readJson, requireAccess } from "@/server/http";
 import { publishDocument } from "@/server/publish";
 import { publicDocument } from "@/server/dto";
 import { getDocumentAccess } from "@/server/documents";
+import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -13,6 +14,9 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const { doc, user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => schema.parse(d ?? {}));
   const result = await publishDocument(doc, user!, body.message);
+  if (!result.skipped) {
+    await recordActivity(id, activityActor(user!), "publish", { storage: doc.storage, commitSha: result.commitSha, message: body.message ?? null });
+  }
   const fresh = await getDocumentAccess(id, user);
   return json({ result, document: fresh ? publicDocument(fresh.doc) : null });
 });

@@ -57,6 +57,37 @@ export interface MentionDto {
   createdAt: string;
 }
 
+export type ActivityActionDto =
+  | "edit"
+  | "comment.add"
+  | "comment.resolve"
+  | "suggestion.add"
+  | "suggestion.accept"
+  | "suggestion.reject"
+  | "version.save"
+  | "version.restore"
+  | "publish"
+  | "share.add"
+  | "share.remove"
+  | "asset.upload"
+  | "mention"
+  | "title.change";
+
+export interface ActivityItemDto {
+  id: string;
+  actorId: string | null;
+  actorName: string;
+  actorKind: "user" | "agent";
+  action: ActivityActionDto;
+  detail: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface ActivityPageDto {
+  items: ActivityItemDto[];
+  nextBefore: string | null;
+}
+
 export const api = {
   documents: {
     list: () => request<{ documents: (Omit<DocumentSummary, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string })[] }>("/api/documents"),
@@ -73,6 +104,13 @@ export const api = {
     delete: (id: string) => request<{ ok: true }>(`/api/documents/${id}`, { method: "DELETE" }),
     collabToken: (id: string) => request<{ token: string; role: Role }>(`/api/documents/${id}/collab-token`, { method: "POST" }),
     versions: (id: string) => request<{ versions: VersionSummary[] }>(`/api/documents/${id}/versions`),
+    activity: (id: string, opts: { before?: string | null; limit?: number } = {}) => {
+      const q = new URLSearchParams();
+      if (opts.before) q.set("before", opts.before);
+      if (opts.limit) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request<ActivityPageDto>(`/api/documents/${id}/activity${qs ? `?${qs}` : ""}`);
+    },
     createVersion: (id: string, title: string) =>
       request<{ version: VersionSummary }>(`/api/documents/${id}/versions`, { method: "POST", body: JSON.stringify({ title }) }),
     version: (id: string, vid: string) => request<{ version: VersionSummary & { content: string } }>(`/api/documents/${id}/versions/${vid}`),

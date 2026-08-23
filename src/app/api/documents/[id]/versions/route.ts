@@ -2,6 +2,7 @@ import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName } from "@/server/http";
 import { addVersion, listVersions } from "@/server/documents";
 import { readLiveText } from "@/server/livedoc";
+import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -28,6 +29,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     createdBy: user?.id,
     createdByName: actorName(user),
   });
+  await recordActivity(id, activityActor(user!), "version.save", { number: version.number, title: body.title });
   return json({ version: { ...version, createdAt: version.createdAt.toISOString() } }, { status: 201 });
 });
 

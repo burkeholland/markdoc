@@ -24,6 +24,7 @@ import { RichPane } from "./rich-pane";
 import { StatusBar, type Layout } from "./status-bar";
 import { CommentsPanel } from "./comments-panel";
 import { VersionsPanel, VersionDiffView } from "./versions-panel";
+import { ActivityPanel } from "./activity-panel";
 import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
@@ -49,7 +50,7 @@ interface Toast {
   action?: { label: string; href: string };
 }
 
-type SidePanel = "comments" | "versions" | null;
+type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
 
@@ -279,6 +280,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
   const toggleHistory = useCallback(() => setSidePanel((p) => (p === "versions" ? null : "versions")), []);
+  const toggleActivity = useCallback(() => setSidePanel((p) => (p === "activity" ? null : "activity")), []);
   const openShare = useCallback(() => setDialog("share"), []);
   const openPublish = useCallback(() => setDialog("publish"), []);
   const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
@@ -373,6 +375,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onPublishNow={publishFromHeader}
           onPull={pullFromHeader}
           onHistory={toggleHistory}
+          onActivity={toggleActivity}
           onShortcuts={openShortcuts}
           onDelete={deleteFromHeader}
           onDownload={download}
@@ -466,6 +469,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           {sidePanel === "versions" && (
             <VersionsPanel session={session} onClose={() => setSidePanel(null)} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
           )}
+          {sidePanel === "activity" && <ActivityPanel session={session} onClose={() => setSidePanel(null)} />}
         </div>
         <StatusBar
           session={session}

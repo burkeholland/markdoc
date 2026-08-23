@@ -5,6 +5,7 @@ import { CommentsModel } from "@/editor/collab/comments";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { recordMentions } from "@/server/mentions";
+import { activityActor, clip, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -90,6 +91,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     const created = result as { id?: string | null };
     const target = body.action === "edit" ? body.replyId ?? body.threadId : created.id;
     if (target) await recordMentions(id, target, user.login, body.body);
+  }
+  if (body.action === "add") {
+    await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
+  } else if (body.action === "resolve" && body.resolved) {
+    await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
   }
   return json(result);
 });

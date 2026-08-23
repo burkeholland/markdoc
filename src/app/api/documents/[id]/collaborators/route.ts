@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { listCollaborators, removeCollaborator, upsertCollaborator, getUserById } from "@/server/documents";
+import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -34,6 +35,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const login = body.login.replace(/^@/, "").toLowerCase();
   if (owner?.login?.toLowerCase() === login) throw new HttpError(400, "That is the owner");
   await upsertCollaborator(id, login, body.role, user!.id);
+  await recordActivity(id, activityActor(user!), "share.add", { login, role: body.role });
   return json({ ok: true, login });
 });
 
@@ -41,8 +43,10 @@ const removeSchema = z.object({ login: z.string().trim().min(1) });
 
 export const DELETE = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
-  await requireAccess(id, "own");
+  const { user } = await requireAccess(id, "own");
   const body = await readJson(req, (d) => removeSchema.parse(d));
-  await removeCollaborator(id, body.login.replace(/^@/, ""));
+  const login = body.login.replace(/^@/, "");
+  await removeCollaborator(id, login);
+  await recordActivity(id, activityActor(user!), "share.remove", { login: login.toLowerCase() });
   return json({ ok: true });
 });

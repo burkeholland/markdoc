@@ -8,6 +8,7 @@ import {
   customType,
   index,
   uniqueIndex,
+  jsonb,
 } from "drizzle-orm/pg-core";
 import type { AdapterAccountType } from "next-auth/adapters";
 
@@ -228,6 +229,43 @@ export const mentions = pgTable(
 );
 
 export type Mention = typeof mentions.$inferSelect;
+
+export type ActivityAction =
+  | "edit"
+  | "comment.add"
+  | "comment.resolve"
+  | "suggestion.add"
+  | "suggestion.accept"
+  | "suggestion.reject"
+  | "version.save"
+  | "version.restore"
+  | "publish"
+  | "share.add"
+  | "share.remove"
+  | "asset.upload"
+  | "mention"
+  | "title.change";
+export type ActorKind = "user" | "agent";
+
+/** Per-document activity feed: who did what, when — humans and agents alike. `detail` never holds document text beyond short quotes. */
+export const activity = pgTable(
+  "activity",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    actorId: text("actor_id"),
+    actorName: text("actor_name").notNull(),
+    actorKind: text("actor_kind").$type<ActorKind>().notNull().default("user"),
+    action: text("action").$type<ActivityAction>().notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("activity_document_created_idx").on(t.documentId, t.createdAt.desc())],
+);
+
+export type Activity = typeof activity.$inferSelect;
 
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
