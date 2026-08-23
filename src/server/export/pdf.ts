@@ -16,7 +16,10 @@ export class PdfUnavailableError extends Error {
 
 async function launch(): Promise<Browser> {
   const { chromium } = await import("playwright-core");
-  const browser = await chromium.launch({ headless: true });
+  // CHROMIUM_PATH points at a system Chromium (the Docker image installs Alpine's). Playwright's
+  // own download is used when it is unset.
+  const executablePath = process.env.CHROMIUM_PATH || undefined;
+  const browser = await chromium.launch({ headless: true, executablePath });
   browser.on("disconnected", () => {
     browserPromise = null;
   });

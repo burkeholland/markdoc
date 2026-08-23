@@ -17,8 +17,13 @@ declare module "next-auth" {
   }
 }
 
-/** Dev-only sign in without GitHub so the app (and e2e tests) can run locally. */
-export const devLoginEnabled = process.env.AUTH_DEV_LOGIN === "1" && process.env.NODE_ENV !== "production";
+/**
+ * Dev-only sign in without GitHub so the app (and e2e tests) can run locally.
+ * `1` is ignored under NODE_ENV=production; `force` enables it there too, which is only meant
+ * for smoke-testing the production build on a developer machine (`npm run start:local`).
+ */
+export const devLoginEnabled =
+  (process.env.AUTH_DEV_LOGIN === "1" && process.env.NODE_ENV !== "production") || process.env.AUTH_DEV_LOGIN === "force";
 
 export const githubConfigured = !!(process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET);
 
