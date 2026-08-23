@@ -1,5 +1,8 @@
-import { test, expect } from "@playwright/test";
-import { codeText, richText } from "./helpers";
+import { test, expect, type Page } from "@playwright/test";
+import { richText } from "./helpers";
+
+/** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
+const codeText = (page: Page) => page.locator(".cm-content").innerText();
 
 /**
  * Browser smoke for a production build that is already running (see `npm run start:local`).
