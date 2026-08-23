@@ -6,7 +6,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { CommentsModel, COMMENTS_ORIGIN } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
-import { openLocalPersistence, type ConnectionPhase, type LocalPersistence } from "./offline";
+import { openLocalPersistence, clearLocalDocument, type ConnectionPhase, type LocalPersistence } from "./offline";
 import type { CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
@@ -51,6 +51,12 @@ export interface CollabSessionOptions {
   /** Returns a fresh collaboration token. */
   getToken: () => Promise<string>;
   wsUrl?: string;
+  /**
+   * Do not open the IndexedDB copy in the constructor; the owner calls
+   * {@link CollabSession.startLocalPersistence} once React has hydrated, so
+   * locally stored content cannot make the client's first render differ from the server's.
+   */
+  deferLocal?: boolean;
 }
 
 type Listener = () => void;
@@ -82,12 +88,14 @@ export class CollabSession {
   localLoaded = false;
   /** Resolves when {@link localLoaded} becomes true. */
   readonly whenLocalLoaded: Promise<void>;
+  private resolveLocalLoaded!: () => void;
   /** True for a moment after a reconnect finished syncing, so the UI can flash a confirmation. */
   recovered = false;
   private everConnected = false;
   private wasOffline = false;
   private recoveredTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly local: LocalPersistence | null;
+  private local: LocalPersistence | null = null;
+  private localStarted = false;
   mode: EditMode;
   activeSurface: Surface = "rich";
   /** Currently highlighted comment thread (shared by both panes and the sidebar). */
@@ -111,16 +119,10 @@ export class CollabSession {
 
     // Mirror the document into IndexedDB so offline edits survive a refresh. Yjs merges
     // the local and server states whichever arrives first, so this need not block connecting.
-    this.local = openLocalPersistence(options.docId, this.ydoc);
-    if (this.local) {
-      this.whenLocalLoaded = this.local.whenLoaded.then(() => {
-        this.localLoaded = true;
-        this.notify();
-      });
-    } else {
-      this.localLoaded = true;
-      this.whenLocalLoaded = Promise.resolve();
-    }
+    this.whenLocalLoaded = new Promise<void>((resolve) => {
+      this.resolveLocalLoaded = resolve;
+    });
+    if (!options.deferLocal) this.startLocalPersistence();
 
     const url = options.wsUrl ?? defaultWsUrl();
     this.provider = new HocuspocusProvider({
@@ -135,7 +137,7 @@ export class CollabSession {
         } else {
           // The provider resets its own synced flag on close without emitting; mirror it.
           this.synced = false;
-          this.wasOffline = this.everConnected;
+          if (this.everConnected) this.wasOffline = true;
         }
         this.updateRecovery();
         this.notify();
@@ -231,9 +233,34 @@ export class CollabSession {
     }, RECOVERED_FLASH_MS);
   }
 
+  /**
+   * Open the IndexedDB copy of this document (no-op when already started, destroyed,
+   * or IndexedDB is unavailable, in which case {@link localLoaded} becomes true at once).
+   */
+  startLocalPersistence() {
+    if (this.localStarted) return;
+    this.localStarted = true;
+    if (this.destroyed) return;
+    this.local = openLocalPersistence(this.docId, this.ydoc);
+    if (!this.local) {
+      this.localLoaded = true;
+      this.resolveLocalLoaded();
+      this.notify();
+      return;
+    }
+    void this.local.whenLoaded.then(() => {
+      this.localLoaded = true;
+      this.resolveLocalLoaded();
+      this.notify();
+    });
+  }
+
   /** Delete this document's local (IndexedDB) copy, e.g. when it is deleted or access is lost. */
   async clearLocal(): Promise<void> {
-    if (!this.local) return;
+    if (!this.local) {
+      await clearLocalDocument(this.docId);
+      return;
+    }
     await this.local.clear();
   }
 

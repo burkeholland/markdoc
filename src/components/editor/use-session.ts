@@ -22,10 +22,13 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role): C
         user: makeCollabUser(user.id, user.name, user.image, user.login),
         role,
         getToken: async () => (await api.documents.collabToken(docId)).token,
+        deferLocal: true,
       }),
   );
   useEffect(() => {
     session.keepAlive();
+    // Only after hydration: locally stored content must not change the first client render.
+    session.startLocalPersistence();
     if (process.env.NODE_ENV !== "production") {
       (window as unknown as { __markdocSession?: CollabSession }).__markdocSession = session;
     }

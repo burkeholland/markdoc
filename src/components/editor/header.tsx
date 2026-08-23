@@ -2,7 +2,7 @@
 import { navigateTo } from "@/lib/nav";
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import {
   Check,
@@ -50,10 +50,18 @@ export function Logo({ className }: { className?: string }) {
   );
 }
 
+const noopSubscribe = () => () => {};
+
 function SaveIndicator({ session }: { session: CollabSession }) {
-  const state = useSessionValue(session, (s) => s.saveState);
-  const unsynced = useSessionValue(session, (s) => s.unsyncedChanges);
-  const recovered = useSessionValue(session, (s) => s.recovered);
+  const liveState = useSessionValue(session, (s) => s.saveState);
+  const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
+  const liveRecovered = useSessionValue(session, (s) => s.recovered);
+  // The server renders a fresh session ("Connecting…"); an offline client may already have
+  // failed to connect by the time React hydrates. Match the server markup first, then switch.
+  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  const state: SaveState = hydrated ? liveState : "connecting";
+  const unsynced = hydrated ? liveUnsynced : 0;
+  const recovered = hydrated && liveRecovered;
   const map: Record<SaveState, { icon: React.ReactNode; className: string }> = {
     saved: { icon: <Check size={16} strokeWidth={2.5} />, className: "text-success" },
     saving: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
