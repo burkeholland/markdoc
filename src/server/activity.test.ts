@@ -1,5 +1,9 @@
 import { describe, expect, it, beforeAll } from "vitest";
 import * as Y from "yjs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import WebSocket from "ws";
+import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -10,7 +14,9 @@ const { getDb, schema } = await import("./db");
 const { createDocument } = await import("./documents");
 const { recordActivity, recordEdit, listActivity, countActivity, activityActor, activityActorFromCollab, clip, watchDocumentActivity, EDIT_COALESCE_WINDOW_MS } =
   await import("./activity");
-const { TEXT_KEY, META_KEY, hydrateDoc } = await import("./collab/hocuspocus");
+const { TEXT_KEY, META_KEY, hydrateDoc, createCollabServer, shutdownCollab } = await import("./collab/hocuspocus");
+const { attachCollab } = await import("./collab/ws");
+const { signCollabToken } = await import("./collab/token");
 
 const alice = { id: "", name: "Alice", kind: "user" as const };
 const bob = { id: "", name: "Bob", kind: "user" as const };
@@ -164,5 +170,49 @@ describe("activity feed", () => {
     const resolve = items.find((i) => i.action === "comment.resolve");
     expect(resolve?.actorName).toBe("Bob");
     doc.destroy();
+  });
+
+  it("records edits typed through a real collaboration connection", async () => {
+    const docId = await newDoc(ownerId);
+    const hocuspocus = createCollabServer();
+    hocuspocus.configuration.debounce = 50;
+    hocuspocus.configuration.maxDebounce = 100;
+    const server = createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end();
+    });
+    attachCollab(server, hocuspocus, { path: "/collab" });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const { port } = server.address() as AddressInfo;
+    const token = await signCollabToken({ userId: alice.id, docId, role: "owner", name: "Alice", login: "alice", avatar: null });
+    const ydoc = new Y.Doc();
+    const socket = new HocuspocusProviderWebsocket({ url: `ws://127.0.0.1:${port}/collab`, WebSocketPolyfill: WebSocket as unknown as typeof globalThis.WebSocket });
+    const provider = new HocuspocusProvider({ websocketProvider: socket, name: docId, document: ydoc, token });
+    provider.attach();
+    try {
+      const start = Date.now();
+      while (!provider.isSynced && Date.now() - start < 5000) await sleep(20);
+      expect(provider.isSynced).toBe(true);
+      const text = ydoc.getText(TEXT_KEY);
+      text.insert(text.length, " typed live");
+      text.insert(text.length, "!");
+      let items: Awaited<ReturnType<typeof listActivity>>["items"] = [];
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        items = (await listActivity(docId)).items;
+        if (items.some((i) => i.action === "edit")) break;
+        await sleep(50);
+      }
+      const edit = items.find((i) => i.action === "edit");
+      expect(edit?.actorName).toBe("Alice");
+      expect(edit?.actorId).toBe(alice.id);
+      expect(edit?.detail.chars).toBe(" typed live!".length);
+      expect(items.filter((i) => i.action === "edit")).toHaveLength(1);
+    } finally {
+      provider.destroy();
+      socket.destroy();
+      await shutdownCollab(hocuspocus);
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 });
