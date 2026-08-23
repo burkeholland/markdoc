@@ -8,6 +8,8 @@ Everything that landed on `main` after the previous README pass (`6181b7d`), 22â
 
 ### Writing
 
+- Code pane Markdown-aware typing: a third `` ` `` or `~` on an empty line opens a fenced block with the caret ready for the language, the backtick never auto-pairs, `*` `_` `` ` `` `[` wrap a selection (`[` as `[text]()`), Tab / Shift-Tab nest and outdent list items; none of it fires inside code blocks (`ff495ee`).
+- Dark mode: system / light / dark preference stored in `localStorage`, applied by an inline boot script before paint so there is no flash; Tailwind tokens routed through runtime CSS variables, CodeMirror and highlight.js palettes on the same variables; toggle in the status bar, dashboard header, `/settings` and the command palette (`695cbbe`).
 - Document statistics popover (`Ctrl+Shift+C`) with words, sentences, reading time, selection counts and a shared writing-goal ring; reading time in the reader view and in `GET /api/documents/:id/content` (`9630ac3`, `fcfdb09`).
 - Command palette (`Ctrl+Shift+P`, or `Ctrl+K` with no selection) backed by a command registry for the editor and the dashboard (`e9bfce2`, `0364c2d`).
 - Slash command menu in the rich pane: `/heading`, `/list`, `/table`, `/code <lang>`, `/image`, `/link`, `/comment`, `/date`; one undo reverts the whole choice (`0123457`, `3a009af`).
@@ -21,6 +23,8 @@ Everything that landed on `main` after the previous README pass (`6181b7d`), 22â
 
 ### Collaborating
 
+- Version compare: pick any two versions and diff them, swap sides, step through hunks with a counter, moved paragraphs detected and shown as moves rather than delete + insert, author chips and kind tags (auto / named / published / restored / imported) per version, rename a version, and copy a version as a new document via `POST /api/documents/:id/versions/:vid/copy` (`e462f15`).
+- Fix: clicking a resolve notification for the thread that was already active now reveals it (the comments panel re-picks its tab via `revealSeq` instead of staying on the empty Open tab); activity test timestamps pinned (`14f4058`).
 - Notifications: replies to your threads, resolves and re-opens, decisions on your suggestions, shares and @mentions, in a bell in the editor header, a strip on the dashboard and thread dots; `?thread=` deep links; `GET /api/notifications` (migration 0008 replaces the `mention` table; `/api/mentions` is deprecated) (`4e5b218`).
 - Reader view `/p/:id`: read-only page with table of contents, "new version" pill, download menu; anonymous view links to `/d` redirect there; `renderMarkdownBody` and `contentHash` shared with export (`309b04e`).
 - Per-document Activity panel: edits (coalesced per actor), comments, suggestions, versions, publish, shares, assets; agents marked; `GET /api/documents/:id/activity` (`1ba7824`, `15a728f`).

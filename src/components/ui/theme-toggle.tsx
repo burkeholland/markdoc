@@ -3,6 +3,7 @@
 import { useSyncExternalStore } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useHydrated } from "@/lib/hooks";
 import { nextTheme, setThemePreference, themeLabel, themeStore, type ThemePreference } from "@/lib/theme";
 
 export function useTheme(): [ThemePreference, (next: ThemePreference) => void] {
@@ -12,9 +13,15 @@ export function useTheme(): [ThemePreference, (next: ThemePreference) => void] {
 
 const ICONS = { system: Monitor, light: Sun, dark: Moon } as const;
 
-/** Cycles system → light → dark. The server renders the "system" icon; the client corrects it after hydration. */
+/**
+ * Cycles system → light → dark. The server renders the "system" icon; the client corrects it after
+ * hydration. The button is `disabled` (and `aria-busy`) until then: the server markup has no click
+ * handler, so a click that lands before React hydrates would be silently lost. Disabling it makes
+ * Playwright's actionability check wait, and tells assistive tech the control is not ready yet.
+ */
 export function ThemeToggle({ className, size = 16 }: { className?: string; size?: number }) {
   const [preference, setPreference] = useTheme();
+  const hydrated = useHydrated();
   const Icon = ICONS[preference];
   const label = `Theme: ${themeLabel(preference)}`;
   return (
@@ -22,6 +29,8 @@ export function ThemeToggle({ className, size = 16 }: { className?: string; size
       type="button"
       className={cn("icon-btn", className)}
       onClick={() => setPreference(nextTheme(preference))}
+      disabled={!hydrated}
+      aria-busy={!hydrated || undefined}
       title={`${label} (click to switch)`}
       aria-label={label}
       data-testid="theme-toggle"
