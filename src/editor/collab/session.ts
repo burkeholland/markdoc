@@ -157,6 +157,9 @@ export class CollabSession {
       },
       onUnsyncedChanges: ({ number }) => {
         this.unsyncedChanges = number;
+        // Pending changes while not connected (e.g. restored from IndexedDB after a reload
+        // that happened offline) should also get the "All changes saved" confirmation.
+        if (number > 0 && this.status !== "connected") this.wasOffline = true;
         this.updateRecovery();
         this.notify();
       },

@@ -245,6 +245,31 @@ describe("save state and reconnect feedback", () => {
     expect(saveStateLabel("saved", 0, false)).toBe("Saved");
   });
 
+  it("flashes after a first connection that uploads changes restored from local storage", () => {
+    const p = lastProvider().opts;
+    // A reload while offline: the IndexedDB copy has edits the server never saw.
+    p.onUnsyncedChanges({ number: 2 });
+    expect(session.saveState).toBe("connecting");
+    expect(session.recovered).toBe(false);
+
+    p.onStatus({ status: "connected" });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
+    expect(session.recovered).toBe(true);
+    vi.advanceTimersByTime(RECOVERED_FLASH_MS + 1);
+    expect(session.recovered).toBe(false);
+  });
+
+  it("does not flash on a plain first connection", () => {
+    const p = lastProvider().opts;
+    p.onStatus({ status: "connected" });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
+    expect(session.recovered).toBe(false);
+  });
+
   it("labels", () => {
     expect(saveStateLabel("offline", 0)).toBe("Offline — changes will sync");
     expect(saveStateLabel("offline", 1)).toBe("Offline — 1 unsaved change");
