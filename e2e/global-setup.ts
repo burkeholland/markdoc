@@ -42,6 +42,12 @@ export default async function globalSetup(config: FullConfig) {
   const baseURL = config.projects[0]?.use.baseURL;
   if (!baseURL) throw new Error("[e2e warm-up] no baseURL configured");
 
+  const webServer = config.webServer;
+  const loadGated = Boolean(webServer?.command.includes("load.mjs"));
+  console.log(
+    `[e2e warm-up] load gate ${loadGated ? "ON" : "OFF"}: webServer "${webServer?.command ?? "<none>"}" (timeout ${Math.round((webServer?.timeout ?? 0) / 1000)} s)`,
+  );
+
   const startedAt = Date.now();
   const log = (step: string, ms: number) => console.log(`[e2e warm-up] ${step.padEnd(34)} ${String(ms).padStart(6)} ms`);
   const timed = async <T>(step: string, fn: () => Promise<T>): Promise<T> => {

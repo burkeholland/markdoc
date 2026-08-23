@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { e2eDistDir, removeDistDir } from "./e2e/dist-dir";
 
 const PORT = Number(process.env.E2E_PORT ?? 3100);
@@ -6,6 +7,16 @@ const PORT = Number(process.env.E2E_PORT ?? 3100);
 // no dev server is started in that case.
 const prodBaseURL = process.env.PROD_BASE_URL?.replace(/\/$/, "");
 const baseURL = prodBaseURL ?? `http://localhost:${PORT}`;
+
+// Several devs share this machine. When the Tools team's load gate is installed, start the dev
+// server only once CPU is <= 70 % (it gives up and starts anyway after 300 s), so the server's
+// first compile does not race other suites. Without the tool the command is unchanged.
+const LOAD_GATE = "C:\\Dev\\ai-experiments\\FACTORY\\tools\\bin\\load.mjs";
+const SERVER_COMMAND = "npx tsx server/index.ts";
+const useLoadGate = !prodBaseURL && existsSync(LOAD_GATE);
+const webServerCommand = useLoadGate ? `node "${LOAD_GATE}" --wait 70 --max 300 -- ${SERVER_COMMAND}` : SERVER_COMMAND;
+// 180 s is enough for the server boot alone; when gated, the up-to-300 s wait must not eat into it.
+const webServerTimeout = useLoadGate ? 480_000 : 180_000;
 
 // One Next dist dir per run so two worktrees (or a killed previous run) never share a cache:
 // `.next-e2e` when E2E_PORT is unset, `.next-e2e-<port>` otherwise (see e2e/dist-dir.ts).
@@ -39,10 +50,10 @@ export default defineConfig({
   webServer: prodBaseURL
     ? undefined
     : {
-        command: "npx tsx server/index.ts",
+        command: webServerCommand,
         url: baseURL,
         reuseExistingServer: false,
-        timeout: 180_000,
+        timeout: webServerTimeout,
         env: {
           PORT: String(PORT),
           AUTH_SECRET: "e2e-secret-e2e-secret-e2e-secret-e2e",
