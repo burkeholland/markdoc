@@ -46,8 +46,11 @@ test.describe("hydration happens once", () => {
   test("a template document opened from the dashboard survives a refresh", async () => {
     const { page } = alice;
     await page.goto("/");
+    await page.waitForLoadState("networkidle");
     await page.getByTestId("new-from-template").click();
-    await page.getByTestId("template-dialog").getByTestId("template-meeting-notes").click();
+    const dialog = page.getByTestId("template-dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId("template-meeting-notes").click();
     await page.waitForURL(/\/d\//);
     const saveState = page.getByTestId("save-state");
     await expect(saveState).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
