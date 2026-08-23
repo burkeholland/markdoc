@@ -66,8 +66,9 @@ test.describe("notifications", () => {
     await bell.click();
     const popover = alice.page.getByTestId("notifications-popover");
     await expect(popover).toBeVisible();
-    const item = popover.getByTestId("notification-item");
-    await expect(item).toHaveCount(1);
+    // Earlier (read) notifications from other specs may be listed too; the new one is first and the only unread one.
+    await expect(popover.locator("[data-testid=notification-item][data-unread=true]")).toHaveCount(1);
+    const item = popover.getByTestId("notification-item").first();
     await expect(item).toHaveAttribute("data-kind", "reply");
     await expect(item).toContainText("bob replied to your comment");
     await expect(item).toContainText("Sure, on it.");
@@ -159,7 +160,7 @@ test.describe("notifications", () => {
     await expect(carol.page.getByTestId("notifications-badge")).toHaveText("1");
     await carol.page.getByTestId("notifications-bell").click();
     const popover = carol.page.getByTestId("notifications-popover");
-    await expect(popover.getByTestId("notification-item")).toContainText("shared ‘Shared with Carol’ with you");
+    await expect(popover.getByTestId("notification-item").first()).toContainText("shared ‘Shared with Carol’ with you");
     await popover.getByTestId("notifications-read-all").click();
     await expect(carol.page.getByTestId("notifications-badge")).toHaveCount(0);
     await expect(popover.getByTestId("notification-unread-dot")).toHaveCount(0);
