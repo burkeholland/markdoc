@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { unified, type Plugin } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
@@ -141,11 +142,53 @@ del { color: #6b7280; }
 }
 `;
 
+export interface RenderedHeading {
+  /** The `id` attribute rehype-slug put on the heading element (the anchor target). */
+  id: string;
+  level: number;
+  text: string;
+}
+
+export interface RenderMarkdownBodyOptions {
+  /** Origin (and optional base path) that relative `/api/assets/<id>` URLs are resolved against; "" keeps them relative. */
+  assetBaseUrl: string;
+  inlineAssets?: boolean;
+}
+
+export interface RenderedMarkdownBody {
+  /** Sanitized HTML fragment (rehype-sanitize ran before slug/highlight/asset rewriting). */
+  html: string;
+  headings: RenderedHeading[];
+}
+
+const HEADING_TAG = /^h([1-6])$/;
+
+function textOf(node: Element): string {
+  let out = "";
+  for (const child of node.children) {
+    if (child.type === "text") out += child.value;
+    else if (child.type === "element") out += textOf(child);
+  }
+  return out;
+}
+
+/** Collect headings (after rehype-slug has assigned ids) into the sink. */
+function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => void {
+  return (tree) => {
+    visitElements(tree, (el) => {
+      const m = HEADING_TAG.exec(el.tagName);
+      if (!m || typeof el.properties?.id !== "string") return;
+      sink.push({ id: el.properties.id, level: Number(m[1]), text: textOf(el).trim() });
+    });
+  };
+}
+
 /**
- * Render a Markdoc document as a standalone HTML5 page: same GFM features the editor
- * supports, sanitized, with embedded styles and no external requests except images.
+ * Render Markdown to a sanitized HTML fragment with the same pipeline the HTML export and
+ * the reader page share: GFM, front matter stripped, rehype-sanitize, slug ids, hljs classes.
  */
-export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inlineAssets = false }: RenderDocumentHtmlOptions): Promise<string> {
+export async function renderMarkdownBody(markdown: string, { assetBaseUrl, inlineAssets = false }: RenderMarkdownBodyOptions): Promise<RenderedMarkdownBody> {
+  const headings: RenderedHeading[] = [];
   const file = await unified()
     .use(remarkParse)
     .use(remarkFrontmatter)
@@ -153,10 +196,25 @@ export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inline
     .use(remarkRehype, { handlers: { yaml: () => undefined, toml: () => undefined } })
     .use(rehypeSanitize, sanitizeSchema)
     .use(rehypeSlug)
+    .use(() => rehypeCollectHeadings(headings))
     .use(rehypeHighlight)
     .use(() => rehypeAssets({ assetBaseUrl, inlineAssets }))
     .use(rehypeStringify)
     .process(markdown);
+  return { html: String(file), headings };
+}
+
+/** SHA-256 of the document text; the reader polls this to detect changes without diffing bodies. */
+export function contentHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Render a Markdoc document as a standalone HTML5 page: same GFM features the editor
+ * supports, sanitized, with embedded styles and no external requests except images.
+ */
+export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inlineAssets = false }: RenderDocumentHtmlOptions): Promise<string> {
+  const { html } = await renderMarkdownBody(markdown, { assetBaseUrl, inlineAssets });
 
   const safeTitle = escapeHtml(title || "Document");
   return `<!DOCTYPE html>
@@ -170,7 +228,7 @@ export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inline
 </head>
 <body>
 <main class="markdoc">
-${String(file)}
+${html}
 </main>
 </body>
 </html>

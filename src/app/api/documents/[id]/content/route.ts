@@ -6,6 +6,7 @@ import { diffOps, applyOps } from "@/editor/sync/text-diff";
 import { recordAgentActivity } from "@/server/agents";
 import { activityActor, recordEdit } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
+import { contentHash } from "@/server/export/html";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -18,6 +19,8 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
     content: live.text,
     clean: live.clean,
     title: live.title,
+    /** SHA-256 of `clean`; the reader view polls this to detect changes cheaply. */
+    contentHash: contentHash(live.clean),
     pendingSuggestions: live.pendingSuggestions,
     openComments: live.openComments,
   });
