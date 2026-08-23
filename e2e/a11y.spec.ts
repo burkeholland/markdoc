@@ -252,8 +252,9 @@ test.describe("axe: editor", () => {
   test("dark: find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-editor-dark");
     const id = await createDocument(page, DOC, "Dark fixture");
-    await openDocument(page, id);
     await setTheme(page, "dark");
+    await openDocument(page, id);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator(".md-rich table")).toBeVisible();
     await ensureCommentsOpen(page);
 
