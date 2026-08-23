@@ -204,9 +204,10 @@ server.registerTool(
   { title: "List comments", description: "Read the comment threads on a document (open and resolved), with the text each one is anchored to.", inputSchema: { id: z.string() } },
   async ({ id }) => {
     const { comments } = await api("GET", `/api/documents/${id}/comments`);
+    const reactions = (r) => (r && Object.keys(r).length ? " " + Object.entries(r).map(([e, ids]) => `${e}${ids.length}`).join(" ") : "");
     const lines = comments.map((t) => {
-      const replies = t.replies.map((r) => `\n    ↳ ${r.author}: ${r.body}`).join("");
-      return `- [${t.id}] ${t.resolved ? "(resolved) " : ""}${t.author} on ${JSON.stringify(t.currentText ?? t.quote)}: ${t.body}${replies}`;
+      const replies = t.replies.map((r) => `\n    ↳ [${r.id}] ${r.author}: ${r.body}${reactions(r.reactions)}`).join("");
+      return `- [${t.id}] ${t.resolved ? "(resolved) " : ""}${t.author} on ${JSON.stringify(t.currentText ?? t.quote)}: ${t.body}${reactions(t.reactions)}${replies}`;
     });
     return ok(lines.length ? lines.join("\n") : "No comments.", { comments });
   },
@@ -216,16 +217,18 @@ server.registerTool(
   "markdoc_comment",
   {
     title: "Comment",
-    description: "Add a comment anchored to a quote of the document text, reply to a thread, or resolve/reopen a thread.",
+    description: "Add a comment anchored to a quote of the document text, reply to a thread, resolve/reopen a thread, or toggle an emoji reaction on a thread or reply. Bodies may use inline Markdown (**bold**, *italic*, `code`, [links](https://…)) and @login mentions.",
     inputSchema: {
       id: z.string(),
-      action: z.enum(["add", "reply", "resolve", "reopen"]).default("add"),
+      action: z.enum(["add", "reply", "resolve", "reopen", "react"]).default("add"),
       quote: z.string().optional().describe("Exact text to anchor a new comment to"),
-      threadId: z.string().optional().describe("Thread to reply to / resolve"),
+      threadId: z.string().optional().describe("Thread to reply to / resolve / react to"),
+      replyId: z.string().optional().describe("With `react`: react to this reply instead of the thread body"),
       body: z.string().optional().describe("Comment text"),
+      emoji: z.string().optional().describe("With `react`: the emoji to toggle, e.g. 👍 ❤️ 🎉 👀 😄 🚀"),
     },
   },
-  async ({ id, action, quote, threadId, body }) => {
+  async ({ id, action, quote, threadId, replyId, body, emoji }) => {
     if (action === "add") {
       if (!quote || !body) throw new Error("`quote` and `body` are required to add a comment.");
       const res = await api("POST", `/api/documents/${id}/comments`, { action: "add", quote, body });
@@ -236,6 +239,11 @@ server.registerTool(
       if (!body) throw new Error("`body` is required to reply.");
       const res = await api("POST", `/api/documents/${id}/comments`, { action: "reply", threadId, body });
       return ok(`Replied to thread ${threadId}.`, res);
+    }
+    if (action === "react") {
+      if (!emoji) throw new Error("`emoji` is required to react.");
+      const res = await api("POST", `/api/documents/${id}/comments`, { action: "react", threadId, replyId, emoji });
+      return ok(`${res.reacted ? "Reacted" : "Removed reaction"} ${emoji} on ${replyId ? `reply ${replyId}` : `thread ${threadId}`}.`, res);
     }
     await api("POST", `/api/documents/${id}/comments`, { action: "resolve", threadId, resolved: action === "resolve" });
     return ok(`Thread ${threadId} ${action === "resolve" ? "resolved" : "reopened"}.`);

@@ -18,6 +18,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Sharing and GitHub](#sharing-and-github)
   - [Account and notifications](#account-and-notifications)
   - [Mentioning people](#mentioning-people)
+  - [Formatting and reactions](#formatting-and-reactions)
   - [Notifications](#notifications)
 - [4. Recipes](#4-recipes)
 - [What people see](#what-people-see)
@@ -65,7 +66,7 @@ Eighteen tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_suggestions` | `id` | List pending suggestions with author and surrounding context. |
 | `markdoc_review_suggestions` | `id`, `action: accept \| reject \| acceptAll \| rejectAll`, `suggestionId?` | Accept or reject (only when asked to). |
 | `markdoc_comments` | `id` | Read threads, open and resolved, with the text they anchor to. |
-| `markdoc_comment` | `id`, `action: add \| reply \| resolve \| reopen`, `quote?`, `threadId?`, `body?` | Add a comment on a quote, reply to a thread, resolve or reopen it. |
+| `markdoc_comment` | `id`, `action: add \| reply \| resolve \| reopen \| react`, `quote?`, `threadId?`, `replyId?`, `body?`, `emoji?` | Add a comment on a quote, reply to a thread, resolve or reopen it, or toggle an emoji reaction (`react` with `emoji`, optionally on a `replyId`). |
 | `markdoc_versions` | `id` | Version history. |
 | `markdoc_publish` | `id`, `message?` | Commit to the linked gist or repository (the document must already be connected in the app). |
 
@@ -109,8 +110,8 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 | `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }` | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`. |
 | `GET /api/documents/:id/suggestions` | | view | Pending suggestions with ranges and context. |
 | `POST /api/documents/:id/suggestions` | `{ action: accept \| reject \| acceptAll \| rejectAll, id? }` | edit | Review suggestions. |
-| `GET /api/documents/:id/comments` | | view | `{ comments: [thread] }`: threads with the text they anchor to and a `mentions` array per thread. |
-| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. |
+| `GET /api/documents/:id/comments` | | view | `{ comments: [thread] }`: threads with the text they anchor to, a `mentions` array, `reactions` (`{ "👍": [userId, …] }`) and `editedAt` per thread and reply. |
+| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. |
 
 ### Versions, activity and export
 
@@ -163,9 +164,15 @@ Sharing a document with an audience: `/p/:id` is the read-only **reader view** (
 
 Agents can get someone's attention by writing `@login` (their GitHub handle) in a comment or reply body, for example `"body": "@burke the numbers in section 2 look stale"`. Mentions render as chips in the comments panel, are listed in each thread's `mentions` array from `GET /api/documents/:id/comments`, and show up on the mentioned person's dashboard and in the bell in the editor header until they open the thread or dismiss them. E-mail addresses are not treated as mentions.
 
+### Formatting and reactions
+
+Comment and reply bodies support inline Markdown: `**bold**`, `*italic*`, `` `code` ``, `[text](https://…)` and bare `http(s)://` URLs (which auto-link). Single newlines are line breaks, blank lines start a new paragraph. Headings, lists, images and HTML are not rendered — they stay literal text — and only `http`, `https` and `mailto` links are clickable. The stored `body` is always the raw text you sent.
+
+Reactions are emoji on a thread or a reply: `POST … { action: "react", threadId, replyId?, emoji: "👍" }` toggles yours (send it again to remove it) and answers `{ ok: true, reacted: true | false }`. Reactions appear live as chips in the comments panel (the editor offers 👍 ❤️ 🎉 👀 😄 🚀, any emoji is accepted) and in `reactions` from `GET /api/documents/:id/comments`. **Reactions never create notifications** — react freely to acknowledge feedback without ringing anyone's bell; reply when you need someone to look.
+
 ### Notifications
 
-People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, or @mentions them. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner.
+People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, or @mentions them. Emoji reactions never notify. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner.
 
 ## 4. Recipes
 

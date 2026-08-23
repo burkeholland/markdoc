@@ -2,15 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
-import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import type { CommentThread } from "@/editor/collab/comments";
+import { QUICK_REACTIONS, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
-import { mentionTriggerAt, splitMentions } from "@/editor/collab/mentions";
-import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent } from "@/components/ui/primitives";
+import { mentionTriggerAt } from "@/editor/collab/mentions";
+import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
+import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
+import "./comments.css";
 
 type Tab = "open" | "resolved" | "suggestions";
 
@@ -21,21 +23,96 @@ export interface MentionCandidate {
   image: string | null;
 }
 
-/** Renders a plain-text comment body with `@login` tokens as chips. */
+/** Renders a comment body: inline Markdown plus `@login` chips. */
 export function MentionBody({ body, className }: { body: string; className?: string }) {
-  const parts = useMemo(() => splitMentions(body), [body]);
+  const content = useMemo(() => renderCommentBody(body), [body]);
   return (
-    <p className={className}>
-      {parts.map((p, i) =>
-        p.type === "mention" ? (
-          <span key={i} className="mention-chip rounded bg-accent-soft px-1 font-medium text-accent" title={p.value} data-testid="mention-chip">
-            @{p.value}
-          </span>
-        ) : (
-          <span key={i}>{p.value}</span>
-        ),
+    <div className={cn("comment-body", className)} data-testid="comment-body">
+      {content}
+    </div>
+  );
+}
+
+/** "(edited)" with the edit time as a tooltip. */
+function EditedMarker({ at }: { at?: number | null }) {
+  if (!at) return null;
+  return (
+    <span className="shrink-0 text-xs italic text-ink-4" title={`Edited ${new Date(at).toLocaleString()}`} data-testid="comment-edited">
+      (edited)
+    </span>
+  );
+}
+
+/** Reaction chips plus the quick picker for one thread body or reply. */
+function ReactionRow({
+  reactions,
+  names,
+  me,
+  canReact,
+  onToggle,
+}: {
+  reactions: Reactions;
+  names: Record<string, string>;
+  me: string;
+  canReact: boolean;
+  onToggle: (emoji: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const entries = Object.entries(reactions).filter(([, ids]) => ids.length > 0);
+  if (entries.length === 0 && !canReact) return null;
+  return (
+    <div className="reaction-row" onClick={(e) => e.stopPropagation()} data-testid="reaction-row">
+      {entries.map(([emoji, ids]) => {
+        const mine = ids.includes(me);
+        return (
+          <button
+            key={emoji}
+            type="button"
+            className="reaction-chip"
+            data-mine={mine ? "true" : undefined}
+            data-emoji={emoji}
+            title={ids.map((id) => names[id] ?? id).join(", ")}
+            aria-pressed={mine}
+            aria-label={`${emoji} ${ids.length}`}
+            disabled={!canReact}
+            onClick={() => onToggle(emoji)}
+            data-testid="reaction-chip"
+          >
+            <span>{emoji}</span>
+            <span className="reaction-count">{ids.length}</span>
+          </button>
+        );
+      })}
+      {canReact && (
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger asChild>
+            <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" data-testid="reaction-add">
+              <SmilePlus size={14} />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent side="top" align="start" className="p-1" data-testid="reaction-picker">
+            <div className="reaction-picker" role="group" aria-label="Pick a reaction">
+              {QUICK_REACTIONS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  data-mine={reactions[emoji]?.includes(me) ? "true" : undefined}
+                  aria-label={`React with ${emoji}`}
+                  onClick={() => {
+                    onToggle(emoji);
+                    setOpen(false);
+                  }}
+                  data-testid="reaction-option"
+                  data-emoji={emoji}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
       )}
-    </p>
+    </div>
   );
 }
 
@@ -124,6 +201,10 @@ function useCommentOps(session: CollabSession) {
         if (replyId) session.comments.deleteReply(threadId, replyId);
         else session.comments.remove(threadId);
       },
+      async react(threadId: string, replyId: string | null, emoji: string) {
+        if (viaApi) return api.documents.comment(id, { action: "react", threadId, replyId: replyId ?? undefined, emoji });
+        session.comments.toggleReaction(threadId, replyId, emoji, session.user);
+      },
     }),
     [session, viaApi, id],
   );
@@ -148,12 +229,30 @@ function Composer({
 }) {
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [focused, setFocused] = useState(false);
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
   }, [autoFocus]);
+
+  /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
+  const applyFormat = (kind: "bold" | "italic" | "code" | "link") => {
+    const el = ref.current;
+    if (!el) return;
+    const { selectionStart, selectionEnd } = el;
+    const r =
+      kind === "link"
+        ? wrapLink(el.value, selectionStart, selectionEnd)
+        : wrapSelection(el.value, selectionStart, selectionEnd, kind === "bold" ? "**" : kind === "italic" ? "*" : "`");
+    setValue(r.value);
+    setTrigger(null);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(r.selectionStart, r.selectionEnd);
+    });
+  };
 
   const matches = useMemo(() => {
     if (!trigger) return [];
@@ -213,8 +312,24 @@ function Composer({
               syncTrigger(e.target);
             }}
             onSelect={(e) => syncTrigger(e.currentTarget)}
-            onBlur={() => setTimeout(() => setTrigger(null), 120)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => {
+              setFocused(false);
+              setTimeout(() => setTrigger(null), 120);
+            }}
             onKeyDown={(e) => {
+              const mod = e.metaKey || e.ctrlKey;
+              // Formatting shortcuts belong to the composer; never let the editor's Ctrl+K / Ctrl+B handlers see them.
+              if (mod && !e.altKey && !e.shiftKey) {
+                const key = e.key.toLowerCase();
+                const kind = key === "b" ? "bold" : key === "i" ? "italic" : key === "e" ? "code" : key === "k" ? "link" : null;
+                if (kind) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  applyFormat(kind);
+                  return;
+                }
+              }
               if (open) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -238,8 +353,10 @@ function Composer({
                   return;
                 }
               }
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              // Enter sends, Shift+Enter inserts a newline (Ctrl/⌘+Enter still sends).
+              if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
                 e.preventDefault();
+                e.stopPropagation();
                 void submit();
               }
               if (e.key === "Escape" && onCancel) onCancel();
@@ -279,6 +396,23 @@ function Composer({
           </ul>
         </PopoverContent>
       </Popover>
+      {focused && (
+        <div className="comment-format-hint" aria-hidden data-testid="comment-format-hint">
+          <span>
+            <kbd>Ctrl/⌘ B</kbd> **bold**
+          </span>
+          <span>
+            <kbd>I</kbd> *italic*
+          </span>
+          <span>
+            <kbd>E</kbd> `code`
+          </span>
+          <span>
+            <kbd>K</kbd> [link](url)
+          </span>
+          <span>@mention · Enter sends · Shift+Enter newline</span>
+        </div>
+      )}
       <div className="flex items-center justify-end gap-2">
         {onCancel && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
@@ -354,6 +488,7 @@ function ThreadCard({
           <div className="flex items-baseline gap-2">
             <span className="truncate text-[13px] font-semibold text-ink">{thread.authorName}</span>
             <span className="shrink-0 text-xs text-ink-4">{relativeTime(thread.createdAt)}</span>
+            <EditedMarker at={thread.editedAt} />
           </div>
           {editing === "root" ? (
             <div className="mt-1">
@@ -371,7 +506,10 @@ function ThreadCard({
               />
             </div>
           ) : (
-            <MentionBody body={thread.body} className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-ink-2" />
+            <>
+              <MentionBody body={thread.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
+              <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, null, emoji)} />
+            </>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
@@ -412,12 +550,13 @@ function ThreadCard({
       {thread.replies.length > 0 && (
         <div className="mt-3 flex flex-col gap-3 border-l border-line pl-3">
           {thread.replies.map((r) => (
-            <div key={r.id} className="flex items-start gap-2.5">
+            <div key={r.id} className="flex items-start gap-2.5" data-testid="comment-reply" data-reply-id={r.id}>
               <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
                   <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
                   <span className="shrink-0 text-xs text-ink-4">{relativeTime(r.createdAt)}</span>
+                  <EditedMarker at={r.editedAt} />
                 </div>
                 {editing === r.id ? (
                   <div className="mt-1">
@@ -435,7 +574,10 @@ function ThreadCard({
                     />
                   </div>
                 ) : (
-                  <MentionBody body={r.body} className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-ink-2" />
+                  <>
+                    <MentionBody body={r.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
+                    <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
+                  </>
                 )}
               </div>
               {(r.authorId === me || canModerate) && (
