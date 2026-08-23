@@ -69,8 +69,9 @@ test.describe("phone", () => {
     const drawer = page.getByTestId("outline-drawer");
     await expect(drawer).toBeVisible();
     await expect(drawer.getByRole("button", { name: "Third" })).toBeVisible();
+    await settled(drawer);
+    await expect.poll(async () => (await drawer.boundingBox())!.x).toBe(0);
     const box = (await drawer.boundingBox())!;
-    expect(box.x).toBe(0);
     expect(box.width).toBeLessThan(phone.viewport.width);
     await drawer.getByRole("button", { name: "Hide outline" }).click();
     await expect(drawer).toHaveCount(0);
