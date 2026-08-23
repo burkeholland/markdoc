@@ -215,14 +215,24 @@ describe("POST /api/import/file", () => {
     }
   });
 
-  it("rejects unsupported types and non-multipart bodies", async () => {
+  it("rejects unsupported types and non-multipart bodies, and imports JSON text", async () => {
     actor = owner;
     try {
       const form = new FormData();
       form.append("files", new File([bytes("x")], "a.pdf", { type: "application/pdf" }));
       expect((await post(form)).status).toBe(415);
-      const res = await POST(new Request("http://localhost:3700/api/import/file", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }));
-      expect(res.status).toBe(415);
+      const plain = await POST(new Request("http://localhost:3700/api/import/file", { method: "POST", headers: { "Content-Type": "text/plain" }, body: "x" }));
+      expect(plain.status).toBe(415);
+      const res = await POST(
+        new Request("http://localhost:3700/api/import/file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: "<h1>Agent Page</h1><p>hi</p>", format: "html" }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { documents: { id: string; title: string }[] };
+      expect(body.documents[0].title).toBe("Agent Page");
     } finally {
       actor = null;
     }
