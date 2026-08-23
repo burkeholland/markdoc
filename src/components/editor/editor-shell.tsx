@@ -126,7 +126,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // so selection changes (React state) are picked up as well as session changes; the shallow
   // comparison keeps the object stable when nothing visible changed.
   const format: FormatState = useSessionValue(session, () => (viewsReady ? actions.formatState() : EMPTY_FORMAT), shallowEqual);
-  const getRichText = useCallback(() => actions.rich?.state.doc.textContent ?? "", [actions]);
 
   const onCodeReady = useCallback(
     (view: CMView | null) => {
@@ -588,7 +587,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onIssueSelect={onIssueSelect}
           onShortcuts={openShortcuts}
           onStorage={openStorage}
-          getRichText={getRichText}
         />
 
         <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={docView} isOwner={isOwner} onDocChange={setDoc} />

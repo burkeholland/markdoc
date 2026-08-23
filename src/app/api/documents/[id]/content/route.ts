@@ -7,6 +7,7 @@ import { recordAgentActivity } from "@/server/agents";
 import { activityActor, recordEdit } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { contentHash } from "@/server/export/html";
+import { computeStats } from "@/editor/stats";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -23,6 +24,8 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
     contentHash: contentHash(live.clean),
     pendingSuggestions: live.pendingSuggestions,
     openComments: live.openComments,
+    /** Prose statistics of `clean`: words, characters, sentences, paragraphs, headings, reading/speaking minutes. */
+    stats: computeStats(live.clean),
   });
 });
 

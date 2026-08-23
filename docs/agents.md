@@ -63,7 +63,7 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `GET /api/documents?q=text&limit=20` | | Search titles and content (case-insensitive, 2+ chars); `{ documents: [{ …, snippet }], query }`. |
 | `POST /api/documents` | `{ title?, content?, template? }` | Create. `template` is an id from `GET /api/templates`; it fills `title` and `content` when they are omitted (`{{date}}` → today, `{{user}}` → your login). Unknown id → `400`. |
 | `GET /api/templates` | | `{ templates: [{ id, name, description }] }` — the ids: `blank`, `meeting-notes`, `project-readme`, `design-doc`, `weekly-status`, `blog-post`, `decision-record`, `checklist`. |
-| `GET /api/documents/:id/content` | | `{ content, clean, title, contentHash, pendingSuggestions, openComments }` — `contentHash` is the SHA-256 of `clean`. |
+| `GET /api/documents/:id/content` | | `{ content, clean, title, contentHash, pendingSuggestions, openComments, stats }` — `contentHash` is the SHA-256 of `clean`; `stats` are prose statistics of `clean`: `{ words, characters, charactersNoSpaces, sentences, paragraphs, headings, readingMinutes (200 wpm), speakingMinutes (130 wpm) }` (fenced code and front matter excluded, inline code and link text included). |
 | `PUT /api/documents/:id/content` | `{ content, message? }` | Replace the whole text (minimal live diff; `message` names a version). |
 | `PATCH /api/documents/:id/content` | `{ append }` | Append Markdown. |
 | `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }` | Propose word-level tracked changes. |

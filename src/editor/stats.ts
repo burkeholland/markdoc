@@ -1,0 +1,235 @@
+/**
+ * Document statistics over Markdown source: prose words, characters, sentences,
+ * paragraphs, headings and derived reading / speaking times.
+ *
+ * Counting is prose-only: fenced code blocks and YAML front matter are excluded,
+ * inline code text is included, link text counts but URLs do not, images are dropped.
+ * Words are runs of Unicode letters/digits (with inner apostrophes/hyphens), which
+ * under-counts CJK text where words are not space-separated; that is accepted for now.
+ */
+
+export interface DocStats {
+  words: number;
+  /** Characters of the prose text, including spaces. */
+  characters: number;
+  charactersNoSpaces: number;
+  sentences: number;
+  paragraphs: number;
+  headings: number;
+  /** Minutes at 200 words per minute; at least 1 when there are words. */
+  readingMinutes: number;
+  /** Minutes at 130 words per minute; at least 1 when there are words. */
+  speakingMinutes: number;
+}
+
+export const READING_WPM = 200;
+export const SPEAKING_WPM = 130;
+
+const WORD_RE = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
+const SENTENCE_RE = /[.!?…]+(?=\s|$)/gu;
+const FENCE_RE = /^(\s{0,3})(`{3,}|~{3,})/;
+
+export const EMPTY_STATS: DocStats = Object.freeze({
+  words: 0,
+  characters: 0,
+  charactersNoSpaces: 0,
+  sentences: 0,
+  paragraphs: 0,
+  headings: 0,
+  readingMinutes: 0,
+  speakingMinutes: 0,
+}) as DocStats;
+
+/** Minutes for `words` at `wpm`, rounded, never 0 when there is at least one word. */
+export function minutesFor(words: number, wpm: number): number {
+  if (words <= 0) return 0;
+  return Math.max(1, Math.round(words / wpm));
+}
+
+/**
+ * Turn one Markdown line into prose: drop block markers (heading, list, quote, table pipes),
+ * images, link URLs, emphasis and inline code delimiters. Returns the prose text and whether
+ * the line was a heading.
+ */
+function proseOfLine(line: string): { text: string; heading: boolean } {
+  let s = line;
+  let heading = false;
+  // Block quotes (possibly nested), then heading markers, list bullets, task boxes.
+  s = s.replace(/^\s{0,3}(?:>\s?)+/, "");
+  const h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(s);
+  if (h) {
+    heading = true;
+    s = h[2];
+  } else {
+    s = s.replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/, "");
+  }
+  // Horizontal rules, table separator rows.
+  if (/^\s*(?:[-*_]\s*){3,}$/.test(s) || /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(s)) return { text: "", heading };
+  // Table pipes become spaces so cells stay separate words.
+  if (s.includes("|")) s = s.replace(/\|/g, " ");
+  // Images are dropped entirely; links keep their text; reference definitions vanish.
+  s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
+  s = s.replace(/!\[[^\]]*\]\[[^\]]*\]/g, "");
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  if (/^\s{0,3}\[[^\]]+\]:\s*\S+/.test(s)) return { text: "", heading };
+  s = s.replace(/<[^>]+>/g, "");
+  s = s.replace(/`+/g, "");
+  s = s.replace(/(\*\*|__|~~|\*|_)/g, "");
+  s = s.replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1");
+  return { text: s, heading };
+}
+
+function countWords(text: string): number {
+  const m = text.match(WORD_RE);
+  return m ? m.length : 0;
+}
+
+function countSentences(text: string): number {
+  const m = text.match(SENTENCE_RE);
+  return m ? m.length : 0;
+}
+
+function compute(markdown: string): DocStats {
+  const lines = markdown.split("\n");
+  let i = 0;
+  // YAML front matter: a leading `---` block closed by `---` or `...`.
+  if (lines[0]?.trim() === "---") {
+    let j = 1;
+    while (j < lines.length && lines[j].trim() !== "---" && lines[j].trim() !== "...") j++;
+    if (j < lines.length) i = j + 1;
+  }
+  let words = 0;
+  let characters = 0;
+  let charactersNoSpaces = 0;
+  let sentences = 0;
+  let paragraphs = 0;
+  let headings = 0;
+  let inFence: string | null = null;
+  let para: string[] = [];
+
+  const flush = () => {
+    if (para.length === 0) return;
+    const text = para.join("\n");
+    para = [];
+    const w = countWords(text);
+    if (w === 0) return;
+    paragraphs++;
+    words += w;
+    characters += text.length;
+    charactersNoSpaces += text.replace(/\s/g, "").length;
+    // A block that ends without terminal punctuation is still a sentence.
+    const s = countSentences(text);
+    sentences += s > 0 ? s : 1;
+  };
+
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    if (inFence) {
+      const m = FENCE_RE.exec(line);
+      if (m && m[2][0] === inFence[0] && m[2].length >= inFence.length && line.trim() === m[2]) inFence = null;
+      continue;
+    }
+    const fence = FENCE_RE.exec(line);
+    if (fence) {
+      flush();
+      inFence = fence[2];
+      continue;
+    }
+    if (line.trim() === "") {
+      flush();
+      continue;
+    }
+    const { text, heading } = proseOfLine(line);
+    if (heading) {
+      flush();
+      headings++;
+      const w = countWords(text);
+      if (w > 0) {
+        words += w;
+        characters += text.length;
+        charactersNoSpaces += text.replace(/\s/g, "").length;
+      }
+      continue;
+    }
+    if (text.trim() !== "") para.push(text.trim());
+  }
+  flush();
+
+  return {
+    words,
+    characters,
+    charactersNoSpaces,
+    sentences,
+    paragraphs,
+    headings,
+    readingMinutes: minutesFor(words, READING_WPM),
+    speakingMinutes: minutesFor(words, SPEAKING_WPM),
+  };
+}
+
+// The status bar asks for stats on every render; remember the last result per string.
+let lastInput: string | null = null;
+let lastStats: DocStats = EMPTY_STATS;
+
+/** Statistics of a whole Markdown document. Memoised on the input string (size-1 cache). */
+export function computeStats(markdown: string): DocStats {
+  if (markdown === lastInput) return lastStats;
+  const stats = markdown ? compute(markdown) : EMPTY_STATS;
+  lastInput = markdown;
+  lastStats = stats;
+  return stats;
+}
+
+let lastSelKey: string | null = null;
+let lastSelStats: DocStats = EMPTY_STATS;
+
+/** Statistics of the source range `[from, to)`; `EMPTY_STATS` when the range is empty. */
+export function computeSelectionStats(markdown: string, from: number, to: number): DocStats {
+  const a = Math.max(0, Math.min(from, to));
+  const b = Math.min(markdown.length, Math.max(from, to));
+  if (b <= a) return EMPTY_STATS;
+  const key = `${a}:${b}:${markdown.length}:${markdown}`;
+  if (key === lastSelKey) return lastSelStats;
+  // Open fences before the selection would otherwise swallow the whole range as code, so the
+  // slice is counted on its own; partial fences inside it are treated as-is (best effort).
+  const stats = compute(markdown.slice(a, b));
+  lastSelKey = key;
+  lastSelStats = stats;
+  return stats;
+}
+
+export type GoalKind = "words" | "minutes";
+export type GoalMode = "min" | "max";
+
+export interface WritingGoal {
+  kind: GoalKind;
+  mode: GoalMode;
+  value: number;
+  setBy: string | null;
+  setAt: number;
+}
+
+export interface GoalProgress {
+  /** Current value in the goal's unit (words or reading minutes). */
+  current: number;
+  target: number;
+  /** 0..1, clamped. */
+  fraction: number;
+  /** "progress" until reached, "reached" at/after a min goal or within a max goal, "exceeded" past a max goal. */
+  state: "progress" | "reached" | "exceeded";
+}
+
+/** Compare document stats against a goal. */
+export function goalProgress(stats: DocStats, goal: WritingGoal): GoalProgress {
+  const current = goal.kind === "words" ? stats.words : stats.readingMinutes;
+  const target = Math.max(1, goal.value);
+  const fraction = Math.max(0, Math.min(1, current / target));
+  let state: GoalProgress["state"] = "progress";
+  if (goal.mode === "min") {
+    if (current >= target) state = "reached";
+  } else {
+    state = current > target ? "exceeded" : "reached";
+  }
+  return { current, target, fraction, state };
+}

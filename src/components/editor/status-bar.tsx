@@ -2,14 +2,15 @@
 import { Menu, MenuCheckboxItem, MenuContent, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, GitHubIcon } from "@/components/ui/primitives";
 
 import { memo, useMemo } from "react";
-import { AlertTriangle, ArrowUpDown, Check, ChevronDown, CircleHelp, FileText, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText } from "lucide-react";
+import { AlertTriangle, ArrowUpDown, Check, ChevronDown, CircleHelp, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { DocumentDto } from "@/server/dto";
 import { lintMarkdown, type LintIssue } from "@/editor/markdown/lint";
 
-import { cn, countWords, formatNumber } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { useHydrated } from "@/lib/hooks";
 import { useDebouncedSessionValue } from "./use-session";
+import { StatsPopover, useLocalSelection } from "./stats-popover";
 
 export type Layout = "split" | "code" | "rich";
 
@@ -25,18 +26,16 @@ export interface StatusBarProps {
   onIssueSelect: (issue: LintIssue) => void;
   onShortcuts: () => void;
   onStorage: () => void;
-  /** Plain text of the rendered document, for word counts (falls back to the source). */
-  getRichText: () => string;
 }
 
-export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage, getRichText }: StatusBarProps) {
-  // Linting re-parses the whole document and word counts walk it: wait for a pause in typing.
+export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage }: StatusBarProps) {
+  // Linting re-parses the whole document and statistics walk it: wait for a pause in typing.
   const source = useDebouncedSessionValue(session, (s) => s.ytext.toString(), 500);
   // The server renders an empty session; by the time this part of the page hydrates the client
   // may already hold the local copy. Show placeholders until hydrated so the markup matches.
   const hydrated = useHydrated();
   const issues = useMemo(() => (hydrated ? lintMarkdown(source) : []), [hydrated, source]);
-  const words = useMemo(() => countWords(getRichText() || source), [getRichText, source]);
+  const selection = useLocalSelection(session);
   const errors = issues.filter((i) => i.severity === "error").length;
 
   const storageLabel =
@@ -45,14 +44,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
 
   return (
     <footer className="flex h-10 shrink-0 items-center gap-1 border-t border-line px-3 text-[13px] text-ink-3" data-testid="status-bar">
-      <span className="inline-flex items-center gap-1.5 px-2">
-        <FileText size={14} />
-        <span data-testid="word-count">{hydrated ? `${formatNumber(words)} words` : "— words"}</span>
-      </span>
-      <span className="h-4 w-px bg-line" />
-      <span className="px-2" data-testid="char-count">
-        {hydrated ? `${formatNumber(source.length)} characters` : "— characters"}
-      </span>
+      <StatsPopover session={session} source={source} selection={selection} hydrated={hydrated} />
       <div className="flex-1" />
 
       <Menu>
