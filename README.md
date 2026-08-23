@@ -15,6 +15,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 ### Writing
 
 - Two-pane live editor: CodeMirror source and a ProseMirror rich pane side by side; type in either, the other follows instantly.
+- Markdown-aware typing in the code pane: a third `` ` `` opens a fenced block, backticks never auto-pair, `*` `_` `` ` `` `[` wrap the selection, Tab / Shift-Tab nest and outdent list items.
 - GitHub Flavored Markdown (tables, task lists, footnotes, front matter, raw HTML kept) with a linter in the status bar and jump-to-line.
 - Slash menu: type `/` in the rich pane for headings, lists, tables, code blocks with a language, images, links, comments, today's date.
 - Command palette (`Ctrl+Shift+P`, or `Ctrl+K` with nothing selected) for every editor and dashboard command.
@@ -32,6 +33,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Comments anchored to text that follow the words as they move; reply, edit, resolve, reopen; `@mentions` with a suggestions popover.
 - Suggesting mode: edits become tracked changes (green/red) that anyone with edit access can accept or reject, one by one or all at once.
 - Version history with automatic snapshots, named versions, word-level diffs and one-click restore.
+- Version compare: diff any two versions, swap sides, step through hunks, see moved paragraphs as moves, rename a version or copy it as a new document.
 - Activity panel per document: who edited, commented, suggested, published or shared, with agents marked.
 - Notifications: a bell in the editor header and a strip on the dashboard when someone replies to your thread, resolves it, accepts or rejects your suggestion, shares with you or @mentions you; `?thread=` links open the thread.
 - Share by GitHub handle as editor, commenter or viewer, or by link (restricted, view, comment, edit).
