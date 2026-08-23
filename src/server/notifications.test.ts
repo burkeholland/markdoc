@@ -12,6 +12,7 @@ const {
   listNotifications,
   unreadCount,
   markNotificationRead,
+  notificationBelongsTo,
   markAllNotificationsRead,
   markRefsRead,
   notify,
@@ -101,6 +102,10 @@ describe("notifications", () => {
     expect(await markNotificationRead(m.id, "carol")).toBe(true);
     expect(await unreadCount("carol")).toBe(1);
     expect(await markNotificationRead(m.id, "carol")).toBe(false);
+    // The owner check used by the read route: a read row is still theirs; other users and unknown ids are not.
+    expect(await notificationBelongsTo(m.id, "carol")).toBe(true);
+    expect(await notificationBelongsTo(m.id, "bob")).toBe(false);
+    expect(await notificationBelongsTo("nope", "carol")).toBe(false);
     // Read items still list unless `unread` is requested.
     expect((await listNotifications("carol")).items).toHaveLength(2);
     expect(await unread("carol")).toHaveLength(1);
