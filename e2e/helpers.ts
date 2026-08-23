@@ -28,7 +28,19 @@ export async function createDocument(page: Page, content: string, title?: string
 
 export async function openDocument(page: Page, id: string) {
   await page.goto(`/d/${id}`);
-  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+  const saveState = page.getByTestId("save-state");
+  try {
+    // 30 s is plenty once the dev server is warm (see e2e/global-setup.ts); do not raise it.
+    await expect(saveState).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+  } catch (err) {
+    const state = await saveState.getAttribute("data-state", { timeout: 1_000 }).catch(() => null);
+    const header = await saveState.innerText({ timeout: 1_000 }).catch(() => "");
+    throw new Error(
+      `openDocument(${id}): save-state did not reach "saved" within 30 s — stuck in data-state=${
+        state ?? "<missing>"
+      } (header: "${header.trim()}")\n${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   await expect(page.locator(".cm-content")).toBeVisible();
   await expect(page.locator(".md-rich")).toBeVisible();
 }
