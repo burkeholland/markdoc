@@ -112,6 +112,11 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
       run: () => {
         const view = ctx.actions.rich;
         if (!view) return;
+        if (item.command) {
+          item.command("")(view.state, view.dispatch, view);
+          view.focus();
+          return;
+        }
         item.run({ view, openImage: ctx.openImage, openLink: ctx.openLink, startComment: ctx.startComment, where: ctx.slashWhere }, "");
       },
     }));
