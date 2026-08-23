@@ -25,6 +25,7 @@ import { suggestingMode } from "./suggesting";
 import { toggleInlineMark, setHeading, toggleLinePrefix } from "./commands";
 import { codeImageUpload } from "./images";
 import { markdownEditingKeymap } from "./continue-markup";
+import { markdownTyping } from "./markdown-typing";
 import type { ImageUploader } from "../prosemirror/images";
 
 export interface CodeEditorHandlers {
@@ -76,7 +77,10 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     crosshairCursor(),
     indentOnInput(),
     bracketMatching(),
+    // Pairs ( [ { and quotes; markdownTyping scopes the list to Markdown (no backtick pairing),
+    // opens fences on ```, wraps selections with * _ ` [ and indents list items with Tab.
     closeBrackets(),
+    markdownTyping(),
     highlightSelectionMatches(),
     placeholder("Start writing Markdown…"),
     // Enter/Backspace come from markdownEditingKeymap (Enter on an empty `> ` or `- ` line exits the block).
