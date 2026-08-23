@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
   images: {
     remotePatterns: [{ protocol: "https", hostname: "avatars.githubusercontent.com" }],
   },
+  // `next build` type-checks the whole tsconfig project, including playwright.config.ts and e2e/**, and
+  // fails inside the container image (whose context has no test code). tsconfig.build.json extends the
+  // base and excludes test-only files; `next dev` / `next typegen` / `npm run typecheck` keep tsconfig.json.
+  typescript: {
+    tsconfigPath: process.env.NODE_ENV === "production" ? "tsconfig.build.json" : "tsconfig.json",
+  },
 };
 
 export default nextConfig;
