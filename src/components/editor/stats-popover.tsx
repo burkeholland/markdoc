@@ -149,7 +149,7 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[22rem] p-0" data-testid="stats-popover">
+      <PopoverContent align="start" className="w-[24rem] p-0" data-testid="stats-popover">
         <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">
           <span>Document statistics</span>
           <span className="font-normal normal-case tracking-normal text-ink-4">{shortcut("Mod-Shift-C")}</span>
@@ -234,13 +234,14 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
       {summary}
       {goal?.setBy && <div className="mt-0.5 text-[11px] text-ink-4">Set by @{goal.setBy}; shared with everyone on this document.</div>}
       {canEdit && (
-        <form className="mt-2 flex items-center gap-1.5" onSubmit={submit}>
-          <select className="select h-8 px-1.5 text-[13px]" value={mode} onChange={(e) => setMode(e.target.value as GoalMode)} aria-label="Goal mode" data-testid="goal-mode">
+        <form className="mt-2 flex flex-wrap items-center gap-1.5" onSubmit={submit}>
+          <select className="select h-8 shrink-0 px-1.5 text-[13px]" value={mode} onChange={(e) => setMode(e.target.value as GoalMode)} aria-label="Goal mode" data-testid="goal-mode">
             <option value="min">At least</option>
             <option value="max">At most</option>
           </select>
           <input
-            className="input h-8 w-20 px-2 text-[13px] tabular-nums"
+            className="input h-8 shrink-0 px-2 text-[13px] tabular-nums"
+            style={{ width: "4.5rem" }}
             type="number"
             min={1}
             step={1}
@@ -251,19 +252,20 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
             aria-label="Goal value"
             data-testid="goal-value"
           />
-          <select className="select h-8 px-1.5 text-[13px]" value={kind} onChange={(e) => setKind(e.target.value as GoalKind)} aria-label="Goal type" data-testid="goal-kind">
+          <select className="select h-8 shrink-0 px-1.5 text-[13px]" value={kind} onChange={(e) => setKind(e.target.value as GoalKind)} aria-label="Goal type" data-testid="goal-kind">
             <option value="words">words</option>
             <option value="minutes">min read</option>
           </select>
-          <div className="flex-1" />
-          <button type="submit" className="btn btn-primary btn-sm h-8" disabled={!(Number(value) > 0)} data-testid="goal-set">
-            Set
-          </button>
-          {goal && (
-            <button type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
-              Clear
+          <span className="ml-auto inline-flex gap-1.5">
+            <button type="submit" className="btn btn-primary btn-sm h-8" disabled={!(Number(value) > 0)} data-testid="goal-set">
+              Set
             </button>
-          )}
+            {goal && (
+              <button type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
+                Clear
+              </button>
+            )}
+          </span>
         </form>
       )}
     </div>
