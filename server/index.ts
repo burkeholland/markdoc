@@ -9,12 +9,18 @@ import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
 import { getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
+import { lanAddresses } from "../scripts/lib/dev-origins.mjs";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const dev = process.env.NODE_ENV !== "production";
-const hostname = process.env.HOST ?? "0.0.0.0";
+// Bind address. Only a concrete HOST is handed to Next as its hostname: for the default 0.0.0.0
+// Next would stamp "http://0.0.0.0:<port>" into every absolute URL it builds (Auth.js redirects
+// included), which no browser can follow. Without it Next falls back to localhost for its own
+// URLs; Auth.js uses the request's Host header instead (src/app/api/auth/[...nextauth]/route.ts).
+const bindHost = process.env.HOST ?? "0.0.0.0";
+const hostname = bindHost === "0.0.0.0" || bindHost === "::" ? undefined : bindHost;
 const port = Number(process.env.PORT ?? 3000);
 
 async function main() {
@@ -46,10 +52,13 @@ async function main() {
 
   attachCollab(server, hocuspocus, { path: COLLAB_PATH, fallback: upgrade });
 
-  server.listen(port, hostname, () => {
-    const shownHost = hostname === "0.0.0.0" ? "localhost" : hostname;
+  server.listen(port, bindHost, () => {
+    const shownHost = hostname ?? "localhost";
     console.log(`> Markdoc ready on http://${shownHost}:${port} (${dev ? "development" : "production"})`);
     console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);
+    if (!hostname) {
+      for (const ip of lanAddresses()) console.log(`> Also reachable on the LAN at http://${ip}:${port}`);
+    }
   });
 
   const shutdown = async () => {

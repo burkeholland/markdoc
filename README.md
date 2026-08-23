@@ -90,6 +90,8 @@ npm run dev                  # http://localhost:3000
 
 With `AUTH_DEV_LOGIN=1` (the default in `.env.example`) the login page offers a **development login** that accepts any handle, so you can open two browsers as two users without a GitHub OAuth app. Set `GITHUB_TOKEN` (for example from `gh auth token`) to use gists and repositories with the development login.
 
+The server listens on all interfaces (`HOST` overrides), so the same process also works from a phone or another machine on the LAN at `http://<your-ip>:3000` or `http://<machine-name>:3000` — the start-up log lists the addresses. Sign-in redirects and the collaboration socket follow whatever host the browser used, and in development Next's cross-origin guard for `/_next/*` is pre-filled with this machine's LAN addresses and name (`scripts/lib/dev-origins.mjs`; add others with `ALLOWED_DEV_ORIGINS=a,b`; restart after a DHCP change). `e2e/lan.spec.ts` covers it.
+
 To sign in with GitHub for real, create an OAuth App (Settings → Developer settings → OAuth Apps) with callback URL `http://localhost:3000/api/auth/callback/github` and set `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET`. Markdoc requests the `read:user user:email gist repo` scopes so it can publish on your behalf.
 
 ### Environment variables
