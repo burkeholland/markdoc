@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -28,24 +28,32 @@ jobs:
           AUTH_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
 
   e2e:
-    name: End-to-end (Playwright)
+    # ~130 tests; one worker on the 2-vCPU runner ran past the 30-min cap. Two shards with two workers
+    # each (playwright.config.ts under CI) keep every job well inside it; fail-fast off so a red shard
+    # still lets the other finish and report.
+    name: End-to-end (Playwright) ${{ matrix.shard }}/2
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+      - run: npm run test:e2e -- --shard=${{ matrix.shard }}/2
         env:
           CI: "1"
-      - uses: actions/upload-artifact@v4
+          NEXT_TELEMETRY_DISABLED: "1"
+      - uses: actions/upload-artifact@v5
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: |
             playwright-report
             test-results
@@ -56,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:

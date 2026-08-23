@@ -1,0 +1,17 @@
+{
+  // Type-check project for `next build` only (next.config.ts `typescript.tsconfigPath` when
+  // NODE_ENV=production). The container image context has no test code (.dockerignore drops e2e/ and
+  // scripts/*.mts), so everything test-only is excluded here; `npm run typecheck` (tsc -p tsconfig.json)
+  // and the editor still cover all of it. Because this file `extends`, Next never rewrites it.
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "playwright.config.ts",
+    "e2e/**",
+    "scripts/**/*.mts",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "vitest.config.*",
+    "vitest.setup.ts"
+  ]
+}

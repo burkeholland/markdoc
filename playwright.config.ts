@@ -40,9 +40,13 @@ export default defineConfig({
   timeout: 90_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
-  workers: 1,
+  // The GitHub runner has 2 vCPUs and the suite is mostly IO-bound (browser <-> dev server); each
+  // spec file creates its own users and documents, so two files can run side by side. Locally one
+  // worker keeps the shared dev box calm (E2E_WORKERS overrides both).
+  workers: Number(process.env.E2E_WORKERS ?? (process.env.CI ? 2 : 1)),
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : [["list"]],
+  // CI: GitHub annotations on failures + the per-test list (timings in the job log) + HTML report artifact.
+  reporter: process.env.CI ? [["github"], ["list"], ["html", { open: "never" }]] : [["list"]],
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
