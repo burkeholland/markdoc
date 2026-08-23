@@ -24,7 +24,7 @@ import { CodePane } from "./code-pane";
 import { RichPane } from "./rich-pane";
 import { StatusBar, type Layout } from "./status-bar";
 import { CommentsPanel } from "./comments-panel";
-import { VersionsPanel, VersionDiffView } from "./versions-panel";
+import { VersionsPanel, VersionDiffView, type VersionPreview } from "./versions-panel";
 import { ActivityPanel } from "./activity-panel";
 import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
@@ -36,7 +36,7 @@ import { FindBar } from "./find-bar";
 import { useScrollSync } from "./scroll-sync";
 import { CommandPalette, isPaletteShortcut } from "./command-palette";
 import { buildCommands, type EditorCommandContext } from "./commands";
-import type { NotificationDto, VersionSummary } from "@/lib/api";
+import type { NotificationDto } from "@/lib/api";
 import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
 import { isMac } from "@/lib/utils";
@@ -71,7 +71,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [commitOpen, setCommitOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [versionPreview, setVersionPreview] = useState<{ version: VersionSummary; content: string } | null>(null);
+  const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
   const [cursor, setCursor] = useState<{ code: number | null; rich: number | null }>({ code: null, rich: null });
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
@@ -572,7 +572,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
               </div>
             )}
             {versionPreview ? (
-              <VersionDiffView session={session} version={versionPreview.version} content={versionPreview.content} />
+              <VersionDiffView session={session} preview={versionPreview} />
             ) : (
               <>
                 <div className={cn("flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden")} data-testid="code-column">

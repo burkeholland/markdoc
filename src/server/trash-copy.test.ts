@@ -13,6 +13,7 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 const { getDb, schema } = await import("@/server/db");
 const { eq } = await import("drizzle-orm");
 const {
+  addVersion,
   createDocument,
   deleteDocument,
   duplicateDocument,
@@ -31,6 +32,7 @@ const { putAsset, getAsset } = await import("@/server/assets");
 const { DELETE, GET: GET_DOC } = await import("../app/api/documents/[id]/route");
 const { POST: RESTORE } = await import("../app/api/documents/[id]/restore/route");
 const { POST: DUPLICATE } = await import("../app/api/documents/[id]/duplicate/route");
+const { POST: COPY_VERSION } = await import("../app/api/documents/[id]/versions/[vid]/copy/route");
 const { POST: COLLAB_TOKEN } = await import("../app/api/documents/[id]/collab-token/route");
 const { GET: GET_LIST } = await import("../app/api/documents/route");
 
@@ -169,6 +171,33 @@ describe("routes", () => {
     expect(await getDocumentAccess(body.id, owner)).toBeNull();
 
     expect((await as(null, () => DUPLICATE(req("POST", `/api/documents/${doc.id}/duplicate`), params(doc.id)))).status).toBe(401);
+  });
+
+  it("POST /versions/:vid/copy: a viewer gets a 201 copy they own with that version's text; anon 401; trashed 404", async () => {
+    const doc = await createDocument({ ownerId: owner.id, title: "Versioned", content: "# Versioned\n\nlatest text\n" });
+    await upsertCollaborator(doc.id, "vic", "viewer", owner.id);
+    const v1 = await addVersion({ documentId: doc.id, content: "# Versioned\n\nfirst draft\n", kind: "named", title: "First", createdBy: owner.id });
+    const vparams = { params: Promise.resolve({ id: doc.id, vid: v1.id }) };
+    const path = `/api/documents/${doc.id}/versions/${v1.id}/copy`;
+
+    const res = await as(viewer, () => COPY_VERSION(req("POST", path), vparams));
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string; title: string };
+    expect(body.title).toBe(`Copy of Versioned (v${v1.number})`);
+    expect((await getDocumentAccess(body.id, viewer))!.role).toBe("owner");
+    expect(await getDocumentAccess(body.id, owner)).toBeNull();
+    const db = await getDb();
+    const [copy] = await db.select().from(schema.documents).where(eq(schema.documents.id, body.id));
+    expect(copy.content).toBe("# Versioned\n\nfirst draft\n");
+    expect((await listVersions(body.id))[0]).toMatchObject({ number: 1, title: `Copied from v${v1.number} “First”` });
+
+    expect((await as(null, () => COPY_VERSION(req("POST", path), vparams))).status).toBe(401);
+    const missing = { params: Promise.resolve({ id: doc.id, vid: "nope" }) };
+    expect((await as(viewer, () => COPY_VERSION(req("POST", path), missing))).status).toBe(404);
+
+    await deleteDocument(doc.id);
+    expect((await as(viewer, () => COPY_VERSION(req("POST", path), vparams))).status).toBe(404);
+    expect((await as(owner, () => COPY_VERSION(req("POST", path), vparams))).status).toBe(404);
   });
 
   it("DELETE moves to the trash; GET ?trash=1 lists it; the document and its collab token are gone", async () => {

@@ -1,25 +1,45 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Clock, GitCommit, History, Loader2, Pencil, RotateCcw, Tag, Upload, X, Download } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, GitCommit, History, Loader2, MoveVertical, Pencil, RotateCcw, Tag, Upload, X, Download } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api, type VersionSummary } from "@/lib/api";
-import { collapseUnchanged, diffStats, wordDiff } from "@/editor/diff";
+import { collapseSegment, detectMoves, diffStats, hunkCounter, hunks, wordDiff, type Collapsed, type DiffSegment } from "@/editor/diff";
 import { cn, formatDateTime, relativeTime } from "@/lib/utils";
+import { setPendingNotice } from "@/lib/notice";
 import { EmptyState, Spinner } from "@/components/ui/primitives";
 import { useSessionValue } from "./use-session";
+
+/** What the diff view shows: one version against the live text, or (with `base`) two versions. */
+export interface VersionPreview {
+  version: VersionSummary;
+  content: string;
+  /** The older side in compare mode; absent = compare against the current document. */
+  base?: { version: VersionSummary; content: string };
+  /** Versions in (base, version], newest first — whose authors are listed under the header. */
+  range?: VersionSummary[];
+}
 
 export interface VersionsPanelProps {
   session: CollabSession;
   onClose: () => void;
-  /** Called with the selected version content to show a diff in place of the editor (null = back to editing). */
-  onPreview: (preview: { version: VersionSummary; content: string } | null) => void;
+  /** Called with the selected version(s) to show a diff in place of the editor (null = back to editing). */
+  onPreview: (preview: VersionPreview | null) => void;
   refreshKey: number;
 }
 
 const KIND_LABEL: Record<VersionSummary["kind"], string> = {
   auto: "Autosaved",
   named: "Named version",
+  publish: "Published",
+  restore: "Restored",
+  import: "Imported",
+};
+
+const KIND_TAG: Record<VersionSummary["kind"], string> = {
+  auto: "Auto",
+  named: "Named",
   publish: "Published",
   restore: "Restored",
   import: "Imported",
@@ -53,12 +73,15 @@ function groupByDay(versions: VersionSummary[]): { day: string; items: VersionSu
 }
 
 export function VersionsPanel({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
+  const router = useRouter();
   const [versions, setVersions] = useState<VersionSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [compare, setCompare] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const contentCache = useRef(new Map<string, string>());
   const canEdit = session.role === "owner" || session.role === "editor";
 
   const load = useCallback(async () => {
@@ -75,22 +98,58 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
     void load();
   }, [load, refreshKey]);
 
-  const select = async (v: VersionSummary) => {
-    if (selected === v.id) {
-      setSelected(null);
-      onPreview(null);
-      return;
-    }
-    setSelected(v.id);
-    setBusy(v.id);
-    try {
+  const contentOf = useCallback(
+    async (v: VersionSummary) => {
+      const cached = contentCache.current.get(v.id);
+      if (cached !== undefined) return cached;
       const res = await api.documents.version(session.docId, v.id);
-      onPreview({ version: v, content: res.version.content });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load version");
-    } finally {
-      setBusy(null);
-    }
+      contentCache.current.set(v.id, res.version.content);
+      return res.version.content;
+    },
+    [session.docId],
+  );
+
+  /** Two ticked versions → old→new compare; otherwise fall back to the clicked row vs current, or nothing. */
+  const showPreview = useCallback(
+    async (compareIds: string[], selectedId: string | null) => {
+      const all = versions ?? [];
+      const picked = compareIds.map((id) => all.find((v) => v.id === id)).filter((v): v is VersionSummary => Boolean(v));
+      try {
+        if (picked.length === 2) {
+          const [older, newer] = [...picked].sort((a, b) => a.number - b.number);
+          setBusy(newer.id);
+          const [oldContent, newContent] = await Promise.all([contentOf(older), contentOf(newer)]);
+          const range = all.filter((v) => v.number > older.number && v.number <= newer.number);
+          onPreview({ version: newer, content: newContent, base: { version: older, content: oldContent }, range });
+          return;
+        }
+        const single = selectedId ? all.find((v) => v.id === selectedId) : undefined;
+        if (single) {
+          setBusy(single.id);
+          onPreview({ version: single, content: await contentOf(single) });
+          return;
+        }
+        onPreview(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load version");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [versions, contentOf, onPreview],
+  );
+
+  const select = async (v: VersionSummary) => {
+    const next = selected === v.id ? null : v.id;
+    setSelected(next);
+    await showPreview(compare, next);
+  };
+
+  const toggleCompare = async (v: VersionSummary) => {
+    // Keep at most two ticked; ticking a third replaces the older tick.
+    const next = compare.includes(v.id) ? compare.filter((id) => id !== v.id) : [...compare.slice(-1), v.id];
+    setCompare(next);
+    await showPreview(next, selected);
   };
 
   const restore = async (v: VersionSummary) => {
@@ -99,6 +158,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
     try {
       await api.documents.restoreVersion(session.docId, v.id);
       setSelected(null);
+      setCompare([]);
       onPreview(null);
       await load();
     } catch (e) {
@@ -112,11 +172,28 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
     const title = draft.trim();
     setRenaming(null);
     if (!title || title === v.title) return;
-    await api.documents.renameVersion(session.docId, v.id, title);
-    await load();
+    try {
+      await api.documents.renameVersion(session.docId, v.id, title);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Rename failed");
+    }
+  };
+
+  const copyAsNew = async (v: VersionSummary) => {
+    setBusy(v.id);
+    try {
+      const res = await api.documents.copyVersion(session.docId, v.id);
+      setPendingNotice(`Created “${res.title}” from version ${v.number}.`, "success");
+      router.push(`/d/${res.id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not copy the version");
+      setBusy(null);
+    }
   };
 
   const groups = useMemo(() => groupByDay(versions ?? []), [versions]);
+  const compareHint = compare.length === 1 ? "Tick one more version to compare" : compare.length === 2 ? "Comparing two versions" : null;
 
   return (
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="versions-panel">
@@ -136,6 +213,21 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
       </div>
       <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
         {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger">{error}</div>}
+        {compareHint && (
+          <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
+            <span>{compareHint}</span>
+            <button
+              type="button"
+              className="text-accent hover:underline"
+              onClick={() => {
+                setCompare([]);
+                void showPreview([], selected);
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        )}
         {versions === null ? (
           <div className="flex justify-center py-10">
             <Spinner />
@@ -153,57 +245,94 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
                   <li key={v.id}>
                     <div
                       className={cn(
-                        "group rounded-lg border px-3 py-2 transition-colors",
-                        selected === v.id ? "border-accent bg-surface shadow-sm" : "border-transparent hover:border-line hover:bg-surface",
+                        "group rounded-lg border px-2 py-2 transition-colors",
+                        selected === v.id || compare.includes(v.id) ? "border-accent bg-surface shadow-sm" : "border-transparent hover:border-line hover:bg-surface",
                       )}
                       data-testid="version-item"
                       data-version-kind={v.kind}
+                      data-version-number={v.number}
                     >
-                      <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => void select(v)}>
-                        <KindIcon kind={v.kind} />
-                        <div className="min-w-0 flex-1">
-                          {renaming === v.id ? (
-                            <input
-                              autoFocus
-                              className="input h-7 text-[13px]"
-                              value={draft}
-                              onChange={(e) => setDraft(e.target.value)}
-                              onBlur={() => void rename(v)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") void rename(v);
-                                if (e.key === "Escape") setRenaming(null);
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          ) : (
-                            <div className="truncate text-[13px] font-medium text-ink">{v.title ?? `${KIND_LABEL[v.kind]} · v${v.number}`}</div>
-                          )}
-                          <div className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-3">
-                            <span title={formatDateTime(v.createdAt)}>{relativeTime(v.createdAt)}</span>
-                            {v.createdByName && <span>· {v.createdByName}</span>}
-                            {v.commitSha && (
-                              <span className="inline-flex items-center gap-0.5 font-mono text-[11px]" title={v.commitSha}>
-                                <GitCommit size={11} /> {v.commitSha.slice(0, 7)}
-                              </span>
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          className="mt-1 h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
+                          checked={compare.includes(v.id)}
+                          onChange={() => void toggleCompare(v)}
+                          aria-label={`Compare v${v.number}`}
+                          title="Tick two versions to compare them"
+                          data-testid="version-compare"
+                        />
+                        <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => void select(v)}>
+                          <KindIcon kind={v.kind} />
+                          <div className="min-w-0 flex-1">
+                            {renaming === v.id ? (
+                              <input
+                                autoFocus
+                                className="input h-7 text-[13px]"
+                                value={draft}
+                                placeholder={`Name version ${v.number}`}
+                                onChange={(e) => setDraft(e.target.value)}
+                                onBlur={() => void rename(v)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") void rename(v);
+                                  if (e.key === "Escape") setRenaming(null);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                data-testid="version-rename-input"
+                              />
+                            ) : (
+                              <div className="flex items-center gap-1.5">
+                                <span className="truncate text-[13px] font-medium text-ink">{v.title ?? `${KIND_LABEL[v.kind]} · v${v.number}`}</span>
+                                <span
+                                  className="shrink-0 rounded border border-line px-1 text-[10px] font-medium uppercase tracking-wide text-ink-3"
+                                  data-testid="version-kind"
+                                >
+                                  {KIND_TAG[v.kind]}
+                                </span>
+                              </div>
                             )}
+                            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-3">
+                              <span className="font-mono text-[11px] text-ink-4">v{v.number}</span>
+                              <span title={formatDateTime(v.createdAt)}>· {relativeTime(v.createdAt)}</span>
+                              {v.createdByName && <span>· {v.createdByName}</span>}
+                              {v.commitSha && (
+                                <span className="inline-flex items-center gap-0.5 font-mono text-[11px]" title={v.commitSha}>
+                                  <GitCommit size={11} /> {v.commitSha.slice(0, 7)}
+                                </span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                        {busy === v.id && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
-                      </button>
-                      {selected === v.id && canEdit && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <button type="button" className="btn btn-sm btn-primary gap-1.5" onClick={() => void restore(v)} data-testid="version-restore">
-                            <RotateCcw size={13} /> Restore
-                          </button>
+                          {busy === v.id && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
+                        </button>
+                      </div>
+                      {selected === v.id && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5">
+                          {canEdit && (
+                            <button type="button" className="btn btn-sm btn-primary gap-1.5" onClick={() => void restore(v)} data-testid="version-restore">
+                              <RotateCcw size={13} /> Restore
+                            </button>
+                          )}
+                          {canEdit && (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-ghost gap-1.5"
+                              onClick={() => {
+                                setDraft(v.title ?? "");
+                                setRenaming(v.id);
+                              }}
+                              data-testid="version-rename"
+                            >
+                              <Pencil size={13} /> {v.title ? "Rename" : "Name"}
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-sm btn-ghost gap-1.5"
-                            onClick={() => {
-                              setDraft(v.title ?? "");
-                              setRenaming(v.id);
-                            }}
+                            onClick={() => void copyAsNew(v)}
+                            title="Copy this version as a new document"
+                            data-testid="version-copy"
                           >
-                            <Pencil size={13} /> Name
+                            <Copy size={13} /> Copy as new doc
                           </button>
                         </div>
                       )}
@@ -219,37 +348,186 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
   );
 }
 
-/** Read-only comparison of a past version against the live document. */
-export function VersionDiffView({ session, version, content }: { session: CollabSession; version: VersionSummary; content: string }) {
-  const current = useSessionValue(session, (s) => s.ytext.toString());
-  const changes = useMemo(() => wordDiff(content, current), [content, current]);
-  const stats = useMemo(() => diffStats(changes), [changes]);
-  const collapsed = useMemo(() => collapseUnchanged(changes), [changes]);
+/** One rendered block of the diff: a hunk (all its segments) or a stretch of unchanged text between hunks. */
+type Block = { hunk: number; segments: DiffSegment[] } | { gap: (DiffSegment | Collapsed)[] };
+
+function buildBlocks(segments: DiffSegment[], hunkList: { start: number; end: number }[]): Block[] {
+  const blocks: Block[] = [];
+  let i = 0;
+  hunkList.forEach((h, n) => {
+    if (i < h.start) blocks.push({ gap: segments.slice(i, h.start).flatMap((s, k) => collapseSegment(s, i + k === 0, false)) });
+    blocks.push({ hunk: n, segments: segments.slice(h.start, h.end + 1) });
+    i = h.end + 1;
+  });
+  if (i < segments.length) blocks.push({ gap: segments.slice(i).flatMap((s, k) => collapseSegment(s, i + k === 0, i + k === segments.length - 1)) });
+  return blocks;
+}
+
+function Segment({ c }: { c: DiffSegment | Collapsed }) {
+  if ("collapsed" in c) {
+    return <span className="my-2 block rounded bg-surface-3 px-2 py-0.5 text-center text-xs text-ink-4">··· {c.collapsed} unchanged words ···</span>;
+  }
+  if (c.moved) {
+    return (
+      <span className="rounded-sm bg-surface-3 text-ink-2 outline-1 outline-dashed outline-line-2" title="Moved paragraph (unchanged text)" data-testid="diff-moved">
+        <MoveVertical size={12} className="mr-1 inline-block align-[-1px] text-ink-3" aria-label="Moved" />
+        {c.value}
+      </span>
+    );
+  }
+  if (c.added) return <ins>{c.value}</ins>;
+  if (c.removed) return <del>{c.value}</del>;
+  return <span>{c.value}</span>;
+}
+
+function versionLabel(v: VersionSummary) {
   return (
-    <div className="flex h-full min-h-0 flex-col" data-testid="version-diff">
-      <div className="flex h-12 items-center gap-3 border-b border-line px-6">
+    <>
+      <span className="font-medium text-ink">v{v.number}</span>
+      {v.title && <span className="text-ink-2"> ‘{v.title}’</span>}
+    </>
+  );
+}
+
+function compactRange(numbers: number[]): string {
+  if (numbers.length <= 4) return numbers.map((n) => `v${n}`).join(", ");
+  return `v${numbers[0]}–v${numbers[numbers.length - 1]}`;
+}
+
+/** Read-only comparison of a past version against the live document, or of two versions (old → new). */
+export function VersionDiffView({ session, preview }: { session: CollabSession; preview: VersionPreview }) {
+  const { version, content, base, range } = preview;
+  const current = useSessionValue(session, (s) => s.ytext.toString());
+  const [swapped, setSwapped] = useState(false);
+  const [active, setActive] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  const oldSide = base ? (swapped ? { version, content } : base) : { version, content };
+  const newSide = base ? (swapped ? base : { version, content }) : null;
+  const oldText = oldSide.content;
+  const newText = newSide ? newSide.content : current;
+
+  const segments = useMemo(() => detectMoves(wordDiff(oldText, newText)), [oldText, newText]);
+  const stats = useMemo(() => diffStats(segments), [segments]);
+  const hunkList = useMemo(() => hunks(segments), [segments]);
+  const blocks = useMemo(() => buildBlocks(segments, hunkList), [segments, hunkList]);
+  const movedCount = useMemo(() => hunkList.filter((h) => h.kind === "moved").length, [hunkList]);
+
+  useEffect(() => {
+    setActive(0);
+  }, [oldText, newText]);
+  useEffect(() => {
+    rootRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const goTo = useCallback(
+    (n: number) => {
+      if (hunkList.length === 0) return;
+      const next = Math.min(Math.max(n, 0), hunkList.length - 1);
+      setActive(next);
+      bodyRef.current?.querySelector<HTMLElement>(`[data-hunk="${next}"]`)?.scrollIntoView({ block: "center" });
+    },
+    [hunkList.length],
+  );
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.target instanceof HTMLElement && /^(input|textarea|button)$/i.test(e.target.tagName) && e.key !== "[" && e.key !== "]") return;
+    if (e.key === "]") {
+      e.preventDefault();
+      goTo(active + 1);
+    } else if (e.key === "[") {
+      e.preventDefault();
+      goTo(active - 1);
+    }
+  };
+
+  const authors = useMemo(() => {
+    const names = new Set<string>();
+    for (const v of range ?? []) if (v.createdByName) names.add(v.createdByName);
+    return Array.from(names);
+  }, [range]);
+  const rangeNumbers = useMemo(() => (range ?? []).map((v) => v.number).sort((a, b) => a - b), [range]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col outline-none" data-testid="version-diff" ref={rootRef} tabIndex={0} onKeyDown={onKeyDown}>
+      <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-6 py-2">
         <span className="pane-label">Comparing</span>
-        <span className="text-sm text-ink-2">
-          <span className="font-medium text-ink">{version.title ?? `v${version.number}`}</span> ({formatDateTime(version.createdAt)}) → current
-        </span>
-        <span className="ml-auto flex items-center gap-3 font-mono text-xs">
-          <span className="text-success">+{stats.added} words</span>
-          <span className="text-danger">−{stats.removed} words</span>
-        </span>
-      </div>
-      <div className="scrollbar-thin flex-1 overflow-y-auto">
-        <pre className="md-diff whitespace-pre-wrap break-words px-8 py-6 font-mono text-[14px] leading-7 text-ink-2">
-          {collapsed.map((c, i) =>
-            "collapsed" in c ? (
-              <span key={i} className="my-2 block rounded bg-surface-3 px-2 py-0.5 text-center text-xs text-ink-4">
-                ··· {c.collapsed} unchanged words ···
+        <span className="text-sm text-ink-2" data-testid="diff-header">
+          {newSide ? (
+            <>
+              {versionLabel(oldSide.version)} → {versionLabel(newSide.version)}{" "}
+              <span className="text-ink-3">
+                ({newSide.version.createdByName ?? "unknown"}, {relativeTime(newSide.version.createdAt)})
               </span>
-            ) : c.added ? (
-              <ins key={i}>{c.value}</ins>
-            ) : c.removed ? (
-              <del key={i}>{c.value}</del>
+            </>
+          ) : (
+            <>
+              {versionLabel(version)} <span className="text-ink-3">({formatDateTime(version.createdAt)})</span> → current
+            </>
+          )}
+        </span>
+        {base && (
+          <button type="button" className="btn btn-sm btn-ghost gap-1" onClick={() => setSwapped((s) => !s)} title="Swap old and new" data-testid="diff-swap">
+            <ArrowLeftRight size={13} /> Swap
+          </button>
+        )}
+        <span className="ml-auto flex items-center gap-2">
+          <span className="flex items-center gap-3 font-mono text-xs">
+            <span className="text-success">+{stats.added} words</span>
+            <span className="text-danger">−{stats.removed} words</span>
+            {movedCount > 0 && <span className="text-ink-3">↕ {movedCount} moved</span>}
+          </span>
+          <span className="ml-2 flex items-center gap-1 rounded-md border border-line bg-surface text-xs text-ink-2">
+            <button type="button" className="icon-btn h-7 w-7" onClick={() => goTo(active - 1)} disabled={active <= 0} aria-label="Previous change ([)" title="Previous change ([)" data-testid="diff-prev">
+              <ChevronUp size={14} />
+            </button>
+            <span className="min-w-[7ch] text-center tabular-nums" data-testid="diff-counter">
+              {hunkCounter(active, hunkList.length)}
+            </span>
+            <button
+              type="button"
+              className="icon-btn h-7 w-7"
+              onClick={() => goTo(active + 1)}
+              disabled={active >= hunkList.length - 1}
+              aria-label="Next change (])"
+              title="Next change (])"
+              data-testid="diff-next"
+            >
+              <ChevronDown size={14} />
+            </button>
+          </span>
+        </span>
+        {newSide && rangeNumbers.length > 0 && (
+          <div className="flex basis-full flex-wrap items-center gap-1.5 text-xs text-ink-3" data-testid="diff-authors">
+            <span>
+              {compactRange(rangeNumbers)} by{authors.length === 0 && " unknown"}
+            </span>
+            {authors.map((name) => (
+              <span key={name} className="rounded-full border border-line bg-surface px-2 py-0.5 text-ink-2" data-testid="diff-author">
+                {name}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="scrollbar-thin flex-1 overflow-y-auto" ref={bodyRef}>
+        <pre className="md-diff whitespace-pre-wrap break-words px-8 py-6 font-mono text-[14px] leading-7 text-ink-2">
+          {blocks.map((b, i) =>
+            "hunk" in b ? (
+              <span
+                key={i}
+                data-hunk={b.hunk}
+                data-testid={`diff-hunk-${b.hunk + 1}`}
+                data-active={b.hunk === active ? "true" : undefined}
+                className={cn("rounded-sm", b.hunk === active && "bg-accent-soft shadow-[0_2px_0_0_var(--color-accent)]")}
+              >
+                {b.segments.map((s, k) => (
+                  <Segment key={k} c={s} />
+                ))}
+              </span>
             ) : (
-              <span key={i}>{c.value}</span>
+              b.gap.map((s, k) => <Segment key={`${i}-${k}`} c={s} />)
             ),
           )}
         </pre>

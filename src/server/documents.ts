@@ -376,19 +376,30 @@ const ASSET_URL_RE = /\/api\/assets\/([0-9a-z]+)/g;
  * suggestions dropped, comments not carried over), always stored in Markdoc regardless of the source,
  * no collaborators. Assets referenced in the text are copied (new rows, same bytes) and their URLs rewritten.
  */
-export async function duplicateDocument(docId: string, userId: string): Promise<Document> {
+export interface DuplicateOptions {
+  /** Text for the copy instead of the current live text (e.g. a past version's content). */
+  content?: string;
+  /** Appended to the "Copy of <title>" title, e.g. " (v12)". */
+  titleSuffix?: string;
+  /** Title of the copy's first version (default "Copied from <title>"). */
+  versionTitle?: string;
+}
+
+export async function duplicateDocument(docId: string, userId: string, options: DuplicateOptions = {}): Promise<Document> {
   const db = await getDb();
   const [source] = await db.select().from(schema.documents).where(eq(schema.documents.id, docId));
   if (!source) throw new Error("Document not found");
   const { readLiveText } = await import("@/server/livedoc");
   const live = await readLiveText(docId);
-  const title = `Copy of ${live.title || source.title}`;
+  const sourceTitle = live.title || source.title;
+  const title = `Copy of ${sourceTitle}${options.titleSuffix ?? ""}`;
   const newId = nanoid();
+  const text = options.content ?? live.clean;
 
-  const referenced = new Set(Array.from(live.clean.matchAll(ASSET_URL_RE), (m) => m[1]));
+  const referenced = new Set(Array.from(text.matchAll(ASSET_URL_RE), (m) => m[1]));
   const assets = referenced.size > 0 ? (await db.select().from(schema.assets).where(eq(schema.assets.documentId, docId))).filter((a) => referenced.has(a.id)) : [];
   const idMap = new Map(assets.map((a) => [a.id, assetNanoid()]));
-  const content = live.clean.replace(ASSET_URL_RE, (m, id: string) => (idMap.has(id) ? `/api/assets/${idMap.get(id)}` : m));
+  const content = text.replace(ASSET_URL_RE, (m, id: string) => (idMap.has(id) ? `/api/assets/${idMap.get(id)}` : m));
 
   const [doc] = await db
     .insert(schema.documents)
@@ -399,7 +410,7 @@ export async function duplicateDocument(docId: string, userId: string): Promise<
       .insert(schema.assets)
       .values(assets.map((a) => ({ id: idMap.get(a.id)!, documentId: newId, userId, name: a.name, mime: a.mime, size: a.size, sha256: a.sha256, data: a.data })));
   }
-  await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: `Copied from ${live.title || source.title}` });
+  await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: options.versionTitle ?? `Copied from ${sourceTitle}` });
   return doc;
 }
 
