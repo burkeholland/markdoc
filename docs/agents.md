@@ -119,7 +119,8 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 | `GET /api/documents/:id/versions` | | view | `{ versions }`, newest first; `kind` is `auto`, `named`, `publish`, `restore` or `import`. |
 | `POST /api/documents/:id/versions` | `{ title }` | edit | Name the current state (`201 { version }`). |
 | `GET /api/documents/:id/versions/:vid` | | view | One version with its full text. |
-| `POST /api/documents/:id/versions/:vid` | `{ action: "restore" }` or `{ action: "rename", title }` | edit | Restore (the pre-restore state is kept as a version) or rename. |
+| `POST /api/documents/:id/versions/:vid` | `{ action: "restore" }` or `{ action: "rename", title }` | edit | Restore (the pre-restore state is kept as a version) or rename (an `auto` version becomes `named`). |
+| `POST /api/documents/:id/versions/:vid/copy` | | view | Copy that version as a new document you own: `201 { id, title }`, titled *Copy of <title> (v<n>)*, same rules as `/duplicate` (images copied, stored in Markdoc, no collaborators, one version *Copied from v<n>*). Trashed documents and unknown versions are `404`. |
 | `DELETE /api/documents/:id/versions/:vid` | | edit | Delete a version. |
 | `GET /api/documents/:id/activity` | `?before=<iso>&limit=50` | view | Who did what, when: `{ items: [{ id, actorId, actorName, actorKind: "user" \| "agent", action, detail, createdAt }], nextBefore }`, newest first. `action` is one of `edit`, `comment.add`, `comment.resolve`, `suggestion.add`, `suggestion.accept`, `suggestion.reject`, `version.save`, `version.restore`, `publish`, `share.add`, `share.remove`, `asset.upload`, `title.change`; `detail` holds small facts (`chars`, `count`, `number`, `title`, `login`, `role`, a ≤120-char `quote`), never document text. Pass `nextBefore` as `before` for the next page. Your own API calls appear under the token's name with `actorKind: "agent"`. |
 | `GET /api/documents/:id/export` | `?format=md \| html \| pdf` (default `md`), `?download=1` (attachment; HTML embeds images as `data:` URIs), `?suggestions=1` keeps pending insertions | view | Plain Markdown, a standalone HTML page, or a Letter PDF. PDF returns `503 { error }` if Chromium is unavailable on the server. |
@@ -221,4 +222,4 @@ curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X
 - The agent's suggestions in green/red on both surfaces, listed under **Comments → Suggestions** with Accept/Reject.
 - The agent's comments with a bot badge; replies from people are readable through `markdoc_comments`.
 - Every action in the document's **Activity** panel under the token's name, marked as an agent.
-- Version history entries attributed to *"you via &lt;agent&gt;"*.
+- Version history entries attributed to *"you via &lt;agent&gt;"*. In the history panel people can tick any two versions to compare them (old → new, with a Swap button, the authors of every version in the range, and `[` / `]` to jump between change hunks; a paragraph that only moved shows once as *moved* rather than red + green), name an auto version inline, restore it, or copy it as a new document.

@@ -520,7 +520,7 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
                 data-hunk={b.hunk}
                 data-testid={`diff-hunk-${b.hunk + 1}`}
                 data-active={b.hunk === active ? "true" : undefined}
-                className={cn("rounded-sm", b.hunk === active && "outline-2 outline-offset-2 outline-accent")}
+                className={cn("rounded-sm", b.hunk === active && "bg-accent-soft shadow-[0_2px_0_0_var(--color-accent)]")}
               >
                 {b.segments.map((s, k) => (
                   <Segment key={k} c={s} />
