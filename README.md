@@ -165,6 +165,10 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 **PDF export needs Chromium.** `GET /api/documents/:id/export?format=pdf` renders with `playwright-core`; it answers `503` when no browser can be launched. Locally, `npx playwright install chromium` installs Playwright's build; on a server, point `CHROMIUM_PATH` at a system Chromium (the Dockerfile installs Alpine's and sets it).
 
+### Accessibility
+
+`npx playwright test e2e/a11y.spec.ts` runs axe-core (`@axe-core/playwright`, WCAG 2.1 A/AA tag set) against every screen and floating surface: login, dashboard (starred strip, trash chip, template dialog), the editor with outline and comments open and with each floating UI open in turn (find bar, slash menu, table menu, selection bubble, command palette, stats/presence/notifications popovers, share/image/shortcuts dialogs), the versions panel in compare mode, the activity panel, the reader page, settings, an iPhone 13 viewport, and dark mode for the dashboard and editor. Each state must report zero violations; on failure the rule id, impact and offending selectors are printed. `color-contrast` is the only disabled rule (axe cannot resolve it through the blurred headers and translucent overlays; the palette tokens are checked by hand in both themes). The second half of the spec is a keyboard-only walkthrough (`page.keyboard` only): skip link → header → toolbar → panes, bold via `Ctrl+B`, command palette, commenting with `Ctrl+Alt+M`, Share via the palette, and a check that the main controls resolve to unique accessible names. Set `A11Y_SOFT=1` to report every state in one run instead of stopping at the first failure. Note for keyboard users: the Markdown pane binds `Tab` to indent; press `Esc` then `Tab` to leave it.
+
 ## How it works
 
 ```text

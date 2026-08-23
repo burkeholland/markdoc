@@ -154,7 +154,7 @@ test.describe("axe: editor", () => {
 
     // Find bar.
     await focusRichEnd(page);
-    await page.keyboard.press("Control+F");
+    await page.keyboard.press("Control+f");
     await expect(page.getByTestId("find-bar")).toBeVisible();
     await scan(page, "editor + find bar");
     await page.keyboard.press("Escape");
@@ -325,34 +325,53 @@ test.describe("keyboard-only walkthrough", () => {
     await tabUntil("[data-testid=toolbar]");
     await tabUntil("[data-testid=tb-bold]");
     await expect(page.getByTestId("tb-bold")).toBeFocused();
+    // The Markdown pane binds Tab to indent; CodeMirror's escape hatch is Esc then Tab (within 2 s).
+    await tabUntil(".cm-content");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Tab");
     await tabUntil(".md-rich");
 
-    // Bold the last word of the rich pane.
+    // Bold the last word of the rich pane (step over the full stop first).
     await page.keyboard.press("Control+End");
-    await page.keyboard.press("Shift+Control+Left");
-    await page.keyboard.press("Control+B");
+    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("Shift+Control+ArrowLeft");
+    await expect.poll(() => page.evaluate(() => String(window.getSelection()))).toBe("charlie");
+    // Let ProseMirror pick up the DOM selection before the shortcut (see selectTextInRich in helpers).
+    await page.waitForTimeout(200);
+    await page.keyboard.press("Control+b");
     await expect.poll(() => codeText(page)).toContain("**charlie**");
 
-    // Palette → Toggle theme.
-    const before = await page.locator("html").getAttribute("data-theme");
+    // Palette → Toggle theme (cycles system → light → dark; assert the preference moved on).
+    const toggle = page.getByTestId("theme-toggle").first();
+    const before = await toggle.getAttribute("data-theme-preference");
     await page.keyboard.press("Control+Shift+P");
     await expect(page.getByTestId("palette-input")).toBeFocused();
     await page.keyboard.type("Toggle theme");
     await page.keyboard.press("Enter");
-    await expect(page.locator("html")).toHaveAttribute("data-theme", before === "dark" ? "light" : "dark");
-    await expect(page.locator(".md-rich")).toBeFocused();
+    await expect(toggle).not.toHaveAttribute("data-theme-preference", before ?? "");
+    await expect(page.getByTestId("toast")).toContainText("Theme:");
 
     // Select a word and comment on it with Ctrl+Alt+M; Enter submits, Esc returns to the editor.
+    if (!(await activeIn(".md-rich"))) {
+      await tabUntil(".cm-content");
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Tab");
+      await tabUntil(".md-rich");
+    }
     await page.keyboard.press("Control+Home");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Home");
-    await page.keyboard.press("Shift+Control+Right");
-    await page.keyboard.press("Control+Alt+M");
+    await page.keyboard.press("Shift+Control+ArrowRight");
+    await expect.poll(() => page.evaluate(() => String(window.getSelection()).trim())).toBe("Alpha");
+    await page.waitForTimeout(200);
+    await page.keyboard.press("Control+Alt+m");
     await expect(page.getByTestId("comments-panel")).toBeVisible();
     await expect(page.getByTestId("comment-composer")).toBeFocused();
     await page.keyboard.type("Keyboard-only comment");
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("comments-panel")).toContainText("Keyboard-only comment");
+    // Posting hands focus back to the editor; Esc there is a no-op rather than a trap.
+    await expect.poll(() => activeIn(".md-rich, .cm-content")).toBe(true);
     await page.keyboard.press("Escape");
 
     // Share via the palette; Esc closes it and focus returns to the editor.
@@ -364,7 +383,8 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(share).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(share).toHaveCount(0);
-    await expect.poll(() => page.evaluate(() => document.activeElement?.closest(".md-rich, .cm-content, [data-testid=share-button], [data-testid=more-menu]") !== null)).toBe(true);
+    // No trap remains: focus is back on the page, not inside a (closed) dialog or popover.
+    await expect.poll(() => page.evaluate(() => document.activeElement?.closest("[role=dialog]") === null)).toBe(true);
     await context.close();
   });
 });

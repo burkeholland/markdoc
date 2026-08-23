@@ -48,6 +48,8 @@ export function CommandPalette({ open, onOpenChange, commands, groupOrder, place
   const [loading, setLoading] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Command picked but not yet run: it fires from onCloseAutoFocus, once the dialog has handed focus back.
+  const pendingRef = useRef<Command | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -100,9 +102,10 @@ export function CommandPalette({ open, onOpenChange, commands, groupOrder, place
       const next = pushRecent(recent, cmd.id);
       saveRecent(next);
       setRecent(next);
+      // Run after the dialog unmounts and restores focus, so a command that opens another dialog
+      // (Share, Image, …) captures the editor — not the palette — as the element to return focus to.
+      pendingRef.current = cmd;
       close();
-      // Let the dialog unmount and restore focus before the command moves it again or opens another dialog.
-      setTimeout(() => void cmd.run(), 0);
     },
     [recent, close],
   );
@@ -147,6 +150,11 @@ export function CommandPalette({ open, onOpenChange, commands, groupOrder, place
           onOpenAutoFocus={(e) => {
             e.preventDefault();
             inputRef.current?.focus();
+          }}
+          onCloseAutoFocus={() => {
+            const cmd = pendingRef.current;
+            pendingRef.current = null;
+            if (cmd) setTimeout(() => void cmd.run(), 0);
           }}
         >
           <RadixDialog.Title className="sr-only">Command palette</RadixDialog.Title>

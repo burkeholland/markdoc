@@ -171,6 +171,8 @@ export interface CommentsPanelProps {
   session: CollabSession;
   onClose: () => void;
   onReveal: (offset: number) => void;
+  /** Called when the pending (new-comment) composer is posted or cancelled, so focus can return to the editor. */
+  onPendingDone?: () => void;
 }
 
 /** Writes comment changes either to the shared doc (editors) or through the API (commenters). */
@@ -684,7 +686,7 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
   );
 }
 
-export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps) {
+export function CommentsPanel({ session, onClose, onReveal, onPendingDone }: CommentsPanelProps) {
   const { threads, suggestions, activeCommentId, activeSuggestionId, revealSeq, pending } = useSessionValue(
     session,
     (s) => ({
@@ -761,8 +763,12 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
                 const id = await ops.add(pending.from, pending.to, body);
                 session.setPendingComment(null);
                 if (typeof id === "string") session.setActiveComment(id);
+                onPendingDone?.();
               }}
-              onCancel={() => session.setPendingComment(null)}
+              onCancel={() => {
+                session.setPendingComment(null);
+                onPendingDone?.();
+              }}
             />
           </div>
         )}
