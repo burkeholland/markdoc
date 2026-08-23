@@ -39,6 +39,7 @@ import {
   PanelLeft,
   Code2,
   GitMerge,
+  Bot,
 } from "lucide-react";
 import type { CollabSession, EditMode, PresenceUser, SaveState } from "@/editor/collab/session";
 import type { SyncStatusDto } from "@/lib/api";
@@ -203,6 +204,20 @@ function HeaderStar({ docId }: { docId: string }) {
   );
 }
 
+/** Bot avatar for agents in the presence list (same badge style as agent comments in the comments panel). */
+function AgentAvatar({ name, color, size }: { name: string; color: string; size: number }) {
+  return (
+    <span
+      className="inline-flex shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700 ring-2 ring-surface dark:bg-violet-950 dark:text-violet-300"
+      style={{ width: size, height: size, boxShadow: `0 0 0 2px ${color}` }}
+      aria-label={`${name} (agent)`}
+      role="img"
+    >
+      <Bot size={Math.round(size * 0.55)} aria-hidden="true" />
+    </span>
+  );
+}
+
 export function PresenceStack({ session, onJump }: { session: CollabSession; onJump?: (user: PresenceUser) => void }) {
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const followUserId = useSessionValue(session, (s) => s.followUserId);
@@ -226,6 +241,7 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
     setOpen(false);
   };
   const roleLabel: Record<string, string> = { owner: "Owner", editor: "Editor", commenter: "Commenter", viewer: "Viewer" };
+  const label = (u: PresenceUser) => (u.isLocal ? `${u.name} (you)` : u.isAgent ? `${u.name} (agent${u.status ? `: ${u.status}` : ""})` : u.name);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -233,12 +249,18 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
           type="button"
           className="flex items-center -space-x-2 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           data-testid="presence"
-          aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here: ${users.map((u) => (u.isLocal ? `${u.name} (you)` : u.name)).join(", ")}`}
+          aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here: ${users.map(label).join(", ")}`}
         >
           {shown.map((u) => (
-            <Tip key={u.id} label={u.isLocal ? `${u.name} (you)` : u.name}>
-              <span className={cn("inline-flex transition-opacity", !u.isLocal && isIdle(u.idleSince, now) && "opacity-40")} data-testid="presence-avatar" data-user-id={u.id} data-idle={!u.isLocal && isIdle(u.idleSince, now) ? "" : undefined}>
-                <Avatar name={u.name} src={u.avatar} color={u.color} size={36} />
+            <Tip key={u.id} label={label(u)}>
+              <span
+                className={cn("relative inline-flex transition-opacity", !u.isLocal && isIdle(u.idleSince, now) && "opacity-40")}
+                data-testid="presence-avatar"
+                data-user-id={u.id}
+                data-idle={!u.isLocal && isIdle(u.idleSince, now) ? "" : undefined}
+                data-agent={u.isAgent ? "" : undefined}
+              >
+                {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={36} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={36} />}
               </span>
             </Tip>
           ))}
@@ -258,19 +280,26 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
             const idle = !u.isLocal && isIdle(u.idleSince, now);
             const following = followUserId === u.id;
             return (
-              <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && "opacity-60")} data-testid="presence-row" data-user-id={u.id}>
-                <Avatar name={u.name} src={u.avatar} color={u.color} size={28} />
+              <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && "opacity-60")} data-testid="presence-row" data-user-id={u.id} data-agent={u.isAgent ? "" : undefined}>
+                {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={28} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={28} />}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 text-sm font-medium text-ink">
                     <span className="truncate">{u.isLocal ? `${u.name} (you)` : u.name}</span>
+                    {u.isAgent && <span className="rounded-md bg-violet-100 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:bg-violet-950 dark:text-violet-300">Agent</span>}
                     {u.role && <span className="rounded-md bg-surface-2 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-ink-3">{roleLabel[u.role] ?? u.role}</span>}
                   </div>
                   <div className="truncate text-xs text-ink-3" data-testid="presence-section">
-                    {idle ? "Idle · " : ""}
-                    {u.cursor === null ? "no cursor" : u.section ? `in ‘${u.section}’` : "at the top"}
+                    {u.isAgent ? (
+                      <span data-testid="presence-status">{idle ? "Idle" : u.status ?? "working"}</span>
+                    ) : (
+                      <>
+                        {idle ? "Idle · " : ""}
+                        {u.cursor === null ? "no cursor" : u.section ? `in ‘${u.section}’` : "at the top"}
+                      </>
+                    )}
                   </div>
                 </div>
-                {!u.isLocal && (
+                {!u.isLocal && !u.isAgent && (
                   <div className="flex shrink-0 items-center gap-1">
                     <button type="button" className="btn btn-sm btn-outline h-7 px-2 text-xs" onClick={() => jump(u)} disabled={u.cursor === null} data-testid="presence-jump">
                       Jump

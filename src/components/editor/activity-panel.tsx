@@ -39,6 +39,10 @@ export function describeActivity(item: ActivityItemDto): string {
       const quote = str(d.quote);
       return quote ? `commented: “${quote}”` : "commented";
     }
+    case "comment.reply": {
+      const quote = str(d.quote);
+      return quote ? `replied: “${quote}”` : "replied to a comment";
+    }
     case "comment.resolve": {
       const quote = str(d.quote);
       return quote ? `resolved a comment: “${quote}”` : "resolved a comment";

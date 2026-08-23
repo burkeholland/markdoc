@@ -84,6 +84,7 @@ export interface NotificationsPageDto {
 export type ActivityActionDto =
   | "edit"
   | "comment.add"
+  | "comment.reply"
   | "comment.resolve"
   | "suggestion.add"
   | "suggestion.accept"

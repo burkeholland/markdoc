@@ -2,6 +2,7 @@ import type * as Y from "yjs";
 import { makeCollabUser, type CollabUser } from "@/editor/collab/shared";
 import type { Actor } from "@/server/http";
 import { META_KEY } from "@/server/collab/hocuspocus";
+import { touchAgentPresence } from "@/server/agent-presence";
 
 /**
  * Identity used for comments and suggestions created through the API.
@@ -26,10 +27,16 @@ export interface AgentActivity {
   at: number;
 }
 
-/** Record agent activity in the shared document so connected editors can show it. */
+/** Status shown on the agent's presence avatar while it works (see agent-presence.ts). */
+const PRESENCE_STATUS: Record<string, string> = { edited: "editing", suggested: "suggesting", commented: "commenting", reacted: "commenting", reviewed: "reviewing suggestions" };
+
+/** Record agent activity in the shared document so connected editors can show it. Also marks the agent present. */
 export function recordAgentActivity(doc: Y.Doc, actor: Actor, action: string) {
   if (!actor.agent) return;
   const meta = doc.getMap(META_KEY);
   const activity: AgentActivity = { name: actor.agent, userName: actor.name ?? actor.login ?? "someone", action, at: Date.now() };
   meta.set("agentActivity", activity);
+  // Live documents are Hocuspocus Documents and carry their id as `name`; a detached copy has nobody watching.
+  const docId = (doc as Y.Doc & { name?: unknown }).name;
+  if (typeof docId === "string") touchAgentPresence(docId, actor, PRESENCE_STATUS[action] ?? action);
 }

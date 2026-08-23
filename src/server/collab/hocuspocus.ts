@@ -7,6 +7,7 @@ import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
+import { publishAgentPresence } from "@/server/agent-presence";
 
 export type CollabContext = CollabClaims;
 
@@ -60,6 +61,7 @@ export function createCollabServer() {
       hydrateDoc(document, row.ystate ?? null, row.content, row.title);
       watchDocumentNotifications(document, documentName);
       startActivityWatch(document, documentName);
+      publishAgentPresence(document, documentName);
       return document;
     },
 

@@ -6,6 +6,7 @@ import type { Actor } from "@/server/http";
 import { newId } from "@/editor/collab/shared";
 import { META_KEY, TEXT_KEY } from "@/server/collab/hocuspocus";
 import type { CollabClaims } from "@/server/collab/token";
+import { wakeDocument } from "@/server/agent-events";
 
 /** Edits by the same actor within this window are merged into one activity row. */
 export const EDIT_COALESCE_WINDOW_MS = Number(process.env.ACTIVITY_EDIT_WINDOW_MS ?? 10 * 60 * 1000);
@@ -74,6 +75,7 @@ export async function recordActivity(docId: string, actor: ActivityActor, action
     .insert(schema.activity)
     .values({ id: newId(), documentId: docId, actorId: actor.id, actorName: actor.name, actorKind: actor.kind, action, detail, createdAt: now })
     .returning();
+  wakeDocument(docId);
   return toItem(row);
 }
 
@@ -104,6 +106,7 @@ export async function recordEdit(docId: string, actor: ActivityActor, chars: num
       .set({ detail: { ...latest.detail, chars: previous + chars }, createdAt: now, actorName: actor.name })
       .where(eq(schema.activity.id, latest.id))
       .returning();
+    wakeDocument(docId);
     return toItem(row);
   }
   return recordActivity(docId, actor, "edit", { chars }, now);
@@ -186,6 +189,8 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
   };
 
   const onText = (event: Y.YTextEvent, txn: Y.Transaction) => {
+    // Agents long-polling the document are woken on every text change, whoever made it.
+    wakeDocument(docId);
     const actor = actorFromOrigin(txn.origin);
     if (!actor) return;
     let chars = 0;
@@ -228,6 +233,20 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
         if (map.get("resolved") !== true) continue;
         const body = map.get("body");
         void recordActivity(docId, byOrigin, "comment.resolve", { threadId: map.get("id"), quote: clip(typeof body === "string" ? body : "") }).catch(log("resolve"));
+      } else if (event.target instanceof Y.Array && event.target.parent instanceof Y.Map && event.target.parent.parent === comments) {
+        const threadId = (event.target.parent as Y.Map<unknown>).get("id");
+        for (const d of event.changes.delta) {
+          if (!Array.isArray(d.insert)) continue;
+          for (const item of d.insert) {
+            const reply = item as Y.Map<unknown> | Record<string, unknown>;
+            const get = (k: string) => (reply instanceof Y.Map ? reply.get(k) : reply[k]);
+            // Edited replies are re-inserted with the same id and an `editedAt`; only fresh replies count.
+            if (get("editedAt")) continue;
+            const body = get("body");
+            const author = activityActorFromCollab(get("authorId") as string | undefined, get("authorName") as string | undefined);
+            void recordActivity(docId, author.id ? author : byOrigin, "comment.reply", { threadId, replyId: get("id"), quote: clip(typeof body === "string" ? body : "") }).catch(log("reply"));
+          }
+        }
       }
     }
   };
