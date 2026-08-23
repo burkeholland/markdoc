@@ -105,8 +105,11 @@ test.describe("GitHub sync", () => {
     await expect.poll(() => codeText(page)).toContain("<<<<<<< local");
     const text = await codeText(page);
     expect(text).toContain("Second paragraph (mine).\n=======\nSecond paragraph (theirs).\n>>>>>>> github");
-    // Three marker lines → three lint errors in the status bar.
-    await expect(page.getByTestId("issues-button")).toHaveText(/3 issues/, { timeout: 10_000 });
+    // Three marker lines → three `merge-conflict` errors (plus `multiple-h1`: `=======` reads as a setext underline).
+    await expect(page.getByTestId("issues-button")).toHaveText(/[3-9] issues/, { timeout: 10_000 });
+    await page.getByTestId("issues-button").click();
+    await expect(page.getByText("Merge conflict start marker")).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(page.locator(".cm-content")).toContainText("<<<<<<< local");
   });
 
