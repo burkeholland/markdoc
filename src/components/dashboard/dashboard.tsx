@@ -15,6 +15,8 @@ import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
 import { MentionsStrip } from "@/components/dashboard/mentions-strip";
+import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
+import { buildDashboardCommands } from "@/components/editor/commands";
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
@@ -22,6 +24,7 @@ type SearchDoc = SearchResultDto;
 const SEARCH_DEBOUNCE_MS = 250;
 const MIN_QUERY_LENGTH = 2;
 const STARRED_STRIP_MAX = 6;
+const DASHBOARD_GROUPS = ["Recent", "Create", "Navigation", "Account"] as const;
 
 export type DashboardSort = "recent" | "modified" | "title" | "created";
 export const SORT_STORAGE_KEY = "markdoc:dashboardSort";
@@ -355,8 +358,46 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
     [router],
   );
 
+  // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (paletteOpen || !isPaletteShortcut(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPaletteOpen(true);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [paletteOpen]);
+  const listDocs = useCallback(async (qs: string) => {
+    const res = await fetch(`/api/documents${qs}`);
+    if (!res.ok) throw new Error(`Could not load documents (${res.status})`);
+    const data = (await res.json()) as { documents: { id: string; title: string }[] };
+    return data.documents.map((d) => ({ id: d.id, title: d.title }));
+  }, []);
+  const paletteCommands = useCallback(
+    () =>
+      buildDashboardCommands({
+        createDocument: (templateId) => void create(templateId ? TEMPLATES.find((t) => t.id === templateId) : undefined),
+        templates: async () => {
+          const res = await fetch("/api/templates");
+          if (!res.ok) throw new Error(`Could not load templates (${res.status})`);
+          const data = (await res.json()) as { templates: { id: string; name: string; description: string }[] };
+          return data.templates;
+        },
+        recentDocuments: () => listDocs("?limit=8"),
+        starredDocuments: () => listDocs("?starred=1"),
+        showTrash: () => setFilter("trash"),
+        navigate: (href) => router.push(href),
+        signOut: () => navigateTo("/api/auth/signout"),
+      }),
+    [create, listDocs, router],
+  );
+
   return (
     <TooltipProvider>
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} groupOrder={DASHBOARD_GROUPS} />
       <main className="min-h-screen bg-surface-2">
         <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
           <div className="mx-auto flex h-16 max-w-6xl items-center gap-4 px-6">
