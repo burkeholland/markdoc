@@ -440,7 +440,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   };
   // The palette reads the context when it opens; a ref keeps `paletteCommands` stable across renders.
   const paletteCtxRef = useRef(paletteCtx);
-  paletteCtxRef.current = paletteCtx;
+  useEffect(() => {
+    paletteCtxRef.current = paletteCtx;
+  });
   const paletteCommands = useCallback(() => buildCommands(paletteCtxRef.current), []);
 
   const findOpen = useSessionValue(session, (s) => s.find !== null);
