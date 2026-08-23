@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { collapseUnchanged, detectMoves, hunkCounter, hunks, wordDiff, type DiffSegment } from "./diff";
 
-const seg = (value: string, flags: Partial<DiffSegment> = {}): DiffSegment => ({ value, added: false, removed: false, ...flags });
+const seg = (value: string, flags: Partial<DiffSegment> = {}): DiffSegment => ({ value, count: 1, added: false, removed: false, ...flags });
 const ins = (value: string) => seg(value, { added: true });
 const del = (value: string) => seg(value, { removed: true });
 

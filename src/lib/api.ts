@@ -148,6 +148,7 @@ export const api = {
       request<{ ok: true }>(`/api/documents/${id}/versions/${vid}`, { method: "POST", body: JSON.stringify({ action: "restore" }) }),
     renameVersion: (id: string, vid: string, title: string) =>
       request<{ ok: true }>(`/api/documents/${id}/versions/${vid}`, { method: "POST", body: JSON.stringify({ action: "rename", title }) }),
+    copyVersion: (id: string, vid: string) => request<{ id: string; title: string }>(`/api/documents/${id}/versions/${vid}/copy`, { method: "POST" }),
     collaborators: (id: string) =>
       request<{ owner: { login: string | null; name: string | null; image: string | null } | null; linkAccess: DocumentDto["linkAccess"]; collaborators: CollaboratorDto[] }>(
         `/api/documents/${id}/collaborators`,
