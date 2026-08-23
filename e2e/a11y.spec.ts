@@ -36,18 +36,20 @@ const DOC = [
 
 /**
  * Rules disabled with a reason. Everything else in the wcag2a/aa + wcag21a/aa tag set is enforced.
- * - `color-contrast`: axe cannot resolve contrast through `backdrop-blur` headers, the translucent
- *   dialog overlay and editor decorations, and reports "incomplete" rather than a verdict; the palette
- *   tokens are checked by eye in both themes (see README → Accessibility).
+ * - `color-contrast`: in the light theme axe cannot resolve contrast through `backdrop-blur` headers,
+ *   the translucent dialog overlay and editor decorations, and reports "incomplete" rather than a verdict;
+ *   the light tokens are checked by eye and by src/app/theme-contrast.test.ts (see README → Accessibility).
+ *   The dark dashboard and dark editor scans enable it (`contrast: true`): every dark token pair passed
+ *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught.
  */
 const DISABLED_RULES = ["color-contrast"];
 
 const softMode = process.env.A11Y_SOFT === "1";
 
-async function scan(page: Page, state: string) {
+async function scan(page: Page, state: string, { contrast = false }: { contrast?: boolean } = {}) {
   const results = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
-    .disableRules(DISABLED_RULES)
+    .disableRules(contrast ? [] : DISABLED_RULES)
     .analyze();
   const { violations } = results;
   const lines = violations.map(
@@ -113,7 +115,7 @@ test.describe("axe: pages", () => {
 
     await setTheme(page, "dark");
     await expect(page.getByTestId("document-card").first()).toBeVisible();
-    await scan(page, "dashboard (dark)");
+    await scan(page, "dashboard (dark)", { contrast: true });
     await context.close();
   });
 
@@ -239,11 +241,40 @@ test.describe("axe: editor", () => {
     await expect(page.getByTestId("activity-panel")).toBeVisible();
     await scan(page, "editor + activity panel");
 
-    // Dark mode.
+    // Dark mode, with color-contrast enabled (see DISABLED_RULES).
     await setTheme(page, "dark");
     await expect(page.locator(".md-rich")).toBeVisible();
     await ensureCommentsOpen(page);
-    await scan(page, "editor (dark)");
+    await scan(page, "editor (dark)", { contrast: true });
+    await context.close();
+  });
+
+  test("dark: find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-editor-dark");
+    const id = await createDocument(page, DOC, "Dark fixture");
+    await setTheme(page, "dark");
+    await openDocument(page, id);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(page.locator(".md-rich table")).toBeVisible();
+    await ensureCommentsOpen(page);
+
+    await focusRichEnd(page);
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("find-bar")).toBeVisible();
+    await scan(page, "editor (dark) + find bar", { contrast: true });
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("find-bar")).toHaveCount(0);
+
+    await focusRichEnd(page);
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-menu")).toBeVisible();
+    await scan(page, "editor (dark) + slash menu", { contrast: true });
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Backspace");
+
+    await clickCell(page, 1, 0);
+    await scan(page, "editor (dark) + table menu", { contrast: true });
     await context.close();
   });
 });
@@ -323,8 +354,32 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(page.getByTestId("skip-link")).toBeFocused();
     await tabUntil("[data-testid=header]");
     await tabUntil("[data-testid=toolbar]");
-    await tabUntil("[data-testid=tb-bold]");
+    // Roving tabindex: the toolbar is one tab stop that lands on its first enabled button; ←/→ move
+    // (wrapping), Home/End jump, disabled buttons (Undo/Redo on a fresh document) are skipped.
+    await expect(page.getByTestId("heading-menu")).toBeFocused();
+    await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("tb-bold")).toBeFocused();
+    await expect(page.getByTestId("tb-undo")).toBeDisabled();
+    await expect(page.getByTestId("tb-redo")).toBeDisabled();
+    await page.keyboard.press("End");
+    await expect(page.getByTestId("tb-comment")).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByTestId("heading-menu")).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("tb-comment")).toBeFocused();
+    // Undo/Redo sit between Horizontal rule and Comment; disabled, they are skipped.
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByRole("button", { name: "Horizontal rule", exact: true })).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(page.getByTestId("heading-menu")).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(page.getByTestId("tb-bold")).toBeFocused();
+    // One Tab leaves the toolbar; Shift+Tab comes back to the last-used button, not the first.
+    await page.keyboard.press("Tab");
+    expect(await activeIn("[data-testid=toolbar]")).toBe(false);
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByTestId("tb-bold")).toBeFocused();
+    await page.keyboard.press("Tab");
     // The Markdown pane binds Tab to indent; CodeMirror's escape hatch is Esc then Tab (within 2 s).
     await tabUntil(".cm-content");
     await page.keyboard.press("Escape");
@@ -374,7 +429,15 @@ test.describe("keyboard-only walkthrough", () => {
     await expect.poll(() => activeIn(".md-rich, .cm-content")).toBe(true);
     await page.keyboard.press("Escape");
 
-    // Share via the palette; Esc closes it and focus returns to the editor.
+    // Share via the palette; Esc closes it and focus returns exactly to where it was before the palette
+    // opened — inside the rich pane — not to <body> (the dialog has no Radix Trigger to fall back on).
+    if (!(await activeIn(".md-rich"))) {
+      await tabUntil(".cm-content");
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Tab");
+      await tabUntil(".md-rich");
+    }
+    expect(await activeIn(".md-rich")).toBe(true);
     await page.keyboard.press("Control+Shift+P");
     await expect(page.getByTestId("palette-input")).toBeFocused();
     await page.keyboard.type("Share");
@@ -383,8 +446,22 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(share).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(share).toHaveCount(0);
-    // No trap remains: focus is back on the page, not inside a (closed) dialog or popover.
-    await expect.poll(() => page.evaluate(() => document.activeElement?.closest("[role=dialog]") === null)).toBe(true);
+    await expect.poll(() => activeIn(".md-rich")).toBe(true);
+
+    // Palette → Esc (no command) also returns focus to the rich pane.
+    await page.keyboard.press("Control+Shift+P");
+    await expect(page.getByTestId("palette-input")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("palette-input")).toHaveCount(0);
+    await expect.poll(() => activeIn(".md-rich")).toBe(true);
+
+    // Share from the header button (keyboard): Esc returns focus to that button.
+    await page.getByTestId("share-button").focus();
+    await page.keyboard.press("Enter");
+    await expect(share).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(share).toHaveCount(0);
+    await expect(page.getByTestId("share-button")).toBeFocused();
     await context.close();
   });
 });

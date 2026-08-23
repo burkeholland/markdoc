@@ -1,6 +1,6 @@
 "use client";
 
-import { memo } from "react";
+import { memo, useCallback, useLayoutEffect, useRef, type FocusEvent, type KeyboardEvent } from "react";
 import {
   Bold,
   Italic,
@@ -25,6 +25,7 @@ import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
 import { Menu, MenuContent, MenuRadioGroup, MenuRadioItem, MenuTrigger, Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
+import { rovingIndex } from "@/lib/a11y";
 import { shallowEqual, useSessionValue } from "./use-session";
 
 function ToolButton({
@@ -104,8 +105,50 @@ export const Toolbar = memo(function Toolbar({
   );
   const dis = !canEdit;
 
+  // Roving tabindex: the toolbar is one tab stop. ←/→ (wrapping) and Home/End move between the enabled
+  // buttons; the last-used button keeps tabindex=0 so tabbing back in lands on it. The buttons do not
+  // take a tabIndex prop, so React never fights the values written here.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const lastRef = useRef<HTMLButtonElement | null>(null);
+  const enabledButtons = useCallback(() => Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []), []);
+  const syncTabStops = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const enabled = enabledButtons();
+    const last = lastRef.current;
+    const stop = last && !last.disabled && enabled.includes(last) ? last : enabled[0];
+    for (const b of root.querySelectorAll<HTMLButtonElement>("button")) b.tabIndex = b === stop ? 0 : -1;
+  }, [enabledButtons]);
+  useLayoutEffect(syncTabStops);
+
+  const onToolbarFocus = (e: FocusEvent<HTMLDivElement>) => {
+    const btn = (e.target as HTMLElement).closest("button");
+    if (!btn || !rootRef.current?.contains(btn)) return;
+    lastRef.current = btn;
+    syncTabStops();
+  };
+
+  const onToolbarKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const items = enabledButtons();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = rovingIndex(e.key, current, items.length, { orientation: "horizontal", wrap: true });
+    if (next < 0) return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
+
   return (
-    <div className="toolbar-scroll safe-x flex h-12 shrink-0 items-center gap-0.5 border-b border-line" role="toolbar" aria-label="Formatting" data-testid="toolbar">
+    <div
+      ref={rootRef}
+      className="toolbar-scroll safe-x flex h-12 shrink-0 items-center gap-0.5 border-b border-line"
+      role="toolbar"
+      aria-label="Formatting"
+      aria-orientation="horizontal"
+      data-testid="toolbar"
+      onFocus={onToolbarFocus}
+      onKeyDown={onToolbarKeyDown}
+    >
       <Menu>
         <MenuTrigger asChild>
           <button
