@@ -5,6 +5,7 @@ import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRad
 import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import {
+  Activity,
   Check,
   ChevronDown,
   CloudOff,
@@ -220,6 +221,7 @@ export interface HeaderProps {
   onPublishNow: () => void;
   onPull: () => void;
   onHistory: () => void;
+  onActivity: () => void;
   onShortcuts: () => void;
   onDelete: () => void;
   onDownload: (format: ExportFormat, withSuggestions: boolean) => void;
@@ -272,6 +274,9 @@ export const Header = memo(function Header(props: HeaderProps) {
           <MenuContent align="end" className="w-64">
             <MenuItem icon={<History size={15} />} onSelect={props.onHistory}>
               Version history
+            </MenuItem>
+            <MenuItem icon={<Activity size={15} />} onSelect={props.onActivity} data-testid="menu-activity">
+              Activity
             </MenuItem>
             {canEdit && (
               <MenuItem icon={<Pencil size={15} />} onSelect={props.onNameVersion}>

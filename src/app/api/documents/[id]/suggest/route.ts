@@ -4,6 +4,7 @@ import { mutateLiveDoc } from "@/server/livedoc";
 import { diffOpsWords } from "@/editor/sync/text-diff";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
+import { activityActor, recordActivity } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 
 type Params = { params: Promise<{ id: string }> };
@@ -81,6 +82,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     recordAgentActivity(doc, user!, "suggested");
   });
 
+  if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count });
   return json({ ok: true, suggestions: count });
 });
 

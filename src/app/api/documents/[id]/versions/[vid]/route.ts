@@ -4,6 +4,7 @@ import { addVersion, getVersion } from "@/server/documents";
 import { readLiveText, replaceLiveText } from "@/server/livedoc";
 import { getDb, schema } from "@/server/db";
 import { and, eq } from "drizzle-orm";
+import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string; vid: string }> };
 
@@ -68,6 +69,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     createdBy: user?.id,
     createdByName: actorName(user),
   });
+  await recordActivity(id, activityActor(user!), "version.restore", { number: version.number, title: version.title });
   return json({ ok: true, version: { ...restored, createdAt: restored.createdAt.toISOString() } });
 });
 

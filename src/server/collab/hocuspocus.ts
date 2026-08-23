@@ -6,6 +6,7 @@ import { verifyCollabToken, type CollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
 import { watchDocumentMentions } from "@/server/mentions";
+import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 
 export type CollabContext = CollabClaims;
 
@@ -58,7 +59,12 @@ export function createCollabServer() {
       if (!row) throw new Error("Document not found");
       hydrateDoc(document, row.ystate ?? null, row.content, row.title);
       watchDocumentMentions(document, documentName);
+      startActivityWatch(document, documentName);
       return document;
+    },
+
+    async afterUnloadDocument({ documentName }) {
+      stopActivityWatch(documentName);
     },
 
     async onStoreDocument({ document, documentName, lastContext }: onStoreDocumentPayload<CollabContext>) {

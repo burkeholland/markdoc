@@ -4,6 +4,7 @@ import { readLiveText, mutateLiveDoc } from "@/server/livedoc";
 import { addVersion } from "@/server/documents";
 import { diffOps, applyOps } from "@/editor/sync/text-diff";
 import { recordAgentActivity } from "@/server/agents";
+import { activityActor, recordEdit } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 
 type Params = { params: Promise<{ id: string }> };
@@ -38,15 +39,18 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
   const { user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => putSchema.parse(d));
   let changed = false;
+  let chars = 0;
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     const ytext = doc.getText(TEXT_KEY);
     const ops = diffOps(ytext.toString(), body.content, 0);
     if (ops.length) {
       applyOps(ytext, ops);
       changed = true;
+      chars = ops.reduce((n, op) => n + op.deleteCount + (op.insert?.length ?? 0), 0);
     }
     recordAgentActivity(doc, user!, "edited");
   });
+  if (changed) void recordEdit(id, activityActor(user!), chars).catch((err) => console.error("[activity] edit failed", err));
   if (changed && (body.message || user!.agent)) {
     await addVersion({
       documentId: id,
@@ -77,5 +81,6 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
     ytext.insert(ytext.length, separator + body.append);
     recordAgentActivity(doc, user!, "edited");
   });
+  void recordEdit(id, activityActor(user!), body.append.length).catch((err) => console.error("[activity] edit failed", err));
   return json({ ok: true });
 });

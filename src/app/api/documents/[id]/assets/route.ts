@@ -1,5 +1,6 @@
 import { handler, json, requireAccess, HttpError } from "@/server/http";
 import { AssetError, MAX_ASSET_BYTES, normalizeMime, putAsset } from "@/server/assets";
+import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -48,6 +49,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const upload = await readUpload(req);
   try {
     const asset = await putAsset({ documentId: id, userId: user?.id ?? null, name: upload.name, mime: upload.mime, bytes: upload.bytes });
+    if (user) await recordActivity(id, activityActor(user), "asset.upload", { name: upload.name.slice(0, 120), size: asset.size });
     return json({ ...asset, alt: stripExtension(upload.name) }, { status: 201 });
   } catch (err) {
     if (err instanceof AssetError) throw new HttpError(err.status, err.message);
