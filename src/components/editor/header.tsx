@@ -2,7 +2,7 @@
 import { navigateTo } from "@/lib/nav";
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
-import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -40,6 +40,7 @@ import type { DocumentDto } from "@/server/dto";
 import { api } from "@/lib/api";
 
 import { cn, shortcut } from "@/lib/utils";
+import { useHydrated } from "@/lib/hooks";
 import { jsonEqual, useSessionValue } from "./use-session";
 import { AgentActivityChip } from "./agent-activity";
 
@@ -53,15 +54,13 @@ export function Logo({ className }: { className?: string }) {
   );
 }
 
-const noopSubscribe = () => () => {};
-
 function SaveIndicator({ session }: { session: CollabSession }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
   const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
   // The server renders a fresh session ("Connecting…"); an offline client may already have
   // failed to connect by the time React hydrates. Match the server markup first, then switch.
-  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  const hydrated = useHydrated();
   const state: SaveState = hydrated ? liveState : "connecting";
   const unsynced = hydrated ? liveUnsynced : 0;
   const recovered = hydrated && liveRecovered;

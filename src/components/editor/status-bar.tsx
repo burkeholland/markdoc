@@ -8,6 +8,7 @@ import type { DocumentDto } from "@/server/dto";
 import { lintMarkdown, type LintIssue } from "@/editor/markdown/lint";
 
 import { cn, countWords, formatNumber } from "@/lib/utils";
+import { useHydrated } from "@/lib/hooks";
 import { useDebouncedSessionValue } from "./use-session";
 
 export type Layout = "split" | "code" | "rich";
@@ -31,7 +32,10 @@ export interface StatusBarProps {
 export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage, getRichText }: StatusBarProps) {
   // Linting re-parses the whole document and word counts walk it: wait for a pause in typing.
   const source = useDebouncedSessionValue(session, (s) => s.ytext.toString(), 500);
-  const issues = useMemo(() => lintMarkdown(source), [source]);
+  // The server renders an empty session; by the time this part of the page hydrates the client
+  // may already hold the local copy. Show placeholders until hydrated so the markup matches.
+  const hydrated = useHydrated();
+  const issues = useMemo(() => (hydrated ? lintMarkdown(source) : []), [hydrated, source]);
   const words = useMemo(() => countWords(getRichText() || source), [getRichText, source]);
   const errors = issues.filter((i) => i.severity === "error").length;
 
@@ -43,11 +47,11 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     <footer className="flex h-10 shrink-0 items-center gap-1 border-t border-line px-3 text-[13px] text-ink-3" data-testid="status-bar">
       <span className="inline-flex items-center gap-1.5 px-2">
         <FileText size={14} />
-        <span data-testid="word-count">{formatNumber(words)} words</span>
+        <span data-testid="word-count">{hydrated ? `${formatNumber(words)} words` : "— words"}</span>
       </span>
       <span className="h-4 w-px bg-line" />
       <span className="px-2" data-testid="char-count">
-        {formatNumber(source.length)} characters
+        {hydrated ? `${formatNumber(source.length)} characters` : "— characters"}
       </span>
       <div className="flex-1" />
 

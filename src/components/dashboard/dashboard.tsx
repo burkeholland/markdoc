@@ -7,7 +7,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, Scale, Search, FileText, Star, Users } from "lucide-react";
 import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { RelativeTime } from "@/components/ui/relative-time";
 import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 
 import { Logo } from "@/components/editor/header";
@@ -403,7 +404,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                       data-testid="starred-card"
                     >
                       <span className="line-clamp-2 text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
-                      <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? `Opened ${relativeTime(d.lastOpenedAt)}` : `Edited ${relativeTime(d.updatedAt)}`}</span>
+                      <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                     </Link>
                     <StarButton starred={d.starred} onToggle={() => toggleStar(d)} className="absolute right-1.5 top-1.5" />
                   </li>
@@ -490,7 +491,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                       <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
                     )}
                     <div className="mt-3 flex items-center gap-2 pr-8 text-xs text-ink-4">
-                      <span>{sort === "recent" && d.lastOpenedAt ? `Opened ${relativeTime(d.lastOpenedAt)}` : `Edited ${relativeTime(d.updatedAt)}`}</span>
+                      <span>{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                       {d.ownerId !== user.id && (
                         <span className="inline-flex items-center gap-1">
                           <Users size={11} /> {d.ownerName ?? d.ownerLogin} · {d.role}
