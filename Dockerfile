@@ -36,6 +36,8 @@ ENV NODE_ENV=production \
     CHROMIUM_PATH=/usr/bin/chromium-browser \
     PGLITE_DATA_DIR=/app/.data/pglite
 # Chromium plus the fonts it needs to render text in the PDF. wget serves the HEALTHCHECK.
+# Alpine drops superseded package versions from its repos, so pins would break rebuilds (DL3018).
+# hadolint ignore=DL3018
 RUN apk add --no-cache \
       chromium \
       nss \
