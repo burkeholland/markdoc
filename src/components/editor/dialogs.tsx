@@ -308,6 +308,14 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     items: [["Insert block menu", "/"]],
   },
   {
+    group: "Code pane",
+    items: [
+      ["Wrap selection", "* _ ` ["],
+      ["Code block", "``` or ~~~ at line start"],
+      ["Indent / outdent list item", "Tab / Shift-Tab"],
+    ],
+  },
+  {
     group: "Markdown shortcuts in the preview",
     items: [
       ["Heading", "# + space"],
