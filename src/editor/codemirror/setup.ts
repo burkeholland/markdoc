@@ -28,6 +28,7 @@ import { codeMarkdownFileDrop } from "./file-drop";
 import type { MarkdownFileDropHandler } from "../prosemirror/file-drop";
 import { markdownEditingKeymap } from "./continue-markup";
 import { markdownTyping } from "./markdown-typing";
+import { remoteCaretInteractions } from "./remote-cursors";
 import type { ImageUploader } from "../prosemirror/images";
 
 export interface CodeEditorHandlers {
@@ -93,6 +94,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     codeEditorTheme,
     wrapping.of(EditorView.lineWrapping),
     yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
+    remoteCaretInteractions(session),
     sourceHighlights(),
     highlightClickHandler((kind, id) => handlers.onHighlightClick?.(kind, id)),
     editable.of([EditorState.readOnly.of(!session.canEdit), EditorView.editable.of(session.canEdit)]),
@@ -113,6 +115,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
         if (update.view.hasFocus) {
           const { head, anchor } = update.state.selection.main;
           handlers.onSelection?.(head, anchor);
+          if (update.selectionSet) session.touchActivity();
         }
       }
     }),

@@ -3,6 +3,7 @@ import { Decoration, DecorationSet } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import * as Y from "yjs";
 import type { CollabSession } from "../collab/session";
+import { isIdle } from "../collab/follow";
 import { isRefresh, scheduleRefresh } from "./refresh";
 
 const key = new PluginKey<DecorationSet>("remoteCursors");
@@ -14,14 +15,39 @@ interface CursorState {
 
 type RelJSON = Parameters<typeof Y.createRelativePositionFromJSON>[0];
 
-function caretWidget(color: string, name: string): HTMLElement {
+interface CaretFlags {
+  userId: string;
+  following: boolean;
+  flash: boolean;
+  idle: boolean;
+}
+
+function caretWidget(session: CollabSession, color: string, name: string, flags: CaretFlags): HTMLElement {
   const caret = document.createElement("span");
   caret.className = "md-remote-caret";
   caret.style.borderColor = color;
+  caret.dataset.userId = flags.userId;
+  if (flags.following) caret.dataset.following = "";
+  if (flags.flash) caret.dataset.flash = "";
+  if (flags.idle) caret.dataset.idle = "";
   const label = document.createElement("span");
   label.className = "md-remote-caret-label";
   label.style.backgroundColor = color;
   label.textContent = name;
+  // The label is the one part of a remote caret the user can click: it starts following.
+  label.style.pointerEvents = "auto";
+  label.style.cursor = "pointer";
+  label.title = `Follow ${name}`;
+  const onMouseDown = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  label.addEventListener("mousedown", onMouseDown);
+  label.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    session.follow(flags.userId);
+  });
   caret.appendChild(label);
   return caret;
 }
@@ -41,10 +67,11 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
   const localId = session.ydoc.clientID;
   const max = doc.content.size;
   const clamp = (n: number) => Math.min(max, Math.max(0, n));
+  const now = Date.now();
   session.awareness.getStates().forEach((state, clientId) => {
     if (clientId === localId) return;
     const cursor = state.cursor as CursorState | undefined;
-    const user = state.user as { name?: string; color?: string; colorLight?: string } | undefined;
+    const user = state.user as { id?: string; name?: string; color?: string; colorLight?: string } | undefined;
     if (!cursor?.anchor || !cursor.head) return;
     const anchorSrc = resolve(session, cursor.anchor);
     const headSrc = resolve(session, cursor.head);
@@ -52,6 +79,13 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     const color = user?.color ?? "#2563eb";
     const colorLight = user?.colorLight ?? color + "33";
     const name = user?.name ?? "Anonymous";
+    const userId = user?.id ?? String(clientId);
+    const flags: CaretFlags = {
+      userId,
+      following: session.followUserId === userId,
+      flash: session.flashUserId === userId,
+      idle: isIdle(typeof state.lastActive === "number" ? state.lastActive : null, now),
+    };
     const head = clamp(map.srcToPm(headSrc));
     const anchor = clamp(map.srcToPm(anchorSrc));
     const from = Math.min(head, anchor);
@@ -60,8 +94,8 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
       decorations.push(Decoration.inline(from, to, { class: "md-remote-selection", style: `background-color: ${colorLight}` }));
     }
     decorations.push(
-      Decoration.widget(head, () => caretWidget(color, name), {
-        key: `caret-${clientId}-${color}-${name}`,
+      Decoration.widget(head, () => caretWidget(session, color, name, flags), {
+        key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}`,
         side: head >= anchor ? 1 : -1,
         ignoreSelection: true,
       }),
@@ -119,6 +153,7 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
         const current = session.awareness.getLocalState()?.cursor as CursorState | undefined;
         if (!sameCursor(current, anchorRel, headRel)) {
           session.awareness.setLocalStateField("cursor", { anchor: anchorRel, head: headRel });
+          session.touchActivity();
         }
       };
       const onFocus = () => publish();

@@ -6,7 +6,7 @@ import {
   Activity, ArrowDownUp, ArrowLeft, Bold, BookOpen, Bot, Calendar, ChevronLeft, ChevronRight, Code, Columns2, Copy, CornerDownLeft, Download, Eye,
   FileCode2, FilePlus2, FileText, Files, Hash, Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, History, Image, Italic, Keyboard,
   LayoutTemplate, Link, List, ListChecks, ListOrdered, ListTree, LogOut, MessageSquare, MessageSquareDashed, MessageSquarePlus, Minus, Pencil, PenLine,
-  Quote, Redo2, Replace, Search, Share2, SquareCode, Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud, type LucideIcon,
+  Quote, Redo2, Replace, Search, Share2, SquareCode, Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud, User, Users, type LucideIcon,
 } from "lucide-react";
 import { Kbd } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
@@ -16,7 +16,7 @@ const ICONS: Record<string, LucideIcon> = {
   Activity, ArrowDownUp, ArrowLeft, Bold, BookOpen, Bot, Calendar, Code, Columns2, Copy, Download, Eye, FileCode2, FilePlus2, FileText, Files, Hash,
   Heading1, Heading2, Heading3, Heading4, Heading5, Heading6, History, Image, Italic, Keyboard, LayoutTemplate, Link, List, ListChecks, ListOrdered,
   ListTree, LogOut, MessageSquare, MessageSquareDashed, MessageSquarePlus, Minus, Pencil, PenLine, Quote, Redo2, Replace, Search, Share2, SquareCode,
-  Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud,
+  Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud, User, Users,
 };
 
 interface Level {

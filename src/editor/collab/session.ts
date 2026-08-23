@@ -18,6 +18,8 @@ import {
   type FindMatch,
   type FindOptions,
 } from "../find";
+import { ACTIVITY_THROTTLE_MS, followReducer, sectionAt, type FollowEvent } from "./follow";
+import type { HeadingInfo } from "../markdown/parse";
 
 export type EditMode = "editing" | "suggesting" | "viewing";
 export type Surface = "code" | "rich";
@@ -41,6 +43,12 @@ export interface PresenceUser extends CollabUser {
   clientId: number;
   /** Source offset of the user's cursor head, if known. */
   cursor: number | null;
+  /** Text of the nearest heading above the cursor, or null before the first heading / without a cursor. */
+  section: string | null;
+  /** Timestamp (ms) the client last reported activity; null when it never did. */
+  idleSince: number | null;
+  /** The user's role on this document, when their client published it. */
+  role: Role | null;
   isLocal: boolean;
 }
 
@@ -109,6 +117,15 @@ export class CollabSession {
   pendingComment: { from: number; to: number } | null = null;
   /** Find & replace state while the find bar is open (matches are in source offsets). */
   find: FindState | null = null;
+  /** Collaborator whose cursor the viewport is glued to, if any. */
+  followUserId: string | null = null;
+  /** Set (with a fresh `seq`) when following ended because that user left, so the shell can toast. */
+  followEnded: { name: string; seq: number } | null = null;
+  /** Collaborator whose remote caret is flashing (after "Jump"), if any. */
+  flashUserId: string | null = null;
+  private flashTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastActivityPublish = 0;
+  private sectionCache: { headings: HeadingInfo[]; byOffset: Map<number, string | null> } | null = null;
   private listeners = new Set<Listener>();
   private notifyScheduled = false;
   private destroyed = false;
@@ -169,7 +186,10 @@ export class CollabSession {
         this.updateRecovery();
         this.notify();
       },
-      onAwarenessChange: () => this.notify(),
+      onAwarenessChange: () => {
+        this.checkFollowedPresence();
+        this.notify();
+      },
       onStateless: ({ payload }) => {
         let message: { type?: string } | null = null;
         try {
@@ -192,7 +212,10 @@ export class CollabSession {
       colorLight: options.user.colorLight,
       avatar: options.user.avatar ?? null,
       login: options.user.login ?? null,
+      role: options.role,
     });
+    this.awareness.setLocalStateField("lastActive", Date.now());
+    this.lastActivityPublish = Date.now();
 
     this.undoManager = new Y.UndoManager(this.ytext, {
       captureTimeout: 400,
@@ -437,7 +460,7 @@ export class CollabSession {
     const byUser = new Map<string, PresenceUser>();
     const localId = this.ydoc.clientID;
     this.awareness.getStates().forEach((state, clientId) => {
-      const u = state.user as Partial<CollabUser> | undefined;
+      const u = state.user as (Partial<CollabUser> & { role?: Role }) | undefined;
       if (!u?.id) return;
       let cursor: number | null = null;
       const head = (state.cursor as { head?: unknown } | undefined)?.head;
@@ -452,6 +475,7 @@ export class CollabSession {
           cursor = null;
         }
       }
+      const lastActive = state.lastActive;
       const entry: PresenceUser = {
         id: u.id,
         name: u.name ?? "Anonymous",
@@ -461,12 +485,88 @@ export class CollabSession {
         login: u.login ?? null,
         clientId,
         cursor,
+        section: this.sectionAt(cursor),
+        idleSince: typeof lastActive === "number" ? lastActive : null,
+        role: u.role ?? null,
         isLocal: clientId === localId,
       };
       const existing = byUser.get(u.id);
       if (!existing || (existing.cursor === null && cursor !== null) || entry.isLocal) byUser.set(u.id, entry);
     });
     return Array.from(byUser.values()).sort((a, b) => (a.isLocal ? -1 : b.isLocal ? 1 : a.name.localeCompare(b.name)));
+  }
+
+  /** Nearest heading above a source offset, memoised per heading list (the binding caches the parse). */
+  private sectionAt(offset: number | null): string | null {
+    if (offset === null) return null;
+    const headings = this.binding.getHeadings();
+    if (!this.sectionCache || this.sectionCache.headings !== headings) {
+      this.sectionCache = { headings, byOffset: new Map() };
+    }
+    const cache = this.sectionCache.byOffset;
+    let section = cache.get(offset);
+    if (section === undefined) {
+      section = sectionAt(headings, offset);
+      cache.set(offset, section);
+    }
+    return section;
+  }
+
+  // ---- Presence interactions ------------------------------------------------
+
+  /**
+   * Publish that the local user is active (called on selection changes, throttled) so
+   * collaborators can dim carets that have not moved for a while.
+   */
+  touchActivity() {
+    const now = Date.now();
+    if (now - this.lastActivityPublish < ACTIVITY_THROTTLE_MS) return;
+    this.lastActivityPublish = now;
+    this.awareness.setLocalStateField("lastActive", now);
+  }
+
+  /** Start following a collaborator's cursor (null stops). */
+  follow(userId: string | null) {
+    this.dispatchFollow(userId ? { type: "follow", userId } : { type: "stop" });
+  }
+
+  /** Feed the follow state machine; returns whether the followed user changed. */
+  dispatchFollow(event: FollowEvent): boolean {
+    const next = followReducer(this.followUserId, event);
+    if (next.left) {
+      const name = this.knownNames.get(next.left) ?? "A collaborator";
+      this.followEnded = { name, seq: (this.followEnded?.seq ?? 0) + 1 };
+    }
+    if (next.userId === this.followUserId && !next.left) return false;
+    this.followUserId = next.userId;
+    this.notify();
+    return true;
+  }
+
+  /** Names seen in awareness, so a "left" notice can name the user after their state is gone. */
+  private knownNames = new Map<string, string>();
+
+  private checkFollowedPresence() {
+    const ids: string[] = [];
+    this.awareness.getStates().forEach((state) => {
+      const u = state.user as Partial<CollabUser> | undefined;
+      if (!u?.id) return;
+      ids.push(u.id);
+      if (u.name) this.knownNames.set(u.id, u.name);
+    });
+    if (this.followUserId !== null) this.dispatchFollow({ type: "presence", userIds: ids });
+  }
+
+  /** Flash a collaborator's remote caret for a second (after "Jump"). */
+  flashUser(userId: string, ms = 1000) {
+    this.flashUserId = userId;
+    if (this.flashTimer) clearTimeout(this.flashTimer);
+    this.flashTimer = setTimeout(() => {
+      this.flashTimer = null;
+      this.flashUserId = null;
+      this.notify();
+    }, ms);
+    this.notify();
   }
 
   undo() {
@@ -525,6 +625,7 @@ export class CollabSession {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.recoveredTimer) clearTimeout(this.recoveredTimer);
+    if (this.flashTimer) clearTimeout(this.flashTimer);
     this.listeners.clear();
     this.binding.destroy();
     this.comments.destroy();
