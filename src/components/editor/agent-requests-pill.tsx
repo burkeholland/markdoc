@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { Bot, Loader2, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { AgentRequestMirror } from "@/server/agent-requests";
-import { Menu, MenuContent, MenuLabel, MenuSeparator, MenuTrigger, Tip } from "@/components/ui/primitives";
+import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
 
@@ -70,9 +70,9 @@ export function AgentRequestsPill({ session, onCancel }: AgentRequestsPillProps)
   const label = claimed.length === pending.length ? `${claimed[0].claimedBy ?? "An agent"} is working…` : `${pending.length} request${pending.length === 1 ? "" : "s"} waiting`;
   const canCancel = (r: AgentRequestMirror) => r.userId === session.user.id || session.role === "owner";
   return (
-    <Menu>
+    <Popover>
       <Tip label="Requests sent to agents from this document">
-        <MenuTrigger asChild>
+        <PopoverTrigger asChild>
           <button
             type="button"
             className={cn(
@@ -86,11 +86,10 @@ export function AgentRequestsPill({ session, onCancel }: AgentRequestsPillProps)
             {claimed.length ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
             <span className="max-w-48 truncate">{label}</span>
           </button>
-        </MenuTrigger>
+        </PopoverTrigger>
       </Tip>
-      <MenuContent align="end" className="w-80">
-        <MenuLabel>Agent requests</MenuLabel>
-        <MenuSeparator />
+      <PopoverContent align="end" className="w-80 p-0" aria-label="Agent requests">
+        <div className="border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">Agent requests</div>
         <ul className="max-h-72 overflow-y-auto py-1" data-testid="agent-requests-list">
           {pending.map((r) => (
             <li key={r.id} className="flex items-start gap-2 px-2 py-1.5 text-sm" data-testid="agent-request-item" data-status={r.status}>
@@ -109,7 +108,7 @@ export function AgentRequestsPill({ session, onCancel }: AgentRequestsPillProps)
             </li>
           ))}
         </ul>
-      </MenuContent>
-    </Menu>
+      </PopoverContent>
+    </Popover>
   );
 }

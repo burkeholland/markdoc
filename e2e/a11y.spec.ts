@@ -378,9 +378,11 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(page.getByTestId("tb-undo")).toBeDisabled();
     await expect(page.getByTestId("tb-redo")).toBeDisabled();
     await page.keyboard.press("End");
-    await expect(page.getByTestId("tb-comment")).toBeFocused();
+    await expect(page.getByTestId("ask-agent-button")).toBeFocused();
     await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("heading-menu")).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("ask-agent-button")).toBeFocused();
     await page.keyboard.press("ArrowLeft");
     await expect(page.getByTestId("tb-comment")).toBeFocused();
     // Undo/Redo sit between Horizontal rule and Comment; disabled, they are skipped.

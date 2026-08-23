@@ -101,7 +101,7 @@ export function AskAgentDialog({ open, onOpenChange, selection, canEdit, canComm
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Ask an agent" description="Your agent picks this up, does the work and proposes it back here." className="w-[min(94vw,560px)]">
+      <DialogContent title="Ask an agent" description="Your agent picks this up, does the work and proposes it back here." className="max-h-[calc(100dvh-2rem)] w-[min(94vw,560px)] overflow-y-auto">
         <div className="flex flex-col gap-4" data-testid="ask-agent-dialog">
           {showSetup && <AgentConnectCard origin={origin} onDismiss={dismiss} onCreateToken={onCreateToken} />}
 
