@@ -5,6 +5,20 @@ import { IndexeddbPersistence, clearDocument } from "y-indexeddb";
  * Local persistence for open documents. Every Yjs update is mirrored into an
  * IndexedDB database named `markdoc:<docId>`, so edits made while offline
  * survive a refresh or a closed tab and are sent to the server on reconnect.
+ *
+ * The mirror is applied before the socket opens (offline-first) and merged with
+ * whatever the server sends. That merge is only safe because the server's state
+ * for a document is stable across loads: the Yjs seed of a document is minted
+ * exactly once (at creation, or on the first load of a legacy row) and stored as
+ * `ystate` (see src/server/collab/seed.ts). Before that was the case, an opened but
+ * never-edited document was re-seeded with fresh CRDT ids on every server load and
+ * the mirror of the previous seed merged with the new one into doubled text.
+ *
+ * There is deliberately no client-side heuristic for that hazard: a "never synced"
+ * flag in the mirror cannot distinguish it (the first session *did* sync before the
+ * reload), and "server wins when both sides have text" would discard edits typed
+ * while offline. The provider applies the server's state before this module could
+ * inspect it, so the fix has to be — and is — on the server.
  */
 
 export const LOCAL_DB_PREFIX = "markdoc:";
