@@ -26,10 +26,11 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Document statistics and a shared writing goal (`Ctrl+Shift+C`): words, sentences, reading time, selection counts.
 - Templates: meeting notes, design doc, weekly status, blog post, decision record, checklist and more.
 - Dark mode: system / light / dark, applied before paint so there is no flash; toggle in the status bar, dashboard header, `/settings` and the command palette. Exports keep the light print stylesheet.
+- Accessible by keyboard and screen reader: skip link and landmarks, a one-tab-stop toolbar with arrow keys, dialogs and the palette return focus to what opened them, AA contrast in both themes; every screen is scanned with axe in the e2e suite.
 
 ### Collaborating
 
-- Real-time editing over Yjs and WebSockets with presence avatars and live carets in both panes.
+- Real-time editing over Yjs and WebSockets with presence avatars and live carets in both panes; hover an avatar to see which section a collaborator is in, click to jump there or follow their cursor (`Esc` stops).
 - Comments anchored to text that follow the words as they move; reply, edit, resolve, reopen; `@mentions` with a suggestions popover.
 - Suggesting mode: edits become tracked changes (green/red) that anyone with edit access can accept or reject, one by one or all at once.
 - Version history with automatic snapshots, named versions, word-level diffs and one-click restore.
@@ -52,6 +53,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 
 - Markdown, standalone HTML (images embedded) or a Letter PDF from the header menu or `GET /api/documents/:id/export`.
 - Publish to a GitHub gist or a repository file (a real commit on the branch you choose); import from either.
+- Safe sync with GitHub: the Publish button shows whether the document is in sync, ahead, behind or diverged; publish and pull refuse to overwrite the other side, and the Sync dialog merges three-way (conflicts left as markers the linter flags), keeps yours or takes GitHub's.
 
 ### Agents
 
