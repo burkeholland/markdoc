@@ -95,9 +95,17 @@ test.describe("dark mode", () => {
     const commentBg = await highlight.evaluate((el) => getComputedStyle(el).backgroundColor);
     expect(commentBg).not.toBe("rgb(254, 243, 199)");
 
-    // Table from the toolbar; its floating menu stays distinguishable from the page.
+    // Slash menu renders on a dark surface.
     await page.locator(".md-rich p").last().click();
     await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-menu")).toBeVisible();
+    expect(isDark(await bg(page, '[data-testid="slash-menu"]'))).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("slash-menu")).toHaveCount(0);
+
+    // Table from the toolbar; its floating menu stays distinguishable from the page.
     await page.getByTestId("tb-table").click();
     await page.getByTestId("table-grid").getByRole("button", { name: "2 by 2" }).click();
     await expect(page.locator(".md-rich table")).toBeVisible();
@@ -109,19 +117,10 @@ test.describe("dark mode", () => {
     expect(menuBg).not.toBeNull();
     expect(Math.abs(menuBg![0] - pageBg![0]) + Math.abs(menuBg![1] - pageBg![1]) + Math.abs(menuBg![2] - pageBg![2])).toBeGreaterThan(60);
 
-    // Slash menu renders on a dark surface.
-    await page.locator(".md-rich p").last().click();
-    await page.keyboard.press("End");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type("/");
-    await expect(page.getByTestId("slash-menu")).toBeVisible();
-    expect(isDark(await bg(page, '[data-testid="slash-menu"]'))).toBe(true);
-    await page.keyboard.press("Escape");
-
     // Palette command cycles the preference (dark → system).
     await page.keyboard.press("Control+Shift+P");
-    await page.getByPlaceholder(/command|type/i).first().fill("Toggle theme");
-    await page.keyboard.press("Enter");
+    await page.getByTestId("palette-input").fill("Toggle theme");
+    await page.getByTestId("palette-item-view:theme").click();
     await expect(page.getByTestId("status-bar").getByTestId("theme-toggle")).toHaveAttribute("data-theme-preference", "system");
     await page.evaluate(() => localStorage.setItem("markdoc:theme", "dark"));
 
