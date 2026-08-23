@@ -169,9 +169,13 @@ test.describe("axe: editor", () => {
     const { page, context } = await openEditorFixture(browser, "a11y-editor");
     await scan(page, "editor split + outline + comments");
 
-    // Dark mode, with color-contrast enabled (see DISABLED_RULES).
+    // Dark mode, with color-contrast enabled (see DISABLED_RULES). The reload drops the collab
+    // connection; until it is back the source pane is read-only (no focusable content inside
+    // `.cm-scroller`), which axe reports as scrollable-region-focusable — wait for it, then scan.
     await setTheme(page, "dark");
     await expect(page.locator(".md-rich")).toBeVisible();
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+    await expect(page.locator(".cm-content")).toHaveAttribute("contenteditable", "true");
     await ensureOutlineOpen(page);
     await ensureCommentsOpen(page);
     await scan(page, "editor (dark)", { contrast: true });

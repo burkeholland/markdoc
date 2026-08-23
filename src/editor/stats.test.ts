@@ -96,8 +96,10 @@ describe("computeStats", () => {
     computeStats(big + " ");
     computeStats(big + "  ");
 
-    // Wall-clock bounds on a shared runner are noisy, so take the median of 5 iterations and
-    // allow a wider budget under CI (2-vCPU GitHub runner; 5.4 ms was observed there once).
+    // Wall-clock bounds on a shared machine are noisy, so take the median of 5 iterations. Idle, a cold
+    // run is 2–4 ms; with another suite saturating the box the median has reached 5.6 ms locally and
+    // 5.4 ms on the 2-vCPU CI runner, so the budgets below leave headroom while still catching a
+    // regression to tens of milliseconds.
     const cold: number[] = [];
     const memoised: number[] = [];
     for (let i = 0; i < 5; i++) {
@@ -110,7 +112,7 @@ describe("computeStats", () => {
       memoised.push(performance.now() - t1);
     }
     const median = (runs: number[]) => [...runs].sort((a, b) => a - b)[Math.floor(runs.length / 2)];
-    const budgetMs = process.env.CI ? 25 : 5;
+    const budgetMs = process.env.CI ? 25 : 10;
     expect(median(cold), `cold runs (ms): ${cold.map((r) => r.toFixed(2)).join(", ")}`).toBeLessThan(budgetMs);
     // The status bar re-reads stats on every render; the memo hit is the guarantee it relies on.
     expect(median(memoised), `memoised runs (ms): ${memoised.map((r) => r.toFixed(3)).join(", ")}`).toBeLessThan(0.5);
