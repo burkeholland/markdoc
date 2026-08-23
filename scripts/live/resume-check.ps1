@@ -1,8 +1,10 @@
 # Is Markdoc back after a machine wipe? Prints a checklist and exits 0 when everything is in place,
-# non-zero on the first hard failure. Fixes what it safely can (creates the live worktree, installs
-# the scheduled task, starts the server, restores data from a snapshot) unless -DryRun.
+# non-zero on the first hard failure. Fixes what it safely can (creates the live worktree, writes a
+# missing .env.local, installs the scheduled tasks, starts the server, restores data from a snapshot)
+# unless -DryRun. A fresh box needs nothing from a human: every .env.local value is generated or derived.
 #   .\resume-check.ps1            check and repair
 #   .\resume-check.ps1 -DryRun    only report; change nothing, start nothing
+#   .\resume-check.ps1 -LiveRoot <dir> -DataRoot <dir> -Port <n>   rehearse against scratch folders
 # Environment (all optional; set by burkeholland/factory-resume/bootstrap.ps1):
 #   FACTORY_MANIFEST   path to the board's manifest.json; when set, HEAD must equal its sha for this repo
 #   FACTORY_SNAPSHOT   folder with markdoc-pglite.tar.gz + manifest.json, restored when the data dir is missing
@@ -16,15 +18,21 @@ param(
   [int]$Port = 3000,
   [int]$TimeoutSec = 180,
   # Dev-login handle used for the read-only GET /api/documents probe (creates that user if new).
-  [string]$CheckLogin = 'resume-check'
+  [string]$CheckLogin = 'resume-check',
+  # Live worktree and data folder. Default: <factory root>\markdoc-live and <factory root>\markdoc-data
+  # (FACTORY_ROOT / Get-FactoryRoot); override both to rehearse a restore in scratch folders.
+  [string]$LiveRoot,
+  [string]$DataRoot
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $factoryRoot = Get-FactoryRoot
-$liveRoot = Join-Path $factoryRoot 'markdoc-live'
-$dataRoot = Join-Path $factoryRoot 'markdoc-data'
+$liveRoot = if ($LiveRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LiveRoot) } else { Join-Path $factoryRoot 'markdoc-live' }
+$dataRoot = if ($DataRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DataRoot) } else { Join-Path $factoryRoot 'markdoc-data' }
 $pgliteDir = Join-Path $dataRoot 'pglite'
+$liveLog = Join-Path $dataRoot 'live.log'
+$startLive = Join-Path $PSScriptRoot 'start-live.ps1'
 $script:failed = $false
 
 function Write-Check {
@@ -106,25 +114,48 @@ if (Test-Path (Join-Path $liveRoot 'package.json')) {
   } else { Write-Check 'ok' 'live deps' 'node_modules present' }
 }
 
-# 4. .env.local with the three keys (+ BACKUP_TOKEN for snapshots, a warning when absent)
+# 4. .env.local with the four keys. None is a secret a human holds: AUTH_SECRET and BACKUP_TOKEN are fresh
+# random strings (changing them only signs everyone out), AUTH_DEV_LOGIN is 1, PGLITE_DATA_DIR is derived.
+# So missing keys are written here - create the file or append only the missing lines, never change an
+# existing value - and the step is a fix, not a failure. Runs before step 7 so the server starts with the file.
 $envPath = Join-Path $liveRoot '.env.local'
 $envVars = Read-EnvFile -Path $envPath
-$required = @('AUTH_SECRET', 'AUTH_DEV_LOGIN', 'PGLITE_DATA_DIR')
-$missing = @($required + 'BACKUP_TOKEN' | Where-Object { -not $envVars.ContainsKey($_) -or -not $envVars[$_] })
+$envKeys = @('AUTH_SECRET', 'AUTH_DEV_LOGIN', 'PGLITE_DATA_DIR', 'BACKUP_TOKEN')
+$missing = @($envKeys | Where-Object { -not $envVars.ContainsKey($_) -or -not $envVars[$_] })
 if ($missing.Count -gt 0) {
-  $hard = @($missing | Where-Object { $required -contains $_ }).Count -gt 0
-  Write-Check $(if ($hard) { 'FAIL' } else { 'warn' }) '.env.local' "$envPath is missing $($missing -join ', '). Add these lines (fresh secrets generated now):"
-  foreach ($key in $missing) {
+  $newLines = @(foreach ($key in $missing) {
     $value = switch ($key) {
       'AUTH_SECRET' { Get-RandomSecret }
       'BACKUP_TOKEN' { Get-RandomSecret }
       'AUTH_DEV_LOGIN' { '1' }
       'PGLITE_DATA_DIR' { $pgliteDir }
     }
-    Write-Host "    $key=$value"
+    "$key=$value"
+  })
+  $envExists = Test-Path -LiteralPath $envPath
+  $action = if ($envExists) { "append $($missing -join ', ') to $envPath" } else { "create $envPath with $($missing -join ', ')" }
+  if ($DryRun) {
+    Write-Check 'fix' '.env.local' "would $action (fresh secrets generated now):"
+    foreach ($line in $newLines) { Write-Host "    $line" }
+  } else {
+    # Probe before writing: the dev server watches .env.local and answers 500 for a while after a change.
+    $serverWasUp = $null -ne (Get-LiveHealth -Port $Port)
+    Write-Check 'fix' '.env.local' "$action (keep these; they are the only copy of the new secrets):"
+    $existing = if ($envExists) { Get-Content -LiteralPath $envPath -Raw } else { '' }
+    $prefix = if ($existing -and -not $existing.EndsWith("`n")) { "`r`n" } else { '' }
+    [IO.File]::AppendAllText($envPath, $prefix + (($newLines -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
+    foreach ($line in $newLines) {
+      Write-Host "    $line"
+      $envVars[$line.Substring(0, $line.IndexOf('='))] = $line.Substring($line.IndexOf('=') + 1)
+    }
+    # A server that was already up started without these values (or with other ones): restart it so it
+    # reads the file, otherwise its BACKUP_TOKEN would differ from .env.local and step 8 would warn.
+    if ($serverWasUp) {
+      Write-Check 'fix' 'server' "restarting :$Port so it picks up the new .env.local (start-live.ps1 -Restart)"
+      & $startLive -Root $liveRoot -Port $Port -LogPath $liveLog -TimeoutSec $TimeoutSec -Restart | Out-Host
+      if ($LASTEXITCODE -ne 0) { Fail 'server' 'start-live.ps1 -Restart did not get a 200 from /api/health' }
+    }
   }
-  if ($hard) { Fail '.env.local' 'see the lines above (RESUME.md > Secrets)' }
-  Write-Host '    (without BACKUP_TOKEN the server runs but snapshot-data.ps1 cannot back it up)'
 } else {
   Write-Check 'ok' '.env.local' 'AUTH_SECRET, AUTH_DEV_LOGIN, PGLITE_DATA_DIR, BACKUP_TOKEN present'
 }
@@ -144,7 +175,7 @@ if (-not (Test-Path (Join-Path $pgliteDir 'PG_VERSION'))) {
   } elseif (Get-LiveHealth -Port $Port) {
     Write-Check 'warn' 'data dir' "$pgliteDir has no PG_VERSION but :$Port answers - PGLITE_DATA_DIR may point elsewhere"
   } else {
-    Write-Check 'warn' 'data dir' "$pgliteDir missing and no tarball in $snapshotDir (set FACTORY_SNAPSHOT): the server will start EMPTY. Restore later with restore-data.ps1 -From <snapshot>"
+    Write-Check 'warn' 'data dir' "$pgliteDir missing and no tarball in $snapshotDir (set FACTORY_SNAPSHOT): the server will start EMPTY (PGlite creates the folder). Restore later with restore-data.ps1 -From <snapshot>"
   }
 } else {
   $files = @(Get-ChildItem -LiteralPath $pgliteDir -Recurse -File -ErrorAction SilentlyContinue)
@@ -179,7 +210,7 @@ if (-not $health) {
   if ($DryRun) { Write-Check 'fix' 'server' "nothing on :$Port; would run start-live.ps1 -Port $Port" }
   else {
     Write-Check 'fix' 'server' "starting via start-live.ps1 (up to ${TimeoutSec}s)"
-    & (Join-Path $PSScriptRoot 'start-live.ps1') -Root $liveRoot -Port $Port -TimeoutSec $TimeoutSec | Out-Host
+    & $startLive -Root $liveRoot -Port $Port -LogPath $liveLog -TimeoutSec $TimeoutSec | Out-Host
     if ($LASTEXITCODE -ne 0) { Fail 'server' 'start-live.ps1 did not get a 200 from /api/health' }
     $health = Get-LiveHealth -Port $Port
   }

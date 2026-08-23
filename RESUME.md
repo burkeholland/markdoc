@@ -16,7 +16,7 @@ folder of this checkout; `Get-FactoryRoot` in `scripts/live/common.ps1`).
 | --- | --- | --- |
 | Source | `markdoc/` (this repo, branch `main`) | From GitHub `burkeholland/markdoc` |
 | Live worktree | `markdoc-live/` — detached at the promoted sha (`git worktree add --detach ../markdoc-live main`) | Yes, `resume-check.ps1` creates it |
-| Live env | `markdoc-live/.env.local` — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Secrets: see below |
+| Live env | `markdoc-live/.env.local` — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Yes, `resume-check.ps1` writes it (see Secrets below) |
 | **Data** | `markdoc-data/pglite/` — the embedded PGlite database (~39 MB, ~1050 files): documents, versions, assets, comments, notifications, users, API tokens | **Only from the snapshot** |
 | Snapshot | `markdoc-data/snapshots/latest/` — current hot backup (`markdoc-pglite.tar.gz` + `manifest.json`), rewritten every 15 min; `markdoc-data/snapshots/<yyyyMMdd-HHmmss>/` — the last 3 copies | Recreated by the "Markdoc snapshot" task while the server runs |
 | Log | `markdoc-data/live.log` (+ `.1` rotation) | Disposable |
@@ -96,17 +96,24 @@ Verified round trip: dev server on :3911 with a temp `PGLITE_DATA_DIR`, two docu
 the two documents are back (also covered by `src/app/api/admin/backup.test.ts`, which restores the
 tarball in memory).
 
-## Secrets to re-enter (`markdoc-live\.env.local`)
+## Secrets (generated automatically by `resume-check.ps1`)
 
-| Key | What | How to regenerate |
+A fresh box needs **nothing from a human** for Markdoc: every value in `markdoc-live\.env.local`
+is either a fresh random string or derived from the paths, so step 4 of `resume-check.ps1`
+creates the file (or appends only the missing keys — existing values are never changed) and
+prints the lines it wrote. `-DryRun` prints what it would write instead.
+
+| Key | What | Where the value comes from |
 | --- | --- | --- |
-| `AUTH_SECRET` | Auth.js session signing key | Any long random string; `resume-check.ps1` prints a fresh one. Changing it signs everyone out — fine. |
+| `AUTH_SECRET` | Auth.js session signing key | Fresh random string. Changing it signs everyone out — fine. |
 | `AUTH_DEV_LOGIN` | `1` — sign in with any handle, no GitHub | Just `1` |
 | `PGLITE_DATA_DIR` | Absolute path of the data dir | `<FACTORY_ROOT>\markdoc-data\pglite` |
-| `BACKUP_TOKEN` | Gate for `/api/admin/backup` | Any long random string; `resume-check.ps1` prints one. Must match what the snapshot job passes. |
-| `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET` / `GITHUB_TOKEN` | Only for GitHub login and publish | Optional on :3000 (dev login is used). GitHub OAuth app settings / `gh auth token`. |
+| `BACKUP_TOKEN` | Gate for `/api/admin/backup` | Fresh random string. The snapshot job reads it from the same file, so they always match. |
+| `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET` / `GITHUB_TOKEN` | Only for GitHub login and publish | **Optional, human-provided** if wanted; not needed on :3000 (dev login is used). GitHub OAuth app settings / `gh auth token`. Not written by the script. |
 
-`resume-check.ps1` lists missing keys with ready-to-paste lines and never writes the file itself.
+If the server was already running when the keys were written (started without them, or with
+other values), `resume-check.ps1` restarts it via `start-live.ps1 -Restart` so it reads the new
+file; otherwise the running server's `BACKUP_TOKEN` would differ from `.env.local`.
 
 ## Checklist: `scripts/live/resume-check.ps1` (`npm run resume-check`)
 
@@ -116,14 +123,14 @@ it safely can unless `-DryRun`:
 1. repo present; if `$env:FACTORY_MANIFEST` points at the board's manifest, HEAD == its markdoc sha (else skipped)
 2. `node`, `npm`, `git` on PATH
 3. `../markdoc-live` exists and is detached (created with `git worktree add --detach` if missing; `npm ci --ignore-scripts` if `node_modules` is missing); warns when it is behind `main` (that is `promote.ps1`'s job)
-4. `.env.local` has `AUTH_SECRET`, `AUTH_DEV_LOGIN`, `PGLITE_DATA_DIR` (hard) and `BACKUP_TOKEN` (warning) — prints the lines to add
-5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` or, when that is unset, `../markdoc-data/snapshots/latest` (folder with the tarball + manifest); without a tarball in either it warns that the server will start empty
+4. `.env.local` has `AUTH_SECRET`, `AUTH_DEV_LOGIN`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` — missing keys are written (file created or lines appended, existing values untouched) and printed; a server that was already running is restarted so it reads them
+5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` or, when that is unset, `../markdoc-data/snapshots/latest` (folder with the tarball + manifest); without a tarball in either it warns and the server starts with an empty database (PGlite creates the folder) — not a failure
 6. scheduled tasks "Markdoc live server" and "Markdoc snapshot" registered (runs `install-autostart.ps1` if either is missing)
 7. `/api/health` 200 with `db:true` within 180 s (`start-live.ps1` if not)
 8. `GET /api/admin/backup?meta=1` with the token; `GET /api/documents` with the dev login (handle `resume-check`, `-CheckLogin` to change) answers 200
 9. `../markdoc-data/snapshots/latest/manifest.json` exists and is < 30 min old — a **warning** only, since right after a restore the first run of the snapshot task may be up to 15 min away (`Start-ScheduledTask 'Markdoc snapshot'` forces one)
 
-Manual order after a wipe, if not using bootstrap.ps1:
+Manual order after a wipe, if not using bootstrap.ps1 (one run, unattended):
 
 ```powershell
 git clone https://github.com/burkeholland/markdoc C:\Dev\ai-experiments\factory\markdoc
@@ -131,9 +138,8 @@ cd C:\Dev\ai-experiments\factory\markdoc; npm ci
 # the folder with markdoc-pglite.tar.gz + manifest.json; from factory-state that is
 # <factory-state>\projects\markdoc\markdoc-data\snapshots\latest (or copy it to ..\markdoc-data\snapshots\latest and skip this)
 $env:FACTORY_SNAPSHOT = '<factory-state>\projects\markdoc\markdoc-data\snapshots\latest'
-.\scripts\live\resume-check.ps1          # creates ../markdoc-live, tells you the .env.local lines
-# paste them into ..\markdoc-live\.env.local, then:
-.\scripts\live\resume-check.ps1          # restores data, registers both tasks, starts :3000
+.\scripts\live\resume-check.ps1          # creates ../markdoc-live, writes .env.local, restores data, registers both tasks, starts :3000
+# rehearse against scratch folders instead of the real ones: -LiveRoot <dir> -DataRoot <dir> -Port <n>
 # and put the board's root nomination back so the next factory-state snapshot carries the data again:
 #   <FACTORY_ROOT>\factory-state.nominate.json  ->  {"markdoc":["markdoc-data/snapshots/latest"]}
 ```
