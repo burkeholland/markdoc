@@ -3,7 +3,14 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // A separate build directory lets a second dev server (e.g. the Playwright suite) run next to `npm run dev`.
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  serverExternalPackages: ["@electric-sql/pglite", "pg", "drizzle-orm", "@hocuspocus/server", "ws", "yjs"],
+  // Only packages that need native/WASM files or a single process-wide instance are left to Node's
+  // loader; everything else is bundled. drizzle-orm is deliberately NOT listed: @auth/drizzle-adapter
+  // imports drizzle-orm/mysql-core and drizzle-orm/sqlite-core for dialect detection, and with
+  // drizzle-orm external Turbopack turned those into runtime `import()`s in every route chunk that
+  // intermittently failed in dev ("Failed to generate static paths" / "Failed to load external
+  // module"). Bundled, they are plain modules in the chunk graph. drizzle-orm is multi-copy safe
+  // (Symbol.for + entityKind), so the custom server's copy and the bundled one share one db.
+  serverExternalPackages: ["@electric-sql/pglite", "pg", "@hocuspocus/server", "ws", "yjs"],
   images: {
     remotePatterns: [{ protocol: "https", hostname: "avatars.githubusercontent.com" }],
   },
