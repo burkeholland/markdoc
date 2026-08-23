@@ -64,7 +64,7 @@ export function createCollabServer() {
     },
 
     async afterUnloadDocument({ documentName }) {
-      stopActivityWatch(documentName);
+      await stopActivityWatch(documentName);
     },
 
     async onStoreDocument({ document, documentName, lastContext }: onStoreDocumentPayload<CollabContext>) {

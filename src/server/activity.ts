@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, desc, eq, lt, ne, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { Activity, ActivityAction, ActorKind } from "@/server/db/schema";
 import type { Actor } from "@/server/http";
@@ -81,6 +81,11 @@ export async function recordActivity(docId: string, actor: ActivityActor, action
  * Record an edit, merging it into the actor's previous edit row when that row is
  * younger than the coalescing window: `detail.chars` is summed and `created_at`
  * moves forward, so a typing session shows as one line in the feed.
+ *
+ * The window closes as soon as any other kind of row (a comment, a version, a
+ * share…) is recorded for the document: moving the edit forward past it would
+ * reorder the newest-first feed, so the next keystrokes start a fresh edit row
+ * instead. Other users' edits do not close the window.
  */
 export async function recordEdit(docId: string, actor: ActivityActor, chars: number, now = new Date()): Promise<ActivityItem> {
   const db = await getDb();
@@ -89,10 +94,10 @@ export async function recordEdit(docId: string, actor: ActivityActor, chars: num
   const [latest] = await db
     .select()
     .from(schema.activity)
-    .where(and(eq(schema.activity.documentId, docId), eq(schema.activity.action, "edit"), actorMatch, gte(schema.activity.createdAt, since)))
-    .orderBy(desc(schema.activity.createdAt))
+    .where(and(eq(schema.activity.documentId, docId), or(ne(schema.activity.action, "edit"), actorMatch)))
+    .orderBy(desc(schema.activity.createdAt), desc(schema.activity.id))
     .limit(1);
-  if (latest) {
+  if (latest && latest.action === "edit" && latest.createdAt >= since) {
     const previous = Number((latest.detail as { chars?: unknown })?.chars ?? 0) || 0;
     const [row] = await db
       .update(schema.activity)
@@ -158,19 +163,26 @@ const log = (what: string) => (err: unknown) => console.error(`[activity] ${what
  * Watch a live document for in-editor activity: typing (coalesced per user), title
  * changes, and comments added or resolved in the UI. Everything is fire-and-forget
  * so the editing path is never slowed down. Returns an unsubscribe that also flushes
- * pending edits.
+ * pending edits and resolves once they are written.
  */
-export function watchDocumentActivity(doc: Y.Doc, docId: string): () => void {
+export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<void> {
   const ytext = doc.getText(TEXT_KEY);
   const meta = doc.getMap(META_KEY);
   const comments = doc.getMap<Y.Map<unknown>>("comments");
   const pending = new Map<string, PendingEdit>();
   let timer: ReturnType<typeof setTimeout> | null = null;
+  // Edit writes are chained so two flushes for the same actor never race (a race would
+  // create two rows where one coalesced row is expected).
+  let writes: Promise<void> = Promise.resolve();
 
   const flush = () => {
     timer = null;
-    for (const [, edit] of pending) void recordEdit(docId, edit.actor, edit.chars).catch(log("edit"));
+    const edits = [...pending.values()];
     pending.clear();
+    for (const edit of edits) {
+      writes = writes.then(() => recordEdit(docId, edit.actor, edit.chars).then(() => undefined, log("edit")));
+    }
+    return writes;
   };
 
   const onText = (event: Y.YTextEvent, txn: Y.Transaction) => {
@@ -228,20 +240,21 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => void {
     meta.unobserve(onMeta);
     comments.unobserveDeep(onComments);
     if (timer) clearTimeout(timer);
-    flush();
+    return flush();
   };
 }
 
-const watchers = new Map<string, () => void>();
+const watchers = new Map<string, () => Promise<void>>();
 
 /** Start watching a loaded document (idempotent per document id). */
 export function startActivityWatch(doc: Y.Doc, docId: string) {
-  watchers.get(docId)?.();
+  void watchers.get(docId)?.();
   watchers.set(docId, watchDocumentActivity(doc, docId));
 }
 
-/** Stop watching and flush pending edits when a document unloads. */
-export function stopActivityWatch(docId: string) {
-  watchers.get(docId)?.();
+/** Stop watching when a document unloads; resolves once pending edits are written. */
+export async function stopActivityWatch(docId: string): Promise<void> {
+  const stop = watchers.get(docId);
   watchers.delete(docId);
+  await stop?.();
 }
