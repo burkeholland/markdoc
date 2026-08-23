@@ -627,13 +627,13 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
                   <StorageBadge doc={d} />
                 </div>
                 <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
-                <div className="mt-3 flex items-center gap-2 text-xs text-ink-4">
-                  <span>{d.deletedAt ? <RelativeTime date={d.deletedAt} prefix="Trashed " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-4">
+                  <span className="whitespace-nowrap">{d.deletedAt ? <RelativeTime date={d.deletedAt} prefix="Trashed " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                   <div className="ml-auto flex items-center gap-1.5">
-                    <button type="button" className="btn btn-sm btn-outline gap-1" disabled={busy !== null} onClick={() => onRestore(d)} data-testid="restore-button">
+                    <button type="button" className="btn btn-sm btn-outline gap-1 whitespace-nowrap" disabled={busy !== null} onClick={() => onRestore(d)} data-testid="restore-button">
                       {isBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Restore
                     </button>
-                    <button type="button" className="btn btn-sm text-danger hover:bg-danger/10" disabled={busy !== null} onClick={() => onPurge(d)} data-testid="purge-button">
+                    <button type="button" className="btn btn-sm gap-1 whitespace-nowrap text-danger hover:bg-red-50" disabled={busy !== null} onClick={() => onPurge(d)} data-testid="purge-button">
                       <Trash2 size={13} /> Delete forever
                     </button>
                   </div>
@@ -646,7 +646,6 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
     </div>
   );
 }
-
 
 
 
