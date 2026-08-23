@@ -21,6 +21,7 @@ Everything that landed on `main` after the previous README pass (`6181b7d`), 22â
 
 ### Collaborating
 
+- Notifications: replies to your threads, resolves and re-opens, decisions on your suggestions, shares and @mentions, in a bell in the editor header, a strip on the dashboard and thread dots; `?thread=` deep links; `GET /api/notifications` (migration 0008 replaces the `mention` table; `/api/mentions` is deprecated) (`4e5b218`).
 - Reader view `/p/:id`: read-only page with table of contents, "new version" pill, download menu; anonymous view links to `/d` redirect there; `renderMarkdownBody` and `contentHash` shared with export (`309b04e`).
 - Per-document Activity panel: edits (coalesced per actor), comments, suggestions, versions, publish, shares, assets; agents marked; `GET /api/documents/:id/activity` (`1ba7824`, `15a728f`).
 - `@mentions` in comments with a suggestions popover, chips, and dashboard notifications; `GET /api/mentions` (`2b2000a`).

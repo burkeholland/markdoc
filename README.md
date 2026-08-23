@@ -32,7 +32,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Suggesting mode: edits become tracked changes (green/red) that anyone with edit access can accept or reject, one by one or all at once.
 - Version history with automatic snapshots, named versions, word-level diffs and one-click restore.
 - Activity panel per document: who edited, commented, suggested, published or shared, with agents marked.
-- Notifications for mentions and activity on your documents: *in progress* (#162).
+- Notifications: a bell in the editor header and a strip on the dashboard when someone replies to your thread, resolves it, accepts or rejects your suggestion, shares with you or @mentions you; `?thread=` links open the thread.
 - Share by GitHub handle as editor, commenter or viewer, or by link (restricted, view, comment, edit).
 - Reader view at `/p/<id>`: clean read-only page with a table of contents, reading time and download menu.
 - Offline editing that survives a refresh or a closed tab; edits merge on reconnect and the header shows what is unsaved.
@@ -110,7 +110,7 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 
 ```bash
 npm test              # Vitest: ~330 unit tests (parser/serializer, sync binding, comments/suggestions models, DB, routes, collaboration server); the incremental-parser fuzz runs 300 seeded docs
-npm run test:e2e      # Playwright: ~85 tests in 20 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, offline, …)
+npm run test:e2e      # Playwright: ~90 tests in 21 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, notifications, offline, …)
 npm run typecheck
 npm run lint
 ```
@@ -176,7 +176,7 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 - **Comments and suggestions are annotations** stored in Yjs maps with relative-position anchors (`src/editor/collab/`). They survive concurrent edits and render identically in both panes. Suggesting mode intercepts edits: deletions are kept and marked, insertions are recorded; accepting or rejecting applies the final text.
 - **Open documents are mirrored to IndexedDB** (`src/editor/collab/offline.ts`, one `markdoc:<docId>` database per document via `y-indexeddb`), so edits made offline survive a refresh or closed tab and merge into the server copy on reconnect; the header shows the unsaved count while offline and confirms "All changes saved" once they land. The local copy is deleted when the document is deleted or access is revoked.
 - **One server process.** `server/index.ts` hosts Next.js and the collaboration WebSocket (`/collab`) on one port. `src/server/collab/hocuspocus.ts` authenticates with short-lived JWTs minted by `/api/documents/:id/collab-token`, loads documents from Postgres and persists them (debounced) with automatic versioning. API edits go through the same live document (`src/server/livedoc.ts`), so an agent's `suggest` shows up in open editors immediately.
-- **Activity is watched, not logged by the client.** `src/server/activity.ts` records rows from API routes and from a watcher on the live Hocuspocus document (typing is coalesced into one row per actor per ten minutes); the Activity panel reads `GET /api/documents/:id/activity`. Mentions (`src/server/mentions.ts`) are extracted from comment bodies the same way. Notification delivery on top of this is in progress (#162).
+- **Activity is watched, not logged by the client.** `src/server/activity.ts` records rows from API routes and from a watcher on the live Hocuspocus document (typing is coalesced into one row per actor per ten minutes); the Activity panel reads `GET /api/documents/:id/activity`. Notifications (`src/server/notifications.ts`) are produced the same way, from the comment, suggestion and share routes and from the live document: replies, resolves, suggestion decisions, shares and @mentions, never for the actor; `GET /api/notifications` feeds the bell and the dashboard strip.
 - **Assets live in Postgres.** Pasted or uploaded images are stored as `asset` rows (bytes, SHA-256, MIME) and served from `/api/assets/:id` with the owning document's access check; identical bytes within a document share one row, and "make a copy" copies the referenced ones.
 - **Export and the reader view share one renderer.** `src/server/export/html.ts` turns clean Markdown into the standalone HTML page; `/p/:id` (`src/components/reader`) reuses `renderMarkdownBody` and the `contentHash` to show a "new version" pill, and PDF export prints the same HTML through Chromium.
 - **Per-user tables for organising.** `star` and `recent` rows drive the dashboard's stars, recently-opened order and sort; trash is a `deleted_at` column on `document` that hides it from every route until it is restored or purged after 30 days.
@@ -213,10 +213,11 @@ Expect **$40–55/month** for a small team, about **$25** with the small app siz
 server/index.ts              custom server: Next.js + collaboration WebSocket on one port
 src/app                      pages: dashboard, /login, /d/[id] editor, /p/[id] reader, /settings
 src/app/api                  REST routes (documents, content, suggest, comments, versions, activity,
-                             assets, export, share, star, trash, templates, mentions, tokens, GitHub)
+                             assets, export, share, star, trash, templates, notifications, tokens, GitHub)
 src/components/editor        editor UI: header, toolbar, panes, panels (comments, versions, activity),
                              command palette, slash menu, find bar, table menu, stats popover, dialogs
-src/components/dashboard     document list, search, stars/recents/sort, templates gallery, mentions strip
+src/components/dashboard     document list, search, stars/recents/sort, templates gallery, notifications strip
+src/components/notifications notifications bell in the editor header, open-thread helper
 src/components/reader        /p/[id] reader view: page, table of contents, update pill, download menu
 src/components/settings      API tokens
 src/editor/markdown          GFM schema, parser with source map, incremental parser, serializer, linter
@@ -231,7 +232,7 @@ src/server/github            Octokit: gists, repositories, import
 src/server/documents.ts      create/list/search/star/recent/trash/duplicate
 src/server/livedoc.ts        apply API edits to the live Yjs document (content, suggest, comments)
 src/server/activity.ts       activity rows from routes and the live-document watcher
-src/server/mentions.ts       @mention extraction and the per-user mention list
+src/server/notifications.ts  notification rows (replies, resolves, suggestion decisions, shares, @mentions) + live watcher
 src/server/assets.ts         image assets in Postgres
 src/server/publish.ts        link/publish/pull against gists and repositories
 src/server/tokens.ts         personal API tokens
@@ -241,10 +242,11 @@ drizzle/                     migrations, applied at startup:
   0001_api_tokens              personal API tokens
   0002_timestamptz             all timestamps to timestamptz
   0003_assets                  image assets (bytes + sha256 per document)
-  0004_mentions                @mentions per comment and mentioned login
+  0004_mentions                @mentions per comment and mentioned login (replaced by 0008)
   0005_activity                per-document activity feed
   0006_recent                  per-user recently-opened documents
   0007_trash                   document.deleted_at for the trash
+  0008_notifications           notification table; migrates and drops mention
 e2e/                         Playwright specs; global-setup.ts health-probes and warms routes,
                              dist-dir.ts gives each E2E_PORT its own Next cache
 scripts/smoke.mts            API smoke against a running (production) server
