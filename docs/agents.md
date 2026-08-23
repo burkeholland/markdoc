@@ -63,7 +63,7 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `GET /api/documents?q=text&limit=20` | | Search titles and content (case-insensitive, 2+ chars); `{ documents: [{ …, snippet }], query }`. |
 | `POST /api/documents` | `{ title?, content?, template? }` | Create. `template` is an id from `GET /api/templates`; it fills `title` and `content` when they are omitted (`{{date}}` → today, `{{user}}` → your login). Unknown id → `400`. |
 | `GET /api/templates` | | `{ templates: [{ id, name, description }] }` — the ids: `blank`, `meeting-notes`, `project-readme`, `design-doc`, `weekly-status`, `blog-post`, `decision-record`, `checklist`. |
-| `GET /api/documents/:id/content` | | `{ content, clean, title, pendingSuggestions, openComments }` |
+| `GET /api/documents/:id/content` | | `{ content, clean, title, contentHash, pendingSuggestions, openComments }` — `contentHash` is the SHA-256 of `clean`. |
 | `PUT /api/documents/:id/content` | `{ content, message? }` | Replace the whole text (minimal live diff; `message` names a version). |
 | `PATCH /api/documents/:id/content` | `{ append }` | Append Markdown. |
 | `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }` | Propose word-level tracked changes. |
@@ -78,6 +78,8 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `POST /api/documents/:id/publish` / `pull` | `{ message? }` | GitHub publish / pull. |
 | `POST /api/documents/:id/assets` | multipart `file` field, or a raw image body with `Content-Type: image/png` and `?name=shot.png` | Upload an image (PNG, JPEG, GIF, WebP, SVG; ≤ 5 MB). Returns `{ id, url, name, mime, size, alt }`; put `![alt](url)` in the Markdown. Identical bytes within a document share one asset. |
 | `GET /api/assets/:id` | | The image bytes. Requires view access to the owning document (shared links included). |
+
+Sharing a document with an audience: `/p/:id` is the read-only **reader view** (clean text, table of contents, no editor chrome); it opens for anyone when link access is not *Restricted*, while `/d/:id` is the editor.
 
 Example:
 

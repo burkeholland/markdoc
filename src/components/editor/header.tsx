@@ -34,6 +34,7 @@ import {
   UploadCloud,
   Link2,
   Star,
+  BookOpen,
 } from "lucide-react";
 import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session";
 import { saveStateLabel } from "@/editor/collab/offline";
@@ -249,6 +250,10 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
             Viewing
           </MenuRadioItem>
         </MenuRadioGroup>
+        <MenuSeparator />
+        <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${session.docId}`, "_blank", "noopener")} data-testid="mode-reader">
+          Open reader view
+        </MenuItem>
       </MenuContent>
     </Menu>
   );
@@ -345,6 +350,9 @@ export const Header = memo(function Header(props: HeaderProps) {
             </MenuItem>
             <MenuItem icon={<Files size={15} />} onSelect={props.onDuplicate} data-testid="menu-duplicate">
               Make a copy
+            </MenuItem>
+            <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${doc.id}`, "_blank", "noopener")} data-testid="menu-reader">
+              Open reader view
             </MenuItem>
             <MenuSeparator />
             {linked && doc.githubUrl && (

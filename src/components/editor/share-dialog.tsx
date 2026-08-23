@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, Copy, Globe, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
+import { BookOpen, Check, Copy, Globe, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
 import { api, type CollaboratorDto } from "@/lib/api";
@@ -35,6 +35,9 @@ export function ShareDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [origin, setOrigin] = useState("");
+  useEffect(() => setOrigin(window.location.origin), []);
+  const readerLink = `${origin}/p/${doc.id}`;
 
   useEffect(() => {
     if (!open) return;
@@ -176,6 +179,14 @@ export function ShareDialog({
                 <div className="text-sm font-medium text-ink">{LINK_OPTIONS.find((o) => o.value === doc.linkAccess)?.label}</div>
               )}
               <p className="mt-1 text-xs text-ink-3">{LINK_OPTIONS.find((o) => o.value === doc.linkAccess)?.description}</p>
+              {doc.linkAccess !== "private" && (
+                <div className="mt-2 flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs" data-testid="reader-link">
+                  <BookOpen size={13} className="shrink-0 text-ink-3" />
+                  <span className="shrink-0 text-ink-3">Reader link:</span>
+                  <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2">{readerLink}</code>
+                  <CopyButton text={readerLink} label="Copy" testId="copy-reader-link" />
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -194,12 +205,13 @@ export function ShareDialog({
   );
 }
 
-export function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
+export function CopyButton({ text, label = "Copy", testId }: { text: string; label?: string; testId?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
       className="btn btn-sm btn-ghost gap-1.5"
+      data-testid={testId}
       onClick={async () => {
         await navigator.clipboard.writeText(text);
         setCopied(true);

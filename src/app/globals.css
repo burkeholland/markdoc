@@ -701,3 +701,263 @@ body {
 }
 
 
+
+/* ---------- Reader view (/p/[id]) ----------
+   Typography mirrors the HTML export's stylesheet (src/server/export/html.ts) on the app's
+   color tokens; the markup is the GFM output of renderMarkdownBody, not ProseMirror's. */
+
+.reader-body {
+  font-size: 17px;
+  line-height: 1.7;
+  color: var(--color-ink-2);
+  word-wrap: break-word;
+}
+.reader-body > * + * {
+  margin-top: 0.9em;
+}
+.reader-body h1,
+.reader-body h2,
+.reader-body h3,
+.reader-body h4,
+.reader-body h5,
+.reader-body h6 {
+  color: var(--color-ink);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  margin: 0;
+  scroll-margin-top: 88px;
+}
+.reader-body h1 {
+  font-size: 2em;
+  margin-top: 0.2em;
+}
+.reader-body h2 {
+  font-size: 1.5em;
+  margin-top: 1.4em;
+  padding-top: 0.9em;
+  border-top: 1px solid var(--color-line);
+}
+.reader-body h2:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.reader-body h3 {
+  font-size: 1.25em;
+  margin-top: 1.3em;
+}
+.reader-body h4 {
+  font-size: 1.05em;
+}
+.reader-body h5,
+.reader-body h6 {
+  font-size: 1em;
+  color: var(--color-ink-2);
+}
+.reader-body p {
+  margin: 0;
+}
+.reader-body a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.reader-body a:hover {
+  text-decoration: underline;
+}
+.reader-body ul,
+.reader-body ol {
+  margin: 0;
+  padding-left: 1.6em;
+}
+.reader-body ul {
+  list-style: disc;
+}
+.reader-body ol {
+  list-style: decimal;
+}
+.reader-body li + li {
+  margin-top: 0.25em;
+}
+.reader-body li > p + p,
+.reader-body li > ul,
+.reader-body li > ol {
+  margin-top: 0.25em;
+}
+.reader-body li.task-list-item {
+  list-style: none;
+  margin-left: -1.6em;
+  padding-left: 1.6em;
+  position: relative;
+}
+.reader-body li.task-list-item > input[type="checkbox"] {
+  position: absolute;
+  left: 0;
+  top: 0.4em;
+  margin: 0;
+  width: 1em;
+  height: 1em;
+  accent-color: var(--color-accent);
+}
+.reader-body li.task-list-item:has(> input:checked) {
+  color: var(--color-ink-3);
+}
+.reader-body blockquote {
+  border-left: 3px solid var(--color-line-2);
+  color: var(--color-ink-3);
+  margin: 0;
+  padding: 0.1em 0 0.1em 1.1em;
+}
+.reader-body pre {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  line-height: 1.6;
+  overflow-x: auto;
+  padding: 14px 16px;
+  white-space: pre;
+}
+.reader-body pre code {
+  background: transparent;
+  border: none;
+  font-size: inherit;
+  padding: 0;
+  color: inherit;
+}
+.reader-body code {
+  background: var(--color-surface-3);
+  border-radius: 4px;
+  color: #be185d;
+  padding: 0.1em 0.35em;
+  font-size: 0.875em;
+  font-family: var(--font-mono);
+}
+.reader-body hr {
+  border: none;
+  border-top: 1px solid var(--color-line);
+  margin: 1.6em 0;
+}
+.reader-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.reader-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0;
+  display: block;
+  overflow-x: auto;
+}
+.reader-body th,
+.reader-body td {
+  border: 1px solid var(--color-line-2);
+  padding: 6px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+.reader-body th {
+  background: var(--color-surface-2);
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.reader-body del {
+  color: var(--color-ink-3);
+}
+/* hljs palette: same colors as the HTML export. */
+.reader-body .hljs-comment,
+.reader-body .hljs-quote {
+  color: #6b7280;
+  font-style: italic;
+}
+.reader-body .hljs-keyword,
+.reader-body .hljs-selector-tag,
+.reader-body .hljs-literal,
+.reader-body .hljs-doctag,
+.reader-body .hljs-name {
+  color: #7c3aed;
+}
+.reader-body .hljs-string,
+.reader-body .hljs-regexp,
+.reader-body .hljs-addition,
+.reader-body .hljs-attribute,
+.reader-body .hljs-meta .hljs-string {
+  color: #047857;
+}
+.reader-body .hljs-number,
+.reader-body .hljs-symbol,
+.reader-body .hljs-bullet,
+.reader-body .hljs-link,
+.reader-body .hljs-variable,
+.reader-body .hljs-template-variable {
+  color: #b45309;
+}
+.reader-body .hljs-title,
+.reader-body .hljs-section,
+.reader-body .hljs-function .hljs-title,
+.reader-body .hljs-title.function_,
+.reader-body .hljs-title.class_ {
+  color: #1d4ed8;
+}
+.reader-body .hljs-attr,
+.reader-body .hljs-selector-attr,
+.reader-body .hljs-selector-class,
+.reader-body .hljs-selector-id,
+.reader-body .hljs-selector-pseudo,
+.reader-body .hljs-type,
+.reader-body .hljs-built_in,
+.reader-body .hljs-params {
+  color: #0f766e;
+}
+.reader-body .hljs-deletion {
+  color: #b91c1c;
+}
+.reader-body .hljs-emphasis {
+  font-style: italic;
+}
+.reader-body .hljs-strong {
+  font-weight: 700;
+}
+
+/* The article is the printed page; chrome, TOC and pills are screen-only. */
+@media print {
+  @page {
+    margin: 0.75in;
+  }
+  .reader-chrome,
+  .reader-aside,
+  .reader-pill,
+  .reader-footer {
+    display: none !important;
+  }
+  .reader-layout {
+    max-width: none;
+    padding: 0;
+  }
+  .reader-body {
+    font-size: 11pt;
+    color: #111827;
+  }
+  .reader-body a {
+    color: inherit;
+    text-decoration: underline;
+  }
+  .reader-body pre,
+  .reader-body blockquote,
+  .reader-body table,
+  .reader-body img {
+    break-inside: avoid;
+  }
+  .reader-body h1,
+  .reader-body h2,
+  .reader-body h3 {
+    break-after: avoid;
+  }
+  .reader-body pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow: visible;
+  }
+}
