@@ -117,6 +117,29 @@ test.describe("notifications", () => {
     await expect(alice.page.getByTestId("notifications-badge")).toHaveCount(0);
   });
 
+  test("opening a resolve notification for the thread that is already active switches the panel to Resolved", async () => {
+    // "Another note" is open; make it the active thread, then Bob resolves it. Activating the same id again
+    // must still move the panel to the Resolved tab, otherwise the click lands on an empty Open list.
+    await alice.page.getByTestId("comments-tab-open").click();
+    const card = alice.page.getByTestId("comment-thread").filter({ hasText: "Another note" });
+    await card.click();
+    await expect(card).toHaveClass(/border-accent/);
+
+    await bob.page.getByTestId("comment-thread").filter({ hasText: "Another note" }).getByTestId("comment-resolve").click();
+    await expect.poll(() => unreadCount(alice.page)).toBe(1);
+    await refresh(alice.page);
+    await alice.page.getByTestId("notifications-bell").click();
+    const item = alice.page.getByTestId("notifications-popover").getByTestId("notification-item").first();
+    await expect(item).toHaveAttribute("data-kind", "resolve");
+    await item.click();
+
+    await expect(alice.page.getByTestId("comments-panel")).toBeVisible();
+    await expect(card).toBeVisible();
+    await expect(card).toHaveClass(/border-accent/);
+    await expect(alice.page.getByTestId("comments-tab-resolved")).toHaveClass(/bg-surface/);
+    await expect.poll(() => unreadCount(alice.page)).toBe(0);
+  });
+
   test("accepting my suggestion notifies me", async () => {
     await alice.page.getByTestId("mode-switcher").click();
     await alice.page.getByRole("menuitemradio", { name: /Suggesting/ }).click();

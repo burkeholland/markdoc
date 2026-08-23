@@ -328,7 +328,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     (refId: string) => {
       const thread = session.comments.list().find((t) => t.id === refId || t.replies.some((r) => r.id === refId));
       if (thread) {
-        session.setActiveComment(thread.id);
+        session.revealComment(thread.id);
         setSidePanel("comments");
         return true;
       }

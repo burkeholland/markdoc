@@ -542,13 +542,14 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
 }
 
 export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps) {
-  const { threads, suggestions, activeCommentId, activeSuggestionId, pending } = useSessionValue(
+  const { threads, suggestions, activeCommentId, activeSuggestionId, revealSeq, pending } = useSessionValue(
     session,
     (s) => ({
       threads: s.comments.list(),
       suggestions: s.suggestions.list(),
       activeCommentId: s.activeCommentId,
       activeSuggestionId: s.activeSuggestionId,
+      revealSeq: s.revealSeq,
       pending: s.pendingComment,
     }),
     jsonEqual,
@@ -569,7 +570,7 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
       if (t) setTab(t.resolved ? "resolved" : "open");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCommentId, activeSuggestionId]);
+  }, [activeCommentId, activeSuggestionId, revealSeq]);
 
   useEffect(() => {
     if (pending) setTab("open");
