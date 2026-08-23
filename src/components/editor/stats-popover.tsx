@@ -240,8 +240,7 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
             <option value="max">At most</option>
           </select>
           <input
-            className="input h-8 shrink-0 px-2 text-[13px] tabular-nums"
-            style={{ width: "4.5rem" }}
+            className="input h-8 w-18 shrink-0 px-2 text-[13px] tabular-nums"
             type="number"
             min={1}
             step={1}
