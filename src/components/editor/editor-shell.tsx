@@ -117,7 +117,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   useEffect(() => {
     const notice = takePendingNotice();
     if (notice) toast(notice.message, notice.kind);
-  }, [toast]);
+  }, [toast, doc.id]);
 
   // Toolbar state is derived from the live editors. The selector also runs on every render,
   // so selection changes (React state) are picked up as well as session changes; the shallow

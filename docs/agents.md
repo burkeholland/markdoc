@@ -31,9 +31,12 @@ Tools:
 | Tool | What it does |
 | --- | --- |
 | `markdoc_whoami` | Which user and agent identity the token acts as. |
-| `markdoc_list_documents` | Documents you own or that are shared with you, most recently opened first; each has `starred` and `lastOpenedAt`. Pass `starred: true` for only starred ones. |
+| `markdoc_list_documents` | Documents you own or that are shared with you, most recently opened first; each has `starred` and `lastOpenedAt`. Pass `starred: true` for only starred ones, or `trash: true` for your own documents in the trash. |
 | `markdoc_search_documents` | Find documents by title or body text (`query`, optional `limit`); each hit includes a snippet around the match. |
 | `markdoc_create_document` | New document from Markdown (`content`) or from a template (`template` id); returns the URL to open in the browser. |
+| `markdoc_duplicate_document` | "Make a copy": a new document you own, titled *Copy of …*, with the current clean text and images. Always a Markdoc document, even when the source lives on GitHub. |
+| `markdoc_delete_document` | Move a document you own to the trash (soft delete; restorable for 30 days). `permanent: true` deletes it for good. |
+| `markdoc_restore_document` | Take a document out of the trash. |
 | `markdoc_list_templates` | The template ids `markdoc_create_document` accepts, with names and descriptions. |
 | `markdoc_read_document` | Current Markdown (`clean: true` excludes pending suggestions). |
 | `markdoc_replace_content` / `markdoc_append` | Direct edits, applied live as minimal diffs (collaborators keep their cursors). |
@@ -52,7 +55,10 @@ All routes accept `Authorization: Bearer mdk_…`.
 | Method & path | Body | Purpose |
 | --- | --- | --- |
 | `GET /api/me` | | Current user and agent name. |
-| `GET /api/documents` | | List documents, most recently opened first (never-opened ones follow by last edit); each has `starred` and `lastOpenedAt`. `?starred=1` lists only the caller's starred documents. |
+| `GET /api/documents` | | List documents, most recently opened first (never-opened ones follow by last edit); each has `starred` and `lastOpenedAt`. `?starred=1` lists only the caller's starred documents. `?trash=1` lists the caller's own documents in the trash instead (each with `deletedAt`). |
+| `POST /api/documents/:id/duplicate` | | Make a copy (anyone with view access): `201 { id, title }`. The copy is owned by the caller, titled *Copy of …*, holds the current clean text with referenced images copied, is stored in Markdoc (no GitHub link), has no collaborators and one version *Copied from …*. |
+| `DELETE /api/documents/:id` | | Owner only. Moves the document to the **trash**: it vanishes from lists, search and every route (`404`), connected editors are sent back to the dashboard, and it is deleted for good after **30 days**. `?permanent=1` deletes it immediately (also for documents already in the trash). |
+| `POST /api/documents/:id/restore` | | Owner only. Takes the document out of the trash. |
 | `GET /api/documents/:id/star` / `PUT` / `DELETE` | | Read, set or clear the caller's star on a document (`{ starred }`). Stars are per user. |
 | `GET /api/documents?q=text&limit=20` | | Search titles and content (case-insensitive, 2+ chars); `{ documents: [{ …, snippet }], query }`. |
 | `POST /api/documents` | `{ title?, content?, template? }` | Create. `template` is an id from `GET /api/templates`; it fills `title` and `content` when they are omitted (`{{date}}` → today, `{{user}}` → your login). Unknown id → `400`. |
