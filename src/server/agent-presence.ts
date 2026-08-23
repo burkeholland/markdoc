@@ -39,8 +39,15 @@ interface Entry extends AgentPresence {
 /** Awareness update origin for everything the server publishes on behalf of agents. */
 export const AGENT_AWARENESS_ORIGIN = { source: "agent" } as const;
 
-const byDoc = new Map<string, Map<string, Entry>>();
-let sweeper: ReturnType<typeof setInterval> | null = null;
+// Shared between the custom server (Hocuspocus hooks) and the Next.js route bundle, which are separate
+// module graphs in one process (see collab/registry.ts).
+interface SharedState {
+  byDoc: Map<string, Map<string, Entry>>;
+  sweeper: ReturnType<typeof setInterval> | null;
+}
+const g = globalThis as typeof globalThis & { __markdocAgentPresence?: SharedState };
+const shared: SharedState = (g.__markdocAgentPresence ??= { byDoc: new Map(), sweeper: null });
+const byDoc = shared.byDoc;
 
 export function agentPresenceId(actor: Pick<Actor, "id" | "agent">): string {
   return `agent:${actor.id}:${actor.agent}`;
@@ -95,9 +102,9 @@ function unpublish(awareness: Awareness, e: Entry) {
 }
 
 function ensureSweeper() {
-  if (sweeper) return;
-  sweeper = setInterval(sweep, AGENT_PRESENCE_REFRESH_MS);
-  sweeper.unref?.();
+  if (shared.sweeper) return;
+  shared.sweeper = setInterval(sweep, AGENT_PRESENCE_REFRESH_MS);
+  shared.sweeper.unref?.();
 }
 
 /** Expire stale agents and re-publish live ones so client-side awareness timeouts never drop them. */
@@ -114,9 +121,9 @@ export function sweep(now = Date.now()) {
     }
     if (agents.size === 0) byDoc.delete(docId);
   }
-  if (byDoc.size === 0 && sweeper) {
-    clearInterval(sweeper);
-    sweeper = null;
+  if (byDoc.size === 0 && shared.sweeper) {
+    clearInterval(shared.sweeper);
+    shared.sweeper = null;
   }
 }
 
@@ -240,6 +247,6 @@ export function publishAgentPresence(doc: Y.Doc, docId: string) {
 /** Tests only. */
 export function resetAgentPresence() {
   byDoc.clear();
-  if (sweeper) clearInterval(sweeper);
-  sweeper = null;
+  if (shared.sweeper) clearInterval(shared.sweeper);
+  shared.sweeper = null;
 }

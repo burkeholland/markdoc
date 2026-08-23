@@ -2,15 +2,23 @@ import { and, asc, eq, gt, gte, inArray, or, sql } from "drizzle-orm";
 import { createTwoFilesPatch } from "diff";
 import { getDb, schema } from "@/server/db";
 import type { SessionUser } from "@/server/documents";
-import { readLiveText } from "@/server/livedoc";
 import { contentHash } from "@/server/export/html";
-import { HttpError } from "@/server/http";
+
+// This module is loaded by both the custom server (Hocuspocus hooks wake waiters) and the Next.js route
+// bundle (long-polls wait). They are separate module graphs in one process, so all state lives on globalThis,
+// and nothing that drags `next/headers` into the custom server (http.ts, livedoc.ts) is imported statically.
 
 /** Long-poll upper bound; clients loop. */
 export const WAIT_MAX_S = 55;
 /** A unified diff longer than this many lines is truncated (the agent can re-read the document). */
 export const DIFF_MAX_LINES = 200;
 const TEXT_CACHE_PER_DOC = 4;
+
+export class InvalidCursorError extends Error {
+  constructor() {
+    super("Invalid cursor");
+  }
+}
 
 export type AgentEvent =
   | { type: "content.changed"; documentId: string; contentHash: string; previousHash: string | null; diff: string | null; truncated: boolean; at: string }
@@ -49,15 +57,21 @@ export function decodeCursor(cursor: string | null | undefined): CursorState | n
       h: typeof parsed.h === "string" ? parsed.h : null,
     };
   } catch {
-    throw new HttpError(400, "Invalid cursor");
+    throw new InvalidCursorError();
   }
 }
 
 // --- Wake-ups -----------------------------------------------------------------
 
 const GLOBAL = "*";
-const seqs = new Map<string, number>();
-const waiters = new Map<string, Set<() => void>>();
+interface SharedState {
+  seqs: Map<string, number>;
+  waiters: Map<string, Set<() => void>>;
+  textCache: Map<string, Map<string, string>>;
+}
+const g = globalThis as typeof globalThis & { __markdocAgentEvents?: SharedState };
+const shared: SharedState = (g.__markdocAgentEvents ??= { seqs: new Map(), waiters: new Map(), textCache: new Map() });
+const { seqs, waiters, textCache } = shared;
 
 function bump(key: string) {
   seqs.set(key, (seqs.get(key) ?? 0) + 1);
@@ -104,8 +118,6 @@ export function clampWait(raw: string | null | undefined): number {
 }
 
 // --- Content diffs ------------------------------------------------------------
-
-const textCache = new Map<string, Map<string, string>>();
 
 function rememberText(docId: string, hash: string, text: string) {
   let m = textCache.get(docId);
@@ -170,6 +182,8 @@ export interface EventsPage {
  * the current cursor is returned so the caller can start watching from "now".
  */
 export async function collectDocumentEvents(docId: string, user: SessionUser, cursor: CursorState | null, now = new Date()): Promise<EventsPage> {
+  // Lazy: livedoc pulls in http.ts (next/headers), which must not load in the custom server's module graph.
+  const { readLiveText } = await import("@/server/livedoc");
   const live = await readLiveText(docId);
   const hash = contentHash(live.clean);
   rememberText(docId, hash, live.clean);

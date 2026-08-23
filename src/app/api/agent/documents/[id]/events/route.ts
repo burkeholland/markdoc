@@ -1,5 +1,5 @@
 import { handler, json, requireAccess, HttpError } from "@/server/http";
-import { clampWait, pollEvents, WAIT_MAX_S } from "@/server/agent-events";
+import { clampWait, pollEvents, InvalidCursorError, WAIT_MAX_S } from "@/server/agent-events";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,7 +14,10 @@ export const GET = handler(async (req: Request, { params }: Params) => {
   const { user } = await requireAccess(id, "view");
   if (!user?.agent) throw new HttpError(403, "This endpoint is for API tokens (agents). Create one at /settings");
   const q = new URL(req.url).searchParams;
-  const page = await pollEvents(id, user, q.get("since"), clampWait(q.get("wait")));
+  const page = await pollEvents(id, user, q.get("since"), clampWait(q.get("wait"))).catch((err) => {
+    if (err instanceof InvalidCursorError) throw new HttpError(400, err.message);
+    throw err;
+  });
   return json({ ...page, documentId: id, waitMax: WAIT_MAX_S });
 });
 
