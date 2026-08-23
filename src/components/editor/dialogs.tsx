@@ -254,13 +254,21 @@ export function NameVersionDialog({ open, onOpenChange, onSubmit }: { open: bool
 
 const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   {
+    group: "General",
+    items: [
+      ["Command palette", "Mod-Shift-P"],
+      ["Command palette (no selection)", "Mod-K"],
+      ["Keyboard shortcuts", "Mod-/"],
+    ],
+  },
+  {
     group: "Formatting",
     items: [
       ["Bold", "Mod-B"],
       ["Italic", "Mod-I"],
       ["Strikethrough", "Mod-Shift-X"],
       ["Inline code", "Mod-`"],
-      ["Link", "Mod-K"],
+      ["Link (with a selection)", "Mod-K"],
       ["Heading 1–6 / Paragraph", "Mod-Alt-1…6 / 0"],
       ["Bulleted list", "Mod-Shift-8"],
       ["Numbered list", "Mod-Shift-7"],

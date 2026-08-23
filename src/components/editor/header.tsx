@@ -23,6 +23,7 @@ import {
   Files,
   Trash2,
   Keyboard,
+  Command,
   ExternalLink,
   AlertTriangle,
   Eye,
@@ -273,6 +274,7 @@ export interface HeaderProps {
   onHistory: () => void;
   onActivity: () => void;
   onShortcuts: () => void;
+  onCommandPalette?: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
   onDownload: (format: ExportFormat, withSuggestions: boolean) => void;
@@ -363,6 +365,11 @@ export const Header = memo(function Header(props: HeaderProps) {
             {props.isOwner && (
               <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish}>
                 {linked ? "GitHub connection…" : "Connect to GitHub…"}
+              </MenuItem>
+            )}
+            {props.onCommandPalette && (
+              <MenuItem icon={<Command size={15} />} onSelect={props.onCommandPalette} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
+                Search commands
               </MenuItem>
             )}
             <MenuItem icon={<Keyboard size={15} />} onSelect={props.onShortcuts}>

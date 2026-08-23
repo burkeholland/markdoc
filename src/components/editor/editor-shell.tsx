@@ -34,6 +34,8 @@ import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FindBar } from "./find-bar";
 import { useScrollSync } from "./scroll-sync";
+import { CommandPalette, isPaletteShortcut } from "./command-palette";
+import { buildCommands, type EditorCommandContext } from "./commands";
 import type { VersionSummary } from "@/lib/api";
 import type { FindMatch } from "@/editor/find";
 import { isMac } from "@/lib/utils";
@@ -78,6 +80,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [richScroller, setRichScroller] = useState<HTMLDivElement | null>(null);
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const richScrollRef = useRef<HTMLDivElement>(null);
   const setRichScrollRef = useCallback((el: HTMLDivElement | null) => {
     richScrollRef.current = el;
@@ -324,6 +327,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const openShare = useCallback(() => setDialog("share"), []);
   const openPublish = useCallback(() => setDialog("publish"), []);
   const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
   const openImage = useCallback(() => setDialog("image"), []);
   const openTable = useCallback(() => setDialog("table"), []);
   const openVersionName = useCallback(() => setDialog("versionName"), []);
@@ -385,6 +389,60 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     return () => window.removeEventListener("keydown", onKey);
   }, [startComment, openFind]);
 
+  // Command palette. Captured at the window so Mod-K with a collapsed selection is taken before the
+  // editors' own Mod-K (Link) binding; with a selection the event falls through to them.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (paletteOpen || !isPaletteShortcut(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPaletteOpen(true);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [paletteOpen]);
+
+  const canChangeMode = role === "owner" || role === "editor";
+  const paletteCtx: EditorCommandContext = {
+    actions,
+    session: { canEdit: session.canEdit, canComment: session.canComment, mode: session.mode, canChangeMode, setMode: (m) => session.setMode(m) },
+    doc,
+    isOwner,
+    slashWhere: { inTable: format.tablePos >= 0, canComment: session.canComment },
+    setDialog,
+    openLink,
+    openImage,
+    startComment,
+    toggleComments,
+    toggleHistory,
+    toggleActivity,
+    layout,
+    setLayout,
+    outlineOpen,
+    toggleOutline: () => setOutlineOpen((o) => !o),
+    syncScroll,
+    setSyncScroll,
+    openFind,
+    download: (format) => void download(format, false),
+    copyMarkdown: copyFromHeader,
+    duplicate: duplicateFromHeader,
+    trash: deleteFromHeader,
+    publish: () => (doc.storage === "local" ? setDialog("publish") : publishFromHeader()),
+    openReader: () => window.open(`/p/${doc.id}`, "_blank", "noopener"),
+    navigate: (href) => router.push(href),
+    headings: () => session.binding.getHeadings(),
+    recentDocuments: async () => {
+      const res = await fetch("/api/documents?limit=8");
+      if (!res.ok) throw new Error(`Could not load documents (${res.status})`);
+      const data = (await res.json()) as { documents: { id: string; title: string }[] };
+      return data.documents.filter((d) => d.id !== doc.id).map((d) => ({ id: d.id, title: d.title }));
+    },
+  };
+  // The palette reads the context when it opens; a ref keeps `paletteCommands` stable across renders.
+  const paletteCtxRef = useRef(paletteCtx);
+  paletteCtxRef.current = paletteCtx;
+  const paletteCommands = useCallback(() => buildCommands(paletteCtxRef.current), []);
+
   const findOpen = useSessionValue(session, (s) => s.find !== null);
 
   // The title lives in the shared document so everyone sees renames immediately.
@@ -418,6 +476,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onHistory={toggleHistory}
           onActivity={toggleActivity}
           onShortcuts={openShortcuts}
+          onCommandPalette={openPalette}
           onDelete={deleteFromHeader}
           onDuplicate={duplicateFromHeader}
           onDownload={download}
@@ -552,6 +611,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           }}
         />
         <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={(o) => setDialog(o ? "shortcuts" : null)} />
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
 
         <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
           {toasts.map((t) => (
