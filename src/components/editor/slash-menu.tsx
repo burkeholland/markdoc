@@ -6,7 +6,7 @@ import { TextSelection } from "prosemirror-state";
 import { Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, Table, Type, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
-import { applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
+import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
 import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems, splitSlashQuery, type SlashItem, type SlashWhere } from "@/editor/slash-items";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
@@ -106,21 +106,31 @@ export function SlashMenu({
       if (!view) return;
       if (!item) return closeSlashMenu(view);
       const arg = splitSlashQuery(controller.getState()?.query ?? "").arg;
-      applySlashItem(view, () => {
-        const ctx = {
-          view,
-          where,
-          openImage: onImage,
-          openLink: onLink,
-          startComment: () => {
-            selectCurrentBlock(view);
-            onComment();
-          },
-        };
-        item.run(ctx, arg);
-      });
+      if (item.command) {
+        // One transaction for the /query removal and the edit: a single undo step.
+        applySlashCommand(view, item.command(arg), session.undoManager);
+        view.focus();
+        return;
+      }
+      applySlashItem(
+        view,
+        () => {
+          const ctx = {
+            view,
+            where,
+            openImage: onImage,
+            openLink: onLink,
+            startComment: () => {
+              selectCurrentBlock(view);
+              onComment();
+            },
+          };
+          item.run(ctx, arg);
+        },
+        session.undoManager,
+      );
     },
-    [view, controller, where, onImage, onLink, onComment],
+    [view, controller, where, onImage, onLink, onComment, session],
   );
 
   useEffect(() => {
