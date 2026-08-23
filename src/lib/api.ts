@@ -95,7 +95,9 @@ export type ActivityActionDto =
   | "share.remove"
   | "asset.upload"
   | "mention"
-  | "title.change";
+  | "title.change"
+  | "agent.request"
+  | "agent.request.done";
 
 export interface ActivityItemDto {
   id: string;
@@ -110,6 +112,20 @@ export interface ActivityItemDto {
 export interface ActivityPageDto {
   items: ActivityItemDto[];
   nextBefore: string | null;
+}
+
+export interface AgentRequestDto {
+  id: string;
+  documentId: string;
+  userId: string;
+  instruction: string;
+  selection: { from: number; to: number; quote: string } | null;
+  mode: "suggest" | "comment" | "rewrite";
+  status: "open" | "claimed" | "done" | "cancelled";
+  claimedBy: string | null;
+  result: { suggestions: number; comments: number; summary?: string } | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt" | "deletedAt"> & {
@@ -192,6 +208,14 @@ export const api = {
       request<{ document: DocumentDto }>(`/api/documents/${id}/link`, { method: "POST", body: JSON.stringify(body) }),
     comment: (id: string, body: Record<string, unknown>) =>
       request<{ id?: string }>(`/api/documents/${id}/comments`, { method: "POST", body: JSON.stringify(body) }),
+    requests: (id: string, opts: { status?: string[] } = {}) =>
+      request<{ requests: AgentRequestDto[] }>(`/api/documents/${id}/requests${opts.status?.length ? `?status=${opts.status.join(",")}` : ""}`),
+    createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"] }) =>
+      request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests`, { method: "POST", body: JSON.stringify(body) }),
+    cancelRequest: (id: string, rid: string) => request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests/${rid}/cancel`, { method: "POST" }),
+  },
+  tokens: {
+    list: () => request<{ tokens: unknown[] }>("/api/tokens"),
   },
   github: {
     gists: () =>

@@ -175,6 +175,8 @@ export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "sn
       return "rejected your suggestion";
     case "share":
       return `shared \u2018${n.documentTitle}\u2019 with you${n.snippet ? ` as ${n.snippet}` : ""}`;
+    case "request.done":
+      return `finished your request${n.snippet ? `: ${n.snippet}` : ""}`;
   }
 }
 
@@ -186,4 +188,5 @@ export const KIND_LABEL: Record<NotificationKind, string> = {
   "suggestion.accept": "Accepted",
   "suggestion.reject": "Rejected",
   share: "Shared",
+  "request.done": "Agent done",
 };

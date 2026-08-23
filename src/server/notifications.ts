@@ -86,7 +86,7 @@ export interface NotificationItem {
   readAt: Date | null;
 }
 
-export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "share"];
+export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "share", "request.done"];
 
 /** Wire shape: dates as ISO strings. */
 export function toNotificationDto(n: NotificationItem) {
