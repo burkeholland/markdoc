@@ -8,6 +8,8 @@
 #   FACTORY_SNAPSHOT   folder with markdoc-pglite.tar.gz + manifest.json, restored when the data dir is missing
 #   FACTORY_ROOT       parent folder of the checkouts (default: parent of this repo)
 # Also: `npm run resume-check`. Windows PowerShell 5.1 compatible. See RESUME.md.
+# Write-Host on purpose: this is a console checklist, like the other scripts in this folder.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
 param(
   [switch]$DryRun,
   [int]$Port = 3000,
@@ -103,24 +105,28 @@ if (Test-Path (Join-Path $liveRoot 'package.json')) {
   } else { Write-Check 'ok' 'live deps' 'node_modules present' }
 }
 
-# 4. .env.local with the three keys
+# 4. .env.local with the three keys (+ BACKUP_TOKEN for snapshots, a warning when absent)
 $envPath = Join-Path $liveRoot '.env.local'
 $envVars = Read-EnvFile -Path $envPath
-$missing = @('AUTH_SECRET', 'AUTH_DEV_LOGIN', 'PGLITE_DATA_DIR', 'BACKUP_TOKEN') | Where-Object { -not $envVars.ContainsKey($_) -or -not $envVars[$_] }
+$required = @('AUTH_SECRET', 'AUTH_DEV_LOGIN', 'PGLITE_DATA_DIR')
+$missing = @($required + 'BACKUP_TOKEN' | Where-Object { -not $envVars.ContainsKey($_) -or -not $envVars[$_] })
 if ($missing.Count -gt 0) {
-  Write-Check 'FAIL' '.env.local' "$envPath is missing $($missing -join ', '). Add these lines (fresh secrets generated now):"
+  $hard = @($missing | Where-Object { $required -contains $_ }).Count -gt 0
+  Write-Check $(if ($hard) { 'FAIL' } else { 'warn' }) '.env.local' "$envPath is missing $($missing -join ', '). Add these lines (fresh secrets generated now):"
   foreach ($key in $missing) {
     $value = switch ($key) {
-      'AUTH_SECRET' { New-RandomSecret }
-      'BACKUP_TOKEN' { New-RandomSecret }
+      'AUTH_SECRET' { Get-RandomSecret }
+      'BACKUP_TOKEN' { Get-RandomSecret }
       'AUTH_DEV_LOGIN' { '1' }
       'PGLITE_DATA_DIR' { $pgliteDir }
     }
     Write-Host "    $key=$value"
   }
-  Fail '.env.local' 'see the lines above (RESUME.md > Secrets)'
+  if ($hard) { Fail '.env.local' 'see the lines above (RESUME.md > Secrets)' }
+  Write-Host '    (without BACKUP_TOKEN the server runs but snapshot-data.ps1 cannot back it up)'
+} else {
+  Write-Check 'ok' '.env.local' 'AUTH_SECRET, AUTH_DEV_LOGIN, PGLITE_DATA_DIR, BACKUP_TOKEN present'
 }
-Write-Check 'ok' '.env.local' 'AUTH_SECRET, AUTH_DEV_LOGIN, PGLITE_DATA_DIR, BACKUP_TOKEN present'
 $token = $envVars['BACKUP_TOKEN']
 
 # 5. data dir (restore from the snapshot if missing)
@@ -174,8 +180,9 @@ if ($health) {
   Write-Check 'ok' 'server' "/api/health 200 on :$Port (db=$($health.db) collab=$($health.collab) version=$($health.version))"
 
   # 8. backup route reachable with the token, documents listable with the dev login
-  $meta = Get-BackupMeta -Port $Port -Token $token
+  $meta = if ($token) { Get-BackupMeta -Port $Port -Token $token } else { $null }
   if ($meta) { Write-Check 'ok' 'backup route' "GET /api/admin/backup?meta=1: $($meta.documents) documents, $($meta.users) users" }
+  elseif (-not $token) { Write-Check 'skip' 'backup route' 'no BACKUP_TOKEN in .env.local' }
   else { Write-Check 'warn' 'backup route' "GET /api/admin/backup?meta=1 did not answer 200 (server older than the route, or BACKUP_TOKEN differs from .env.local)" }
 
   $docs = Get-DocumentsAsDevUser -Port $Port -Login $CheckLogin

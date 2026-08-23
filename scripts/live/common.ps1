@@ -96,7 +96,7 @@ function Resolve-BackupToken {
   return $null
 }
 
-function New-RandomSecret {
+function Get-RandomSecret {
   # 32 random bytes as base64url (no padding): fits AUTH_SECRET and BACKUP_TOKEN.
   $bytes = New-Object byte[] 32
   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()

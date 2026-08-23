@@ -4,10 +4,11 @@
 # extracts the tarball with PGlite's own loader (restore-data.mjs), restarts the server via
 # start-live.ps1 and verifies: /api/health db:true, GET /api/admin/backup?meta=1 documents ==
 # manifest.documents, GET /api/documents with the dev login answers 200.
-# -SkipServer: only do the data-dir part (nothing is stopped or started) — for a first restore
+# -SkipServer: only do the data-dir part (nothing is stopped or started) - for a first restore
 # before the server exists, or for a throwaway data dir in a test. NEVER point -DataDir at a
 # directory a running server has open.
 # Exit 0 on success, 1 on failure (the previous data dir is still in the .bak folder).
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
 param(
   [Parameter(Mandatory = $true)][string]$From,
   # PGlite directory to replace; defaults to ../markdoc-data/pglite next to the repo.
