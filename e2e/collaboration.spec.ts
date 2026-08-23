@@ -136,6 +136,13 @@ test.describe("collaboration between two users", () => {
     await expect(carol.page.locator(".md-rich")).toHaveAttribute("contenteditable", "false");
     await expect(carol.page.getByTestId("tb-comment")).toBeVisible();
 
+    // Commenters read comments through the API too. This is also the first request to the
+    // comments route in the suite, so give the dev server's on-demand compile room here rather
+    // than inside the 15s UI expectations below.
+    const list = await carol.page.request.get(`/api/documents/${docId}/comments`, { timeout: 60_000 });
+    expect(list.ok()).toBeTruthy();
+    expect(Array.isArray(((await list.json()) as { comments: unknown[] }).comments)).toBeTruthy();
+
     await selectTextInRich(carol.page, "First paragraph");
     await carol.page.getByTestId("tb-comment").click();
     await carol.page.getByTestId("comment-composer").fill("Nice section, Bob.");
