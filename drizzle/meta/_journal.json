@@ -57,6 +57,13 @@
       "when": 1787462574769,
       "tag": "0007_trash",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787472274121,
+      "tag": "0008_notifications",
+      "breakpoints": true
     }
   ]
 }

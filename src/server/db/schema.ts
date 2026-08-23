@@ -225,27 +225,38 @@ export const assets = pgTable(
 export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
-/** `@login` mentions in comments, so mentioned people can find them on the dashboard. */
-export const mentions = pgTable(
-  "mention",
+export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "share";
+
+/**
+ * Per-user notifications: @mentions, replies to and resolutions of threads they took part in,
+ * decisions on their suggestions, documents shared with them. Replaces the former `mention` table
+ * (migration 0008 copied its rows here with kind 'mention').
+ */
+export const notifications = pgTable(
+  "notification",
   {
     id: text("id").primaryKey(),
+    /** Lower-cased GitHub login of the recipient (they may not have signed in yet). */
+    userLogin: text("user_login").notNull(),
     documentId: text("document_id")
       .notNull()
       .references(() => documents.id, { onDelete: "cascade" }),
-    /** Thread id or reply id the mention appears in. */
-    commentId: text("comment_id").notNull(),
-    /** Lower-cased GitHub login of the mentioned person. */
-    mentionedLogin: text("mentioned_login").notNull(),
-    byLogin: text("by_login"),
+    kind: text("kind").$type<NotificationKind>().notNull(),
+    actorLogin: text("actor_login"),
+    actorName: text("actor_name"),
+    /** Thread, reply or suggestion id the notification is about; the document id for shares. */
+    refId: text("ref_id").notNull(),
     snippet: text("snippet").notNull().default(""),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     readAt: timestamp("read_at", { mode: "date", withTimezone: true }),
   },
-  (t) => [uniqueIndex("mention_comment_login_idx").on(t.commentId, t.mentionedLogin), index("mention_login_idx").on(t.mentionedLogin)],
+  (t) => [
+    uniqueIndex("notification_user_kind_ref_idx").on(t.userLogin, t.kind, t.refId),
+    index("notification_user_read_created_idx").on(t.userLogin, t.readAt, t.createdAt.desc()),
+  ],
 );
 
-export type Mention = typeof mentions.$inferSelect;
+export type Notification = typeof notifications.$inferSelect;
 
 export type ActivityAction =
   | "edit"

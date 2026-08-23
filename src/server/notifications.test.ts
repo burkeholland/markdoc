@@ -1,0 +1,247 @@
+import { describe, expect, it, beforeAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import * as Y from "yjs";
+
+process.env.PGLITE_DATA_DIR = "memory://";
+delete process.env.DATABASE_URL;
+
+const { getDb, schema } = await import("./db");
+const {
+  recordMentions,
+  listNotifications,
+  unreadCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+  markRefsRead,
+  notify,
+  notifyShare,
+  watchDocumentNotifications,
+} = await import("./notifications");
+const { CommentsModel } = await import("@/editor/collab/comments");
+const { SuggestionsModel } = await import("@/editor/collab/suggestions");
+const { makeCollabUser } = await import("@/editor/collab/shared");
+
+async function seedUser(login: string, name: string) {
+  const db = await getDb();
+  const [user] = await db.insert(schema.users).values({ name, login, email: `${login}@example.com` }).returning();
+  return user;
+}
+
+async function seedDocument(id: string, title: string, ownerId: string) {
+  const db = await getDb();
+  await db.insert(schema.documents).values({ id, title, ownerId, content: "# " + title });
+}
+
+const until = async (check: () => Promise<boolean>, ms = 5000) => {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error("timed out");
+};
+const settle = () => new Promise((r) => setTimeout(r, 150));
+
+const unread = async (login: string) => (await listNotifications(login, { unread: true })).items;
+const origin = (userId: string, name: string) => ({ source: "connection", connection: { context: { userId, docId: "n-doc1", role: "editor", name, login: name.toLowerCase(), avatar: null } } });
+
+describe("notifications", () => {
+  let aliceId: string;
+  let bobId: string;
+  beforeAll(async () => {
+    const owner = await seedUser("owner", "Owner");
+    aliceId = (await seedUser("alice", "Alice")).id;
+    bobId = (await seedUser("bob", "Bob")).id;
+    await seedUser("carol", "Carol");
+    await seedDocument("n-doc1", "Launch plan", owner.id);
+    await seedDocument("n-doc2", "Release notes", owner.id);
+  });
+
+  it("records mentions idempotently per comment and mentioned login, never yourself", async () => {
+    expect(await recordMentions("n-doc1", "c1", "alice", "hi @Bob and @carol, see a@b.com")).toBe(2);
+    expect(await recordMentions("n-doc1", "c1", "alice", "hi @bob and @carol (edited)")).toBe(0);
+    expect(await recordMentions("n-doc1", "c1", "alice", "hi @bob, @carol and now @dave")).toBe(1);
+    expect(await recordMentions("n-doc1", "c2", "alice", "note to self @alice")).toBe(0);
+    expect(await recordMentions("n-doc1", "c3", "alice", "no mentions here")).toBe(0);
+    const bob = await unread("Bob");
+    expect(bob).toHaveLength(1);
+    expect(bob[0]).toMatchObject({ kind: "mention", refId: "c1", actorLogin: "alice", documentTitle: "Launch plan", snippet: "hi @Bob and @carol, see a@b.com" });
+  });
+
+  it("is idempotent per (user, kind, ref) and ignores self-notifications", async () => {
+    const input = { userLogin: "Carol", documentId: "n-doc2", kind: "share" as const, actorLogin: "owner", actorName: "Owner", refId: "n-doc2:carol", snippet: "editor" };
+    expect(await notify(input)).toBe(true);
+    expect(await notify(input)).toBe(false);
+    expect(await notify({ ...input, userLogin: "owner" })).toBe(false);
+    expect(await notify({ ...input, userLogin: "  " })).toBe(false);
+    expect(await notifyShare("n-doc2", "dave", "viewer", { login: "owner", name: "Owner" })).toBe(true);
+    expect(await notifyShare("n-doc2", "dave", "viewer", { login: "owner", name: "Owner" })).toBe(false);
+    expect(await notifyShare("n-doc2", "owner", "viewer", { login: "owner", name: "Owner" })).toBe(false);
+  });
+
+  it("clips snippets to 120 characters", async () => {
+    await recordMentions("n-doc1", "c-long", "alice", "@frank " + "x".repeat(500));
+    const [n] = await unread("frank");
+    expect(n.snippet.length).toBe(120);
+    expect(n.snippet.endsWith("…")).toBe(true);
+  });
+
+  it("lists newest first with the unread count, and marks read only for the recipient", async () => {
+    const page = await listNotifications("carol");
+    expect(page.unreadCount).toBe(2);
+    expect(page.items.map((n) => n.kind)).toEqual(["share", "mention"]);
+    expect(page.items.map((n) => n.documentTitle)).toEqual(["Release notes", "Launch plan"]);
+    expect((await listNotifications("carol", { kind: "mention" })).items).toHaveLength(1);
+    expect((await listNotifications("carol", { limit: 1 })).items).toHaveLength(1);
+
+    const [m] = await unread("carol");
+    expect(await markNotificationRead(m.id, "bob")).toBe(false);
+    expect(await unreadCount("carol")).toBe(2);
+    expect(await markNotificationRead(m.id, "carol")).toBe(true);
+    expect(await unreadCount("carol")).toBe(1);
+    expect(await markNotificationRead(m.id, "carol")).toBe(false);
+    // Read items still list unless `unread` is requested.
+    expect((await listNotifications("carol")).items).toHaveLength(2);
+    expect(await unread("carol")).toHaveLength(1);
+  });
+
+  it("read-all only touches the caller's rows", async () => {
+    expect(await unreadCount("bob")).toBe(1);
+    expect(await unreadCount("dave")).toBe(2);
+    expect(await markAllNotificationsRead("dave")).toBe(2);
+    expect(await unreadCount("dave")).toBe(0);
+    expect(await unreadCount("bob")).toBe(1);
+    expect(await markAllNotificationsRead("dave")).toBe(0);
+  });
+
+  it("marks every notification about a set of refs read (opening a thread)", async () => {
+    await notify({ userLogin: "erin", documentId: "n-doc1", kind: "reply", actorLogin: "bob", refId: "r1" });
+    await notify({ userLogin: "erin", documentId: "n-doc1", kind: "resolve", actorLogin: "bob", refId: "t1" });
+    await notify({ userLogin: "erin", documentId: "n-doc2", kind: "reply", actorLogin: "bob", refId: "r9" });
+    expect(await markRefsRead("erin", "n-doc1", [])).toBe(0);
+    expect(await markRefsRead("erin", "n-doc1", ["t1", "r1", "missing"])).toBe(2);
+    expect((await unread("erin")).map((n) => n.refId)).toEqual(["r9"]);
+  });
+
+  it("watches a live document: mentions, replies and resolutions from comments", async () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, "Some text to comment on");
+    const stop = watchDocumentNotifications(doc, "n-doc1");
+    const model = new CommentsModel(doc, ytext);
+    const alice = makeCollabUser(aliceId, "Alice", null, "alice");
+    const bob = makeCollabUser(bobId, "Bob", null, "bob");
+    const carol = makeCollabUser("u-carol", "Carol", null, "carol");
+    const anon = makeCollabUser("u-anon", "Anonymous", null, null);
+
+    const threadId = model.add({ from: 0, to: 4, body: "@gina what do you think?", author: alice });
+    const ownReply = model.reply(threadId, "also @hank", alice)!;
+    const bobReply = model.reply(threadId, "I think so", bob)!;
+    const carolReply = model.reply(threadId, "Agreed", carol)!;
+    model.editBody(threadId, "@gina and @ivy what do you think?");
+    await until(async () => (await unread("ivy")).length === 1);
+    await settle();
+
+    expect((await unread("gina")).map((n) => [n.kind, n.refId])).toEqual([["mention", threadId]]);
+    expect((await unread("hank")).map((n) => [n.kind, n.refId])).toEqual([["mention", ownReply]]);
+    // Alice replying to her own thread notifies nobody; Bob's reply reaches Alice; Carol's reaches Alice and Bob.
+    const aliceItems = await unread("alice");
+    const byActor = (a: unknown[], b: unknown[]) => String(a[2]).localeCompare(String(b[2]));
+    expect(aliceItems.map((n) => [n.kind, n.refId, n.actorLogin]).sort(byActor)).toEqual([
+      ["reply", bobReply, "bob"],
+      ["reply", carolReply, "carol"],
+    ]);
+    expect(aliceItems.find((n) => n.refId === bobReply)).toMatchObject({ actorName: "Bob", snippet: "I think so", documentTitle: "Launch plan" });
+    expect((await unread("bob")).map((n) => [n.kind, n.refId])).toEqual([["reply", carolReply]]);
+    expect((await unread("carol")).filter((n) => n.kind === "reply")).toHaveLength(0);
+
+    // Editing a reply re-inserts it with the same id: no duplicate.
+    model.editBody(threadId, "I think so!", bobReply);
+    await settle();
+    expect((await unread("alice")).filter((n) => n.refId === bobReply)).toHaveLength(1);
+
+    // Anonymous replies (no login) never notify.
+    model.reply(threadId, "drive-by", anon);
+    await settle();
+    expect((await unread("alice")).filter((n) => n.kind === "reply")).toHaveLength(2);
+
+    // Resolving through a connection notifies every participant but the actor; server-side origins are left to the route.
+    const map = model.ymap.get(threadId)!;
+    doc.transact(() => map.set("resolved", true), origin(bobId, "Bob"));
+    await settle();
+    expect((await unread("alice")).filter((n) => n.kind === "resolve").map((n) => n.refId)).toEqual([threadId]);
+    expect((await unread("carol")).filter((n) => n.kind === "resolve").map((n) => n.refId)).toEqual([threadId]);
+    expect((await unread("bob")).filter((n) => n.kind === "resolve")).toHaveLength(0);
+    doc.transact(() => map.set("resolved", false), origin(aliceId, "Alice"));
+    await settle();
+    expect((await unread("bob")).filter((n) => n.kind === "reopen").map((n) => n.refId)).toEqual([threadId]);
+    expect((await unread("alice")).filter((n) => n.kind === "reopen")).toHaveLength(0);
+    model.setResolved(threadId, true, bob); // local origin: ignored by the watcher
+    await settle();
+    expect((await unread("alice")).filter((n) => n.kind === "resolve")).toHaveLength(1);
+
+    stop();
+    model.add({ from: 0, to: 4, body: "@jon unwatched", author: alice });
+    await settle();
+    expect(await unread("jon")).toHaveLength(0);
+    model.destroy();
+  });
+
+  it("watches a live document: suggestions accepted or rejected notify their author", async () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, "Hello brave new world");
+    const stop = watchDocumentNotifications(doc, "n-doc2");
+    const model = new SuggestionsModel(doc, ytext);
+    const alice = makeCollabUser(aliceId, "Alice", null, "alice");
+    const agent = makeCollabUser("agent:x:Bot", "Bot", null, null);
+
+    model.applyEdit({ from: 6, to: 6, insert: "very " }, alice); // insert "very "
+    model.applyEdit({ from: 11, to: 16, insert: "" }, alice); // delete "brave"
+    model.applyEdit({ from: ytext.length, to: ytext.length, insert: "!" }, alice); // insert "!"
+    model.applyEdit({ from: 0, to: 5, insert: "" }, agent); // agent suggests deleting "Hello"
+    const list = model.list();
+    expect(list).toHaveLength(4);
+    const ins = list.find((s) => s.type === "insert" && s.text === "very ")!;
+    const del = list.find((s) => s.type === "delete" && s.text === "brave")!;
+    const bang = list.find((s) => s.text === "!")!;
+    const agentDel = list.find((s) => s.text === "Hello")!;
+
+    doc.transact(() => model.accept(ins.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
+    doc.transact(() => model.reject(del.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
+    doc.transact(() => model.reject(bang.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
+    doc.transact(() => model.accept(agentDel.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
+    await until(async () => (await unread("alice")).filter((n) => n.kind.startsWith("suggestion.")).length === 3);
+    const items = (await unread("alice")).filter((n) => n.kind.startsWith("suggestion."));
+    expect(items.map((n) => [n.kind, n.refId, n.actorLogin]).sort()).toEqual(
+      [
+        ["suggestion.accept", ins.id, "bob"],
+        ["suggestion.reject", del.id, "bob"],
+        ["suggestion.reject", bang.id, "bob"],
+      ].sort(),
+    );
+    expect(items.find((n) => n.refId === del.id)?.snippet).toBe('Delete "brave"');
+    expect(ytext.toString()).toBe(" very brave new world");
+
+    // Deciding on your own suggestion, or a server-side decision, notifies nobody from the watcher.
+    model.applyEdit({ from: 0, to: 0, insert: "Oh " }, alice);
+    const own = model.list().find((s) => s.text === "Oh ")!;
+    model.accept(own.id, origin(aliceId, "Alice"));
+    model.applyEdit({ from: 0, to: 0, insert: "Ah " }, alice);
+    const local = model.list().find((s) => s.text === "Ah ")!;
+    model.accept(local.id);
+    await settle();
+    expect((await unread("alice")).filter((n) => n.kind.startsWith("suggestion."))).toHaveLength(3);
+    stop();
+    model.destroy();
+  });
+
+  it("migration 0008 copies legacy mention rows and drops the old table", () => {
+    const sql = readFileSync(join(process.cwd(), "drizzle", "0008_notifications.sql"), "utf8");
+    expect(sql).toMatch(/CREATE TABLE "notification"/);
+    expect(sql).toMatch(/INSERT INTO "notification"[\s\S]*SELECT[\s\S]*FROM "mention"/);
+    expect(sql).toMatch(/DROP TABLE "mention"/);
+    expect(sql.indexOf("INSERT INTO")).toBeLessThan(sql.indexOf("DROP TABLE"));
+  });
+});

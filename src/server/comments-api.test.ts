@@ -23,7 +23,7 @@ const { createCollabServer, shutdownCollab, TEXT_KEY } = await import("@/server/
 const { attachCollab } = await import("@/server/collab/ws");
 const { signCollabToken } = await import("@/server/collab/token");
 const { registerCollab } = await import("@/server/collab/registry");
-const { listUnreadMentions } = await import("@/server/mentions");
+const { listNotifications } = await import("@/server/notifications");
 const { CommentsModel } = await import("@/editor/collab/comments");
 const { POST, GET } = await import("@/app/api/documents/[id]/comments/route");
 
@@ -127,11 +127,11 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
 
     // The mention is stored exactly once even though both the live-document watcher and the route record it.
     const db = await getDb();
-    const rows = await db.select().from(schema.mentions).where(eq(schema.mentions.commentId, id));
+    const rows = await db.select().from(schema.notifications).where(eq(schema.notifications.refId, id));
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ documentId: docId, mentionedLogin: "alice", byLogin: carol.login });
-    const unread = await listUnreadMentions("alice");
-    expect(unread.map((m) => m.commentId)).toContain(id);
+    expect(rows[0]).toMatchObject({ documentId: docId, kind: "mention", userLogin: "alice", actorLogin: carol.login });
+    const unread = await listNotifications("alice", { unread: true });
+    expect(unread.items.map((m) => m.refId)).toContain(id);
 
     // And the commenter can read it back through the API.
     const list = await get(docId);
@@ -201,8 +201,8 @@ describe("POST /api/documents/:id/comments without a collaboration server", () =
     expect(doc.getMap("comments").has(id)).toBe(true);
     doc.destroy();
 
-    const rows = await db.select().from(schema.mentions).where(eq(schema.mentions.commentId, id));
+    const rows = await db.select().from(schema.notifications).where(eq(schema.notifications.refId, id));
     expect(rows).toHaveLength(1);
-    expect(rows[0].mentionedLogin).toBe("alice-2");
+    expect(rows[0].userLogin).toBe("alice-2");
   });
 });

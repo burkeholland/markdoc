@@ -1,10 +1,12 @@
 import { handler, json, requireUser } from "@/server/http";
-import { listUnreadMentions } from "@/server/mentions";
+import { listNotifications } from "@/server/notifications";
+import { toDto } from "@/app/api/notifications/route";
 
-/** The current user's unread `@mentions`, newest first, with the document title. */
+/** @deprecated Alias kept for one release: unread notifications of kind `mention`. Use GET /api/notifications?unread=1&kind=mention. */
 export const GET = handler(async () => {
   const user = await requireUser();
-  if (!user.login) return json({ mentions: [] });
-  const mentions = await listUnreadMentions(user.login);
-  return json({ mentions: mentions.map((m) => ({ ...m, createdAt: m.createdAt.toISOString() })) });
+  if (!user.login) return json({ items: [], unreadCount: 0, mentions: [] });
+  const page = await listNotifications(user.login, { unread: true, kind: "mention" });
+  const items = page.items.map(toDto);
+  return json({ items, unreadCount: page.unreadCount, mentions: items.map((n) => ({ ...n, commentId: n.refId, byLogin: n.actorLogin })) });
 });

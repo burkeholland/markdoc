@@ -5,6 +5,8 @@ import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { recordAgentActivity } from "@/server/agents";
 import { activityActor, recordActivity } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
+import { notifySuggestionDecision } from "@/server/notifications";
+import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -45,10 +47,13 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const { user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => actionSchema.parse(d));
   let count = 0;
+  let decided: ResolvedSuggestion[] = [];
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     const model = new SuggestionsModel(doc, doc.getText(TEXT_KEY));
     try {
-      const before = model.list().length;
+      const pending = model.list();
+      const before = pending.length;
+      decided = body.id ? pending.filter((s) => s.id === body.id) : pending;
       switch (body.action) {
         case "accept":
           if (body.id) model.accept(body.id);
@@ -69,8 +74,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     }
     recordAgentActivity(doc, user!, "reviewed");
   });
+  const accepted = body.action.startsWith("accept");
   if (count > 0) {
-    await recordActivity(id, activityActor(user!), body.action.startsWith("accept") ? "suggestion.accept" : "suggestion.reject", { count });
+    await recordActivity(id, activityActor(user!), accepted ? "suggestion.accept" : "suggestion.reject", { count });
+    const actor = { login: user!.login ?? null, name: actorName(user) ?? null };
+    for (const s of decided) await notifySuggestionDecision(id, s, accepted, actor);
   }
   return json({ ok: true });
 });

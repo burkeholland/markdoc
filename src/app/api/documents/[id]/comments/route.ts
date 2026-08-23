@@ -4,7 +4,7 @@ import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { CommentsModel } from "@/editor/collab/comments";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
-import { recordMentions } from "@/server/mentions";
+import { notifyReply, notifyResolved, readThread, recordMentions } from "@/server/notifications";
 import { activityActor, clip, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
@@ -35,7 +35,10 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   if (!user) throw new HttpError(401, "Sign in required");
   const body = await readJson(req, (d) => schema.parse(d));
   const author = collabIdentity(user);
+  const actor = { login: user.login ?? null, name: author.name };
   let result: unknown = { ok: true };
+  // Side effects the live-document watcher only performs for WebSocket transactions; collected inside the mutation, run after it.
+  const after: (() => Promise<unknown>)[] = [];
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
     const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
@@ -57,12 +60,24 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           result = { id: model.add({ from, to, body: body.body, author }) };
           break;
         }
-        case "reply":
-          result = { id: model.reply(body.threadId, body.body, author) };
+        case "reply": {
+          const replyId = model.reply(body.threadId, body.body, author);
+          result = { id: replyId };
+          const map = model.ymap.get(body.threadId);
+          const thread = map ? readThread(map) : null;
+          const reply = thread?.replies.find((r) => r.id === replyId);
+          if (thread && reply) after.push(() => notifyReply(id, thread, reply));
           break;
-        case "resolve":
+        }
+        case "resolve": {
+          const map = model.ymap.get(body.threadId);
+          const thread = map ? readThread(map) : null;
+          if (!thread) throw new HttpError(404, "Comment not found");
+          const was = map!.get("resolved") === true;
           model.setResolved(body.threadId, body.resolved, author);
+          if (was !== body.resolved) after.push(() => notifyResolved(id, thread, body.resolved, actor));
           break;
+        }
         case "edit": {
           const thread = model.get(body.threadId);
           if (!thread) throw new HttpError(404, "Comment not found");
@@ -90,8 +105,9 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   if (body.action === "add" || body.action === "reply" || body.action === "edit") {
     const created = result as { id?: string | null };
     const target = body.action === "edit" ? body.replyId ?? body.threadId : created.id;
-    if (target) await recordMentions(id, target, user.login, body.body);
+    if (target) await recordMentions(id, target, user.login, body.body, author.name);
   }
+  for (const fn of after) await fn();
   if (body.action === "add") {
     await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
   } else if (body.action === "resolve" && body.resolved) {
