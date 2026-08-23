@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { e2eDistDir, removeDistDir } from "./e2e/dist-dir";
 
 const PORT = Number(process.env.E2E_PORT ?? 3100);
 // PROD_BASE_URL points the suite at an already-running production build (see e2e/prod-smoke.spec.ts);
@@ -6,10 +7,22 @@ const PORT = Number(process.env.E2E_PORT ?? 3100);
 const prodBaseURL = process.env.PROD_BASE_URL?.replace(/\/$/, "");
 const baseURL = prodBaseURL ?? `http://localhost:${PORT}`;
 
+// One Next dist dir per run so two worktrees (or a killed previous run) never share a cache:
+// `.next-e2e` when E2E_PORT is unset, `.next-e2e-<port>` otherwise (see e2e/dist-dir.ts).
+const distDir = e2eDistDir();
+// Playwright re-imports this file in every worker process; only the runner (no TEST_WORKER_INDEX)
+// may delete the cache, and only before the webServer starts. A stale cache is never useful for a
+// test run (404s on every API route, EPERM on app-paths-manifest.json); Next recompiles in ~30 s.
+if (!prodBaseURL && process.env.TEST_WORKER_INDEX === undefined) {
+  removeDistDir(distDir, "pre-run");
+}
+
 export default defineConfig({
   testDir: "./e2e",
   // Compiles the editor and API routes once before the first spec (no-op with PROD_BASE_URL).
   globalSetup: "./e2e/global-setup.ts",
+  // Removes the per-run dist dir (best-effort) and reverts Next's tsconfig.json `include` churn.
+  globalTeardown: "./e2e/global-teardown.ts",
   timeout: 90_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
@@ -35,7 +48,7 @@ export default defineConfig({
           AUTH_SECRET: "e2e-secret-e2e-secret-e2e-secret-e2e",
           AUTH_DEV_LOGIN: "1",
           PGLITE_DATA_DIR: "memory://",
-          NEXT_DIST_DIR: ".next-e2e",
+          NEXT_DIST_DIR: distDir,
           AUTO_VERSION_INTERVAL_MS: "1000",
           NODE_ENV: "development",
         },
