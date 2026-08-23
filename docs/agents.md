@@ -31,7 +31,24 @@ Open **Settings → Agents & API access** (`/settings`), name the token after th
 
 ## 2. Connect an MCP client
 
-`mcp/server.mjs` exposes Markdoc over the Model Context Protocol (stdio). Point any MCP client at it:
+Markdoc serves the Model Context Protocol itself at `/api/mcp` (Streamable HTTP). Any MCP client connects with the server URL and a token — nothing to install, no checkout. The **Share** dialog of every document has a *Collaborate with an agent* card with this config filled in for the server you are on (and a *Create a token* button), as does the *Connect an agent* card in **Settings → Agents** and on the first **Ask an agent**:
+
+```json
+{
+  "mcpServers": {
+    "markdoc": {
+      "type": "http",
+      "url": "http://localhost:3000/api/mcp",
+      "headers": { "Authorization": "Bearer mdk_…" },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or run `/mcp add` and enter the same URL and header); for VS Code put it in `.vscode/mcp.json` under `servers`; Claude, Cursor and other Streamable HTTP clients use the same shape. Use the URL you open Markdoc with (a LAN address such as `http://192.168.1.20:3000/api/mcp` works too; `MARKDOC_URL` on the server overrides the origin the tools call back to when it sits behind a proxy). A plain `GET /api/mcp` (no token) answers `{ name, version, tools, docs }` so a `curl` shows it is alive; without a token every MCP request is a `401` that says where to create one.
+
+**Alternative: stdio from a checkout.** `mcp/server.mjs` exposes the same tools over stdio for clients that cannot speak HTTP:
 
 ```json
 {
@@ -45,7 +62,7 @@ Open **Settings → Agents & API access** (`/settings`), name the token after th
 }
 ```
 
-For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or use `/mcp add`); for VS Code put it in `.vscode/mcp.json` under `servers`; Claude Desktop and Cursor use the same shape. From a checkout you can also run `npm run mcp` with `MARKDOC_URL` and `MARKDOC_TOKEN` set.
+From a checkout you can also run `npm run mcp` with `MARKDOC_URL` and `MARKDOC_TOKEN` set. Both transports register the same tool set from `mcp/tools.mjs`; `npm run mcp:smoke` (with `MARKDOC_URL` and `MARKDOC_TOKEN`) checks a running server over HTTP with a real MCP client.
 
 ### MCP tools
 
