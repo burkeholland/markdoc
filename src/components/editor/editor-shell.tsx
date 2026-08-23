@@ -631,7 +631,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   const panel =
     sidePanel === "comments" ? (
-      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} />
+      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} />
     ) : sidePanel === "versions" ? (
       <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (
@@ -642,6 +642,17 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   return (
     <TooltipProvider>
       <div className="flex h-screen flex-col overflow-hidden bg-surface supports-[height:100dvh]:h-[100dvh]" data-testid="editor-shell" data-breakpoint={breakpoint}>
+        <a
+          href="#editor-main"
+          className="skip-link"
+          data-testid="skip-link"
+          onClick={(e) => {
+            e.preventDefault();
+            actions.focus();
+          }}
+        >
+          Skip to editor
+        </a>
         <Header
           session={session}
           doc={docView}
@@ -690,7 +701,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
             </button>
           </div>
         )}
-        <div className="relative flex min-h-0 flex-1">
+        <main id="editor-main" className="relative flex min-h-0 flex-1">
           {isPhone ? (
             <Dialog open={outlineDrawerOpen} onOpenChange={setOutlineDrawerOpen}>
               <DialogPortal>
@@ -787,7 +798,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
             ) : (
               panel
             ))}
-        </div>
+        </main>
         <StatusBar
           session={session}
           doc={docView}

@@ -28,6 +28,7 @@ export const COMPONENT_PREFIXES = [
   "dialog",
   "kbd",
   "pane-label",
+  "skip-link",
   "avatar",
   "drawer",
   "sheet",

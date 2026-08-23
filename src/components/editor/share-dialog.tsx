@@ -108,7 +108,7 @@ export function ShareDialog({
                 data-testid="share-login"
               />
             </div>
-            <select className="select" value={role} onChange={(e) => setRole(e.target.value as Exclude<Role, "owner">)} data-testid="share-role">
+            <select className="select" value={role} onChange={(e) => setRole(e.target.value as Exclude<Role, "owner">)} aria-label="Role for new collaborator" data-testid="share-role">
               <option value="editor">Editor</option>
               <option value="commenter">Commenter</option>
               <option value="viewer">Viewer</option>
@@ -142,7 +142,7 @@ export function ShareDialog({
                 </div>
                 {isOwner ? (
                   <>
-                    <select className="select h-8 text-xs" value={c.role} onChange={(e) => void changeRole(c, e.target.value as Exclude<Role, "owner">)}>
+                    <select className="select h-8 text-xs" value={c.role} onChange={(e) => void changeRole(c, e.target.value as Exclude<Role, "owner">)} aria-label={`Role for ${c.login}`}>
                       <option value="editor">Editor</option>
                       <option value="commenter">Commenter</option>
                       <option value="viewer">Viewer</option>
@@ -168,7 +168,7 @@ export function ShareDialog({
             </span>
             <div className="min-w-0 flex-1">
               {isOwner ? (
-                <select className="select w-full" value={doc.linkAccess} onChange={(e) => void setLink(e.target.value as DocumentDto["linkAccess"])} data-testid="link-access">
+                <select className="select w-full" value={doc.linkAccess} onChange={(e) => void setLink(e.target.value as DocumentDto["linkAccess"])} aria-label="Link access" data-testid="link-access">
                   {LINK_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}

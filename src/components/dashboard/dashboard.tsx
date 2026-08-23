@@ -417,7 +417,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
       <main className="min-h-screen bg-surface-2">
         <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
           <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
-            <Link href="/" className="flex items-center gap-2.5">
+            <Link href="/" className="flex items-center gap-2.5" aria-label="Markdoc — all documents">
               <Logo className="h-8 w-8" />
               <span className="hidden text-lg font-semibold text-ink sm:inline">Markdoc</span>
             </Link>

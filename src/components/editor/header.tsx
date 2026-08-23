@@ -225,7 +225,12 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button type="button" className="flex items-center -space-x-2 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" data-testid="presence" aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here`}>
+        <button
+          type="button"
+          className="flex items-center -space-x-2 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          data-testid="presence"
+          aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here: ${users.map((u) => (u.isLocal ? `${u.name} (you)` : u.name)).join(", ")}`}
+        >
           {shown.map((u) => (
             <Tip key={u.id} label={u.isLocal ? `${u.name} (you)` : u.name}>
               <span className={cn("inline-flex transition-opacity", !u.isLocal && isIdle(u.idleSince, now) && "opacity-40")} data-testid="presence-avatar" data-user-id={u.id} data-idle={!u.isLocal && isIdle(u.idleSince, now) ? "" : undefined}>
