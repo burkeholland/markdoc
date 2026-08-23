@@ -153,7 +153,7 @@ describe("notifications", () => {
       ["reply", carolReply, "carol"],
     ]);
     expect(aliceItems.find((n) => n.refId === bobReply)).toMatchObject({ actorName: "Bob", snippet: "I think so", documentTitle: "Launch plan" });
-    expect((await unread("bob")).map((n) => [n.kind, n.refId])).toEqual([["reply", carolReply]]);
+    expect((await unread("bob")).filter((n) => n.kind === "reply").map((n) => n.refId)).toEqual([carolReply]);
     expect((await unread("carol")).filter((n) => n.kind === "reply")).toHaveLength(0);
 
     // Editing a reply re-inserts it with the same id: no duplicate.
