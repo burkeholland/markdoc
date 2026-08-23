@@ -2,6 +2,7 @@ import { and, desc, eq, ilike, isNotNull, isNull, lt, or, sql } from "drizzle-or
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
+import { encodeSeedState } from "@/server/collab/seed";
 
 const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
 
@@ -293,13 +294,16 @@ export async function createDocument(input: CreateDocumentInput): Promise<Docume
   const db = await getDb();
   const content = input.content ?? DEFAULT_CONTENT;
   const id = nanoid();
+  const title = input.title ?? titleFromContent(content);
   const [doc] = await db
     .insert(schema.documents)
     .values({
       id,
-      title: input.title ?? titleFromContent(content),
+      title,
       ownerId: input.ownerId,
       content,
+      // Mint the CRDT state once, here, so no load ever has to seed it (see collab/seed.ts).
+      ystate: encodeSeedState(content, title),
       storage: input.storage ?? "local",
       gistId: input.gistId ?? null,
       gistFile: input.gistFile ?? null,
@@ -403,7 +407,7 @@ export async function duplicateDocument(docId: string, userId: string, options: 
 
   const [doc] = await db
     .insert(schema.documents)
-    .values({ id: newId, title, ownerId: userId, content, storage: "local", lastEditedBy: userId })
+    .values({ id: newId, title, ownerId: userId, content, ystate: encodeSeedState(content, title), storage: "local", lastEditedBy: userId })
     .returning();
   if (assets.length > 0) {
     await db
