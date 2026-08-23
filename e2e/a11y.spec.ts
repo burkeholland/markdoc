@@ -138,21 +138,42 @@ test.describe("axe: pages", () => {
   });
 });
 
-test.describe("axe: editor", () => {
-  test("split view, panels, every floating UI, compare mode, dark", async ({ browser }) => {
-    const { page, context } = await signIn(browser, "a11y-editor");
-    const id = await createDocument(page, DOC, "Editor fixture");
-    // Two content revisions so the versions panel has something to compare.
+/**
+ * Sign in, create the fixture document, open it in split view with the outline and comments panels
+ * showing. Each editor scan below starts here so a failure names the UI that broke and no single
+ * test carries more than a handful of axe runs (one test used to do 15 and hit the 90 s timeout on
+ * the 2-vCPU CI runner, see task #278).
+ */
+async function openEditorFixture(browser: Browser, login: string, { revisions = false }: { revisions?: boolean } = {}) {
+  const { page, context } = await signIn(browser, login);
+  const id = await createDocument(page, DOC, "Editor fixture");
+  // A second content revision so the versions panel has something to compare.
+  if (revisions) {
     expect((await page.request.put(`/api/documents/${id}/content`, { data: { content: DOC + "\nVersion two.\n", message: "Two" } })).ok()).toBeTruthy();
-    await openDocument(page, id);
+  }
+  await openDocument(page, id);
+  await ensureOutlineOpen(page);
+  await ensureCommentsOpen(page);
+  await expect(page.locator(".md-rich table")).toBeVisible();
+  await expect(page.locator(".md-rich pre")).toBeVisible();
+  await expect(page.locator(".md-rich img[alt='Markdoc logo']")).toBeVisible();
+  return { page, context, id };
+}
 
-    if ((await page.getByTestId("outline").count()) === 0) await page.getByTestId("outline-button").click();
-    await expect(page.getByTestId("outline")).toBeVisible();
-    await ensureCommentsOpen(page);
-    await expect(page.locator(".md-rich table")).toBeVisible();
-    await expect(page.locator(".md-rich pre")).toBeVisible();
-    await expect(page.locator(".md-rich img[alt='Markdoc logo']")).toBeVisible();
+async function ensureOutlineOpen(page: Page) {
+  if ((await page.getByTestId("outline").count()) === 0) await page.getByTestId("outline-button").click();
+  await expect(page.getByTestId("outline")).toBeVisible();
+}
+
+test.describe("axe: editor", () => {
+  test("split view with outline and comments panels", async ({ browser }) => {
+    const { page, context } = await openEditorFixture(browser, "a11y-editor");
     await scan(page, "editor split + outline + comments");
+    await context.close();
+  });
+
+  test("floating menus: find bar, slash menu, table menu, selection bubble, command palette", async ({ browser }) => {
+    const { page, context } = await openEditorFixture(browser, "a11y-editor-menus");
 
     // Find bar.
     await focusRichEnd(page);
@@ -171,7 +192,7 @@ test.describe("axe: editor", () => {
     await page.keyboard.press("Escape");
     await page.keyboard.press("Backspace");
 
-    // Table menu.
+    // Table menu (clickCell waits for it).
     await clickCell(page, 1, 0);
     await scan(page, "editor + table menu");
 
@@ -187,42 +208,58 @@ test.describe("axe: editor", () => {
     await scan(page, "editor + command palette");
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("palette-input")).toHaveCount(0);
+    await context.close();
+  });
+
+  test("popovers and dialogs: stats, presence, notifications, share, image, shortcuts", async ({ browser }) => {
+    const { page, context } = await openEditorFixture(browser, "a11y-editor-dialogs");
 
     // Stats popover.
     await page.getByTestId("stats-button").click();
     await expect(page.getByTestId("stats-popover")).toBeVisible();
     await scan(page, "editor + stats popover");
     await page.keyboard.press("Escape");
+    await expect(page.getByTestId("stats-popover")).not.toBeVisible();
 
     // Presence popover.
     await page.getByTestId("presence").click();
     await expect(page.getByTestId("presence-popover")).toBeVisible();
     await scan(page, "editor + presence popover");
     await page.keyboard.press("Escape");
+    await expect(page.getByTestId("presence-popover")).not.toBeVisible();
 
     // Notifications bell.
     await page.getByTestId("notifications-bell").click();
     await expect(page.getByTestId("notifications-popover")).toBeVisible();
     await scan(page, "editor + notifications popover");
     await page.keyboard.press("Escape");
+    await expect(page.getByTestId("notifications-popover")).not.toBeVisible();
 
     // Share dialog.
     await page.getByTestId("share-button").click();
     await expect(page.getByRole("dialog", { name: /share/i })).toBeVisible();
     await scan(page, "editor + share dialog");
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: /share/i })).not.toBeVisible();
 
     // Image dialog.
     await page.getByTestId("tb-image").click();
     await expect(page.getByRole("dialog", { name: /image/i })).toBeVisible();
     await scan(page, "editor + image dialog");
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: /image/i })).not.toBeVisible();
 
     // Shortcuts dialog.
     await page.getByTestId("status-bar").getByRole("button", { name: "Help and shortcuts" }).click();
     await expect(page.getByRole("dialog", { name: /shortcuts/i })).toBeVisible();
     await scan(page, "editor + shortcuts dialog");
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: /shortcuts/i })).not.toBeVisible();
+    await context.close();
+  });
+
+  test("versions panel in compare mode, activity panel", async ({ browser }) => {
+    const { page, context } = await openEditorFixture(browser, "a11y-editor-history", { revisions: true });
 
     // Versions panel in compare mode.
     await page.getByTestId("more-menu").click();
@@ -240,23 +277,20 @@ test.describe("axe: editor", () => {
     await page.getByTestId("menu-activity").click();
     await expect(page.getByTestId("activity-panel")).toBeVisible();
     await scan(page, "editor + activity panel");
-
-    // Dark mode, with color-contrast enabled (see DISABLED_RULES).
-    await setTheme(page, "dark");
-    await expect(page.locator(".md-rich")).toBeVisible();
-    await ensureCommentsOpen(page);
-    await scan(page, "editor (dark)", { contrast: true });
     await context.close();
   });
 
-  test("dark: find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
+  test("dark: split view with panels, find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-editor-dark");
     const id = await createDocument(page, DOC, "Dark fixture");
+    // Theme is switched on the dashboard so the document loads dark once, with no reload of /d/<id>.
     await setTheme(page, "dark");
     await openDocument(page, id);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator(".md-rich table")).toBeVisible();
+    await ensureOutlineOpen(page);
     await ensureCommentsOpen(page);
+    await scan(page, "editor (dark) split + outline + comments", { contrast: true });
 
     await focusRichEnd(page);
     await page.keyboard.press("Control+f");
