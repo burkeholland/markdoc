@@ -35,14 +35,22 @@ test.describe("activity panel", () => {
     expect(warm.ok()).toBeTruthy();
 
     // Typing in the editor becomes one coalesced "edit" row once the server stores the change.
+    // Wait until every typed character is accounted for: the watcher flushes on a timer, so on a
+    // slow machine the text can land in two flushes, and a late flush after the comment below
+    // would otherwise start a second edit row.
+    const typed = " Alice added a closing line here.";
     await focusRichEnd(alice.page);
-    await alice.page.keyboard.type(" Alice added a closing line here.");
+    await alice.page.keyboard.type(typed);
     await expect(alice.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
     await expect
-      .poll(async () => ((await (await alice.page.request.get(`/api/documents/${docId}/activity`)).json()) as { items: { action: string }[] }).items.some((i) => i.action === "edit"), {
-        timeout: 30_000,
-      })
-      .toBe(true);
+      .poll(
+        async () => {
+          const { items } = (await (await alice.page.request.get(`/api/documents/${docId}/activity`)).json()) as { items: { action: string; detail: { chars?: number } }[] };
+          return items.filter((i) => i.action === "edit").map((i) => i.detail.chars ?? 0);
+        },
+        { timeout: 30_000 },
+      )
+      .toEqual([typed.length]);
 
     await selectTextInRich(alice.page, "First paragraph");
     await alice.page.getByTestId("tb-comment").click();

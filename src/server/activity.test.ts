@@ -91,6 +91,45 @@ describe("activity feed", () => {
     ]);
   });
 
+  it("closes the edit window when another kind of row lands, so the feed stays in order", async () => {
+    const docId = await newDoc(ownerId);
+    const t = (s: number) => new Date(Date.parse("2026-03-01T12:00:00Z") + s * 1000);
+
+    // Alice types, comments, then keeps typing: the later keystrokes must not drag the
+    // first edit row above the comment.
+    const e1 = await recordEdit(docId, alice, 20, t(0));
+    await recordActivity(docId, alice, "comment.add", { quote: "Shorter?" }, t(5));
+    const e2 = await recordEdit(docId, alice, 13, t(6));
+    expect(e2.id).not.toBe(e1.id);
+    expect(e2.detail.chars).toBe(13);
+
+    // Once open, the new window coalesces as usual; Bob's edit in between does not close it.
+    const e3 = await recordEdit(docId, alice, 7, t(30));
+    expect(e3.id).toBe(e2.id);
+    expect(e3.detail.chars).toBe(20);
+    await recordEdit(docId, bob, 3, t(40));
+    const e4 = await recordEdit(docId, alice, 1, t(50));
+    expect(e4.id).toBe(e2.id);
+    expect(e4.detail.chars).toBe(21);
+
+    // A row by someone else (an agent's version through the API) closes it too.
+    const agent = activityActor({ id: bob.id, login: "bob", name: "Bob", image: null, agent: "Review Bot" });
+    await recordActivity(docId, agent, "version.save", { number: 2, title: "Draft" }, t(60));
+    const e5 = await recordEdit(docId, alice, 2, t(61));
+    expect(e5.id).not.toBe(e2.id);
+
+    const { items } = await listActivity(docId);
+    expect(items.map((i) => [i.action, i.actorName, i.detail.chars ?? null])).toEqual([
+      ["edit", "Alice", 2],
+      ["version.save", "Review Bot", null],
+      ["edit", "Alice", 21],
+      ["edit", "Bob", 3],
+      ["comment.add", "Alice", null],
+      ["edit", "Alice", 20],
+    ]);
+    expect(await countActivity(docId)).toBe(6);
+  });
+
   it("attributes API calls through a token to the agent", async () => {
     const docId = await newDoc(ownerId);
     const agent = activityActor({ id: alice.id, login: "alice", name: "Alice", image: null, agent: "Copilot CLI" });
@@ -148,8 +187,7 @@ describe("activity feed", () => {
     doc.transact(() => comments.get("t1")!.set("resolved", true), origin(bob.id, "Bob"));
 
     await sleep(150);
-    stop();
-    await sleep(50);
+    await stop();
 
     const { items } = await listActivity(docId);
     const edits = items.filter((i) => i.action === "edit");
