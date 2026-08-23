@@ -191,7 +191,7 @@ export const api = {
       const qs = q.toString();
       return request<NotificationsPageDto>(`/api/notifications${qs ? `?${qs}` : ""}`);
     },
-    read: (id: string) => request<{ ok: true }>(`/api/notifications/${id}/read`, { method: "POST" }),
+    read: (id: string) => request<{ ok: true; changed: boolean }>(`/api/notifications/${id}/read`, { method: "POST" }),
     readAll: () => request<{ ok: true; count: number }>("/api/notifications/read-all", { method: "POST" }),
     readRefs: (documentId: string, refIds: string[]) =>
       request<{ ok: true; count: number }>("/api/notifications/thread-read", { method: "POST", body: JSON.stringify({ documentId, refIds }) }),

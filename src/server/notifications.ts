@@ -150,6 +150,17 @@ export async function markNotificationRead(id: string, login: string): Promise<b
   return updated.length > 0;
 }
 
+/** True when the notification exists and is addressed to `login`, whether or not it has been read. */
+export async function notificationBelongsTo(id: string, login: string): Promise<boolean> {
+  const db = await getDb();
+  const [row] = await db
+    .select({ id: schema.notifications.id })
+    .from(schema.notifications)
+    .where(and(eq(schema.notifications.id, id), userWhere(login)))
+    .limit(1);
+  return Boolean(row);
+}
+
 /** Mark all of the user's unread notifications read. Returns how many changed. */
 export async function markAllNotificationsRead(login: string): Promise<number> {
   const db = await getDb();

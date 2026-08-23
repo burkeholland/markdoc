@@ -112,8 +112,8 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 ## Test it
 
 ```bash
-npm test              # Vitest: ~330 unit tests (parser/serializer, sync binding, comments/suggestions models, DB, routes, collaboration server); the incremental-parser fuzz runs 300 seeded docs
-npm run test:e2e      # Playwright: ~90 tests in 21 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, notifications, offline, …)
+npm test              # Vitest: ~430 unit tests (parser/serializer, sync binding, comments/suggestions models, DB, routes, collaboration server); the incremental-parser fuzz runs 300 seeded docs
+npm run test:e2e      # Playwright: ~120 tests in 27 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, notifications, offline, dark mode, phone layouts, import, …)
 npm run typecheck
 npm run lint
 ```
