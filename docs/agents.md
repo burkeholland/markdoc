@@ -9,6 +9,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 - [1. Create a token](#1-create-a-token)
 - [2. Connect an MCP client](#2-connect-an-mcp-client)
   - [MCP tools](#mcp-tools)
+  - [Requests](#requests)
 - [3. Or call the REST API directly](#3-or-call-the-rest-api-directly)
   - [Access levels](#access-levels)
   - [Documents](#documents)
@@ -72,8 +73,26 @@ Eighteen tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_publish` | `id`, `message?`, `force?` | Commit to the linked gist or repository (the document must already be connected in the app). Answers with `status: remote-ahead \| diverged` instead of publishing when GitHub moved since the last sync; `force: true` overwrites. |
 | `markdoc_pull` | `id`, `merge?`, `force?` | Bring the GitHub file into the document. Answers with `status: local-ahead \| diverged` instead of discarding unpublished edits; `merge: true` three-way merges a diverged document (conflicts → `status: "conflict"`, `merged` text with `<<<<<<< local` / `=======` / `>>>>>>> github` markers, `conflicts` count); `force: true` replaces the text regardless (a version is kept). |
 | `markdoc_sync_status` | `id` | `in-sync`, `local-ahead` (publish is safe), `remote-ahead` (pull is safe) or `diverged`, with line counts for each side. |
+| `markdoc_list_requests` | `status?`, `limit?` | Work humans asked for with **Ask an agent** in the editor: open requests across every document you can see, with the selected text, the instruction and the mode. See [Requests](#requests). |
+| `markdoc_claim_request` | `documentId`, `requestId` | Take a request; the editor's pill switches to *"<agent> is working…"*. |
+| `markdoc_complete_request` | `documentId`, `requestId`, `summary?` | Mark it done: the requester is notified (`request.done`) and the Comments panel opens on your suggestions. |
+
+`markdoc_suggest` and `markdoc_comment` (`add`) also take an optional `requestId` so the work they produce is counted against the request.
 
 A typical session: *"Let's write the launch plan"* → the agent calls `markdoc_create_document` and gives you the link → you open it, invite teammates, edit and comment → the agent reads `markdoc_comments`, answers with `markdoc_comment`, and revises with `markdoc_suggest` → you accept the good parts in the app.
+
+### Requests
+
+The other direction — a human asks **from the document** and an agent picks it up:
+
+1. In the editor, select some text (or nothing for the whole document) and press **Ask an agent** (toolbar, selection bubble or command palette). Type an instruction or pick a chip (*Tighten this*, *Fix grammar and tone*, *Turn into a checklist*), choose how the agent should answer — **tracked changes** (default), **comment only** or **rewrite directly** (edit access) — and send. A pill in the header shows *"1 request waiting"*.
+2. Your agent — GitHub Copilot CLI connected through the MCP server above, by default — calls `markdoc_list_requests` when you ask it to *"Check Markdoc for requests"*. Each request names the document, the requester, the instruction, the mode and the selected text.
+3. It calls `markdoc_claim_request`, reads the document (`markdoc_read_document`), does the work with `markdoc_suggest` / `markdoc_comment` / `markdoc_replace_content` passing the same `requestId`, and finishes with `markdoc_complete_request { summary }`.
+4. Back in the editor the pill clears, a toast says *"Copilot CLI finished: 3 suggestions"*, the Comments panel opens on **Suggestions** and the requester gets a `request.done` notification. The Activity panel shows *asked an agent* and *finished a request* rows.
+
+Requests are scoped: `markdoc_list_requests` only lists documents the token's user owns or collaborates on. Commenters can ask for comments; asking for changes needs edit access. The requester (or the document owner) can cancel from the pill's menu. Nothing runs on the Markdoc server — it only keeps the inbox; the model is whichever agent you connect.
+
+The first time someone without a token clicks **Ask an agent**, the dialog shows a one-time *Connect an agent* card with the MCP config for the server they are on (the same card sits at the top of **Settings → Agents**).
 
 ## 3. Or call the REST API directly
 
@@ -110,11 +129,24 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 | `GET /api/documents/:id/content` | | view | `{ content, clean, title, contentHash, pendingSuggestions, openComments, stats }`. `contentHash` is the SHA-256 of `clean`; `stats` are prose statistics of `clean`: `{ words, characters, charactersNoSpaces, sentences, paragraphs, headings, readingMinutes (200 wpm), speakingMinutes (130 wpm) }` (fenced code and front matter excluded). |
 | `PUT /api/documents/:id/content` | `{ content, message? }` | edit | Replace the whole text (minimal live diff; `message` names a version). |
 | `PATCH /api/documents/:id/content` | `{ append }` | edit | Append Markdown. |
-| `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }` | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`. |
+| `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }`, plus `requestId?` | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`. Returns `{ suggestions, suggestionIds }`; with `requestId` the suggestions count against that request. |
 | `GET /api/documents/:id/suggestions` | | view | Pending suggestions with ranges and context. |
 | `POST /api/documents/:id/suggestions` | `{ action: accept \| reject \| acceptAll \| rejectAll, id? }` | edit | Review suggestions. |
 | `GET /api/documents/:id/comments` | | view | `{ comments: [thread] }`: threads with the text they anchor to, a `mentions` array, `reactions` (`{ "👍": [userId, …] }`) and `editedAt` per thread and reply. |
-| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. |
+| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body, requestId? }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. |
+
+### Agent requests
+
+| Method & path | Body / query | Access | Purpose |
+| --- | --- | --- | --- |
+| `GET /api/agent/requests` | `?status=open` (default; comma-separated list allowed), `?limit=` | token only | The agent's inbox: requests across every document the token's user owns or collaborates on, each with `documentTitle`, `userName`, `instruction`, `selection`, `mode`, `status`. |
+| `POST /api/documents/:id/requests` | `{ instruction (≤ 2000), selection?: { from, to, quote }, mode?: suggest \| comment \| rewrite }` | comment (`suggest`/`rewrite`: edit) | Ask an agent (`201 { request }`). Records `agent.request` activity. |
+| `GET /api/documents/:id/requests` | `?status=open,claimed` | view | Requests on this document, newest first. |
+| `POST /api/documents/:id/requests/:rid/claim` | | comment | Take an open request (`409` when another agent has it). |
+| `POST /api/documents/:id/requests/:rid/complete` | `{ summary?, suggestions?, comments? }` | comment | Mark done: `result` gets the counts (from `requestId`-linked suggest/comment calls unless overridden) and `summary`; records `agent.request.done` and notifies the requester (`request.done`). |
+| `POST /api/documents/:id/requests/:rid/cancel` | | requester or owner | Withdraw an open or claimed request. |
+
+Request status is also mirrored into the live document (`meta.agentRequests`), which is how the editor's pill updates without polling.
 
 ### Versions, activity and export
 

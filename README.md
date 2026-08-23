@@ -56,6 +56,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 ### Agents
 
 - Personal API tokens, a REST API, and an MCP server (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes and answer comments; the app shows who did what. See [docs/agents.md](docs/agents.md).
+- **Ask an agent** from the document: select text (or nothing), pick an instruction and how the agent should answer (tracked changes, comment only, rewrite). The request waits in an inbox agents read over MCP (`markdoc_list_requests` → `markdoc_claim_request` → work with `requestId` → `markdoc_complete_request`); a header pill tracks it live, and the result comes back as suggestions plus a notification. Nothing runs server-side — your own Copilot CLI does the work. First-time users get a *Connect an agent* card with the MCP config for the host they are on. See [Requests](docs/agents.md#requests).
 
 Sign in is GitHub only (OAuth), with a development login for local work.
 

@@ -77,6 +77,32 @@ const versions = await call("GET", `/api/documents/${id}/versions`);
 console.log("versions:", versions.versions.map((v: { kind: string; title: string | null; createdByName: string | null }) => `${v.kind}:${v.title} (${v.createdByName})`));
 expect(versions.versions.some((v: { title: string | null }) => v.title === "Agent revision")).toBe(true);
 
+console.log("== ask an agent: request loop (UI route → token inbox → claim → suggest with requestId → complete)");
+// The human asks from the document (session cookie); the agent answers through the token.
+const askRes = await page.request.post(`${base}/api/documents/${id}/requests`, {
+  data: { instruction: "Tighten this", mode: "suggest", selection: { from: 0, to: 7, quote: "# Draft" } },
+});
+expect(askRes.status()).toBe(201);
+const ask = ((await askRes.json()) as { request: { id: string; status: string } }).request;
+expect(ask.status).toBe("open");
+await expect(page.getByTestId("agent-requests-pill")).toContainText("1 request waiting");
+const inbox = await call("GET", "/api/agent/requests?status=open");
+expect(inbox.agent).toBe("Smoke agent");
+expect(inbox.requests.some((r: { id: string }) => r.id === ask.id)).toBe(true);
+await call("POST", `/api/documents/${id}/requests/${ask.id}/claim`);
+await expect(page.getByTestId("agent-requests-pill")).toContainText("Smoke agent is working");
+const linked = await call("POST", `/api/documents/${id}/suggest`, { edits: [{ find: "# Draft", replace: "# Launch draft" }], requestId: ask.id });
+expect(linked.suggestions).toBeGreaterThan(0);
+const doneReq = await call("POST", `/api/documents/${id}/requests/${ask.id}/complete`, { summary: "Sharper title." });
+expect(doneReq.request.status).toBe("done");
+expect(doneReq.request.result.suggestions).toBe(linked.suggestions);
+await expect(page.getByTestId("agent-requests-pill")).toHaveCount(0);
+await expect(page.getByTestId("toast").filter({ hasText: "Smoke agent finished" })).toBeVisible();
+const notes = await page.request.get(`${base}/api/notifications?unread=1`);
+const noteItems = ((await notes.json()) as { items: { kind: string; refId: string }[] }).items;
+expect(noteItems.some((n) => n.kind === "request.done" && n.refId === ask.id)).toBe(true);
+console.log("request loop: done, suggestions =", linked.suggestions, "notification row present");
+
 console.log("== auth hygiene");
 expect((await fetch(`${base}/api/me`, { headers: { Authorization: "Bearer mdk_" + "z".repeat(40) } })).status).toBe(401);
 expect((await fetch(`${base}/api/tokens`, { method: "POST", headers, body: JSON.stringify({ name: "nope" }) })).status).toBe(403);
