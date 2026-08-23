@@ -128,6 +128,16 @@ export interface AgentRequestDto {
   updatedAt: string;
 }
 
+/** A personal access token as listed by GET /api/tokens (the secret is only returned at creation). */
+export interface ApiTokenDto {
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+}
+
 export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt" | "deletedAt"> & {
   updatedAt: string;
   createdAt: string;
@@ -215,7 +225,10 @@ export const api = {
     cancelRequest: (id: string, rid: string) => request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests/${rid}/cancel`, { method: "POST" }),
   },
   tokens: {
-    list: () => request<{ tokens: unknown[] }>("/api/tokens"),
+    list: () => request<{ tokens: ApiTokenDto[] }>("/api/tokens"),
+    /** Mint a personal access token (browser sessions only); the secret comes back once. */
+    create: (name: string, expiresInDays: number | null = 90) =>
+      request<{ token: { id: string; name: string; token: string; prefix: string } }>("/api/tokens", { method: "POST", body: JSON.stringify({ name, expiresInDays }) }),
   },
   github: {
     gists: () =>
