@@ -241,11 +241,21 @@ test.describe("axe: editor", () => {
     await expect(page.getByTestId("activity-panel")).toBeVisible();
     await scan(page, "editor + activity panel");
 
-    // Dark mode, with color-contrast enabled: outline + comments, then the find bar, slash menu and table menu.
+    // Dark mode, with color-contrast enabled (see DISABLED_RULES).
     await setTheme(page, "dark");
     await expect(page.locator(".md-rich")).toBeVisible();
     await ensureCommentsOpen(page);
     await scan(page, "editor (dark)", { contrast: true });
+    await context.close();
+  });
+
+  test("dark: find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-editor-dark");
+    const id = await createDocument(page, DOC, "Dark fixture");
+    await openDocument(page, id);
+    await setTheme(page, "dark");
+    await expect(page.locator(".md-rich table")).toBeVisible();
+    await ensureCommentsOpen(page);
 
     await focusRichEnd(page);
     await page.keyboard.press("Control+f");
@@ -356,8 +366,9 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(page.getByTestId("heading-menu")).toBeFocused();
     await page.keyboard.press("ArrowLeft");
     await expect(page.getByTestId("tb-comment")).toBeFocused();
+    // Undo/Redo sit between Horizontal rule and Comment; disabled, they are skipped.
     await page.keyboard.press("ArrowLeft");
-    await expect(page.getByTestId("tb-table")).toBeFocused();
+    await expect(page.getByRole("button", { name: "Horizontal rule", exact: true })).toBeFocused();
     await page.keyboard.press("Home");
     await expect(page.getByTestId("heading-menu")).toBeFocused();
     await page.keyboard.press("ArrowRight");
