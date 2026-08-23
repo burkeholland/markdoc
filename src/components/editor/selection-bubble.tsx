@@ -6,6 +6,8 @@ import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough 
 import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
 import { cn } from "@/lib/utils";
+import { clampToViewport } from "@/lib/viewport";
+import { isCoarsePointer } from "@/lib/viewport-hooks";
 
 interface Position {
   left: number;
@@ -88,16 +90,23 @@ export function SelectionBubble({
       const end = view.coordsAtPos(to, -1);
       const host = container.getBoundingClientRect();
       const topEdge = Math.min(start.top, end.top);
+      const bottomEdge = Math.max(start.bottom, end.bottom);
       const centerX = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2;
-      const left = Math.max(8, Math.min(host.width - BUBBLE_WIDTH - 8, centerX - host.left - BUBBLE_WIDTH / 2));
-      let top = topEdge - host.top - BUBBLE_HEIGHT - 10;
-      let below = false;
-      if (top < 4) {
-        top = Math.max(start.bottom, end.bottom) - host.top + 10;
-        below = true;
+      // Touch devices draw the OS selection toolbar above the selection; sit below it there.
+      let below = isCoarsePointer() || topEdge - host.top - BUBBLE_HEIGHT - 10 < 4;
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      let box = clampToViewport(
+        { left: centerX - BUBBLE_WIDTH / 2, top: below ? bottomEdge + 10 : topEdge - BUBBLE_HEIGHT - 10, width: BUBBLE_WIDTH, height: BUBBLE_HEIGHT },
+        viewport,
+      );
+      if (below && box.top + box.height > viewport.height - 8 && topEdge - BUBBLE_HEIGHT - 10 >= 8) {
+        // No room under the selection after all: flip back above.
+        below = false;
+        box = clampToViewport({ ...box, top: topEdge - BUBBLE_HEIGHT - 10 }, viewport);
       }
       // The bubble is absolutely positioned inside the scrolling container.
-      top += container.scrollTop;
+      const left = Math.max(8, Math.min(host.width - BUBBLE_WIDTH - 8, box.left - host.left));
+      const top = box.top - host.top + container.scrollTop;
       setPos({ left, top, below });
       setVisible(true);
     } catch {
@@ -150,9 +159,10 @@ export function SelectionBubble({
 
   return (
     <div
-      className="absolute z-30 flex items-center gap-0.5 rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
+      className="touch-target absolute z-30 flex items-center gap-0.5 rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
       style={{ left: pos.left, top: pos.top, width: BUBBLE_WIDTH }}
       data-testid="selection-bubble"
+      data-below={pos.below || undefined}
       role="toolbar"
       aria-label="Selection"
     >

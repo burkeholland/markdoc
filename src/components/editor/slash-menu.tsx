@@ -9,6 +9,7 @@ import { tableAt } from "@/editor/prosemirror/commands";
 import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
 import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems, splitSlashQuery, type SlashItem, type SlashWhere } from "@/editor/slash-items";
 import { cn } from "@/lib/utils";
+import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
 
 const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, SquareCode, Minus, Table, Image, Link, MessageSquarePlus, Calendar };
@@ -85,7 +86,7 @@ export function SlashMenu({
 }) {
   const [state, setState] = useState<SlashState | null>(() => controller.getState());
   const [index, setIndex] = useState(0);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const canComment = useSessionValue(session, (s) => s.canComment);
@@ -161,10 +162,12 @@ export function SlashMenu({
     }
     const host = container.getBoundingClientRect();
     const height = Math.min(MENU_MAX_HEIGHT, Math.max(1, items.length) * ROW_HEIGHT + 8);
-    const left = Math.max(8, Math.min(host.width - MENU_WIDTH - 8, state.coords.left - host.left));
-    const below = state.coords.bottom + 6 + height <= window.innerHeight - 8;
-    const top = (below ? state.coords.bottom + 6 : state.coords.top - 6 - height) - host.top + container.scrollTop;
-    setPos({ left, top });
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const below = state.coords.bottom + 6 + height <= viewport.height - 8;
+    const box = clampToViewport({ left: state.coords.left, top: below ? state.coords.bottom + 6 : state.coords.top - 6 - height, width: MENU_WIDTH, height }, viewport);
+    const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
+    const top = box.top - host.top + container.scrollTop;
+    setPos({ left, top, width: box.width, maxHeight: box.height });
   }, [open, state, items.length, containerRef]);
 
   if (!open || !pos) return null;
@@ -175,8 +178,8 @@ export function SlashMenu({
   return (
     <div
       ref={listRef}
-      className="scrollbar-thin absolute z-40 overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl animate-fade-in"
-      style={{ left: pos.left, top: pos.top, width: MENU_WIDTH, maxHeight: MENU_MAX_HEIGHT }}
+      className="touch-target scrollbar-thin absolute z-40 overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl animate-fade-in"
+      style={{ left: pos.left, top: pos.top, width: pos.width, maxHeight: Math.min(MENU_MAX_HEIGHT, pos.maxHeight) }}
       role="listbox"
       aria-label="Insert block"
       data-testid="slash-menu"
