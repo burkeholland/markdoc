@@ -1,7 +1,12 @@
 import { Octokit } from "@octokit/rest";
 import { HttpError } from "@/server/http";
+import { isGitHubMock, mockGithub } from "./mock";
+
+export { isGitHubMock } from "./mock";
 
 export function githubClient(token: string): Octokit {
+  // Under GITHUB_MOCK no request ever reaches the network; the client is a placeholder.
+  if (isGitHubMock()) return { mock: true } as unknown as Octokit;
   return new Octokit({ auth: token, userAgent: "markdoc" });
 }
 
@@ -34,6 +39,7 @@ export async function listMarkdownGists(octokit: Octokit): Promise<GistSummary[]
 }
 
 export async function readGistFile(octokit: Octokit, gistId: string, filename?: string) {
+  if (isGitHubMock()) return mockGithub.readGistFile(gistId, filename);
   const { data } = await octokit.gists.get({ gist_id: gistId });
   const files = Object.values(data.files ?? {}).filter((f): f is NonNullable<typeof f> => !!f);
   const file = filename
@@ -53,10 +59,18 @@ export async function readGistFile(octokit: Octokit, gistId: string, filename?: 
     htmlUrl: data.html_url ?? `https://gist.github.com/${data.id}`,
     isPublic: !!data.public,
     owner: data.owner?.login ?? null,
+    // Gists have no per-file sha; the latest history entry is the remote revision (stored in `githubSha`).
+    revision: gistRevision(data),
+    updatedAt: data.updated_at ?? null,
   };
 }
 
+function gistRevision(data: { history?: { version?: string }[] | null; updated_at?: string | null }): string | null {
+  return data.history?.[0]?.version ?? data.updated_at ?? null;
+}
+
 export async function createGist(octokit: Octokit, input: { filename: string; content: string; description?: string; isPublic: boolean }) {
+  if (isGitHubMock()) return mockGithub.createGist(input);
   const { data } = await octokit.gists.create({
     description: input.description,
     public: input.isPublic,
@@ -66,12 +80,13 @@ export async function createGist(octokit: Octokit, input: { filename: string; co
 }
 
 export async function updateGist(octokit: Octokit, gistId: string, filename: string, content: string, description?: string) {
+  if (isGitHubMock()) return mockGithub.updateGist(gistId, filename, content, description);
   const { data } = await octokit.gists.update({
     gist_id: gistId,
     description,
     files: { [filename]: { content: content || "\n" } },
   });
-  return { htmlUrl: data.html_url!, updatedAt: data.updated_at! };
+  return { htmlUrl: data.html_url!, updatedAt: data.updated_at!, revision: gistRevision(data) };
 }
 
 export interface RepoSummary {
@@ -86,6 +101,7 @@ export interface RepoSummary {
 }
 
 export async function listRepos(octokit: Octokit): Promise<RepoSummary[]> {
+  if (isGitHubMock()) return mockGithub.listRepos();
   const repos = await octokit.paginate(octokit.repos.listForAuthenticatedUser, {
     per_page: 100,
     sort: "pushed",
@@ -104,6 +120,7 @@ export async function listRepos(octokit: Octokit): Promise<RepoSummary[]> {
 }
 
 export async function listBranches(octokit: Octokit, owner: string, repo: string): Promise<string[]> {
+  if (isGitHubMock()) return mockGithub.listBranches(owner, repo);
   const branches = await octokit.paginate(octokit.repos.listBranches, { owner, repo, per_page: 100 });
   return branches.map((b) => b.name);
 }
@@ -117,6 +134,7 @@ export interface TreeEntry {
 
 /** Markdown files in a repository tree (recursive). */
 export async function listMarkdownFiles(octokit: Octokit, owner: string, repo: string, ref: string): Promise<TreeEntry[]> {
+  if (isGitHubMock()) return mockGithub.listMarkdownFiles(owner, repo, ref);
   const { data } = await octokit.git.getTree({ owner, repo, tree_sha: ref, recursive: "1" });
   return (data.tree ?? [])
     .filter((e) => e.type === "blob" && e.path && MARKDOWN_RE.test(e.path))
@@ -125,16 +143,18 @@ export async function listMarkdownFiles(octokit: Octokit, owner: string, repo: s
 }
 
 export async function readRepoFile(octokit: Octokit, owner: string, repo: string, path: string, ref: string) {
+  if (isGitHubMock()) return mockGithub.readRepoFile(owner, repo, path, ref);
   const { data } = await octokit.repos.getContent({ owner, repo, path, ref });
   if (Array.isArray(data) || data.type !== "file") throw new HttpError(400, "Path is not a file");
   const content = data.encoding === "base64" ? Buffer.from(data.content, "base64").toString("utf8") : data.content;
-  return { content, sha: data.sha, htmlUrl: data.html_url ?? `https://github.com/${owner}/${repo}/blob/${ref}/${path}` };
+  return { content, sha: data.sha, htmlUrl: data.html_url ?? `https://github.com/${owner}/${repo}/blob/${ref}/${path}`, updatedAt: null as string | null };
 }
 
 export async function commitRepoFile(
   octokit: Octokit,
   input: { owner: string; repo: string; path: string; branch: string; content: string; message: string; sha?: string | null },
 ) {
+  if (isGitHubMock()) return mockGithub.commitRepoFile(input);
   try {
     const { data } = await octokit.repos.createOrUpdateFileContents({
       owner: input.owner,

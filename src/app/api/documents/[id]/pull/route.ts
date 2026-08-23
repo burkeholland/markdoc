@@ -5,10 +5,16 @@ import { getDocumentAccess } from "@/server/documents";
 
 type Params = { params: Promise<{ id: string }> };
 
-export const POST = handler(async (_req: Request, { params }: Params) => {
+/**
+ * Pull GitHub's copy. Refuses with `409 { status: "local-ahead" | "diverged", remoteContent }` when
+ * local edits would be lost; `?merge=1` three-way merges a diverged document (conflicts → `409
+ * { status: "conflict", merged, conflicts }`); `?force=1` replaces the local text regardless.
+ */
+export const POST = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const { doc, user } = await requireAccess(id, "edit");
-  const result = await pullDocument(doc, user!);
+  const q = new URL(req.url).searchParams;
+  const result = await pullDocument(doc, user!, { force: q.get("force") === "1", merge: q.get("merge") === "1" });
   const fresh = await getDocumentAccess(id, user);
   return json({ result, document: fresh ? publicDocument(fresh.doc) : null });
 });
