@@ -29,6 +29,7 @@ const {
   upsertCollaborator,
 } = await import("@/server/documents");
 const { putAsset, getAsset } = await import("@/server/assets");
+const { encodeSeedState } = await import("@/server/collab/seed");
 const { DELETE, GET: GET_DOC } = await import("../app/api/documents/[id]/route");
 const { POST: RESTORE } = await import("../app/api/documents/[id]/restore/route");
 const { POST: DUPLICATE } = await import("../app/api/documents/[id]/duplicate/route");
@@ -68,7 +69,11 @@ describe("duplicateDocument", () => {
     const asset = await putAsset({ documentId: source.id, userId: owner.id, name: "dot.png", mime: "image/png", bytes: PNG });
     const db = await getDb();
     const content = `# Plan\n\n![dot](${asset.url})\n\nBody text.\n`;
-    await db.update(schema.documents).set({ content, storage: "repo", repoOwner: "o", repoName: "r", repoPath: "PLAN.md" }).where(eq(schema.documents.id, source.id));
+    // Rewriting the text behind the editor's back: keep `ystate` (the source of truth) in step.
+    await db
+      .update(schema.documents)
+      .set({ content, ystate: encodeSeedState(content, "Plan"), storage: "repo", repoOwner: "o", repoName: "r", repoPath: "PLAN.md" })
+      .where(eq(schema.documents.id, source.id));
     await upsertCollaborator(source.id, "vic", "viewer", owner.id);
 
     const copy = await duplicateDocument(source.id, viewer.id);
