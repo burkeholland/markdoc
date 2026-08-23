@@ -30,6 +30,7 @@ import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
 import { TableMenu } from "./table-menu";
+import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FindBar } from "./find-bar";
 import { useScrollSync } from "./scroll-sync";
 import type { VersionSummary } from "@/lib/api";
@@ -98,6 +99,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   }, []);
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
+  const slashMenu = useSlashMenuController();
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
   const isOwner = role === "owner";
   useEffect(() => {
@@ -449,6 +451,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                   <div ref={setRichScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
+                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} />
                     <RichPane
                       session={session}
                       onReady={onRichReady}
@@ -459,6 +462,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       uploadImage={uploadImage}
                       onImageError={onImageError}
                       focusSource={activeSurface === "code" ? cursor.code : null}
+                      slashMenu={slashMenu.handlers}
                     />
                   </div>
                 </div>

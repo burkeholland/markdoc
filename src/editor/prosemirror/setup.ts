@@ -14,6 +14,7 @@ import { remoteCursorsPlugin } from "./remote-cursors";
 import { richHighlightsPlugin, richSuggestingPlugin, type HighlightHandlers } from "./highlights";
 import { smartPastePlugin } from "./paste";
 import { imageUploadPlugin, type ImageUploader } from "./images";
+import { slashMenuPlugin, type SlashMenuHandlers } from "./slash-menu";
 import {
   toggleMark,
   setHeadingLevel,
@@ -44,6 +45,8 @@ export interface RichEditorHandlers extends HighlightHandlers {
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** Slash command menu (`/`) state and navigation; when absent the menu is disabled. */
+  slashMenu?: SlashMenuHandlers;
 }
 
 const editableKey = new PluginKey<{ canEdit: boolean }>("editable");
@@ -184,6 +187,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     doc: session.binding.initialDoc(),
     plugins: [
       editablePlugin(session.canEdit),
+      ...(handlers.slashMenu ? [slashMenuPlugin(handlers.slashMenu)] : []),
       markdownBindingPlugin(session.binding),
       richSuggestingPlugin(session),
       markdownInputRules(),

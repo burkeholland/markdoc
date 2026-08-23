@@ -5,6 +5,7 @@ import { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
 import { createRichEditorState, setEditable } from "@/editor/prosemirror/setup";
 import type { ImageUploader } from "@/editor/prosemirror/images";
+import type { SlashMenuHandlers } from "@/editor/prosemirror/slash-menu";
 import { createNodeViews } from "@/editor/prosemirror/nodeviews";
 import { refreshRichHighlights } from "@/editor/prosemirror/highlights";
 import { useSessionValue } from "./use-session";
@@ -21,9 +22,11 @@ export interface RichPaneProps {
   onImageError?: (message: string) => void;
   /** Source offset of the code pane's cursor while the code pane is active (for the focus block). */
   focusSource: number | null;
+  /** Slash command menu plumbing (stable object; see SlashMenuController). */
+  slashMenu?: SlashMenuHandlers;
 }
 
-export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, focusSource }: RichPaneProps) {
+export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, focusSource, slashMenu }: RichPaneProps) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const handlers = useRef({ onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError });
@@ -43,6 +46,7 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
       onImageError: (message) => handlers.current.onImageError?.(message),
       getFocusSource: () => (session.activeSurface === "code" ? focusRef.current : null),
+      slashMenu,
     });
     const view = new EditorView(host.current, {
       state,

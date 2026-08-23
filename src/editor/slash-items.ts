@@ -1,0 +1,123 @@
+import type { EditorView } from "prosemirror-view";
+import { insertHorizontalRule, insertTable, insertText, setHeadingLevel, toggleBlockquote, toggleCodeBlock, toggleList } from "./prosemirror/commands";
+
+/**
+ * Everything a slash item may need from its host. The rich pane supplies the
+ * ProseMirror view; the shell supplies the dialog and comment plumbing that
+ * lives outside the editor.
+ */
+export interface SlashContext {
+  view: EditorView;
+  openImage: () => void;
+  openLink: () => void;
+  /** Starts a comment on the current selection (see EditorShell.startComment). */
+  startComment: () => void;
+  /** Insertion targets the caret is in; used to hide items that do not fit. */
+  where: SlashWhere;
+}
+
+export interface SlashWhere {
+  inTable: boolean;
+  canComment: boolean;
+}
+
+export type SlashGroup = "Basic" | "Lists" | "Blocks" | "Insert";
+
+export const SLASH_GROUPS: readonly SlashGroup[] = ["Basic", "Lists", "Blocks", "Insert"];
+
+export interface SlashItem {
+  id: string;
+  title: string;
+  keywords: string[];
+  /** lucide icon name, resolved to a component by the menu. */
+  icon: string;
+  group: SlashGroup;
+  /** When set, the item accepts a trailing argument (`/code ts`). */
+  acceptsArg?: boolean;
+  /** Optional hint shown when an argument is accepted. */
+  hint?: string;
+  /** Hides the item in contexts where it cannot be inserted. */
+  available?: (where: SlashWhere) => boolean;
+  run: (ctx: SlashContext, arg: string) => void;
+}
+
+const pm = (ctx: SlashContext, command: import("prosemirror-state").Command) => {
+  command(ctx.view.state, ctx.view.dispatch, ctx.view);
+  ctx.view.focus();
+};
+
+const notInTable = (w: SlashWhere) => !w.inTable;
+
+export const SLASH_ITEMS: readonly SlashItem[] = [
+  { id: "text", title: "Text", keywords: ["paragraph", "plain", "p"], icon: "Type", group: "Basic", run: (ctx) => pm(ctx, setHeadingLevel(0)) },
+  { id: "heading1", title: "Heading 1", keywords: ["h1", "title"], icon: "Heading1", group: "Basic", available: notInTable, run: (ctx) => pm(ctx, setHeadingLevel(1)) },
+  { id: "heading2", title: "Heading 2", keywords: ["h2", "subtitle"], icon: "Heading2", group: "Basic", available: notInTable, run: (ctx) => pm(ctx, setHeadingLevel(2)) },
+  { id: "heading3", title: "Heading 3", keywords: ["h3"], icon: "Heading3", group: "Basic", available: notInTable, run: (ctx) => pm(ctx, setHeadingLevel(3)) },
+  { id: "bullet", title: "Bullet list", keywords: ["unordered", "ul", "list"], icon: "List", group: "Lists", available: notInTable, run: (ctx) => pm(ctx, toggleList("bullet")) },
+  { id: "numbered", title: "Numbered list", keywords: ["ordered", "ol", "list"], icon: "ListOrdered", group: "Lists", available: notInTable, run: (ctx) => pm(ctx, toggleList("ordered")) },
+  { id: "task", title: "Task list", keywords: ["todo", "check", "checkbox", "checklist", "list"], icon: "ListChecks", group: "Lists", available: notInTable, run: (ctx) => pm(ctx, toggleList("task")) },
+  { id: "quote", title: "Quote", keywords: ["blockquote", "citation"], icon: "Quote", group: "Blocks", available: notInTable, run: (ctx) => pm(ctx, toggleBlockquote()) },
+  {
+    id: "code",
+    title: "Code block",
+    keywords: ["fence", "pre", "snippet"],
+    icon: "SquareCode",
+    group: "Blocks",
+    acceptsArg: true,
+    hint: "language",
+    available: notInTable,
+    run: (ctx, arg) => pm(ctx, toggleCodeBlock(arg.trim() || null)),
+  },
+  { id: "divider", title: "Divider", keywords: ["hr", "rule", "separator", "line"], icon: "Minus", group: "Blocks", available: notInTable, run: (ctx) => pm(ctx, insertHorizontalRule()) },
+  { id: "table", title: "Table", keywords: ["grid", "rows", "columns"], icon: "Table", group: "Blocks", available: notInTable, run: (ctx) => pm(ctx, insertTable(3, 3)) },
+  { id: "image", title: "Image", keywords: ["picture", "photo", "img", "upload"], icon: "Image", group: "Insert", run: (ctx) => ctx.openImage() },
+  { id: "link", title: "Link", keywords: ["url", "href", "anchor"], icon: "Link", group: "Insert", run: (ctx) => ctx.openLink() },
+  {
+    id: "comment",
+    title: "Comment",
+    keywords: ["note", "review", "annotate"],
+    icon: "MessageSquarePlus",
+    group: "Insert",
+    available: (w) => w.canComment,
+    run: (ctx) => ctx.startComment(),
+  },
+  { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", run: (ctx) => pm(ctx, insertText(todayIso())) },
+];
+
+export function todayIso(now = new Date()): string {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/** Splits a raw query into the word used for matching and the argument passed to the item. */
+export function splitSlashQuery(query: string): { word: string; arg: string } {
+  const trimmed = query.trimStart();
+  const space = trimmed.indexOf(" ");
+  if (space < 0) return { word: trimmed.toLowerCase(), arg: "" };
+  return { word: trimmed.slice(0, space).toLowerCase(), arg: trimmed.slice(space + 1).trim() };
+}
+
+function matches(item: SlashItem, word: string): boolean {
+  if (!word) return true;
+  const title = item.title.toLowerCase();
+  if (title.startsWith(word)) return true;
+  if (title.split(/\s+/).some((part) => part.startsWith(word))) return true;
+  return item.keywords.some((k) => k.toLowerCase().startsWith(word));
+}
+
+/**
+ * Items matching `query`, in group order. Matching is a case-insensitive
+ * prefix on the title, any word of the title, or a keyword; an empty query
+ * returns everything. When the query carries an argument (`code ts`) only
+ * items that accept one are returned.
+ */
+export function filterSlashItems(query: string, items: readonly SlashItem[] = SLASH_ITEMS, where?: SlashWhere): SlashItem[] {
+  const { word, arg } = splitSlashQuery(query);
+  const hasArg = arg.length > 0 || /\s$/.test(query.trimStart()) && word.length > 0;
+  const order = new Map(SLASH_GROUPS.map((g, i) => [g, i]));
+  return items
+    .filter((item) => (!where || !item.available || item.available(where)) && (!hasArg || item.acceptsArg) && matches(item, word))
+    .sort((a, b) => (order.get(a.group) ?? 0) - (order.get(b.group) ?? 0));
+}

@@ -295,6 +295,10 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     ],
   },
   {
+    group: "Blocks",
+    items: [["Insert block menu", "/"]],
+  },
+  {
     group: "Markdown shortcuts in the preview",
     items: [
       ["Heading", "# + space"],
