@@ -141,7 +141,8 @@ test.describe("axe: pages", () => {
 /**
  * Sign in, create the fixture document, open it in split view with the outline and comments panels
  * showing. Each editor scan below starts here so a failure names the UI that broke and no single
- * test carries more than a handful of axe runs (one did 15 and hit the 90 s timeout on the CI runner).
+ * test carries more than a handful of axe runs (one test used to do 15 and hit the 90 s timeout on
+ * the 2-vCPU CI runner, see task #278).
  */
 async function openEditorFixture(browser: Browser, login: string, { revisions = false }: { revisions?: boolean } = {}) {
   const { page, context } = await signIn(browser, login);
@@ -165,20 +166,9 @@ async function ensureOutlineOpen(page: Page) {
 }
 
 test.describe("axe: editor", () => {
-  test("split view with outline and comments panels, light and dark", async ({ browser }) => {
+  test("split view with outline and comments panels", async ({ browser }) => {
     const { page, context } = await openEditorFixture(browser, "a11y-editor");
     await scan(page, "editor split + outline + comments");
-
-    // Dark mode, with color-contrast enabled (see DISABLED_RULES). The reload drops the collab
-    // connection; until it is back the source pane is read-only (no focusable content inside
-    // `.cm-scroller`), which axe reports as scrollable-region-focusable — wait for it, then scan.
-    await setTheme(page, "dark");
-    await expect(page.locator(".md-rich")).toBeVisible();
-    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
-    await expect(page.locator(".cm-content")).toHaveAttribute("contenteditable", "true");
-    await ensureOutlineOpen(page);
-    await ensureCommentsOpen(page);
-    await scan(page, "editor (dark)", { contrast: true });
     await context.close();
   });
 
@@ -290,14 +280,17 @@ test.describe("axe: editor", () => {
     await context.close();
   });
 
-  test("dark: find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
+  test("dark: split view with panels, find bar, slash menu, table menu (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-editor-dark");
     const id = await createDocument(page, DOC, "Dark fixture");
+    // Theme is switched on the dashboard so the document loads dark once, with no reload of /d/<id>.
     await setTheme(page, "dark");
     await openDocument(page, id);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator(".md-rich table")).toBeVisible();
+    await ensureOutlineOpen(page);
     await ensureCommentsOpen(page);
+    await scan(page, "editor (dark) split + outline + comments", { contrast: true });
 
     await focusRichEnd(page);
     await page.keyboard.press("Control+f");
