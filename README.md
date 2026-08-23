@@ -59,7 +59,7 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 ```bash
 npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (~200 tests); incremental-parser fuzz runs 300 seeded docs
 npm run test:fuzz     # Full 1500-document incremental-parser fuzz (FUZZ_DOCS / FUZZ_SEED override; the seed is logged on failure)
-npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs, tables, templates (~50 tests)
+npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs, tables, templates, offline persistence (~50 tests)
 npm run typecheck
 npm run lint
 ```
@@ -96,6 +96,7 @@ PROD_BASE_URL=http://localhost:3900 npx playwright test e2e/prod-smoke.spec.ts  
 - **The rich pane is a lossless projection.** `src/editor/sync/markdown-binding.ts` serializes local ProseMirror edits block by block and applies them to the text as minimal diffs; text changes from anywhere (other users, the code pane, undo, a pull from GitHub) are parsed and applied to ProseMirror as a minimal replacement, so the caret and selection survive. Empty paragraphs, which Markdown cannot express, are kept locally as "phantom" blocks.
 - **Carets are shared across surfaces.** Both editors publish the selection as a source-text position, so your caret in the code pane shows up in everyone's rich pane and vice versa.
 - **Comments and suggestions are annotations** stored in Yjs maps with relative-position anchors (`src/editor/collab/`). They survive concurrent edits and render identically in both panes. Suggesting mode intercepts edits: deletions are kept and marked, insertions are recorded; accepting or rejecting applies the final text.
+- **Open documents are mirrored to IndexedDB** (`src/editor/collab/offline.ts`, one `markdoc:<docId>` database per document via `y-indexeddb`), so edits made offline survive a refresh or closed tab and are merged into the server copy on reconnect; the header shows the unsaved count while offline, "Reconnecting…" during retries, and confirms "All changes saved" once they land. The local copy is deleted when the document is deleted or access is revoked.
 - **Server.** `server/index.ts` hosts Next.js and the collaboration WebSocket (`/collab`) on one port. `src/server/collab/hocuspocus.ts` authenticates with short-lived JWTs minted by `/api/documents/:id/collab-token`, loads documents from Postgres, and persists them (debounced) with automatic versioning. REST routes under `src/app/api` handle documents, sharing, versions, GitHub publishing and imports.
 
 ## Deploy to Azure

@@ -2,7 +2,7 @@
 import { navigateTo } from "@/lib/nav";
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import {
   Check,
@@ -33,6 +33,7 @@ import {
   Link2,
 } from "lucide-react";
 import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session";
+import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
 
 import { cn, shortcut } from "@/lib/utils";
@@ -49,20 +50,39 @@ export function Logo({ className }: { className?: string }) {
   );
 }
 
+const noopSubscribe = () => () => {};
+
 function SaveIndicator({ session }: { session: CollabSession }) {
-  const state = useSessionValue(session, (s) => s.saveState);
-  const map: Record<SaveState, { icon: React.ReactNode; label: string; className: string }> = {
-    saved: { icon: <Check size={16} strokeWidth={2.5} />, label: "Saved", className: "text-success" },
-    saving: { icon: <Loader2 size={16} className="animate-spin" />, label: "Saving…", className: "text-ink-3" },
-    connecting: { icon: <Loader2 size={16} className="animate-spin" />, label: "Connecting…", className: "text-ink-3" },
-    offline: { icon: <CloudOff size={16} />, label: "Offline — changes will sync", className: "text-warning" },
-    error: { icon: <AlertTriangle size={16} />, label: "Not connected", className: "text-danger" },
+  const liveState = useSessionValue(session, (s) => s.saveState);
+  const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
+  const liveRecovered = useSessionValue(session, (s) => s.recovered);
+  // The server renders a fresh session ("Connecting…"); an offline client may already have
+  // failed to connect by the time React hydrates. Match the server markup first, then switch.
+  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  const state: SaveState = hydrated ? liveState : "connecting";
+  const unsynced = hydrated ? liveUnsynced : 0;
+  const recovered = hydrated && liveRecovered;
+  const map: Record<SaveState, { icon: React.ReactNode; className: string }> = {
+    saved: { icon: <Check size={16} strokeWidth={2.5} />, className: "text-success" },
+    saving: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
+    connecting: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
+    reconnecting: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-warning" },
+    offline: { icon: <CloudOff size={16} />, className: "text-warning" },
+    error: { icon: <AlertTriangle size={16} />, className: "text-danger" },
   };
   const m = map[state];
+  const flash = state === "saved" && recovered;
   return (
-    <span className={cn("inline-flex items-center gap-1.5 text-sm font-medium", m.className)} data-testid="save-state" data-state={state}>
+    <span
+      className={cn("inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors", m.className, flash && "save-state-recovered")}
+      data-testid="save-state"
+      data-state={state}
+      data-unsynced={unsynced}
+      data-recovered={flash || undefined}
+      role="status"
+    >
       {m.icon}
-      <span>{m.label}</span>
+      <span>{saveStateLabel(state, unsynced, recovered)}</span>
     </span>
   );
 }

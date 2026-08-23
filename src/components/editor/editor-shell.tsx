@@ -1,7 +1,7 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import type { EditorView as CMView } from "@codemirror/view";
 import type { EditorView as PMView } from "prosemirror-view";
@@ -50,6 +50,8 @@ interface Toast {
 }
 
 type SidePanel = "comments" | "versions" | null;
+
+const noopSubscribe = () => () => {};
 
 export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: EditorShellProps) {
   const router = useRouter();
@@ -270,8 +272,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const deleteDoc = useCallback(async () => {
     if (!confirm(`Delete “${doc.title}”? This cannot be undone.`)) return;
     await api.documents.delete(doc.id);
+    await session.clearLocal();
     router.push("/");
-  }, [doc.id, doc.title, router]);
+  }, [doc.id, doc.title, router, session]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
@@ -346,6 +349,12 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const docView = useMemo(() => (sharedTitle && sharedTitle !== doc.title ? { ...doc, title: sharedTitle } : doc), [doc, sharedTitle]);
 
   const authError = useSessionValue(session, (s) => s.authError);
+  // Keep the panes covered until either the local copy or the server state is in, so a
+  // document never flashes empty before its content arrives. The server has no IndexedDB
+  // and renders without the overlay, so only show it after hydration to keep markup in sync.
+  const contentReady = useSessionValue(session, (s) => s.localLoaded || s.synced);
+  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  const showLoading = hydrated && !contentReady;
   const showCode = layout !== "rich" && !versionPreview;
   const showRich = layout !== "code" && !versionPreview;
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
@@ -394,7 +403,12 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
         )}
         <div className="flex min-h-0 flex-1">
           <OutlinePanel session={session} open={outlineOpen} onToggle={() => setOutlineOpen((o) => !o)} cursorSource={cursorSource} onSelect={onOutlineSelect} />
-          <div className="flex min-w-0 flex-1">
+          <div className="relative flex min-w-0 flex-1">
+            {showLoading && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
+                Loading…
+              </div>
+            )}
             {versionPreview ? (
               <VersionDiffView session={session} version={versionPreview.version} content={versionPreview.content} />
             ) : (

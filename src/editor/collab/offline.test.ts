@@ -1,0 +1,280 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { IndexeddbPersistence } from "y-indexeddb";
+
+// A CollabSession normally opens a WebSocket through Hocuspocus; stand in a provider
+// that only supplies the awareness instance and lets tests drive connection events.
+vi.mock("@hocuspocus/provider", async () => {
+  const { Awareness } = await import("y-protocols/awareness");
+  class HocuspocusProvider {
+    awareness: InstanceType<typeof Awareness>;
+    static last: HocuspocusProvider | null = null;
+    constructor(readonly opts: {
+      document: Y.Doc;
+      onStatus?: (e: { status: string }) => void;
+      onSynced?: (e: { state: boolean }) => void;
+      onUnsyncedChanges?: (e: { number: number }) => void;
+      onAuthenticationFailed?: (e: { reason: string }) => void;
+    }) {
+      this.awareness = new Awareness(opts.document);
+      HocuspocusProvider.last = this;
+    }
+    destroy() {
+      this.awareness.destroy();
+    }
+  }
+  return { HocuspocusProvider };
+});
+
+import { HocuspocusProvider } from "@hocuspocus/provider";
+import { CollabSession, RECOVERED_FLASH_MS } from "./session";
+import { makeCollabUser } from "./shared";
+import { clearLocalDocument, hasIndexedDB, localDbName, openLocalPersistence, saveStateLabel } from "./offline";
+
+type FakeProvider = {
+  opts: {
+    onStatus: (e: { status: string }) => void;
+    onSynced: (e: { state: boolean }) => void;
+    onUnsyncedChanges: (e: { number: number }) => void;
+    onAuthenticationFailed: (e: { reason: string }) => void;
+  };
+};
+const lastProvider = () => (HocuspocusProvider as unknown as { last: FakeProvider }).last;
+
+function makeSession(docId = "doc"): CollabSession {
+  return new CollabSession({ docId, user: makeCollabUser("a", "Alice"), role: "owner", getToken: async () => "token" });
+}
+
+const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+describe("CRDT merge is order independent", () => {
+  it("applies offline edits from two peers in either order with the same result", () => {
+    const base = new Y.Doc();
+    base.getText("content").insert(0, "Hello world");
+    const snapshot = Y.encodeStateAsUpdate(base);
+
+    // Two peers start from the same state; one edits "offline" (no provider at all).
+    const online = new Y.Doc();
+    const offline = new Y.Doc();
+    Y.applyUpdate(online, snapshot);
+    Y.applyUpdate(offline, snapshot);
+    const onlineBefore = Y.encodeStateVector(online);
+    const offlineBefore = Y.encodeStateVector(offline);
+
+    online.getText("content").insert(11, " from the server");
+    offline.getText("content").insert(0, "Offline says: ");
+
+    const onlineUpdate = Y.encodeStateAsUpdate(online, onlineBefore);
+    const offlineUpdate = Y.encodeStateAsUpdate(offline, offlineBefore);
+
+    // Merge in both orders.
+    const a = new Y.Doc();
+    Y.applyUpdate(a, snapshot);
+    Y.applyUpdate(a, onlineUpdate);
+    Y.applyUpdate(a, offlineUpdate);
+
+    const b = new Y.Doc();
+    Y.applyUpdate(b, snapshot);
+    Y.applyUpdate(b, offlineUpdate);
+    Y.applyUpdate(b, onlineUpdate);
+
+    expect(a.getText("content").toString()).toBe(b.getText("content").toString());
+    expect(a.getText("content").toString()).toBe("Offline says: Hello world from the server");
+
+    // And the two peers converge when they exchange their updates directly.
+    Y.applyUpdate(online, offlineUpdate);
+    Y.applyUpdate(offline, onlineUpdate);
+    expect(online.getText("content").toString()).toBe(offline.getText("content").toString());
+  });
+});
+
+describe("without IndexedDB", () => {
+  beforeEach(() => {
+    vi.stubGlobal("indexedDB", undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("feature detection reports it missing", () => {
+    expect(hasIndexedDB()).toBe(false);
+    expect(openLocalPersistence("x", new Y.Doc())).toBeNull();
+  });
+
+  it("a session constructs without throwing and is locally loaded at once", async () => {
+    const session = makeSession("no-idb");
+    expect(session.localLoaded).toBe(true);
+    await expect(session.whenLocalLoaded).resolves.toBeUndefined();
+    await expect(session.clearLocal()).resolves.toBeUndefined();
+    await expect(clearLocalDocument("no-idb")).resolves.toBeUndefined();
+    session.destroy();
+  });
+});
+
+describe("with IndexedDB (fake-indexeddb)", () => {
+  beforeEach(async () => {
+    const { indexedDB, IDBKeyRange } = await import("fake-indexeddb");
+    vi.stubGlobal("indexedDB", indexedDB);
+    vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("restores the text from IndexedDB in a second session with no network", async () => {
+    const docId = `restore-${Date.now()}`;
+    const first = makeSession(docId);
+    expect(first.localLoaded).toBe(false);
+    await first.whenLocalLoaded;
+    expect(first.localLoaded).toBe(true);
+
+    first.ytext.insert(0, "# Written while offline\n\nStill here after a refresh.");
+    // Persistence writes every update asynchronously; give the transaction a moment.
+    await tick();
+    first.destroy();
+    await tick();
+
+    const second = makeSession(docId);
+    expect(second.ytext.toString()).toBe("");
+    await second.whenLocalLoaded;
+    expect(second.ytext.toString()).toBe("# Written while offline\n\nStill here after a refresh.");
+    second.destroy();
+  });
+
+  it("clearLocal() removes the stored copy", async () => {
+    const docId = `clear-${Date.now()}`;
+    const first = makeSession(docId);
+    await first.whenLocalLoaded;
+    first.ytext.insert(0, "to be forgotten");
+    await tick();
+    await first.clearLocal();
+    first.destroy();
+    await tick();
+
+    const second = makeSession(docId);
+    await second.whenLocalLoaded;
+    expect(second.ytext.toString()).toBe("");
+    second.destroy();
+  });
+
+  it("an authentication failure wipes the local copy", async () => {
+    const docId = `auth-${Date.now()}`;
+    const first = makeSession(docId);
+    await first.whenLocalLoaded;
+    first.ytext.insert(0, "secret");
+    await tick();
+    lastProvider().opts.onAuthenticationFailed({ reason: "permission-denied" });
+    await tick();
+    expect(first.saveState).toBe("error");
+    first.destroy();
+    await tick();
+
+    const bare = new Y.Doc();
+    const p = new IndexeddbPersistence(localDbName(docId), bare);
+    await p.whenSynced;
+    expect(bare.getText("content").toString()).toBe("");
+    await p.clearData();
+  });
+
+  it("the raw persistence round-trips through a bare Y.Doc", async () => {
+    const name = localDbName(`bare-${Date.now()}`);
+    const a = new Y.Doc();
+    const pa = new IndexeddbPersistence(name, a);
+    await pa.whenSynced;
+    a.getText("content").insert(0, "bare doc");
+    await tick();
+    await pa.destroy();
+
+    const b = new Y.Doc();
+    const pb = new IndexeddbPersistence(name, b);
+    await pb.whenSynced;
+    expect(b.getText("content").toString()).toBe("bare doc");
+    await pb.clearData();
+  });
+});
+
+describe("save state and reconnect feedback", () => {
+  let session: CollabSession;
+  beforeEach(() => {
+    vi.stubGlobal("indexedDB", undefined);
+    vi.useFakeTimers();
+    session = makeSession("state");
+  });
+  afterEach(() => {
+    session.destroy();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("distinguishes the first connection from a reconnect and flashes after recovery", () => {
+    const p = lastProvider().opts;
+    expect(session.saveState).toBe("connecting");
+
+    p.onStatus({ status: "connected" });
+    p.onUnsyncedChanges({ number: 1 });
+    expect(session.saveState).toBe("saving");
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
+    expect(session.recovered).toBe(false);
+
+    // Connection drops; local edits pile up.
+    p.onStatus({ status: "disconnected" });
+    expect(session.saveState).toBe("offline");
+    p.onUnsyncedChanges({ number: 3 });
+    expect(saveStateLabel(session.saveState, session.unsyncedChanges)).toBe("Offline — 3 unsaved changes");
+
+    // The provider retries: this is a reconnect, not the initial connect.
+    p.onStatus({ status: "connecting" });
+    expect(session.saveState).toBe("reconnecting");
+    expect(saveStateLabel(session.saveState, session.unsyncedChanges)).toBe("Reconnecting…");
+
+    // Back online: the provider resets the counter and syncs; we stay "saving" until it hits 0.
+    p.onStatus({ status: "connected" });
+    expect(session.saveState).toBe("saving");
+    expect(session.recovered).toBe(false);
+    p.onUnsyncedChanges({ number: 1 });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
+    expect(session.recovered).toBe(true);
+    expect(saveStateLabel("saved", 0, true)).toBe("All changes saved");
+
+    vi.advanceTimersByTime(RECOVERED_FLASH_MS + 1);
+    expect(session.recovered).toBe(false);
+    expect(saveStateLabel("saved", 0, false)).toBe("Saved");
+  });
+
+  it("flashes after a first connection that uploads changes restored from local storage", () => {
+    const p = lastProvider().opts;
+    // A reload while offline: the IndexedDB copy has edits the server never saw.
+    p.onUnsyncedChanges({ number: 2 });
+    expect(session.saveState).toBe("connecting");
+    expect(session.recovered).toBe(false);
+
+    p.onStatus({ status: "connected" });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
+    expect(session.recovered).toBe(true);
+    vi.advanceTimersByTime(RECOVERED_FLASH_MS + 1);
+    expect(session.recovered).toBe(false);
+  });
+
+  it("does not flash on a plain first connection", () => {
+    const p = lastProvider().opts;
+    p.onStatus({ status: "connected" });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
+    expect(session.recovered).toBe(false);
+  });
+
+  it("labels", () => {
+    expect(saveStateLabel("offline", 0)).toBe("Offline — changes will sync");
+    expect(saveStateLabel("offline", 1)).toBe("Offline — 1 unsaved change");
+    expect(saveStateLabel("connecting", 0)).toBe("Connecting…");
+    expect(saveStateLabel("saving", 2)).toBe("Saving…");
+    expect(saveStateLabel("error", 0)).toBe("Not connected");
+  });
+});

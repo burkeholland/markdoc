@@ -685,4 +685,19 @@ body {
   animation: md-fade-in 0.12s ease-out;
 }
 
+/* Brief confirmation on the header save chip after offline edits finish syncing. */
+@keyframes md-recovered {
+  from {
+    background: #dcfce7;
+    box-shadow: 0 0 0 4px #dcfce7;
+  }
+  to {
+    background: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+.save-state-recovered {
+  animation: md-recovered 2s ease-out forwards;
+}
+
 
