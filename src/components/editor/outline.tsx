@@ -4,6 +4,7 @@ import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { useHydrated } from "@/lib/hooks";
+import { rovingIndex } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
 import type { KeyboardEvent } from "react";
@@ -46,19 +47,7 @@ export function activeHeadingIndex(headings: HeadingInfo[], cursor: number | nul
 
 /** Index the arrow/Home/End keys should focus next, or -1 if the key is not a navigation key. */
 export function nextOutlineIndex(key: string, current: number, count: number): number {
-  if (count === 0) return -1;
-  switch (key) {
-    case "ArrowDown":
-      return Math.min(count - 1, current + 1);
-    case "ArrowUp":
-      return Math.max(0, current - 1);
-    case "Home":
-      return 0;
-    case "End":
-      return count - 1;
-    default:
-      return -1;
-  }
+  return rovingIndex(key, current, count, { orientation: "vertical", wrap: false });
 }
 
 export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }: OutlineProps) {

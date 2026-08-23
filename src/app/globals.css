@@ -99,7 +99,8 @@
   --p-ink: #e5e7eb;
   --p-ink-2: #c9d1dc;
   --p-ink-3: #9ca3af;
-  --p-ink-4: #6b7280;
+  /* 5.4:1 on surface, 4.9:1 on surface-2 (AA for small text; #6b7280 was 3.96:1). */
+  --p-ink-4: #7f889a;
   --p-line: #273244;
   --p-line-2: #354152;
   --p-surface: #0b0f17;
@@ -117,7 +118,7 @@
   --cm-ink: #d1d5db;
   --cm-strong: #f3f4f6;
   --cm-muted: #9ca3af;
-  --cm-faint: #6b7280;
+  --cm-faint: #7f889a;
   --cm-punct: #9ca3af;
   --cm-code: #f472b6;
   --cm-url-underline: #3b82f6;

@@ -84,6 +84,22 @@ describe("theme contrast", () => {
           expect(contrast(p[token], p["p-surface"]), token).toBeGreaterThanOrEqual(3);
         }
       });
+      it("faint text stays dimmer than secondary text", () => {
+        const bodyOnSurface = (t: string) => contrast(p[t], p["p-surface"]);
+        expect(bodyOnSurface("p-ink-4")).toBeLessThan(bodyOnSurface("p-ink-3"));
+        expect(bodyOnSurface("cm-faint")).toBeLessThan(bodyOnSurface("cm-muted"));
+      });
     });
   }
+
+  // axe's color-contrast rule runs on the dark dashboard and editor (e2e/a11y.spec.ts): timestamps,
+  // line numbers and Markdown punctuation use ink-4 / cm-faint at small sizes, so they need AA there.
+  describe("dark faint text", () => {
+    it("ink-4 and cm-faint are AA (≥ 4.5) on the surface and surface-2", () => {
+      for (const token of ["p-ink-4", "cm-faint"]) {
+        expect(contrast(dark[token], dark["p-surface"]), token).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(dark[token], dark["p-surface-2"]), token).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  });
 });
