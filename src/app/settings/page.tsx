@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { auth } from "@/auth";
 import { Logo } from "@/components/editor/header";
 import { TokensPanel } from "@/components/settings/tokens-panel";
+import { ThemePicker } from "@/components/ui/theme-toggle";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
@@ -28,6 +29,13 @@ export default async function SettingsPage() {
         </div>
       </header>
       <section className="mx-auto max-w-4xl px-6 py-8">
+        <div className="mb-8 flex items-center justify-between gap-6 rounded-2xl border border-line bg-surface px-5 py-4" data-testid="theme-row">
+          <div>
+            <h2 className="text-base font-semibold text-ink">Theme</h2>
+            <p className="mt-0.5 text-sm text-ink-3">System follows your operating system; the choice is saved in this browser.</p>
+          </div>
+          <ThemePicker />
+        </div>
         <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} />
       </section>
     </main>

@@ -118,7 +118,7 @@ export function ShareDialog({
             </button>
           </form>
         )}
-        {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger">{error}</div>}
+        {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
 
         <div className="mt-5">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-3">People with access</div>
@@ -163,7 +163,7 @@ export function ShareDialog({
         <div className="mt-5">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-3">General access</div>
           <div className="flex items-start gap-3 rounded-xl border border-line p-3">
-            <span className={cn("mt-0.5 flex h-8 w-8 items-center justify-center rounded-full", doc.linkAccess === "private" ? "bg-surface-3 text-ink-2" : "bg-green-50 text-green-700")}>
+            <span className={cn("mt-0.5 flex h-8 w-8 items-center justify-center rounded-full", doc.linkAccess === "private" ? "bg-surface-3 text-ink-2" : "bg-green-50 text-green-700 dark:bg-green-950/40 dark:text-green-300")}>
               {doc.linkAccess === "private" ? <Lock size={15} /> : <Globe size={15} />}
             </span>
             <div className="min-w-0 flex-1">

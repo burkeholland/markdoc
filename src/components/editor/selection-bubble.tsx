@@ -150,7 +150,7 @@ export function SelectionBubble({
 
   return (
     <div
-      className="absolute z-30 flex items-center gap-0.5 rounded-lg bg-ink px-1 py-1 shadow-xl animate-fade-in"
+      className="absolute z-30 flex items-center gap-0.5 rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
       style={{ left: pos.left, top: pos.top, width: BUBBLE_WIDTH }}
       data-testid="selection-bubble"
       role="toolbar"
@@ -175,7 +175,7 @@ export function SelectionBubble({
       <BubbleButton label="Comment" disabled={!session.canComment} onClick={onComment}>
         <MessageSquarePlus size={16} />
       </BubbleButton>
-      <span className={cn("absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-ink", pos.below ? "-top-1" : "-bottom-1")} aria-hidden />
+      <span className={cn("absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-inverse", pos.below ? "-top-1" : "-bottom-1")} aria-hidden />
     </div>
   );
 }

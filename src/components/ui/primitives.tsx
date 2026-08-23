@@ -23,7 +23,7 @@ export function Tip({ label, children, side = "bottom", shortcut }: { label: str
         <RadixTooltip.Content
           side={side}
           sideOffset={6}
-          className="z-[60] flex items-center gap-2 rounded-md bg-ink px-2.5 py-1.5 text-xs font-medium text-white shadow-lg animate-fade-in"
+          className="z-[60] flex items-center gap-2 rounded-md bg-inverse px-2.5 py-1.5 text-xs font-medium text-white shadow-lg animate-fade-in"
         >
           {label}
           {shortcut && <span className="rounded bg-white/15 px-1 py-0.5 font-sans text-[10px] text-white/80">{shortcut}</span>}
@@ -167,7 +167,7 @@ export function Avatar({
 }) {
   const [failed, setFailed] = React.useState(false);
   const style: React.CSSProperties = { width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.36)) };
-  if (color) style.boxShadow = `0 0 0 2px white, 0 0 0 4px ${color}`;
+  if (color) style.boxShadow = `0 0 0 2px var(--color-surface), 0 0 0 4px ${color}`;
   return (
     <span className={cn("avatar", className)} style={style} title={title ?? name}>
       {src && !failed ? (

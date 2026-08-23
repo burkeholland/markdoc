@@ -22,7 +22,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
             <p className="text-sm text-ink-3">Collaborative Markdown editing.</p>
           </div>
         </div>
-        {error && <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger">Sign in failed ({error}). Please try again.</div>}
+        {error && <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">Sign in failed ({error}). Please try again.</div>}
         {githubConfigured ? (
           <form
             action={async () => {

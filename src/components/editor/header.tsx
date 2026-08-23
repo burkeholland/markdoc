@@ -232,7 +232,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
           type="button"
           className={cn(
             "btn btn-sm gap-1.5 border",
-            mode === "suggesting" ? "border-green-200 bg-green-50 text-green-800" : "border-line-2 bg-surface text-ink-2 hover:bg-surface-2",
+            mode === "suggesting" ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300" : "border-line-2 bg-surface text-ink-2 hover:bg-surface-2",
           )}
           data-testid="mode-switcher"
         >
@@ -318,7 +318,7 @@ export const Header = memo(function Header(props: HeaderProps) {
           <button type="button" className="icon-btn relative" onClick={props.onToggleComments} data-active={props.commentsOpen} aria-label="Comments" data-testid="comments-toggle">
             <MessageSquare size={20} />
             {openComments > 0 && (
-              <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-white" data-testid="comments-badge">
+              <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-on-accent" data-testid="comments-badge">
                 {openComments}
               </span>
             )}

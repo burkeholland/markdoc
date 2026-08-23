@@ -1,6 +1,7 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
 import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
@@ -119,7 +120,7 @@ export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) 
               className="group flex h-full w-full flex-col gap-2 rounded-xl border border-line bg-surface p-4 text-left transition hover:border-accent hover:shadow-sm focus-visible:border-accent disabled:cursor-default disabled:opacity-60"
               data-testid={`template-${t.id}`}
             >
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-3 text-ink-2 transition group-hover:bg-accent group-hover:text-white">
+              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-3 text-ink-2 transition group-hover:bg-accent group-hover:text-on-accent">
                 {isBusy ? <Loader2 size={18} className="animate-spin" /> : <Icon size={18} />}
               </span>
               <span className="block text-sm font-semibold text-ink">{t.name}</span>
@@ -410,6 +411,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
               <input className="input pl-9 pr-9" placeholder="Search documents" value={query} onChange={(e) => setQuery(e.target.value)} data-testid="search" />
               {searching && <Loader2 size={16} className="pointer-events-none absolute right-3 top-2.5 animate-spin text-ink-4" data-testid="search-loading" />}
             </div>
+            <ThemeToggle className="shrink-0" />
             <Menu>
               <MenuTrigger asChild>
                 <button type="button" className="rounded-full" aria-label="Account">
@@ -443,7 +445,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                 className="flex flex-1 items-center gap-4 rounded-l-2xl p-5 text-left"
                 data-testid="new-document"
               >
-                <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent text-white">{creating === "blank" ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
+                <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent text-on-accent">{creating === "blank" ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
                 <span>
                   <span className="block text-[15px] font-semibold text-ink">New document</span>
                   <span className="block text-sm text-ink-3">Start with a blank Markdown page.</span>
@@ -622,7 +624,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
             <div
               className={cn(
                 "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm text-white shadow-xl animate-fade-in",
-                notice.kind === "error" ? "bg-red-600" : "bg-ink",
+                notice.kind === "error" ? "bg-red-600" : "bg-inverse",
               )}
               role="status"
               data-testid="toast"
@@ -674,7 +676,7 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
                     <button type="button" className="btn btn-sm btn-outline gap-1 whitespace-nowrap" disabled={busy !== null} onClick={() => onRestore(d)} data-testid="restore-button">
                       {isBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Restore
                     </button>
-                    <button type="button" className="btn btn-sm gap-1 whitespace-nowrap text-danger hover:bg-red-50" disabled={busy !== null} onClick={() => onPurge(d)} data-testid="purge-button">
+                    <button type="button" className="btn btn-sm gap-1 whitespace-nowrap text-danger hover:bg-red-50 dark:hover:bg-red-950/40" disabled={busy !== null} onClick={() => onPurge(d)} data-testid="purge-button">
                       <Trash2 size={13} /> Delete forever
                     </button>
                   </div>

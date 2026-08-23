@@ -177,7 +177,7 @@ export function ActivityPanel({ session, onClose }: ActivityPanelProps) {
         </button>
       </div>
       <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
-        {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger">{error}</div>}
+        {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40">{error}</div>}
         {items === null ? (
           <div className="flex justify-center py-10">
             <Spinner />

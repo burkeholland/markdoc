@@ -83,7 +83,7 @@ const MAX_SUGGESTIONS = 6;
 function AuthorAvatar({ id, name, src, size }: { id: string; name: string; src?: string | null; size: number }) {
   if (id.startsWith("agent:")) {
     return (
-      <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700 ring-2 ring-white" style={{ width: size, height: size }} title={`${name} (agent)`}>
+      <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700 ring-2 ring-surface dark:bg-violet-950 dark:text-violet-300" style={{ width: size, height: size }} title={`${name} (agent)`}>
         <Bot size={Math.round(size * 0.55)} />
       </span>
     );
@@ -521,7 +521,7 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
           </div>
           <p className="mt-0.5 text-[13px] leading-5 text-ink-2">
             <span className="font-medium">{s.type === "insert" ? "Add" : "Delete"}:</span>{" "}
-            <span className={cn("rounded px-1", s.type === "insert" ? "bg-green-50 text-green-800" : "bg-red-50 line-through text-red-800")}>
+            <span className={cn("rounded px-1", s.type === "insert" ? "bg-green-50 text-green-800 dark:bg-green-950/50 dark:text-green-300" : "bg-red-50 line-through text-red-800 dark:bg-red-950/50 dark:text-red-300")}>
               {text.length > 120 ? text.slice(0, 120) + "…" : text || "(whitespace)"}
             </span>
           </p>
