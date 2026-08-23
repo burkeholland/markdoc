@@ -13,7 +13,9 @@ function Get-LiveHealth {
   try {
     $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/api/health" -TimeoutSec 5
     if ($resp.StatusCode -eq 200) { return ($resp.Content | ConvertFrom-Json) }
-  } catch { }
+  } catch {
+    $null = $_  # connection refused / timeout while starting is expected
+  }
   return $null
 }
 
