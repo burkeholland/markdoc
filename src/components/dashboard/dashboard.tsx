@@ -401,10 +401,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} groupOrder={DASHBOARD_GROUPS} />
       <main className="min-h-screen bg-surface-2">
         <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
-          <div className="mx-auto flex h-16 max-w-6xl items-center gap-4 px-6">
+          <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
             <Link href="/" className="flex items-center gap-2.5">
               <Logo className="h-8 w-8" />
-              <span className="text-lg font-semibold text-ink">Markdoc</span>
+              <span className="hidden text-lg font-semibold text-ink sm:inline">Markdoc</span>
             </Link>
             <div className="relative mx-auto w-full max-w-xl">
               <Search size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
@@ -434,7 +434,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
           </div>
         </header>
 
-        <section className="mx-auto max-w-6xl px-6 py-8">
+        <section className="safe-x mx-auto max-w-6xl py-6 sm:py-8 sm:[--safe-pad:1.5rem]">
           <NotificationsStrip />
           <div className="mb-8 grid gap-3 sm:grid-cols-2">
             <div className="group flex items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md">
@@ -520,7 +520,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
 
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <h2 className="text-sm font-semibold text-ink">Documents</h2>
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex max-w-full items-center gap-2 overflow-x-auto" data-testid="dashboard-chips">
               <label className="flex items-center gap-1.5 text-xs text-ink-3">
                 <span className="sr-only">Sort by</span>
                 <select
@@ -537,7 +537,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                   ))}
                 </select>
               </label>
-              <div className="flex rounded-lg border border-line bg-surface p-0.5 text-xs">
+              <div className="flex shrink-0 rounded-lg border border-line bg-surface p-0.5 text-xs">
                 {FILTERS.map((f) => (
                   <button
                     key={f.value}

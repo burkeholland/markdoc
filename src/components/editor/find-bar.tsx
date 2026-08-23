@@ -129,8 +129,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
       data-testid="find-bar"
       onKeyDown={onBarKeyDown}
     >
-      <div className="flex items-center gap-1.5">
-        <div className="flex h-8 w-[min(420px,40vw)] items-center gap-0.5 rounded-lg border border-line-2 bg-surface pl-2.5 pr-1 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex h-8 min-w-[9rem] flex-1 items-center gap-0.5 rounded-lg md:w-[min(420px,40vw)] md:flex-none border border-line-2 bg-surface pl-2.5 pr-1 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
           <input
             ref={searchRef}
             className="h-full min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-4"
@@ -189,8 +189,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
         </Tip>
       </div>
       {showReplace && (
-        <div className="flex items-center gap-1.5" data-testid="find-replace-row">
-          <div className="w-[min(420px,40vw)]">
+        <div className="flex flex-wrap items-center gap-1.5" data-testid="find-replace-row">
+          <div className="min-w-[9rem] flex-1 md:w-[min(420px,40vw)] md:flex-none">
             <input
               ref={replaceRef}
               className="input h-8 text-[13px]"

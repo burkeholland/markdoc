@@ -14,7 +14,9 @@ import { api } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
-import { TooltipProvider, Tip } from "@/components/ui/primitives";
+import { TooltipProvider, Tip, Dialog, DialogPortal, DialogOverlay, DialogPrimitiveContent, DialogTitle } from "@/components/ui/primitives";
+import { useBreakpoint } from "@/lib/viewport-hooks";
+import { defaultLayout, LAYOUT_STORAGE_KEY, TABLET_MAX } from "@/lib/viewport";
 import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
 import { EditorActions, EMPTY_FORMAT, type DialogKind, type FormatState } from "./actions";
 import { Header, type ExportFormat } from "./header";
@@ -63,9 +65,35 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const router = useRouter();
   const session = useCollabSession(initialDoc.id, user, role);
   const [doc, setDoc] = useState(initialDoc);
-  const [layout, setLayout] = useState<Layout>("split");
+  const [layout, setLayoutState] = useState<Layout>("split");
   const [outlineOpen, setOutlineOpen] = useState(true);
+  const [outlineDrawerOpen, setOutlineDrawerOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<SidePanel>(null);
+  const breakpoint = useBreakpoint();
+  const isPhone = breakpoint === "phone";
+  const isTablet = breakpoint === "tablet";
+  // Phones never split: a remembered/initial "split" renders as the preview there.
+  const shownLayout: Layout = isPhone && layout === "split" ? "rich" : layout;
+  // First load: narrow windows open in the preview unless the user chose Markdown before; tablets
+  // start with the outline hidden so both panes get the width.
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    } catch {
+      // Storage may be unavailable (private mode); fall back to the width-based default.
+    }
+    setLayoutState(defaultLayout(window.innerWidth, stored));
+    if (window.innerWidth < TABLET_MAX) setOutlineOpen(false);
+  }, []);
+  const setLayout = useCallback((next: Layout) => {
+    setLayoutState(next);
+    try {
+      localStorage.setItem(LAYOUT_STORAGE_KEY, next);
+    } catch {
+      // Ignore storage errors; the choice still applies for this session.
+    }
+  }, []);
   const [lineWrapping, setLineWrapping] = useState(true);
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [commitOpen, setCommitOpen] = useState(false);
@@ -203,9 +231,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     (issue: LintIssue) => {
       session.setActiveSurface("code");
       actions.revealSource(issue.offset, { focus: true });
-      if (layout === "rich") setLayout("split");
+      if (shownLayout === "rich") setLayout(isPhone ? "code" : "split");
     },
-    [actions, session, layout],
+    [actions, session, shownLayout, isPhone, setLayout],
   );
 
   const publishNow = useCallback(
@@ -470,10 +498,10 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     toggleComments,
     toggleHistory,
     toggleActivity,
-    layout,
+    layout: shownLayout,
     setLayout,
-    outlineOpen,
-    toggleOutline: () => setOutlineOpen((o) => !o),
+    outlineOpen: isPhone ? outlineDrawerOpen : outlineOpen,
+    toggleOutline: () => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)),
     syncScroll,
     setSyncScroll,
     openFind,
@@ -513,14 +541,33 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const contentReady = useSessionValue(session, (s) => s.localLoaded || s.synced);
   const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const showLoading = hydrated && !contentReady;
-  const showCode = layout !== "rich" && !versionPreview;
-  const showRich = layout !== "code" && !versionPreview;
+  const showCode = shownLayout !== "rich" && !versionPreview;
+  const showRich = shownLayout !== "code" && !versionPreview;
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
   useScrollSync({ session, code: codeView, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
+  const closeSidePanel = useCallback(() => setSidePanel(null), []);
+  const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
+  const onOutlinePick = useCallback(
+    (h: HeadingInfo) => {
+      setOutlineDrawerOpen(false);
+      onOutlineSelect(h);
+    },
+    [onOutlineSelect],
+  );
+
+  const panel =
+    sidePanel === "comments" ? (
+      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} />
+    ) : sidePanel === "versions" ? (
+      <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
+    ) : sidePanel === "activity" ? (
+      <ActivityPanel session={session} onClose={closeSidePanel} />
+    ) : null;
+  const panelTitle = sidePanel === "comments" ? "Comments" : sidePanel === "versions" ? "Version history" : "Activity";
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen flex-col overflow-hidden bg-surface" data-testid="editor-shell">
+      <div className="flex h-screen flex-col overflow-hidden bg-surface supports-[height:100dvh]:h-[100dvh]" data-testid="editor-shell" data-breakpoint={breakpoint}>
         <Header
           session={session}
           doc={docView}
@@ -543,6 +590,10 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           publishing={publishing}
           isOwner={isOwner}
           onHome={goHome}
+          layout={shownLayout}
+          onLayout={setLayout}
+          onOutline={toggleOutline}
+          compact={isPhone}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
         {findOpen && (
@@ -563,8 +614,20 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
             </button>
           </div>
         )}
-        <div className="flex min-h-0 flex-1">
-          <OutlinePanel session={session} open={outlineOpen} onToggle={() => setOutlineOpen((o) => !o)} cursorSource={cursorSource} onSelect={onOutlineSelect} />
+        <div className="relative flex min-h-0 flex-1">
+          {isPhone ? (
+            <Dialog open={outlineDrawerOpen} onOpenChange={setOutlineDrawerOpen}>
+              <DialogPortal>
+                <DialogOverlay className="dialog-overlay animate-fade-in" data-testid="outline-drawer-backdrop" />
+                <DialogPrimitiveContent className="drawer" aria-describedby={undefined} data-testid="outline-drawer">
+                  <DialogTitle className="sr-only">Outline</DialogTitle>
+                  <OutlinePanel session={session} open onToggle={() => setOutlineDrawerOpen(false)} cursorSource={cursorSource} onSelect={onOutlinePick} />
+                </DialogPrimitiveContent>
+              </DialogPortal>
+            </Dialog>
+          ) : (
+            <OutlinePanel session={session} open={outlineOpen} onToggle={toggleOutline} cursorSource={cursorSource} onSelect={onOutlineSelect} />
+          )}
           <div className="relative flex min-w-0 flex-1">
             {showLoading && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
@@ -626,16 +689,31 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
               </>
             )}
           </div>
-          {sidePanel === "comments" && <CommentsPanel session={session} onClose={() => setSidePanel(null)} onReveal={reveal} />}
-          {sidePanel === "versions" && (
-            <VersionsPanel session={session} onClose={() => setSidePanel(null)} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
-          )}
-          {sidePanel === "activity" && <ActivityPanel session={session} onClose={() => setSidePanel(null)} />}
+          {panel &&
+            (isPhone ? (
+              <Dialog open onOpenChange={(o) => !o && closeSidePanel()}>
+                <DialogPortal>
+                  <DialogOverlay className="dialog-overlay animate-fade-in" data-testid="sheet-backdrop" />
+                  <DialogPrimitiveContent className="sheet" aria-describedby={undefined} data-testid="sheet" data-panel={sidePanel}>
+                    <DialogTitle className="sr-only">{panelTitle}</DialogTitle>
+                    <span className="sheet-handle" aria-hidden />
+                    {panel}
+                  </DialogPrimitiveContent>
+                </DialogPortal>
+              </Dialog>
+            ) : isTablet ? (
+              // Tablets float the panel over the panes so the text does not reflow when it opens.
+              <div className="absolute inset-y-0 right-0 z-20 flex w-[360px] max-w-full shadow-2xl shadow-black/20 [&>aside]:w-full" data-testid="panel-overlay">
+                {panel}
+              </div>
+            ) : (
+              panel
+            ))}
         </div>
         <StatusBar
           session={session}
           doc={docView}
-          layout={layout}
+          layout={shownLayout}
           onLayout={setLayout}
           lineWrapping={lineWrapping}
           onLineWrapping={setLineWrapping}
@@ -644,6 +722,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onIssueSelect={onIssueSelect}
           onShortcuts={openShortcuts}
           onStorage={openStorage}
+          compact={isPhone}
         />
 
         <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={docView} isOwner={isOwner} onDocChange={setDoc} />

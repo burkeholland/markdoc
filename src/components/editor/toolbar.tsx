@@ -105,7 +105,7 @@ export const Toolbar = memo(function Toolbar({
   const dis = !canEdit;
 
   return (
-    <div className="flex h-12 shrink-0 items-center gap-0.5 border-b border-line px-3" role="toolbar" aria-label="Formatting" data-testid="toolbar">
+    <div className="toolbar-scroll safe-x flex h-12 shrink-0 items-center gap-0.5 border-b border-line" role="toolbar" aria-label="Formatting" data-testid="toolbar">
       <Menu>
         <MenuTrigger asChild>
           <button

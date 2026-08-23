@@ -36,11 +36,14 @@ import {
   Link2,
   Star,
   BookOpen,
+  PanelLeft,
+  Code2,
 } from "lucide-react";
 import type { CollabSession, EditMode, SaveState } from "@/editor/collab/session";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
 import { api } from "@/lib/api";
+import type { Layout } from "@/lib/viewport";
 
 import { cn, shortcut } from "@/lib/utils";
 import { useHydrated } from "@/lib/hooks";
@@ -59,7 +62,7 @@ export function Logo({ className }: { className?: string }) {
   );
 }
 
-function SaveIndicator({ session }: { session: CollabSession }) {
+function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
   const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
@@ -87,14 +90,15 @@ function SaveIndicator({ session }: { session: CollabSession }) {
       data-unsynced={unsynced}
       data-recovered={flash || undefined}
       role="status"
+      title={compact ? saveStateLabel(state, unsynced, recovered) : undefined}
     >
       {m.icon}
-      <span>{saveStateLabel(state, unsynced, recovered)}</span>
+      <span className={cn(compact && "sr-only")}>{saveStateLabel(state, unsynced, recovered)}</span>
     </span>
   );
 }
 
-function TitleEditor({ session, fallback }: { session: CollabSession; fallback: string }) {
+function TitleEditor({ session, fallback, compact }: { session: CollabSession; fallback: string; compact?: boolean }) {
   const title = useSessionValue(session, (s) => s.title || fallback);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
@@ -145,8 +149,8 @@ function TitleEditor({ session, fallback }: { session: CollabSession; fallback: 
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
-      <span className="truncate text-[22px] font-semibold leading-8 text-ink">{title}</span>
-      {canEdit && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
+      <span className={cn("truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-[22px]")}>{title}</span>
+      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
     </button>
   );
 }
@@ -264,6 +268,26 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
 
 export type ExportFormat = "md" | "html" | "pdf";
 
+/** Editing / Suggesting / Viewing as menu rows — the phone header has no room for the ModeSwitcher pill. */
+function ModeItems({ session }: { session: CollabSession }) {
+  const mode = useSessionValue(session, (s) => s.mode);
+  const editable = session.role === "owner" || session.role === "editor";
+  return (
+    <>
+      <MenuLabel>Mode</MenuLabel>
+      <MenuRadioGroup value={mode} onValueChange={(v) => session.setMode(v as EditMode)}>
+        <MenuRadioItem value="editing" disabled={!editable}>
+          Editing
+        </MenuRadioItem>
+        <MenuRadioItem value="suggesting" disabled={!editable}>
+          Suggesting
+        </MenuRadioItem>
+        <MenuRadioItem value="viewing">Viewing</MenuRadioItem>
+      </MenuRadioGroup>
+    </>
+  );
+}
+
 export interface HeaderProps {
   session: CollabSession;
   doc: DocumentDto;
@@ -287,33 +311,81 @@ export interface HeaderProps {
   publishing: boolean;
   isOwner: boolean;
   onHome: () => void;
+  /** Pane layout shown by the segmented control on phones. */
+  layout: Layout;
+  onLayout: (layout: Layout) => void;
+  /** Opens the outline drawer (phones only). */
+  onOutline: () => void;
+  /** Phone layout: icon-only save state, segmented pane control, secondary actions folded into the menu. */
+  compact: boolean;
+}
+
+/** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
+function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: (l: Layout) => void }) {
+  const options: { value: Layout; label: string; icon: React.ReactNode }[] = [
+    { value: "rich", label: "Preview", icon: <Eye size={17} /> },
+    { value: "code", label: "Markdown", icon: <Code2 size={17} /> },
+  ];
+  return (
+    <div className="inline-flex h-9 shrink-0 rounded-lg border border-line-2 bg-surface p-0.5 md:hidden" role="radiogroup" aria-label="Pane" data-testid="layout-segment">
+      {options.map((o) => {
+        const active = layout === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            aria-label={o.label}
+            title={o.label}
+            className={cn("inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors", active ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink")}
+            onClick={() => onLayout(o.value)}
+            data-testid={`layout-segment-${o.value}`}
+          >
+            {o.icon}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export const Header = memo(function Header(props: HeaderProps) {
-  const { session, doc } = props;
+  const { session, doc, compact } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
 
   return (
-    <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line px-4" data-testid="header">
-      <Link href="/" className="icon-btn h-10 w-10 shrink-0" aria-label="Back to documents" title="All documents">
-        <Logo className="h-8 w-8" />
-      </Link>
-      <div className="flex min-w-0 flex-1 items-center gap-4">
-        <TitleEditor session={session} fallback={doc.title} />
-        <HeaderStar docId={doc.id} />
-        <SaveIndicator session={session} />
-      </div>
-      <div className="flex shrink-0 items-center gap-3">
-        <AgentActivityChip session={session} />
-        <ModeSwitcher session={session} />
-        <PresenceStack session={session} />
-        {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} />}
-        <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
-          <UserPlus size={17} />
-          Share
+    <header className="safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header">
+      {compact ? (
+        <button type="button" className="icon-btn h-9 w-9 shrink-0" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
+          <PanelLeft size={20} />
         </button>
+      ) : (
+        <Link href="/" className="icon-btn h-10 w-10 shrink-0" aria-label="Back to documents" title="All documents">
+          <Logo className="h-8 w-8" />
+        </Link>
+      )}
+      <div className="flex min-w-0 flex-1 items-center gap-2 md:gap-4">
+        <TitleEditor session={session} fallback={doc.title} compact={compact} />
+        {!compact && <HeaderStar docId={doc.id} />}
+        <SaveIndicator session={session} compact={compact} />
+      </div>
+      <div className="flex shrink-0 items-center gap-1 md:gap-3">
+        <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
+        <div className="hidden items-center gap-3 md:flex">
+          <AgentActivityChip session={session} />
+          <ModeSwitcher session={session} />
+          <PresenceStack session={session} />
+        </div>
+        {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} />}
+        {!compact && (
+          <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
+            <UserPlus size={17} />
+            Share
+          </button>
+        )}
         <Tip label={props.commentsOpen ? "Hide comments" : "Show comments"} shortcut={shortcut("Mod-Alt-M")}>
           <button type="button" className="icon-btn relative" onClick={props.onToggleComments} data-active={props.commentsOpen} aria-label="Comments" data-testid="comments-toggle">
             <MessageSquare size={20} />
@@ -331,6 +403,24 @@ export const Header = memo(function Header(props: HeaderProps) {
             </button>
           </MenuTrigger>
           <MenuContent align="end" className="w-64">
+            {compact && (
+              <>
+                <MenuItem icon={<UserPlus size={15} />} onSelect={props.onShare} data-testid="menu-share">
+                  Share…
+                </MenuItem>
+                <MenuItem
+                  icon={linked ? <UploadCloud size={15} /> : <GitHubIcon size={15} />}
+                  onSelect={linked ? props.onPublishNow : props.onPublish}
+                  disabled={props.publishing || (linked ? !canEdit : !props.isOwner)}
+                  data-testid="menu-publish"
+                >
+                  {linked ? (doc.storage === "gist" ? "Update gist" : "Commit to GitHub…") : "Publish to GitHub…"}
+                </MenuItem>
+                <MenuSeparator />
+                <ModeItems session={session} />
+                <MenuSeparator />
+              </>
+            )}
             <MenuItem icon={<History size={15} />} onSelect={props.onHistory}>
               Version history
             </MenuItem>
@@ -397,62 +487,63 @@ export const Header = memo(function Header(props: HeaderProps) {
             )}
           </MenuContent>
         </Menu>
-        <Menu>
-          <MenuTrigger asChild>
-            <button type="button" className="btn btn-primary gap-1.5 pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
-              {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
-              Publish
-              <ChevronDown size={16} className="opacity-80" />
-            </button>
-          </MenuTrigger>
-          <MenuContent align="end" className="w-72">
-            {linked ? (
-              <>
-                <MenuLabel>
-                  {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
-                </MenuLabel>
-                <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
-                  {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
-                </MenuItem>
-                <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit}>
-                  Pull latest from GitHub
-                </MenuItem>
-                {doc.githubUrl && (
-                  <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
-                    Open on GitHub
+        {!compact && (
+          <Menu>
+            <MenuTrigger asChild>
+              <button type="button" className="btn btn-primary gap-1.5 pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
+                {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
+                Publish
+                <ChevronDown size={16} className="opacity-80" />
+              </button>
+            </MenuTrigger>
+            <MenuContent align="end" className="w-72">
+              {linked ? (
+                <>
+                  <MenuLabel>
+                    {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
+                  </MenuLabel>
+                  <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+                    {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
                   </MenuItem>
-                )}
-                {props.isOwner && (
-                  <>
-                    <MenuSeparator />
-                    <MenuItem icon={<Link2 size={15} />} onSelect={props.onPublish}>
-                      Change connection…
+                  <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit}>
+                    Pull latest from GitHub
+                  </MenuItem>
+                  {doc.githubUrl && (
+                    <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+                      Open on GitHub
                     </MenuItem>
-                  </>
-                )}
-              </>
-            ) : (
-              <>
-                <MenuLabel>Publish to GitHub</MenuLabel>
-                <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish} disabled={!props.isOwner}>
-                  Gist or repository…
-                </MenuItem>
-                <MenuSeparator />
-                <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
-                  Download Markdown
-                </MenuItem>
-                <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
-                  Share link…
-                </MenuItem>
-              </>
-            )}
-          </MenuContent>
-        </Menu>
+                  )}
+                  {props.isOwner && (
+                    <>
+                      <MenuSeparator />
+                      <MenuItem icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                        Change connection…
+                      </MenuItem>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <MenuLabel>Publish to GitHub</MenuLabel>
+                  <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish} disabled={!props.isOwner}>
+                    Gist or repository…
+                  </MenuItem>
+                  <MenuSeparator />
+                  <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+                    Download Markdown
+                  </MenuItem>
+                  <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
+                    Share link…
+                  </MenuItem>
+                </>
+              )}
+            </MenuContent>
+          </Menu>
+        )}
       </div>
     </header>
   );
 });
-
 
 
 

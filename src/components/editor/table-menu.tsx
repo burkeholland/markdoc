@@ -19,6 +19,7 @@ import type { TableAlign } from "@/editor/prosemirror/commands";
 import type { EditorActions, FormatState } from "./actions";
 import { Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
+import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
 
 const MENU_WIDTH = 372;
@@ -74,7 +75,7 @@ export function TableMenu({
   format: FormatState;
   containerRef: React.RefObject<HTMLElement | null>;
 }) {
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
   const raf = useRef<number | null>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
@@ -94,10 +95,15 @@ export function TableMenu({
     }
     const rect = table.getBoundingClientRect();
     const host = container.getBoundingClientRect();
-    const left = Math.max(8, Math.min(host.width - MENU_WIDTH - 8, rect.left - host.left));
-    // Sit above the table; if that edge is scrolled away, stick to the top of the viewport.
-    const top = Math.max(container.scrollTop + 4, rect.top - host.top + container.scrollTop - MENU_HEIGHT - 8);
-    setPos({ left, top });
+    // Sit above the table; if that edge is scrolled away, stick to the top of the pane. Then keep
+    // the whole menu inside the window (narrow phones shrink it and let it scroll sideways).
+    const box = clampToViewport(
+      { left: rect.left, top: Math.max(host.top + 4, rect.top - MENU_HEIGHT - 8), width: MENU_WIDTH, height: MENU_HEIGHT },
+      { width: window.innerWidth, height: window.innerHeight },
+    );
+    const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
+    const top = Math.max(container.scrollTop + 4, box.top - host.top + container.scrollTop);
+    setPos({ left, top, width: box.width });
   }, [view, canEdit, activeSurface, containerRef, format.tablePos]);
 
   const schedule = useCallback(() => {
@@ -126,8 +132,8 @@ export function TableMenu({
 
   return (
     <div
-      className="absolute z-30 flex items-center gap-0.5 rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
-      style={{ left: pos.left, top: pos.top, width: MENU_WIDTH }}
+      className="touch-target scrollbar-thin absolute z-30 flex items-center gap-0.5 overflow-x-auto rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
+      style={{ left: pos.left, top: pos.top, width: pos.width }}
       data-testid="table-menu"
       role="toolbar"
       aria-label="Table"

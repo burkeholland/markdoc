@@ -834,6 +834,126 @@ body {
   animation: md-recovered 2s ease-out forwards;
 }
 
+/* ---------- Responsive (phone < md, tablet md–lg) ---------- */
+
+/* Notch / home-indicator insets (viewport-fit=cover in src/app/layout.tsx). */
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.safe-x {
+  padding-left: max(var(--safe-pad, 0.75rem), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--safe-pad, 0.75rem), env(safe-area-inset-right, 0px));
+}
+
+/* Horizontal toolbar strip on phones: no wrap, no scrollbar, faded edges hint at more items. */
+@media (max-width: 767.98px) {
+  .toolbar-scroll {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .toolbar-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  .toolbar-scroll > * {
+    flex-shrink: 0;
+  }
+}
+
+/* Left drawer (outline) and bottom sheet (comments / history / activity) used below md. */
+.drawer {
+  @apply fixed inset-y-0 left-0 z-50 flex w-[min(85vw,320px)] flex-col bg-surface shadow-2xl shadow-black/30 outline-none;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  animation: md-slide-in-left 0.18s ease-out;
+}
+.drawer > aside {
+  width: 100%;
+  border-right: 0;
+}
+.sheet {
+  @apply fixed inset-x-0 bottom-0 z-50 flex flex-col rounded-t-2xl bg-surface-2 shadow-2xl shadow-black/30 outline-none;
+  top: max(3rem, env(safe-area-inset-top, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  animation: md-slide-in-up 0.2s ease-out;
+}
+.sheet > aside {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  border-left: 0;
+  border-radius: inherit;
+}
+.sheet-handle {
+  @apply mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-line-2;
+}
+@keyframes md-slide-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes md-slide-in-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@media (max-width: 767.98px) {
+  /* iOS Safari zooms the page into any focused input below 16px. */
+  input,
+  textarea,
+  select,
+  .input,
+  .textarea {
+    font-size: 16px;
+  }
+  /* Floating menus need finger-sized targets. */
+  .touch-target {
+    min-height: 40px;
+  }
+  .touch-target [role="option"] {
+    min-height: 40px;
+  }
+  .dialog {
+    width: min(100vw - 1.5rem, 560px);
+    max-height: calc(100dvh - 1.5rem);
+    overflow-y: auto;
+    padding: 1.25rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .save-state-recovered,
+  .drawer,
+  .sheet,
+  .md-rich .md-image-upload-spinner,
+  .animate-spin {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .transition,
+  .transition-colors,
+  .transition-opacity,
+  .md-diff-hunk-active,
+  .cm-line,
+  .md-rich * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
 
 
 /* ---------- Reader view (/p/[id]) ----------

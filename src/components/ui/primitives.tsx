@@ -111,6 +111,11 @@ export function PopoverContent({ className, children, ...props }: React.Componen
 export const Dialog = RadixDialog.Root;
 export const DialogTrigger = RadixDialog.Trigger;
 export const DialogClose = RadixDialog.Close;
+export const DialogPortal = RadixDialog.Portal;
+export const DialogOverlay = RadixDialog.Overlay;
+export const DialogTitle = RadixDialog.Title;
+/** Unstyled Radix content for drawers and sheets; `DialogContent` below is the centred card. */
+export const DialogPrimitiveContent = RadixDialog.Content;
 
 export function DialogContent({
   title,
