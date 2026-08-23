@@ -631,7 +631,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   const panel =
     sidePanel === "comments" ? (
-      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focus()} />
+      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} />
     ) : sidePanel === "versions" ? (
       <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (

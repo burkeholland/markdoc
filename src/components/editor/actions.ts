@@ -87,6 +87,24 @@ export class EditorActions {
     a.view.focus();
   }
 
+  /**
+   * Return focus to the editor with the caret collapsed at the end of the current selection.
+   * Used after a comment is posted/cancelled: refocusing with the range still selected would
+   * re-open the selection bubble over the text the user just commented on.
+   */
+  focusCollapsed() {
+    const a = this.active;
+    if (!a) return;
+    if (a.kind === "code") {
+      const { main } = a.view.state.selection;
+      if (!main.empty) a.view.dispatch({ selection: { anchor: main.to } });
+    } else {
+      const { selection } = a.view.state;
+      if (!selection.empty) a.view.dispatch(a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, selection.to)));
+    }
+    a.view.focus();
+  }
+
   private runPm(command: import("prosemirror-state").Command) {
     if (!this.rich) return;
     command(this.rich.state, this.rich.dispatch, this.rich);
