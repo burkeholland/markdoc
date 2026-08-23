@@ -5,7 +5,8 @@ process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
 
 // Same stand-ins as templates.test.ts: the routes resolve the caller through next-auth and `next/headers`.
-let actor: { id: string; login: string; name: string; image: null } | null = null;
+type Actor = { id: string; login: string; name: string; image: null };
+let actor: Actor | null = null;
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
@@ -14,7 +15,6 @@ const { createDocument, recordDocumentOpen, upsertCollaborator } = await import(
 const { GET: GET_STAR, PUT, DELETE } = await import("./[id]/star/route");
 const { GET: GET_LIST } = await import("./route");
 
-type Actor = NonNullable<typeof actor>;
 let owner: Actor;
 let viewer: Actor;
 let stranger: Actor;
