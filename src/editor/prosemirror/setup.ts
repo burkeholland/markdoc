@@ -220,7 +220,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
             spellcheck: "true",
             role: "textbox",
             "aria-multiline": "true",
-            "aria-label": "Document",
+            "aria-label": "Rich text editor",
           }),
         },
         view() {
