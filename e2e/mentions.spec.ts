@@ -62,15 +62,17 @@ test.describe("@mentions in comments", () => {
       .toEqual(["Mentions doc"]);
 
     await bob.page.goto("/");
-    const strip = bob.page.getByTestId("mentions-strip");
+    const strip = bob.page.getByTestId("notifications-strip");
     await expect(strip).toBeVisible();
-    await expect(strip.getByTestId("mention-item")).toHaveCount(1);
-    await expect(strip.getByTestId("mention-doc-title")).toHaveText("Mentions doc");
-    await expect(strip).toContainText("@alice mentioned you");
-    await expect(strip).toContainText("hi @bob can you check this?");
+    // The strip carries every kind (Bob was also notified of the share); look at the mention.
+    const item = strip.locator("[data-testid=notification-item][data-kind=mention]");
+    await expect(item).toHaveCount(1);
+    await expect(item.getByTestId("notification-doc-title")).toHaveText("Mentions doc");
+    await expect(item).toContainText("alice mentioned you");
+    await expect(item).toContainText("hi @bob can you check this?");
 
-    await strip.getByTestId("mention-open").click();
-    await bob.page.waitForURL(`**/d/${docId}`);
+    await item.getByTestId("notification-open").click();
+    await bob.page.waitForURL(`**/d/${docId}**`);
     await expect
       .poll(async () => {
         const res = await bob.page.request.get("/api/mentions");
@@ -80,7 +82,7 @@ test.describe("@mentions in comments", () => {
 
     await bob.page.goto("/");
     await bob.page.waitForLoadState("networkidle");
-    await expect(bob.page.getByTestId("mentions-strip")).toHaveCount(0);
+    await expect(bob.page.locator("[data-testid=notification-item][data-kind=mention]")).toHaveCount(0);
   });
 
   test("mentions written through the comments API are recorded too and e-mails are not", async () => {

@@ -208,10 +208,10 @@ describe("notifications", () => {
     const bang = list.find((s) => s.text === "!")!;
     const agentDel = list.find((s) => s.text === "Hello")!;
 
-    doc.transact(() => model.accept(ins.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
-    doc.transact(() => model.reject(del.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
-    doc.transact(() => model.reject(bang.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
-    doc.transact(() => model.accept(agentDel.id, origin(bobId, "Bob")), origin(bobId, "Bob"));
+    model.accept(ins.id, origin(bobId, "Bob"));
+    model.reject(del.id, origin(bobId, "Bob"));
+    model.reject(bang.id, origin(bobId, "Bob"));
+    model.accept(agentDel.id, origin(bobId, "Bob"));
     await until(async () => (await unread("alice")).filter((n) => n.kind.startsWith("suggestion.")).length === 3);
     const items = (await unread("alice")).filter((n) => n.kind.startsWith("suggestion."));
     expect(items.map((n) => [n.kind, n.refId, n.actorLogin]).sort()).toEqual(

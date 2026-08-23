@@ -71,7 +71,9 @@ All routes accept `Authorization: Bearer mdk_…`.
 | `POST /api/documents/:id/suggestions` | `{ action: accept\|reject\|acceptAll\|rejectAll, id? }` | Review suggestions. |
 | `GET /api/documents/:id/comments` | | Threads with the text they anchor to. |
 | `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }` | Comment. |
-| `GET /api/mentions` / `POST /api/mentions/:id/read` | | Your unread `@mentions` (with document title); mark one read. |
+| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you); `refId` is the thread, reply or suggestion id (`<docId>:<login>` for shares). |
+| `POST /api/notifications/:id/read` / `POST /api/notifications/read-all` / `POST /api/notifications/thread-read` | `{ documentId, refIds }` for thread-read | Mark one, all, or everything about the given threads/replies read. |
+| `GET /api/mentions` / `POST /api/mentions/:id/read` | | **Deprecated, removed next release**: alias of `GET /api/notifications?unread=1&kind=mention` (also returns the old `mentions` array) and of `POST /api/notifications/:id/read`. |
 | `GET /api/documents/:id/versions` / `POST` | `{ title }` | History; name the current state. |
 | `GET /api/documents/:id/activity` | `?before=<iso>&limit=50` | Who did what, when — `{ items: [{ id, actorId, actorName, actorKind: "user"\|"agent", action, detail, createdAt }], nextBefore }`, newest first. `action` is one of `edit`, `comment.add`, `comment.resolve`, `suggestion.add`, `suggestion.accept`, `suggestion.reject`, `version.save`, `version.restore`, `publish`, `share.add`, `share.remove`, `asset.upload`, `title.change`; `detail` holds small facts (`chars`, `count`, `number`, `title`, `login`, `role`, a ≤120-char `quote`) — never document text. Pass `nextBefore` as `before` for the next page. Your own API calls appear here under the token's name with `actorKind: "agent"`. |
 | `GET /api/documents/:id/export` | `?format=md\|html\|pdf` (default `md`), `?download=1` (attachment; HTML embeds images as `data:` URIs), `?suggestions=1` keeps pending insertions | Plain Markdown, a standalone HTML page, or a Letter PDF. PDF returns `503 { error }` if Chromium is unavailable on the server. |
@@ -101,7 +103,11 @@ curl -s -H "Authorization: ******" -H "Content-Type: application/json" \
 
 ### Mentioning people
 
-Agents can get someone's attention by writing `@login` (their GitHub handle) in a comment or reply body, for example `"body": "@burke the numbers in section 2 look stale"`. Mentions render as chips in the comments panel, are listed in each thread's `mentions` array from `GET /api/documents/:id/comments`, and show up on the mentioned person's dashboard until they open the document or dismiss them. E-mail addresses are not treated as mentions.
+Agents can get someone's attention by writing `@login` (their GitHub handle) in a comment or reply body, for example `"body": "@burke the numbers in section 2 look stale"`. Mentions render as chips in the comments panel, are listed in each thread's `mentions` array from `GET /api/documents/:id/comments`, and show up on the mentioned person's dashboard and in the bell in the editor header until they open the thread or dismiss them. E-mail addresses are not treated as mentions.
+
+### Notifications
+
+People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, or @mentions them. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner.
 
 ## What people see
 

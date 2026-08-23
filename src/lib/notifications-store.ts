@@ -134,6 +134,11 @@ export function useNotifications(): State {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 
+// Lets tests (and the console) pull instead of waiting for the next poll, like `__markdocSession`.
+if (typeof window !== "undefined") {
+  (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh = refreshNotifications;
+}
+
 /** Unread notifications about a document keyed by ref id (thread, reply or suggestion id). */
 export function useUnreadRefs(documentId: string): Set<string> {
   const { items } = useNotifications();
