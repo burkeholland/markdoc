@@ -6,6 +6,7 @@
 # Environment (all optional; set by burkeholland/factory-resume/bootstrap.ps1):
 #   FACTORY_MANIFEST   path to the board's manifest.json; when set, HEAD must equal its sha for this repo
 #   FACTORY_SNAPSHOT   folder with markdoc-pglite.tar.gz + manifest.json, restored when the data dir is missing
+#                      (default: ../markdoc-data/snapshots/latest when that folder has a tarball)
 #   FACTORY_ROOT       parent folder of the checkouts (default: parent of this repo)
 # Also: `npm run resume-check`. Windows PowerShell 5.1 compatible. See RESUME.md.
 # Write-Host on purpose: this is a console checklist, like the other scripts in this folder.
@@ -129,19 +130,21 @@ if ($missing.Count -gt 0) {
 }
 $token = $envVars['BACKUP_TOKEN']
 
-# 5. data dir (restore from the snapshot if missing)
+# 5. data dir (restore from the snapshot if missing: $env:FACTORY_SNAPSHOT, else ../markdoc-data/snapshots/latest)
+$snapshotDir = $env:FACTORY_SNAPSHOT
+if (-not $snapshotDir) { $snapshotDir = Join-Path $dataRoot 'snapshots\latest' }
 if (-not (Test-Path (Join-Path $pgliteDir 'PG_VERSION'))) {
-  if ($env:FACTORY_SNAPSHOT -and (Test-Path (Join-Path $env:FACTORY_SNAPSHOT 'markdoc-pglite.tar.gz'))) {
-    if ($DryRun) { Write-Check 'fix' 'data dir' "$pgliteDir missing; would run restore-data.ps1 -From $($env:FACTORY_SNAPSHOT) -SkipServer" }
+  if (Test-Path (Join-Path $snapshotDir 'markdoc-pglite.tar.gz')) {
+    if ($DryRun) { Write-Check 'fix' 'data dir' "$pgliteDir missing; would run restore-data.ps1 -From $snapshotDir -SkipServer" }
     else {
-      Write-Check 'fix' 'data dir' "restoring $pgliteDir from $($env:FACTORY_SNAPSHOT)"
-      & (Join-Path $PSScriptRoot 'restore-data.ps1') -From $env:FACTORY_SNAPSHOT -DataDir $pgliteDir -SkipServer
+      Write-Check 'fix' 'data dir' "restoring $pgliteDir from $snapshotDir"
+      & (Join-Path $PSScriptRoot 'restore-data.ps1') -From $snapshotDir -DataDir $pgliteDir -SkipServer
       if ($LASTEXITCODE -ne 0) { Fail 'data dir' 'restore-data.ps1 failed' }
     }
   } elseif (Get-LiveHealth -Port $Port) {
     Write-Check 'warn' 'data dir' "$pgliteDir has no PG_VERSION but :$Port answers - PGLITE_DATA_DIR may point elsewhere"
   } else {
-    Write-Check 'warn' 'data dir' "$pgliteDir missing and FACTORY_SNAPSHOT not set: the server will start EMPTY. Restore later with restore-data.ps1 -From <snapshot>"
+    Write-Check 'warn' 'data dir' "$pgliteDir missing and no tarball in $snapshotDir (set FACTORY_SNAPSHOT): the server will start EMPTY. Restore later with restore-data.ps1 -From <snapshot>"
   }
 } else {
   $files = @(Get-ChildItem -LiteralPath $pgliteDir -Recurse -File -ErrorAction SilentlyContinue)
@@ -149,19 +152,25 @@ if (-not (Test-Path (Join-Path $pgliteDir 'PG_VERSION'))) {
   Write-Check 'ok' 'data dir' "$pgliteDir ($($files.Count) files, $mb MB)"
 }
 
-# 6. scheduled task
-$task = Get-ScheduledTask -TaskName 'Markdoc live server' -ErrorAction SilentlyContinue
-if (-not $task) {
+# 6. scheduled tasks ("Markdoc live server" at logon, "Markdoc snapshot" every 15 min)
+$taskNames = @('Markdoc live server', 'Markdoc snapshot')
+$missingTasks = @($taskNames | Where-Object { -not (Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue) })
+if ($missingTasks.Count -gt 0) {
   $installer = Join-Path $liveRoot 'scripts\live\install-autostart.ps1'
-  if (-not (Test-Path $installer)) { $installer = Join-Path $PSScriptRoot 'install-autostart.ps1' }
-  if ($DryRun) { Write-Check 'fix' 'scheduled task' "missing; would run $installer" }
+  # Prefer the live worktree's copy (tasks then point at the permanent location), unless it predates the snapshot task.
+  if (-not (Test-Path $installer) -or -not (Select-String -LiteralPath $installer -Pattern 'Markdoc snapshot' -Quiet)) { $installer = Join-Path $PSScriptRoot 'install-autostart.ps1' }
+  if ($DryRun) { Write-Check 'fix' 'scheduled tasks' "missing $($missingTasks -join ', '); would run $installer" }
   else {
-    Write-Check 'fix' 'scheduled task' "registering via $installer"
+    Write-Check 'fix' 'scheduled tasks' "registering $($missingTasks -join ', ') via $installer"
     & $installer | Out-Host
-    if (-not (Get-ScheduledTask -TaskName 'Markdoc live server' -ErrorAction SilentlyContinue)) { Fail 'scheduled task' 'install-autostart.ps1 did not register it' }
+    $still = @($taskNames | Where-Object { -not (Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue) })
+    if ($still.Count -gt 0) { Fail 'scheduled tasks' "install-autostart.ps1 did not register $($still -join ', ')" }
   }
 } else {
-  Write-Check 'ok' 'scheduled task' "'Markdoc live server' -> $($task.Actions[0].Arguments -replace '.*-File ', '')"
+  foreach ($n in $taskNames) {
+    $task = Get-ScheduledTask -TaskName $n
+    Write-Check 'ok' 'scheduled task' "'$n' ($($task.State)) -> $($task.Actions[0].Arguments -replace '.*-File ', '')"
+  }
 }
 
 # 7. server healthy (start it if not)
@@ -188,6 +197,18 @@ if ($health) {
   $docs = Get-DocumentsAsDevUser -Port $Port -Login $CheckLogin
   if ($null -eq $docs) { Fail 'documents' "GET /api/documents with the dev login '$CheckLogin' failed (is AUTH_DEV_LOGIN=1?)" }
   Write-Check 'ok' 'documents' "GET /api/documents as @$CheckLogin -> $(@($docs.documents).Count) documents"
+
+  # 9. the 15-min snapshot is landing: ../markdoc-data/snapshots/latest/manifest.json < 30 min old. A warning,
+  # not a failure: right after a restore the first run of the task may still be up to 15 min away.
+  $latestManifest = Join-Path $dataRoot 'snapshots\latest\manifest.json'
+  if (-not (Test-Path -LiteralPath $latestManifest)) {
+    Write-Check 'warn' 'snapshot' "$latestManifest missing - the 'Markdoc snapshot' task has not run yet (Start-ScheduledTask 'Markdoc snapshot' to force one)"
+  } else {
+    $ageMin = [math]::Round(((Get-Date) - (Get-Item -LiteralPath $latestManifest).LastWriteTime).TotalMinutes, 1)
+    $takenAt = try { (Get-Content -LiteralPath $latestManifest -Raw | ConvertFrom-Json).takenAt } catch { '?' }
+    if ($ageMin -gt 30) { Write-Check 'warn' 'snapshot' "$latestManifest is $ageMin min old (takenAt $takenAt); the 'Markdoc snapshot' task should refresh it every 15 min" }
+    else { Write-Check 'ok' 'snapshot' "snapshots\latest\manifest.json is $ageMin min old (takenAt $takenAt)" }
+  }
 } elseif ($DryRun) {
   Write-Check 'skip' 'documents' 'server not running (dry run)'
 }

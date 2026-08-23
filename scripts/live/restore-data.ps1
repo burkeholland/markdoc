@@ -1,5 +1,9 @@
 # Restore the live server's PGlite database from a snapshot made by snapshot-data.ps1.
+#   .\restore-data.ps1                          from ..\markdoc-data\snapshots\latest (the 15-min task's output)
 #   .\restore-data.ps1 -From C:\snapshots\markdoc
+# After a machine wipe the board's factory-state restore puts that folder back at
+# <state>\projects\markdoc\markdoc-data\snapshots\latest (root nomination `markdoc` -> `markdoc-data/snapshots/latest`
+# in <factory>\factory-state.nominate.json); point -From there, or copy it to ..\markdoc-data\snapshots\latest first.
 # Stops the live server, moves the current data dir aside (pglite.bak-<timestamp>, never deleted),
 # extracts the tarball with PGlite's own loader (restore-data.mjs), restarts the server via
 # start-live.ps1 and verifies: /api/health db:true, GET /api/admin/backup?meta=1 documents ==
@@ -10,7 +14,8 @@
 # Exit 0 on success, 1 on failure (the previous data dir is still in the .bak folder).
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
 param(
-  [Parameter(Mandatory = $true)][string]$From,
+  # Folder with markdoc-pglite.tar.gz + manifest.json; defaults to ../markdoc-data/snapshots/latest next to the repo.
+  [string]$From,
   # PGlite directory to replace; defaults to ../markdoc-data/pglite next to the repo.
   [string]$DataDir,
   # Live worktree (for stop/start); defaults to ../markdoc-live.
@@ -25,7 +30,9 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
 if (-not $DataDir) { $DataDir = Join-Path (Get-FactoryRoot) 'markdoc-data\pglite' }
+if (-not $From) { $From = Join-Path (Get-FactoryRoot) 'markdoc-data\snapshots\latest' }
 
+if (-not (Test-Path -LiteralPath $From)) { Write-Step "snapshot folder $From does not exist"; exit 1 }
 $From = (Resolve-Path -LiteralPath $From).Path
 $tarPath = Join-Path $From 'markdoc-pglite.tar.gz'
 $manifestPath = Join-Path $From 'manifest.json'

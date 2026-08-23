@@ -18,8 +18,9 @@ folder of this checkout; `Get-FactoryRoot` in `scripts/live/common.ps1`).
 | Live worktree | `markdoc-live/` — detached at the promoted sha (`git worktree add --detach ../markdoc-live main`) | Yes, `resume-check.ps1` creates it |
 | Live env | `markdoc-live/.env.local` — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Secrets: see below |
 | **Data** | `markdoc-data/pglite/` — the embedded PGlite database (~39 MB, ~1050 files): documents, versions, assets, comments, notifications, users, API tokens | **Only from the snapshot** |
+| Snapshot | `markdoc-data/snapshots/latest/` — current hot backup (`markdoc-pglite.tar.gz` + `manifest.json`), rewritten every 15 min; `markdoc-data/snapshots/<yyyyMMdd-HHmmss>/` — the last 3 copies | Recreated by the "Markdoc snapshot" task while the server runs |
 | Log | `markdoc-data/live.log` (+ `.1` rotation) | Disposable |
-| Scheduled task | "Markdoc live server" (per user, at logon) → `markdoc-live\scripts\live\start-live.ps1` | `scripts/live/install-autostart.ps1` |
+| Scheduled tasks | "Markdoc live server" (per user, at logon) → `markdoc-live\scripts\live\start-live.ps1`; "Markdoc snapshot" (per user, every 15 min) → `snapshot-data.ps1 -Latest` | `scripts/live/install-autostart.ps1` registers both, `-Uninstall` removes both |
 | Ports | 3000 live; 3100/31xx Playwright; 32xx–39xx dev servers (`npm run dev:port`) | — |
 
 Nothing else. No external database, no cloud storage; GitHub publish/login use per-user tokens
@@ -34,15 +35,45 @@ Instead the running server exposes `GET /api/admin/backup`, which runs a `CHECKP
 PGlite's own `dumpDataDir()` (a tar of PGDATA) gzipped. The tar walk is synchronous inside the one
 PGlite process, so no query can interleave: the copy is consistent without a stop.
 
-`scripts/live/snapshot-data.ps1 -Out <dir>` (read-only for the server, ~8 s for 40 MB) writes:
+`scripts/live/snapshot-data.ps1` (read-only for the server, ~2–35 s for 40 MB) writes:
 
 - `<dir>\markdoc-pglite.tar.gz` — the backup
 - `<dir>\manifest.json` — `{ sha, takenAt, bytes, documents, users, port, file, sha256, durationMs }`
   (`sha` is the live worktree's HEAD; `documents` counts non-deleted documents)
 
-The board's snapshot job should call it every few minutes; it exits 1 (and writes nothing) when the
-server is down or the token is wrong, so the previous snapshot stays intact. Token resolution:
-`-Token`, else `$env:BACKUP_TOKEN`, else `BACKUP_TOKEN=` in `markdoc-live\.env.local`.
+With `-Latest` (the default when `-Out` is omitted) `<dir>` is `markdoc-data\snapshots\latest`, written
+**atomically**: the download goes to `latest.tmp`, then `latest` → `prev`, `latest.tmp` → `latest`,
+`prev` deleted — anything copying `latest` sees the old complete folder, a brief absence, or the new
+complete folder, never a half-written tarball. It also keeps the newest 3 timestamped copies in
+`markdoc-data\snapshots\<yyyyMMdd-HHmmss>\` and prunes older ones. `-Out <dir>` writes anywhere else
+and touches nothing under `snapshots\`.
+
+It exits 1 (and leaves `latest` untouched) when the server is down or the token is wrong. `/api/health`
+is polled once a second for up to 60 s (`-HealthTimeoutSec`) until it answers `db:true` — a cold
+Next.js server compiles the route on the first hit and used to fail a single short probe. Token
+resolution: `-Token`, else `$env:BACKUP_TOKEN`, else `BACKUP_TOKEN=` in `markdoc-live\.env.local`.
+
+### Every 15 minutes, and where it lands in factory-state
+
+The per-user scheduled task **"Markdoc snapshot"** (`install-autostart.ps1`; trigger: once, repeating
+every 15 min indefinitely, 10-min execution cap, overlapping runs ignored) runs
+`powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\live\snapshot-data.ps1 -Latest`.
+Force one with `Start-ScheduledTask 'Markdoc snapshot'`. After promoting a commit that contains
+`scripts\live`, re-run `install-autostart.ps1` from `markdoc-live` so both tasks point at the
+permanent location rather than a review worktree.
+
+The board's own 15-minute factory-state snapshot has no pre-command hook: it only copies folders that
+are already fresh, which is why `latest` is a fixed name rewritten atomically. How it is nominated:
+
+- `<repo>/snapshot.json` (this repo: `{"paths":[],"sqlite":[]}`) can only name paths **inside** the
+  repo — `board/lib/snapshot.js readRepoNominations` rejects any `..` segment ("paths must stay inside
+  the repo"). Markdoc keeps no state in the repo, so the file is intentionally empty.
+- The data folder is nominated from the **root** file `<FACTORY_ROOT>\factory-state.nominate.json`:
+  `{"markdoc":["markdoc-data/snapshots/latest"]}` (section 4a of `board/tools/state/snapshot.ps1`,
+  paths relative to the factory root). The board robocopies it (`/MIR`) to
+  **`<factory-state>\projects\markdoc\markdoc-data\snapshots\latest\`** — exactly one tarball + manifest,
+  not a growing pile. That root file is not in any repo; after a wipe, `bootstrap.ps1` / the board
+  team restore it, or recreate it by hand with the line above.
 
 If the server is stopped anyway (e.g. the box is going down), a plain `robocopy /MIR` of
 `markdoc-data\pglite` is also a valid snapshot — a stopped PGlite directory is consistent — and
@@ -50,7 +81,9 @@ If the server is stopped anyway (e.g. the box is going down), a plain `robocopy 
 
 ## Restore
 
-`scripts/live/restore-data.ps1 -From <dir>` — stops the live server, moves the current
+`scripts/live/restore-data.ps1 [-From <dir>]` — `-From` defaults to `markdoc-data\snapshots\latest`;
+after a factory-state restore pass `-From <factory-state>\projects\markdoc\markdoc-data\snapshots\latest`
+(or copy that folder to `markdoc-data\snapshots\latest` first). It stops the live server, moves the current
 `markdoc-data\pglite` to `pglite.bak-<timestamp>` (never deleted), extracts the tarball with
 PGlite's own `loadDataDir` loader (`restore-data.mjs`), restarts via `start-live.ps1`, then checks
 `/api/health` `db:true`, `GET /api/admin/backup?meta=1` document count == manifest, and that
@@ -84,18 +117,23 @@ it safely can unless `-DryRun`:
 2. `node`, `npm`, `git` on PATH
 3. `../markdoc-live` exists and is detached (created with `git worktree add --detach` if missing; `npm ci --ignore-scripts` if `node_modules` is missing); warns when it is behind `main` (that is `promote.ps1`'s job)
 4. `.env.local` has `AUTH_SECRET`, `AUTH_DEV_LOGIN`, `PGLITE_DATA_DIR` (hard) and `BACKUP_TOKEN` (warning) — prints the lines to add
-5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` (folder with the tarball + manifest); without a snapshot it warns that the server will start empty
-6. scheduled task "Markdoc live server" registered (runs `install-autostart.ps1` if not)
+5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` or, when that is unset, `../markdoc-data/snapshots/latest` (folder with the tarball + manifest); without a tarball in either it warns that the server will start empty
+6. scheduled tasks "Markdoc live server" and "Markdoc snapshot" registered (runs `install-autostart.ps1` if either is missing)
 7. `/api/health` 200 with `db:true` within 180 s (`start-live.ps1` if not)
 8. `GET /api/admin/backup?meta=1` with the token; `GET /api/documents` with the dev login (handle `resume-check`, `-CheckLogin` to change) answers 200
+9. `../markdoc-data/snapshots/latest/manifest.json` exists and is < 30 min old — a **warning** only, since right after a restore the first run of the snapshot task may be up to 15 min away (`Start-ScheduledTask 'Markdoc snapshot'` forces one)
 
 Manual order after a wipe, if not using bootstrap.ps1:
 
 ```powershell
 git clone https://github.com/burkeholland/markdoc C:\Dev\ai-experiments\factory\markdoc
 cd C:\Dev\ai-experiments\factory\markdoc; npm ci
-$env:FACTORY_SNAPSHOT = '<folder with markdoc-pglite.tar.gz + manifest.json>'
+# the folder with markdoc-pglite.tar.gz + manifest.json; from factory-state that is
+# <factory-state>\projects\markdoc\markdoc-data\snapshots\latest (or copy it to ..\markdoc-data\snapshots\latest and skip this)
+$env:FACTORY_SNAPSHOT = '<factory-state>\projects\markdoc\markdoc-data\snapshots\latest'
 .\scripts\live\resume-check.ps1          # creates ../markdoc-live, tells you the .env.local lines
 # paste them into ..\markdoc-live\.env.local, then:
-.\scripts\live\resume-check.ps1          # restores data, registers the task, starts :3000
+.\scripts\live\resume-check.ps1          # restores data, registers both tasks, starts :3000
+# and put the board's root nomination back so the next factory-state snapshot carries the data again:
+#   <FACTORY_ROOT>\factory-state.nominate.json  ->  {"markdoc":["markdoc-data/snapshots/latest"]}
 ```
