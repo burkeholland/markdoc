@@ -126,3 +126,11 @@ infra, deploy              Bicep and deployment script
 MIT
 
 
+
+## Live test server (Burke's :3000)
+
+Burke's live test server runs `npm run dev` from the pinned worktree `C:\Dev\ai-experiments\FACTORY\markdoc-live` (env in that folder's `.env.local`, PGlite data under `markdoc-data\pglite`). Ops scripts live in `scripts/live/` (Windows PowerShell 5.1 compatible):
+
+- `start-live.ps1` — idempotent start: exits 0 if `/api/health` already answers 200, otherwise kills stale `markdoc-live` node processes, deletes `.next`, starts `npm run dev` hidden (log appended to `markdoc-data\live.log`, rotated at 20 MB) and waits up to 180 s for health.
+- `promote.ps1 -Sha <sha>` — what the lead does at every merge: verifies the sha is on `origin/main`, stops the server, `git checkout --detach <sha>`, runs `npm ci --ignore-scripts` only if `package.json`/`package-lock.json` changed, clears `.next`, restarts; rolls back to the previous sha if health never returns 200.
+- `install-autostart.ps1` — registers a per-user scheduled task "Markdoc live server" (at logon, no admin) that runs `start-live.ps1`; `-Uninstall` removes it. Re-run it from `markdoc-live` after the first promote that includes these scripts so the task points at the permanent path.
