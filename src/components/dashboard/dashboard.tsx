@@ -1,14 +1,15 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
-import { Avatar, Dialog, DialogContent, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
+import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, FilePlus2, GitBranch, HardDrive, Loader2, LogOut, Search, FileText, Users } from "lucide-react";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, Scale, Search, FileText, Users } from "lucide-react";
 import type { DocumentSummary } from "@/server/documents";
 import { api } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
+import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
@@ -52,6 +53,47 @@ function useDebounced<T>(value: T, ms: number): T {
   return debounced;
 }
 
+const TEMPLATE_ICONS: Record<TemplateIcon, typeof File> = {
+  File,
+  Users,
+  BookOpen,
+  DraftingCompass,
+  CalendarCheck,
+  PenLine,
+  Scale,
+  ListChecks,
+};
+
+/** Grid of template cards; `busy` is the id currently being created (disables the grid). */
+export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) => void; busy: string | null; compact?: boolean }) {
+  return (
+    <ul className={cn("grid gap-3", compact ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" : "sm:grid-cols-2 lg:grid-cols-3")} data-testid="template-grid">
+      {TEMPLATES.map((t) => {
+        const Icon = TEMPLATE_ICONS[t.icon];
+        const isBusy = busy === t.id;
+        return (
+          <li key={t.id}>
+            <button
+              type="button"
+              onClick={() => onPick(t)}
+              disabled={busy !== null}
+              aria-busy={isBusy || undefined}
+              className="group flex h-full w-full flex-col gap-2 rounded-xl border border-line bg-surface p-4 text-left transition hover:border-accent hover:shadow-sm focus-visible:border-accent disabled:cursor-default disabled:opacity-60"
+              data-testid={`template-${t.id}`}
+            >
+              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-3 text-ink-2 transition group-hover:bg-accent group-hover:text-white">
+                {isBusy ? <Loader2 size={18} className="animate-spin" /> : <Icon size={18} />}
+              </span>
+              <span className="block text-sm font-semibold text-ink">{t.name}</span>
+              <span className="block text-xs leading-4 text-ink-3">{t.description}</span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export interface DashboardProps {
   user: { id: string; name: string; login: string | null; image: string | null };
   documents: Doc[];
@@ -83,7 +125,6 @@ function StorageBadge({ doc }: { doc: Doc }) {
 export function Dashboard({ user, documents, githubAvailable }: DashboardProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  const [creating, setCreating] = useState(false);
   const [openPicker, setOpenPicker] = useState(false);
   const [filter, setFilter] = useState<"all" | "mine" | "shared">("all");
   const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
@@ -127,15 +168,23 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
     return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q)));
   }, [documents, serverResults, trimmed, filter, user.id]);
 
-  const create = async () => {
-    setCreating(true);
-    try {
-      const res = await api.documents.create({});
-      router.push(`/d/${res.document.id}`);
-    } finally {
-      setCreating(false);
-    }
-  };
+  const [creating, setCreating] = useState<string | null>(null);
+  const [openTemplates, setOpenTemplates] = useState(false);
+
+  const create = useCallback(
+    async (template?: Template) => {
+      const key = template?.id ?? "blank";
+      setCreating(key);
+      try {
+        const res = await api.documents.create(template ? { template: template.id } : {});
+        router.push(`/d/${res.document.id}`);
+      } catch (err) {
+        console.error(err);
+        setCreating(null);
+      }
+    },
+    [router],
+  );
 
   return (
     <TooltipProvider>
@@ -176,19 +225,41 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
         <section className="mx-auto max-w-6xl px-6 py-8">
           <MentionsStrip />
           <div className="mb-8 grid gap-3 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => void create()}
-              disabled={creating}
-              className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md"
-              data-testid="new-document"
-            >
-              <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent text-white">{creating ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
-              <span>
-                <span className="block text-[15px] font-semibold text-ink">New document</span>
-                <span className="block text-sm text-ink-3">Start with a blank Markdown page.</span>
-              </span>
-            </button>
+            <div className="group flex items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md">
+              <button
+                type="button"
+                onClick={() => void create()}
+                disabled={creating !== null}
+                className="flex flex-1 items-center gap-4 rounded-l-2xl p-5 text-left"
+                data-testid="new-document"
+              >
+                <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent text-white">{creating === "blank" ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
+                <span>
+                  <span className="block text-[15px] font-semibold text-ink">New document</span>
+                  <span className="block text-sm text-ink-3">Start with a blank Markdown page.</span>
+                </span>
+              </button>
+              <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
+                <DialogTrigger asChild>
+                  <button
+                    type="button"
+                    disabled={creating !== null}
+                    className="flex items-center gap-1 rounded-r-2xl border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                    aria-label="New document from template"
+                    title="From template"
+                    data-testid="new-from-template"
+                  >
+                    <LayoutTemplate size={16} />
+                    <ChevronDown size={14} />
+                  </button>
+                </DialogTrigger>
+                <DialogContent title="New from template" description="Pick a starting point. Everything is plain Markdown you can change afterwards." wide>
+                  <div data-testid="template-dialog">
+                    <TemplateGrid onPick={(t) => void create(t)} busy={creating} />
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
             <button
               type="button"
               onClick={() => setOpenPicker(true)}
@@ -216,13 +287,20 @@ export function Dashboard({ user, documents, githubAvailable }: DashboardProps) 
             </div>
           </div>
 
-          {filtered.length === 0 ? (
+          {filtered.length === 0 && !trimmed && documents.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-8" data-testid="empty-state">
+              <div className="mb-5 text-center">
+                <FileText className="mx-auto mb-3 text-ink-4" size={28} />
+                <p className="text-sm font-medium text-ink-2">No documents yet</p>
+                <p className="mt-1 text-sm text-ink-3">Start from a template, or open a Markdown file from GitHub.</p>
+              </div>
+              <TemplateGrid compact onPick={(t) => void create(t)} busy={creating} />
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
               <FileText className="mx-auto mb-3 text-ink-4" size={28} />
-              <p className="text-sm font-medium text-ink-2">
-                {pending ? `Searching for "${trimmed}"…` : trimmed ? `No matches for "${trimmed}"` : documents.length === 0 ? "No documents yet" : "No matches"}
-              </p>
-              <p className="mt-1 text-sm text-ink-3">{!trimmed && documents.length === 0 ? "Create a new document or open one from GitHub." : pending ? "Looking through titles and content." : "Try a different search."}</p>
+              <p className="text-sm font-medium text-ink-2">{pending ? `Searching for "${trimmed}"…` : trimmed ? `No matches for "${trimmed}"` : "No matches"}</p>
+              <p className="mt-1 text-sm text-ink-3">{pending ? "Looking through titles and content." : "Try a different search."}</p>
             </div>
           ) : (
             <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">

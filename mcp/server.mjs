@@ -88,12 +88,27 @@ server.registerTool(
   "markdoc_create_document",
   {
     title: "Create document",
-    description: "Create a new Markdoc document from Markdown. Returns the id and the URL to open it in the browser, where others can collaborate in real time.",
-    inputSchema: { title: z.string().optional().describe("Title; defaults to the first heading"), content: z.string().describe("Markdown content") },
+    description:
+      "Create a new Markdoc document from Markdown, or from a template (ids: blank, meeting-notes, project-readme, design-doc, weekly-status, blog-post, decision-record, checklist; see GET /api/templates). Returns the id and the URL to open it in the browser, where others can collaborate in real time.",
+    inputSchema: {
+      title: z.string().optional().describe("Title; defaults to the first heading"),
+      content: z.string().optional().describe("Markdown content (omit when using `template`)"),
+      template: z.string().optional().describe("Template id; fills title and content when `content` is omitted"),
+    },
   },
-  async ({ title, content }) => {
-    const { document } = await api("POST", "/api/documents", { title, content });
+  async ({ title, content, template }) => {
+    if (content === undefined && !template) throw new Error("Provide `content` or `template`.");
+    const { document } = await api("POST", "/api/documents", { title, content, template });
     return ok(`Created "${document.title}" (id ${document.id}). Open it: ${docUrl(document.id)}`, { id: document.id, title: document.title, url: docUrl(document.id) });
+  },
+);
+
+server.registerTool(
+  "markdoc_list_templates",
+  { title: "List templates", description: "List the document templates markdoc_create_document accepts (id, name, description).", inputSchema: {} },
+  async () => {
+    const { templates } = await api("GET", "/api/templates");
+    return ok(templates.map((t) => `- ${t.id}: ${t.name} — ${t.description}`).join("\n"), { templates });
   },
 );
 
