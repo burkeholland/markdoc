@@ -372,20 +372,32 @@ export class EditorActions {
 
   /** Scroll both panes to a source offset and place the caret there in the active surface. */
   revealSource(offset: number, opts: { focus?: boolean } = {}) {
+    // Focus before dispatching: both panes only report selection changes while focused, and the
+    // outline's active heading follows that report.
     if (this.code) {
       const pos = Math.min(offset, this.code.state.doc.length);
-      this.code.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
       if (opts.focus && this.surface === "code") this.code.focus();
+      this.code.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
     }
     if (this.rich) {
       const map = this.session.binding.getSourceMap();
-      const pos = Math.min(this.rich.state.doc.content.size, Math.max(0, map.srcToPm(offset)));
-      const sel = TextSelection.near(this.rich.state.doc.resolve(pos));
+      const doc = this.rich.state.doc;
+      // Offsets at a block start (outline headings, lint issues) sit in Markdown syntax, where
+      // srcToPm snaps to the previous block's end; resolve them to the block itself instead.
+      const blockIdx = map.blocks.findIndex((b) => b.from === offset && !b.phantom);
+      let pos: number;
+      if (blockIdx >= 0 && blockIdx < doc.childCount) {
+        pos = 0;
+        for (let i = 0; i < blockIdx; i++) pos += doc.child(i).nodeSize;
+      } else {
+        pos = Math.min(doc.content.size, Math.max(0, map.srcToPm(offset)));
+      }
+      const sel = TextSelection.near(doc.resolve(pos), 1);
+      if (opts.focus && this.surface === "rich") this.rich.focus();
       this.rich.dispatch(this.rich.state.tr.setSelection(sel).scrollIntoView());
       const dom = this.rich.domAtPos(sel.head);
       const el = (dom.node instanceof HTMLElement ? dom.node : dom.node.parentElement) as HTMLElement | null;
       el?.scrollIntoView({ block: "center", behavior: "smooth" });
-      if (opts.focus && this.surface === "rich") this.rich.focus();
     }
   }
 }

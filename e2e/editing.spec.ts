@@ -167,6 +167,36 @@ test.describe("single user editing", () => {
     await user.context.close();
   });
 
+  test("outline lists headings, selects on click and moves focus with arrow keys", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "# First\n\nIntro.\n\n## Second\n\nMore.\n\n## Third\n\nEnd.\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+    const items = page.getByTestId("outline").getByRole("button", { name: /First|Second|Third/ });
+    await expect(items).toHaveCount(3);
+    await expect(items).toHaveText(["First", "Second", "Third"]);
+
+    // Clicking the third heading reveals it in the code pane and marks it current.
+    await items.nth(2).click();
+    await expect(page.locator(".cm-activeLine")).toContainText("## Third");
+    await expect(items.nth(2)).toHaveAttribute("aria-current", "location");
+    await expect(items.nth(0)).not.toHaveAttribute("aria-current", /.+/);
+
+    // Roving tabindex: ArrowDown/ArrowUp/Home/End move focus between items.
+    await items.nth(0).focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(1)).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(items.nth(2)).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(items.nth(1)).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(items.nth(0)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".cm-activeLine")).toContainText("# First");
+    await user.context.close();
+  });
+
   test("status bar lints the Markdown and jumps to issues", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, "# Title\n\n### Jumped heading\n\nSee [missing][ref].\n");

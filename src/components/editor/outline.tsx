@@ -3,8 +3,10 @@
 import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { HeadingInfo } from "@/editor/markdown/parse";
+import { useHydrated } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
+import type { KeyboardEvent } from "react";
 
 export interface OutlineProps {
   session: CollabSession;
@@ -14,6 +16,8 @@ export interface OutlineProps {
   cursorSource: number | null;
   onSelect: (heading: HeadingInfo) => void;
 }
+
+const EMPTY_HEADINGS: HeadingInfo[] = [];
 
 function sameHeadings(a: HeadingInfo[], b: HeadingInfo[]): boolean {
   if (a === b) return true;
@@ -40,10 +44,42 @@ export function activeHeadingIndex(headings: HeadingInfo[], cursor: number | nul
   return idx;
 }
 
+/** Index the arrow/Home/End keys should focus next, or -1 if the key is not a navigation key. */
+export function nextOutlineIndex(key: string, current: number, count: number): number {
+  if (count === 0) return -1;
+  switch (key) {
+    case "ArrowDown":
+      return Math.min(count - 1, current + 1);
+    case "ArrowUp":
+      return Math.max(0, current - 1);
+    case "Home":
+      return 0;
+    case "End":
+      return count - 1;
+    default:
+      return -1;
+  }
+}
+
 export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }: OutlineProps) {
-  const headings = useHeadings(session);
+  // IndexedDB can fill the document before React hydrates; keep the first client render
+  // identical to the server (no headings) and switch in the next render.
+  const hydrated = useHydrated();
+  const liveHeadings = useHeadings(session);
+  const headings = hydrated ? liveHeadings : EMPTY_HEADINGS;
   const active = activeHeadingIndex(headings, cursorSource);
   const minLevel = headings.reduce((m, h) => Math.min(m, h.level), 6);
+  // Roving tabindex: the active heading (or the first one) is the list's single tab stop.
+  const tabStop = active >= 0 ? active : 0;
+
+  const onListKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-outline-item]"));
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = nextOutlineIndex(e.key, current, items.length);
+    if (next < 0) return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
 
   if (!open) {
     return (
@@ -64,29 +100,29 @@ export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }
         </button>
       </div>
       <nav className="scrollbar-thin flex-1 overflow-y-auto pb-6 pr-2" aria-label="Document outline">
-        {headings.length === 0 ? (
-          <p className="px-6 pt-1 text-[13px] leading-5 text-ink-4">Headings you add will show up here.</p>
-        ) : (
-          <ul className="flex flex-col">
-            {headings.map((h, i) => (
-              <li key={`${h.from}-${i}`}>
-                <button
-                  type="button"
-                  onClick={() => onSelect(h)}
-                  className={cn(
-                    "relative flex w-full items-start truncate py-2.5 pr-3 text-left text-[15px] leading-5 transition-colors hover:text-ink",
-                    i === active ? "font-medium text-accent" : "text-ink-2",
-                  )}
-                  style={{ paddingLeft: 24 + (h.level - minLevel) * 14 }}
-                  data-active={i === active || undefined}
-                >
-                  {i === active && <span className="absolute left-0 top-1.5 h-7 w-[3px] rounded-r bg-accent" aria-hidden />}
-                  <span className="truncate">{h.text || "Untitled"}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        <ul className="flex flex-col" onKeyDown={onListKeyDown}>
+          {headings.map((h, i) => (
+            <li key={`${h.from}-${i}`}>
+              <button
+                type="button"
+                onClick={() => onSelect(h)}
+                className={cn(
+                  "relative flex w-full items-start truncate py-2.5 pr-3 text-left text-[15px] leading-5 transition-colors hover:text-ink",
+                  i === active ? "font-medium text-accent" : "text-ink-2",
+                )}
+                style={{ paddingLeft: 24 + (h.level - minLevel) * 14 }}
+                data-active={i === active || undefined}
+                data-outline-item
+                aria-current={i === active ? "location" : undefined}
+                tabIndex={i === tabStop ? 0 : -1}
+              >
+                {i === active && <span className="absolute left-0 top-1.5 h-7 w-[3px] rounded-r bg-accent" aria-hidden />}
+                <span className="truncate">{h.text || "Untitled"}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        {hydrated && headings.length === 0 && <p className="px-6 pt-1 text-[13px] leading-5 text-ink-4">Headings you add will show up here.</p>}
       </nav>
     </aside>
   );
