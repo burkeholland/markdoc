@@ -1,5 +1,5 @@
-import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirror-state";
-import { ReplaceStep } from "prosemirror-transform";
+import { Plugin, PluginKey, type Command, type EditorState, type Transaction } from "prosemirror-state";
+import { Mapping, ReplaceStep } from "prosemirror-transform";
 import type { EditorView } from "prosemirror-view";
 import { schema } from "../markdown/schema";
 import { isEditable } from "./setup";
@@ -73,15 +73,73 @@ export const closeSlashMenu = (view: EditorView) => {
 };
 
 /**
- * Removes the `/query` text and then runs `action`, so the menu's choice lands
- * in the document as a single user-visible edit.
+ * Transaction that removes the tracked `/query` and closes the menu, or null
+ * when the menu is not open.
  */
-export function applySlashItem(view: EditorView, action: () => void) {
+function deleteQueryTransaction(view: EditorView): Transaction | null {
   const tracked = slashMenuKey.getState(view.state);
-  if (tracked) {
-    view.dispatch(view.state.tr.delete(tracked.from, tracked.to).setMeta(slashMenuKey, { close: true }));
+  if (!tracked) return null;
+  return view.state.tr.delete(tracked.from, tracked.to).setMeta(slashMenuKey, { close: true });
+}
+
+/**
+ * The part of the session's Y.UndoManager the menu needs. Capturing is
+ * stopped around the application so the typed `/query` (before) and whatever
+ * the user types next (after) stay separate undo steps instead of being merged
+ * into the menu's edit by the undo manager's capture timeout.
+ */
+export interface UndoBoundary {
+  stopCapturing(): void;
+}
+
+/**
+ * Removes the `/query` and runs `command` in the SAME ProseMirror transaction.
+ * The command sees the document without the query (a derived state), and its
+ * steps are appended to the deletion, so the binding writes one diff to the
+ * shared text and one undo reverts the whole choice regardless of timing.
+ *
+ * Returns what the command returned; the query is removed either way.
+ */
+export function applySlashCommand(view: EditorView, command: Command, undo?: UndoBoundary): boolean {
+  undo?.stopCapturing();
+  try {
+    const tr = deleteQueryTransaction(view);
+    if (!tr) return command(view.state, view.dispatch, view);
+    // Plugins may append normalizing transactions to the deletion (tables);
+    // fold those in so the command's steps apply to the document it was given.
+    const { state: derived, transactions } = view.state.applyTransaction(tr);
+    for (const appended of transactions.slice(1)) for (const step of appended.steps) tr.step(step);
+    const ok = command(
+      derived,
+      (next) => {
+        for (const step of next.steps) tr.step(step);
+        tr.setSelection(next.selection.map(tr.doc, new Mapping()));
+        if (next.storedMarksSet) tr.setStoredMarks(next.storedMarks);
+        if (next.scrolledIntoView) tr.scrollIntoView();
+      },
+      view,
+    );
+    view.dispatch(tr);
+    return ok;
+  } finally {
+    undo?.stopCapturing();
   }
-  action();
+}
+
+/**
+ * Removes the `/query` text and then runs `action`, for items that do not edit
+ * the document themselves (dialogs, comments). Editing items should use
+ * {@link applySlashCommand} so the edit is a single transaction.
+ */
+export function applySlashItem(view: EditorView, action: () => void, undo?: UndoBoundary) {
+  undo?.stopCapturing();
+  try {
+    const tr = deleteQueryTransaction(view);
+    if (tr) view.dispatch(tr);
+    action();
+  } finally {
+    undo?.stopCapturing();
+  }
 }
 
 /**

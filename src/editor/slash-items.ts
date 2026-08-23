@@ -1,3 +1,4 @@
+import type { Command } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import { insertHorizontalRule, insertTable, insertText, setHeadingLevel, toggleBlockquote, toggleCodeBlock, toggleList } from "./prosemirror/commands";
 
@@ -25,7 +26,7 @@ export type SlashGroup = "Basic" | "Lists" | "Blocks" | "Insert";
 
 export const SLASH_GROUPS: readonly SlashGroup[] = ["Basic", "Lists", "Blocks", "Insert"];
 
-export interface SlashItem {
+interface SlashItemBase {
   id: string;
   title: string;
   keywords: string[];
@@ -38,25 +39,28 @@ export interface SlashItem {
   hint?: string;
   /** Hides the item in contexts where it cannot be inserted. */
   available?: (where: SlashWhere) => boolean;
-  run: (ctx: SlashContext, arg: string) => void;
 }
 
-const pm = (ctx: SlashContext, command: import("prosemirror-state").Command) => {
-  command(ctx.view.state, ctx.view.dispatch, ctx.view);
-  ctx.view.focus();
-};
+/**
+ * An item either edits the document through a ProseMirror `command`, which the
+ * menu runs in the same transaction that removes the `/query` (so the choice
+ * is one undo step, see `applySlashCommand`), or hands off to the shell with
+ * `run` (dialogs, comments) after the `/query` has been removed.
+ */
+export type SlashItem = SlashItemBase &
+  ({ command: (arg: string) => Command; run?: undefined } | { run: (ctx: SlashContext, arg: string) => void; command?: undefined });
 
 const notInTable = (w: SlashWhere) => !w.inTable;
 
 export const SLASH_ITEMS: readonly SlashItem[] = [
-  { id: "text", title: "Text", keywords: ["paragraph", "plain", "p"], icon: "Type", group: "Basic", run: (ctx) => pm(ctx, setHeadingLevel(0)) },
-  { id: "heading1", title: "Heading 1", keywords: ["h1", "title"], icon: "Heading1", group: "Basic", available: notInTable, run: (ctx) => pm(ctx, setHeadingLevel(1)) },
-  { id: "heading2", title: "Heading 2", keywords: ["h2", "subtitle"], icon: "Heading2", group: "Basic", available: notInTable, run: (ctx) => pm(ctx, setHeadingLevel(2)) },
-  { id: "heading3", title: "Heading 3", keywords: ["h3"], icon: "Heading3", group: "Basic", available: notInTable, run: (ctx) => pm(ctx, setHeadingLevel(3)) },
-  { id: "bullet", title: "Bullet list", keywords: ["unordered", "ul", "list"], icon: "List", group: "Lists", available: notInTable, run: (ctx) => pm(ctx, toggleList("bullet")) },
-  { id: "numbered", title: "Numbered list", keywords: ["ordered", "ol", "list"], icon: "ListOrdered", group: "Lists", available: notInTable, run: (ctx) => pm(ctx, toggleList("ordered")) },
-  { id: "task", title: "Task list", keywords: ["todo", "check", "checkbox", "checklist", "list"], icon: "ListChecks", group: "Lists", available: notInTable, run: (ctx) => pm(ctx, toggleList("task")) },
-  { id: "quote", title: "Quote", keywords: ["blockquote", "citation"], icon: "Quote", group: "Blocks", available: notInTable, run: (ctx) => pm(ctx, toggleBlockquote()) },
+  { id: "text", title: "Text", keywords: ["paragraph", "plain", "p"], icon: "Type", group: "Basic", command: () => setHeadingLevel(0) },
+  { id: "heading1", title: "Heading 1", keywords: ["h1", "title"], icon: "Heading1", group: "Basic", available: notInTable, command: () => setHeadingLevel(1) },
+  { id: "heading2", title: "Heading 2", keywords: ["h2", "subtitle"], icon: "Heading2", group: "Basic", available: notInTable, command: () => setHeadingLevel(2) },
+  { id: "heading3", title: "Heading 3", keywords: ["h3"], icon: "Heading3", group: "Basic", available: notInTable, command: () => setHeadingLevel(3) },
+  { id: "bullet", title: "Bullet list", keywords: ["unordered", "ul", "list"], icon: "List", group: "Lists", available: notInTable, command: () => toggleList("bullet") },
+  { id: "numbered", title: "Numbered list", keywords: ["ordered", "ol", "list"], icon: "ListOrdered", group: "Lists", available: notInTable, command: () => toggleList("ordered") },
+  { id: "task", title: "Task list", keywords: ["todo", "check", "checkbox", "checklist", "list"], icon: "ListChecks", group: "Lists", available: notInTable, command: () => toggleList("task") },
+  { id: "quote", title: "Quote", keywords: ["blockquote", "citation"], icon: "Quote", group: "Blocks", available: notInTable, command: () => toggleBlockquote() },
   {
     id: "code",
     title: "Code block",
@@ -66,10 +70,10 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
     acceptsArg: true,
     hint: "language",
     available: notInTable,
-    run: (ctx, arg) => pm(ctx, toggleCodeBlock(arg.trim() || null)),
+    command: (arg) => toggleCodeBlock(arg.trim() || null),
   },
-  { id: "divider", title: "Divider", keywords: ["hr", "rule", "separator", "line"], icon: "Minus", group: "Blocks", available: notInTable, run: (ctx) => pm(ctx, insertHorizontalRule()) },
-  { id: "table", title: "Table", keywords: ["grid", "rows", "columns"], icon: "Table", group: "Blocks", available: notInTable, run: (ctx) => pm(ctx, insertTable(3, 3)) },
+  { id: "divider", title: "Divider", keywords: ["hr", "rule", "separator", "line"], icon: "Minus", group: "Blocks", available: notInTable, command: () => insertHorizontalRule() },
+  { id: "table", title: "Table", keywords: ["grid", "rows", "columns"], icon: "Table", group: "Blocks", available: notInTable, command: () => insertTable(3, 3) },
   { id: "image", title: "Image", keywords: ["picture", "photo", "img", "upload"], icon: "Image", group: "Insert", run: (ctx) => ctx.openImage() },
   { id: "link", title: "Link", keywords: ["url", "href", "anchor"], icon: "Link", group: "Insert", run: (ctx) => ctx.openLink() },
   {
@@ -81,7 +85,7 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
     available: (w) => w.canComment,
     run: (ctx) => ctx.startComment(),
   },
-  { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", run: (ctx) => pm(ctx, insertText(todayIso())) },
+  { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", command: () => insertText(todayIso()) },
 ];
 
 export function todayIso(now = new Date()): string {

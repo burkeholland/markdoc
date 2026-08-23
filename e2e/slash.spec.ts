@@ -120,13 +120,21 @@ test.describe("slash command menu", () => {
     await expect(page.locator(".md-rich blockquote")).toHaveCount(1);
     await expect.poll(() => codeText(page)).toContain(">");
 
-    // One undo removes the slash insertion (the /query deletion and the block change
-    // land in the same undo step) and restores the paragraph.
+    // One undo removes the slash insertion: the /query deletion and the block change are
+    // a single transaction, so they are always one undo step. The typed "/" is the user's
+    // own keystroke and stays a separate step, so it comes back first.
     await page.keyboard.press(`${mod}+z`);
     await expect(page.locator(".md-rich blockquote")).toHaveCount(0);
     await expect.poll(() => codeText(page)).not.toContain(">");
     await expect(page.locator(".md-rich p")).toHaveCount(2);
+    await expect(page.locator(".md-rich p").last()).toHaveText("/");
     expect(await codeText(page)).toContain(before.trimEnd());
+    expect(await codeText(page)).toContain("/");
+
+    // A second undo takes the typed "/" away.
+    await page.keyboard.press(`${mod}+z`);
+    await expect.poll(() => codeText(page)).not.toContain("/");
+    await expect(page.locator(".md-rich blockquote")).toHaveCount(0);
 
     await user.context.close();
   });
