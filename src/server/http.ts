@@ -9,6 +9,8 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** Extra JSON fields merged into the error body (e.g. sync `status`, `remoteContent`). */
+    public details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -85,7 +87,7 @@ export function handler<T extends unknown[]>(fn: (...args: T) => Promise<Respons
     try {
       return await fn(...args);
     } catch (err) {
-      if (err instanceof HttpError) return json({ error: err.message }, { status: err.status });
+      if (err instanceof HttpError) return json({ error: err.message, ...(err.details ?? {}) }, { status: err.status });
       if (err && typeof err === "object" && "issues" in err) {
         return json({ error: "Invalid request", issues: (err as { issues: unknown }).issues }, { status: 400 });
       }

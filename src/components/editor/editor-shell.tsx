@@ -10,7 +10,7 @@ import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
-import { api } from "@/lib/api";
+import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
@@ -31,6 +31,9 @@ import { VersionsPanel, VersionDiffView, type VersionPreview } from "./versions-
 import { ActivityPanel } from "./activity-panel";
 import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
+import { SyncDialog, type SyncActions } from "./sync-dialog";
+
+const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
 import { TableMenu } from "./table-menu";
@@ -101,6 +104,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [commitOpen, setCommitOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [sync, setSync] = useState<SyncStatusDto | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncTick, setSyncTick] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
@@ -258,15 +264,23 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   );
 
   const publishNow = useCallback(
-    async (message?: string) => {
+    async (message?: string, force = false) => {
       setPublishing(true);
       try {
-        const res = await api.documents.publish(doc.id, message);
+        const res = await api.documents.publish(doc.id, message, { force });
         if (res.document) setDoc(res.document);
         setVersionsRefresh((n) => n + 1);
+        setSyncTick((n) => n + 1);
         if (res.result.skipped) toast("Already up to date on GitHub.", "info");
         else toast(doc.storage === "gist" ? "Gist updated." : "Committed to GitHub.", "success", res.result.url ? { label: "View", href: res.result.url } : undefined);
       } catch (e) {
+        // GitHub moved since the last sync: hand the decision to the Sync dialog instead of a raw error.
+        if (e instanceof ApiError && e.status === 409 && e.body?.status) {
+          setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
+          setCommitOpen(false);
+          setSyncOpen(true);
+          throw e;
+        }
         toast(e instanceof Error ? e.message : "Publish failed", "error");
         throw e;
       } finally {
@@ -276,19 +290,95 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     [doc.id, doc.storage, toast],
   );
 
-  const pull = useCallback(async () => {
-    setPublishing(true);
-    try {
-      const res = await api.documents.pull(doc.id);
-      if (res.document) setDoc(res.document);
-      setVersionsRefresh((n) => n + 1);
-      toast(res.result.changed ? "Pulled the latest version from GitHub." : "Already up to date.", "success");
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Pull failed", "error");
-    } finally {
-      setPublishing(false);
+  const pull = useCallback(
+    async (options: { force?: boolean; merge?: boolean } = {}) => {
+      setPublishing(true);
+      try {
+        const res = await api.documents.pull(doc.id, options);
+        if (res.document) setDoc(res.document);
+        setVersionsRefresh((n) => n + 1);
+        setSyncTick((n) => n + 1);
+        toast(res.result.merged ? "Merged GitHub\u2019s changes — review, then publish." : res.result.changed ? "Pulled the latest version from GitHub." : "Already up to date.", "success");
+        return res;
+      } catch (e) {
+        // Local edits would be lost (or both sides changed): open the Sync dialog; the caller handles merge conflicts.
+        if (e instanceof ApiError && e.status === 409 && e.body?.status) {
+          if (e.body.status !== "conflict") {
+            setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
+            setSyncOpen(true);
+          }
+          throw e;
+        }
+        toast(e instanceof Error ? e.message : "Pull failed", "error");
+        throw e;
+      } finally {
+        setPublishing(false);
+      }
+    },
+    [doc.id, toast],
+  );
+
+  // Poll the three-way status while the document is GitHub-backed (60 s, or SYNC_POLL_MS via the response) and
+  // right after publish/pull; the server caches the GitHub read so this is cheap.
+  const linkedToGitHub = doc.storage !== "local";
+  useEffect(() => {
+    if (!linkedToGitHub) {
+      setSync(null);
+      return;
     }
-  }, [doc.id, toast]);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async (fresh: boolean) => {
+      try {
+        const s = await api.documents.sync(doc.id, { fresh });
+        if (cancelled) return;
+        setSync(s);
+        timer = setTimeout(() => void tick(false), s.pollMs ?? 60_000);
+      } catch {
+        if (!cancelled) timer = setTimeout(() => void tick(false), 60_000);
+      }
+    };
+    void tick(syncTick > 0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [doc.id, linkedToGitHub, syncTick]);
+
+  const syncActions = useMemo<SyncActions>(
+    () => ({
+      merge: async () => {
+        try {
+          await pull({ merge: true });
+          return 0;
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409 && e.body?.status === "conflict" && typeof e.body.merged === "string") {
+            // Put the marked text in the document so the user resolves conflicts inline (the `merge-conflict` lint flags each marker).
+            session.replaceSource([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
+            session.setActiveSurface("code");
+            if (shownLayout === "rich") setLayout(isPhone ? "code" : "split");
+            toast(`Merged with ${e.body.conflicts} conflict${e.body.conflicts === 1 ? "" : "s"} — resolve the marked lines, then publish.`, "info");
+            return Number(e.body.conflicts ?? 1);
+          }
+          throw e;
+        }
+      },
+      keepMine: (message: string) => publishNow(message, true),
+      takeRemote: async () => {
+        await pull({ force: true });
+      },
+      compare: async () => {
+        const body = await api.documents.sync(doc.id, { fresh: true, content: true });
+        const remoteContent = body.remoteContent ?? "";
+        const now = new Date().toISOString();
+        setVersionPreview({
+          version: { id: "github-remote", number: 0, title: "GitHub", kind: "import", createdBy: null, createdByName: "GitHub", commitSha: body.remote.sha, createdAt: body.remote.updatedAt ?? now, size: remoteContent.length },
+          content: remoteContent,
+        });
+      },
+    }),
+    [pull, publishNow, session, shownLayout, isPhone, setLayout, toast, doc.id],
+  );
 
   const download = useCallback(
     async (format: ExportFormat, withSuggestions: boolean) => {
@@ -453,7 +543,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const openVersionName = useCallback(() => setDialog("versionName"), []);
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
   const publishFromHeader = useCallback(() => (doc.storage === "gist" ? void publishNow() : setCommitOpen(true)), [doc.storage, publishNow]);
-  const pullFromHeader = useCallback(() => void pull(), [pull]);
+  const pullFromHeader = useCallback(() => void pull().catch(() => undefined), [pull]);
+  const openSync = useCallback(() => setSyncOpen(true), []);
   const deleteFromHeader = useCallback(() => void deleteDoc(), [deleteDoc]);
   const duplicateFromHeader = useCallback(() => void duplicateDoc(), [duplicateDoc]);
   const copyFromHeader = useCallback(() => void copyMarkdown(), [copyMarkdown]);
@@ -663,6 +754,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onPublish={openPublish}
           onPublishNow={publishFromHeader}
           onPull={pullFromHeader}
+          onSync={openSync}
+          sync={sync}
           onHistory={toggleHistory}
           onActivity={toggleActivity}
           onShortcuts={openShortcuts}
@@ -722,7 +815,17 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
               </div>
             )}
             {versionPreview ? (
-              <VersionDiffView session={session} preview={versionPreview} />
+              <div className="flex h-full min-h-0 flex-col">
+                {versionPreview.version.id === "github-remote" && (
+                  <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2" data-testid="sync-compare-bar">
+                    <span>Comparing GitHub\u2019s copy with this document.</span>
+                    <button type="button" className="btn btn-sm btn-outline ml-auto" onClick={() => setVersionPreview(null)} data-testid="sync-compare-close">
+                      Back to editing
+                    </button>
+                  </div>
+                )}
+                <VersionDiffView session={session} preview={versionPreview} />
+              </div>
             ) : (
               <>
                 <div className={cn("flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden")} data-testid="code-column">
@@ -817,6 +920,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
         <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
         <GitHubDialog open={dialog === "publish"} onOpenChange={(o) => setDialog(o ? "publish" : null)} doc={docView} onDocChange={(d) => { setDoc(d); setVersionsRefresh((n) => n + 1); }} githubAvailable={githubAvailable} />
         <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
+        <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />
         <LinkDialog
           open={dialog === "link"}
           onOpenChange={(o) => setDialog(o ? "link" : null)}
