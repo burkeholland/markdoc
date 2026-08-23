@@ -189,6 +189,37 @@ test.describe("phone", () => {
     expect(await noHorizontalScroll(page)).toBe(true);
     await context.close();
   });
+
+  test("settings theme card at 390 px stacks the picker under its description", async ({ browser }) => {
+    const { context, page } = await signInOn(browser, "phone-settings", { ...phone });
+    await page.goto("/settings");
+    await page.waitForLoadState("networkidle");
+    const picker = page.getByTestId("theme-picker");
+    await expect(picker).toBeVisible();
+    expect(await noHorizontalScroll(page)).toBe(true);
+    const description = (await page.getByTestId("theme-description").boundingBox())!;
+    const pickerBox = (await picker.boundingBox())!;
+    expect(pickerBox.y).toBeGreaterThan(description.y + description.height - 1);
+    expect(pickerBox.x + pickerBox.width).toBeLessThanOrEqual(phone.viewport.width);
+    // The description gets the card's full width rather than being squeezed beside the control.
+    expect(description.width).toBeGreaterThan(phone.viewport.width / 2);
+    await context.close();
+  });
+
+  test("find bar at 390 px keeps the close button on the first row", async ({ browser }) => {
+    const { context, page } = await signInOn(browser, "phone-find", { ...phone });
+    const id = await createDocument(page, DOC, "Mobile find");
+    await openDoc(page, id);
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("find-bar")).toBeVisible();
+    const input = (await page.getByTestId("find-input").boundingBox())!;
+    const close = (await page.getByTestId("find-close").boundingBox())!;
+    expect(Math.abs(close.y - input.y)).toBeLessThanOrEqual(4);
+    expect(close.x).toBeGreaterThan(input.x + input.width);
+    expect(close.x + close.width).toBeLessThanOrEqual(phone.viewport.width);
+    expect(await noHorizontalScroll(page)).toBe(true);
+    await context.close();
+  });
 });
 
 test.describe("tablet", () => {

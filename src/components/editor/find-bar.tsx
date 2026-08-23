@@ -129,7 +129,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
       data-testid="find-bar"
       onKeyDown={onBarKeyDown}
     >
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex items-start gap-1.5">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5" data-testid="find-row">
         <div className="flex h-8 min-w-[9rem] flex-1 items-center gap-0.5 rounded-lg md:w-[min(420px,40vw)] md:flex-none border border-line-2 bg-surface pl-2.5 pr-1 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
           <input
             ref={searchRef}
@@ -182,8 +183,10 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
           </button>
         )}
         <div className="flex-1" />
+        </div>
+        {/* Outside the wrapping row so it stays pinned top-right when the controls wrap on phones. */}
         <Tip label="Close" shortcut="Esc">
-          <button type="button" className="icon-btn h-7 w-7 rounded-md" onClick={onClose} aria-label="Close find" data-testid="find-close">
+          <button type="button" className="icon-btn mt-0.5 h-7 w-7 shrink-0 rounded-md" onClick={onClose} aria-label="Close find" data-testid="find-close">
             <X size={15} />
           </button>
         </Tip>

@@ -118,6 +118,10 @@ npm run typecheck
 npm run lint
 ```
 
+### Working in a worktree
+
+A second checkout (`git worktree add ../markdoc-task-x -b task-x`) needs its own `npm ci --ignore-scripts`: Turbopack refuses to run from a junctioned or symlinked `node_modules`, so linking the main checkout's dependencies is not enough. No `.env.local` is needed — `PORT=3800 npm run dev:port` starts with dev-only auth defaults (see below) and a private PGlite directory, and `E2E_PORT=3218 npm run test:e2e` gives the suite its own port and Next cache.
+
 ### Scripts and knobs
 
 Every `npm run` script, and the environment variables the test tooling reads:
@@ -125,7 +129,7 @@ Every `npm run` script, and the environment variables the test tooling reads:
 | Script / variable | What it does |
 | --- | --- |
 | `dev` | Dev server (Next + collaboration WebSocket) on `:3000`. |
-| `dev:port` | `PORT=3800 npm run dev:port`: a dev server on its own port with `.next-manual-<port>` and `.data/pglite-<port>`, so it never collides with the suite or another dev. |
+| `dev:port` | `PORT=3800 npm run dev:port`: a dev server on its own port with `.next-manual-<port>` and `.data/pglite-<port>`, so it never collides with the suite or another dev. Without `.env.local` it fills in dev-only defaults (`AUTH_SECRET=dev-only-secret-<port>`, `AUTH_DEV_LOGIN=1`) and prints which ones it applied; anything you set wins. |
 | `build` / `build:server` | `next build` plus the custom server bundled to `dist/server.mjs` (`build:server` does only the second step). |
 | `start` | Production server from `dist/`. |
 | `start:local` | Production server on `:3900` with a throwaway PGlite and the dev login forced on, for local smoke tests. |

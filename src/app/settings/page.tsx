@@ -29,10 +29,10 @@ export default async function SettingsPage() {
         </div>
       </header>
       <section className="mx-auto max-w-4xl px-6 py-8">
-        <div className="mb-8 flex items-center justify-between gap-6 rounded-2xl border border-line bg-surface px-5 py-4" data-testid="theme-row">
+        <div className="mb-8 flex flex-col items-start gap-4 rounded-2xl border border-line bg-surface px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6" data-testid="theme-row">
           <div>
             <h2 className="text-base font-semibold text-ink">Theme</h2>
-            <p className="mt-0.5 text-sm text-ink-3">System follows your operating system; the choice is saved in this browser.</p>
+            <p className="mt-0.5 text-sm text-ink-3" data-testid="theme-description">System follows your operating system; the choice is saved in this browser.</p>
           </div>
           <ThemePicker />
         </div>
