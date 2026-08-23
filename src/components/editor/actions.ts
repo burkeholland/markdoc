@@ -437,14 +437,19 @@ export class EditorActions {
     }
   }
 
-  /** Scroll both panes to a source offset and place the caret there in the active surface. */
+  /**
+   * Scroll both panes to a source offset and place the caret there in the active surface. Both panes
+   * centre the target: with scroll sync on, each pane's programmatic scroll is mirrored onto the other
+   * (cancelling any smooth scroll in flight), so the two must agree on where the target ends up or the
+   * caret lands on the edge of whichever pane the last sync step mirrored.
+   */
   revealSource(offset: number, opts: { focus?: boolean } = {}) {
     // Focus before dispatching: both panes only report selection changes while focused, and the
     // outline's active heading follows that report.
     if (this.code) {
       const pos = Math.min(offset, this.code.state.doc.length);
       if (opts.focus && this.surface === "code") this.code.focus();
-      this.code.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+      this.code.dispatch({ selection: { anchor: pos }, effects: CMView.scrollIntoView(pos, { y: "center" }) });
     }
     if (this.rich) {
       const map = this.session.binding.getSourceMap();
@@ -461,7 +466,9 @@ export class EditorActions {
       }
       const sel = TextSelection.near(doc.resolve(pos), 1);
       if (opts.focus && this.surface === "rich") this.rich.focus();
-      this.rich.dispatch(this.rich.state.tr.setSelection(sel).scrollIntoView());
+      // No tr.scrollIntoView(): its "nearest" scroll would leave the caret on the pane's edge, and
+      // the centring below is what should win when scroll sync mirrors the panes onto each other.
+      this.rich.dispatch(this.rich.state.tr.setSelection(sel));
       const dom = this.rich.domAtPos(sel.head);
       const el = (dom.node instanceof HTMLElement ? dom.node : dom.node.parentElement) as HTMLElement | null;
       el?.scrollIntoView({ block: "center", behavior: "smooth" });
