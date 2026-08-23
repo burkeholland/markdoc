@@ -78,8 +78,7 @@ function ReactionRow({
             onClick={() => onToggle(emoji)}
             data-testid="reaction-chip"
           >
-            <span>{emoji}</span>
-            <span className="reaction-count">{ids.length}</span>
+            <span>{emoji}</span> <span className="reaction-count">{ids.length}</span>
           </button>
         );
       })}
@@ -234,7 +233,10 @@ function Composer({
   const [highlight, setHighlight] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
-    if (autoFocus) ref.current?.focus();
+    if (!autoFocus) return;
+    // A frame later: a closing menu (Edit…) hands focus back to its trigger first.
+    const raf = requestAnimationFrame(() => ref.current?.focus());
+    return () => cancelAnimationFrame(raf);
   }, [autoFocus]);
 
   /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
@@ -299,7 +301,7 @@ function Composer({
     }
   };
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
       <Popover open={open} onOpenChange={(o) => !o && setTrigger(null)}>
         <PopoverAnchor asChild>
           <textarea
@@ -396,23 +398,22 @@ function Composer({
           </ul>
         </PopoverContent>
       </Popover>
-      {focused && (
-        <div className="comment-format-hint" aria-hidden data-testid="comment-format-hint">
-          <span>
-            <kbd>Ctrl/⌘ B</kbd> **bold**
-          </span>
-          <span>
-            <kbd>I</kbd> *italic*
-          </span>
-          <span>
-            <kbd>E</kbd> `code`
-          </span>
-          <span>
-            <kbd>K</kbd> [link](url)
-          </span>
-          <span>@mention · Enter sends · Shift+Enter newline</span>
-        </div>
-      )}
+      {/* Always laid out, so the buttons do not move while focus leaves the textarea (a moving button swallows the click). */}
+      <div className="comment-format-hint" data-visible={focused ? "true" : "false"} aria-hidden data-testid="comment-format-hint">
+        <span>
+          <kbd>Ctrl/⌘ B</kbd> **bold**
+        </span>
+        <span>
+          <kbd>I</kbd> *italic*
+        </span>
+        <span>
+          <kbd>E</kbd> `code`
+        </span>
+        <span>
+          <kbd>K</kbd> [link](url)
+        </span>
+        <span>@mention · Enter sends · Shift+Enter newline</span>
+      </div>
       <div className="flex items-center justify-end gap-2">
         {onCancel && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
