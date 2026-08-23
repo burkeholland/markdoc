@@ -66,15 +66,15 @@ server.registerTool(
     title: "List documents",
     description:
       "List the documents the user owns or that are shared with them (id, title, storage, last edit, starred, lastOpenedAt). Most recently opened first; never-opened documents follow by last edit.",
-    inputSchema: { starred: z.boolean().optional().describe("Only documents the user has starred") },
+    inputSchema: { starred: z.boolean().optional().describe("Only documents the user has starred"), trash: z.boolean().optional().describe("List the user's own documents in the trash instead (each has deletedAt)") },
   },
-  async ({ starred }) => {
-    const { documents } = await api("GET", `/api/documents${starred ? "?starred=1" : ""}`);
+  async ({ starred, trash }) => {
+    const { documents } = await api("GET", `/api/documents${trash ? "?trash=1" : starred ? "?starred=1" : ""}`);
     const lines = documents.map(
       (d) =>
-        `- ${d.starred ? "★ " : ""}${d.title} — id ${d.id} — ${d.storage}${d.repoName ? ` ${d.repoOwner}/${d.repoName}:${d.repoPath}` : ""} — edited ${d.updatedAt}${d.lastOpenedAt ? ` — opened ${d.lastOpenedAt}` : ""} — ${docUrl(d.id)}`,
+        `- ${d.starred ? "★ " : ""}${d.title} — id ${d.id} — ${d.storage}${d.repoName ? ` ${d.repoOwner}/${d.repoName}:${d.repoPath}` : ""} — edited ${d.updatedAt}${d.lastOpenedAt ? ` — opened ${d.lastOpenedAt}` : ""}${d.deletedAt ? ` — trashed ${d.deletedAt}` : ""} — ${docUrl(d.id)}`,
     );
-    return ok(lines.length ? lines.join("\n") : starred ? "No starred documents." : "No documents yet.", { documents });
+    return ok(lines.length ? lines.join("\n") : trash ? "The trash is empty." : starred ? "No starred documents." : "No documents yet.", { documents });
   },
 );
 
@@ -258,6 +258,43 @@ server.registerTool(
   async ({ id, message }) => {
     const res = await api("POST", `/api/documents/${id}/publish`, { message });
     return ok(res.result.skipped ? "Already up to date on GitHub." : `Published. ${res.result.url ?? ""}`, res);
+  },
+);
+
+server.registerTool(
+  "markdoc_duplicate_document",
+  {
+    title: "Make a copy",
+    description:
+      "Create a copy of a document owned by the user: \"Copy of <title>\" with the current text (pending suggestions dropped, comments not copied), images included. The copy is always a Markdoc document even when the source is linked to GitHub. Returns the new id and URL.",
+    inputSchema: { id: z.string().describe("Document id to copy") },
+  },
+  async ({ id }) => {
+    const copy = await api("POST", `/api/documents/${id}/duplicate`);
+    return ok(`Created "${copy.title}" (id ${copy.id}). Open it: ${docUrl(copy.id)}`, { id: copy.id, title: copy.title, url: docUrl(copy.id) });
+  },
+);
+
+server.registerTool(
+  "markdoc_delete_document",
+  {
+    title: "Move document to trash",
+    description:
+      "Move a document the user owns to the trash (soft delete). It disappears from lists and search and nobody can open it; the owner can restore it with markdoc_restore_document for 30 days, after which it is deleted for good. Pass permanent: true to delete it immediately and irreversibly.",
+    inputSchema: { id: z.string(), permanent: z.boolean().optional().describe("Delete for good instead of moving to the trash (default false)") },
+  },
+  async ({ id, permanent }) => {
+    await api("DELETE", `/api/documents/${id}${permanent ? "?permanent=1" : ""}`);
+    return ok(permanent ? `Deleted document ${id} permanently.` : `Moved document ${id} to the trash. It can be restored for 30 days.`, { id, permanent: !!permanent });
+  },
+);
+
+server.registerTool(
+  "markdoc_restore_document",
+  { title: "Restore from trash", description: "Take a document the user owns out of the trash so it is listed and editable again.", inputSchema: { id: z.string() } },
+  async ({ id }) => {
+    const res = await api("POST", `/api/documents/${id}/restore`);
+    return ok(`Restored "${res.document.title}" (id ${id}). Open it: ${docUrl(id)}`, { id, title: res.document.title, url: docUrl(id) });
   },
 );
 

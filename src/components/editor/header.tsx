@@ -20,6 +20,7 @@ import {
   FileCode2,
   FileText,
   Copy,
+  Files,
   Trash2,
   Keyboard,
   ExternalLink,
@@ -268,6 +269,7 @@ export interface HeaderProps {
   onActivity: () => void;
   onShortcuts: () => void;
   onDelete: () => void;
+  onDuplicate: () => void;
   onDownload: (format: ExportFormat, withSuggestions: boolean) => void;
   onCopyMarkdown: () => void;
   onNameVersion: () => void;
@@ -341,6 +343,9 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem icon={<Copy size={15} />} onSelect={props.onCopyMarkdown}>
               Copy Markdown
             </MenuItem>
+            <MenuItem icon={<Files size={15} />} onSelect={props.onDuplicate} data-testid="menu-duplicate">
+              Make a copy
+            </MenuItem>
             <MenuSeparator />
             {linked && doc.githubUrl && (
               <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
@@ -365,8 +370,8 @@ export const Header = memo(function Header(props: HeaderProps) {
             {props.isOwner && (
               <>
                 <MenuSeparator />
-                <MenuItem icon={<Trash2 size={15} />} className="text-danger" onSelect={props.onDelete}>
-                  Delete document
+                <MenuItem icon={<Trash2 size={15} />} className="text-danger" onSelect={props.onDelete} data-testid="menu-delete">
+                  Move to trash
                 </MenuItem>
               </>
             )}

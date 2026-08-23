@@ -8,6 +8,10 @@ import { createCollabServer, shutdownCollab } from "@/server/collab/hocuspocus";
 import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
 import { getDb } from "@/server/db";
+import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
+
+/** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
+const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = process.env.HOST ?? "0.0.0.0";
@@ -24,6 +28,13 @@ async function main() {
 
   const hocuspocus = createCollabServer();
   registerCollab(hocuspocus);
+
+  const purgeTrash = () =>
+    purgeTrashOlderThan(TRASH_RETENTION_DAYS)
+      .then((n) => n > 0 && console.log(`> Purged ${n} document(s) from the trash`))
+      .catch((err: unknown) => console.error("[trash] purge failed", err));
+  void purgeTrash();
+  setInterval(purgeTrash, TRASH_PURGE_INTERVAL_MS).unref();
 
   const server = createServer((req, res) => {
     handle(req, res).catch((err: unknown) => {

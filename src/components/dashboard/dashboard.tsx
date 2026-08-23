@@ -5,10 +5,11 @@ import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuIt
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, Scale, Search, FileText, Star, Users } from "lucide-react";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Star, Trash2, Users, X } from "lucide-react";
 import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
+import { takePendingNotice, type PendingNotice } from "@/lib/notice";
 import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 
 import { Logo } from "@/components/editor/header";
@@ -134,13 +135,16 @@ export interface DashboardProps {
   githubAvailable: boolean;
 }
 
-type Filter = "all" | "mine" | "shared" | "starred";
+type Filter = "all" | "mine" | "shared" | "starred" | "trash";
 const FILTERS: { value: Filter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "mine", label: "Owned by me" },
   { value: "shared", label: "Shared with me" },
   { value: "starred", label: "Starred" },
+  { value: "trash", label: "Trash" },
 ];
+
+const TRASH_RETENTION_DAYS = 30;
 
 /** Star toggle for a document card; hover-visible unless starred. */
 function StarButton({ starred, onToggle, className }: { starred: boolean; onToggle: () => void; className?: string }) {
@@ -197,6 +201,64 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
   const [filter, setFilter] = useState<Filter>("all");
   const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
   const [searching, setSearching] = useState(false);
+
+  // One-shot message from the page we came from (e.g. the editor after "Move to trash").
+  const [notice, setNotice] = useState<PendingNotice | null>(null);
+  useEffect(() => {
+    const pending = takePendingNotice();
+    if (!pending) return;
+    setNotice(pending);
+    const t = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, []);
+
+  // The trash is loaded on demand; `initialDocuments` never contains trashed documents.
+  const [trash, setTrash] = useState<Doc[] | null>(null);
+  const [trashBusy, setTrashBusy] = useState<string | null>(null);
+  useEffect(() => {
+    if (filter !== "trash") return;
+    let cancelled = false;
+    api.documents
+      .list({ trash: true })
+      .then((res) => !cancelled && setTrash(res.documents))
+      .catch((err: unknown) => {
+        console.error(err);
+        if (!cancelled) setTrash([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filter]);
+  const restore = useCallback(
+    async (doc: Doc) => {
+      setTrashBusy(doc.id);
+      try {
+        await api.documents.restore(doc.id);
+        setTrash((t) => t?.filter((d) => d.id !== doc.id) ?? null);
+        setNotice({ message: `“${doc.title}” was restored.`, kind: "success" });
+        router.refresh();
+      } catch (err) {
+        console.error(err);
+        setNotice({ message: err instanceof Error ? err.message : "Could not restore the document", kind: "error" });
+      } finally {
+        setTrashBusy(null);
+      }
+    },
+    [router],
+  );
+  const purge = useCallback(async (doc: Doc) => {
+    if (!confirm(`Delete “${doc.title}” forever? This cannot be undone.`)) return;
+    setTrashBusy(doc.id);
+    try {
+      await api.documents.delete(doc.id, { permanent: true });
+      setTrash((t) => t?.filter((d) => d.id !== doc.id) ?? null);
+    } catch (err) {
+      console.error(err);
+      setNotice({ message: err instanceof Error ? err.message : "Could not delete the document", kind: "error" });
+    } finally {
+      setTrashBusy(null);
+    }
+  }, []);
 
   // Optimistic stars: the server list is the source of truth until the user clicks.
   const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
@@ -449,7 +511,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
             </div>
           </div>
 
-          {filtered.length === 0 && !trimmed && documents.length === 0 ? (
+          {filter === "trash" ? (
+            <TrashView documents={trash} busy={trashBusy} onRestore={restore} onPurge={purge} />
+          ) : filtered.length === 0 && !trimmed && documents.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-8" data-testid="empty-state">
               <div className="mb-5 text-center">
                 <FileText className="mx-auto mb-3 text-ink-4" size={28} />
@@ -511,11 +575,77 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
             <GitHubPicker mode="import" githubAvailable={githubAvailable} onImported={(id) => router.push(`/d/${id}`)} />
           </DialogContent>
         </Dialog>
+
+        {notice && (
+          <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
+            <div
+              className={cn(
+                "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm text-white shadow-xl animate-fade-in",
+                notice.kind === "error" ? "bg-red-600" : "bg-ink",
+              )}
+              role="status"
+              data-testid="toast"
+              data-kind={notice.kind}
+            >
+              <span>{notice.message}</span>
+              <button type="button" className="text-white/60 hover:text-white" onClick={() => setNotice(null)} aria-label="Dismiss">
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
       </main>
     </TooltipProvider>
   );
 }
 
+/** The caller's trashed documents: not openable; restore or delete forever. `documents` is null while loading. */
+function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] | null; busy: string | null; onRestore: (d: Doc) => void; onPurge: (d: Doc) => void }) {
+  return (
+    <div data-testid="trash-view">
+      <p className="mb-3 flex items-center gap-1.5 text-xs text-ink-3" data-testid="trash-note">
+        <Trash2 size={12} /> Items are deleted forever after {TRASH_RETENTION_DAYS} days.
+      </p>
+      {documents === null ? (
+        <div className="flex items-center gap-2 py-10 text-sm text-ink-3">
+          <Loader2 size={16} className="animate-spin" /> Loading trash…
+        </div>
+      ) : documents.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
+          <Trash2 className="mx-auto mb-3 text-ink-4" size={28} />
+          <p className="text-sm font-medium text-ink-2">The trash is empty</p>
+          <p className="mt-1 text-sm text-ink-3">Documents you move to the trash can be restored here for {TRASH_RETENTION_DAYS} days.</p>
+        </div>
+      ) : (
+        <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="trash-list">
+          {documents.map((d) => {
+            const isBusy = busy === d.id;
+            return (
+              <li key={d.id} className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm" data-testid="trash-card" aria-busy={isBusy || undefined}>
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <h3 className="line-clamp-2 text-[15px] font-semibold leading-5 text-ink">{d.title}</h3>
+                  <StorageBadge doc={d} />
+                </div>
+                <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-4">
+                  <span className="whitespace-nowrap">{d.deletedAt ? <RelativeTime date={d.deletedAt} prefix="Trashed " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button type="button" className="btn btn-sm btn-outline gap-1 whitespace-nowrap" disabled={busy !== null} onClick={() => onRestore(d)} data-testid="restore-button">
+                      {isBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Restore
+                    </button>
+                    <button type="button" className="btn btn-sm gap-1 whitespace-nowrap text-danger hover:bg-red-50" disabled={busy !== null} onClick={() => onPurge(d)} data-testid="purge-button">
+                      <Trash2 size={13} /> Delete forever
+                    </button>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 
 

@@ -91,6 +91,22 @@ export async function mutateLiveDoc(docId: string, ctx: CollabContext, fn: (doc:
   }
 }
 
+/** Stateless message sent to connected editors right before they are disconnected. */
+export type EvictionReason = "trashed";
+
+/**
+ * Tell connected editors the document is gone (they navigate away), close their connections and
+ * unload the live copy. No-op when the collaboration server is not running or the document is not loaded.
+ */
+export async function evictLiveDocument(docId: string, reason: EvictionReason): Promise<void> {
+  const collab = getCollab();
+  const live = collab?.documents.get(docId);
+  if (!collab || !live) return;
+  live.broadcastStateless(JSON.stringify({ type: reason }));
+  collab.closeConnections(docId);
+  await collab.unloadDocument(live).catch(() => undefined);
+}
+
 /** Replace the document text with `newText` using a minimal diff, keeping collaborators' positions stable. */
 export async function replaceLiveText(docId: string, ctx: CollabContext, newText: string): Promise<boolean> {
   let changed = false;

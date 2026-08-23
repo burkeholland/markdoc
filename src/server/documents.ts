@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
@@ -42,11 +42,20 @@ function roleFromLink(linkAccess: LinkAccess, signedIn: boolean): Role | null {
   }
 }
 
-/** Resolve the document and the caller's role, or null if the caller has no access. */
-export async function getDocumentAccess(docId: string, user: SessionUser | null): Promise<DocumentAccess | null> {
+export interface AccessOptions {
+  /** Also resolve documents that are in the trash (owner-only trash routes). */
+  allowDeleted?: boolean;
+}
+
+/**
+ * Resolve the document and the caller's role, or null if the caller has no access.
+ * Documents in the trash resolve as "not found" unless `allowDeleted` is set.
+ */
+export async function getDocumentAccess(docId: string, user: SessionUser | null, { allowDeleted = false }: AccessOptions = {}): Promise<DocumentAccess | null> {
   const db = await getDb();
   const [doc] = await db.select().from(schema.documents).where(eq(schema.documents.id, docId));
   if (!doc) return null;
+  if (doc.deletedAt && !allowDeleted) return null;
   if (user && doc.ownerId === user.id) return { doc, role: "owner" };
   if (user?.login) {
     const [collab] = await db
@@ -78,6 +87,8 @@ export interface DocumentSummary {
   starred: boolean;
   /** When the current user last opened this document, or null if never. */
   lastOpenedAt: Date | null;
+  /** When the document was moved to the trash; null for live documents. */
+  deletedAt: Date | null;
 }
 
 function excerpt(content: string): string {
@@ -120,7 +131,7 @@ function visibleDocuments(db: Awaited<ReturnType<typeof getDb>>, user: SessionUs
     )
     .leftJoin(schema.stars, and(eq(schema.stars.documentId, schema.documents.id), eq(schema.stars.userId, user.id)))
     .leftJoin(schema.recents, and(eq(schema.recents.documentId, schema.documents.id), eq(schema.recents.userId, user.id)));
-  const visible = or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`)!;
+  const visible = and(or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`), isNull(schema.documents.deletedAt))!;
   const starredOnly = eq(schema.stars.starred, true);
   return { query, visible, starredOnly };
 }
@@ -143,6 +154,7 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     gistId: doc.gistId,
     starred: starred === true,
     lastOpenedAt: lastOpenedAt ?? null,
+    deletedAt: doc.deletedAt ?? null,
   };
 }
 
@@ -158,6 +170,16 @@ export async function listDocumentsForUser(user: SessionUser, { starred }: ListD
   const rows = await query
     .where(starred ? and(visible, starredOnly) : visible)
     .orderBy(sql`${schema.recents.openedAt} desc nulls last`, desc(schema.documents.updatedAt));
+  return rows.map((row) => toSummary(row, user));
+}
+
+/** The caller's own documents that are in the trash, most recently trashed first. */
+export async function listTrashForUser(user: SessionUser): Promise<DocumentSummary[]> {
+  const db = await getDb();
+  const { query } = visibleDocuments(db, user);
+  const rows = await query
+    .where(and(eq(schema.documents.ownerId, user.id), isNotNull(schema.documents.deletedAt)))
+    .orderBy(desc(schema.documents.deletedAt));
   return rows.map((row) => toSummary(row, user));
 }
 
@@ -306,10 +328,82 @@ export async function updateDocument(docId: string, patch: Partial<Document>): P
   return doc ?? null;
 }
 
-export async function deleteDocument(docId: string): Promise<void> {
+/** Days a document stays in the trash before {@link purgeTrashOlderThan} removes it for good. */
+export const TRASH_RETENTION_DAYS = 30;
+
+/**
+ * Move a document to the trash (soft delete). Connected editors are told and disconnected;
+ * the document disappears from lists, search and access checks until {@link restoreDocument}.
+ */
+export async function deleteDocument(docId: string, at = new Date()): Promise<void> {
   const db = await getDb();
+  await db.update(schema.documents).set({ deletedAt: at }).where(and(eq(schema.documents.id, docId), isNull(schema.documents.deletedAt)));
+  // Lazy import: livedoc → hocuspocus → documents would otherwise be a static import cycle.
+  const { evictLiveDocument } = await import("@/server/livedoc");
+  await evictLiveDocument(docId, "trashed");
+}
+
+/** Take a document out of the trash. No-op for live documents. */
+export async function restoreDocument(docId: string): Promise<Document | null> {
+  const db = await getDb();
+  const [doc] = await db.update(schema.documents).set({ deletedAt: null }).where(eq(schema.documents.id, docId)).returning();
+  return doc ?? null;
+}
+
+/** Remove a document and everything attached to it (versions, assets, comments metadata) for good. */
+export async function purgeDocument(docId: string): Promise<void> {
+  const db = await getDb();
+  const { evictLiveDocument } = await import("@/server/livedoc");
+  await evictLiveDocument(docId, "trashed");
   await db.delete(schema.documents).where(eq(schema.documents.id, docId));
 }
+
+/** Purge documents that have been in the trash longer than `days`. Returns how many were removed. */
+export async function purgeTrashOlderThan(days = TRASH_RETENTION_DAYS, now = new Date()): Promise<number> {
+  const db = await getDb();
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const rows = await db
+    .delete(schema.documents)
+    .where(and(isNotNull(schema.documents.deletedAt), lt(schema.documents.deletedAt, cutoff)))
+    .returning();
+  return rows.length;
+}
+
+const ASSET_URL_RE = /\/api\/assets\/([0-9a-z]+)/g;
+
+/**
+ * Create a copy of a document owned by `userId`: "Copy of <title>", the current clean text (pending
+ * suggestions dropped, comments not carried over), always stored in Markdoc regardless of the source,
+ * no collaborators. Assets referenced in the text are copied (new rows, same bytes) and their URLs rewritten.
+ */
+export async function duplicateDocument(docId: string, userId: string): Promise<Document> {
+  const db = await getDb();
+  const [source] = await db.select().from(schema.documents).where(eq(schema.documents.id, docId));
+  if (!source) throw new Error("Document not found");
+  const { readLiveText } = await import("@/server/livedoc");
+  const live = await readLiveText(docId);
+  const title = `Copy of ${live.title || source.title}`;
+  const newId = nanoid();
+
+  const referenced = new Set(Array.from(live.clean.matchAll(ASSET_URL_RE), (m) => m[1]));
+  const assets = referenced.size > 0 ? (await db.select().from(schema.assets).where(eq(schema.assets.documentId, docId))).filter((a) => referenced.has(a.id)) : [];
+  const idMap = new Map(assets.map((a) => [a.id, assetNanoid()]));
+  const content = live.clean.replace(ASSET_URL_RE, (m, id: string) => (idMap.has(id) ? `/api/assets/${idMap.get(id)}` : m));
+
+  const [doc] = await db
+    .insert(schema.documents)
+    .values({ id: newId, title, ownerId: userId, content, storage: "local", lastEditedBy: userId })
+    .returning();
+  if (assets.length > 0) {
+    await db
+      .insert(schema.assets)
+      .values(assets.map((a) => ({ id: idMap.get(a.id)!, documentId: newId, userId, name: a.name, mime: a.mime, size: a.size, sha256: a.sha256, data: a.data })));
+  }
+  await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: `Copied from ${live.title || source.title}` });
+  return doc;
+}
+
+const assetNanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
 
 export interface AddVersionInput {
   documentId: string;

@@ -1,22 +1,35 @@
 import { z } from "zod";
 import { handler, HttpError, json, readJson, requireUser } from "@/server/http";
-import { createDocument, listDocumentsForUser, searchDocumentsForUser } from "@/server/documents";
+import { createDocument, listDocumentsForUser, listTrashForUser, searchDocumentsForUser } from "@/server/documents";
 import { applyTemplate, getTemplate } from "@/lib/templates";
+
+const flag = z
+  .string()
+  .optional()
+  .transform((v) => v === "1" || v === "true");
 
 const querySchema = z.object({
   q: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   /** `starred=1|true` lists only the caller's starred documents (ignored when searching). */
-  starred: z
-    .string()
-    .optional()
-    .transform((v) => v === "1" || v === "true"),
+  starred: flag,
+  /** `trash=1|true` lists the caller's own documents in the trash instead (with `deletedAt`). */
+  trash: flag,
 });
 
 export const GET = handler(async (req: Request) => {
   const user = await requireUser();
   const params = new URL(req.url).searchParams;
-  const { q, limit, starred } = querySchema.parse({ q: params.get("q") ?? undefined, limit: params.get("limit") ?? undefined, starred: params.get("starred") ?? undefined });
+  const { q, limit, starred, trash } = querySchema.parse({
+    q: params.get("q") ?? undefined,
+    limit: params.get("limit") ?? undefined,
+    starred: params.get("starred") ?? undefined,
+    trash: params.get("trash") ?? undefined,
+  });
+  if (trash) {
+    const documents = await listTrashForUser(user);
+    return json({ documents });
+  }
   if (q !== undefined) {
     const documents = await searchDocumentsForUser(user, q, { limit });
     return json({ documents, query: q });

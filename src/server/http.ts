@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { auth } from "@/auth";
-import { getDocumentAccess, type DocumentAccess, type SessionUser } from "@/server/documents";
+import { getDocumentAccess, type AccessOptions, type DocumentAccess, type SessionUser } from "@/server/documents";
 import { resolveApiToken, looksLikeApiToken } from "@/server/tokens";
 import type { Role } from "@/server/db/schema";
 
@@ -57,9 +57,13 @@ export function actorName(actor: Actor | null | undefined): string | null {
   return actor.agent ? `${base} via ${actor.agent}` : base;
 }
 
-export async function requireAccess(docId: string, minimum: "view" | "comment" | "edit" | "own" = "view"): Promise<DocumentAccess & { user: Actor | null }> {
+export async function requireAccess(
+  docId: string,
+  minimum: "view" | "comment" | "edit" | "own" = "view",
+  options: AccessOptions = {},
+): Promise<DocumentAccess & { user: Actor | null }> {
   const user = await currentUser();
-  const access = await getDocumentAccess(docId, user);
+  const access = await getDocumentAccess(docId, user, options);
   if (!access) throw new HttpError(user ? 404 : 401, user ? "Document not found" : "Sign in required");
   if (!roleSatisfies(access.role, minimum)) throw new HttpError(403, "You do not have permission to do that");
   return { ...access, user };

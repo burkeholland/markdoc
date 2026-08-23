@@ -111,6 +111,8 @@ export const documents = pgTable(
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     lastEditedBy: text("last_edited_by"),
+    /** Set when the document is in the trash; purged for good 30 days later. */
+    deletedAt: timestamp("deleted_at", { mode: "date", withTimezone: true }),
   },
   (t) => [index("document_owner_idx").on(t.ownerId)],
 );

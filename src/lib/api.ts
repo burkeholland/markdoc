@@ -88,12 +88,23 @@ export interface ActivityPageDto {
   nextBefore: string | null;
 }
 
-export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt"> & { updatedAt: string; createdAt: string; lastOpenedAt: string | null };
-export type SearchResultDto = Omit<SearchResult, "updatedAt" | "createdAt" | "lastOpenedAt"> & { updatedAt: string; createdAt: string; lastOpenedAt: string | null };
+export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt" | "deletedAt"> & {
+  updatedAt: string;
+  createdAt: string;
+  lastOpenedAt: string | null;
+  deletedAt: string | null;
+};
+export type SearchResultDto = Omit<SearchResult, "updatedAt" | "createdAt" | "lastOpenedAt" | "deletedAt"> & {
+  updatedAt: string;
+  createdAt: string;
+  lastOpenedAt: string | null;
+  deletedAt: string | null;
+};
 
 export const api = {
   documents: {
-    list: (opts: { starred?: boolean } = {}) => request<{ documents: DocumentSummaryDto[] }>(`/api/documents${opts.starred ? "?starred=1" : ""}`),
+    list: (opts: { starred?: boolean; trash?: boolean } = {}) =>
+      request<{ documents: DocumentSummaryDto[] }>(`/api/documents${opts.trash ? "?trash=1" : opts.starred ? "?starred=1" : ""}`),
     search: (q: string, init?: RequestInit) =>
       request<{ documents: SearchResultDto[]; query: string }>(
         `/api/documents?q=${encodeURIComponent(q)}`,
@@ -107,7 +118,11 @@ export const api = {
     unstar: (id: string) => request<{ starred: false }>(`/api/documents/${id}/star`, { method: "DELETE" }),
     patch: (id: string, body: { title?: string; linkAccess?: DocumentDto["linkAccess"] }) =>
       request<{ document: DocumentDto }>(`/api/documents/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-    delete: (id: string) => request<{ ok: true }>(`/api/documents/${id}`, { method: "DELETE" }),
+    /** Move to the trash; `permanent` removes the document for good (also from the trash). */
+    delete: (id: string, opts: { permanent?: boolean } = {}) =>
+      request<{ ok: true; permanent: boolean }>(`/api/documents/${id}${opts.permanent ? "?permanent=1" : ""}`, { method: "DELETE" }),
+    restore: (id: string) => request<{ ok: true; document: DocumentDto }>(`/api/documents/${id}/restore`, { method: "POST" }),
+    duplicate: (id: string) => request<{ id: string; title: string }>(`/api/documents/${id}/duplicate`, { method: "POST" }),
     collabToken: (id: string) => request<{ token: string; role: Role }>(`/api/documents/${id}/collab-token`, { method: "POST" }),
     versions: (id: string) => request<{ versions: VersionSummary[] }>(`/api/documents/${id}/versions`),
     activity: (id: string, opts: { before?: string | null; limit?: number } = {}) => {
