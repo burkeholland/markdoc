@@ -139,9 +139,11 @@ describe("activity feed", () => {
     expect(activityActorFromCollab("agent:x:Bot", "Bot").kind).toBe("agent");
     expect(activityActorFromCollab(alice.id, "Alice").kind).toBe("user");
 
-    await recordActivity(docId, agent, "suggestion.add", { count: 3 });
-    await recordActivity(docId, human, "suggestion.accept", { count: 3 });
-    await recordActivity(docId, human, "version.restore", { number: 4, title: "Before review" });
+    // Explicit timestamps: ids are random, so three rows in the same millisecond would come back in random order.
+    const t = (s: number) => new Date(Date.parse("2026-03-01T12:00:00Z") + s * 1000);
+    await recordActivity(docId, agent, "suggestion.add", { count: 3 }, t(0));
+    await recordActivity(docId, human, "suggestion.accept", { count: 3 }, t(1));
+    await recordActivity(docId, human, "version.restore", { number: 4, title: "Before review" }, t(2));
     const { items } = await listActivity(docId);
     expect(items.map((i) => [i.action, i.actorKind, i.actorName])).toEqual([
       ["version.restore", "user", "Alice"],

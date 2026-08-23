@@ -103,6 +103,8 @@ export class CollabSession {
   /** Currently highlighted comment thread (shared by both panes and the sidebar). */
   activeCommentId: string | null = null;
   activeSuggestionId: string | null = null;
+  /** Bumped by `revealComment` so the comments panel re-picks its tab even when the thread was already active. */
+  revealSeq = 0;
   /** Pending comment composer anchored to a selection, if any. */
   pendingComment: { from: number; to: number } | null = null;
   /** Find & replace state while the find bar is open (matches are in source offsets). */
@@ -304,6 +306,14 @@ export class CollabSession {
     if (this.activeCommentId === id) return;
     this.activeCommentId = id;
     if (id) this.activeSuggestionId = null;
+    this.notify();
+  }
+
+  /** Activate a thread from outside the panel (notification, `?thread=`): the panel switches to its tab even if it was already active. */
+  revealComment(id: string) {
+    this.revealSeq++;
+    this.activeCommentId = id;
+    this.activeSuggestionId = null;
     this.notify();
   }
 
