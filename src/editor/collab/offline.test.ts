@@ -350,7 +350,7 @@ describe("with IndexedDB (fake-indexeddb)", () => {
 
       const real = indexedDB;
       const withoutList = Object.create(real) as IDBFactory & { databases?: unknown };
-      withoutList.databases = undefined;
+      Object.defineProperty(withoutList, "databases", { value: undefined });
       for (const m of ["open", "deleteDatabase", "cmp"] as const) {
         (withoutList as unknown as Record<string, unknown>)[m] = (real[m] as (...a: unknown[]) => unknown).bind(real);
       }
