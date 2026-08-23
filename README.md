@@ -24,6 +24,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Images by paste, drop or upload, stored as assets behind `/api/assets`.
 - Document statistics and a shared writing goal (`Ctrl+Shift+C`): words, sentences, reading time, selection counts.
 - Templates: meeting notes, design doc, weekly status, blog post, decision record, checklist and more.
+- Dark mode: system / light / dark, applied before paint so there is no flash; toggle in the status bar, dashboard header, `/settings` and the command palette. Exports keep the light print stylesheet.
 
 ### Collaborating
 
