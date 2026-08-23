@@ -484,6 +484,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     publish: () => (doc.storage === "local" ? setDialog("publish") : publishFromHeader()),
     openReader: () => window.open(`/p/${doc.id}`, "_blank", "noopener"),
     navigate: (href) => router.push(href),
+    notify: (message) => toast(message, "info"),
     headings: () => session.binding.getHeadings(),
     recentDocuments: async () => {
       const res = await fetch("/api/documents?limit=8");
@@ -555,7 +556,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           />
         )}
         {authError && (
-          <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger" role="alert">
+          <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">
             Could not connect to the collaboration server ({authError}).
             <button type="button" className="btn btn-sm btn-outline" onClick={() => window.location.reload()}>
               Reload
@@ -675,7 +676,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
               key={t.id}
               className={cn(
                 "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
-                t.kind === "error" ? "bg-red-600 text-white" : "bg-ink text-white",
+                t.kind === "error" ? "bg-red-600 text-white" : "bg-inverse text-white",
               )}
               role="status"
               data-testid="toast"

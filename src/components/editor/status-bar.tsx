@@ -8,6 +8,7 @@ import type { DocumentDto } from "@/server/dto";
 import { lintMarkdown, type LintIssue } from "@/editor/markdown/lint";
 
 import { cn } from "@/lib/utils";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useHydrated } from "@/lib/hooks";
 import { useDebouncedSessionValue } from "./use-session";
 import { StatsPopover, useLocalSelection } from "./stats-popover";
@@ -136,6 +137,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         {storageLabel}
         {doc.hasUnpublishedChanges && doc.storage !== "local" && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="Unpublished changes" />}
       </button>
+      <ThemeToggle className="h-7 w-7" />
       <button type="button" className="icon-btn h-7 w-7" onClick={onShortcuts} aria-label="Help and shortcuts">
         <CircleHelp size={16} />
       </button>

@@ -142,11 +142,11 @@ export function TokensPanel({ origin, userLogin }: { origin: string; userLogin: 
             {busy ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />} Create token
           </button>
         </form>
-        {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger">{error}</div>}
+        {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
 
         {created && (
-          <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4" data-testid="token-created">
-            <div className="mb-2 text-sm font-medium text-green-900">Token “{created.name}” created. Copy it now; it will not be shown again.</div>
+          <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/40" data-testid="token-created">
+            <div className="mb-2 text-sm font-medium text-green-900 dark:text-green-200">Token “{created.name}” created. Copy it now; it will not be shown again.</div>
             <CopyField value={created.token} label="token" />
             <details className="mt-3 text-sm text-ink-2">
               <summary className="cursor-pointer select-none font-medium text-ink">How to use it</summary>

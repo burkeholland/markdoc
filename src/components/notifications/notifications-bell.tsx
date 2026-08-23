@@ -60,7 +60,7 @@ export function NotificationsBell({ currentDocId, onOpen }: NotificationsBellPro
             <Bell size={20} />
             {unreadCount > 0 && (
               <span
-                className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-white"
+                className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-on-accent"
                 data-testid="notifications-badge"
               >
                 {unreadCount > 9 ? "9+" : unreadCount}

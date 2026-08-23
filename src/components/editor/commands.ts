@@ -4,6 +4,7 @@ import { SLASH_GROUPS, SLASH_ITEMS, type SlashContext, type SlashItem, type Slas
 import type { Layout } from "./status-bar";
 import type { DialogKind } from "./actions";
 import type { ExportFormat } from "./header";
+import { nextTheme, readThemePreference, setThemePreference, themeLabel } from "@/lib/theme";
 
 /**
  * One entry in the command palette. The registry is a pure function of a plain
@@ -76,6 +77,8 @@ export interface EditorCommandContext {
   navigate: (href: string) => void;
   headings: () => HeadingInfo[];
   recentDocuments: () => Promise<DocumentRef[]>;
+  /** Optional toast for commands whose effect is not obvious from the UI. */
+  notify?: (message: string) => void;
 }
 
 export const EDITOR_GROUPS = ["Recent", "Navigation", "Formatting", "Basic", "Lists", "Blocks", "Insert", "Document", "View", "Help"] as const;
@@ -242,6 +245,18 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       group: "View",
       icon: "ArrowDownUp",
       run: () => ctx.setSyncScroll(!ctx.syncScroll),
+    },
+    {
+      id: "view:theme",
+      title: "Toggle theme",
+      keywords: ["theme", "dark", "light", "system", "appearance", "mode", "color scheme"],
+      group: "View",
+      icon: "SunMoon",
+      run: () => {
+        const next = nextTheme(readThemePreference());
+        setThemePreference(next);
+        ctx.notify?.(`Theme: ${themeLabel(next)}`);
+      },
     },
     modeItem("editing", "Mode: Editing", ["edit", "write"], "PenLine"),
     modeItem("suggesting", "Mode: Suggesting", ["suggest", "track changes", "review"], "MessageSquareDashed"),

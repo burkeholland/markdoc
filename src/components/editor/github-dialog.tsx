@@ -162,7 +162,7 @@ export function GitHubPicker({
             <button
               key={t}
               type="button"
-              className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === t ? "bg-ink text-white" : "text-ink-2 hover:bg-surface-3")}
+              className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === t ? "bg-inverse text-white" : "text-ink-2 hover:bg-surface-3")}
               onClick={() => {
                 setTab(t);
                 setFilter("");
@@ -178,7 +178,7 @@ export function GitHubPicker({
           <input className="input pl-9" placeholder={tab === "gist" ? "Filter gists" : repo ? "Filter files" : "Filter repositories"} value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
       </div>
-      {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger">{error}</div>}
+      {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
 
       {tab === "gist" && (
         <div className="flex flex-col gap-3">
@@ -460,7 +460,7 @@ export function CommitDialog({
           <label className="text-sm font-medium text-ink-2">{doc.storage === "gist" ? "Description" : "Commit message"}</label>
           <input className="input" value={message} onChange={(e) => setMessage(e.target.value)} autoFocus data-testid="commit-message" />
           <p className="text-xs text-ink-3">Pending suggestions are not included until they are accepted.</p>
-          {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger">{error}</div>}
+          {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
           <div className="flex justify-end gap-2">
             <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
               Cancel

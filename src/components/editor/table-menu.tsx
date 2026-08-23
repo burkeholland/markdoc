@@ -126,7 +126,7 @@ export function TableMenu({
 
   return (
     <div
-      className="absolute z-30 flex items-center gap-0.5 rounded-lg bg-ink px-1 py-1 shadow-xl animate-fade-in"
+      className="absolute z-30 flex items-center gap-0.5 rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
       style={{ left: pos.left, top: pos.top, width: MENU_WIDTH }}
       data-testid="table-menu"
       role="toolbar"
