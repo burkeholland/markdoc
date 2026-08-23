@@ -28,6 +28,21 @@ function Get-LiveHealth {
   return $null
 }
 
+function Wait-LiveHealth {
+  # Polls /api/health once a second until it answers 200 with db=true or $TimeoutSec passes. Returns the
+  # last body ($null when nothing ever answered). A cold Next.js server compiles the route on the first
+  # hit and can take well over Get-LiveHealth's 5 s on that request, so a single probe is not enough.
+  param([int]$Port, [int]$TimeoutSec = 60)
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $health = $null
+  while ($true) {
+    $health = Get-LiveHealth -Port $Port
+    if ($health -and $health.db -eq $true) { return $health }
+    if ((Get-Date) -ge $deadline) { return $health }
+    Start-Sleep -Seconds 1
+  }
+}
+
 function Get-LiveProcesses {
   # node.exe processes whose command line mentions the live worktree folder name.
   param([string]$Root)
