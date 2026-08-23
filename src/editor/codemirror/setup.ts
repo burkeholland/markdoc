@@ -24,6 +24,7 @@ import { sourceHighlights, highlightClickHandler } from "./highlights";
 import { suggestingMode } from "./suggesting";
 import { toggleInlineMark, setHeading, toggleLinePrefix } from "./commands";
 import { codeImageUpload } from "./images";
+import { markdownEditingKeymap } from "./continue-markup";
 import type { ImageUploader } from "../prosemirror/images";
 
 export interface CodeEditorHandlers {
@@ -78,7 +79,9 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     closeBrackets(),
     highlightSelectionMatches(),
     placeholder("Start writing Markdown…"),
-    markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: true }),
+    // Enter/Backspace come from markdownEditingKeymap (Enter on an empty `> ` or `- ` line exits the block).
+    markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
+    markdownEditingKeymap,
     codeEditorTheme,
     wrapping.of(EditorView.lineWrapping),
     yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
