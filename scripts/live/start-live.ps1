@@ -23,7 +23,7 @@ if (-not $Restart) {
 }
 
 if (-not (Test-Path (Join-Path $Root 'package.json'))) {
-  Write-Error "no package.json in $Root"
+  Write-Step "no package.json in $Root"
   exit 1
 }
 

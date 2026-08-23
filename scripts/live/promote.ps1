@@ -47,7 +47,7 @@ function Switch-LiveTo {
   Invoke-Git checkout --detach $To | Out-Null
   if (Test-DepsChanged -From $From -To $To) { Invoke-NpmCi } else { Write-Step 'dependencies unchanged; skipping npm ci' }
   Remove-NextCache -Root $Root
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startLive -Root $Root -Port $Port -LogPath $LogPath -TimeoutSec $TimeoutSec -Restart
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startLive -Root $Root -Port $Port -LogPath $LogPath -TimeoutSec $TimeoutSec -Restart | Out-Host
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -57,13 +57,13 @@ Invoke-Git fetch origin --quiet | Out-Null
 $target = (Invoke-Git rev-parse --verify "$Sha^{commit}") | Select-Object -First 1
 & git -C $Root merge-base --is-ancestor $target origin/main
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "$target is not on origin/main; refusing to promote"
+  Write-Step "$target is not on origin/main; refusing to promote"
   exit 1
 }
 
 $dirty = @(Invoke-Git status --porcelain --untracked-files=no)
 if ($dirty.Count -gt 0) {
-  Write-Error "live worktree $Root has local changes to tracked files; refusing to promote:`n$($dirty -join "`n")"
+  Write-Step "live worktree $Root has local changes to tracked files; refusing to promote:`n$($dirty -join "`n")"
   exit 1
 }
 
