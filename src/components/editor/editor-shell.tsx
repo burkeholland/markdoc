@@ -12,6 +12,7 @@ import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { api } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
+import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip } from "@/components/ui/primitives";
 import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
@@ -111,6 +112,12 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     setToasts((t) => [...t, { id, message, kind, action }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 8000 : 4500);
   }, []);
+
+  // A message left by the previous page (e.g. "Copy created" after "Make a copy").
+  useEffect(() => {
+    const notice = takePendingNotice();
+    if (notice) toast(notice.message, notice.kind);
+  }, [toast]);
 
   // Toolbar state is derived from the live editors. The selector also runs on every render,
   // so selection changes (React state) are picked up as well as session changes; the shallow
@@ -272,12 +279,43 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const uploadImage = useCallback((file: File) => uploadAsset(doc.id, file), [doc.id]);
   const onImageError = useCallback((message: string) => toast(`Image upload failed: ${message}`, "error"), [toast]);
 
+  // Set once this client has decided to leave (own delete or server eviction) so the two paths do not race.
+  const leavingRef = useRef(false);
   const deleteDoc = useCallback(async () => {
-    if (!confirm(`Delete “${doc.title}”? This cannot be undone.`)) return;
-    await api.documents.delete(doc.id);
+    if (!confirm(`Move “${doc.title}” to trash? You can restore it from the dashboard for 30 days.`)) return;
+    try {
+      await api.documents.delete(doc.id);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Could not move to trash", "error");
+      return;
+    }
+    leavingRef.current = true;
+    setPendingNotice(`“${doc.title}” was moved to the trash.`, "success");
     await session.clearLocal();
     router.push("/");
-  }, [doc.id, doc.title, router, session]);
+  }, [doc.id, doc.title, router, session, toast]);
+
+  // Another owner session (or this one, via the API) trashed the document: leave with a notice.
+  const trashed = useSessionValue(session, (s) => s.trashed);
+  useEffect(() => {
+    if (!trashed || leavingRef.current) return;
+    leavingRef.current = true;
+    setPendingNotice("This document was moved to the trash.", "info");
+    void session.clearLocal().finally(() => router.push("/"));
+  }, [trashed, session, router]);
+
+  const duplicateDoc = useCallback(async () => {
+    try {
+      const res = await api.documents.duplicate(doc.id);
+      setPendingNotice(
+        doc.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
+        "success",
+      );
+      router.push(`/d/${res.id}`);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Could not make a copy", "error");
+    }
+  }, [doc.id, doc.storage, router, toast]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
@@ -293,6 +331,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const publishFromHeader = useCallback(() => (doc.storage === "gist" ? void publishNow() : setCommitOpen(true)), [doc.storage, publishNow]);
   const pullFromHeader = useCallback(() => void pull(), [pull]);
   const deleteFromHeader = useCallback(() => void deleteDoc(), [deleteDoc]);
+  const duplicateFromHeader = useCallback(() => void duplicateDoc(), [duplicateDoc]);
   const copyFromHeader = useCallback(() => void copyMarkdown(), [copyMarkdown]);
   const goHome = useCallback(() => router.push("/"), [router]);
 
@@ -380,6 +419,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onActivity={toggleActivity}
           onShortcuts={openShortcuts}
           onDelete={deleteFromHeader}
+          onDuplicate={duplicateFromHeader}
           onDownload={download}
           onCopyMarkdown={copyFromHeader}
           onNameVersion={openVersionName}

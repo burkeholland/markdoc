@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
-import { deleteDocument, updateDocument } from "@/server/documents";
+import { deleteDocument, purgeDocument, updateDocument } from "@/server/documents";
 import { publicDocument } from "@/server/dto";
 
 type Params = { params: Promise<{ id: string }> };
@@ -25,9 +25,19 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
   return json({ document: publicDocument(doc) });
 });
 
-export const DELETE = handler(async (_req: Request, { params }: Params) => {
+/**
+ * Move the document to the trash (owner only). `?permanent=1` removes it for good instead —
+ * also for documents already in the trash ("Delete forever").
+ */
+export const DELETE = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
+  const permanent = /^(1|true)$/.test(new URL(req.url).searchParams.get("permanent") ?? "");
+  if (permanent) {
+    await requireAccess(id, "own", { allowDeleted: true });
+    await purgeDocument(id);
+    return json({ ok: true, permanent: true });
+  }
   await requireAccess(id, "own");
   await deleteDocument(id);
-  return json({ ok: true });
+  return json({ ok: true, permanent: false });
 });

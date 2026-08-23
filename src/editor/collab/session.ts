@@ -83,6 +83,8 @@ export class CollabSession {
   status: WebSocketStatus | "connecting" = "connecting";
   synced = false;
   authError: string | null = null;
+  /** Set when the server told us the document was moved to the trash; the editor navigates away. */
+  trashed = false;
   unsyncedChanges = 0;
   /** Whether the locally persisted (IndexedDB) state has been applied; true at once when unavailable. */
   localLoaded = false;
@@ -166,6 +168,19 @@ export class CollabSession {
         this.notify();
       },
       onAwarenessChange: () => this.notify(),
+      onStateless: ({ payload }) => {
+        let message: { type?: string } | null = null;
+        try {
+          message = JSON.parse(payload) as { type?: string };
+        } catch {
+          return;
+        }
+        if (message?.type !== "trashed" || this.trashed) return;
+        this.trashed = true;
+        // Stop reconnecting: the server will refuse a token for a trashed document anyway.
+        this.provider.disconnect();
+        this.notify();
+      },
     });
     this.awareness = this.provider.awareness!;
     this.awareness.setLocalStateField("user", {
