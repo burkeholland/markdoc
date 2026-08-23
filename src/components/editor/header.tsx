@@ -38,8 +38,11 @@ import {
   BookOpen,
   PanelLeft,
   Code2,
+  GitMerge,
 } from "lucide-react";
 import type { CollabSession, EditMode, PresenceUser, SaveState } from "@/editor/collab/session";
+import type { SyncStatusDto } from "@/lib/api";
+import { SYNC_LABELS } from "./sync-dialog";
 import { isIdle } from "@/editor/collab/follow";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
@@ -371,6 +374,10 @@ export interface HeaderProps {
   onPublish: () => void;
   onPublishNow: () => void;
   onPull: () => void;
+  /** Opens the Sync dialog (both sides changed). */
+  onSync: () => void;
+  /** Three-way status against the linked GitHub file; null while unknown or when not linked. */
+  sync: SyncStatusDto | null;
   onHistory: () => void;
   onActivity: () => void;
   onShortcuts: () => void;
@@ -563,24 +570,61 @@ export const Header = memo(function Header(props: HeaderProps) {
         </Menu>
         {!compact && (
           <Menu>
-            <MenuTrigger asChild>
-              <button type="button" className="btn btn-primary gap-1.5 pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
-                {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
-                Publish
-                <ChevronDown size={16} className="opacity-80" />
-              </button>
-            </MenuTrigger>
+            <div className="flex items-stretch" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
+              {linked && canEdit && props.sync ? (
+                <button
+                  type="button"
+                  className="btn btn-primary gap-1.5 rounded-r-none pl-3 pr-3"
+                  disabled={props.publishing}
+                  data-testid="publish-button"
+                  onClick={props.sync.status === "remote-ahead" ? props.onPull : props.sync.status === "diverged" ? props.onSync : props.onPublishNow}
+                  title={SYNC_LABELS[props.sync.status]}
+                >
+                  {props.publishing ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : props.sync.status === "remote-ahead" ? (
+                    <RefreshCw size={15} />
+                  ) : props.sync.status === "diverged" ? (
+                    <GitMerge size={15} />
+                  ) : (
+                    <span
+                      aria-hidden
+                      className={cn("inline-block h-2 w-2 rounded-full", props.sync.status === "in-sync" ? "bg-emerald-300" : "bg-amber-300")}
+                    />
+                  )}
+                  <span data-testid="publish-status" data-status={props.sync.status}>
+                    {props.sync.status === "remote-ahead" ? "Pull" : props.sync.status === "diverged" ? "Both changed" : props.sync.status === "in-sync" ? "Up to date" : "Publish"}
+                  </span>
+                </button>
+              ) : (
+                <MenuTrigger asChild>
+                  <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
+                    {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
+                    Publish
+                  </button>
+                </MenuTrigger>
+              )}
+              <MenuTrigger asChild>
+                <button type="button" className="btn btn-primary rounded-l-none border-l border-white/20 px-1.5" disabled={props.publishing} aria-label="Publish options" data-testid="publish-menu">
+                  <ChevronDown size={16} className="opacity-80" />
+                </button>
+              </MenuTrigger>
+            </div>
             <MenuContent align="end" className="w-72">
               {linked ? (
                 <>
                   <MenuLabel>
                     {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
+                    {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
                   </MenuLabel>
                   <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
                     {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
                   </MenuItem>
                   <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit}>
                     Pull latest from GitHub
+                  </MenuItem>
+                  <MenuItem icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
+                    Sync…
                   </MenuItem>
                   {doc.githubUrl && (
                     <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>

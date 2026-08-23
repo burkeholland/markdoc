@@ -31,5 +31,16 @@ describe("lintMarkdown", () => {
     const issues = lintMarkdown("| a | b |\n|---|---|\n| 1 |\n");
     expect(issues.map((i) => i.rule)).toEqual(["table-columns"]);
   });
+
+  it("flags merge-conflict markers as errors, one per marker line", () => {
+    const src = "# T\n\n<<<<<<< local\nmine\n=======\ntheirs\n>>>>>>> github\n\nok\n";
+    const issues = lintMarkdown(src).filter((i) => i.rule === "merge-conflict");
+    expect(issues.map((i) => i.line)).toEqual([3, 5, 7]);
+    expect(issues.every((i) => i.severity === "error")).toBe(true);
+    expect(issues[0].offset).toBe(src.indexOf("<<<<<<<"));
+    // A setext heading underline is not a marker, and `=======` inside a fence still is (it cannot be intended there either).
+    expect(lintMarkdown("Title\n=====\n\ntext\n").filter((i) => i.rule === "merge-conflict")).toEqual([]);
+    expect(lintMarkdown("a\n========\nb\n").filter((i) => i.rule === "merge-conflict")).toEqual([]);
+  });
 });
 

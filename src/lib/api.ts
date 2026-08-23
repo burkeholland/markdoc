@@ -7,9 +7,24 @@ export class ApiError extends Error {
     public status: number,
     message: string,
     public issues?: unknown,
+    /** The full error body (sync 409s carry `status`, `remoteContent`, `merged`, `conflicts`). */
+    public body?: Record<string, unknown>,
   ) {
     super(message);
   }
+}
+
+export type SyncState = "in-sync" | "local-ahead" | "remote-ahead" | "diverged";
+export interface SyncStatusDto {
+  status: SyncState;
+  remote: { sha: string | null; revision: string | null; url: string | null; updatedAt: string | null };
+  localChanged: boolean;
+  remoteChanged: boolean;
+  lines: { local: number; remote: number };
+  /** Suggested client poll interval (SYNC_POLL_MS on the server; 60 s by default). */
+  pollMs?: number;
+  /** Only with `?content=1`: the GitHub file as it is now. */
+  remoteContent?: string;
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -22,7 +37,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const data = text ? (JSON.parse(text) as unknown) : null;
   if (!res.ok) {
     const err = (data ?? {}) as { error?: string; issues?: unknown };
-    throw new ApiError(res.status, err.error ?? res.statusText, err.issues);
+    throw new ApiError(res.status, err.error ?? res.statusText, err.issues, (data ?? undefined) as Record<string, unknown> | undefined);
   }
   return data as T;
 }
@@ -157,13 +172,22 @@ export const api = {
       request<{ ok: true; login: string }>(`/api/documents/${id}/collaborators`, { method: "POST", body: JSON.stringify({ login, role }) }),
     removeCollaborator: (id: string, login: string) =>
       request<{ ok: true }>(`/api/documents/${id}/collaborators`, { method: "DELETE", body: JSON.stringify({ login }) }),
-    publish: (id: string, message?: string) =>
-      request<{ result: { url: string | null; commitSha: string | null; publishedAt: string; skipped?: boolean }; document: DocumentDto | null }>(
-        `/api/documents/${id}/publish`,
+    publish: (id: string, message?: string, options: { force?: boolean } = {}) =>
+      request<{ result: { url: string | null; commitSha: string | null; publishedAt: string; skipped?: boolean; status: SyncState }; document: DocumentDto | null }>(
+        `/api/documents/${id}/publish${options.force ? "?force=1" : ""}`,
         { method: "POST", body: JSON.stringify({ message }) },
       ),
-    pull: (id: string) =>
-      request<{ result: { changed: boolean; url: string | null }; document: DocumentDto | null }>(`/api/documents/${id}/pull`, { method: "POST" }),
+    pull: (id: string, options: { force?: boolean; merge?: boolean } = {}) => {
+      const q = [options.force && "force=1", options.merge && "merge=1"].filter(Boolean).join("&");
+      return request<{ result: { changed: boolean; url: string | null; status: SyncState; merged?: boolean }; document: DocumentDto | null }>(
+        `/api/documents/${id}/pull${q ? `?${q}` : ""}`,
+        { method: "POST" },
+      );
+    },
+    sync: (id: string, options: { fresh?: boolean; content?: boolean } = {}) => {
+      const q = [options.fresh && "fresh=1", options.content && "content=1"].filter(Boolean).join("&");
+      return request<SyncStatusDto>(`/api/documents/${id}/sync${q ? `?${q}` : ""}`);
+    },
     link: (id: string, body: Record<string, unknown>) =>
       request<{ document: DocumentDto }>(`/api/documents/${id}/link`, { method: "POST", body: JSON.stringify(body) }),
     comment: (id: string, body: Record<string, unknown>) =>

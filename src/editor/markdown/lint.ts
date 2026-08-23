@@ -148,13 +148,17 @@ export function lintMarkdown(src: string): LintIssue[] {
   const h1s = headings.filter((h) => h.depth === 1);
   if (h1s.length > 1) push(h1s[1].pos, "multiple-h1", "More than one top-level heading");
 
-  // Trailing whitespace (excluding intentional two-space hard breaks).
+  // Trailing whitespace (excluding intentional two-space hard breaks) and leftover merge-conflict markers.
   const lines = src.split("\n");
   let offset = 0;
   let inFence = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    if (/^(<{7}|>{7})(\s|$)|^={7}$/.test(line)) {
+      const side = line.startsWith("<") ? "start" : line.startsWith(">") ? "end" : "separator";
+      issues.push({ line: i + 1, column: 1, offset, message: `Merge conflict ${side} marker — resolve and remove it`, rule: "merge-conflict", severity: "error" });
+    }
     if (!inFence && /[ \t]$/.test(line) && !/ {2}$/.test(line) && line.trim() !== "") {
       issues.push({ line: i + 1, column: line.length, offset: offset + line.length - 1, message: "Trailing whitespace", rule: "trailing-space", severity: "warning" });
     }

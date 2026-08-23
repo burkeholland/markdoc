@@ -64,9 +64,11 @@ export interface SyncStatus {
   remoteChanged: boolean;
   /** Line counts for the UI summary: how far each side moved from the base. */
   lines: { local: number; remote: number };
+  /** Only when asked for (`content`): the GitHub file as it is now. */
+  remoteContent?: string;
 }
 
-export const SYNC_CACHE_MS = 30_000;
+export const SYNC_CACHE_MS = Math.max(0, Number(process.env.SYNC_CACHE_MS) || 30_000);
 const remoteCache = new Map<string, { remote: RemoteFile; at: number }>();
 
 /** Drop the cached remote read for a document (or all, in tests). */
@@ -133,10 +135,11 @@ function toStatus(base: string | null, local: string, remote: RemoteFile): SyncS
 }
 
 /** Where the document stands against its GitHub file: in-sync, local-ahead, remote-ahead or diverged. */
-export async function syncStatus(doc: Document, user: SessionUser, options: { fresh?: boolean } = {}): Promise<SyncStatus> {
+export async function syncStatus(doc: Document, user: SessionUser, options: { fresh?: boolean; content?: boolean } = {}): Promise<SyncStatus> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const [remote, live] = await Promise.all([readRemote(doc, user, options.fresh), readLiveText(doc.id)]);
-  return toStatus(doc.publishedContent, live.clean, remote);
+  const status = toStatus(doc.publishedContent, live.clean, remote);
+  return options.content ? { ...status, remoteContent: remote.content ?? "" } : status;
 }
 
 export interface MergeOutcome {
