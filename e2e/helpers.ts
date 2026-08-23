@@ -106,6 +106,58 @@ export async function selectTextInRich(page: Page, text: string) {
 }
 
 
+/** GFM table lines (those starting with `|`) of the shared Markdown text. */
+export const tableLines = async (page: Page) => (await codeText(page)).split("\n").filter((l) => l.trim().startsWith("|"));
+
+/** Cell (r, c) of the rich pane's table: row index over `tr` (header row is 0), column index over `td,th`. */
+export const tableCell = (page: Page, r: number, c: number) =>
+  page.locator(".md-rich table tr").nth(r).locator("td,th").nth(c);
+
+const caretInCell = (page: Page, r: number, c: number) =>
+  page.evaluate(([row, col]) => {
+    const target = document.querySelectorAll(".md-rich table tr")[row]?.querySelectorAll("td,th")[col];
+    const anchor = window.getSelection()?.anchorNode ?? null;
+    const active = document.activeElement;
+    return Boolean(target && anchor && target.contains(anchor) && active && active.closest(".md-rich"));
+  }, [r, c] as const);
+
+/**
+ * Put the caret in table cell (r, c) and wait until the DOM selection really sits inside it.
+ * Table commands and shortcuts move the caret (a new row takes focus, a deleted row drops it
+ * elsewhere), and under load the selection update races the next keypress; always call this
+ * before typing or pressing a table shortcut so the keys land in the intended cell.
+ */
+export async function clickCell(page: Page, r: number, c: number) {
+  const cell = tableCell(page, r, c);
+  await expect(cell).toBeVisible();
+  for (let attempt = 1; ; attempt++) {
+    await cell.click();
+    const landed = await expect
+      .poll(() => caretInCell(page, r, c), { timeout: 3_000 })
+      .toBe(true)
+      .then(() => true, () => false);
+    if (landed) break;
+    if (attempt >= 3) throw new Error(`clickCell(${r}, ${c}): caret did not land in the cell after ${attempt} clicks`);
+  }
+  await expect(page.getByTestId("table-menu")).toBeVisible();
+}
+
+/**
+ * Wait until the rich pane's table has `rows` rows (header included) of `cols` cells each AND
+ * the code pane has the matching `rows + 1` GFM lines (header, delimiter, bodies). Call after
+ * every structural table operation before acting on either pane again.
+ */
+export async function expectTableShape(page: Page, rows: number, cols: number) {
+  const trs = page.locator(".md-rich table tr");
+  await expect(trs).toHaveCount(rows);
+  await expect
+    .poll(() => trs.evaluateAll((els) => els.map((tr) => tr.querySelectorAll("td,th").length)), {
+      message: `every row should have ${cols} cells`,
+    })
+    .toEqual(Array.from({ length: rows }, () => cols));
+  await expect.poll(async () => (await tableLines(page)).length, { message: `code pane should have ${rows + 1} table lines` }).toBe(rows + 1);
+}
+
 /** Open the comments side panel if it is not already visible. */
 export async function ensureCommentsOpen(page: Page) {
   if ((await page.getByTestId("comments-panel").count()) === 0) {
