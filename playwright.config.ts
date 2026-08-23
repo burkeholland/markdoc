@@ -64,6 +64,7 @@ export default defineConfig({
           PGLITE_DATA_DIR: "memory://",
           NEXT_DIST_DIR: distDir,
           AUTO_VERSION_INTERVAL_MS: "1000",
+          READER_POLL_MS: "2000",
           NODE_ENV: "development",
         },
       },

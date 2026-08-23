@@ -22,6 +22,8 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
     if (!user) redirect(`/login?next=${encodeURIComponent(`/d/${id}`)}`);
     notFound();
   }
+  // A signed-out visitor on a view-only link cannot edit or comment: the reader page serves them better.
+  if (!user && access.doc.linkAccess === "view") redirect(`/p/${id}`);
   const githubAvailable = user ? !!(await getGitHubToken(user.id)) : false;
   return (
     <EditorShell

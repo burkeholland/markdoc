@@ -1,0 +1,148 @@
+import { test, expect } from "@playwright/test";
+import { signIn, createDocument, openDocument, focusCodeEnd, codeText } from "./helpers";
+
+const CONTENT = ["# Reader Title", "", "Intro paragraph for the reader.", "", "## First Section", "", "Some text in the first section.", "", "## Second Section", "", "```ts", "const x = 1;", "```", ""].join("\n");
+
+async function setLinkAccess(page: import("@playwright/test").Page, id: string, linkAccess: "private" | "view" | "comment" | "edit") {
+  const res = await page.request.patch(`/api/documents/${id}`, { data: { linkAccess } });
+  expect(res.ok()).toBeTruthy();
+}
+
+test.describe("reader view", () => {
+  test("anonymous visitor reads a view-shared document with a table of contents", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-owner");
+    const id = await createDocument(owner.page, CONTENT, "Reader Title");
+    await setLinkAccess(owner.page, id, "view");
+
+    const anon = await browser.newContext();
+    const page = await anon.newPage();
+    const res = await page.goto(`/p/${id}`);
+    expect(res?.status()).toBe(200);
+
+    await expect(page.getByTestId("reader-title")).toHaveText("Reader Title");
+    const body = page.getByTestId("reader-body");
+    await expect(body.locator("h1")).toHaveText("Reader Title");
+    await expect(body.locator("h2")).toHaveCount(2);
+    await expect(body.locator("pre code.hljs")).toBeVisible();
+    await expect(page.getByTestId("reader-byline")).toContainText("Updated");
+
+    const toc = page.getByTestId("reader-toc-entry");
+    await expect(toc).toHaveCount(2);
+    await expect(toc.nth(0)).toHaveText("First Section");
+    await expect(toc.nth(1)).toHaveText("Second Section");
+
+    // No editor chrome for the audience; no edit affordance for a viewer.
+    await expect(page.getByTestId("editor-shell")).toHaveCount(0);
+    await expect(page.getByTestId("toolbar")).toHaveCount(0);
+    await expect(page.locator(".cm-content")).toHaveCount(0);
+    await expect(page.getByTestId("open-in-editor")).toHaveCount(0);
+    await expect(page.getByTestId("reader-download")).toBeVisible();
+
+    // The TOC links to the heading anchors.
+    await toc.nth(1).click();
+    await expect(page).toHaveURL(new RegExp(`/p/${id}#second-section$`));
+    await expect(body.locator("#second-section")).toBeInViewport();
+
+    // Downloads go through the existing export route.
+    const md = await anon.request.get(`/api/documents/${id}/export?format=md`);
+    expect(md.ok()).toBeTruthy();
+    expect(await md.text()).toContain("# Reader Title");
+
+    await anon.close();
+    await owner.context.close();
+  });
+
+  test("anonymous /d on a view-only link redirects to the reader; comment links keep the editor", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-owner");
+    const id = await createDocument(owner.page, CONTENT, "Reader Title");
+    await setLinkAccess(owner.page, id, "view");
+
+    const anon = await browser.newContext();
+    const page = await anon.newPage();
+    await page.goto(`/d/${id}`);
+    await expect(page).toHaveURL(new RegExp(`/p/${id}$`));
+    await expect(page.getByTestId("reader-title")).toHaveText("Reader Title");
+
+    await setLinkAccess(owner.page, id, "comment");
+    await page.goto(`/d/${id}`);
+    await expect(page).toHaveURL(new RegExp(`/d/${id}$`));
+    await expect(page.getByTestId("editor-shell")).toBeVisible();
+
+    await anon.close();
+    await owner.context.close();
+  });
+
+  test("private documents are not readable anonymously; strangers get 404", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-owner");
+    const id = await createDocument(owner.page, CONTENT, "Reader Title");
+
+    // Same as /d today: signed-out visitors are sent to sign in.
+    const anon = await browser.newContext();
+    const page = await anon.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page).toHaveURL(/\/login\?next=/);
+    expect(new URL(page.url()).searchParams.get("next")).toBe(`/p/${id}`);
+    await anon.close();
+
+    const stranger = await signIn(browser, "reader-stranger");
+    const res = await stranger.page.goto(`/p/${id}`);
+    expect(res?.status()).toBe(404);
+    await stranger.context.close();
+
+    // The owner can always read their own document and gets the editor link.
+    await owner.page.goto(`/p/${id}`);
+    await expect(owner.page.getByTestId("reader-title")).toHaveText("Reader Title");
+    await expect(owner.page.getByTestId("open-in-editor")).toHaveAttribute("href", `/d/${id}`);
+    await owner.context.close();
+  });
+
+  test("header menu opens the reader view and the share dialog shows the reader link", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-owner");
+    const { page } = owner;
+    const id = await createDocument(page, CONTENT, "Reader Title");
+    await openDocument(page, id);
+
+    await page.getByTestId("more-menu").click();
+    const popupPromise = page.waitForEvent("popup");
+    await page.getByTestId("menu-reader").click();
+    const reader = await popupPromise;
+    await reader.waitForURL(new RegExp(`/p/${id}$`));
+    await expect(reader.getByTestId("reader-title")).toHaveText("Reader Title");
+    await reader.close();
+
+    await page.getByTestId("share-button").click();
+    await expect(page.getByTestId("reader-link")).toHaveCount(0);
+    await page.getByTestId("link-access").selectOption("view");
+    await expect(page.getByTestId("reader-link")).toContainText(`/p/${id}`);
+    await expect(page.getByTestId("copy-reader-link")).toBeVisible();
+    await expect(page.getByTestId("copy-link")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await owner.context.close();
+  });
+
+  test("anonymous reader is told when the document changed", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-owner");
+    const id = await createDocument(owner.page, CONTENT, "Reader Title");
+    await setLinkAccess(owner.page, id, "view");
+
+    const anon = await browser.newContext();
+    const page = await anon.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-title")).toHaveText("Reader Title");
+    await expect(page.getByTestId("reader-updated")).toHaveCount(0);
+
+    await openDocument(owner.page, id);
+    await focusCodeEnd(owner.page);
+    await owner.page.keyboard.type("\nA new closing line.");
+    await expect.poll(() => codeText(owner.page)).toContain("A new closing line.");
+
+    // The dev server runs with READER_POLL_MS=2000 (playwright.config.ts); the pill shows within 35 s regardless.
+    await expect(page.getByTestId("reader-updated")).toBeVisible({ timeout: 35_000 });
+    await page.getByTestId("reader-updated").getByRole("button").click();
+    await expect(page.getByTestId("reader-body")).toContainText("A new closing line.");
+    await expect(page.getByTestId("reader-updated")).toHaveCount(0);
+
+    await anon.close();
+    await owner.context.close();
+  });
+});
