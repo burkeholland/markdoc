@@ -45,6 +45,8 @@ import { api } from "@/lib/api";
 import { cn, shortcut } from "@/lib/utils";
 import { useHydrated } from "@/lib/hooks";
 import { jsonEqual, useSessionValue } from "./use-session";
+import { NotificationsBell } from "@/components/notifications/notifications-bell";
+import type { NotificationDto } from "@/lib/api";
 import { AgentActivityChip } from "./agent-activity";
 
 export function Logo({ className }: { className?: string }) {
@@ -267,6 +269,8 @@ export interface HeaderProps {
   doc: DocumentDto;
   commentsOpen: boolean;
   onToggleComments: () => void;
+  /** Open the thread/suggestion/document a notification points at (the item is already marked read). */
+  onOpenNotification: (n: NotificationDto) => void;
   onShare: () => void;
   onPublish: () => void;
   onPublishNow: () => void;
@@ -305,6 +309,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         <AgentActivityChip session={session} />
         <ModeSwitcher session={session} />
         <PresenceStack session={session} />
+        {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} />}
         <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
           <UserPlus size={17} />
           Share

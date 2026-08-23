@@ -36,7 +36,8 @@ import { FindBar } from "./find-bar";
 import { useScrollSync } from "./scroll-sync";
 import { CommandPalette, isPaletteShortcut } from "./command-palette";
 import { buildCommands, type EditorCommandContext } from "./commands";
-import type { VersionSummary } from "@/lib/api";
+import type { NotificationDto, VersionSummary } from "@/lib/api";
+import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
 import { isMac } from "@/lib/utils";
 
@@ -321,6 +322,60 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
+
+  /** Open the comments panel on a thread (by thread or reply id) or suggestion. Returns false when nothing matches. */
+  const activateRef = useCallback(
+    (refId: string) => {
+      const thread = session.comments.list().find((t) => t.id === refId || t.replies.some((r) => r.id === refId));
+      if (thread) {
+        session.setActiveComment(thread.id);
+        setSidePanel("comments");
+        return true;
+      }
+      if (session.suggestions.list().some((s) => s.id === refId)) {
+        session.setActiveSuggestion(refId);
+        setSidePanel("comments");
+        return true;
+      }
+      return false;
+    },
+    [session],
+  );
+
+  const onOpenNotification = useCallback(
+    (n: NotificationDto) => {
+      if (n.documentId !== doc.id) {
+        navigateTo(notificationHref(n));
+        return;
+      }
+      if (n.kind === "share") return;
+      if (!activateRef(n.refId)) {
+        // Decided suggestions are gone from the document; show the panel anyway.
+        setSidePanel("comments");
+        if (n.kind.startsWith("suggestion.")) session.setActiveSuggestion(n.refId);
+      }
+    },
+    [doc.id, activateRef, session],
+  );
+
+  // `/d/<id>?thread=<thread|reply|suggestion id>` (from a notification elsewhere) opens that thread once the document is in.
+  const threadParamReady = useSessionValue(session, (s) => s.localLoaded || s.synced);
+  useEffect(() => {
+    if (!threadParamReady) return;
+    const url = new URL(window.location.href);
+    const threadParam = url.searchParams.get("thread");
+    if (!threadParam) return;
+    url.searchParams.delete("thread");
+    window.history.replaceState(window.history.state, "", url.toString());
+    // The shared comments map may arrive a beat after the text; retry briefly.
+    let tries = 0;
+    const tick = () => {
+      if (activateRef(threadParam) || ++tries > 40) return;
+      timer = setTimeout(tick, 100);
+    };
+    let timer = setTimeout(tick, 0);
+    return () => clearTimeout(timer);
+  }, [threadParamReady, activateRef]);
   const toggleHistory = useCallback(() => setSidePanel((p) => (p === "versions" ? null : "versions")), []);
   const toggleActivity = useCallback(() => setSidePanel((p) => (p === "activity" ? null : "activity")), []);
   const openShare = useCallback(() => setDialog("share"), []);
@@ -470,6 +525,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           doc={docView}
           commentsOpen={sidePanel === "comments"}
           onToggleComments={toggleComments}
+          onOpenNotification={onOpenNotification}
           onShare={openShare}
           onPublish={openPublish}
           onPublishNow={publishFromHeader}

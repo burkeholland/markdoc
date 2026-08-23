@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { CommentThread } from "@/editor/collab/comments";
@@ -299,6 +300,7 @@ function ThreadCard({
   onReveal,
   ops,
   candidates,
+  unread,
 }: {
   thread: CommentThread;
   session: CollabSession;
@@ -306,6 +308,8 @@ function ThreadCard({
   onReveal: (offset: number) => void;
   ops: ReturnType<typeof useCommentOps>;
   candidates: MentionCandidate[];
+  /** The current user has unread notifications about this thread. */
+  unread?: boolean;
 }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<string | null>(null); // "root" or reply id
@@ -316,15 +320,21 @@ function ThreadCard({
   useEffect(() => {
     if (active) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [active]);
+  // Opening the thread reads every notification about it (the thread itself and its replies).
+  const replyIds = thread.replies.map((r) => r.id).join(",");
+  useEffect(() => {
+    if (active && unread) void markRefsRead(session.docId, [thread.id, ...replyIds.split(",").filter(Boolean)]);
+  }, [active, unread, session.docId, thread.id, replyIds]);
 
   return (
     <div
       ref={ref}
       className={cn(
-        "rounded-xl border bg-surface p-3 transition-shadow",
+        "relative rounded-xl border bg-surface p-3 transition-shadow",
         active ? "border-accent shadow-md shadow-accent/10" : "border-line hover:border-line-2",
         thread.resolved && "opacity-80",
       )}
+      data-unread={unread || undefined}
       onClick={() => {
         session.setActiveComment(thread.id);
         if (thread.range) onReveal(thread.range.from);
@@ -332,6 +342,7 @@ function ThreadCard({
       data-testid="comment-thread"
       data-thread-id={thread.id}
     >
+      {unread && <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-accent" aria-label="Unread activity" data-testid="thread-unread-dot" />}
       {thread.quote && (
         <div className="mb-2 truncate border-l-2 border-amber-400 pl-2 text-xs text-ink-3" title={thread.quote}>
           {thread.range ? thread.quote : <span className="italic">(original text removed) </span>}
@@ -544,6 +555,8 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
   );
   const ops = useCommentOps(session);
   const candidates = useMentionCandidates(session);
+  const unreadRefs = useUnreadRefs(session.docId);
+  const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const [tab, setTab] = useState<Tab>("open");
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
@@ -615,13 +628,13 @@ export function CommentsPanel({ session, onClose, onReveal }: CommentsPanelProps
               Select some text and press <kbd className="kbd">⌘/Ctrl</kbd>+<kbd className="kbd">Alt</kbd>+<kbd className="kbd">M</kbd> or use the Comment button.
             </EmptyState>
           ) : (
-            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} onReveal={onReveal} ops={ops} candidates={candidates} />)
+            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} />)
           ))}
         {tab === "resolved" &&
           (resolved.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
-            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} onReveal={onReveal} ops={ops} candidates={candidates} />)
+            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} />)
           ))}
         {tab === "suggestions" &&
           (suggestions.length === 0 ? (

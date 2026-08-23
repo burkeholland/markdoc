@@ -14,7 +14,7 @@ import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
 
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
-import { MentionsStrip } from "@/components/dashboard/mentions-strip";
+import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
 import { buildDashboardCommands } from "@/components/editor/commands";
 
@@ -433,7 +433,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
         </header>
 
         <section className="mx-auto max-w-6xl px-6 py-8">
-          <MentionsStrip />
+          <NotificationsStrip />
           <div className="mb-8 grid gap-3 sm:grid-cols-2">
             <div className="group flex items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md">
               <button

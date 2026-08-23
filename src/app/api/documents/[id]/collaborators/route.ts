@@ -2,6 +2,7 @@ import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { listCollaborators, removeCollaborator, upsertCollaborator, getUserById } from "@/server/documents";
 import { activityActor, recordActivity } from "@/server/activity";
+import { notifyShare } from "@/server/notifications";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -36,6 +37,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   if (owner?.login?.toLowerCase() === login) throw new HttpError(400, "That is the owner");
   await upsertCollaborator(id, login, body.role, user!.id);
   await recordActivity(id, activityActor(user!), "share.add", { login, role: body.role });
+  await notifyShare(id, login, body.role, { login: user!.login ?? null, name: user!.name ?? user!.login ?? null });
   return json({ ok: true, login });
 });
 
