@@ -56,12 +56,12 @@ test.describe("sharing dialog", () => {
     await page.getByTestId("link-access").selectOption("view");
     await expect.poll(async () => (await (await page.request.get(`/api/documents/${id}`)).json()).document.linkAccess).toBe("view");
 
-    // Anyone with the link can now view (anonymous).
+    // Anyone with the link can now view; signed-out visitors are sent to the reader view.
     const anon = await browser.newContext();
     const anonPage = await anon.newPage();
     await anonPage.goto(`/d/${id}`);
-    await expect(anonPage.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
-    await expect(anonPage.locator(".md-rich")).toHaveAttribute("contenteditable", "false");
+    await expect(anonPage).toHaveURL(new RegExp(`/p/${id}$`));
+    await expect(anonPage.getByTestId("reader-body").locator("h1")).toHaveText("Share me");
     await anon.close();
     await user.context.close();
   });

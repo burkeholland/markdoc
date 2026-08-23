@@ -25,6 +25,8 @@ export interface ReaderPageProps {
 /** Read-only presentation of a document: minimal chrome, the article, and a table of contents. */
 export function ReaderPage({ docId, title, html, headings, initialHash, updatedAt, owner, signedIn, canOpenEditor, pollMs }: ReaderPageProps) {
   const toc = headings.filter((h) => h.level === 2 || h.level === 3);
+  // Titles usually come from the first h1; do not show it twice.
+  const hideFirstH1 = headings[0]?.level === 1 && headings[0].text.trim() === title.trim() && html.startsWith("<h1 ");
   return (
     <div className="reader flex min-h-screen flex-col bg-surface text-ink" data-testid="reader">
       <header className="reader-chrome sticky top-0 z-10 flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface/90 px-4 backdrop-blur" data-testid="reader-header">
@@ -68,7 +70,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
           {/* Safe to inject: `html` is the output of renderMarkdownBody, which runs rehype-sanitize
               (GitHub's default schema) before slugging/highlighting, so scripts, handlers and
               javascript: URLs never reach this point. */}
-          <div className="reader-body" data-testid="reader-body" dangerouslySetInnerHTML={{ __html: html }} />
+          <div className="reader-body" data-testid="reader-body" data-hide-first-h1={hideFirstH1 || undefined} dangerouslySetInnerHTML={{ __html: html }} />
           <footer className="reader-footer mt-16 border-t border-line pt-5 text-xs text-ink-4">
             Made with{" "}
             <Link href={signedIn ? "/" : "/login"} className="font-medium text-ink-3 hover:text-accent">

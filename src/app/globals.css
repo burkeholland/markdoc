@@ -961,3 +961,19 @@ body {
     overflow: visible;
   }
 }
+/* Split "Download" button: unlayered .btn rules beat utilities, so the shape lives here. */
+.reader-split-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.reader-split-more {
+  width: 2rem;
+  padding: 0;
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+/* The document's own leading h1 repeats the page title shown above the byline. */
+.reader-body[data-hide-first-h1="true"] > h1:first-child {
+  display: none;
+}
