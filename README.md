@@ -10,18 +10,70 @@ Google Docs for Markdown. Write Markdown together in real time, edit the **sourc
 
 ## What it does
 
-| Area | Details |
+What changed recently is in [CHANGELOG.md](CHANGELOG.md).
+
+### Writing
+
+- Two-pane live editor: CodeMirror source and a ProseMirror rich pane side by side; type in either, the other follows instantly.
+- GitHub Flavored Markdown (tables, task lists, footnotes, front matter, raw HTML kept) with a linter in the status bar and jump-to-line.
+- Slash menu: type `/` in the rich pane for headings, lists, tables, code blocks with a language, images, links, comments, today's date.
+- Command palette (`Ctrl+Shift+P`, or `Ctrl+K` with nothing selected) for every editor and dashboard command.
+- Find & replace across both panes (`Ctrl+F` / `Ctrl+H`), with live highlights.
+- Smart paste: a URL over a selection becomes a link, Markdown-looking text is inserted as source, HTML keeps bold/lists.
+- Tables with a floating menu and shortcuts for rows, columns and alignment.
+- Images by paste, drop or upload, stored as assets behind `/api/assets`.
+- Document statistics and a shared writing goal (`Ctrl+Shift+C`): words, sentences, reading time, selection counts.
+- Templates: meeting notes, design doc, weekly status, blog post, decision record, checklist and more.
+
+### Collaborating
+
+- Real-time editing over Yjs and WebSockets with presence avatars and live carets in both panes.
+- Comments anchored to text that follow the words as they move; reply, edit, resolve, reopen; `@mentions` with a suggestions popover.
+- Suggesting mode: edits become tracked changes (green/red) that anyone with edit access can accept or reject, one by one or all at once.
+- Version history with automatic snapshots, named versions, word-level diffs and one-click restore.
+- Activity panel per document: who edited, commented, suggested, published or shared, with agents marked.
+- Notifications: a bell in the editor header and a strip on the dashboard when someone replies to your thread, resolves it, accepts or rejects your suggestion, shares with you or @mentions you; `?thread=` links open the thread.
+- Share by GitHub handle as editor, commenter or viewer, or by link (restricted, view, comment, edit).
+- Reader view at `/p/<id>`: clean read-only page with a table of contents, reading time and download menu.
+- Offline editing that survives a refresh or a closed tab; edits merge on reconnect and the header shows what is unsaved.
+
+### Organising
+
+- Dashboard search looks inside document content and shows a snippet around each match.
+- Stars, recently opened, and sort order that is remembered.
+- Templates gallery on the dashboard and in the empty state.
+- Trash with restore for 30 days, then permanent deletion.
+- Make a copy of any document you can view.
+
+### Exporting
+
+- Markdown, standalone HTML (images embedded) or a Letter PDF from the header menu or `GET /api/documents/:id/export`.
+- Publish to a GitHub gist or a repository file (a real commit on the branch you choose); import from either.
+
+### Agents
+
+- Personal API tokens, a REST API, and an MCP server (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes and answer comments; the app shows who did what. See [docs/agents.md](docs/agents.md).
+
+Sign in is GitHub only (OAuth), with a development login for local work.
+
+### Keyboard shortcuts
+
+`Ctrl` is `Cmd` on macOS. Press `Ctrl+/` in the editor for the full list.
+
+| Shortcut | Action |
 | --- | --- |
-| Two editing surfaces | CodeMirror 6 source pane and a ProseMirror rich pane, side by side. Type in either one; the other follows instantly. Toolbar, shortcuts and Markdown input rules (`# `, `- `, `- [ ] `, `> `, ```` ``` ````, `---`) work on both. |
-| Real-time collaboration | Yjs CRDT over WebSockets (Hocuspocus). Presence avatars, live carets and selections in **both** panes, offline edits merge on reconnect. |
-| Comments | Threads anchored to text ranges that follow the words as the document changes. Reply, edit, resolve, reopen. Commenters can comment without being able to edit. |
-| Suggesting mode | Edits become tracked changes (green insertions, red struck deletions) on both surfaces. Accept or reject one at a time or all at once. Published text never includes pending suggestions. |
-| Version history | Automatic snapshots while editing, named versions, versions for every publish/pull/restore. Word-level diff against the current text and one-click restore (the pre-restore state is kept). |
-| Storage | Markdoc's own database, **GitHub Gists**, or **repository files** (publishing creates a real commit on the branch you choose; conflicts with upstream edits are detected). Import any Markdown file from your gists or repos. |
-| Sharing | Add people by GitHub handle as editor, commenter or viewer. Link sharing: restricted, view, comment, or edit. |
-| Markdown quality | GitHub Flavored Markdown (tables, task lists, footnotes, strikethrough, front matter, raw HTML preserved). Built-in linter in the status bar (heading structure, broken references, unclosed fences, ragged tables, trailing whitespace) with jump-to-line. |
-| Sign in | GitHub only (OAuth). |
-| Agents | Personal access tokens plus an **MCP server** (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes, and read/answer comments. The app shows who the agent is and what it did. See [docs/agents.md](docs/agents.md). |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+K` | Command palette (no selection) / Link (with a selection) |
+| `Ctrl+F` / `Ctrl+H` | Find / Find and replace |
+| `Ctrl+Shift+C` | Document statistics and writing goal |
+| `Ctrl+Alt+M` | Add a comment on the selection |
+| `Ctrl+B` / `Ctrl+I` / `Ctrl+Shift+X` | Bold / Italic / Strikethrough |
+| `` Ctrl+` `` | Inline code |
+| `Ctrl+Alt+1…6` / `Ctrl+Alt+0` | Heading 1–6 / Paragraph |
+| `Ctrl+Shift+8` / `Ctrl+Shift+7` / `Ctrl+Shift+9` | Bulleted / Numbered / Task list |
+| `Ctrl+Alt+C` | Code block |
+| `Ctrl+Alt+↓` / `Ctrl+Alt+→` | Table: row below / column right (`↑` / `←` for above / left) |
+| `Ctrl+/` | Keyboard shortcuts help |
 
 ## Run it locally
 
@@ -57,18 +109,37 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 ## Test it
 
 ```bash
-npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (~200 tests); incremental-parser fuzz runs 300 seeded docs
-npm run test:fuzz     # Full 1500-document incremental-parser fuzz (FUZZ_DOCS / FUZZ_SEED override; the seed is logged on failure)
-npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs, tables, templates, offline persistence (~50 tests); E2E_PORT=3190 for a private port + cache
+npm test              # Vitest: ~330 unit tests (parser/serializer, sync binding, comments/suggestions models, DB, routes, collaboration server); the incremental-parser fuzz runs 300 seeded docs
+npm run test:e2e      # Playwright: ~90 tests in 21 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, notifications, offline, …)
 npm run typecheck
 npm run lint
 ```
 
-```bash
-PORT=3800 npm run dev:port   # manual server on its own port, Next cache and PGlite dir (see below)
-```
+### Scripts and knobs
 
-`npm run test:e2e` starts its own server on port 3100 with an in-memory database and a throwaway Next cache (`.next-e2e`, or `.next-e2e-<port>` with `E2E_PORT=3190 npm run test:e2e`), deleted before and after every run; on a shared machine give each worktree its own `E2E_PORT` so runs never share a cache. For a manual server that cannot collide with the suite or another dev, use `PORT=3800 npm run dev:port` (PowerShell: `$env:PORT=3800; npm run dev:port`) — it serves on that port with `.next-manual-3800` and `.data/pglite-3800`. `next dev`/`next typegen` append the dist dir in use to `include` in `tsconfig.json`; `test:e2e` and `dev:port` revert that on exit when it is the only change, otherwise they print the diff — `npm run tsconfig:revert` does the same by hand (equivalent to `git checkout -- tsconfig.json` when you have no edits of your own). `scripts/github-smoke.mts` exercises gist and repository publishing against the real GitHub API (needs a running server with `GITHUB_TOKEN` and a scratch repository; see the file header).
+Every `npm run` script, and the environment variables the test tooling reads:
+
+| Script / variable | What it does |
+| --- | --- |
+| `dev` | Dev server (Next + collaboration WebSocket) on `:3000`. |
+| `dev:port` | `PORT=3800 npm run dev:port`: a dev server on its own port with `.next-manual-<port>` and `.data/pglite-<port>`, so it never collides with the suite or another dev. |
+| `build` / `build:server` | `next build` plus the custom server bundled to `dist/server.mjs` (`build:server` does only the second step). |
+| `start` | Production server from `dist/`. |
+| `start:local` | Production server on `:3900` with a throwaway PGlite and the dev login forced on, for local smoke tests. |
+| `smoke` | API smoke against `BASE_URL` (default `:3900`): health, dev login, dashboard, template doc, PNG asset round-trip, md/html/pdf export. `SMOKE_PDF_OPTIONAL=1` tolerates a 503 from PDF. |
+| `test` / `test:watch` | Vitest once / in watch mode. |
+| `test:fuzz` | Full 1500-document incremental-parser fuzz (`FUZZ_DOCS` / `FUZZ_SEED` override; the seed is logged on failure). |
+| `test:e2e` | Playwright; starts its own server on `:3100` with an in-memory database. `posttest:e2e` removes the run's Next cache afterwards. |
+| `tsconfig:revert` | Undo the `include` churn `next dev` / `next typegen` write into `tsconfig.json` when that is the only change. |
+| `typecheck` / `lint` | `next typegen && tsc --noEmit` / `eslint` (Markdown files are not linted). |
+| `db:generate` | `drizzle-kit generate`: a new migration under `drizzle/` after a schema change. |
+| `mcp` | Run the MCP server from a checkout (`MARKDOC_URL`, `MARKDOC_TOKEN`). |
+| `E2E_PORT` | Private port and Next cache (`.next-e2e-<port>`) for one e2e run; give each worktree its own on a shared machine. |
+| `E2E_SERVER_LOG` | `1` pipes the e2e dev server's stdout into the Playwright output so hydration warnings can be grepped. |
+| `PROD_BASE_URL` | Makes `e2e/prod-smoke.spec.ts` run against a built server instead of starting the dev server; the rest of the suite is skipped. |
+| `READER_POLL_MS` | How often the reader view (`/p/:id`) polls for a newer version (default 30 s). |
+
+`npm run test:e2e` deletes its Next cache (`.next-e2e`, or `.next-e2e-<port>`) before and after every run; `e2e/global-setup.ts` probes `/api/health` and warms the editor and API routes first so a cold compile never fails the first test. `next dev`/`next typegen` append the dist dir in use to `include` in `tsconfig.json`; `test:e2e` and `dev:port` revert that on exit when it is the only change, otherwise they print the diff (`npm run tsconfig:revert` does the same by hand). `scripts/github-smoke.mts` exercises gist and repository publishing against the real GitHub API (needs a running server with `GITHUB_TOKEN` and a scratch repository; see the file header); `scripts/agent-smoke.mts`, `scripts/mcp-smoke.mts`, `scripts/perf-*.mts` and `scripts/screenshot.mts` are one-off dev tools with usage in their headers.
 
 ### Run the production build locally
 
@@ -89,21 +160,27 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 ## How it works
 
-```
- browser                                        server (one Node process)
- ┌──────────────────────────────────────┐       ┌────────────────────────────────┐
- │ CodeMirror ◀── y-codemirror ──▶ Y.Text │◀─WS─▶│ Hocuspocus (auth, persistence) │
- │ ProseMirror ◀─ MarkdownBinding ─▶  │   │       │ Next.js app + API routes       │
- │ comments / suggestions  ◀─▶ Y.Map    │       │ Postgres (Drizzle)             │
- └──────────────────────────────────────┘       └────────────────────────────────┘
+```text
+ browser                                               server (one Node process)
+ ┌─────────────────────────────────────────┐          ┌──────────────────────────────────────┐
+ │ CodeMirror ◀── y-codemirror ──▶ Y.Text   │◀── WS ──▶│ Hocuspocus (auth, persistence,       │
+ │ ProseMirror ◀─ MarkdownBinding ─▶  │     │          │   activity watcher, live API edits)  │
+ │ comments / suggestions ◀──▶ Y.Map        │◀─ HTTP ─▶│ Next.js app + REST API + reader view │
+ │ IndexedDB mirror (y-indexeddb)           │          │ Postgres via Drizzle (PGlite locally) │
+ └─────────────────────────────────────────┘          └──────────────────────────────────────┘
 ```
 
 - **The Markdown text is the document.** A Yjs `Y.Text` holds the source; CodeMirror binds to it directly. That keeps gists and repositories honest and conflict-free merging simple.
-- **The rich pane is a lossless projection.** `src/editor/sync/markdown-binding.ts` serializes local ProseMirror edits block by block and applies them to the text as minimal diffs; text changes from anywhere (other users, the code pane, undo, a pull from GitHub) are parsed and applied to ProseMirror as a minimal replacement, so the caret and selection survive. Empty paragraphs, which Markdown cannot express, are kept locally as "phantom" blocks.
+- **The rich pane is a lossless projection.** `src/editor/sync/markdown-binding.ts` serializes local ProseMirror edits block by block and applies them to the text as minimal diffs; text changes from anywhere (other users, the code pane, undo, an API call, a pull from GitHub) are parsed and applied to ProseMirror as a minimal replacement, so the caret and selection survive. Empty paragraphs, which Markdown cannot express, are kept locally as "phantom" blocks.
 - **Carets are shared across surfaces.** Both editors publish the selection as a source-text position, so your caret in the code pane shows up in everyone's rich pane and vice versa.
 - **Comments and suggestions are annotations** stored in Yjs maps with relative-position anchors (`src/editor/collab/`). They survive concurrent edits and render identically in both panes. Suggesting mode intercepts edits: deletions are kept and marked, insertions are recorded; accepting or rejecting applies the final text.
-- **Open documents are mirrored to IndexedDB** (`src/editor/collab/offline.ts`, one `markdoc:<docId>` database per document via `y-indexeddb`), so edits made offline survive a refresh or closed tab and are merged into the server copy on reconnect; the header shows the unsaved count while offline, "Reconnecting…" during retries, and confirms "All changes saved" once they land. The local copy is deleted when the document is deleted or access is revoked.
-- **Server.** `server/index.ts` hosts Next.js and the collaboration WebSocket (`/collab`) on one port. `src/server/collab/hocuspocus.ts` authenticates with short-lived JWTs minted by `/api/documents/:id/collab-token`, loads documents from Postgres, and persists them (debounced) with automatic versioning. REST routes under `src/app/api` handle documents, sharing, versions, GitHub publishing and imports.
+- **Open documents are mirrored to IndexedDB** (`src/editor/collab/offline.ts`, one `markdoc:<docId>` database per document via `y-indexeddb`), so edits made offline survive a refresh or closed tab and merge into the server copy on reconnect; the header shows the unsaved count while offline and confirms "All changes saved" once they land. The local copy is deleted when the document is deleted or access is revoked.
+- **One server process.** `server/index.ts` hosts Next.js and the collaboration WebSocket (`/collab`) on one port. `src/server/collab/hocuspocus.ts` authenticates with short-lived JWTs minted by `/api/documents/:id/collab-token`, loads documents from Postgres and persists them (debounced) with automatic versioning. API edits go through the same live document (`src/server/livedoc.ts`), so an agent's `suggest` shows up in open editors immediately.
+- **Activity is watched, not logged by the client.** `src/server/activity.ts` records rows from API routes and from a watcher on the live Hocuspocus document (typing is coalesced into one row per actor per ten minutes); the Activity panel reads `GET /api/documents/:id/activity`. Notifications (`src/server/notifications.ts`) are produced the same way, from the comment, suggestion and share routes and from the live document: replies, resolves, suggestion decisions, shares and @mentions, never for the actor; `GET /api/notifications` feeds the bell and the dashboard strip.
+- **Assets live in Postgres.** Pasted or uploaded images are stored as `asset` rows (bytes, SHA-256, MIME) and served from `/api/assets/:id` with the owning document's access check; identical bytes within a document share one row, and "make a copy" copies the referenced ones.
+- **Export and the reader view share one renderer.** `src/server/export/html.ts` turns clean Markdown into the standalone HTML page; `/p/:id` (`src/components/reader`) reuses `renderMarkdownBody` and the `contentHash` to show a "new version" pill, and PDF export prints the same HTML through Chromium.
+- **Per-user tables for organising.** `star` and `recent` rows drive the dashboard's stars, recently-opened order and sort; trash is a `deleted_at` column on `document` that hides it from every route until it is restored or purged after 30 days.
+- **Build.** `drizzle-orm` is bundled into the server (not externalised; see the note under *Run the production build locally*), and `src/server/db/externals.test.ts` pins the short list of packages Node loads from `node_modules`.
 
 ## Deploy to Azure
 
@@ -132,25 +209,52 @@ Expect **$40–55/month** for a small team, about **$25** with the small app siz
 
 ## Project layout
 
+```text
+server/index.ts              custom server: Next.js + collaboration WebSocket on one port
+src/app                      pages: dashboard, /login, /d/[id] editor, /p/[id] reader, /settings
+src/app/api                  REST routes (documents, content, suggest, comments, versions, activity,
+                             assets, export, share, star, trash, templates, notifications, tokens, GitHub)
+src/components/editor        editor UI: header, toolbar, panes, panels (comments, versions, activity),
+                             command palette, slash menu, find bar, table menu, stats popover, dialogs
+src/components/dashboard     document list, search, stars/recents/sort, templates gallery, notifications strip
+src/components/notifications notifications bell in the editor header, open-thread helper
+src/components/reader        /p/[id] reader view: page, table of contents, update pill, download menu
+src/components/settings      API tokens
+src/editor/markdown          GFM schema, parser with source map, incremental parser, serializer, linter
+src/editor/sync              ProseMirror <-> Y.Text binding, text diff
+src/editor/collab            session, comments, suggestions, offline (IndexedDB) models
+src/editor/codemirror        source pane setup, commands, suggesting filter
+src/editor/prosemirror       rich pane setup, commands, input rules, tables, node views
+src/server/db                Drizzle schema, connection (Postgres or PGlite), externals guard
+src/server/collab            Hocuspocus server, JWT collab tokens, document registry, WebSocket
+src/server/export            Markdown -> standalone HTML renderer (shared with the reader), PDF via Chromium
+src/server/github            Octokit: gists, repositories, import
+src/server/documents.ts      create/list/search/star/recent/trash/duplicate
+src/server/livedoc.ts        apply API edits to the live Yjs document (content, suggest, comments)
+src/server/activity.ts       activity rows from routes and the live-document watcher
+src/server/notifications.ts  notification rows (replies, resolves, suggestion decisions, shares, @mentions) + live watcher
+src/server/assets.ts         image assets in Postgres
+src/server/publish.ts        link/publish/pull against gists and repositories
+src/server/tokens.ts         personal API tokens
+mcp/server.mjs               MCP server over stdio (see docs/agents.md)
+drizzle/                     migrations, applied at startup:
+  0000_init                    users, sessions, documents, collaborators, versions, stars
+  0001_api_tokens              personal API tokens
+  0002_timestamptz             all timestamps to timestamptz
+  0003_assets                  image assets (bytes + sha256 per document)
+  0004_mentions                @mentions per comment and mentioned login (replaced by 0008)
+  0005_activity                per-document activity feed
+  0006_recent                  per-user recently-opened documents
+  0007_trash                   document.deleted_at for the trash
+  0008_notifications           notification table; migrates and drops mention
+e2e/                         Playwright specs; global-setup.ts health-probes and warms routes,
+                             dist-dir.ts gives each E2E_PORT its own Next cache
+scripts/smoke.mts            API smoke against a running (production) server
+scripts/dev-port.mts         dev server on a private port/cache/db
+scripts/build-server.mjs     esbuild bundle of server/index.ts -> dist/server.mjs
+scripts/live/                PowerShell ops for Burke's live :3000 server (start, promote, autostart)
+infra, deploy                Bicep and deployment script
 ```
-server/index.ts            custom server: Next.js + collaboration WebSocket
-src/app                    routes (dashboard, login, /d/[id] editor) and API
-src/components/editor      editor UI (header, toolbar, panes, panels, dialogs)
-src/editor/markdown        GFM schema, parser with source map, serializer, linter
-src/editor/sync            ProseMirror <-> Y.Text binding
-src/editor/collab          session, comments, suggestions models
-src/editor/codemirror      source pane setup, commands, suggesting filter
-src/editor/prosemirror     rich pane setup, commands, input rules, node views
-src/server                 database (Drizzle), documents, GitHub, publish, collaboration server
-e2e                        Playwright tests
-infra, deploy              Bicep and deployment script
-```
-
-## License
-
-MIT
-
-
 
 ## Live test server (Burke's :3000)
 
@@ -159,3 +263,7 @@ Burke's live test server runs `npm run dev` from the pinned worktree `C:\Dev\ai-
 - `start-live.ps1` — idempotent start: exits 0 if `/api/health` already answers 200, otherwise kills stale `markdoc-live` node processes, deletes `.next`, starts `npm run dev` hidden (log appended to `markdoc-data\live.log`, rotated at 20 MB) and waits up to 180 s for health.
 - `promote.ps1 -Sha <sha>` — what the lead does at every merge: verifies the sha is on `origin/main`, stops the server, `git checkout --detach <sha>`, runs `npm ci --ignore-scripts` only if `package.json`/`package-lock.json` changed, clears `.next`, restarts; rolls back to the previous sha if health never returns 200.
 - `install-autostart.ps1` — registers a per-user scheduled task "Markdoc live server" (at logon, no admin) that runs `start-live.ps1`; `-Uninstall` removes it. Re-run it from `markdoc-live` after the first promote that includes these scripts so the task points at the permanent path.
+
+## License
+
+MIT

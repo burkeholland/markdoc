@@ -1,0 +1,5 @@
+{
+  // Prose and tables in README.md / docs/agents.md are written one sentence or one row per line;
+  // wrapping them would make the tables unreadable in source, so only the line-length rule is off.
+  "MD013": false
+}
