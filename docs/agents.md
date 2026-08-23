@@ -31,7 +31,7 @@ Tools:
 | Tool | What it does |
 | --- | --- |
 | `markdoc_whoami` | Which user and agent identity the token acts as. |
-| `markdoc_list_documents` | Documents you own or that are shared with you. |
+| `markdoc_list_documents` | Documents you own or that are shared with you, most recently opened first; each has `starred` and `lastOpenedAt`. Pass `starred: true` for only starred ones. |
 | `markdoc_search_documents` | Find documents by title or body text (`query`, optional `limit`); each hit includes a snippet around the match. |
 | `markdoc_create_document` | New document from Markdown (`content`) or from a template (`template` id); returns the URL to open in the browser. |
 | `markdoc_list_templates` | The template ids `markdoc_create_document` accepts, with names and descriptions. |
@@ -52,7 +52,8 @@ All routes accept `Authorization: Bearer mdk_…`.
 | Method & path | Body | Purpose |
 | --- | --- | --- |
 | `GET /api/me` | | Current user and agent name. |
-| `GET /api/documents` | | List documents. |
+| `GET /api/documents` | | List documents, most recently opened first (never-opened ones follow by last edit); each has `starred` and `lastOpenedAt`. `?starred=1` lists only the caller's starred documents. |
+| `GET /api/documents/:id/star` / `PUT` / `DELETE` | | Read, set or clear the caller's star on a document (`{ starred }`). Stars are per user. |
 | `GET /api/documents?q=text&limit=20` | | Search titles and content (case-insensitive, 2+ chars); `{ documents: [{ …, snippet }], query }`. |
 | `POST /api/documents` | `{ title?, content?, template? }` | Create. `template` is an id from `GET /api/templates`; it fills `title` and `content` when they are omitted (`{{date}}` → today, `{{user}}` → your login). Unknown id → `400`. |
 | `GET /api/templates` | | `{ templates: [{ id, name, description }] }` — the ids: `blank`, `meeting-notes`, `project-readme`, `design-doc`, `weekly-status`, `blog-post`, `decision-record`, `checklist`. |

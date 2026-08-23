@@ -1,5 +1,6 @@
 import { handler, json, requireAccess } from "@/server/http";
 import { signCollabToken } from "@/server/collab/token";
+import { recordDocumentOpen } from "@/server/documents";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -7,6 +8,8 @@ type Params = { params: Promise<{ id: string }> };
 export const POST = handler(async (_req: Request, { params }: Params) => {
   const { id } = await params;
   const { role, user } = await requireAccess(id, "view");
+  // Every editor session starts here, so this doubles as "the user opened the document" for the dashboard's recents.
+  if (user) await recordDocumentOpen(user.id, id).catch((err: unknown) => console.error("recordDocumentOpen failed", err));
   const token = await signCollabToken({
     userId: user?.id ?? `anon-${crypto.randomUUID().slice(0, 8)}`,
     docId: id,

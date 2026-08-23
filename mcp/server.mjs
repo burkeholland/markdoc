@@ -62,11 +62,19 @@ server.registerTool(
 
 server.registerTool(
   "markdoc_list_documents",
-  { title: "List documents", description: "List the documents the user owns or that are shared with them (id, title, storage, last edit).", inputSchema: {} },
-  async () => {
-    const { documents } = await api("GET", "/api/documents");
-    const lines = documents.map((d) => `- ${d.title} — id ${d.id} — ${d.storage}${d.repoName ? ` ${d.repoOwner}/${d.repoName}:${d.repoPath}` : ""} — edited ${d.updatedAt} — ${docUrl(d.id)}`);
-    return ok(lines.length ? lines.join("\n") : "No documents yet.", { documents });
+  {
+    title: "List documents",
+    description:
+      "List the documents the user owns or that are shared with them (id, title, storage, last edit, starred, lastOpenedAt). Most recently opened first; never-opened documents follow by last edit.",
+    inputSchema: { starred: z.boolean().optional().describe("Only documents the user has starred") },
+  },
+  async ({ starred }) => {
+    const { documents } = await api("GET", `/api/documents${starred ? "?starred=1" : ""}`);
+    const lines = documents.map(
+      (d) =>
+        `- ${d.starred ? "★ " : ""}${d.title} — id ${d.id} — ${d.storage}${d.repoName ? ` ${d.repoOwner}/${d.repoName}:${d.repoPath}` : ""} — edited ${d.updatedAt}${d.lastOpenedAt ? ` — opened ${d.lastOpenedAt}` : ""} — ${docUrl(d.id)}`,
+    );
+    return ok(lines.length ? lines.join("\n") : starred ? "No starred documents." : "No documents yet.", { documents });
   },
 );
 

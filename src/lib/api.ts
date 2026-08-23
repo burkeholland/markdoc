@@ -88,17 +88,23 @@ export interface ActivityPageDto {
   nextBefore: string | null;
 }
 
+export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt"> & { updatedAt: string; createdAt: string; lastOpenedAt: string | null };
+export type SearchResultDto = Omit<SearchResult, "updatedAt" | "createdAt" | "lastOpenedAt"> & { updatedAt: string; createdAt: string; lastOpenedAt: string | null };
+
 export const api = {
   documents: {
-    list: () => request<{ documents: (Omit<DocumentSummary, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string })[] }>("/api/documents"),
+    list: (opts: { starred?: boolean } = {}) => request<{ documents: DocumentSummaryDto[] }>(`/api/documents${opts.starred ? "?starred=1" : ""}`),
     search: (q: string, init?: RequestInit) =>
-      request<{ documents: (Omit<SearchResult, "updatedAt" | "createdAt"> & { updatedAt: string; createdAt: string })[]; query: string }>(
+      request<{ documents: SearchResultDto[]; query: string }>(
         `/api/documents?q=${encodeURIComponent(q)}`,
         init,
       ),
     create: (body: { title?: string; content?: string; template?: string } = {}) =>
       request<{ document: { id: string; title: string } }>("/api/documents", { method: "POST", body: JSON.stringify(body) }),
     get: (id: string) => request<{ document: DocumentDto; role: Role }>(`/api/documents/${id}`),
+    starred: (id: string) => request<{ starred: boolean }>(`/api/documents/${id}/star`),
+    star: (id: string) => request<{ starred: true }>(`/api/documents/${id}/star`, { method: "PUT" }),
+    unstar: (id: string) => request<{ starred: false }>(`/api/documents/${id}/star`, { method: "DELETE" }),
     patch: (id: string, body: { title?: string; linkAccess?: DocumentDto["linkAccess"] }) =>
       request<{ document: DocumentDto }>(`/api/documents/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     delete: (id: string) => request<{ ok: true }>(`/api/documents/${id}`, { method: "DELETE" }),

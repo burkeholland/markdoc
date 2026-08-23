@@ -3,17 +3,25 @@ import { handler, HttpError, json, readJson, requireUser } from "@/server/http";
 import { createDocument, listDocumentsForUser, searchDocumentsForUser } from "@/server/documents";
 import { applyTemplate, getTemplate } from "@/lib/templates";
 
-const querySchema = z.object({ q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(20) });
+const querySchema = z.object({
+  q: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  /** `starred=1|true` lists only the caller's starred documents (ignored when searching). */
+  starred: z
+    .string()
+    .optional()
+    .transform((v) => v === "1" || v === "true"),
+});
 
 export const GET = handler(async (req: Request) => {
   const user = await requireUser();
   const params = new URL(req.url).searchParams;
-  const { q, limit } = querySchema.parse({ q: params.get("q") ?? undefined, limit: params.get("limit") ?? undefined });
+  const { q, limit, starred } = querySchema.parse({ q: params.get("q") ?? undefined, limit: params.get("limit") ?? undefined, starred: params.get("starred") ?? undefined });
   if (q !== undefined) {
     const documents = await searchDocumentsForUser(user, q, { limit });
     return json({ documents, query: q });
   }
-  const documents = await listDocumentsForUser(user);
+  const documents = await listDocumentsForUser(user, { starred });
   return json({ documents });
 });
 
