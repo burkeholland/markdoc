@@ -320,6 +320,10 @@ describe("slash menu undo", () => {
     expect(view.state.doc.childCount).toBe(3);
     expect(view.state.doc.child(2).type).toBe(schema.nodes.paragraph);
     expect(view.state.doc.child(2).textContent).toBe("/");
+
+    // The typed "/" is the next step.
+    undoManager.undo();
+    expect(ytext.toString()).toBe(ORIGINAL);
   });
 
   it("typing right after the choice starts a new undo step", () => {
