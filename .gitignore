@@ -51,6 +51,10 @@ shots/
 dist/
 
 .next-e2e/
+# per-run / per-port Next dist dirs (playwright.config.ts, scripts/dev-port.mts, probes)
+.next-e2e*/
+.next-manual*/
+.next-probe*/
 
 
 # Agent board CLI (per-directory identity)

@@ -59,12 +59,16 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 ```bash
 npm test              # Vitest: parser/serializer, sync binding, suggestions/comments models, DB, collaboration server (~200 tests); incremental-parser fuzz runs 300 seeded docs
 npm run test:fuzz     # Full 1500-document incremental-parser fuzz (FUZZ_DOCS / FUZZ_SEED override; the seed is logged on failure)
-npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs, tables, templates, offline persistence (~50 tests)
+npm run test:e2e      # Playwright: two-browser collaboration, comments, suggestions, versions, sharing, editing, commenter role, insert dialogs, tables, templates, offline persistence (~50 tests); E2E_PORT=3190 for a private port + cache
 npm run typecheck
 npm run lint
 ```
 
-`npm run test:e2e` starts its own server on port 3100 with an in-memory database. `scripts/github-smoke.mts` exercises gist and repository publishing against the real GitHub API (needs a running server with `GITHUB_TOKEN` and a scratch repository; see the file header).
+```bash
+PORT=3800 npm run dev:port   # manual server on its own port, Next cache and PGlite dir (see below)
+```
+
+`npm run test:e2e` starts its own server on port 3100 with an in-memory database and a throwaway Next cache (`.next-e2e`, or `.next-e2e-<port>` with `E2E_PORT=3190 npm run test:e2e`), deleted before and after every run; on a shared machine give each worktree its own `E2E_PORT` so runs never share a cache. For a manual server that cannot collide with the suite or another dev, use `PORT=3800 npm run dev:port` (PowerShell: `$env:PORT=3800; npm run dev:port`) — it serves on that port with `.next-manual-3800` and `.data/pglite-3800`. `next dev`/`next typegen` append the dist dir in use to `include` in `tsconfig.json`; `test:e2e` and `dev:port` revert that on exit when it is the only change, otherwise they print the diff — `npm run tsconfig:revert` does the same by hand (equivalent to `git checkout -- tsconfig.json` when you have no edits of your own). `scripts/github-smoke.mts` exercises gist and repository publishing against the real GitHub API (needs a running server with `GITHUB_TOKEN` and a scratch repository; see the file header).
 
 ### Run the production build locally
 
