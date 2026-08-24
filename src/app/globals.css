@@ -30,161 +30,10 @@
 
 :root {
   color-scheme: light;
-  /* Raw palette. @theme inline above maps --color-* onto these so Tailwind utilities re-resolve when [data-theme] changes. */
-  --p-ink: #111827;
-  --p-ink-2: #374151;
-  --p-ink-3: #6b7280;
-  --p-ink-4: #9ca3af;
-  --p-line: #e5e7eb;
-  --p-line-2: #d1d5db;
-  --p-surface: #ffffff;
-  --p-surface-2: #f9fafb;
-  --p-surface-3: #f3f4f6;
-  --p-accent: #2563eb;
-  --p-accent-hover: #1d4ed8;
-  --p-accent-soft: #eff6ff;
-  --p-success: #16a34a;
-  --p-warning: #d97706;
-  --p-danger: #dc2626;
-  --p-on-accent: #ffffff;
-  --p-inverse: #111827;
-  /* CodeMirror markdown/syntax palette (src/editor/codemirror/theme.ts reads these). */
-  --cm-ink: #1f2937;
-  --cm-strong: #111827;
-  --cm-muted: #6b7280;
-  --cm-faint: #9ca3af;
-  --cm-punct: #374151;
-  --cm-code: #be185d;
-  --cm-url-underline: #93c5fd;
-  --cm-label: #dc2626;
-  --cm-tag: #0891b2;
-  --cm-keyword: #7c3aed;
-  --cm-string: #16a34a;
-  --cm-function: #2563eb;
-  --cm-variable: #b45309;
-  /* 5.2:1 on white, ≥ 4.7 on every light code surface incl. brand paper/chrome (#ea580c was 3.6). */
-  --cm-number: #c2410c;
-  --cm-active-line: #f8fafc;
-  --cm-selection: #bfdbfe88;
-  --cm-bracket: #dbeafe;
-  --cm-search: #fde68a;
-  --cm-search-selected: #fbbf24;
-  --cm-tooltip-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
-  /* Collaboration decorations. */
-  --md-comment-bg: #fef3c7;
-  --md-comment-bg-active: #fde68a;
-  --md-comment-line: #f59e0b;
-  --md-insert-bg: #dcfce7;
-  --md-insert-ink: #166534;
-  --md-delete-bg: #fee2e2;
-  --md-delete-ink: #991b1b;
-  --md-focus-line: #bfdbfe;
-  --md-inline-code: #be185d;
-  /* highlight.js palette (rich pane code blocks and the reader). */
-  --hljs-comment: #6b7280;
-  --hljs-keyword: #7c3aed;
-  --hljs-string: #047857;
-  --hljs-string-2: #16a34a;
-  --hljs-number: #b45309;
-  --hljs-literal: #c2410c;
-  --hljs-title: #1d4ed8;
-  --hljs-title-2: #2563eb;
-  --hljs-attr: #0f766e;
-  --hljs-name: #0891b2;
-  --hljs-deletion: #b91c1c;
-  --scrollbar-thumb: #d1d5db;
-}
-
-[data-theme="dark"] {
-  color-scheme: dark;
-  --p-ink: #e5e7eb;
-  --p-ink-2: #c9d1dc;
-  --p-ink-3: #9ca3af;
-  /* 5.4:1 on surface, 4.9:1 on surface-2 (AA for small text; #6b7280 was 3.96:1). */
-  --p-ink-4: #7f889a;
-  --p-line: #273244;
-  --p-line-2: #354152;
-  --p-surface: #0b0f17;
-  --p-surface-2: #111827;
-  --p-surface-3: #1f2937;
-  --p-accent: #60a5fa;
-  --p-accent-hover: #93c5fd;
-  --p-accent-soft: rgba(96, 165, 250, 0.16);
-  --p-success: #4ade80;
-  --p-warning: #fbbf24;
-  --p-danger: #f87171;
-  --p-on-accent: #0b0f17;
-  --p-inverse: #374151;
-
-  --cm-ink: #d1d5db;
-  --cm-strong: #f3f4f6;
-  --cm-muted: #9ca3af;
-  --cm-faint: #7f889a;
-  --cm-punct: #9ca3af;
-  --cm-code: #f472b6;
-  --cm-url-underline: #3b82f6;
-  --cm-label: #f87171;
-  --cm-tag: #22d3ee;
-  --cm-keyword: #c084fc;
-  --cm-string: #4ade80;
-  --cm-function: #60a5fa;
-  --cm-variable: #fbbf24;
-  --cm-number: #fb923c;
-  --cm-active-line: #111827;
-  --cm-selection: #3b82f655;
-  --cm-bracket: #1e3a8a;
-  --cm-search: #854d0e;
-  --cm-search-selected: #b45309;
-  --cm-tooltip-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
-
-  --md-comment-bg: rgba(245, 158, 11, 0.22);
-  --md-comment-bg-active: rgba(245, 158, 11, 0.4);
-  --md-comment-line: #d97706;
-  --md-insert-bg: rgba(34, 197, 94, 0.22);
-  --md-insert-ink: #86efac;
-  --md-delete-bg: rgba(239, 68, 68, 0.22);
-  --md-delete-ink: #fca5a5;
-  --md-focus-line: #1e40af;
-  --md-inline-code: #f472b6;
-
-  --hljs-comment: #8b949e;
-  --hljs-keyword: #c084fc;
-  --hljs-string: #4ade80;
-  --hljs-string-2: #4ade80;
-  --hljs-number: #fbbf24;
-  --hljs-literal: #fb923c;
-  --hljs-title: #60a5fa;
-  --hljs-title-2: #60a5fa;
-  --hljs-attr: #2dd4bf;
-  --hljs-name: #22d3ee;
-  --hljs-deletion: #f87171;
-  --scrollbar-thumb: #374151;
-}
-
-/* ---------- Brand candidates (task #398, phase 1) ----------
-   Two looks behind `<html data-brand="a|b">` (set by src/lib/brand.ts from `?brand=`), layered on
-   the same tokens as dark mode: a brand block overrides the light palette, `[data-brand][data-theme="dark"]`
-   the dark one. No brand attribute = the current look. Both blocks define the same token set
-   (src/app/brand-tokens.test.ts) and every pair below is WCAG AA; axe checks them live with
-   color-contrast on in e2e/a11y.spec.ts ("axe: brands"). Nothing here moves a component: the
-   brand-only chrome (header shadow, toolbar pills, paper preview) is keyed off classes the
-   components already carry. Unbranded defaults for the new knobs live in :root / dark above. */
-:root {
-  /* Display face for document titles and h1–h3 in the preview; the body stays --font-sans. */
-  --p-font-display: var(--font-sans);
-  /* Background of the preview column and of the header/toolbar chrome; both are the surface until a brand says otherwise. */
-  --p-paper: var(--p-surface);
-  --p-chrome: var(--p-surface);
-  /* Corner radius of buttons, inputs and icon buttons (rounded-lg today). */
-  --p-radius-control: 0.5rem;
-  --p-selection: #bfdbfe;
-}
-[data-theme="dark"] {
-  --p-selection: #1e3a8a;
-}
-
-/* Option A — "Ink & teal": deep teal accent, warm paper preview, Fraunces for headings. */
-[data-brand="a"] {
+  /* Raw palette ("Ink & teal", Burke #1205 / tasks #398 + #416). @theme inline above maps --color-* onto
+     these so Tailwind utilities re-resolve when [data-theme] changes. Warm stone inks, a deep teal accent,
+     a faintly warm paper behind the preview. Every pair below is WCAG AA (src/app/tokens-contrast.test.ts,
+     src/app/theme-contrast.test.ts); axe re-checks them live with color-contrast on in e2e/a11y.spec.ts. */
   --p-ink: #1c1917;
   --p-ink-2: #44403c;
   --p-ink-3: #57534e;
@@ -202,27 +51,69 @@
   --p-danger: #b91c1c;
   --p-on-accent: #ffffff;
   --p-inverse: #1c1917;
+  /* Display face for the wordmark, document titles and h1–h3 in the preview/reader; the body stays --font-sans. */
   --p-font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
+  /* Background of the preview column (paper) and of the header/toolbar chrome. */
   --p-paper: #fcfbf7;
   --p-chrome: #ffffff;
+  /* Corner radius of buttons, inputs and icon buttons. */
   --p-radius-control: 0.375rem;
+  /* Text selection inside rendered Markdown (preview, reader). */
   --p-selection: #c4ebe4;
+  /* CodeMirror markdown/syntax palette (src/editor/codemirror/theme.ts reads these). */
+  --cm-ink: #292524;
+  --cm-strong: #1c1917;
+  --cm-muted: #57534e;
   --cm-faint: #6b6560;
-  --cm-function: #0f766e;
+  --cm-punct: #44403c;
+  --cm-code: #be185d;
   --cm-url-underline: #5eead4;
+  --cm-label: #dc2626;
+  --cm-tag: #0891b2;
+  --cm-keyword: #7c3aed;
+  --cm-string: #16a34a;
+  --cm-function: #0f766e;
+  --cm-variable: #b45309;
+  /* 5.2:1 on white, ≥ 4.7 on every light code surface incl. paper/chrome (#ea580c was 3.6). */
+  --cm-number: #c2410c;
+  --cm-active-line: #faf9f5;
   --cm-selection: #99f6e488;
   --cm-bracket: #ccfbf1;
-  --cm-active-line: #faf9f5;
+  --cm-search: #fde68a;
+  --cm-search-selected: #fbbf24;
+  --cm-tooltip-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  /* Collaboration decorations. */
+  --md-comment-bg: #fef3c7;
+  --md-comment-bg-active: #fde68a;
+  --md-comment-line: #f59e0b;
+  --md-insert-bg: #dcfce7;
+  --md-insert-ink: #166534;
+  --md-delete-bg: #fee2e2;
+  --md-delete-ink: #991b1b;
   --md-focus-line: #99f6e4;
+  --md-inline-code: #be185d;
+  /* highlight.js palette (rich pane code blocks and the reader). */
   --hljs-comment: #57534e;
+  --hljs-keyword: #7c3aed;
+  --hljs-string: #047857;
+  --hljs-string-2: #16a34a;
+  --hljs-number: #b45309;
+  --hljs-literal: #c2410c;
   --hljs-title: #0f766e;
   --hljs-title-2: #0d9488;
+  --hljs-attr: #0f766e;
+  --hljs-name: #0891b2;
+  --hljs-deletion: #b91c1c;
   --scrollbar-thumb: #d6d3d1;
 }
-[data-brand="a"][data-theme="dark"] {
+
+/* Dark: the tuned warm-grey variant of the same look (lighter teal accent, near-black text on filled controls). */
+[data-theme="dark"] {
+  color-scheme: dark;
   --p-ink: #e7e5e4;
   --p-ink-2: #d6d3d1;
   --p-ink-3: #a8a29e;
+  /* 5.8:1 on surface, 5.3:1 on surface-2 (AA for small text: timestamps, line numbers, Markdown punctuation). */
   --p-ink-4: #97918a;
   --p-line: #2b2e33;
   --p-line-2: #3a3d43;
@@ -237,176 +128,102 @@
   --p-danger: #f87171;
   --p-on-accent: #14161a;
   --p-inverse: #3a3633;
-  --p-font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
   --p-paper: #14161a;
   --p-chrome: #14161a;
-  --p-radius-control: 0.375rem;
   --p-selection: #134e4a;
+
+  --cm-ink: #d6d3d1;
+  --cm-strong: #f5f5f4;
+  --cm-muted: #a8a29e;
   --cm-faint: #97918a;
-  --cm-function: #2dd4bf;
+  --cm-punct: #a8a29e;
+  --cm-code: #f472b6;
   --cm-url-underline: #14b8a6;
+  --cm-label: #f87171;
+  --cm-tag: #22d3ee;
+  --cm-keyword: #c084fc;
+  --cm-string: #4ade80;
+  --cm-function: #2dd4bf;
+  --cm-variable: #fbbf24;
+  --cm-number: #fb923c;
+  --cm-active-line: #1c1f24;
   --cm-selection: #14b8a655;
   --cm-bracket: #134e4a;
-  --cm-active-line: #1c1f24;
+  --cm-search: #854d0e;
+  --cm-search-selected: #b45309;
+  --cm-tooltip-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+
+  --md-comment-bg: rgba(245, 158, 11, 0.22);
+  --md-comment-bg-active: rgba(245, 158, 11, 0.4);
+  --md-comment-line: #d97706;
+  --md-insert-bg: rgba(34, 197, 94, 0.22);
+  --md-insert-ink: #86efac;
+  --md-delete-bg: rgba(239, 68, 68, 0.22);
+  --md-delete-ink: #fca5a5;
   --md-focus-line: #0f766e;
+  --md-inline-code: #f472b6;
+
   --hljs-comment: #a8a29e;
+  --hljs-keyword: #c084fc;
+  --hljs-string: #4ade80;
+  --hljs-string-2: #4ade80;
+  --hljs-number: #fbbf24;
+  --hljs-literal: #fb923c;
   --hljs-title: #2dd4bf;
   --hljs-title-2: #2dd4bf;
+  --hljs-attr: #2dd4bf;
+  --hljs-name: #22d3ee;
+  --hljs-deletion: #f87171;
   --scrollbar-thumb: #3a3d43;
 }
 
-/* Option B — "Graphite & amber": amber accent, cool graphite chrome, neutral preview, Inter Tight headings. */
-[data-brand="b"] {
-  --p-ink: #16181d;
-  --p-ink-2: #3b3f47;
-  --p-ink-3: #5b616b;
-  --p-ink-4: #656b75;
-  --p-line: #e3e5e8;
-  --p-line-2: #cfd3d8;
-  --p-surface: #ffffff;
-  --p-surface-2: #f4f5f7;
-  --p-surface-3: #eceef1;
-  --p-accent: #b45309;
-  --p-accent-hover: #92400e;
-  --p-accent-soft: #fdf1e3;
-  --p-success: #15803d;
-  --p-warning: #b45309;
-  --p-danger: #b91c1c;
-  --p-on-accent: #ffffff;
-  --p-inverse: #16181d;
-  --p-font-display: var(--font-inter-tight), var(--font-sans);
-  --p-paper: #ffffff;
-  --p-chrome: #f4f5f7;
-  --p-radius-control: 0.375rem;
-  --p-selection: #fde6c4;
-  --cm-faint: #656b75;
-  --cm-function: #b45309;
-  --cm-url-underline: #fcd34d;
-  --cm-selection: #fde68a88;
-  --cm-bracket: #fef3c7;
-  --cm-active-line: #f8f9fa;
-  --md-focus-line: #fcd34d;
-  --hljs-comment: #5b616b;
-  --hljs-title: #b45309;
-  --hljs-title-2: #d97706;
-  --scrollbar-thumb: #cfd3d8;
-}
-[data-brand="b"][data-theme="dark"] {
-  --p-ink: #e6e8eb;
-  --p-ink-2: #c8ccd2;
-  --p-ink-3: #9aa1ab;
-  --p-ink-4: #8a929e;
-  --p-line: #262a31;
-  --p-line-2: #343941;
-  --p-surface: #0f1115;
-  --p-surface-2: #171a20;
-  --p-surface-3: #1f232a;
-  --p-accent: #fbbf24;
-  --p-accent-hover: #fcd34d;
-  --p-accent-soft: rgba(251, 191, 36, 0.16);
-  --p-success: #4ade80;
-  --p-warning: #fbbf24;
-  --p-danger: #f87171;
-  --p-on-accent: #0f1115;
-  --p-inverse: #343941;
-  --p-font-display: var(--font-inter-tight), var(--font-sans);
-  --p-paper: #0f1115;
-  --p-chrome: #0f1115;
-  --p-radius-control: 0.375rem;
-  --p-selection: #78350f;
-  --cm-faint: #8a929e;
-  --cm-function: #fbbf24;
-  --cm-url-underline: #d97706;
-  --cm-selection: #f59e0b55;
-  --cm-bracket: #78350f;
-  --cm-active-line: #171a20;
-  --md-focus-line: #b45309;
-  --hljs-comment: #9aa1ab;
-  --hljs-title: #fbbf24;
-  --hljs-title-2: #fbbf24;
-  --scrollbar-thumb: #343941;
-}
-
-/* Brand-only chrome. Outside a brand these rules do nothing (no data-brand on <html>). */
-[data-brand] .app-header {
+/* ---------- Chrome ----------
+   Header and toolbar sit on --p-chrome with a hairline shadow instead of a border, toolbar groups are
+   pills, the preview column is paper. Keyed off classes the components already carry; these rules are
+   unlayered on purpose so they beat the call-site utilities (border-b, bg-surface/90). */
+.app-header {
   background: var(--p-chrome);
   border-bottom-color: transparent;
   box-shadow: 0 1px 0 color-mix(in srgb, var(--color-line) 70%, transparent), 0 2px 10px -6px rgba(15, 23, 42, 0.18);
 }
-[data-brand][data-theme="dark"] .app-header {
+[data-theme="dark"] .app-header {
   box-shadow: 0 1px 0 var(--color-line), 0 2px 12px -6px rgba(0, 0, 0, 0.7);
 }
-[data-brand] .app-toolbar {
+.app-toolbar {
   background: var(--p-chrome);
   border-bottom-color: transparent;
   box-shadow: 0 1px 0 color-mix(in srgb, var(--color-line) 60%, transparent);
   gap: 6px;
 }
-[data-brand] .tb-group {
+.tb-group {
   border: 1px solid var(--color-line);
   border-radius: 999px;
   padding: 2px;
   gap: 1px;
   background: var(--color-surface);
 }
-[data-brand] .tb-group .icon-btn {
+.tb-group .icon-btn {
   border-radius: 999px;
   height: 2rem;
   width: 2rem;
 }
-[data-brand] .tb-group .icon-btn.w-auto {
+.tb-group .icon-btn.w-auto {
   width: auto;
 }
-[data-brand] .tb-divider {
+.tb-divider {
   display: none;
 }
-[data-brand] .rich-column {
+.rich-column {
   background: var(--p-paper);
 }
-[data-brand] .wordmark {
+.wordmark {
   font-family: var(--p-font-display);
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-[data-brand="a"] .wordmark {
   font-weight: 500;
+  letter-spacing: -0.02em;
   font-variation-settings: "opsz" 24, "SOFT" 40;
 }
-[data-brand] .doc-title,
-[data-brand] .hero-title,
-[data-brand] .md-rich h1,
-[data-brand] .md-rich h2,
-[data-brand] .md-rich h3,
-[data-brand] .reader-body h1,
-[data-brand] .reader-body h2,
-[data-brand] .reader-body h3 {
-  font-family: var(--p-font-display);
-}
-[data-brand="a"] .md-rich h1,
-[data-brand="a"] .md-rich h2,
-[data-brand="a"] .md-rich h3,
-[data-brand="a"] .reader-body h1,
-[data-brand="a"] .reader-body h2,
-[data-brand="a"] .reader-body h3,
-[data-brand="a"] .hero-title,
-[data-brand="a"] .doc-title {
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  font-variation-settings: "opsz" 36, "SOFT" 30;
-}
-[data-brand="b"] .md-rich h1,
-[data-brand="b"] .md-rich h2,
-[data-brand="b"] .md-rich h3,
-[data-brand="b"] .reader-body h1,
-[data-brand="b"] .reader-body h2,
-[data-brand="b"] .reader-body h3,
-[data-brand="b"] .hero-title,
-[data-brand="b"] .doc-title {
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-[data-brand] .md-rich ::selection,
-[data-brand] .reader-body ::selection {
+.md-rich ::selection,
+.reader-body ::selection {
   background: var(--p-selection);
 }
 
@@ -1560,6 +1377,31 @@ body {
 }
 .reader-body .hljs-strong {
   font-weight: 700;
+}
+
+/* ---------- Display type ----------
+   Fraunces (--p-font-display) only where it belongs: the document title, the landing hero, and h1–h3
+   in the preview, the reader and (hand-mirrored in src/server/export/html.ts) the HTML export. The
+   body stays Inter. Same specificity as the heading rules above, so this block must stay below them. */
+.doc-title,
+.hero-title,
+.md-rich h1,
+.md-rich h2,
+.md-rich h3,
+.reader-body h1,
+.reader-body h2,
+.reader-body h3 {
+  font-family: var(--p-font-display);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  font-variation-settings: "opsz" 36, "SOFT" 30;
+}
+/* Phone: a 40-character `# Title` must fit in two lines at 390 px (2em of 16px Fraunces wraps to three). */
+@media (max-width: 767.98px) {
+  .md-rich h1,
+  .reader-body h1 {
+    font-size: 1.75em;
+  }
 }
 
 /* The article is the printed page; chrome, TOC and pills are screen-only. */

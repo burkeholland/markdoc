@@ -41,9 +41,9 @@ const DOC = [
  *   the translucent dialog overlay and editor decorations, and reports "incomplete" rather than a verdict;
  *   the light tokens are checked by eye and by src/app/theme-contrast.test.ts (see README → Accessibility).
  *   The dark dashboard and dark editor scans enable it (`contrast: true`): every dark token pair passed
- *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught. The two brand
- *   candidates ("axe: brands" below) are scanned with it on in light and dark — their palettes were
- *   chosen to pass (src/app/brand-tokens.test.ts).
+ *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught. "axe: contrast"
+ *   below scans the dashboard, editor, settings and reader with it on in light and dark — the palette
+ *   was chosen to pass (src/app/tokens-contrast.test.ts).
  */
 const DISABLED_RULES = ["color-contrast"];
 
@@ -485,49 +485,56 @@ test.describe("axe: editor", () => {
 });
 
 /**
- * Brand candidates (task #398): the two looks behind `?brand=a|b` (src/lib/brand.ts) are scanned with
- * color-contrast ON in light and dark, on the dashboard and the editor. This is the gate on the two
- * palettes: a failing colour is fixed in globals.css, never here. The default look keeps the scans above.
+ * The look (Ink & teal, tasks #398 → #416) scanned with color-contrast ON in light and dark on the
+ * dashboard, the editor, settings and the reader. This is the gate on the palette: a failing colour is
+ * fixed in globals.css (src/app/tokens-contrast.test.ts has the same pairs as numbers), never here.
  */
-test.describe("axe: brands", () => {
-  for (const brand of ["a", "b"] as const) {
-    test(`brand ${brand}: dashboard light + dark (color-contrast enabled)`, async ({ browser }) => {
-      const { page, context } = await signIn(browser, `a11y-brand-${brand}-dash`);
-      await seedDashboard(page);
-      await page.goto(`/?brand=${brand}`);
-      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
-      await expect(page.getByTestId("document-card").first()).toBeVisible();
-      await expect(page.getByTestId("starred-strip")).toBeVisible();
-      await scan(page, `dashboard (brand ${brand}, light)`, { contrast: true });
+test.describe("axe: contrast", () => {
+  test("dashboard light + dark (color-contrast enabled)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-contrast-dash");
+    await seedDashboard(page);
+    await expect(page.locator("html")).not.toHaveAttribute("data-brand");
+    await scan(page, "dashboard (light)", { contrast: true });
 
-      await setTheme(page, "dark");
-      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
-      await expect(page.getByTestId("document-card").first()).toBeVisible();
-      await scan(page, `dashboard (brand ${brand}, dark)`, { contrast: true });
-      await context.close();
-    });
+    await setTheme(page, "dark");
+    await expect(page.getByTestId("document-card").first()).toBeVisible();
+    await scan(page, "dashboard (dark)", { contrast: true });
+    await context.close();
+  });
 
-    test(`brand ${brand}: editor split + outline + comments, light + dark (color-contrast enabled)`, async ({ browser }) => {
-      const { page, context } = await signIn(browser, `a11y-brand-${brand}-editor`);
-      const id = await createDocument(page, DOC, `Brand ${brand} fixture`);
-      await page.goto(`/?brand=${brand}`);
-      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
-      await openDocument(page, id);
-      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
-      await expect(page.locator(".md-rich table")).toBeVisible();
-      await ensureOutlineOpen(page);
-      await ensureCommentsOpen(page);
-      await scan(page, `editor (brand ${brand}, light) split + outline + comments`, { contrast: true });
+  test("editor split + outline + comments, light + dark (color-contrast enabled)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-contrast-editor");
+    const id = await createDocument(page, DOC, "Contrast fixture");
+    await openDocument(page, id);
+    await expect(page.locator(".md-rich table")).toBeVisible();
+    await ensureOutlineOpen(page);
+    await ensureCommentsOpen(page);
+    await scan(page, "editor (light) split + outline + comments", { contrast: true });
 
-      await setTheme(page, "dark");
-      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
-      await expect(page.locator(".md-rich table")).toBeVisible();
-      await ensureOutlineOpen(page);
-      await ensureCommentsOpen(page);
-      await scan(page, `editor (brand ${brand}, dark) split + outline + comments`, { contrast: true });
-      await context.close();
-    });
-  }
+    await setTheme(page, "dark");
+    await expect(page.locator(".md-rich table")).toBeVisible();
+    await ensureOutlineOpen(page);
+    await ensureCommentsOpen(page);
+    await scan(page, "editor (dark) split + outline + comments", { contrast: true });
+    await context.close();
+  });
+
+  test("settings + reader, light + dark (color-contrast enabled)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-contrast-pages");
+    const id = await createDocument(page, DOC, "Contrast reader fixture");
+    expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+    for (const theme of ["light", "dark"] as const) {
+      await page.goto("/settings");
+      await setTheme(page, theme);
+      await expect(page.getByTestId("theme-row")).toBeVisible();
+      await scan(page, `settings (${theme})`, { contrast: true });
+      await page.goto(`/p/${id}`);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(page.getByTestId("reader-body")).toBeVisible();
+      await scan(page, `reader (${theme})`, { contrast: true });
+    }
+    await context.close();
+  });
 });
 
 test.describe("axe: phone (iPhone 13)", () => {
