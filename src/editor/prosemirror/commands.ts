@@ -472,8 +472,8 @@ export const liftEmptyQuoteParagraph: Command = (state, dispatch) => {
   const hit = quoteParagraphAt(state);
   if (!hit || hit.$from.parent.content.size > 0) return false;
   const range = hit.$from.blockRange();
-  const target = range && liftTarget(range);
-  if (target == null) return false;
+  const target = range ? liftTarget(range) : null;
+  if (!range || target == null) return false;
   dispatch?.(state.tr.lift(range, target).scrollIntoView());
   return true;
 };
@@ -483,8 +483,8 @@ export const liftFirstQuoteParagraphOnBackspace: Command = (state, dispatch) => 
   const hit = quoteParagraphAt(state);
   if (!hit || hit.$from.parentOffset !== 0 || hit.index !== 0) return false;
   const range = hit.$from.blockRange();
-  const target = range && liftTarget(range);
-  if (target == null) return false;
+  const target = range ? liftTarget(range) : null;
+  if (!range || target == null) return false;
   dispatch?.(state.tr.lift(range, target).scrollIntoView());
   return true;
 };

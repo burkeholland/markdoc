@@ -12,6 +12,9 @@ interface InternalState {
   marks: Record<string, unknown>;
   options: SerializerOptions;
   out: string;
+  delim: string;
+  closed: PMNode | null;
+  flushClose(size?: number): void;
 }
 
 const StateCtor = MarkdownSerializerState as unknown as new (
@@ -82,7 +85,7 @@ const nodes: Record<string, NodeSerializer> = {
    * exactly and the caret stays where the user put it.
    */
   blockquote(state, node) {
-    const internal = state as unknown as InternalState & { delim: string; closed: PMNode | null };
+    const internal = state as unknown as InternalState;
     state.write("> ");
     const oldDelim = internal.delim;
     internal.delim += "> ";
@@ -100,7 +103,7 @@ const nodes: Record<string, NodeSerializer> = {
         }
         if (i === 0) internal.out = internal.out.replace(/[ \t]+$/, "") + "\n" + marker + "\n";
         else {
-          state.flushClose(2);
+          internal.flushClose(2);
           internal.out += marker + "\n";
         }
         internal.closed = null;
