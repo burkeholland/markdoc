@@ -53,8 +53,10 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     const thread = page.getByTestId("comment-thread").first();
     await expect(thread).toHaveAttribute("data-suggestion", "pending");
     const diff = thread.getByTestId("suggestion-diff");
+    // "very unique" → "unique": the diff is one deletion; the kept word stays plain.
     await expect(diff.locator("del")).toContainText("very");
-    await expect(diff.locator("ins")).toContainText("unique");
+    await expect(diff).toContainText("unique");
+    await expect(diff.locator("ins")).toHaveCount(0);
     // The prose renders without the fence.
     await expect(thread.getByTestId("comment-body")).toHaveText("Redundant.");
     await expect(thread.getByTestId("comment-body")).not.toContainText("```");
