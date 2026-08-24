@@ -1363,3 +1363,6 @@ body {
 .reader-body[data-hide-first-h1="true"] > h1:first-child {
   display: none;
 }
+.reader-body[data-hide-first-h1="true"] > h1:first-child + * {
+  margin-top: 0;
+}
