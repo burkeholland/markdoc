@@ -124,12 +124,20 @@ export function DialogContent({
   children,
   className,
   wide,
+  onClosed,
 }: {
   title: string;
   description?: string;
   children: React.ReactNode;
   className?: string;
   wide?: boolean;
+  /**
+   * Runs once the closed dialog has let go of focus. An action that must leave focus in the editor
+   * (insert a table, apply a link) belongs here rather than in the button's onClick: while the modal
+   * is still mounted its focus trap pulls focus straight back into the dialog, and on unmount focus
+   * goes to the opener — the toolbar button, so the next keystroke went to the button (task #437).
+   */
+  onClosed?: () => void;
 }) {
   // Dialogs here open from state (no Radix Trigger), so Radix would leave focus on <body> when they
   // close. Remember the opener — editor pane, toolbar or header button — and hand focus back to it.
@@ -146,6 +154,7 @@ export function DialogContent({
           e.preventDefault();
           restoreFocus(returnRef.current);
           returnRef.current = null;
+          onClosed?.();
         }}
       >
         <div className="mb-4 flex items-start justify-between gap-4">

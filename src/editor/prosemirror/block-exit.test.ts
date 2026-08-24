@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { EditorState, TextSelection, type Command } from "prosemirror-state";
+import { EditorState, TextSelection, type Command, type Transaction } from "prosemirror-state";
+import type { EditorView } from "prosemirror-view";
 import { baseKeymap, chainCommands, createParagraphNear, exitCode, liftEmptyBlock, newlineInCode, splitBlock } from "prosemirror-commands";
 import { parseMarkdown } from "../markdown/parse";
 import { serializeMarkdown } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
+import { markdownInputRules } from "./inputrules";
 import {
   codeBlockToParagraphOnBackspace,
   exitCodeBlockOnTripleEnter,
@@ -265,5 +267,39 @@ describe("end of document", () => {
   it("Enter after the last paragraph always gives a new paragraph", () => {
     const s = type(press(caretIn("Last.", "paragraph"), enter), "New");
     expect(md(s)).toBe("Last.\n\nNew");
+  });
+});
+
+describe("Markdown input rules in the preview (task #437)", () => {
+  const rules = markdownInputRules();
+  /** Type `text` one character at a time through the input-rule plugin, the way handleTextInput sees it. */
+  function typeWithRules(start: EditorState, text: string): EditorState {
+    let state = start;
+    for (const ch of text) {
+      const { from, to } = state.selection;
+      const view = { state, composing: false, dispatch: (tr: Transaction) => void (state = state.apply(tr)) } as unknown as EditorView;
+      const handled = (rules.props.handleTextInput as (this: unknown, v: EditorView, from: number, to: number, text: string) => boolean).call(rules, view, from, to, ch);
+      if (!handled) state = state.apply(state.tr.insertText(ch));
+    }
+    return state;
+  }
+
+  it("\"---\" on an empty paragraph becomes a rule with the caret in a new paragraph below it, not in the next block", () => {
+    const s = typeWithRules(press(caretIn("Target paragraph.\n\nAfter text.", "paragraph", undefined, 0), enter), "---");
+    expect(md(s)).toBe("Target paragraph.\n\n---\n\nAfter text.");
+    expect(caretBlock(s)).toBe("paragraph");
+    expect(s.selection.$from.parent.content.size, "the caret is in the empty paragraph under the rule").toBe(0);
+    expect(md(type(s, "Below"))).toBe("Target paragraph.\n\n---\n\nBelow\n\nAfter text.");
+  });
+
+  it("typing ~~x~~ strikes x through and the intermediate sources read back unchanged", () => {
+    let s = caretIn("Target paragraph.", "paragraph");
+    for (const ch of " ~~typed~") {
+      s = typeWithRules(s, ch);
+      expect(parseMarkdown(md(s)).doc.eq(s.doc), `after typing ${JSON.stringify(ch)}: ${md(s)}`).toBe(true);
+    }
+    s = typeWithRules(s, "~");
+    expect(md(s)).toBe("Target paragraph. ~~typed~~");
+    expect(md(type(s, " plain"))).toBe("Target paragraph. ~~typed~~ plain");
   });
 });

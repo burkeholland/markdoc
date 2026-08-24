@@ -1,5 +1,5 @@
 import { InputRule, inputRules, textblockTypeInputRule, wrappingInputRule } from "prosemirror-inputrules";
-import type { Plugin } from "prosemirror-state";
+import { TextSelection, type Plugin } from "prosemirror-state";
 import type { MarkType } from "prosemirror-model";
 import { schema } from "../markdown/schema";
 import { findParentNode } from "./utils";
@@ -80,6 +80,9 @@ export function markdownInputRules(): Plugin {
       const block = tr.doc.nodeAt(blockPos);
       if (!block || block.content.size !== 0) return null;
       tr.replaceWith(blockPos, blockPos + block.nodeSize, [schema.nodes.horizontal_rule.create(), schema.nodes.paragraph.create()]);
+      // The mapped selection would land after the new paragraph, at the start of the next block
+      // (typing "---" then "Below" gave "BelowAfter text.", task #437): put the caret in the paragraph.
+      tr.setSelection(TextSelection.create(tr.doc, blockPos + 2));
       return tr;
     }),
   ];

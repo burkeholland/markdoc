@@ -4,6 +4,20 @@ import { memo, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { shortcut } from "@/lib/utils";
 
+/**
+ * Editor actions picked in a dialog run after the dialog has closed and let go of focus (see
+ * `DialogContent.onClosed`), so the caret ends up in the editor, not on the toolbar button.
+ */
+function useAfterClose() {
+  const pending = useRef<(() => void) | null>(null);
+  const onClosed = () => {
+    const run = pending.current;
+    pending.current = null;
+    run?.();
+  };
+  return { defer: (run: () => void) => void (pending.current = run), onClosed };
+}
+
 export const LinkDialog = memo(function LinkDialog({
   open,
   onOpenChange,
@@ -32,15 +46,17 @@ export const LinkDialog = memo(function LinkDialog({
     if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(t)) return `https://${t}`;
     return t;
   };
+  const after = useAfterClose();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={initial?.href ? "Edit link" : "Insert link"}>
+      <DialogContent title={initial?.href ? "Edit link" : "Insert link"} onClosed={after.onClosed}>
         <form
           className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
             if (!href.trim()) return;
-            onSubmit(normalize(href), text.trim());
+            const [h, t] = [normalize(href), text.trim()];
+            after.defer(() => onSubmit(h, t));
             onOpenChange(false);
           }}
         >
@@ -58,7 +74,7 @@ export const LinkDialog = memo(function LinkDialog({
                 type="button"
                 className="btn btn-ghost text-danger"
                 onClick={() => {
-                  onRemove();
+                  after.defer(() => onRemove());
                   onOpenChange(false);
                 }}
               >
@@ -122,15 +138,17 @@ export const ImageDialog = memo(function ImageDialog({
       if (fileInput.current) fileInput.current.value = "";
     }
   };
+  const after = useAfterClose();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Insert image" description="Paste the address of an image or upload one. Alt text describes the image for people who can't see it.">
+      <DialogContent title="Insert image" description="Paste the address of an image or upload one. Alt text describes the image for people who can't see it." onClosed={after.onClosed}>
         <form
           className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
             if (!src.trim()) return;
-            onSubmit(src.trim(), alt.trim());
+            const [s, a] = [src.trim(), alt.trim()];
+            after.defer(() => onSubmit(s, a));
             onOpenChange(false);
           }}
         >
@@ -184,9 +202,10 @@ export const ImageDialog = memo(function ImageDialog({
 
 export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (rows: number, cols: number) => void }) {
   const [hover, setHover] = useState<{ r: number; c: number }>({ r: 3, c: 3 });
+  const after = useAfterClose();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Insert table" description="Pick a size. The first row becomes the header.">
+      <DialogContent title="Insert table" description="Pick a size. The first row becomes the header." onClosed={after.onClosed}>
         <div className="flex flex-col items-center gap-3">
           <div className="grid grid-cols-8 gap-1" onMouseLeave={() => setHover({ r: 3, c: 3 })} data-testid="table-grid">
             {Array.from({ length: 6 }, (_, r) =>
@@ -197,7 +216,7 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
                   className={`h-6 w-6 rounded border ${r < hover.r && c < hover.c ? "border-accent bg-accent-soft" : "border-line-2 bg-surface"}`}
                   onMouseEnter={() => setHover({ r: r + 1, c: c + 1 })}
                   onClick={() => {
-                    onSubmit(r + 1, c + 1);
+                    after.defer(() => onSubmit(r + 1, c + 1));
                     onOpenChange(false);
                   }}
                   aria-label={`${r + 1} by ${c + 1}`}
