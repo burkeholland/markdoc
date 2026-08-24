@@ -61,6 +61,8 @@ export interface PresenceUser extends CollabUser {
   isAgent: boolean;
   /** Agent status text ("reading", "drafting the summary"); null for people. */
   status: string | null;
+  /** For agents: login of the user the token acts for (what `@login/<agent>` mentions resolve to). */
+  ownerLogin: string | null;
 }
 
 export interface CollabSessionOptions {
@@ -478,7 +480,7 @@ export class CollabSession {
     const byUser = new Map<string, PresenceUser>();
     const localId = this.ydoc.clientID;
     this.awareness.getStates().forEach((state, clientId) => {
-      const u = state.user as (Partial<CollabUser> & { role?: Role; isAgent?: boolean; status?: string | null }) | undefined;
+      const u = state.user as (Partial<CollabUser> & { role?: Role; isAgent?: boolean; status?: string | null; userLogin?: string | null }) | undefined;
       if (!u?.id) return;
       let cursor: number | null = null;
       const head = (state.cursor as { head?: unknown } | undefined)?.head;
@@ -509,6 +511,7 @@ export class CollabSession {
         isLocal: clientId === localId,
         isAgent: u.isAgent === true,
         status: typeof u.status === "string" && u.status ? u.status : null,
+        ownerLogin: u.isAgent === true && typeof u.userLogin === "string" && u.userLogin ? u.userLogin : null,
       };
       const existing = byUser.get(u.id);
       if (!existing || (existing.cursor === null && cursor !== null) || entry.isLocal) byUser.set(u.id, entry);

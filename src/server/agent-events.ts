@@ -3,6 +3,7 @@ import { createTwoFilesPatch } from "diff";
 import { getDb, schema } from "@/server/db";
 import type { SessionUser } from "@/server/documents";
 import { contentHash } from "@/server/export/html";
+import { parseAgentMentions } from "@/editor/collab/mentions";
 
 // This module is loaded by both the custom server (Hocuspocus hooks wake waiters) and the Next.js route
 // bundle (long-polls wait). They are separate module graphs in one process, so all state lives on globalThis,
@@ -23,7 +24,7 @@ export class InvalidCursorError extends Error {
 export type AgentEvent =
   | { type: "content.changed"; documentId: string; contentHash: string; previousHash: string | null; diff: string | null; truncated: boolean; at: string }
   | { type: "comment.added" | "comment.replied" | "comment.resolved"; documentId: string; threadId: string | null; author: string; authorKind: string; body: string; quote: string | null; at: string }
-  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; at: string }
+  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; at: string }
   | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; at: string }
   | { type: "activity"; documentId: string; action: string; actor: string; actorKind: string; detail: Record<string, unknown>; at: string };
 
@@ -142,6 +143,11 @@ export function unifiedDiff(before: string, after: string, title = "document.md"
 
 // --- Event collection ---------------------------------------------------------
 
+/** The agent slug when the snippet mentions one of `login`'s agents (`@login/Agent`), else null. */
+function mentionedAgent(snippet: string, login: string): string | null {
+  return parseAgentMentions(snippet).find((m) => m.login === login)?.agent ?? null;
+}
+
 function activityToEvent(row: typeof schema.activity.$inferSelect): AgentEvent | null {
   const d = (row.detail ?? {}) as Record<string, unknown>;
   const at = row.createdAt.toISOString();
@@ -220,7 +226,7 @@ export async function collectDocumentEvents(docId: string, user: SessionUser, cu
       .limit(200);
     for (const m of mentions) {
       next.n = Math.max(next.n, m.createdAt.getTime());
-      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, at: m.createdAt.toISOString() });
+      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, agent: mentionedAgent(m.snippet, login), at: m.createdAt.toISOString() });
     }
   }
 
@@ -255,7 +261,7 @@ export async function collectUserEvents(user: SessionUser, cursor: CursorState |
       .limit(200);
     for (const { n, title } of mentions) {
       next.n = Math.max(next.n, n.createdAt.getTime());
-      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, at: n.createdAt.toISOString() });
+      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: mentionedAgent(n.snippet, login), at: n.createdAt.toISOString() });
     }
   }
 

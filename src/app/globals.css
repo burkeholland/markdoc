@@ -353,6 +353,14 @@ body {
 .cm-ySelectionCaret[data-flash] {
   animation: md-caret-flash 1s ease-out;
 }
+/* an agent's caret (published by the server): dashed so it reads as "not a person", bot glyph in the label */
+.cm-ySelectionCaret[data-agent] {
+  border-left-style: dashed !important;
+}
+.cm-ySelectionCaret[data-agent] > .cm-ySelectionInfo::before {
+  content: "🤖 ";
+  font-size: 10px;
+}
 
 /* ---------- Shared collaboration decorations (both panes) ---------- */
 .md-comment {
@@ -843,6 +851,25 @@ body {
 }
 .md-remote-caret[data-flash] {
   animation: md-caret-flash 1s ease-out;
+}
+/* an agent's caret: dashed line, bot glyph before the name */
+.md-remote-caret[data-agent] {
+  border-left-style: dashed;
+}
+.md-remote-caret-bot {
+  display: inline-block;
+  margin-right: 3px;
+  vertical-align: -1px;
+}
+.md-remote-caret-bot > svg {
+  height: 11px;
+  width: 11px;
+}
+.mention-chip-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  vertical-align: baseline;
 }
 @keyframes md-caret-flash {
   0%,

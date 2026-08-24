@@ -294,3 +294,62 @@ export function cleanTextWith(text: string, suggestions: ResolvedSuggestion[]): 
   out += text.slice(pos);
   return out;
 }
+
+/**
+ * Inverse of {@link cleanTextWith} for one offset: the index in the full text (with pending insertions)
+ * that corresponds to `clean`, an offset in the clean text. An offset right before a pending insertion
+ * stays before it, so a range never swallows a suggestion that merely touches it.
+ */
+export function cleanToRawOffset(clean: number, suggestions: Pick<ResolvedSuggestion, "type" | "from" | "to">[]): number {
+  let raw = Math.max(0, clean);
+  let covered = 0;
+  for (const s of suggestions.filter((s) => s.type === "insert").sort((a, b) => a.from - b.from)) {
+    const from = Math.max(s.from, covered);
+    const to = Math.max(s.to, from);
+    if (from >= raw) break;
+    raw += to - from;
+    covered = to;
+  }
+  return raw;
+}
+
+/** Inverse of {@link cleanToRawOffset}: the clean-text offset of an index in the full text (inside a pending insertion → its start). */
+export function rawToCleanOffset(raw: number, suggestions: Pick<ResolvedSuggestion, "type" | "from" | "to">[]): number {
+  let removed = 0;
+  let covered = 0;
+  for (const s of suggestions.filter((s) => s.type === "insert").sort((a, b) => a.from - b.from)) {
+    const from = Math.max(s.from, covered);
+    const to = Math.max(s.to, from);
+    if (from >= raw) break;
+    removed += Math.min(to, raw) - from;
+    covered = to;
+  }
+  return Math.max(0, raw - removed);
+}
+
+/** Where an agent says it is: offsets in the clean text, or the first occurrence of a quote. */
+export type CleanRangeInput = { from: number; to: number } | { anchor: string };
+
+/**
+ * Resolve a clean-text range to offsets in the full text. Offsets are clamped to the clean text;
+ * an `anchor` that does not occur yields null.
+ */
+export function resolveCleanRange(
+  clean: string,
+  suggestions: Pick<ResolvedSuggestion, "type" | "from" | "to">[],
+  input: CleanRangeInput,
+): { clean: { from: number; to: number }; raw: { from: number; to: number } } | null {
+  let from: number;
+  let to: number;
+  if ("anchor" in input) {
+    if (!input.anchor) return null;
+    const idx = clean.indexOf(input.anchor);
+    if (idx === -1) return null;
+    from = idx;
+    to = idx + input.anchor.length;
+  } else {
+    from = Math.min(Math.max(0, input.from), clean.length);
+    to = Math.min(Math.max(from, input.to), clean.length);
+  }
+  return { clean: { from, to }, raw: { from: cleanToRawOffset(from, suggestions), to: cleanToRawOffset(to, suggestions) } };
+}

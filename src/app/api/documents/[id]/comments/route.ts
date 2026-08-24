@@ -43,6 +43,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   let result: unknown = { ok: true };
   // Side effects the live-document watcher only performs for WebSocket transactions; collected inside the mutation, run after it.
   const after: (() => Promise<unknown>)[] = [];
+  // The text the action concerns (new comment's quote, replied thread's range): an agent's caret moves there.
+  let at: { from: number; to: number } | undefined;
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
     const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
@@ -62,11 +64,13 @@ export const POST = handler(async (req: Request, { params }: Params) => {
             to = Math.min(Math.max(body.to ?? from, from), text.length);
           }
           result = { id: model.add({ from, to, body: body.body, author }) };
+          at = { from, to };
           break;
         }
         case "reply": {
           const replyId = model.reply(body.threadId, body.body, author);
           result = { id: replyId };
+          at = model.get(body.threadId)?.range ?? undefined;
           const map = model.ymap.get(body.threadId);
           const thread = map ? readThread(map) : null;
           const reply = thread?.replies.find((r) => r.id === replyId);
@@ -110,7 +114,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     } finally {
       model.destroy();
     }
-    recordAgentActivity(doc, user, body.action === "react" ? "reacted" : "commented");
+    recordAgentActivity(doc, user, body.action === "react" ? "reacted" : "commented", at);
   });
   // Editors' comments are picked up by the live-document watcher; this covers the no-collab path too (idempotent).
   if (body.action === "add" || body.action === "reply" || body.action === "edit") {
