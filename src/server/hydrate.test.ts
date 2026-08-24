@@ -16,7 +16,7 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const { getDb, schema } = await import("./db");
 const { createDocument, duplicateDocument } = await import("./documents");
-const { TEXT_KEY, META_KEY, hydrateDoc, encodeSeedState } = await import("./collab/seed");
+const { TEXT_KEY, META_KEY, hydrateDoc, encodeSeedState, isDoubledSeed, revertDoubledSeed } = await import("./collab/seed");
 const { createCollabServer, shutdownCollab } = await import("./collab/hocuspocus");
 const { attachCollab } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
@@ -78,6 +78,63 @@ describe("seed state", () => {
     expect(hydrateDoc(doc, null, CONTENT, "T")).toBe(true);
     expect(hydrateDoc(new Y.Doc(), new Uint8Array(0), CONTENT, "T")).toBe(true);
     expect(hydrateDoc(new Y.Doc(), null, "", "T")).toBe(false);
+  });
+});
+
+describe("doubled-seed guard", () => {
+  /** Server seeded this lifetime; a client pushes its mirror of an older, never-persisted seed. */
+  function mergeStaleMirror(content: string): Y.Doc {
+    const server = new Y.Doc();
+    const staleMirror = new Y.Doc();
+    hydrateDoc(server, null, content, "T");
+    hydrateDoc(staleMirror, null, content, "T");
+    Y.applyUpdate(server, Y.encodeStateAsUpdate(staleMirror));
+    return server;
+  }
+
+  it("recognises exactly seed+seed, with or without one separator newline", () => {
+    expect(isDoubledSeed(CONTENT + CONTENT, CONTENT)).toBe(true);
+    const noTrailingNewline = CONTENT.trimEnd();
+    expect(isDoubledSeed(noTrailingNewline + noTrailingNewline, noTrailingNewline)).toBe(true);
+    expect(isDoubledSeed(`${noTrailingNewline}\n${noTrailingNewline}`, noTrailingNewline)).toBe(true);
+    // Real edits, however close, are not the artefact.
+    expect(isDoubledSeed(CONTENT, CONTENT)).toBe(false);
+    expect(isDoubledSeed(`${CONTENT}\n${CONTENT}`, CONTENT)).toBe(false);
+    expect(isDoubledSeed(CONTENT + CONTENT + "x", CONTENT)).toBe(false);
+    expect(isDoubledSeed(CONTENT + "x" + CONTENT, CONTENT)).toBe(false);
+    expect(isDoubledSeed(CONTENT + CONTENT.slice(1), CONTENT)).toBe(false);
+    expect(isDoubledSeed("", "")).toBe(false);
+    expect(isDoubledSeed("ab", "")).toBe(false);
+  });
+
+  it("collapses the merged stale mirror back to the seed and reports it", () => {
+    const server = mergeStaleMirror(CONTENT);
+    expect(server.getText(TEXT_KEY).toString()).toHaveLength(CONTENT.length * 2);
+    const origins: unknown[] = [];
+    server.on("update", (_u: Uint8Array, origin: unknown) => origins.push(origin));
+    expect(revertDoubledSeed(server, CONTENT, { source: "local", context: {} })).toBe(true);
+    expect(server.getText(TEXT_KEY).toString()).toBe(CONTENT);
+    expect(headingCount(server.getText(TEXT_KEY).toString())).toBe(headingCount(CONTENT));
+    expect(origins).toEqual([{ source: "local", context: {} }]);
+    // The correction is a plain update that any client (including the stale one) converges on.
+    const client = new Y.Doc();
+    Y.applyUpdate(client, Y.encodeStateAsUpdate(server));
+    expect(client.getText(TEXT_KEY).toString()).toBe(CONTENT);
+  });
+
+  it("leaves anything that is not the exact double untouched", () => {
+    const edited = new Y.Doc();
+    hydrateDoc(edited, null, CONTENT, "T");
+    edited.getText(TEXT_KEY).insert(CONTENT.length, "- One more item\n");
+    const before = edited.getText(TEXT_KEY).toString();
+    expect(revertDoubledSeed(edited, CONTENT)).toBe(false);
+    expect(edited.getText(TEXT_KEY).toString()).toBe(before);
+
+    const doubledPlusEdit = mergeStaleMirror(CONTENT);
+    doubledPlusEdit.getText(TEXT_KEY).insert(0, "x");
+    const doubledText = doubledPlusEdit.getText(TEXT_KEY).toString();
+    expect(revertDoubledSeed(doubledPlusEdit, CONTENT)).toBe(false);
+    expect(doubledPlusEdit.getText(TEXT_KEY).toString()).toBe(doubledText);
   });
 });
 
@@ -185,6 +242,50 @@ describe("onLoadDocument persists the seed for legacy rows", () => {
     expect(c.getText(TEXT_KEY).toString()).toBe(CONTENT);
     await clientC.close();
     expect((await readRow(docId)).content).toBe(CONTENT);
+  });
+
+  it("a client holding a mirror of a pre-persistence seed is collapsed back to the content on a freshly seeded row", async () => {
+    const docId = await legacyRow();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // The browser's IndexedDB copy: the same Markdown seeded by an older server that never stored it.
+      const stale = new Y.Doc();
+      hydrateDoc(stale, null, CONTENT, "Launch checklist");
+      const client = await connect(docId, stale);
+      // The server seeds on this load (first open since the fix), merges the stale seed, and reverts.
+      await waitFor(() => stale.getText(TEXT_KEY).toString() === CONTENT);
+      expect(headingCount(stale.getText(TEXT_KEY).toString())).toBe(headingCount(CONTENT));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(docId));
+      // The store that follows writes the single text, not the double.
+      await waitFor(() => hocuspocus.documents.get(docId)?.getText(TEXT_KEY).toString() === CONTENT);
+      await sleep(250);
+      expect((await readRow(docId)).content).toBe(CONTENT);
+      await client.close();
+      expect((await readRow(docId)).content).toBe(CONTENT);
+
+      // A cold client afterwards sees the content once.
+      const cold = new Y.Doc();
+      const clientCold = await connect(docId, cold);
+      expect(cold.getText(TEXT_KEY).toString()).toBe(CONTENT);
+      await clientCold.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the guard only watches the first change: a real edit that happens to repeat the text is kept", async () => {
+    const docId = await legacyRow();
+    const a = new Y.Doc();
+    const clientA = await connect(docId, a);
+    a.getText(TEXT_KEY).insert(a.getText(TEXT_KEY).length, "- Lock the door\n");
+    const edited = CONTENT + "- Lock the door\n";
+    await waitFor(() => hocuspocus.documents.get(docId)?.getText(TEXT_KEY).toString() === edited);
+    // Now a deliberate duplication by the user — not the first change, so nothing is reverted.
+    a.getText(TEXT_KEY).insert(a.getText(TEXT_KEY).length, CONTENT);
+    await waitFor(() => hocuspocus.documents.get(docId)?.getText(TEXT_KEY).toString() === edited + CONTENT);
+    await sleep(100);
+    expect(hocuspocus.documents.get(docId)?.getText(TEXT_KEY).toString()).toBe(edited + CONTENT);
+    await clientA.close();
   });
 
   it("a document created through createDocument never needs seeding on load", async () => {

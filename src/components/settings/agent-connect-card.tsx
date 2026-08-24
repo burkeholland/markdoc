@@ -3,11 +3,36 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MCP_PATH } from "@/lib/mcp";
 
 export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
 
-/** MCP config for Copilot CLI / Claude / Cursor pointing at this very server. */
-export function mcpConfigFor(origin: string, token = "MARKDOC_TOKEN"): string {
+/** Placeholder shown where the user's token goes until one is inlined. */
+export const TOKEN_PLACEHOLDER = "MARKDOC_TOKEN";
+
+/**
+ * The MCP config for Copilot CLI / VS Code / Claude / Cursor pointing at this server's remote
+ * endpoint (`/api/mcp`, Streamable HTTP). No checkout needed: a URL and a token.
+ */
+export function mcpHttpConfigFor(origin: string, token: string = TOKEN_PLACEHOLDER): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        markdoc: {
+          type: "http",
+          url: `${origin}${MCP_PATH}`,
+          headers: { Authorization: ["Bearer", token].join(" ") },
+          tools: ["*"],
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/** The stdio alternative: `mcp/server.mjs` from a checkout, for clients that cannot speak HTTP. */
+export function mcpConfigFor(origin: string, token: string = TOKEN_PLACEHOLDER): string {
   return JSON.stringify(
     {
       mcpServers: {
@@ -32,7 +57,7 @@ export function useOrigin(fallback = ""): string {
   return origin;
 }
 
-function CopyBlock({ value, label, testId }: { value: string; label: string; testId?: string }) {
+export function CopyBlock({ value, label, testId, copyTestId }: { value: string; label: string; testId?: string; copyTestId?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="relative">
@@ -48,6 +73,7 @@ function CopyBlock({ value, label, testId }: { value: string; label: string; tes
           setTimeout(() => setCopied(false), 1500);
         }}
         aria-label={`Copy ${label}`}
+        data-testid={copyTestId}
       >
         {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
         {copied ? "Copied" : "Copy"}
@@ -75,7 +101,9 @@ export interface AgentConnectCardProps {
  * Copilot. Used by the Ask-an-agent dialog (first run) and the Settings › Agents section.
  */
 export function AgentConnectCard({ origin, token, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
-  const config = mcpConfigFor(origin || "http://localhost:3000", token ?? undefined);
+  const base = origin || "http://localhost:3000";
+  const config = mcpHttpConfigFor(base, token ?? undefined);
+  const stdioConfig = mcpConfigFor(base, token ?? undefined);
   return (
     <section className={cn("relative rounded-xl border border-violet-200 bg-violet-50/60 p-4 dark:border-violet-900 dark:bg-violet-950/30", className)} data-testid="agent-connect-card" aria-label="Connect an agent">
       {onDismiss && (
@@ -113,10 +141,27 @@ export function AgentConnectCard({ origin, token, onCreateToken, onDismiss, hide
           <div className="min-w-0 flex-1">
             <div className="mb-1.5">
               Add Markdoc to Copilot CLI: run <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">/mcp add</code> and paste this (or merge it into{" "}
-              <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">~/.copilot/mcp-config.json</code>). Point <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">args</code> at your
-              Markdoc checkout and replace <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">MARKDOC_TOKEN</code> with your token.
+              <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">~/.copilot/mcp-config.json</code>; VS Code takes the same shape in{" "}
+              <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">.vscode/mcp.json</code>). It connects to this server over HTTP — no checkout needed.
+              {!token && (
+                <>
+                  {" "}
+                  Replace <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{TOKEN_PLACEHOLDER}</code> with your token.
+                </>
+              )}
             </div>
             <CopyBlock value={config} label="MCP configuration" testId="agent-connect-config" />
+            <details className="mt-2 text-xs text-ink-3">
+              <summary className="cursor-pointer select-none" data-testid="agent-connect-stdio-toggle">
+                Client without HTTP support? Run the server from a checkout (stdio)
+              </summary>
+              <div className="mt-2">
+                <div className="mb-1.5">
+                  Point <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">args</code> at your Markdoc checkout.
+                </div>
+                <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="agent-connect-config-stdio" />
+              </div>
+            </details>
           </div>
         </li>
         <li className="flex gap-3">
