@@ -30,7 +30,8 @@ export function textChangeSpan(oldText: string, newText: string): ChangeSpan | n
 const GLOBAL_CONTEXT = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[[^\]\n]*\]:|\[\^/m;
 
 /** A link reference definition or footnote definition, possibly nested in a blockquote or list item. */
-const DEFINITION = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[[^\]\n]*\]:/m;
+const DEFINITION = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[([^\]\n]*)\]:/m;
+const DEFINITIONS = new RegExp(DEFINITION.source, "gm");
 
 /** True when a region cannot be parsed in isolation because of document-wide constructs. */
 export function hasGlobalContext(text: string): boolean {
@@ -40,6 +41,13 @@ export function hasGlobalContext(text: string): boolean {
 /** True when the text defines a link reference or footnote, which changes how the rest of the document reads. */
 export function hasDefinition(text: string): boolean {
   return DEFINITION.test(text);
+}
+
+/** Identifiers of the definitions in `text`, normalized the way micromark matches them (first definition wins). */
+function definitionIds(text: string): Set<string> {
+  const ids = new Set<string>();
+  for (const m of text.matchAll(DEFINITIONS)) ids.add(m[1].replace(/[\t\n\r ]+/g, " ").trim().toLowerCase().toUpperCase());
+  return ids;
 }
 
 /**
@@ -130,6 +138,10 @@ function parseRegion(region: string, followed: boolean, definitions: readonly st
     if (!node || node.type !== schema.nodes.paragraph || node.textContent !== SENTINEL || parsed.map.blocks[i].from !== sentinelFrom) return null;
     count = i;
     if (count === 0) return null;
+    // At the end of the document an unclosed fence runs to the end of the text, but with the
+    // sentinel behind it it also swallows the trailing line endings: its range then reaches
+    // past the last content line, which an isolated parse never does.
+    if (!followed && parsed.map.blocks[count - 1].to > lineEnd(region, region.trimEnd().length)) return null;
   }
   const nodes: PMNode[] = [];
   let size = 0;
@@ -197,12 +209,17 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
   const touchedFrom = lineStart(oldText, Math.min(span.from, blocks[touchedFirst].from));
   const touchedToOld = lineEnd(oldText, Math.max(span.oldTo, blocks[touchedLast].to));
   if (hasDefinition(oldText.slice(touchedFrom, touchedToOld)) || hasDefinition(newText.slice(touchedFrom, touchedToOld + delta))) return null;
+  // An unchanged neighbour may define references; the first definition of an identifier wins, so
+  // it must not be shadowed by an earlier definition outside the region.
+  const regionIds = definitionIds(region);
   const definitions: string[] = [];
   for (let i = 0; i < n; i++) {
     if (i >= a && i <= b) continue;
     const node = prev.doc.child(i);
     const text = oldText.slice(blocks[i].from, blocks[i].to);
-    if (node.type === schema.nodes.link_definition || node.type === schema.nodes.footnote_definition || hasDefinition(text)) definitions.push(text);
+    if (node.type !== schema.nodes.link_definition && node.type !== schema.nodes.footnote_definition && !hasDefinition(text)) continue;
+    if (i < a && regionIds.size > 0) for (const id of definitionIds(text)) if (regionIds.has(id)) return null;
+    definitions.push(text);
   }
 
   const sub = parseRegion(region, b < n - 1, definitions);
