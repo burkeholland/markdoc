@@ -322,11 +322,38 @@ export async function createDocument(input: CreateDocumentInput): Promise<Docume
   return doc;
 }
 
+/**
+ * Patch document metadata. Refuses a `content` write that does not also carry `ystate`:
+ * `ystate` is authoritative (see collab/seed.ts), so a content-only write would be silently
+ * ignored by every editor. Use {@link setDocumentText} for a never-opened document or
+ * `replaceLiveText` (livedoc.ts) for one that may have editors connected.
+ */
 export async function updateDocument(docId: string, patch: Partial<Document>): Promise<Document | null> {
+  if ("content" in patch && !("ystate" in patch)) {
+    throw new Error("updateDocument: `content` must be written together with `ystate` — use setDocumentText or replaceLiveText");
+  }
   const db = await getDb();
   const [doc] = await db
     .update(schema.documents)
     .set({ ...patch, updatedAt: new Date() })
+    .where(eq(schema.documents.id, docId))
+    .returning();
+  return doc ?? null;
+}
+
+/**
+ * Replace a document's text, writing `content` and a freshly minted `ystate` seed together.
+ * Only for documents nobody can have open yet (e.g. mid-import): a fresh seed discards the
+ * CRDT history, so a connected editor holding the old state would see the text doubled.
+ * For live documents use `replaceLiveText` in livedoc.ts instead.
+ */
+export async function setDocumentText(docId: string, content: string): Promise<Document | null> {
+  const db = await getDb();
+  const [current] = await db.select({ title: schema.documents.title }).from(schema.documents).where(eq(schema.documents.id, docId));
+  if (!current) return null;
+  const [doc] = await db
+    .update(schema.documents)
+    .set({ content, ystate: encodeSeedState(content, current.title), updatedAt: new Date() })
     .where(eq(schema.documents.id, docId))
     .returning();
   return doc ?? null;

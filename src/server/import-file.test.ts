@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, vi } from "vitest";
+import * as Y from "yjs";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -12,8 +13,9 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const { getDb, schema } = await import("@/server/db");
 const { eq } = await import("drizzle-orm");
-const { listVersions } = await import("@/server/documents");
+const { listVersions, updateDocument } = await import("@/server/documents");
 const { getAsset } = await import("@/server/assets");
+const { TEXT_KEY, hydrateDoc } = await import("@/server/collab/seed");
 const {
   convertImport,
   firstHeading,
@@ -32,6 +34,17 @@ const { POST } = await import("@/app/api/import/file/route");
 // 1x1 transparent PNG.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const bytes = (s: string) => new TextEncoder().encode(s);
+
+/** The text an editor would see: decoded from the authoritative `ystate`, not from `content`. */
+function textFromYstate(ystate: Uint8Array | null, content: string, title: string): string {
+  const doc = new Y.Doc();
+  try {
+    hydrateDoc(doc, ystate, content, title);
+    return doc.getText(TEXT_KEY).toString();
+  } finally {
+    doc.destroy();
+  }
+}
 
 let owner: Actor;
 
@@ -159,6 +172,11 @@ describe("importFiles", () => {
     const m = /!\[Beach\]\((\/api\/assets\/[a-z0-9]+)\)/.exec(row.content);
     expect(m).not.toBeNull();
     expect(row.content).toContain("![Lost](missing.png)");
+    // ystate is what the editor actually shows; the rewrite must land there too (regression from #288).
+    const shown = textFromYstate(row.ystate ?? null, row.content, row.title);
+    expect(shown).toBe(row.content);
+    expect(shown).toContain(`![Beach](${m![1]})`);
+    expect(shown).not.toContain("beach.png");
     const asset = await getAsset(m![1].split("/").pop()!);
     expect(asset?.documentId).toBe(doc.id);
     expect(Buffer.from(asset!.bytes).equals(PNG)).toBeTruthy();
@@ -170,6 +188,13 @@ describe("importFiles", () => {
     expect(versions).toHaveLength(1);
     expect(versions[0].kind).toBe("import");
     expect(versions[0].title).toBe("Imported from trip.md");
+  });
+
+  it("updateDocument refuses a content write that leaves ystate behind", async () => {
+    const doc = await importText({ ownerId: owner.id, content: "# Guarded\n", format: "markdown" });
+    await expect(updateDocument(doc.id, { content: "# Changed\n" })).rejects.toThrow(/ystate/);
+    // Other fields still go through.
+    await expect(updateDocument(doc.id, { title: "Renamed" })).resolves.toMatchObject({ title: "Renamed" });
   });
 
   it("importText creates a document from HTML with a given title", async () => {

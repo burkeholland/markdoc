@@ -20,6 +20,7 @@
     "db:generate": "drizzle-kit generate",
     "build:server": "node scripts/build-server.mjs",
     "resume-check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/live/resume-check.ps1",
+    "repair:imported-ystate": "tsx scripts/repair-imported-ystate.mts",
     "mcp": "node mcp/server.mjs"
   },
   "dependencies": {

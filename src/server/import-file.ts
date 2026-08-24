@@ -4,7 +4,7 @@ import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from "r
 import rehypeRemark from "rehype-remark";
 import remarkGfm from "remark-gfm";
 import remarkStringify from "remark-stringify";
-import { addVersion, createDocument, updateDocument } from "@/server/documents";
+import { addVersion, createDocument, setDocumentText } from "@/server/documents";
 import { AssetError, normalizeMime, putAsset } from "@/server/assets";
 
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
@@ -238,7 +238,12 @@ function decode(bytes: Uint8Array): string {
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 
-/** Create one document from already-converted Markdown, attaching matching images as assets. */
+/**
+ * Create one document from already-converted Markdown, attaching matching images as assets.
+ * The row is created first because `asset.document_id` is a foreign key; once the asset URLs are
+ * known the text is rewritten with {@link setDocumentText}, which writes `content` and `ystate`
+ * together (the document cannot be open in an editor yet, so a fresh seed is safe).
+ */
 async function createImported(ownerId: string, converted: ConvertedImport, images: ImportImageInput[], source: string): Promise<ImportedDocument> {
   const warnings = [...converted.warnings];
   const doc = await createDocument({ ownerId, title: converted.title, content: converted.content });
@@ -263,7 +268,7 @@ async function createImported(ownerId: string, converted: ConvertedImport, image
     if (rewritten.missing.length) warnings.push(missingImagesWarning(rewritten.missing));
     if (rewritten.content !== content) {
       content = rewritten.content;
-      await updateDocument(doc.id, { content });
+      await setDocumentText(doc.id, content);
     }
   }
 
