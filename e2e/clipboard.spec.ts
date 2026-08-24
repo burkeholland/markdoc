@@ -39,6 +39,13 @@ async function contextWithout(browser: Browser, ...scripts: (() => void)[]): Pro
   return context;
 }
 
+/** /settings, hydrated: the tokens list has loaded, so the form's handlers are attached. */
+async function openSettings(page: Page) {
+  await page.goto("/settings");
+  await expect(page.getByTestId("token-name")).toBeVisible();
+  await expect(page.getByText("Loading…")).toHaveCount(0);
+}
+
 test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)", () => {
   test("Share agent card, Copy link and the settings token card copy without a page error", async ({ browser }) => {
     const context = await contextWithout(browser, NO_CLIPBOARD_API);
@@ -63,8 +70,7 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     await page.keyboard.press("Escape");
 
     // 3. Settings → create a token → Copy on the token card, plus the connect card's config.
-    await page.goto("/settings");
-    await expect(page.getByTestId("token-name")).toBeVisible();
+    await openSettings(page);
     await page.getByTestId("token-create").click();
     await expect(page.getByTestId("token-created")).toBeVisible();
     await page.getByTestId("copy-token-button").click();
@@ -132,7 +138,7 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     expect(await readClipboard()).toBe(`${origin}/d/${id}`);
     await page.keyboard.press("Escape");
 
-    await page.goto("/settings");
+    await openSettings(page);
     await page.getByTestId("token-create").click();
     await expect(page.getByTestId("token-created")).toBeVisible();
     await page.getByTestId("copy-token-button").click();
