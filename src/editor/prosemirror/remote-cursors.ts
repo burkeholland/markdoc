@@ -20,7 +20,13 @@ interface CaretFlags {
   following: boolean;
   flash: boolean;
   idle: boolean;
+  /** The caret of an agent (API token) published by the server. */
+  agent: boolean;
 }
+
+/** lucide "bot" outline, inline so the label needs no React. */
+const BOT_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>';
 
 function caretWidget(session: CollabSession, color: string, name: string, flags: CaretFlags): HTMLElement {
   const caret = document.createElement("span");
@@ -30,14 +36,21 @@ function caretWidget(session: CollabSession, color: string, name: string, flags:
   if (flags.following) caret.dataset.following = "";
   if (flags.flash) caret.dataset.flash = "";
   if (flags.idle) caret.dataset.idle = "";
+  if (flags.agent) caret.dataset.agent = "";
   const label = document.createElement("span");
   label.className = "md-remote-caret-label";
   label.style.backgroundColor = color;
-  label.textContent = name;
+  if (flags.agent) {
+    const glyph = document.createElement("span");
+    glyph.className = "md-remote-caret-bot";
+    glyph.innerHTML = BOT_SVG;
+    label.appendChild(glyph);
+  }
+  label.appendChild(document.createTextNode(name));
   // The label is the one part of a remote caret the user can click: it starts following.
   label.style.pointerEvents = "auto";
   label.style.cursor = "pointer";
-  label.title = `Follow ${name}`;
+  label.title = flags.agent ? `Follow ${name} (agent)` : `Follow ${name}`;
   const onMouseDown = (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -71,7 +84,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
   session.awareness.getStates().forEach((state, clientId) => {
     if (clientId === localId) return;
     const cursor = state.cursor as CursorState | undefined;
-    const user = state.user as { id?: string; name?: string; color?: string; colorLight?: string } | undefined;
+    const user = state.user as { id?: string; name?: string; color?: string; colorLight?: string; isAgent?: boolean } | undefined;
     if (!cursor?.anchor || !cursor.head) return;
     const anchorSrc = resolve(session, cursor.anchor);
     const headSrc = resolve(session, cursor.head);
@@ -85,6 +98,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
       following: session.followUserId === userId,
       flash: session.flashUserId === userId,
       idle: isIdle(typeof state.lastActive === "number" ? state.lastActive : null, now),
+      agent: user?.isAgent === true,
     };
     const head = clamp(map.srcToPm(headSrc));
     const anchor = clamp(map.srcToPm(anchorSrc));
@@ -95,7 +109,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     }
     decorations.push(
       Decoration.widget(head, () => caretWidget(session, color, name, flags), {
-        key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}`,
+        key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}`,
         side: head >= anchor ? 1 : -1,
         ignoreSelection: true,
       }),

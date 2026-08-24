@@ -94,8 +94,8 @@ Twenty-six tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_list_requests` | `status?`, `limit?` | Work humans asked for with **Ask an agent** in the editor: open requests across every document you can see, with the selected text, the instruction and the mode. See [Requests](#requests). |
 | `markdoc_claim_request` | `documentId`, `requestId` | Take a request; the editor's pill switches to *"<agent> is working…"*. |
 | `markdoc_complete_request` | `documentId`, `requestId`, `summary?` | Mark it done: the requester is notified (`request.done`) and the Comments panel opens on your suggestions. |
-| `markdoc_presence` | `id`, `state: active \| idle \| left`, `status?` | Show up in the document's presence list as a bot avatar with a short status (*reading*, *drafting the summary*). Lapses 90 s after the last call or write; `left` removes you at once. |
-| `markdoc_watch` | `id?`, `since?`, `wait?` (default 30, max 55) | Wait for humans: long-poll a document for `content.changed` (with a diff), `comment.added` / `replied` / `resolved`, `mention`, `request.created`; or, without `id`, mentions and requests across every document you can see. First call without `since` returns a cursor only. See [Sit in a document](#sit-in-a-document). |
+| `markdoc_presence` | `id`, `state: active \| idle \| left`, `status?`, `anchor?`, `cursor?: { from, to }` | Show up in the document's presence list as a bot avatar with a short status (*reading*, *drafting the summary*). `anchor` (exact text, first occurrence — like a comment's `quote`) or `cursor` (offsets in the clean Markdown from `markdoc_read_document { clean: true }`) places your **caret** there: people see a labelled caret with a bot glyph in both panes, like any collaborator's; `cursor: null` hides it. `suggest`, `comment` and `replace_content` move it to where you acted. Lapses 90 s after the last call or write; `left` removes you at once. |
+| `markdoc_watch` | `id?`, `since?`, `wait?` (default 30, max 55) | Wait for humans: long-poll a document for `content.changed` (with a diff), `comment.added` / `replied` / `resolved`, `mention` (your user, or you as `@user/Your-Agent` from the picker — then `agent` names you), `request.created`; or, without `id`, mentions and requests across every document you can see. First call without `since` returns a cursor only. See [Sit in a document](#sit-in-a-document). |
 
 `markdoc_suggest` and `markdoc_comment` (`add`) also take an optional `requestId` so the work they produce is counted against the request.
 
@@ -225,12 +225,12 @@ Request status is also mirrored into the live document (`meta.agentRequests`), w
 
 | Method & path | Body / query | Access | Purpose |
 | --- | --- | --- | --- |
-| `POST /api/agent/documents/:id/presence` | `{ state: active \| idle \| left, status?, cursor?: { from, to } }` | token only (view) | Heartbeat: the agent appears in the header's presence list with a bot avatar and `status` until 90 s after the last heartbeat or write, or until `left`. Every write through the API (`content`, `suggest`, `comments`) marks the agent active implicitly. |
-| `GET /api/agent/documents/:id/presence` | | view | Agents currently present on the document. |
-| `GET /api/agent/documents/:id/events` | `?since=<cursor>&wait=<s ≤ 55>` | token only (view) | Long-poll for the document: `{ cursor, events }`. Without `since` you get the current cursor and no events. Events: `content.changed` (`contentHash`, unified `diff` of the clean text against the last state you saw, ≤ 200 lines, `truncated`), `comment.added` / `comment.replied` / `comment.resolved` (`threadId`, `author`, `body`), `mention` (your user was @-mentioned: `by`, `snippet`, `refId`), `request.created` (`requestId`, `mode`, `instruction`, `quote`) and `activity` (anything else in the feed). Returns as soon as something happens. |
+| `POST /api/agent/documents/:id/presence` | `{ state: active \| idle \| left, status?, anchor?, cursor?: { from, to } \| null }` | token only (view) | Heartbeat: the agent appears in the header's presence list with a bot avatar and `status` until 90 s after the last heartbeat or write, or until `left`. `anchor` (first occurrence of the text in the clean Markdown; `400` when absent) or `cursor` (clean-text offsets, clamped) places the agent's caret; the response echoes `presence.cursor` as clean offsets. Every write through the API (`content`, `suggest`, `comments`) marks the agent active implicitly and moves the caret to the edit / the quote. |
+| `GET /api/agent/documents/:id/presence` | | view | Agents currently present on the document (`name`, `userLogin`, `state`, `status`, `cursor`). |
+| `GET /api/agent/documents/:id/events` | `?since=<cursor>&wait=<s ≤ 55>` | token only (view) | Long-poll for the document: `{ cursor, events }`. Without `since` you get the current cursor and no events. Events: `content.changed` (`contentHash`, unified `diff` of the clean text against the last state you saw, ≤ 200 lines, `truncated`), `comment.added` / `comment.replied` / `comment.resolved` (`threadId`, `author`, `body`), `mention` (your user was @-mentioned: `by`, `snippet`, `refId`; `agent` is your token's slug when the mention was `@user/Your-Agent`), `request.created` (`requestId`, `mode`, `instruction`, `quote`) and `activity` (anything else in the feed). Returns as soon as something happens. |
 | `GET /api/agent/events` | `?since=<cursor>&wait=<s ≤ 55>` | token only | The cross-document variant an idle session sits on: `mention` and `request.created` across every document the token's user owns or collaborates on. |
 
-Agents are published into the document's awareness by the server, so the bot avatar, its status and the "Agent" badge in the presence popover appear in every open browser without any client-side polling.
+Agents are published into the document's awareness by the server, so the bot avatar, its status, the "Agent" badge in the presence popover and its caret appear in every open browser without any client-side polling. The caret is sent as the same Yjs relative positions browsers publish, so it follows the text as people edit around it.
 
 ### Versions, activity and export
 
@@ -284,6 +284,8 @@ Sharing a document with an audience: `/p/:id` is the read-only **reader view** (
 ### Mentioning people
 
 Agents can get someone's attention by writing `@login` (their GitHub handle) in a comment or reply body, for example `"body": "@burke the numbers in section 2 look stale"`. Mentions render as chips in the comments panel, are listed in each thread's `mentions` array from `GET /api/documents/:id/comments`, and show up on the mentioned person's dashboard and in the bell in the editor header until they open the thread or dismiss them. E-mail addresses are not treated as mentions.
+
+**Mentioning an agent.** People mention an agent as `@login/Agent-Name` — the token owner's login, a slash, and the token name with spaces turned into dashes (`@burke/Copilot-CLI`). The editor's `@` picker offers every agent present on the document or active in it in the last 30 days, with a bot badge and an *agent* hint under the people, and inserts that form. Because tokens act as their user, the mention is keyed on the owner's login: it reaches the agent through `markdoc_watch` / `GET /api/agent/…/events` as a `mention` event with `agent` set to the slug, and it is listed in `mentions` as the owner's login. When the owner mentions their own agent, the notification is stored already read — the agent gets the event, the owner's bell does not ring. When someone else mentions your agent, you are notified like a normal mention.
 
 ### Formatting and reactions
 
@@ -366,7 +368,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X
 
 Collaborate live from Copilot CLI: the agent is visible in the header and reacts when people write.
 
-1. `markdoc_presence { id, state: "active", status: "reading" }` — the bot avatar appears next to the people in the document.
+1. `markdoc_presence { id, state: "active", status: "reading", anchor: "<the paragraph you are reading>" }` — the bot avatar appears next to the people in the document, with a labelled caret on that text.
 2. `markdoc_watch { id }` — the first call returns only a `cursor`.
 3. Loop: `markdoc_presence { id, state: "idle", status: "waiting for feedback" }`, then `markdoc_watch { id, since: cursor, wait: 55 }`. When events come back:
    - `comment.added` / `comment.replied` / `mention` → read the thread with `markdoc_comments`, answer with `markdoc_comment { action: "reply", threadId }`.
@@ -375,7 +377,7 @@ Collaborate live from Copilot CLI: the agent is visible in the header and reacts
    Pass the returned `cursor` into the next call; nothing is delivered twice.
 4. When you are done, `markdoc_presence { id, state: "left" }`.
 
-With no `id`, `markdoc_watch` is the inbox for an idle session: mentions and requests across every document you can see, so you can wait for *"@copilot, can you…"* anywhere.
+With no `id`, `markdoc_watch` is the inbox for an idle session: mentions and requests across every document you can see, so you can wait for *"@copilot, can you…"* anywhere. In the editor, typing `@` in a comment offers present and recent agents (*Copilot CLI · agent*); picking one writes `@user/Copilot-CLI`, which reaches you as a `mention` event with `agent: "Copilot-CLI"` — also when the person writing is your own token's owner.
 
 The same loop over REST:
 
@@ -392,6 +394,8 @@ done
 ## What people see
 
 - A bot avatar in the header's presence stack while an agent is present, with an **Agent** badge and its status (*"drafting the summary"*) in the popover.
+- The agent's caret in both panes — a dashed caret in the agent's colour with a bot glyph and its name, sitting on the text it announced with `anchor` / `cursor` or where it last suggested, commented or edited; it dims when the agent is idle, and clicking the label follows it like a person.
+- Agents under the people in the `@` picker of every comment (*Copilot CLI · agent*); the posted chip carries a bot badge.
 - A chip in the editor header while an agent is active: *"Copilot proposed changes"*.
 - The agent's suggestions in green/red on both surfaces, listed under **Comments → Suggestions** with Accept/Reject.
 - The agent's comments with a bot badge; replies from people are readable through `markdoc_comments`.

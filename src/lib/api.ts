@@ -192,9 +192,13 @@ export const api = {
       request<{ ok: true }>(`/api/documents/${id}/versions/${vid}`, { method: "POST", body: JSON.stringify({ action: "rename", title }) }),
     copyVersion: (id: string, vid: string) => request<{ id: string; title: string }>(`/api/documents/${id}/versions/${vid}/copy`, { method: "POST" }),
     collaborators: (id: string) =>
-      request<{ owner: { login: string | null; name: string | null; image: string | null } | null; linkAccess: DocumentDto["linkAccess"]; collaborators: CollaboratorDto[] }>(
-        `/api/documents/${id}/collaborators`,
-      ),
+      request<{
+        owner: { login: string | null; name: string | null; image: string | null } | null;
+        linkAccess: DocumentDto["linkAccess"];
+        collaborators: CollaboratorDto[];
+        /** Agents that can be @-mentioned here: `login` is `<ownerLogin>/<slug>` (see src/server/agents.ts). */
+        agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean }[];
+      }>(`/api/documents/${id}/collaborators`),
     addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">) =>
       request<{ ok: true; login: string }>(`/api/documents/${id}/collaborators`, { method: "POST", body: JSON.stringify({ login, role }) }),
     removeCollaborator: (id: string, login: string) =>

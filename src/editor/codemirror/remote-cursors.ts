@@ -69,10 +69,11 @@ export function remoteCaretInteractions(session: CollabSession) {
           toggle(caret, "following", session.followUserId === user.id);
           toggle(caret, "flash", session.flashUserId === user.id);
           toggle(caret, "idle", isIdle(user.idleSince, now));
+          toggle(caret, "agent", user.isAgent);
           if (label) {
             label.style.pointerEvents = "auto";
             label.style.cursor = "pointer";
-            label.title = `Follow ${user.name}`;
+            label.title = user.isAgent ? `Follow ${user.name} (agent)` : `Follow ${user.name}`;
           }
         });
       }

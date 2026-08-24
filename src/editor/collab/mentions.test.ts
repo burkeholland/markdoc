@@ -1,5 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { mentionTriggerAt, parseMentions, splitMentions } from "./mentions";
+import { agentMentionLogin, agentMentionSlug, mentionTriggerAt, parseAgentMentions, parseMentions, splitMentions } from "./mentions";
+
+describe("agent mentions (@login/Agent-Name)", () => {
+  it("slugs token names into mention-safe text", () => {
+    expect(agentMentionSlug("Copilot CLI")).toBe("Copilot-CLI");
+    expect(agentMentionSlug("  GitHub Copilot (work) ")).toBe("GitHub-Copilot-work");
+    expect(agentMentionSlug("***")).toBe("agent");
+    expect(agentMentionSlug("x".repeat(50))).toHaveLength(39);
+    expect(agentMentionLogin("burke", "Copilot CLI")).toBe("burke/Copilot-CLI");
+  });
+
+  it("splits the agent suffix off and still resolves the mention to the owner", () => {
+    expect(splitMentions("@burke/Copilot-CLI tighten this")).toEqual([
+      { type: "mention", value: "burke", agent: "Copilot-CLI" },
+      { type: "text", value: " tighten this" },
+    ]);
+    expect(parseMentions("@burke/Copilot-CLI and @Burke too")).toEqual(["burke"]);
+    expect(parseAgentMentions("@burke/Copilot-CLI, @alice and @Burke/copilot-cli again, @bob/Scribe")).toEqual([
+      { login: "burke", agent: "Copilot-CLI" },
+      { login: "bob", agent: "Scribe" },
+    ]);
+  });
+
+  it("a bare slash after a login is plain text", () => {
+    expect(splitMentions("@bob/ ok")).toEqual([
+      { type: "mention", value: "bob" },
+      { type: "text", value: "/ ok" },
+    ]);
+  });
+
+  it("the composer trigger follows an agent login being typed", () => {
+    expect(mentionTriggerAt("hi @burke/Cop", 13)).toEqual({ start: 3, query: "burke/Cop" });
+    expect(mentionTriggerAt("hi @burke/", 10)).toEqual({ start: 3, query: "burke/" });
+  });
+});
 
 describe("splitMentions", () => {
   it("returns nothing for empty input", () => {
