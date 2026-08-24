@@ -19,6 +19,8 @@ export class HttpError extends Error {
 /** The caller: a signed-in user, or a user acting through an API token (then `agent` is set). */
 export interface Actor extends SessionUser {
   agent?: string;
+  /** Id of the API token when acting as an agent. */
+  tokenId?: string;
 }
 
 /**
@@ -33,7 +35,7 @@ export async function currentUser(): Promise<Actor | null> {
     if (looksLikeApiToken(token)) {
       const actor = await resolveApiToken(token);
       if (!actor) throw new HttpError(401, "Invalid or revoked API token");
-      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent };
+      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId };
     }
   }
   const session = await auth();

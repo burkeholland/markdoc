@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import { createAnchor, newId, resolveAnchor, type CollabUser, type TextAnchor } from "./shared";
 import { parseMentions } from "./mentions";
+import { applyOps, diffOps } from "../sync/text-diff";
 
 export interface CommentReply {
   id: string;
@@ -51,6 +52,10 @@ export interface CommentThread {
   replies: CommentReply[];
   /** Current absolute range in the text, or null when the anchored text no longer exists. */
   range: { from: number; to: number } | null;
+  /** Decision on the body's ```suggestion block, if one was made (see suggestion-block.ts). */
+  suggestionState?: "accepted" | "rejected" | null;
+  suggestionBy?: string | null;
+  suggestionAt?: number | null;
 }
 
 export const COMMENTS_ORIGIN = { name: "comments" };
@@ -166,6 +171,9 @@ export class CommentsModel {
       reactorNames: names,
       replies: replies ? replies.toArray().map((r) => readReply(r, byTarget.get(r.id) ?? {})) : [],
       range: anchor ? resolveAnchor(this.ytext, anchor) : null,
+      suggestionState: (map.get("suggestionState") as "accepted" | "rejected" | null) ?? null,
+      suggestionBy: (map.get("suggestionBy") as string | null) ?? null,
+      suggestionAt: (map.get("suggestionAt") as number | null) ?? null,
     };
   }
 
@@ -312,5 +320,41 @@ export class CommentsModel {
 
   remove(id: string) {
     this.ydoc.transact(() => this.ymap.delete(id), COMMENTS_ORIGIN);
+  }
+
+  /**
+   * Accept the thread's ```suggestion block: replace the anchored range with `proposed`, record the
+   * decision and resolve the thread — all in one transaction (one undo step, one broadcast).
+   * Returns false when the thread is missing, already decided, or outdated (anchored text ≠ quote).
+   */
+  acceptSuggestion(id: string, proposed: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
+    const map = this.ymap.get(id);
+    if (!map) return false;
+    const thread = this.read(map);
+    if (thread.suggestionState || !thread.range) return false;
+    const { from, to } = thread.range;
+    if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    this.ydoc.transact(() => {
+      applyOps(this.ytext, diffOps(thread.quote, proposed, from));
+      map.set("suggestionState", "accepted");
+      map.set("suggestionBy", by.id);
+      map.set("suggestionAt", Date.now());
+      map.set("resolved", true);
+      map.set("resolvedBy", by.id);
+      map.set("resolvedAt", Date.now());
+    }, origin);
+    return true;
+  }
+
+  /** Reject the thread's suggestion: the text is untouched, the decision recorded. Allowed even when outdated. */
+  rejectSuggestion(id: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
+    const map = this.ymap.get(id);
+    if (!map || map.get("suggestionState")) return false;
+    this.ydoc.transact(() => {
+      map.set("suggestionState", "rejected");
+      map.set("suggestionBy", by.id);
+      map.set("suggestionAt", Date.now());
+    }, origin);
+    return true;
   }
 }

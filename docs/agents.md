@@ -27,6 +27,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Formatting and reactions](#formatting-and-reactions)
   - [Notifications](#notifications)
 - [4. Recipes](#4-recipes)
+  - [Review a document](#review-a-document)
   - [Sit in a document](#sit-in-a-document)
 - [What people see](#what-people-see)
 
@@ -93,7 +94,8 @@ Twenty-six tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_suggestions` | `id` | List pending suggestions with author and surrounding context. |
 | `markdoc_review_suggestions` | `id`, `action: accept \| reject \| acceptAll \| rejectAll`, `suggestionId?` | Accept or reject (only when asked to). |
 | `markdoc_comments` | `id` | Read threads, open and resolved, with the text they anchor to. |
-| `markdoc_comment` | `id`, `action: add \| reply \| resolve \| reopen \| react`, `quote?`, `threadId?`, `replyId?`, `body?`, `emoji?` | Add a comment on a quote, reply to a thread, resolve or reopen it, or toggle an emoji reaction (`react` with `emoji`, optionally on a `replyId`). |
+| `markdoc_comment` | `id`, `action: add \| reply \| resolve \| reopen \| react`, `quote?`, `threadId?`, `replyId?`, `body?`, `emoji?` | Add a comment on a quote, reply to a thread, resolve or reopen it, or toggle an emoji reaction (`react` with `emoji`, optionally on a `replyId`). A body may carry one ` ```suggestion ` fenced block (GitHub's syntax) proposing a rewrite of the quoted text; people see a diff with **Accept** / **Reject**, and nothing changes until they accept. |
+| `markdoc_review` | `id`, `summary`, `verdict: approve \| request_changes \| comment`, `comments: [{ quote, body }]` | Leave a GitHub-style review: one thread per finding (bodies may carry ` ```suggestion ` blocks) plus a review card at the top of the Comments panel with **Accept all** / **Reject all**. Atomic: one quote that is not found fails the whole call and creates nothing. See [Review a document](#review-a-document). |
 | `markdoc_versions` | `id` | Version history. |
 | `markdoc_publish` | `id`, `message?`, `force?` | Commit to the linked gist or repository (the document must already be connected in the app). Answers with `status: remote-ahead \| diverged` instead of publishing when GitHub moved since the last sync; `force: true` overwrites. |
 | `markdoc_pull` | `id`, `merge?`, `force?` | Bring the GitHub file into the document. Answers with `status: local-ahead \| diverged` instead of discarding unpublished edits; `merge: true` three-way merges a diverged document (conflicts → `status: "conflict"`, `merged` text with `<<<<<<< local` / `=======` / `>>>>>>> github` markers, `conflicts` count); `force: true` replaces the text regardless (a version is kept). |
@@ -102,7 +104,7 @@ Twenty-six tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_claim_request` | `documentId`, `requestId` | Take a request; the editor's pill switches to *"<agent> is working…"*. |
 | `markdoc_complete_request` | `documentId`, `requestId`, `summary?` | Mark it done: the requester is notified (`request.done`) and the Comments panel opens on your suggestions. |
 | `markdoc_presence` | `id`, `state: active \| idle \| left`, `status?`, `anchor?`, `cursor?: { from, to }` | Show up in the document's presence list as a bot avatar with a short status (*reading*, *drafting the summary*). `anchor` (exact text, first occurrence — like a comment's `quote`) or `cursor` (offsets in the clean Markdown from `markdoc_read_document { clean: true }`) places your **caret** there: people see a labelled caret with a bot glyph in both panes, like any collaborator's; `cursor: null` hides it. `suggest`, `comment` and `replace_content` move it to where you acted. Lapses 90 s after the last call or write; `left` removes you at once. |
-| `markdoc_watch` | `id?`, `since?`, `wait?` (default 30, max 55) | Wait for humans: long-poll a document for `content.changed` (with a diff), `comment.added` / `replied` / `resolved`, `mention` (your user, or you as `@user/Your-Agent` from the picker — then `agent` names you), `request.created`; or, without `id`, mentions and requests across every document you can see. First call without `since` returns a cursor only. See [Sit in a document](#sit-in-a-document). |
+| `markdoc_watch` | `id?`, `since?`, `wait?` (default 30, max 55) | Wait for humans: long-poll a document for `content.changed` (with a diff), `comment.added` / `replied` / `resolved`, `suggestion.accepted` / `suggestion.rejected` (a decision on a suggestion block in a comment), `review.created`, `mention` (your user, or you as `@user/Your-Agent` from the picker — then `agent` names you), `request.created`; or, without `id`, mentions and requests across every document you can see. First call without `since` returns a cursor only. See [Sit in a document](#sit-in-a-document). |
 
 `markdoc_suggest` and `markdoc_comment` (`add`) also take an optional `requestId` so the work they produce is counted against the request.
 
@@ -258,7 +260,9 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 | `GET /api/documents/:id/suggestions` | | view | Pending suggestions with ranges and context. |
 | `POST /api/documents/:id/suggestions` | `{ action: accept \| reject \| acceptAll \| rejectAll, id? }` | edit | Review suggestions. |
 | `GET /api/documents/:id/comments` | | view | `{ comments: [thread] }`: threads with the text they anchor to, a `mentions` array, `reactions` (`{ "👍": [userId, …] }`) and `editedAt` per thread and reply. |
-| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body, requestId? }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. |
+| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body, requestId? }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }`, `{ action: "suggestion", threadId, decision: accept \| reject }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. A body may carry one ` ```suggestion ` fenced block proposing a rewrite of the quoted text; `suggestion` decides on it — `accept` (editors only; `409` when the quoted text changed, i.e. the suggestion is outdated) replaces the quote, resolves the thread and notifies the author; `reject` only records the decision. |
+| `POST /api/documents/:id/reviews` | `{ summary, verdict: approve \| request_changes \| comment, comments: [{ quote, body }] }` | comment | A review: one thread per comment (bodies may carry ` ```suggestion ` blocks) and a review card. Atomic: if any `quote` is not found, `400 { notFound: [...] }` and nothing is created. Returns `201 { review }`; the document owner is notified. |
+| `GET /api/documents/:id/reviews` | | view | `{ reviews: [{ id, authorName, agent, verdict, summary, threadIds, createdAt }] }`, newest first. |
 
 ### Agent requests
 
@@ -415,6 +419,25 @@ esac
 curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -X POST "$BASE/api/documents/$ID/requests/$RID/complete" \
   -d '{"summary":"Done — see the Suggestions tab."}'
 ```
+
+### Review a document
+
+One call leaves a GitHub-style review: a verdict, a summary, and one comment per finding. Quote the exact sentence each comment is about and put your rewrite in a ` ```suggestion ` block — the person sees the sentence and your proposal as a diff with **Accept** (applies it, resolves the thread, one undo step) and **Reject**, or **Accept all** on the card at the top of the Comments panel. Nothing is applied until they click.
+
+```text
+markdoc_review {
+  "id": "<document id>",
+  "verdict": "request_changes",
+  "summary": "Clear structure; two sentences read awkwardly and one claim needs a date.",
+  "comments": [
+    { "quote": "Our product is very unique.", "body": "\"Very unique\" is redundant.\n\n```suggestion\nOur product is unique.\n```" },
+    { "quote": "We launched recently", "body": "Say when — readers skim for dates.\n\n```suggestion\nWe launched in March 2026\n```" },
+    { "quote": "## Pricing", "body": "Consider moving this above Roadmap; most readers come for the price." }
+  ]
+}
+```
+
+Over REST the same body goes to `POST /api/documents/:id/reviews`. Afterwards `markdoc_watch` reports `suggestion.accepted` / `suggestion.rejected` (with the `threadId`) as the person decides, and `comment.resolved` for each accepted one.
 
 ### Sit in a document
 

@@ -32,6 +32,7 @@ const ADDITIVE_SET = [
   "markdoc_append",
   "markdoc_suggest",
   "markdoc_comment",
+  "markdoc_review",
   "markdoc_publish",
   "markdoc_pull",
   "markdoc_duplicate_document",
@@ -69,10 +70,10 @@ describe("MCP tool annotations", () => {
     await client?.close();
   });
 
-  it("the three sets cover all 26 tools exactly once", () => {
+  it("the three sets cover all 27 tools exactly once", () => {
     const all = [...READ_SET, ...ADDITIVE_SET, ...DESTRUCTIVE_SET];
     expect(new Set(all).size).toBe(all.length);
-    expect(all.length).toBe(26);
+    expect(all.length).toBe(27);
     expect([...all].sort()).toEqual([...listToolNames()].sort());
   });
 

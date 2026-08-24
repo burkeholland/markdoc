@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
-import { CommentsModel } from "@/editor/collab/comments";
+import { CommentsModel, type CommentThread } from "@/editor/collab/comments";
+import { isSuggestionOutdated, parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { notifyReply, notifyResolved, readThread, recordMentions } from "@/server/notifications";
 import { activityActor, clip, recordActivity } from "@/server/activity";
+import { recordSuggestionDecision } from "@/server/reviews";
 import { attachWork } from "@/server/agent-requests";
 
 type Params = { params: Promise<{ id: string }> };
@@ -26,6 +28,8 @@ const schema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("edit"), threadId: z.string().min(1), replyId: z.string().optional(), body: z.string().trim().min(1).max(5000) }),
   z.object({ action: z.literal("delete"), threadId: z.string().min(1), replyId: z.string().optional() }),
   z.object({ action: z.literal("react"), threadId: z.string().min(1), replyId: z.string().optional(), emoji: z.string().trim().min(1).max(16) }),
+  /** Decide on the thread's ```suggestion block: accept applies it to the text (editors only), reject records the decision. */
+  z.object({ action: z.literal("suggestion"), threadId: z.string().min(1), decision: z.enum(["accept", "reject"]) }),
 ]);
 
 /**
@@ -45,6 +49,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const after: (() => Promise<unknown>)[] = [];
   // The text the action concerns (new comment's quote, replied thread's range): an agent's caret moves there.
   let at: { from: number; to: number } | undefined;
+  let decided: { thread: CommentThread; accepted: boolean } | null = null;
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
     const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
@@ -110,6 +115,24 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           result = { ok: true, reacted };
           break;
         }
+        case "suggestion": {
+          const thread = model.get(body.threadId);
+          if (!thread) throw new HttpError(404, "Comment not found");
+          const block = parseSuggestionBlock(thread.body);
+          if (!block) throw new HttpError(400, "This comment has no suggestion block");
+          if (thread.suggestionState) throw new HttpError(409, `Suggestion already ${thread.suggestionState}`);
+          if (body.decision === "accept") {
+            if (role !== "owner" && role !== "editor") throw new HttpError(403, "Only editors can accept suggestions");
+            if (isSuggestionOutdated(thread, doc.getText(TEXT_KEY).toString())) throw new HttpError(409, "Suggestion is outdated: the quoted text changed");
+            if (!model.acceptSuggestion(body.threadId, block.text, author)) throw new HttpError(409, "Could not apply the suggestion");
+          } else {
+            model.rejectSuggestion(body.threadId, author);
+          }
+          decided = { thread, accepted: body.decision === "accept" };
+          at = thread.range ?? undefined;
+          result = { ok: true, state: body.decision === "accept" ? "accepted" : "rejected" };
+          break;
+        }
       }
     } finally {
       model.destroy();
@@ -133,6 +156,9 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
   } else if (body.action === "resolve" && body.resolved) {
     await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
+  } else if (body.action === "suggestion") {
+    const d = decided as { thread: CommentThread; accepted: boolean } | null;
+    if (d) await recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null });
   }
   return json(result);
 });
@@ -157,6 +183,11 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
         quote: t.quote,
         range: t.range,
         currentText: t.range ? text.slice(t.range.from, t.range.to) : null,
+        suggestion: (() => {
+          const block = parseSuggestionBlock(t.body);
+          if (!block) return null;
+          return { text: block.text, state: t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"), by: t.suggestionBy ?? null, at: t.suggestionAt ? new Date(t.suggestionAt).toISOString() : null };
+        })(),
         reactions: t.reactions,
         replies: t.replies.map((r) => ({
           id: r.id,

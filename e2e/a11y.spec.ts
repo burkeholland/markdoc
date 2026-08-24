@@ -402,6 +402,33 @@ test.describe("axe: editor", () => {
     await context.close();
   });
 
+  test("review card and a comment with a suggestion diff (Accept / Reject, Outdated)", async ({ browser }) => {
+    const { page, context, id } = await openEditorFixture(browser, "a11y-editor-review");
+    // An agent review with one suggestion and one plain comment, posted over REST with a token (task #397).
+    const tok = await page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 1 } });
+    expect(tok.ok()).toBeTruthy();
+    const token = ((await tok.json()) as { token: { token: string } }).token.token;
+    const res = await page.request.post(`/api/documents/${id}/reviews`, {
+      headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" },
+      data: {
+        summary: "Two small things.",
+        verdict: "request_changes",
+        comments: [
+          { quote: "Intro paragraph with a", body: "Tighter opener.\n\n```suggestion\nAn intro paragraph with a\n```" },
+          { quote: "## Table", body: "Good table." },
+        ],
+      },
+    });
+    expect(res.status(), await res.text()).toBe(201);
+    await expect(page.getByTestId("review-card")).toBeVisible();
+    await page.getByTestId("review-toggle").click();
+    await expect(page.getByTestId("review-thread-link")).toHaveCount(2);
+    await expect(page.getByTestId("suggestion-diff").first()).toBeVisible();
+    await expect(page.getByTestId("suggestion-accept-comment")).toBeEnabled();
+    await scan(page, "editor + review card + suggestion diff");
+    await context.close();
+  });
+
   test("versions panel in compare mode, activity panel", async ({ browser }) => {
     const { page, context } = await openEditorFixture(browser, "a11y-editor-history", { revisions: true });
 

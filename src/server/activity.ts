@@ -228,6 +228,15 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
           const author = activityActorFromCollab(map.get("authorId") as string | undefined, map.get("authorName") as string | undefined);
           void recordActivity(docId, author.id ? author : byOrigin, "comment.add", { threadId: key, quote: clip(typeof body === "string" ? body : "") }).catch(log("comment"));
         });
+      } else if (event.target instanceof Y.Map && event.target.parent === comments && event.changes.keys.has("suggestionState")) {
+        const map = event.target as Y.Map<unknown>;
+        const state = map.get("suggestionState");
+        if (state !== "accepted" && state !== "rejected") continue;
+        void recordActivity(docId, byOrigin, state === "accepted" ? "comment.suggestion.accepted" : "comment.suggestion.rejected", { threadId: map.get("id"), author: map.get("authorName"), quote: clip(typeof map.get("quote") === "string" ? (map.get("quote") as string) : "") }).catch(log("suggestion"));
+        // Accepting also resolves the thread in the same transaction; the resolve row below covers that.
+        if (!event.changes.keys.has("resolved") || map.get("resolved") !== true) continue;
+        const body = map.get("body");
+        void recordActivity(docId, byOrigin, "comment.resolve", { threadId: map.get("id"), quote: clip(typeof body === "string" ? body : "") }).catch(log("resolve"));
       } else if (event.target instanceof Y.Map && event.target.parent === comments && event.changes.keys.has("resolved")) {
         const map = event.target as Y.Map<unknown>;
         if (map.get("resolved") !== true) continue;

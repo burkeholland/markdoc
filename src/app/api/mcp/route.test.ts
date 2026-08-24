@@ -93,7 +93,7 @@ describe("/api/mcp", () => {
     const body = (await res.json()) as { name: string; version: string; tools: number; docs: string };
     expect(body.name).toBe("markdoc");
     expect(body.tools).toBe(listToolNames().length);
-    expect(body.tools).toBe(26);
+    expect(body.tools).toBe(27);
     expect(body.docs).toContain("docs/agents");
   });
 
