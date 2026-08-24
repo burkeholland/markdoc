@@ -28,10 +28,12 @@ function toText(node: Md.Node): string {
  * A small, fast Markdown linter for the status bar. It focuses on problems
  * that are easy to introduce while editing and that break rendering or
  * navigation: heading structure, broken references, unbalanced fences.
+ *
+ * Pass the document's existing mdast (`MarkdownBinding.getTree()`) to skip the
+ * parse; it must be the parse of `src`, with positions. The result is the same.
  */
-export function lintMarkdown(src: string): LintIssue[] {
+export function lintMarkdown(src: string, tree: Md.Root = parseMdast(src)): LintIssue[] {
   const issues: LintIssue[] = [];
-  const tree = parseMdast(src);
   const definitions = new Set<string>();
   const footnotes = new Set<string>();
   const headings: { depth: number; text: string; pos: Position }[] = [];

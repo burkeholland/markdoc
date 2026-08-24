@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { shortcut } from "@/lib/utils";
 
-export function LinkDialog({
+export const LinkDialog = memo(function LinkDialog({
   open,
   onOpenChange,
   initial,
@@ -80,9 +80,9 @@ export function LinkDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});
 
-export function ImageDialog({
+export const ImageDialog = memo(function ImageDialog({
   open,
   onOpenChange,
   onSubmit,
@@ -180,9 +180,9 @@ export function ImageDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});
 
-export function TableDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (rows: number, cols: number) => void }) {
+export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (rows: number, cols: number) => void }) {
   const [hover, setHover] = useState<{ r: number; c: number }>({ r: 3, c: 3 });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -212,9 +212,9 @@ export function TableDialog({ open, onOpenChange, onSubmit }: { open: boolean; o
       </DialogContent>
     </Dialog>
   );
-}
+});
 
-export function NameVersionDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (title: string) => Promise<void> }) {
+export const NameVersionDialog = memo(function NameVersionDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (title: string) => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -250,7 +250,7 @@ export function NameVersionDialog({ open, onOpenChange, onSubmit }: { open: bool
       </DialogContent>
     </Dialog>
   );
-}
+});
 
 const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   {
@@ -330,7 +330,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   },
 ];
 
-export function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+export const ShortcutsDialog = memo(function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Keyboard shortcuts" wide>
@@ -352,4 +352,4 @@ export function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenC
       </DialogContent>
     </Dialog>
   );
-}
+});

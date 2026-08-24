@@ -1,6 +1,6 @@
 "use client";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { AlertTriangle, Check, CloudDownload, GitMerge, Loader2, Scale, UploadCloud } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { SyncStatusDto } from "@/lib/api";
@@ -26,7 +26,7 @@ export interface SyncActions {
  * way forward: merge (conflicts land in the editor with markers), keep mine (force publish), take
  * GitHub (force pull) or look at the diff first.
  */
-export function SyncDialog({
+export const SyncDialog = memo(function SyncDialog({
   open,
   onOpenChange,
   doc,
@@ -156,4 +156,4 @@ export function SyncDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});

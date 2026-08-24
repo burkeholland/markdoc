@@ -13,8 +13,6 @@ export interface OutlineProps {
   session: CollabSession;
   open: boolean;
   onToggle: () => void;
-  /** Source offset of the active surface's cursor. */
-  cursorSource: number | null;
   onSelect: (heading: HeadingInfo) => void;
 }
 
@@ -50,13 +48,14 @@ export function nextOutlineIndex(key: string, current: number, count: number): n
   return rovingIndex(key, current, count, { orientation: "vertical", wrap: false });
 }
 
-export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }: OutlineProps) {
+export function OutlinePanel({ session, open, onToggle, onSelect }: OutlineProps) {
   // IndexedDB can fill the document before React hydrates; keep the first client render
   // identical to the server (no headings) and switch in the next render.
   const hydrated = useHydrated();
   const liveHeadings = useHeadings(session);
   const headings = hydrated ? liveHeadings : EMPTY_HEADINGS;
-  const active = activeHeadingIndex(headings, cursorSource);
+  // Only the active index matters: the panel re-renders when the caret crosses a heading, not per keystroke.
+  const active = useSessionValue(session, (s) => activeHeadingIndex(headings, s.cursorSource));
 
   if (!open) {
     return (

@@ -1,7 +1,7 @@
 "use client";
 import { Dialog, DialogContent, Spinner, GitHubIcon } from "@/components/ui/primitives";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError } from "@/lib/api";
@@ -344,7 +344,7 @@ export function GitHubPicker({
   );
 }
 
-export function GitHubDialog({
+export const GitHubDialog = memo(function GitHubDialog({
   open,
   onOpenChange,
   doc,
@@ -413,9 +413,9 @@ export function GitHubDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});
 
-export function CommitDialog({
+export const CommitDialog = memo(function CommitDialog({
   open,
   onOpenChange,
   doc,
@@ -474,6 +474,6 @@ export function CommitDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});
 
 

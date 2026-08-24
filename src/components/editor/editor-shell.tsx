@@ -113,7 +113,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
-  const [cursor, setCursor] = useState<{ code: number | null; rich: number | null }>({ code: null, rich: null });
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
   const [viewsReady, setViewsReady] = useState(0);
   const [richView, setRichView] = useState<PMView | null>(null);
@@ -145,7 +144,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const slashMenu = useSlashMenuController();
-  const activeSurface = useSessionValue(session, (s) => s.activeSurface);
   const isOwner = role === "owner";
   useEffect(() => {
     actions.setRichScroller(richScroller);
@@ -163,9 +161,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     if (notice) toast(notice.message, notice.kind);
   }, [toast, doc.id]);
 
-  // Toolbar state is derived from the live editors. The selector also runs on every render,
-  // so selection changes (React state) are picked up as well as session changes; the shallow
-  // comparison keeps the object stable when nothing visible changed.
+  // Toolbar state is derived from the live editors. Caret moves reach the session too (setLocalCursor),
+  // so the selector runs after selection changes as well as text changes; the shallow comparison keeps
+  // the object stable when nothing visible changed, and the shell does not re-render for plain typing.
   const format: FormatState = useSessionValue(session, () => (viewsReady ? actions.formatState() : EMPTY_FORMAT), shallowEqual);
 
   const onCodeReady = useCallback(
@@ -185,20 +183,10 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     [actions],
   );
 
-  const onCodeSelection = useCallback(
-    (head: number) => {
-      setCursor((c) => (c.code === head ? c : { ...c, code: head }));
-    },
-    [],
-  );
-  const onRichSelection = useCallback(
-    (head: number) => {
-      const src = session.binding.getSourceMap().pmToSrc(head);
-      setCursor((c) => (c.rich === src ? c : { ...c, rich: src }));
-    },
-    [session],
-  );
-  const cursorSource = activeSurface === "code" ? cursor.code : cursor.rich;
+  // The caret position lives on the session: the outline and the opposite pane's focus line read it
+  // there, so a keystroke does not re-render the shell (and with it every closed dialog).
+  const onCodeSelection = useCallback((head: number) => session.setLocalCursor("code", head), [session]);
+  const onRichSelection = useCallback((head: number) => session.setLocalCursor("rich", session.binding.getSourceMap().pmToSrc(head)), [session]);
 
   const onHighlightClick = useCallback(
     (kind: string, id: string | null) => {
@@ -756,6 +744,37 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   }, [session, followUserId, richScroller, codeView, richView]);
   const closeSidePanel = useCallback(() => setSidePanel(null), []);
   const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
+  const closeOutlineDrawer = useCallback(() => setOutlineDrawerOpen(false), []);
+
+  // Stable handlers for the dialogs: each is memoized, so a render of the shell (a toast, a sync poll, a
+  // format change) does not re-render the closed ones.
+  const dialogOpenChange = useMemo(() => {
+    const make = (kind: Exclude<DialogKind, null>) => (open: boolean) => setDialog(open ? kind : null);
+    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), table: make("table"), versionName: make("versionName"), shortcuts: make("shortcuts") };
+  }, []);
+  const onPublishDocChange = useCallback((d: DocumentDto) => {
+    setDoc(d);
+    setVersionsRefresh((n) => n + 1);
+  }, []);
+  const applyLink = useCallback((href: string, text: string) => actions.applyLink(href, text), [actions]);
+  const removeLink = useCallback(() => actions.removeLink(), [actions]);
+  const insertImage = useCallback((src: string, alt: string) => actions.insertImage(src, alt), [actions]);
+  const insertTable = useCallback((rows: number, cols: number) => actions.insertTable(rows, cols), [actions]);
+  const closeFileDrop = useCallback(() => setFileDrop(null), []);
+  const fileDropError = useCallback((m: string) => toast(m, "error"), [toast]);
+  const saveNamedVersion = useCallback(
+    async (title: string) => {
+      await api.documents.createVersion(doc.id, title);
+      setVersionsRefresh((n) => n + 1);
+      toast(`Saved version “${title}”.`, "success");
+    },
+    [doc.id, toast],
+  );
+  const onAskAgentOpenChange = useCallback((o: boolean) => {
+    if (!o) setAskAgent(null);
+  }, []);
+  const canEdit = useSessionValue(session, (s) => s.canEdit);
+  const canComment = useSessionValue(session, (s) => s.canComment);
   const onOutlinePick = useCallback(
     (h: HeadingInfo) => {
       setOutlineDrawerOpen(false);
@@ -846,12 +865,12 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                 <DialogOverlay className="dialog-overlay animate-fade-in" data-testid="outline-drawer-backdrop" />
                 <DialogPrimitiveContent className="drawer" aria-describedby={undefined} data-testid="outline-drawer">
                   <DialogTitle className="sr-only">Outline</DialogTitle>
-                  <OutlinePanel session={session} open onToggle={() => setOutlineDrawerOpen(false)} cursorSource={cursorSource} onSelect={onOutlinePick} />
+                  <OutlinePanel session={session} open onToggle={closeOutlineDrawer} onSelect={onOutlinePick} />
                 </DialogPrimitiveContent>
               </DialogPortal>
             </Dialog>
           ) : (
-            <OutlinePanel session={session} open={outlineOpen} onToggle={toggleOutline} cursorSource={cursorSource} onSelect={onOutlineSelect} />
+            <OutlinePanel session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
           )}
           <div className="relative flex min-w-0 flex-1">
             {showLoading && (
@@ -883,7 +902,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       uploadImage={uploadImage}
                       onImageError={onImageError}
                       onMarkdownFileDrop={onCodeFileDrop}
-                      focusSource={activeSurface === "rich" ? cursor.rich : null}
                       lineWrapping={lineWrapping}
                     />
                   </div>
@@ -918,7 +936,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                       uploadImage={uploadImage}
                       onImageError={onImageError}
                       onMarkdownFileDrop={onRichFileDrop}
-                      focusSource={activeSurface === "code" ? cursor.code : null}
                       slashMenu={slashMenu.handlers}
                     />
                   </div>
@@ -962,38 +979,22 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           compact={isPhone}
         />
 
-        <ShareDialog open={dialog === "share"} onOpenChange={(o) => setDialog(o ? "share" : null)} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
-        <GitHubDialog open={dialog === "publish"} onOpenChange={(o) => setDialog(o ? "publish" : null)} doc={docView} onDocChange={(d) => { setDoc(d); setVersionsRefresh((n) => n + 1); }} githubAvailable={githubAvailable} />
+        <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
+        <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} />
         <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
         <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />
-        <LinkDialog
-          open={dialog === "link"}
-          onOpenChange={(o) => setDialog(o ? "link" : null)}
-          initial={linkInitial}
-          onSubmit={(href, text) => actions.applyLink(href, text)}
-          onRemove={() => actions.removeLink()}
-        />
-        <ImageDialog open={dialog === "image"} onOpenChange={(o) => setDialog(o ? "image" : null)} onSubmit={(src, alt) => actions.insertImage(src, alt)} onUpload={uploadImage} />
-        <FileDropDialog pending={fileDrop} onClose={() => setFileDrop(null)} canEdit={session.canEdit} onReplace={replaceAll} onInsert={insertAt} onError={(m) => toast(m, "error")} />
-        <TableDialog open={dialog === "table"} onOpenChange={(o) => setDialog(o ? "table" : null)} onSubmit={(r, c) => actions.insertTable(r, c)} />
-        <NameVersionDialog
-          open={dialog === "versionName"}
-          onOpenChange={(o) => setDialog(o ? "versionName" : null)}
-          onSubmit={async (title) => {
-            await api.documents.createVersion(doc.id, title);
-            setVersionsRefresh((n) => n + 1);
-            toast(`Saved version “${title}”.`, "success");
-          }}
-        />
-        <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={(o) => setDialog(o ? "shortcuts" : null)} />
+        <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />
+        <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />
+        <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />
+        <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />
+        <NameVersionDialog open={dialog === "versionName"} onOpenChange={dialogOpenChange.versionName} onSubmit={saveNamedVersion} />
+        <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />
         <AskAgentDialog
           open={askAgent !== null}
-          onOpenChange={(o) => {
-            if (!o) setAskAgent(null);
-          }}
+          onOpenChange={onAskAgentOpenChange}
           selection={askAgent?.selection ?? null}
-          canEdit={session.canEdit}
-          canComment={session.canComment}
+          canEdit={canEdit}
+          canComment={canComment}
           onSend={sendAskAgent}
           onCreateToken={goCreateToken}
         />

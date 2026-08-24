@@ -122,6 +122,12 @@ export class CollabSession {
   private localStarted = false;
   mode: EditMode;
   activeSurface: Surface = "rich";
+  /**
+   * Source offset of the local caret in each pane, as the panes report it. Kept here (not in
+   * React state of the shell) so only the outline and the opposite pane's focus line re-render
+   * when it moves, not the whole editor.
+   */
+  localCursor: { code: number | null; rich: number | null } = { code: null, rich: null };
   /** Currently highlighted comment thread (shared by both panes and the sidebar). */
   activeCommentId: string | null = null;
   activeSuggestionId: string | null = null;
@@ -351,6 +357,17 @@ export class CollabSession {
     if (this.activeSurface === surface) return;
     this.activeSurface = surface;
     this.notify();
+  }
+
+  setLocalCursor(surface: Surface, source: number | null) {
+    if (this.localCursor[surface] === source) return;
+    this.localCursor = { ...this.localCursor, [surface]: source };
+    this.notify();
+  }
+
+  /** Source offset of the caret in the active pane (the outline highlights the section it is in). */
+  get cursorSource(): number | null {
+    return this.activeSurface === "code" ? this.localCursor.code : this.localCursor.rich;
   }
 
   setActiveComment(id: string | null) {

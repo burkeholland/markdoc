@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useEffect, useRef, useState, type RefObject } from "react";
 import { BookOpen, Bot, Check, Copy, Globe, KeyRound, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
@@ -18,7 +18,7 @@ const LINK_OPTIONS: { value: DocumentDto["linkAccess"]; label: string; descripti
   { value: "edit", label: "Anyone with the link can edit", description: "Signed-in visitors can edit; others can read." },
 ];
 
-export function ShareDialog({
+export const ShareDialog = memo(function ShareDialog({
   open,
   onOpenChange,
   doc,
@@ -238,7 +238,7 @@ export function ShareDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});
 
 export function CopyButton({ text, label = "Copy", testId, target }: { text: string; label?: string; testId?: string; target?: RefObject<HTMLElement | null> }) {
   const { copy, label: buttonLabel, copied } = useCopy(text, target, label);
