@@ -29,7 +29,18 @@ vi.mock("@hocuspocus/provider", async () => {
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { CollabSession, RECOVERED_FLASH_MS } from "./session";
 import { makeCollabUser } from "./shared";
-import { clearLocalDocument, hasIndexedDB, localDbName, openLocalPersistence, saveStateLabel } from "./offline";
+import {
+  clearLocalDocument,
+  ensureLocalEpoch,
+  hasIndexedDB,
+  IDB_EPOCH,
+  IDB_EPOCH_KEY,
+  IDB_REGISTRY_KEY,
+  localDbName,
+  openLocalPersistence,
+  saveStateLabel,
+  storedIdbEpoch,
+} from "./offline";
 
 type FakeProvider = {
   opts: {
@@ -111,11 +122,28 @@ describe("without IndexedDB", () => {
   });
 });
 
+/** Minimal in-memory `localStorage` stand-in (the Node test runtime has none). */
+function memoryStorage(initial: Record<string, string> = {}): Storage {
+  const map = new Map(Object.entries(initial));
+  return {
+    get length() {
+      return map.size;
+    },
+    key: (i: number) => [...map.keys()][i] ?? null,
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => void map.set(k, String(v)),
+    removeItem: (k: string) => void map.delete(k),
+    clear: () => map.clear(),
+  } as Storage;
+}
+
 describe("with IndexedDB (fake-indexeddb)", () => {
   beforeEach(async () => {
     const { indexedDB, IDBKeyRange } = await import("fake-indexeddb");
     vi.stubGlobal("indexedDB", indexedDB);
     vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+    // Mirrors written by these tests belong to the current epoch; the epoch tests below override this.
+    vi.stubGlobal("localStorage", memoryStorage({ [IDB_EPOCH_KEY]: String(IDB_EPOCH) }));
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -237,6 +265,119 @@ describe("with IndexedDB (fake-indexeddb)", () => {
       expect(second.ytext.toString()).toHaveLength(CONTENT.length * 2);
       second.destroy();
       await clearLocalDocument(docId);
+    });
+
+    it("a stale mirror from the previous epoch is wiped before the mirror opens, so the text stays single", async () => {
+      const docId = `epoch-${Date.now()}`;
+      // A pre-fix browser: mirror of a seed the server never persisted, written under epoch 1.
+      const oldSeed = new Y.Doc();
+      oldSeed.getText("content").insert(0, CONTENT);
+      const first = await openAndSync(docId, Y.encodeStateAsUpdate(oldSeed));
+      first.destroy();
+      await tick();
+      localStorage.setItem(IDB_EPOCH_KEY, "1");
+
+      // The server now hands out its persisted seed (different CRDT ids, same text).
+      const second = await openAndSync(docId, seed);
+      expect(second.ytext.toString()).toBe(CONTENT);
+      expect(storedIdbEpoch()).toBe(IDB_EPOCH);
+      second.destroy();
+      await clearLocalDocument(docId);
+    });
+  });
+
+  describe("mirror epoch", () => {
+    async function writeMirror(docId: string, text: string) {
+      const d = new Y.Doc();
+      const p = new IndexeddbPersistence(localDbName(docId), d);
+      await p.whenSynced;
+      d.getText("content").insert(0, text);
+      await tick();
+      await p.destroy();
+    }
+
+    async function readMirror(docId: string): Promise<string> {
+      const d = new Y.Doc();
+      const p = new IndexeddbPersistence(localDbName(docId), d);
+      await p.whenSynced;
+      const text = d.getText("content").toString();
+      await p.clearData();
+      return text;
+    }
+
+    it("a missing or older epoch deletes every markdoc:* database and records the current epoch", async () => {
+      const a = `wipe-a-${Date.now()}`;
+      const b = `wipe-b-${Date.now()}`;
+      await writeMirror(a, "mirror a");
+      await writeMirror(b, "mirror b");
+      localStorage.removeItem(IDB_EPOCH_KEY);
+      expect(storedIdbEpoch()).toBeNull();
+
+      await expect(ensureLocalEpoch()).resolves.toBe(true);
+      expect(storedIdbEpoch()).toBe(IDB_EPOCH);
+      const names = (await indexedDB.databases()).map((d) => d.name);
+      expect(names.filter((n) => n === localDbName(a) || n === localDbName(b))).toEqual([]);
+      expect(await readMirror(a)).toBe("");
+      expect(await readMirror(b)).toBe("");
+
+      localStorage.setItem(IDB_EPOCH_KEY, "1");
+      await writeMirror(a, "written under epoch 1");
+      await expect(ensureLocalEpoch()).resolves.toBe(true);
+      expect(await readMirror(a)).toBe("");
+      expect(localStorage.getItem(IDB_EPOCH_KEY)).toBe(String(IDB_EPOCH));
+    });
+
+    it("a matching epoch leaves the mirrors alone", async () => {
+      const docId = `keep-${Date.now()}`;
+      await writeMirror(docId, "keep me");
+      expect(storedIdbEpoch()).toBe(IDB_EPOCH);
+      await expect(ensureLocalEpoch()).resolves.toBe(true);
+      expect(await readMirror(docId)).toBe("keep me");
+    });
+
+    it("falls back to the localStorage registry when indexedDB.databases() is missing", async () => {
+      const listed = `reg-listed-${Date.now()}`;
+      const unlisted = `reg-unlisted-${Date.now()}`;
+      // Open through the module so the registry records the id; the other one bypasses it.
+      const d = new Y.Doc();
+      const p = openLocalPersistence(listed, d)!;
+      await p.whenLoaded;
+      d.getText("content").insert(0, "listed");
+      await tick();
+      await p.destroy();
+      await writeMirror(unlisted, "unlisted");
+      expect(JSON.parse(localStorage.getItem(IDB_REGISTRY_KEY)!)).toContain(listed);
+
+      const real = indexedDB;
+      const withoutList = Object.create(real) as IDBFactory & { databases?: unknown };
+      Object.defineProperty(withoutList, "databases", { value: undefined });
+      for (const m of ["open", "deleteDatabase", "cmp"] as const) {
+        (withoutList as unknown as Record<string, unknown>)[m] = (real[m] as (...a: unknown[]) => unknown).bind(real);
+      }
+      vi.stubGlobal("indexedDB", withoutList);
+      localStorage.setItem(IDB_EPOCH_KEY, "1");
+      await expect(ensureLocalEpoch()).resolves.toBe(true);
+      vi.stubGlobal("indexedDB", real);
+
+      expect(await readMirror(listed)).toBe("");
+      expect(await readMirror(unlisted)).toBe("unlisted");
+      expect(JSON.parse(localStorage.getItem(IDB_REGISTRY_KEY)!)).toEqual([]);
+    });
+
+    it("a session does not open a mirror until the epoch check passed", async () => {
+      const docId = `session-epoch-${Date.now()}`;
+      await writeMirror(docId, "stale");
+      localStorage.setItem(IDB_EPOCH_KEY, "1");
+      const session = makeSession(docId);
+      expect(session.localLoaded).toBe(false);
+      await session.whenLocalLoaded;
+      expect(session.ytext.toString()).toBe("");
+      expect(storedIdbEpoch()).toBe(IDB_EPOCH);
+      session.ytext.insert(0, "fresh");
+      await tick();
+      session.destroy();
+      await tick();
+      expect(await readMirror(docId)).toBe("fresh");
     });
   });
 });

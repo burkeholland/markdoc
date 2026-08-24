@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { applyOps, diffOps } from "@/editor/sync/text-diff";
 
 /**
  * Shared Y.Doc layout and the initial ("seed") state of a document.
@@ -51,4 +52,31 @@ export function encodeSeedState(content: string, title: string): Uint8Array {
   } finally {
     doc.destroy();
   }
+}
+
+/**
+ * Whether `text` is exactly the seed twice — the shape a client produces when its
+ * IndexedDB mirror of an older, never-persisted seed merges with the seed the server
+ * minted for the same content. Both seeds are inserted at offset 0 with no origin, so the
+ * CRDT concatenates them in either order and the result is `seed + seed`, optionally
+ * with one newline between when the seed did not end with one. Nothing else qualifies.
+ */
+export function isDoubledSeed(text: string, seed: string): boolean {
+  if (!seed || text.length <= seed.length) return false;
+  if (text === seed + seed) return true;
+  return !seed.endsWith("\n") && text === `${seed}\n${seed}`;
+}
+
+/**
+ * If the document's text is the seed doubled (see {@link isDoubledSeed}), collapse it back
+ * to the seed with the minimal set of deletions (the same path REST-side replacements take,
+ * so collaborators' positions survive). Returns true when a correction was applied.
+ * Runs inside a transaction with `origin` so Hocuspocus attributes and stores it like a local change.
+ */
+export function revertDoubledSeed(doc: Y.Doc, seed: string, origin?: unknown): boolean {
+  const ytext = doc.getText(TEXT_KEY);
+  const current = ytext.toString();
+  if (!isDoubledSeed(current, seed)) return false;
+  doc.transact(() => applyOps(ytext, diffOps(current, seed, 0)), origin);
+  return ytext.toString() === seed;
 }

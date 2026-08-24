@@ -19,9 +19,34 @@ import { IndexeddbPersistence, clearDocument } from "y-indexeddb";
  * reload), and "server wins when both sides have text" would discard edits typed
  * while offline. The provider applies the server's state before this module could
  * inspect it, so the fix has to be — and is — on the server.
+ *
+ * ## The mirror epoch
+ *
+ * One hole remains after the server fix: a browser that still holds a mirror of an
+ * *old, never-persisted* seed (written before the server started persisting seeds)
+ * would merge it with the now-persisted seed on its first open and push the doubled
+ * text to the server. Such a mirror is unsalvageable — its CRDT ids never existed on
+ * the server — so the only safe move is to throw away every `markdoc:*` database once.
+ *
+ * `markdoc:idb-epoch` (localStorage) records which generation of server-side seed
+ * identity this browser's mirrors belong to. When it differs from {@link IDB_EPOCH}
+ * every local mirror is deleted before any y-indexeddb provider is created, then the
+ * epoch is written. Bump {@link IDB_EPOCH} only when the identity of the state the
+ * server hands out changes (a re-seed, a storage migration that re-mints CRDT ids);
+ * never for ordinary releases — the wipe also discards edits made offline and not yet
+ * synced, which there is no persisted marker to protect.
  */
 
 export const LOCAL_DB_PREFIX = "markdoc:";
+
+/**
+ * Generation of the server-side seed identity the local mirrors are compatible with.
+ * 1: seeds re-minted on every load (pre-fix); 2: seeds minted once and persisted as `ystate`.
+ */
+export const IDB_EPOCH = 2;
+export const IDB_EPOCH_KEY = "markdoc:idb-epoch";
+/** localStorage registry of mirrored doc ids, for runtimes without `indexedDB.databases()`. */
+export const IDB_REGISTRY_KEY = "markdoc:idb-docs";
 
 /** How long to wait for IndexedDB before the UI stops waiting on it. */
 export const LOCAL_LOAD_TIMEOUT_MS = 1500;
@@ -37,6 +62,124 @@ export function hasIndexedDB(): boolean {
   } catch {
     return false;
   }
+}
+
+function storage(): Storage | null {
+  try {
+    const s = typeof localStorage === "undefined" ? null : localStorage;
+    return s && typeof s.getItem === "function" ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+function readRegistry(): string[] {
+  try {
+    const raw = storage()?.getItem(IDB_REGISTRY_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRegistry(ids: string[]) {
+  try {
+    storage()?.setItem(IDB_REGISTRY_KEY, JSON.stringify(ids));
+  } catch {
+    // Quota or disabled storage: the registry is only a fallback for listing databases.
+  }
+}
+
+function rememberLocalDoc(docId: string) {
+  const ids = readRegistry();
+  if (ids.includes(docId)) return;
+  ids.push(docId);
+  writeRegistry(ids);
+}
+
+function forgetLocalDoc(docId: string) {
+  const ids = readRegistry();
+  if (!ids.includes(docId)) return;
+  writeRegistry(ids.filter((id) => id !== docId));
+}
+
+/** Names of every `markdoc:*` IndexedDB database this browser holds. */
+async function listLocalDbNames(): Promise<string[]> {
+  const idb = indexedDB as IDBFactory & { databases?: () => Promise<{ name?: string }[]> };
+  if (typeof idb.databases === "function") {
+    try {
+      const all = await idb.databases();
+      return all.map((d) => d.name ?? "").filter((n) => n.startsWith(LOCAL_DB_PREFIX));
+    } catch {
+      // Fall through to the registry.
+    }
+  }
+  return readRegistry().map(localDbName);
+}
+
+/** The epoch the stored mirrors belong to, or null when nothing was ever recorded. */
+export function storedIdbEpoch(): number | null {
+  const raw = storage()?.getItem(IDB_EPOCH_KEY);
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+let epochCheck: Promise<boolean> | null = null;
+
+/**
+ * Make sure the local mirrors belong to the current {@link IDB_EPOCH}; when they do
+ * not, delete every `markdoc:*` database and record the new epoch. Must complete before
+ * any {@link openLocalPersistence} call so a stale mirror is never applied to a document.
+ *
+ * Resolves true when mirrors may be opened. Resolves false when the wipe did not finish
+ * within {@link LOCAL_LOAD_TIMEOUT_MS} (a database held open by another tab blocks its
+ * deletion): the caller must then not open a mirror this session, and the epoch stays
+ * unwritten so the next load tries again.
+ */
+export function ensureLocalEpoch(): Promise<boolean> {
+  if (!hasIndexedDB()) return Promise.resolve(true);
+  if (storedIdbEpoch() === IDB_EPOCH) return Promise.resolve(true);
+  if (epochCheck) return epochCheck;
+  epochCheck = (async () => {
+    const wipe = (async () => {
+      const names = await listLocalDbNames();
+      await Promise.all(
+        names.map(async (name) => {
+          try {
+            await clearDocument(name);
+          } catch {
+            // Best effort; a failed delete leaves the database for the next attempt.
+          }
+        }),
+      );
+      return names.length;
+    })();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), LOCAL_LOAD_TIMEOUT_MS);
+    });
+    try {
+      const wiped = await Promise.race([wipe, timeout]);
+      if (wiped === null) {
+        console.warn(`[markdoc] local mirror reset did not finish in ${LOCAL_LOAD_TIMEOUT_MS}ms; not opening IndexedDB this session`);
+        return false;
+      }
+      writeRegistry([]);
+      try {
+        storage()?.setItem(IDB_EPOCH_KEY, String(IDB_EPOCH));
+      } catch {
+        // Without localStorage the wipe repeats on the next load; harmless for a doc that just synced.
+      }
+      if (wiped > 0) console.info(`[markdoc] local mirrors reset to epoch ${IDB_EPOCH} (${wiped} database${wiped === 1 ? "" : "s"} removed)`);
+      return true;
+    } finally {
+      if (timer) clearTimeout(timer);
+      epochCheck = null;
+    }
+  })();
+  return epochCheck;
 }
 
 export interface LocalPersistence {
@@ -64,6 +207,7 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
   } catch {
     return null;
   }
+  rememberLocalDoc(docId);
   let loaded = false;
   let destroyed = false;
   const whenLoaded = new Promise<void>((resolve) => {
@@ -104,6 +248,7 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
       } catch {
         // Best effort: the database may already be gone.
       }
+      forgetLocalDoc(docId);
     },
   };
 }
@@ -116,6 +261,7 @@ export async function clearLocalDocument(docId: string): Promise<void> {
   } catch {
     // Best effort.
   }
+  forgetLocalDoc(docId);
 }
 
 export type ConnectionPhase = "saved" | "saving" | "offline" | "connecting" | "reconnecting" | "error";

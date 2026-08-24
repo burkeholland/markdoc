@@ -6,7 +6,14 @@ import type { Awareness } from "y-protocols/awareness";
 import { CommentsModel, COMMENTS_ORIGIN } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
-import { openLocalPersistence, clearLocalDocument, type ConnectionPhase, type LocalPersistence } from "./offline";
+import {
+  clearLocalDocument,
+  ensureLocalEpoch,
+  hasIndexedDB,
+  openLocalPersistence,
+  type ConnectionPhase,
+  type LocalPersistence,
+} from "./offline";
 import type { CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
@@ -276,22 +283,29 @@ export class CollabSession {
   /**
    * Open the IndexedDB copy of this document (no-op when already started, destroyed,
    * or IndexedDB is unavailable, in which case {@link localLoaded} becomes true at once).
+   * Mirrors from an older {@link IDB_EPOCH} are wiped first, before y-indexeddb can
+   * apply them; the provider may sync meanwhile, the fresh mirror then stores its state.
    */
   startLocalPersistence() {
     if (this.localStarted) return;
     this.localStarted = true;
     if (this.destroyed) return;
-    this.local = openLocalPersistence(this.docId, this.ydoc);
-    if (!this.local) {
+    const markLoaded = () => {
       this.localLoaded = true;
       this.resolveLocalLoaded();
       this.notify();
+    };
+    if (!hasIndexedDB()) {
+      markLoaded();
       return;
     }
-    void this.local.whenLoaded.then(() => {
-      this.localLoaded = true;
-      this.resolveLocalLoaded();
-      this.notify();
+    void ensureLocalEpoch().then((usable) => {
+      if (!this.destroyed && usable) this.local = openLocalPersistence(this.docId, this.ydoc);
+      if (!this.local) {
+        markLoaded();
+        return;
+      }
+      void this.local.whenLoaded.then(markLoaded);
     });
   }
 
