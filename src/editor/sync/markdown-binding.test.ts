@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import * as Y from "yjs";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { splitBlock, setBlockType } from "prosemirror-commands";
-import { MarkdownBinding, markdownBindingPlugin } from "./markdown-binding";
+import { MarkdownBinding, markdownBindingPlugin, isStructuralChange, VERIFY_TRUST_AFTER, VERIFY_EVERY_NTH_WINDOW } from "./markdown-binding";
 import { schema } from "../markdown/schema";
+import { parseMarkdown } from "../markdown/parse";
+import { textChangeSpan } from "../markdown/incremental";
 import { diffOps, diffOpsWords, applyOps } from "./text-diff";
 
 function makeEditor(ytext: Y.Text) {
@@ -270,6 +272,149 @@ describe("MarkdownBinding", () => {
     expect(seen).toEqual([[{ index: 0, deleteCount: 0, insert: "X" }]]);
     expect(ytext.toString()).toBe("Hello world. (intercepted)");
     expect(view.state.doc.textContent).toBe("Hello world. (intercepted)");
+  });
+
+  describe("parse verification", () => {
+    const DOC = "# Title\n\nFirst paragraph with words.\n\n- one\n- two\n\nLast paragraph.";
+    let visibility: DocumentVisibilityState;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      visibility = "visible";
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      delete (document as unknown as { visibilityState?: unknown }).visibilityState;
+    });
+
+    /** Type `ch` at the end of the last paragraph through the text (the code pane / remote path) and let the quiet period elapse. */
+    const typeAndPause = (ch: string) => {
+      ytext.insert(ytext.length, ch);
+      vi.advanceTimersByTime(1000);
+    };
+    /** Drive the binding until the incremental parser is trusted. */
+    const N = VERIFY_TRUST_AFTER;
+    const trust = (binding: MarkdownBinding) => {
+      for (let i = 0; i < N; i++) typeAndPause("x");
+      expect(binding.verifyStats).toMatchObject({ runs: N, matches: N, mismatches: 0, skipped: 0 });
+    };
+
+    it("detects structural edits", () => {
+      const structural = (before: string, after: string) => {
+        const span = textChangeSpan(before, after)!;
+        return isStructuralChange(before, after, span);
+      };
+      expect(structural("Hello world", "Hello brave world")).toBe(false);
+      expect(structural("Hello world", "Hello **brave** world")).toBe(false);
+      expect(structural("Hello world", "Hello `brave` world")).toBe(false);
+      expect(structural("Hello world", "Hello [world]")).toBe(true);
+      expect(structural("Hello world", "Hello world[^1]")).toBe(true);
+      expect(structural("a | b", "a | bc")).toBe(true);
+      expect(structural("Hello", "# Hello")).toBe(true);
+      expect(structural("Hello", "- Hello")).toBe(true);
+      expect(structural("Hello", "> Hello")).toBe(true);
+      expect(structural("Hello\n", "Hello\n---")).toBe(true);
+      expect(structural("Hello world", "Hello\n\nworld")).toBe(true);
+      expect(structural("```\ncode\n```", "```\ncod\n```")).toBe(false);
+      expect(structural("```\ncode\n```", "\ncode\n```")).toBe(true);
+      expect(structural("text\n\n    code", "text\n\n    cod")).toBe(true);
+    });
+
+    it("verifies an incremental parse after the quiet period and repairs drift", () => {
+      ytext.insert(0, DOC);
+      const { view, binding } = editor();
+      typeAndPause("!");
+      expect(binding.verifyStats).toMatchObject({ runs: 1, matches: 1, mismatches: 0 });
+
+      // Inject a wrong incremental result and let the editor render it, as a drifted parse would.
+      const wrong = parseMarkdown("# Wrong\n\nonly this");
+      binding["parseCache"] = { text: ytext.toString(), result: wrong };
+      binding.syncFromText();
+      expect(view.state.doc.childCount).toBe(2);
+      expect(view.state.doc.child(0).textContent).toBe("Wrong");
+
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(binding.verifyParse()).toBe(false);
+      warn.mockRestore();
+      expect(binding.verifyStats).toMatchObject({ runs: 2, matches: 1, mismatches: 1 });
+      expect(view.state.doc.childCount).toBe(4);
+      expect(view.state.doc.child(0).textContent).toBe("Title");
+      expect(view.state.doc.child(3).textContent).toBe("Last paragraph.!");
+      expect(binding.blocks.length).toBe(4);
+    });
+
+    it("skips the verification for routine edits once trusted, but not for structural ones", () => {
+      ytext.insert(0, DOC);
+      const { binding } = editor();
+      trust(binding);
+
+      typeAndPause("y");
+      expect(binding.verifyStats).toMatchObject({ runs: N, skipped: 1 });
+      typeAndPause(" more `code`");
+      expect(binding.verifyStats).toMatchObject({ runs: N, skipped: 2 });
+
+      typeAndPause(" [ref]");
+      expect(binding.verifyStats).toMatchObject({ runs: N + 1, matches: N + 1, skipped: 2 });
+      typeAndPause("\n\n## Heading");
+      expect(binding.verifyStats).toMatchObject({ runs: N + 2, matches: N + 2, skipped: 2 });
+
+      // A structural edit followed by a routine one within the same quiet period still verifies.
+      ytext.insert(ytext.length, " [x]");
+      typeAndPause("z");
+      expect(binding.verifyStats).toMatchObject({ runs: N + 3, skipped: 2 });
+    });
+
+    it("still verifies a routine edit every 25th idle window once trusted", () => {
+      ytext.insert(0, DOC);
+      const { binding } = editor();
+      trust(binding);
+      for (let i = 0; i < VERIFY_EVERY_NTH_WINDOW - 1; i++) typeAndPause("r");
+      expect(binding.verifyStats).toMatchObject({ runs: N, skipped: VERIFY_EVERY_NTH_WINDOW - 1 });
+      typeAndPause("r");
+      expect(binding.verifyStats).toMatchObject({ runs: N + 1, skipped: VERIFY_EVERY_NTH_WINDOW - 1 });
+      typeAndPause("r");
+      expect(binding.verifyStats).toMatchObject({ runs: N + 1, skipped: VERIFY_EVERY_NTH_WINDOW });
+    });
+
+    it("resets the trust after a mismatch", () => {
+      ytext.insert(0, DOC);
+      const { binding } = editor();
+      trust(binding);
+      binding["parseCache"] = { text: ytext.toString(), result: parseMarkdown("# Wrong") };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      binding.verifyParse();
+      warn.mockRestore();
+      typeAndPause("q");
+      expect(binding.verifyStats).toMatchObject({ runs: N + 2, mismatches: 1, skipped: 0 });
+    });
+
+    it("does not verify while the tab is hidden and catches up when it becomes visible", () => {
+      ytext.insert(0, DOC);
+      const { binding } = editor();
+      visibility = "hidden";
+      typeAndPause("h");
+      vi.advanceTimersByTime(10000);
+      expect(binding.verifyStats.runs).toBe(0);
+
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(binding.verifyStats.runs).toBe(0);
+      vi.advanceTimersByTime(1000);
+      expect(binding.verifyStats).toMatchObject({ runs: 1, matches: 1 });
+    });
+
+    it("cancels a pending verification when another keystroke arrives", () => {
+      ytext.insert(0, DOC);
+      const { binding } = editor();
+      for (let i = 0; i < 5; i++) {
+        ytext.insert(ytext.length, "k");
+        vi.advanceTimersByTime(900);
+      }
+      expect(binding.verifyStats.runs).toBe(0);
+      vi.advanceTimersByTime(100);
+      expect(binding.verifyStats.runs).toBe(1);
+    });
   });
 });
 

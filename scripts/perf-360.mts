@@ -108,7 +108,65 @@ for (let i = 0; i < 8; i++) {
   await page.waitForTimeout(1500);
   paused.push(await token(page, `zp${letters[i]}${letters[(i + 5) % 8]}`));
 }
-console.log(`[perf360 ${label}] outside-view 4-char token, 1.5 s pause before each ×8: median ${median(paused)} ms (${paused.join("/")})`);
+console.log(`[perf360 ${label}] outside-view 4-char token, 1.5 s pause before each ×8: median ${median(paused)} ms max ${Math.max(...paused)} ms (${paused.join("/")})`);
+
+const INCLUSIVE = ["syncFromText", "buildDoc", "reparseRange", "parseRegion", "parseMarkdown", "buildSourceMap", "minimalReplaceTransaction", "getSourceMap", "getHeadings", "getTree", "lintMarkdown", "verifyParse", "handleLocalTransaction", "formatState", "collectHighlights", "applyHighlights", "refreshRichHighlights", "updateState", "performWorkUntilDeadline", "performSyncWorkOnRoot", "performWorkOnRoot", "flushSyncWorkAcrossRoots_impl", "commitRoot", "renderRootSync", "textChangeSpan", "countNewlines", "toString", "shiftMdast"];
+// 2b. Same again under the CDP profiler: how much full parsing (verifyParse) lands in the pauses.
+// Sampled at 1 ms so the profiler itself does not distort the tokens.
+{
+  await page.waitForTimeout(1500);
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Profiler.enable");
+  await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
+  await cdp.send("Profiler.start");
+  const profiled: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    await page.waitForTimeout(1500);
+    profiled.push(await token(page, `zv${letters[i]}${letters[(i + 2) % 8]}`));
+  }
+  await page.waitForTimeout(1500);
+  const { profile } = await cdp.send("Profiler.stop");
+  await cdp.detach();
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const parent = new Map<number, number>();
+  for (const n of profile.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
+  const deltas = profile.timeDeltas ?? [];
+  let verify = 0;
+  let fullParse = 0;
+  let anyParse = 0;
+  let idle = 0;
+  const inclusive = new Map<string, number>();
+  const self = new Map<string, number>();
+  for (let i = 0; i < profile.samples!.length; i++) {
+    const ms = (deltas[i] ?? 0) / 1000;
+    const cf = byId.get(profile.samples![i])!.callFrame;
+    if (cf.functionName === "(idle)") idle += ms;
+    const selfKey = `${cf.functionName || "(anon)"} @ ${cf.url.replace(/^.*\/_next\/static\/chunks\//, "").replace(/\?.*$/, "").slice(-40)}`;
+    self.set(selfKey, (self.get(selfKey) ?? 0) + ms);
+    let underVerify = false;
+    let underParse = false;
+    let underIncremental = false;
+    const seen = new Set<string>();
+    for (let p: number | undefined = profile.samples![i]; p !== undefined; p = parent.get(p)) {
+      const n = byId.get(p)!.callFrame.functionName;
+      if (n === "verifyParse") underVerify = true;
+      if (n === "parseMarkdown") underParse = true;
+      if (n === "reparseRange" || n === "parseRegion") underIncremental = true;
+      if (INCLUSIVE.includes(n) && !seen.has(n)) {
+        seen.add(n);
+        inclusive.set(n, (inclusive.get(n) ?? 0) + ms);
+      }
+    }
+    if (underVerify) verify += ms;
+    if (underParse) anyParse += ms;
+    if (underParse && !underIncremental) fullParse += ms;
+  }
+  const total = (profile.endTime - profile.startTime) / 1000;
+  console.log(`[perf360 ${label}] profiled 1.5 s pause ×8: median ${median(profiled)} ms max ${Math.max(...profiled)} ms (${profiled.join("/")}) · verifyParse ${verify.toFixed(0)} ms · parseMarkdown full ${fullParse.toFixed(0)} ms, any ${anyParse.toFixed(0)} ms · ${Math.round(total - idle)} ms busy of ${Math.round(total)}`);
+  console.log(`[perf360 ${label}]   inclusive: ${[...inclusive.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ")}`);
+  const top = [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  for (const [k, v] of top) console.log(`[perf360 ${label}]   ${String(Math.round(v)).padStart(6)} ms  ${k}`);
+}
 if (process.env.QUICK) {
   await browser.close();
   process.exit(0);
@@ -146,7 +204,6 @@ await page.waitForTimeout(1500);
 const cdp = await context.newCDPSession(page);
 await cdp.send("Profiler.enable");
 await cdp.send("Profiler.setSamplingInterval", { interval: 250 });
-const INCLUSIVE = ["syncFromText", "buildDoc", "reparseRange", "parseRegion", "parseMarkdown", "buildSourceMap", "minimalReplaceTransaction", "getSourceMap", "getHeadings", "getTree", "lintMarkdown", "verifyParse", "handleLocalTransaction", "formatState", "collectHighlights", "applyHighlights", "refreshRichHighlights", "updateState", "performWorkUntilDeadline", "performSyncWorkOnRoot", "performWorkOnRoot", "flushSyncWorkAcrossRoots_impl", "commitRoot", "renderRootSync", "textChangeSpan", "countNewlines", "toString", "shiftMdast"];
 async function profileKeystrokes(name: string, keys: number, pauseMs: number) {
   await cdp.send("Profiler.start");
   for (let i = 0; i < keys; i++) await page.keyboard.type("x", { delay: 0 });
