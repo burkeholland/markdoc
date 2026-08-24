@@ -226,12 +226,12 @@ test.describe("preview vertical rhythm", () => {
     await waitForPreview(page);
 
     // Same rule set as e2e/a11y.spec.ts: color-contrast is skipped in the light theme (axe cannot
-    // resolve it through the translucent chrome) and enforced in dark. Scoped to the preview pane:
-    // the whole editor is a11y.spec's job, and a 40-line fixture makes the code pane scroll, which
-    // trips axe's pre-existing `scrollable-region-focusable` finding on `.cm-scroller`.
+    // resolve it through the translucent chrome) and enforced in dark. The whole editor is scanned:
+    // this 40-line fixture makes both panes scroll, which is exactly the case that used to trip
+    // `scrollable-region-focusable` on the rich pane's scroller (fixed in task #361 — the
+    // contenteditable `.ProseMirror` now carries tabindex="0", see src/editor/prosemirror/setup.ts).
     const scan = async (contrast: boolean) =>
       new AxeBuilder({ page })
-        .include('[data-testid="rich-pane"]')
         .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
         .disableRules(contrast ? [] : ["color-contrast"])
         .analyze();
