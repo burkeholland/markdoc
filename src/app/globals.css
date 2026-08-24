@@ -431,8 +431,36 @@ body {
 .md-rich:focus {
   outline: none;
 }
-.md-rich > * + * {
-  margin-top: 0.9em;
+
+/* ---------- Markdown prose rhythm ----------
+   One margin system for every rendered-Markdown surface: the rich editor (.md-rich), the reader
+   view (.reader-body) and, mirrored by hand, the HTML export (src/server/export/html.ts, STYLES).
+   Spacing is applied from the child side with margin-top only, so blocks compose predictably:
+   a block after a block gets --md-space, the first block after a heading gets the tighter
+   --md-space-heading-after, and headings take their own margin-top per level. Block elements must
+   not set `margin` themselves — `.md-rich p { margin: 0 }` used to beat the sibling rule on
+   specificity and glued headings, paragraphs and tables together (task #346, Burke #1057);
+   src/app/md-rhythm.test.ts guards against that coming back. The tokens are em-based and resolve
+   against the element they land on, so they scale with the surface's font size and are identical
+   in both themes. */
+.md-rich,
+.reader-body {
+  --md-space: 0.9em;
+  --md-space-heading-after: 0.45em;
+  --md-space-heading-before-h2: 1.6em;
+  --md-space-heading-before-h3: 1.25em;
+  --md-space-heading-before-h4: 1em;
+}
+.md-rich > * + *,
+.reader-body > * + * {
+  margin-top: var(--md-space);
+}
+/* A thematic break gets more air than a paragraph break, on both sides, still margin-top only. */
+.md-rich > hr,
+.md-rich > hr + *,
+.reader-body > hr,
+.reader-body > hr + * {
+  margin-top: calc(var(--md-space) * 1.75);
 }
 .md-rich h1,
 .md-rich h2,
@@ -446,14 +474,46 @@ body {
   line-height: 1.25;
   scroll-margin-top: 12px;
 }
+.md-rich h1,
+.reader-body h1 {
+  margin-top: var(--md-space-heading-before-h2);
+}
+.md-rich h2,
+.reader-body h2 {
+  /* margin + padding together are the visual gap above an h2 (--md-space-heading-before-h2); the
+     border sits inside it, closer to the heading it introduces. */
+  margin-top: calc(var(--md-space-heading-before-h2) - 0.6em);
+  padding-top: 0.6em;
+}
+.md-rich h3,
+.reader-body h3 {
+  margin-top: var(--md-space-heading-before-h3);
+}
+.md-rich h4,
+.md-rich h5,
+.md-rich h6,
+.reader-body h4,
+.reader-body h5,
+.reader-body h6 {
+  margin-top: var(--md-space-heading-before-h4);
+}
+/* The first block under a heading hugs it (also h2 + h3): same specificity as the per-level
+   heading rules above, so it must stay below them. */
+.md-rich > :is(h1, h2, h3, h4, h5, h6) + *,
+.reader-body > :is(h1, h2, h3, h4, h5, h6) + * {
+  margin-top: var(--md-space-heading-after);
+}
+/* The document does not start with a gap. */
+.md-rich > :first-child,
+.reader-body > :first-child {
+  margin-top: 0;
+}
+
 .md-rich h1 {
   font-size: 2em;
-  margin-top: 0.2em;
 }
 .md-rich h2 {
   font-size: 1.5em;
-  margin-top: 1.4em;
-  padding-top: 0.9em;
   border-top: 1px solid var(--color-line);
 }
 .md-rich h2:first-child {
@@ -462,7 +522,6 @@ body {
 }
 .md-rich h3 {
   font-size: 1.25em;
-  margin-top: 1.3em;
 }
 .md-rich h4 {
   font-size: 1.05em;
@@ -471,12 +530,6 @@ body {
 .md-rich h6 {
   font-size: 1em;
   color: var(--color-ink-2);
-}
-.md-rich p {
-  margin: 0;
-}
-.md-rich p + p {
-  margin-top: 0.9em;
 }
 .md-rich a {
   color: var(--color-accent);
@@ -551,7 +604,6 @@ body {
 .md-rich blockquote {
   border-left: 3px solid var(--color-line-2);
   color: var(--color-ink-3);
-  margin: 0;
   padding: 0.1em 0 0.1em 1.1em;
 }
 .md-rich pre {
@@ -615,7 +667,6 @@ body {
 .md-rich hr {
   border: none;
   border-top: 1px solid var(--color-line);
-  margin: 1.6em 0;
 }
 .md-rich img {
   max-width: 100%;
@@ -677,7 +728,6 @@ body {
   border-collapse: collapse;
   table-layout: fixed;
   width: 100%;
-  margin: 0;
   overflow: hidden;
 }
 .md-rich th,
@@ -1060,9 +1110,7 @@ body {
   color: var(--color-ink-2);
   word-wrap: break-word;
 }
-.reader-body > * + * {
-  margin-top: 0.9em;
-}
+/* Block spacing: see "Markdown prose rhythm" above (shared with .md-rich). */
 .reader-body h1,
 .reader-body h2,
 .reader-body h3,
@@ -1073,17 +1121,13 @@ body {
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.25;
-  margin: 0;
   scroll-margin-top: 88px;
 }
 .reader-body h1 {
   font-size: 2em;
-  margin-top: 0.2em;
 }
 .reader-body h2 {
   font-size: 1.5em;
-  margin-top: 1.4em;
-  padding-top: 0.9em;
   border-top: 1px solid var(--color-line);
 }
 .reader-body h2:first-child {
@@ -1092,7 +1136,6 @@ body {
 }
 .reader-body h3 {
   font-size: 1.25em;
-  margin-top: 1.3em;
 }
 .reader-body h4 {
   font-size: 1.05em;
@@ -1101,9 +1144,6 @@ body {
 .reader-body h6 {
   font-size: 1em;
   color: var(--color-ink-2);
-}
-.reader-body p {
-  margin: 0;
 }
 .reader-body a {
   color: var(--color-accent);
@@ -1116,7 +1156,6 @@ body {
 }
 .reader-body ul,
 .reader-body ol {
-  margin: 0;
   padding-left: 1.6em;
 }
 .reader-body ul {
@@ -1154,7 +1193,6 @@ body {
 .reader-body blockquote {
   border-left: 3px solid var(--color-line-2);
   color: var(--color-ink-3);
-  margin: 0;
   padding: 0.1em 0 0.1em 1.1em;
 }
 .reader-body pre {
@@ -1187,7 +1225,6 @@ body {
 .reader-body hr {
   border: none;
   border-top: 1px solid var(--color-line);
-  margin: 1.6em 0;
 }
 .reader-body img {
   max-width: 100%;
@@ -1197,7 +1234,6 @@ body {
 .reader-body table {
   border-collapse: collapse;
   width: 100%;
-  margin: 0;
   display: block;
   overflow-x: auto;
 }
