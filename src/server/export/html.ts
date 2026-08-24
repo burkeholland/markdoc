@@ -77,7 +77,7 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/** Typography mirrors `.md-rich` in globals.css; colors are the same palette. */
+/** Typography mirrors `.md-rich` in globals.css (block rhythm: see "Markdown prose rhythm" there); colors are the same palette. */
 const STYLES = `
 :root { color-scheme: light; }
 html { -webkit-text-size-adjust: 100%; }
@@ -86,25 +86,34 @@ body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 16px; line-height: 1.65; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 }
-main { max-width: 820px; margin: 0 auto; padding: 48px 32px 96px; }
-main > * + * { margin-top: 0.9em; }
-h1, h2, h3, h4, h5, h6 { color: #111827; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; margin: 0; }
-h1 { font-size: 2em; margin-top: 0.2em; }
-h2 { font-size: 1.5em; margin-top: 1.4em; padding-top: 0.9em; border-top: 1px solid #e5e7eb; }
+main {
+  max-width: 820px; margin: 0 auto; padding: 48px 32px 96px;
+  --md-space: 0.9em; --md-space-heading-after: 0.45em;
+  --md-space-heading-before-h2: 1.6em; --md-space-heading-before-h3: 1.25em; --md-space-heading-before-h4: 1em;
+}
+/* No Tailwind preflight here: zero the UA margins first, then space blocks from the child side with margin-top only. */
+h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, pre, table, figure, hr { margin: 0; }
+main > * + * { margin-top: var(--md-space); }
+main > hr, main > hr + * { margin-top: calc(var(--md-space) * 1.75); }
+h1, h2, h3, h4, h5, h6 { color: #111827; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
+h1 { font-size: 2em; margin-top: var(--md-space-heading-before-h2); }
+h2 { font-size: 1.5em; margin-top: calc(var(--md-space-heading-before-h2) - 0.6em); padding-top: 0.6em; border-top: 1px solid #e5e7eb; }
 h2:first-child { border-top: none; padding-top: 0; }
-h3 { font-size: 1.25em; margin-top: 1.3em; }
+h3 { font-size: 1.25em; margin-top: var(--md-space-heading-before-h3); }
 h4 { font-size: 1.05em; }
 h5, h6 { font-size: 1em; color: #374151; }
-p { margin: 0; }
+h4, h5, h6 { margin-top: var(--md-space-heading-before-h4); }
+main > :is(h1, h2, h3, h4, h5, h6) + * { margin-top: var(--md-space-heading-after); }
+main > :first-child { margin-top: 0; }
 a { color: #2563eb; text-decoration: none; }
 a:hover { text-decoration: underline; }
-ul, ol { margin: 0; padding-left: 1.6em; }
+ul, ol { padding-left: 1.6em; }
 li + li { margin-top: 0.25em; }
 li > p + p, li > ul, li > ol { margin-top: 0.25em; }
 li.task-list-item { list-style: none; margin-left: -1.6em; padding-left: 1.6em; position: relative; }
 li.task-list-item > input[type="checkbox"] { position: absolute; left: 0; top: 0.35em; margin: 0; width: 1em; height: 1em; accent-color: #2563eb; }
 li.task-list-item:has(> input:checked) { color: #6b7280; }
-blockquote { border-left: 3px solid #d1d5db; color: #6b7280; margin: 0; padding: 0.1em 0 0.1em 1.1em; }
+blockquote { border-left: 3px solid #d1d5db; color: #6b7280; padding: 0.1em 0 0.1em 1.1em; }
 pre {
   background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; color: #111827;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -115,9 +124,9 @@ code {
   background: #f3f4f6; border-radius: 4px; color: #be185d; padding: 0.1em 0.35em; font-size: 0.875em;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-hr { border: none; border-top: 1px solid #e5e7eb; margin: 1.6em 0; }
+hr { border: none; border-top: 1px solid #e5e7eb; }
 img { max-width: 100%; height: auto; border-radius: 8px; }
-table { border-collapse: collapse; width: 100%; margin: 0; }
+table { border-collapse: collapse; width: 100%; }
 th, td { border: 1px solid #d1d5db; padding: 6px 10px; vertical-align: top; text-align: left; }
 th { background: #f9fafb; font-weight: 600; color: #111827; }
 del { color: #6b7280; }
