@@ -1,11 +1,20 @@
 import { test, expect, type Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, type User } from "./helpers";
 
+const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
+
 /** JSON-RPC over /api/mcp, the way Copilot CLI calls the HTTP server. */
 async function mcp<T>(page: Page, token: string, name: string, args: Record<string, unknown>): Promise<T> {
-  const res = await page.request.post("/api/mcp", {
-    headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-    data: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+  const post = () =>
+    page.request.post("/api/mcp", {
+      headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      data: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+    });
+  // The dev server occasionally drops a keep-alive socket while recompiling (read ECONNRESET); retry once.
+  const res = await post().catch(async (err: unknown) => {
+    if (!/ECONNRESET|ECONNREFUSED|socket hang up/.test(String(err))) throw err;
+    await page.waitForTimeout(500);
+    return post();
   });
   expect(res.ok(), `${name} -> ${res.status()} ${await res.text()}`).toBeTruthy();
   const text = await res.text();
@@ -16,20 +25,32 @@ async function mcp<T>(page: Page, token: string, name: string, args: Record<stri
   return (body.result.structuredContent ?? JSON.parse(body.result.content[0].text)) as T;
 }
 
+/**
+ * Comment on `quote` with a ```suggestion block proposing `replacement` (Ctrl+Shift+S in the composer
+ * pre-fills the fence with the quote selected, so typing replaces it).
+ */
+async function suggestChange(page: Page, quote: string, replacement: string) {
+  await selectTextInRich(page, quote);
+  await page.getByTestId("tb-comment").click();
+  const composer = page.getByTestId("comment-composer");
+  await expect(composer).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+Shift+s");
+  await expect(composer).toHaveValue(`\`\`\`suggestion\n${quote}\n\`\`\``);
+  await page.keyboard.type(replacement);
+  await page.keyboard.press("ControlOrMeta+Enter");
+}
+
 test.describe("review suggestions: ```suggestion blocks in comments, Accept / Reject, agent reviews", () => {
   let alice: User;
   let bob: User;
-  let docId: string;
+  let token: string;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
     bob = await signIn(browser, "bob");
-    docId = await createDocument(alice.page, "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n", "Review me");
-    await shareWith(alice.page, docId, "bob", "editor");
-    await openDocument(alice.page, docId);
-    await openDocument(bob.page, docId);
-    await ensureCommentsOpen(alice.page);
-    await ensureCommentsOpen(bob.page);
+    const res = await alice.page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 30 } });
+    expect(res.ok()).toBeTruthy();
+    token = ((await res.json()) as { token: { token: string } }).token.token;
   });
 
   test.afterAll(async () => {
@@ -37,7 +58,19 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await bob.context.close();
   });
 
+  /** Each test gets its own document (Alice owns, Bob edits) so a failure in one never leaks into the next. */
+  async function freshDocument(): Promise<string> {
+    const docId = await createDocument(alice.page, SOURCE, "Review me");
+    await shareWith(alice.page, docId, "bob", "editor");
+    await openDocument(alice.page, docId);
+    await openDocument(bob.page, docId);
+    await ensureCommentsOpen(alice.page);
+    await ensureCommentsOpen(bob.page);
+    return docId;
+  }
+
   test("Suggest a change pre-fills the quote; the thread shows a diff; Accept replaces the text, resolves, and Ctrl+Z undoes it in one step", async () => {
+    await freshDocument();
     const page = bob.page;
     await selectTextInRich(page, "very unique");
     await page.getByTestId("tb-comment").click();
@@ -68,38 +101,37 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await aliceThread.getByTestId("suggestion-accept-comment").click();
     await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
     expect(Date.now() - before).toBeLessThan(1500);
-    await expect(alice.page.getByTestId("toast")).toContainText("Accepted suggestion from Bob");
+    // The dev-login display name is the lower-case handle.
+    await expect(alice.page.getByTestId("toast")).toContainText(/Accepted suggestion from bob/i);
     // Accepting resolves the thread (it moves to the Resolved tab).
     await expect(alice.page.getByTestId("comments-tab-resolved")).toContainText("1");
     await alice.page.getByTestId("comments-tab-resolved").click();
     await expect(alice.page.getByTestId("comment-thread").first()).toHaveAttribute("data-suggestion", "accepted");
     await alice.page.getByTestId("comments-tab-open").click();
 
-    // One undo step in the editor restores the text and the thread.
+    // One undo step in the editor restores the text. The undo manager's scope is the text (as for
+    // accepted tracked changes), so the thread keeps its decision record and stays resolved.
     await alice.page.locator(".md-rich").click();
     await alice.page.keyboard.press("ControlOrMeta+z");
     await expect.poll(() => codeText(alice.page)).toContain("Our product is very unique.");
-    await expect(alice.page.getByTestId("comments-tab-open")).toContainText("1");
+    await expect(alice.page.getByTestId("comments-tab-resolved")).toContainText("1");
   });
 
   test("Reject keeps the text; editing the quoted text first marks the suggestion Outdated and disables Accept", async () => {
+    await freshDocument();
     const page = alice.page;
-    // Reject the (undone, so pending again) first suggestion.
-    const first = page.getByTestId("comment-thread").first();
+
+    // Bob suggests on "very unique"; Alice rejects — the text is untouched and the thread is decided.
+    await suggestChange(bob.page, "very unique", "unique");
+    const first = page.getByTestId("comment-thread").filter({ hasText: "very unique" }).first();
+    await expect(first).toHaveAttribute("data-suggestion", "pending");
     await first.getByTestId("suggestion-reject-comment").click();
     await expect(first).toHaveAttribute("data-suggestion", "rejected");
     expect(await codeText(page)).toContain("Our product is very unique.");
     await expect(first.getByTestId("suggestion-accept-comment")).toHaveCount(0);
 
     // Bob suggests on "sales are good"; Alice edits that text before deciding.
-    await selectTextInRich(bob.page, "sales are good");
-    await bob.page.getByTestId("tb-comment").click();
-    await bob.page.keyboard.press("ControlOrMeta+Shift+s");
-    const composer = bob.page.getByTestId("comment-composer");
-    await expect(composer).toHaveValue("```suggestion\nsales are good\n```");
-    await bob.page.keyboard.type("sales are strong");
-    await bob.page.keyboard.press("ControlOrMeta+Enter");
-
+    await suggestChange(bob.page, "sales are good", "sales are strong");
     const outdated = page.getByTestId("comment-thread").filter({ hasText: "sales are" }).first();
     await expect(outdated).toHaveAttribute("data-suggestion", "pending");
     await selectTextInRich(page, "good");
@@ -112,10 +144,8 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
   });
 
   test("an agent posts a review over MCP → review card; Accept all applies the suggestion; markdoc_watch reports suggestion.accepted; a bad quote creates nothing", async () => {
+    const docId = await freshDocument();
     const page = alice.page;
-    const res = await page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 30 } });
-    expect(res.ok()).toBeTruthy();
-    const token = ((await res.json()) as { token: { token: string } }).token.token;
 
     const watch0 = await mcp<{ cursor: string }>(page, token, "markdoc_watch", { id: docId, wait: 0 });
     expect(watch0.cursor).toBeTruthy();
@@ -167,14 +197,25 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       )
       .toEqual(expect.arrayContaining(["review.created", "suggestion.accepted", "comment.resolved"]));
 
-    // The comment author (Alice's token acts for Alice, so she is the actor) is not notified of her own acceptance;
-    // the bell still shows the review notification is suppressed for the owner acting on herself.
+    // The REST comments listing reports the decided state.
     const comments = (await (await page.request.get(`/api/documents/${docId}/comments`)).json()) as { comments: { id: string; suggestion: { state: string } | null }[] };
     const accepted = comments.comments.find((c) => c.id === review.threadIds[0]);
     expect(accepted?.suggestion?.state).toBe("accepted");
   });
 
-  test("a viewer sees the suggestion diff without Accept / Reject", async ({ browser }) => {
+  test("a viewer sees the suggestion diff and the review card without Accept / Reject", async ({ browser }) => {
+    const docId = await freshDocument();
+    // A pending human suggestion and a pending agent review on the same document.
+    await suggestChange(bob.page, "sales are good", "sales are strong");
+    await expect(alice.page.getByTestId("comment-thread").filter({ hasText: "sales are" }).first()).toHaveAttribute("data-suggestion", "pending");
+    await mcp(alice.page, token, "markdoc_review", {
+      id: docId,
+      verdict: "comment",
+      summary: "One thought.",
+      comments: [{ quote: "The end is near.", body: "Softer close.\n\n```suggestion\nThat is all for now.\n```" }],
+    });
+    await expect(alice.page.getByTestId("review-card").first()).toBeVisible();
+
     await shareWith(alice.page, docId, "carol", "viewer");
     const carol = await signIn(browser, "carol");
     try {
@@ -182,11 +223,13 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       await ensureCommentsOpen(carol.page);
       await carol.page.getByTestId("comments-tab-open").click();
       const thread = carol.page.getByTestId("comment-thread").filter({ hasText: "sales are" }).first();
+      await expect(thread).toHaveAttribute("data-suggestion", "pending");
       await expect(thread.getByTestId("suggestion-diff")).toBeVisible();
       await expect(thread.getByTestId("suggestion-accept-comment")).toHaveCount(0);
       await expect(thread.getByTestId("suggestion-reject-comment")).toHaveCount(0);
       await expect(carol.page.getByTestId("review-card").first()).toBeVisible();
       await expect(carol.page.getByTestId("review-accept-all")).toHaveCount(0);
+      await expect(carol.page.getByTestId("review-reject-all")).toHaveCount(0);
     } finally {
       await carol.context.close();
     }
