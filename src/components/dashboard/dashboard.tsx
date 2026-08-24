@@ -416,11 +416,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
       {fileImport.input}
       <ImportDialog open={fileImport.open} onOpenChange={fileImport.setOpen} items={fileImport.items} ignored={fileImport.ignored} />
       <main className="min-h-screen bg-surface-2">
-        <header className="sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
+        <header className="app-header sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
           <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
             <Link href="/" className="flex items-center gap-2.5" aria-label="Markdoc — all documents">
               <Logo className="h-8 w-8" />
-              <span className="hidden text-lg font-semibold text-ink sm:inline">Markdoc</span>
+              <span className="wordmark hidden text-lg font-semibold text-ink sm:inline">Markdoc</span>
             </Link>
             <div className="relative mx-auto w-full max-w-xl">
               <Search size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />

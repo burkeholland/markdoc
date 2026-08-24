@@ -160,6 +160,251 @@
   --scrollbar-thumb: #374151;
 }
 
+/* ---------- Brand candidates (task #398, phase 1) ----------
+   Two looks behind `<html data-brand="a|b">` (set by src/lib/brand.ts from `?brand=`), layered on
+   the same tokens as dark mode: a brand block overrides the light palette, `[data-brand][data-theme="dark"]`
+   the dark one. No brand attribute = the current look. Both blocks define the same token set
+   (src/app/brand-tokens.test.ts) and every pair below is WCAG AA; axe checks them live with
+   color-contrast on in e2e/a11y.spec.ts ("axe: brands"). Nothing here moves a component: the
+   brand-only chrome (header shadow, toolbar pills, paper preview) is keyed off classes the
+   components already carry. Unbranded defaults for the new knobs live in :root / dark above. */
+:root {
+  /* Display face for document titles and h1–h3 in the preview; the body stays --font-sans. */
+  --p-font-display: var(--font-sans);
+  /* Background of the preview column and of the header/toolbar chrome; both are the surface until a brand says otherwise. */
+  --p-paper: var(--p-surface);
+  --p-chrome: var(--p-surface);
+  /* Corner radius of buttons, inputs and icon buttons (rounded-lg today). */
+  --p-radius-control: 0.5rem;
+  --p-selection: #bfdbfe;
+}
+[data-theme="dark"] {
+  --p-selection: #1e3a8a;
+}
+
+/* Option A — "Ink & teal": deep teal accent, warm paper preview, Fraunces for headings. */
+[data-brand="a"] {
+  --p-ink: #1c1917;
+  --p-ink-2: #44403c;
+  --p-ink-3: #57534e;
+  --p-ink-4: #6b6560;
+  --p-line: #e7e5e4;
+  --p-line-2: #d6d3d1;
+  --p-surface: #ffffff;
+  --p-surface-2: #f7f5f0;
+  --p-surface-3: #efece6;
+  --p-accent: #0f766e;
+  --p-accent-hover: #115e59;
+  --p-accent-soft: #e6f4f1;
+  --p-success: #15803d;
+  --p-warning: #b45309;
+  --p-danger: #b91c1c;
+  --p-on-accent: #ffffff;
+  --p-inverse: #1c1917;
+  --p-font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
+  --p-paper: #fcfbf7;
+  --p-chrome: #ffffff;
+  --p-radius-control: 0.375rem;
+  --p-selection: #c4ebe4;
+  --cm-faint: #6b6560;
+  --cm-function: #0f766e;
+  --cm-url-underline: #5eead4;
+  --cm-selection: #99f6e488;
+  --cm-bracket: #ccfbf1;
+  --cm-active-line: #faf9f5;
+  --md-focus-line: #99f6e4;
+  --hljs-title: #0f766e;
+  --hljs-title-2: #0d9488;
+  --scrollbar-thumb: #d6d3d1;
+}
+[data-brand="a"][data-theme="dark"] {
+  --p-ink: #e7e5e4;
+  --p-ink-2: #d6d3d1;
+  --p-ink-3: #a8a29e;
+  --p-ink-4: #97918a;
+  --p-line: #2b2e33;
+  --p-line-2: #3a3d43;
+  --p-surface: #14161a;
+  --p-surface-2: #1c1f24;
+  --p-surface-3: #25282e;
+  --p-accent: #2dd4bf;
+  --p-accent-hover: #5eead4;
+  --p-accent-soft: rgba(45, 212, 191, 0.16);
+  --p-success: #4ade80;
+  --p-warning: #fbbf24;
+  --p-danger: #f87171;
+  --p-on-accent: #14161a;
+  --p-inverse: #3a3633;
+  --p-font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
+  --p-paper: #14161a;
+  --p-chrome: #14161a;
+  --p-radius-control: 0.375rem;
+  --p-selection: #134e4a;
+  --cm-faint: #97918a;
+  --cm-function: #2dd4bf;
+  --cm-url-underline: #14b8a6;
+  --cm-selection: #14b8a655;
+  --cm-bracket: #134e4a;
+  --cm-active-line: #1c1f24;
+  --md-focus-line: #0f766e;
+  --hljs-title: #2dd4bf;
+  --hljs-title-2: #2dd4bf;
+  --scrollbar-thumb: #3a3d43;
+}
+
+/* Option B — "Graphite & amber": amber accent, cool graphite chrome, neutral preview, Inter Tight headings. */
+[data-brand="b"] {
+  --p-ink: #16181d;
+  --p-ink-2: #3b3f47;
+  --p-ink-3: #5b616b;
+  --p-ink-4: #656b75;
+  --p-line: #e3e5e8;
+  --p-line-2: #cfd3d8;
+  --p-surface: #ffffff;
+  --p-surface-2: #f4f5f7;
+  --p-surface-3: #eceef1;
+  --p-accent: #b45309;
+  --p-accent-hover: #92400e;
+  --p-accent-soft: #fdf1e3;
+  --p-success: #15803d;
+  --p-warning: #b45309;
+  --p-danger: #b91c1c;
+  --p-on-accent: #ffffff;
+  --p-inverse: #16181d;
+  --p-font-display: var(--font-inter-tight), var(--font-sans);
+  --p-paper: #ffffff;
+  --p-chrome: #f4f5f7;
+  --p-radius-control: 0.375rem;
+  --p-selection: #fde6c4;
+  --cm-faint: #656b75;
+  --cm-function: #b45309;
+  --cm-url-underline: #fcd34d;
+  --cm-selection: #fde68a88;
+  --cm-bracket: #fef3c7;
+  --cm-active-line: #f8f9fa;
+  --md-focus-line: #fcd34d;
+  --hljs-title: #b45309;
+  --hljs-title-2: #d97706;
+  --scrollbar-thumb: #cfd3d8;
+}
+[data-brand="b"][data-theme="dark"] {
+  --p-ink: #e6e8eb;
+  --p-ink-2: #c8ccd2;
+  --p-ink-3: #9aa1ab;
+  --p-ink-4: #8a929e;
+  --p-line: #262a31;
+  --p-line-2: #343941;
+  --p-surface: #0f1115;
+  --p-surface-2: #171a20;
+  --p-surface-3: #1f232a;
+  --p-accent: #fbbf24;
+  --p-accent-hover: #fcd34d;
+  --p-accent-soft: rgba(251, 191, 36, 0.16);
+  --p-success: #4ade80;
+  --p-warning: #fbbf24;
+  --p-danger: #f87171;
+  --p-on-accent: #0f1115;
+  --p-inverse: #343941;
+  --p-font-display: var(--font-inter-tight), var(--font-sans);
+  --p-paper: #0f1115;
+  --p-chrome: #0f1115;
+  --p-radius-control: 0.375rem;
+  --p-selection: #78350f;
+  --cm-faint: #8a929e;
+  --cm-function: #fbbf24;
+  --cm-url-underline: #d97706;
+  --cm-selection: #f59e0b55;
+  --cm-bracket: #78350f;
+  --cm-active-line: #171a20;
+  --md-focus-line: #b45309;
+  --hljs-title: #fbbf24;
+  --hljs-title-2: #fbbf24;
+  --scrollbar-thumb: #343941;
+}
+
+/* Brand-only chrome. Outside a brand these rules do nothing (no data-brand on <html>). */
+[data-brand] .app-header {
+  background: var(--p-chrome);
+  border-bottom-color: transparent;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--color-line) 70%, transparent), 0 2px 10px -6px rgba(15, 23, 42, 0.18);
+}
+[data-brand][data-theme="dark"] .app-header {
+  box-shadow: 0 1px 0 var(--color-line), 0 2px 12px -6px rgba(0, 0, 0, 0.7);
+}
+[data-brand] .app-toolbar {
+  background: var(--p-chrome);
+  border-bottom-color: transparent;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--color-line) 60%, transparent);
+  gap: 6px;
+}
+[data-brand] .tb-group {
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 1px;
+  background: var(--color-surface);
+}
+[data-brand] .tb-group .icon-btn {
+  border-radius: 999px;
+  height: 2rem;
+  width: 2rem;
+}
+[data-brand] .tb-group .icon-btn.w-auto {
+  width: auto;
+}
+[data-brand] .tb-divider {
+  display: none;
+}
+[data-brand] .rich-column {
+  background: var(--p-paper);
+}
+[data-brand] .wordmark {
+  font-family: var(--p-font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+[data-brand="a"] .wordmark {
+  font-weight: 500;
+  font-variation-settings: "opsz" 24, "SOFT" 40;
+}
+[data-brand] .doc-title,
+[data-brand] .hero-title,
+[data-brand] .md-rich h1,
+[data-brand] .md-rich h2,
+[data-brand] .md-rich h3,
+[data-brand] .reader-body h1,
+[data-brand] .reader-body h2,
+[data-brand] .reader-body h3 {
+  font-family: var(--p-font-display);
+}
+[data-brand="a"] .md-rich h1,
+[data-brand="a"] .md-rich h2,
+[data-brand="a"] .md-rich h3,
+[data-brand="a"] .reader-body h1,
+[data-brand="a"] .reader-body h2,
+[data-brand="a"] .reader-body h3,
+[data-brand="a"] .hero-title,
+[data-brand="a"] .doc-title {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  font-variation-settings: "opsz" 36, "SOFT" 30;
+}
+[data-brand="b"] .md-rich h1,
+[data-brand="b"] .md-rich h2,
+[data-brand="b"] .md-rich h3,
+[data-brand="b"] .reader-body h1,
+[data-brand="b"] .reader-body h2,
+[data-brand="b"] .reader-body h3,
+[data-brand="b"] .hero-title,
+[data-brand="b"] .doc-title {
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+[data-brand] .md-rich ::selection,
+[data-brand] .reader-body ::selection {
+  background: var(--p-selection);
+}
+
 html,
 body {
   height: 100%;
@@ -193,6 +438,7 @@ body {
   .btn {
     @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-colors select-none;
     @apply h-9 px-3.5;
+    border-radius: var(--p-radius-control);
   }
   .btn:disabled {
     @apply opacity-50 pointer-events-none;
@@ -214,18 +460,22 @@ body {
   }
   .icon-btn {
     @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 transition-colors hover:bg-surface-3 hover:text-ink disabled:opacity-40 disabled:pointer-events-none;
+    border-radius: var(--p-radius-control);
   }
   .icon-btn[data-active="true"] {
     @apply bg-accent-soft text-accent;
   }
   .input {
     @apply h-9 w-full rounded-lg border border-line-2 bg-surface px-3 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
+    border-radius: var(--p-radius-control);
   }
   .textarea {
     @apply w-full rounded-lg border border-line-2 bg-surface px-3 py-2 text-sm text-ink outline-none placeholder:text-ink-4 focus:border-accent focus:ring-2 focus:ring-accent/20;
+    border-radius: var(--p-radius-control);
   }
   .select {
     @apply h-9 rounded-lg border border-line-2 bg-surface px-2 text-sm text-ink outline-none focus:border-accent;
+    border-radius: var(--p-radius-control);
   }
   .menu {
     @apply z-50 min-w-48 rounded-xl border border-line bg-surface p-1.5 shadow-xl shadow-black/10 dark:shadow-black/50;

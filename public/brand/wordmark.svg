@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 176 40" width="176" height="40" role="img" aria-label="Markdoc">
+  <!-- Wordmark: the mark plus the name. Colours are parameters for the two brand candidates; this file carries Option A. -->
+  <g transform="translate(4 4)">
+    <path d="M9 2h12l9 9v12a7 7 0 0 1-7 7H9a7 7 0 0 1-7-7V9a7 7 0 0 1 7-7z" fill="#0f766e"/>
+    <path d="M21 2v6a3 3 0 0 0 3 3h6z" fill="#ffffff" fill-opacity="0.42"/>
+    <path d="M10 13.5h13M9 19.5h13M14.5 9.5l-2 13M20 9.5l-2 13" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+  <text x="48" y="27" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="22" font-weight="500" letter-spacing="-0.4" fill="#1c1917">Markdoc</text>
+</svg>

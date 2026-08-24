@@ -11,7 +11,7 @@ import { z } from "zod";
 export const SERVER_INFO = { name: "markdoc", version: "0.1.0" };
 
 export const INSTRUCTIONS = [
-  "Markdoc is a collaborative Markdown editor (Google Docs for Markdown).",
+  "Markdoc is a collaborative Markdown editor: people and agents write the same document in real time, with comments, tracked suggestions and version history.",
   "Use markdoc_create_document to start a document people can open in their browser and edit with you in real time;",
   "always give the user the returned URL.",
   "markdoc_suggest is the preferred way to change text: suggestions show up as tracked changes the humans review and accept or reject in the app.",

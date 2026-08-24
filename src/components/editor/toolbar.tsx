@@ -66,7 +66,12 @@ function ToolButton({
 }
 
 function Divider() {
-  return <span className="mx-1.5 h-6 w-px bg-line" aria-hidden />;
+  return <span className="tb-divider mx-1.5 h-6 w-px bg-line" aria-hidden />;
+}
+
+/** A run of related buttons. Plain inline flow today; the brand candidates draw it as a hairline pill. */
+function Group({ children }: { children: React.ReactNode }) {
+  return <span className="tb-group flex items-center gap-0.5">{children}</span>;
 }
 
 const HEADINGS = [
@@ -144,7 +149,7 @@ export const Toolbar = memo(function Toolbar({
   return (
     <div
       ref={rootRef}
-      className="toolbar-scroll safe-x flex h-12 shrink-0 items-center gap-0.5 border-b border-line"
+      className="app-toolbar toolbar-scroll safe-x flex h-12 shrink-0 items-center gap-0.5 border-b border-line"
       role="toolbar"
       aria-label="Formatting"
       aria-orientation="horizontal"
@@ -152,81 +157,93 @@ export const Toolbar = memo(function Toolbar({
       onFocus={onToolbarFocus}
       onKeyDown={onToolbarKeyDown}
     >
-      <Menu>
-        <MenuTrigger asChild>
-          <button
-            type="button"
-            className="icon-btn w-auto gap-1 px-2.5 font-semibold"
-            disabled={dis}
-            onMouseDown={(e) => e.preventDefault()}
-            aria-label="Text style"
-            data-testid="heading-menu"
-          >
-            <Heading size={18} />
-            {format.heading > 0 && <span className="text-xs text-accent">{format.heading}</span>}
-            <ChevronDown size={14} className="text-ink-4" />
-          </button>
-        </MenuTrigger>
-        <MenuContent align="start" className="w-56">
-          <MenuRadioGroup value={String(format.heading)} onValueChange={(v) => actions.setHeading(Number(v))}>
-            {HEADINGS.map((h) => (
-              <MenuRadioItem key={h.value} value={h.value} className={h.className}>
-                {h.label}
-              </MenuRadioItem>
-            ))}
-          </MenuRadioGroup>
-        </MenuContent>
-      </Menu>
+      <Group>
+        <Menu>
+          <MenuTrigger asChild>
+            <button
+              type="button"
+              className="icon-btn w-auto gap-1 px-2.5 font-semibold"
+              disabled={dis}
+              onMouseDown={(e) => e.preventDefault()}
+              aria-label="Text style"
+              data-testid="heading-menu"
+            >
+              <Heading size={18} />
+              {format.heading > 0 && <span className="text-xs text-accent">{format.heading}</span>}
+              <ChevronDown size={14} className="text-ink-4" />
+            </button>
+          </MenuTrigger>
+          <MenuContent align="start" className="w-56">
+            <MenuRadioGroup value={String(format.heading)} onValueChange={(v) => actions.setHeading(Number(v))}>
+              {HEADINGS.map((h) => (
+                <MenuRadioItem key={h.value} value={h.value} className={h.className}>
+                  {h.label}
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuContent>
+        </Menu>
+      </Group>
       <Divider />
-      <ToolButton label="Bold" keys="Mod-B" active={format.strong} disabled={dis} onClick={() => actions.toggleMark("strong")} testId="tb-bold">
-        <Bold size={18} strokeWidth={2.6} />
-      </ToolButton>
-      <ToolButton label="Italic" keys="Mod-I" active={format.em} disabled={dis} onClick={() => actions.toggleMark("em")} testId="tb-italic">
-        <Italic size={18} />
-      </ToolButton>
-      <ToolButton label="Strikethrough" keys="Mod-Shift-X" active={format.strike} disabled={dis} onClick={() => actions.toggleMark("strike")}>
-        <Strikethrough size={18} />
-      </ToolButton>
+      <Group>
+        <ToolButton label="Bold" keys="Mod-B" active={format.strong} disabled={dis} onClick={() => actions.toggleMark("strong")} testId="tb-bold">
+          <Bold size={18} strokeWidth={2.6} />
+        </ToolButton>
+        <ToolButton label="Italic" keys="Mod-I" active={format.em} disabled={dis} onClick={() => actions.toggleMark("em")} testId="tb-italic">
+          <Italic size={18} />
+        </ToolButton>
+        <ToolButton label="Strikethrough" keys="Mod-Shift-X" active={format.strike} disabled={dis} onClick={() => actions.toggleMark("strike")}>
+          <Strikethrough size={18} />
+        </ToolButton>
+      </Group>
       <Divider />
-      <ToolButton label="Link" keys="Mod-K" active={format.link} disabled={dis} onClick={() => actions.openLinkDialog()} testId="tb-link">
-        <LinkIcon size={18} />
-      </ToolButton>
-      <ToolButton label="Inline code" keys="Mod-`" active={format.code} disabled={dis} onClick={() => actions.toggleMark("code")} testId="tb-code">
-        <Code size={18} />
-      </ToolButton>
-      <ToolButton label="Code block" keys="Mod-Alt-C" active={format.codeBlock} disabled={dis} onClick={() => actions.toggleCodeBlock()}>
-        <SquareCode size={18} />
-      </ToolButton>
+      <Group>
+        <ToolButton label="Link" keys="Mod-K" active={format.link} disabled={dis} onClick={() => actions.openLinkDialog()} testId="tb-link">
+          <LinkIcon size={18} />
+        </ToolButton>
+        <ToolButton label="Inline code" keys="Mod-`" active={format.code} disabled={dis} onClick={() => actions.toggleMark("code")} testId="tb-code">
+          <Code size={18} />
+        </ToolButton>
+        <ToolButton label="Code block" keys="Mod-Alt-C" active={format.codeBlock} disabled={dis} onClick={() => actions.toggleCodeBlock()}>
+          <SquareCode size={18} />
+        </ToolButton>
+      </Group>
       <Divider />
-      <ToolButton label="Bulleted list" keys="Mod-Shift-8" active={format.bullet} disabled={dis} onClick={() => actions.toggleList("bullet")} testId="tb-bullet">
-        <List size={18} />
-      </ToolButton>
-      <ToolButton label="Numbered list" keys="Mod-Shift-7" active={format.ordered} disabled={dis} onClick={() => actions.toggleList("ordered")} testId="tb-ordered">
-        <ListOrdered size={18} />
-      </ToolButton>
-      <ToolButton label="Task list" keys="Mod-Shift-9" active={format.task} disabled={dis} onClick={() => actions.toggleList("task")} testId="tb-task">
-        <ListChecks size={18} />
-      </ToolButton>
-      <ToolButton label="Quote" keys="Mod-Shift-." active={format.quote} disabled={dis} onClick={() => actions.toggleQuote()}>
-        <Quote size={18} />
-      </ToolButton>
-      <ToolButton label="Image" disabled={dis} onClick={onImage} testId="tb-image">
-        <ImageIcon size={18} />
-      </ToolButton>
-      <ToolButton label="Table" disabled={dis} onClick={onTable} testId="tb-table">
-        <Table size={18} />
-      </ToolButton>
+      <Group>
+        <ToolButton label="Bulleted list" keys="Mod-Shift-8" active={format.bullet} disabled={dis} onClick={() => actions.toggleList("bullet")} testId="tb-bullet">
+          <List size={18} />
+        </ToolButton>
+        <ToolButton label="Numbered list" keys="Mod-Shift-7" active={format.ordered} disabled={dis} onClick={() => actions.toggleList("ordered")} testId="tb-ordered">
+          <ListOrdered size={18} />
+        </ToolButton>
+        <ToolButton label="Task list" keys="Mod-Shift-9" active={format.task} disabled={dis} onClick={() => actions.toggleList("task")} testId="tb-task">
+          <ListChecks size={18} />
+        </ToolButton>
+        <ToolButton label="Quote" keys="Mod-Shift-." active={format.quote} disabled={dis} onClick={() => actions.toggleQuote()}>
+          <Quote size={18} />
+        </ToolButton>
+        <ToolButton label="Image" disabled={dis} onClick={onImage} testId="tb-image">
+          <ImageIcon size={18} />
+        </ToolButton>
+        <ToolButton label="Table" disabled={dis} onClick={onTable} testId="tb-table">
+          <Table size={18} />
+        </ToolButton>
+      </Group>
       <Divider />
-      <ToolButton label="Horizontal rule" disabled={dis} onClick={() => actions.horizontalRule()}>
-        <Minus size={18} />
-      </ToolButton>
+      <Group>
+        <ToolButton label="Horizontal rule" disabled={dis} onClick={() => actions.horizontalRule()}>
+          <Minus size={18} />
+        </ToolButton>
+      </Group>
       <Divider />
-      <ToolButton label="Undo" keys="Mod-Z" disabled={!canEdit || !canUndo} onClick={() => actions.undo()} testId="tb-undo">
-        <Undo2 size={18} />
-      </ToolButton>
-      <ToolButton label="Redo" keys="Mod-Shift-Z" disabled={!canEdit || !canRedo} onClick={() => actions.redo()} testId="tb-redo">
-        <Redo2 size={18} />
-      </ToolButton>
+      <Group>
+        <ToolButton label="Undo" keys="Mod-Z" disabled={!canEdit || !canUndo} onClick={() => actions.undo()} testId="tb-undo">
+          <Undo2 size={18} />
+        </ToolButton>
+        <ToolButton label="Redo" keys="Mod-Shift-Z" disabled={!canEdit || !canRedo} onClick={() => actions.redo()} testId="tb-redo">
+          <Redo2 size={18} />
+        </ToolButton>
+      </Group>
       <div className="flex-1" />
       {canComment && (
         <Tip label="Add comment" shortcut={shortcut("Mod-Alt-M")}>

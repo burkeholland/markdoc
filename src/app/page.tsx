@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, MessageSquare, Sparkles, Users, GitBranch, History, Columns2 } from "lucide-react";
 import { auth } from "@/auth";
-import { Logo } from "@/components/editor/header";
+import { Wordmark } from "@/components/editor/header";
 import { GitHubIcon } from "@/components/ui/primitives";
 import { Dashboard } from "@/components/dashboard/dashboard";
 import { getGitHubToken, listDocumentsForUser } from "@/server/documents";
@@ -37,21 +37,19 @@ function Feature({ icon, title, children }: { icon: React.ReactNode; title: stri
 function Landing() {
   return (
     <main className="min-h-screen bg-surface-2">
-      <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
-        <div className="flex items-center gap-2.5">
-          <Logo className="h-8 w-8" />
-          <span className="text-lg font-semibold text-ink">Markdoc</span>
-        </div>
+      <header className="app-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
+        <Wordmark />
         <Link href="/login" className="btn btn-primary gap-2">
           <GitHubIcon size={16} /> Sign in with GitHub
         </Link>
       </header>
       <section className="mx-auto max-w-6xl px-6 pb-16 pt-12">
         <div className="max-w-2xl">
-          <h1 className="text-4xl font-bold leading-tight tracking-tight text-ink sm:text-5xl">Google Docs, for Markdown.</h1>
-          <p className="mt-5 text-lg leading-8 text-ink-2">
-            Write Markdown together in real time. Edit the source or the rendered page — both are live for everyone. Review with comments and suggestions, keep every
-            version, and publish straight to a gist or a repository.
+          <h1 className="hero-title text-4xl font-bold leading-tight tracking-tight text-ink sm:text-5xl">Markdown, together.</h1>
+          <p className="mt-3 text-xl leading-8 text-ink-2">A shared editor for Markdown — source and preview side by side, live for everyone.</p>
+          <p className="mt-5 text-lg leading-8 text-ink-3">
+            Edit the source or the rendered page; both update for everyone at once. Review with comments and suggestions, keep every version, and publish
+            straight to a gist or a repository.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
