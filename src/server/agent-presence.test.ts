@@ -185,6 +185,12 @@ describe("agent presence", () => {
       await waitFor(() => human.agents().length === 1);
       expect(human.agents()[0].name).toBe("Scribe");
 
+      // Re-joining right after `left` is visible at once: the awareness clock keeps growing past the removal clients saw.
+      await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "active", status: "back" }), params(docId)));
+      await waitFor(() => human.agents().some((a) => a.name === "Copilot" && a.status === "back"), 1000);
+      await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "left" }), params(docId)));
+      await waitFor(() => human.agents().length === 1);
+
       // Expiry through the sweeper removes the rest.
       presence.sweep(Date.now() + presence.AGENT_PRESENCE_TTL_MS + 1);
       await waitFor(() => human.agents().length === 0);

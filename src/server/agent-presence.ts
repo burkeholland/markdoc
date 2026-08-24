@@ -46,6 +46,7 @@ export interface AgentPresence {
 }
 
 interface Entry extends Omit<AgentPresence, "cursor"> {
+  docId: string;
   cursor: AgentCursor | null;
   clientId: number;
   clock: number;
@@ -61,10 +62,15 @@ export const AGENT_AWARENESS_ORIGIN = { source: "agent" } as const;
 interface SharedState {
   byDoc: Map<string, Map<string, Entry>>;
   sweeper: ReturnType<typeof setInterval> | null;
+  /** Last awareness clock published per `<docId>\u0000<agent id>`; survives `left` so a re-joining agent is not ignored by clients. */
+  clocks: Map<string, number>;
 }
 const g = globalThis as typeof globalThis & { __markdocAgentPresence?: SharedState };
-const shared: SharedState = (g.__markdocAgentPresence ??= { byDoc: new Map(), sweeper: null });
+const shared: SharedState = (g.__markdocAgentPresence ??= { byDoc: new Map(), sweeper: null, clocks: new Map() });
+shared.clocks ??= new Map();
 const byDoc = shared.byDoc;
+
+const clockKey = (docId: string, id: string) => `${docId}\u0000${id}`;
 
 export function agentPresenceId(actor: Pick<Actor, "id" | "agent">): string {
   return `agent:${actor.id}:${actor.agent}`;
@@ -112,7 +118,11 @@ export function encodeAgentAwareness(clientId: number, clock: number, state: unk
 }
 
 function publish(awareness: Awareness, e: Entry) {
-  e.clock += 1;
+  // Clients ignore an update whose clock does not exceed the last one they saw for this client id (including the
+  // removal sent on `left`), so never fall below what this awareness has already published for it.
+  const seen = (awareness.meta.get(e.clientId)?.clock ?? 0) as number;
+  e.clock = Math.max(e.clock, seen) + 1;
+  shared.clocks.set(clockKey(e.docId, e.id), e.clock);
   applyAwarenessUpdate(awareness, encodeAgentAwareness(e.clientId, e.clock, awarenessState(e)), AGENT_AWARENESS_ORIGIN);
 }
 
@@ -247,6 +257,7 @@ function upsert(docId: string, actor: Actor, id: string, existing: Entry | undef
   }
   const entry: Entry = existing ?? {
     id,
+    docId,
     name: actor.agent!,
     userId: actor.id,
     userName: actor.name ?? actor.login ?? "someone",
@@ -258,7 +269,7 @@ function upsert(docId: string, actor: Actor, id: string, existing: Entry | undef
     lastSeen: now,
     expiresAt: now + AGENT_PRESENCE_TTL_MS,
     clientId: agentClientId(id),
-    clock: 0,
+    clock: shared.clocks.get(clockKey(docId, id)) ?? 0,
     explicitStatusUntil: 0,
   };
   entry.lastSeen = now;
@@ -309,7 +320,7 @@ export function publishAgentPresence(doc: Y.Doc, docId: string) {
   for (const e of agents.values()) if (e.expiresAt > now) publish(awareness, e);
 }
 
-/** Tests only. */
+/** Tests only (clock floors are kept: they only ever need to grow). */
 export function resetAgentPresence() {
   byDoc.clear();
   if (shared.sweeper) clearInterval(shared.sweeper);
