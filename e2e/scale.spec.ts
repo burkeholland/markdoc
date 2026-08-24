@@ -88,7 +88,8 @@ async function typeAndMeasure(page: Page, prefix: string): Promise<number[]> {
   await page.keyboard.type(prefix);
   await page.waitForFunction((m) => (document.querySelector(".md-rich")?.textContent ?? "").includes(m), prefix, { timeout: 15_000 });
   const tokenMs = Date.now() - t0;
-  const tokenBudget = budgetMs(300) * prefix.length;
+  // Task #360: 600 ms for the whole token (was 300 ms per character); the lead's #357 after-state was 259 ms.
+  const tokenBudget = budgetMs(600);
   record(`  ${prefix.length}-char token typed → in preview (outside view)`, tokenMs, tokenBudget);
   expect(tokenMs).toBeLessThan(tokenBudget);
   const samples: number[] = [];
