@@ -17,6 +17,7 @@ export const INSTRUCTIONS = [
   "markdoc_suggest is the preferred way to change text: suggestions show up as tracked changes the humans review and accept or reject in the app.",
   "Use markdoc_replace_content only when the user explicitly asks you to rewrite the document in place.",
   "Use markdoc_comments to read feedback left for you and markdoc_comment to reply.",
+  "When asked to review a document, call markdoc_review: a summary, a verdict and one comment per finding, each quoting the exact text and proposing a rewrite in a ```suggestion block the humans accept with one click.",
   "When the user asks you to check Markdoc for requests (or says an agent was asked for something in a document), call markdoc_list_requests,",
   "claim a request, do what its instruction says with the requestId, and call markdoc_complete_request with a one-line summary.",
 ].join(" ");
@@ -321,7 +322,8 @@ export function registerTools(server, client) {
     "markdoc_comment",
     {
       title: "Comment",
-      description: "Add a comment anchored to a quote of the document text, reply to a thread, resolve/reopen a thread, or toggle an emoji reaction on a thread or reply. Bodies may use inline Markdown (**bold**, *italic*, `code`, [links](https://…)) and @login mentions.",
+      description:
+        "Add a comment anchored to a quote of the document text, reply to a thread, resolve/reopen a thread, or toggle an emoji reaction on a thread or reply. Bodies may use inline Markdown (**bold**, *italic*, `code`, [links](https://…)) and @login mentions. To propose a rewrite of the quoted text, include one fenced block with the info string `suggestion` (exactly GitHub's syntax) — ```suggestion⏎new text⏎``` — people see a diff with Accept / Reject; Accept replaces the quoted text. Nothing is applied until a human accepts.",
       inputSchema: {
         id: z.string(),
         action: z.enum(["add", "reply", "resolve", "reopen", "react"]).default("add"),
@@ -353,6 +355,35 @@ export function registerTools(server, client) {
       }
       await api("POST", `/api/documents/${id}/comments`, { action: "resolve", threadId, resolved: action === "resolve" });
       return ok(`Thread ${threadId} ${action === "resolve" ? "resolved" : "reopened"}.`);
+    },
+  );
+
+  tool(
+    "markdoc_review",
+    {
+      title: "Review a document",
+      description:
+        "Leave a GitHub-style review: a summary, a verdict (approve / request_changes / comment) and one comment per finding. Each comment quotes the exact text it is about (first occurrence) and may propose a rewrite of that quote in a ```suggestion fenced block — the humans see a diff and click Accept (applies it) or Reject. Nothing is changed until they accept. The review shows as a card at the top of the Comments panel with Accept all / Reject all. Atomic: if any quote is not found, nothing is created and the error lists which.",
+      inputSchema: {
+        id: z.string(),
+        summary: z.string().describe("One or two sentences on the whole document"),
+        verdict: z.enum(["approve", "request_changes", "comment"]).default("comment"),
+        comments: z
+          .array(
+            z.object({
+              quote: z.string().describe("Exact text the comment is about"),
+              body: z.string().describe("Comment text; add ```suggestion⏎replacement⏎``` to propose a rewrite of the quote"),
+            }),
+          )
+          .min(1)
+          .describe("One entry per finding"),
+      },
+      annotations: ADDITIVE,
+    },
+    async ({ id, summary, verdict, comments }) => {
+      const { review } = await api("POST", `/api/documents/${id}/reviews`, { summary, verdict, comments });
+      const suggestions = comments.filter((c) => /(^|\n)\s*(`{3,}|~{3,})\s*suggestion\s*\n/.test(c.body)).length;
+      return ok(`Review ${review.id} posted on ${id}: ${verdict}, ${comments.length} comment(s), ${suggestions} suggestion(s). People can accept them at ${docUrl(id)}`, { ...review, url: docUrl(id) });
     },
   );
 
@@ -550,7 +581,7 @@ export function registerTools(server, client) {
     {
       title: "Wait for humans",
       description:
-        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
+        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
       inputSchema: {
         id: z.string().optional().describe("Document id; omit for the cross-document inbox"),
         since: z.string().optional().describe("Cursor from the previous call"),

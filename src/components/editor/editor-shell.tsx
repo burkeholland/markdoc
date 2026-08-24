@@ -64,7 +64,7 @@ interface Toast {
   id: number;
   message: string;
   kind: "info" | "error" | "success";
-  action?: { label: string; href: string };
+  action?: { label: string; href?: string; onClick?: () => void };
 }
 
 type SidePanel = "comments" | "versions" | "activity" | null;
@@ -808,7 +808,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
 
   const panel =
     sidePanel === "comments" ? (
-      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} onAskAgent={openAskAgent} focusTab={commentsFocus} />
+      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} onAskAgent={openAskAgent} focusTab={commentsFocus} onToast={toast} />
     ) : sidePanel === "versions" ? (
       <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (
@@ -1036,10 +1036,23 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
               data-testid="toast"
             >
               <span>{t.message}</span>
-              {t.action && (
+              {t.action?.href && (
                 <a className="font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
                   {t.action.label}
                 </a>
+              )}
+              {t.action?.onClick && (
+                <button
+                  type="button"
+                  className="font-semibold underline decoration-white/40 underline-offset-2"
+                  onClick={() => {
+                    t.action?.onClick?.();
+                    setToasts((list) => list.filter((x) => x.id !== t.id));
+                  }}
+                  data-testid="toast-action"
+                >
+                  {t.action.label}
+                </button>
               )}
               <button type="button" className="text-white/60 hover:text-white" onClick={() => setToasts((list) => list.filter((x) => x.id !== t.id))} aria-label="Dismiss">
                 <X size={14} />

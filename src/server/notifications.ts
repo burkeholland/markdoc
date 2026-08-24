@@ -103,7 +103,7 @@ export interface NotificationItem {
   readAt: Date | null;
 }
 
-export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "share", "request.done"];
+export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "suggestion.accepted", "review", "share", "request.done"];
 
 /** Wire shape: dates as ISO strings. */
 export function toNotificationDto(n: NotificationItem) {
@@ -291,6 +291,15 @@ export async function notifyShare(docId: string, login: string, role: string, ac
   return notify({ userLogin: login, documentId: docId, kind: "share", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${login.toLowerCase()}`, snippet: role });
 }
 
+/** `suggestion.accepted`: the author of a comment whose ```suggestion block was applied, unless they did it themselves. */
+export async function notifySuggestionAccepted(docId: string, thread: ThreadInfo, authorId: string, quote: string, actor: Actor): Promise<boolean> {
+  if (!actor.login) return false;
+  // Agents' collab ids are `agent:<userId>:<token>`; the notification goes to the human behind the token.
+  const login = thread.authorLogin ?? (await loginForUserId(authorId.startsWith("agent:") ? authorId.split(":")[1] : authorId));
+  if (!login) return false;
+  return notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: thread.id, snippet: quote });
+}
+
 // --- Live document watcher -----------------------------------------------------
 
 type Origin = { source?: string; connection?: { context?: CollabClaims } } | null | undefined;
@@ -337,6 +346,11 @@ export function watchDocumentNotifications(doc: Y.Doc, docId: string): () => voi
         if (event.changes.keys.has("resolved") && actor) {
           const thread = readThread(map);
           if (thread) void notifyResolved(docId, thread, map.get("resolved") === true, actor).catch(log("resolve"));
+        }
+        if (event.changes.keys.has("suggestionState") && actor && map.get("suggestionState") === "accepted") {
+          const thread = readThread(map);
+          const authorId = str(map.get("authorId"));
+          if (thread && authorId) void notifySuggestionAccepted(docId, thread, authorId, str(map.get("quote")) ?? "", actor).catch(log("suggestion.accepted"));
         }
       } else if (event.target instanceof Y.Array) {
         const parent = event.target.parent;

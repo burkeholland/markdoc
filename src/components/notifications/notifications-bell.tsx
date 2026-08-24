@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AtSign, Bell, Bot, CheckCheck, CircleCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus } from "lucide-react";
+import { AtSign, Bell, Bot, CheckCheck, CircleCheck, ClipboardCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { RelativeTime } from "@/components/ui/relative-time";
 import type { NotificationDto } from "@/lib/api";
@@ -16,6 +16,8 @@ const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; class
   reopen: RotateCcw,
   "suggestion.accept": ThumbsUp,
   "suggestion.reject": ThumbsDown,
+  "suggestion.accepted": CheckCheck,
+  review: ClipboardCheck,
   share: UserPlus,
   "request.done": Bot,
 };

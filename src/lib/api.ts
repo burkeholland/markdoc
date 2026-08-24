@@ -1,6 +1,7 @@
 import type { DocumentDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
 import type { NotificationKind, Role } from "@/server/db/schema";
+import type { ReviewDto } from "@/server/reviews";
 
 export class ApiError extends Error {
   constructor(
@@ -227,6 +228,7 @@ export const api = {
       request<{ document: DocumentDto }>(`/api/documents/${id}/link`, { method: "POST", body: JSON.stringify(body) }),
     comment: (id: string, body: Record<string, unknown>) =>
       request<{ id?: string }>(`/api/documents/${id}/comments`, { method: "POST", body: JSON.stringify(body) }),
+    reviews: (id: string) => request<{ reviews: ReviewDto[] }>(`/api/documents/${id}/reviews`),
     requests: (id: string, opts: { status?: string[] } = {}) =>
       request<{ requests: AgentRequestDto[] }>(`/api/documents/${id}/requests${opts.status?.length ? `?status=${opts.status.join(",")}` : ""}`),
     createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"] }) =>

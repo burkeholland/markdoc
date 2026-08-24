@@ -229,7 +229,7 @@ export const assets = pgTable(
 export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
-export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "share" | "request.done";
+export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "suggestion.accepted" | "review" | "share" | "request.done";
 
 /**
  * Per-user notifications: @mentions, replies to and resolutions of threads they took part in,
@@ -267,6 +267,9 @@ export type ActivityAction =
   | "comment.add"
   | "comment.reply"
   | "comment.resolve"
+  | "comment.suggestion.accepted"
+  | "comment.suggestion.rejected"
+  | "review.create"
   | "suggestion.add"
   | "suggestion.accept"
   | "suggestion.reject"
@@ -344,6 +347,36 @@ export const agentRequests = pgTable(
 );
 
 export type AgentRequest = typeof agentRequests.$inferSelect;
+
+export type ReviewVerdict = "approve" | "request_changes" | "comment";
+
+/**
+ * A review card: one agent (or person) pass over a document that bundles several comment threads,
+ * each possibly carrying a ```suggestion block, under a verdict and summary. Threads themselves live
+ * in the shared Y.Doc; this row only remembers which ones belong together.
+ */
+export const reviews = pgTable(
+  "review",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Agent (API token) that posted the review, when it was not the user directly. */
+    agentTokenId: text("agent_token_id"),
+    authorName: text("author_name").notNull(),
+    verdict: text("verdict").$type<ReviewVerdict>().notNull().default("comment"),
+    summary: text("summary").notNull().default(""),
+    threadIds: jsonb("thread_ids").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("review_document_created_idx").on(t.documentId, t.createdAt.desc())],
+);
+
+export type Review = typeof reviews.$inferSelect;
 
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;

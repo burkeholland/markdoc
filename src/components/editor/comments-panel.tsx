@@ -2,12 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
-import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { QUICK_REACTIONS, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
 import { agentMentionLogin, mentionTriggerAt } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
+import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor } from "@/editor/collab/suggestion-block";
+import { wordDiff } from "@/editor/diff";
+import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
@@ -40,14 +43,31 @@ export function filterMentionCandidates(candidates: MentionCandidate[], query: s
   return [...humans, ...agents].slice(0, max);
 }
 
-/** Renders a comment body: inline Markdown plus `@login` chips. */
+/** Renders a comment body: inline Markdown plus `@login` chips. A ```suggestion block is lifted out (see SuggestionBox). */
 export function MentionBody({ body, className }: { body: string; className?: string }) {
-  const content = useMemo(() => renderCommentBody(body), [body]);
+  const content = useMemo(() => renderCommentBody(parseSuggestionBlock(body)?.prose ?? body), [body]);
+  if (content === null) return null;
   return (
     <div className={cn("comment-body", className)} data-testid="comment-body">
       {content}
     </div>
   );
+}
+
+/** Compact word-level diff of the quoted text → the proposed text (same renderer as version compare). */
+export function SuggestionDiff({ from, to }: { from: string; to: string }) {
+  const parts = useMemo(() => wordDiff(from, to), [from, to]);
+  return (
+    <div className="suggestion-diff" data-testid="suggestion-diff">
+      {parts.map((c, i) => (c.added ? <ins key={i}>{c.value}</ins> : c.removed ? <del key={i}>{c.value}</del> : <span key={i}>{c.value}</span>))}
+      {to === "" && from !== "" && <span className="ml-1 text-xs italic text-ink-4">(deletes the text)</span>}
+    </div>
+  );
+}
+
+/** Review card author label: token name for agents, display name for humans. */
+function verdictTone(verdict: ReviewDto["verdict"]): string {
+  return verdict === "approve" ? "text-success" : verdict === "request_changes" ? "text-amber-700 dark:text-amber-300" : "text-ink-2";
 }
 
 /** "(edited)" with the edit time as a tooltip. */
@@ -205,6 +225,8 @@ export interface CommentsPanelProps {
   onAskAgent?: () => void;
   /** Switch to a tab from outside; bump `nonce` to switch again to the same tab. */
   focusTab?: { tab: "open" | "resolved" | "suggestions"; nonce: number } | null;
+  /** Shell toast (Accept suggestion offers Undo). */
+  onToast?: (message: string, kind?: "info" | "success" | "error", action?: { label: string; onClick?: () => void }) => void;
 }
 
 /** Writes comment changes either to the shared doc (editors) or through the API (commenters). */
@@ -216,6 +238,21 @@ function useCommentOps(session: CollabSession) {
       async add(from: number, to: number, body: string) {
         if (viaApi) return (await api.documents.comment(id, { action: "add", from, to, body })).id ?? null;
         return session.comments.add({ from, to, body, author: session.user });
+      },
+      /** Accept the thread's suggestion block. Editors apply it locally (one undo step); returns false when it could not be applied. */
+      async acceptSuggestion(threadId: string, proposed: string): Promise<boolean> {
+        if (viaApi) {
+          await api.documents.comment(id, { action: "suggestion", threadId, decision: "accept" });
+          return true;
+        }
+        return session.comments.acceptSuggestion(threadId, proposed, session.user);
+      },
+      async rejectSuggestion(threadId: string): Promise<boolean> {
+        if (viaApi) {
+          await api.documents.comment(id, { action: "suggestion", threadId, decision: "reject" });
+          return true;
+        }
+        return session.comments.rejectSuggestion(threadId, session.user);
       },
       async reply(threadId: string, body: string) {
         if (viaApi) return api.documents.comment(id, { action: "reply", threadId, body });
@@ -251,6 +288,7 @@ function Composer({
   submitLabel = "Comment",
   initial = "",
   candidates = [],
+  quote,
 }: {
   placeholder: string;
   autoFocus?: boolean;
@@ -259,6 +297,8 @@ function Composer({
   submitLabel?: string;
   initial?: string;
   candidates?: MentionCandidate[];
+  /** Anchored text; when set, "Suggest a change" (Ctrl+Shift+S) inserts a ```suggestion block pre-filled with it. */
+  quote?: string;
 }) {
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
@@ -272,6 +312,20 @@ function Composer({
     const raf = requestAnimationFrame(() => ref.current?.focus());
     return () => cancelAnimationFrame(raf);
   }, [autoFocus]);
+
+  /** Insert a suggestion block for the quoted text and select its contents so typing replaces them. */
+  const insertSuggestion = () => {
+    const el = ref.current;
+    if (quote === undefined || parseSuggestionBlock(value)) return;
+    const next = suggestionBlockFor(quote, value);
+    setValue(next);
+    setTrigger(null);
+    const start = next.lastIndexOf(quote);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(start, start + quote.length);
+    });
+  };
 
   /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
   const applyFormat = (kind: "bold" | "italic" | "code" | "link") => {
@@ -351,6 +405,12 @@ function Composer({
             }}
             onKeyDown={(e) => {
               const mod = e.metaKey || e.ctrlKey;
+              if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "s" && quote !== undefined) {
+                e.preventDefault();
+                e.stopPropagation();
+                insertSuggestion();
+                return;
+              }
               // Formatting shortcuts belong to the composer; never let the editor's Ctrl+K / Ctrl+B handlers see them.
               if (mod && !e.altKey && !e.shiftKey) {
                 const key = e.key.toLowerCase();
@@ -452,6 +512,19 @@ function Composer({
         <span>@mention · Enter sends · Shift+Enter newline</span>
       </div>
       <div className="flex items-center justify-end gap-2">
+        {quote !== undefined && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm mr-auto gap-1.5"
+            onClick={insertSuggestion}
+            disabled={parseSuggestionBlock(value) !== null}
+            title="Suggest a change (Ctrl+Shift+S)"
+            aria-label="Suggest a change"
+            data-testid="comment-suggest-change"
+          >
+            <Wand2 size={13} /> Suggest a change
+          </button>
+        )}
         {onCancel && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
             Cancel
@@ -473,6 +546,7 @@ function ThreadCard({
   ops,
   candidates,
   unread,
+  onToast,
 }: {
   thread: CommentThread;
   session: CollabSession;
@@ -482,12 +556,14 @@ function ThreadCard({
   candidates: MentionCandidate[];
   /** The current user has unread notifications about this thread. */
   unread?: boolean;
+  onToast?: CommentsPanelProps["onToast"];
 }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<string | null>(null); // "root" or reply id
   const me = session.user.id;
   const canModerate = session.role === "owner";
   const canComment = session.canComment;
+  const canEdit = session.role === "owner" || session.role === "editor";
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (active) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -498,6 +574,21 @@ function ThreadCard({
     if (active && unread) void markRefsRead(session.docId, [thread.id, ...replyIds.split(",").filter(Boolean)]);
   }, [active, unread, session.docId, thread.id, replyIds]);
 
+  const suggestion = useMemo(() => parseSuggestionBlock(thread.body), [thread.body]);
+  const suggestionState: "pending" | "accepted" | "rejected" | "outdated" | null = suggestion
+    ? thread.suggestionState ?? (isSuggestionOutdated(thread, session.ytext.toString()) ? "outdated" : "pending")
+    : null;
+
+  const accept = async () => {
+    if (!suggestion) return;
+    const ok = await ops.acceptSuggestion(thread.id, suggestion.text);
+    if (!ok) {
+      onToast?.("The quoted text changed — this suggestion is outdated.", "error");
+      return;
+    }
+    onToast?.(`Accepted suggestion from ${thread.authorName}.`, "success", { label: "Undo", onClick: () => session.undo() });
+  };
+
   return (
     <div
       ref={ref}
@@ -507,6 +598,7 @@ function ThreadCard({
         thread.resolved && "opacity-80",
       )}
       data-unread={unread || undefined}
+      data-suggestion={suggestionState ?? undefined}
       onClick={() => {
         session.setActiveComment(thread.id);
         if (thread.range) onReveal(thread.range.from);
@@ -546,6 +638,33 @@ function ThreadCard({
           ) : (
             <>
               <MentionBody body={thread.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
+              {suggestion && suggestionState && (
+                <div className="suggestion-box mt-2" onClick={(e) => e.stopPropagation()} data-testid="suggestion-box" data-state={suggestionState}>
+                  <div className="suggestion-box-head">
+                    <Wand2 size={12} aria-hidden />
+                    <span>Suggested change</span>
+                    {suggestionState === "outdated" && (
+                      <span className="suggestion-badge" data-testid="suggestion-outdated" title="The quoted text changed since this was suggested">
+                        Outdated
+                      </span>
+                    )}
+                    {suggestionState === "accepted" && <span className="suggestion-badge suggestion-badge-ok">Accepted</span>}
+                    {suggestionState === "rejected" && <span className="suggestion-badge">Rejected</span>}
+                    {suggestion.warning && <span className="ml-auto text-[11px] text-ink-4">{suggestion.warning}</span>}
+                  </div>
+                  <SuggestionDiff from={thread.quote} to={suggestion.text} />
+                  {canEdit && (suggestionState === "pending" || suggestionState === "outdated") && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <button type="button" className="btn btn-sm btn-primary gap-1.5" disabled={suggestionState === "outdated"} onClick={() => void accept()} data-testid="suggestion-accept-comment">
+                        <Check size={13} /> Accept suggestion
+                      </button>
+                      <button type="button" className="btn btn-sm btn-outline gap-1.5" onClick={() => void ops.rejectSuggestion(thread.id)} data-testid="suggestion-reject-comment">
+                        <X size={13} /> Reject
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, null, emoji)} />
             </>
           )}
@@ -614,6 +733,18 @@ function ThreadCard({
                 ) : (
                   <>
                     <MentionBody body={r.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
+                    {(() => {
+                      const block = parseSuggestionBlock(r.body);
+                      return block ? (
+                        <div className="suggestion-box mt-1.5" data-testid="suggestion-box" data-state="reply">
+                          <div className="suggestion-box-head">
+                            <Wand2 size={12} aria-hidden />
+                            <span>Suggested change</span>
+                          </div>
+                          <SuggestionDiff from={thread.quote} to={block.text} />
+                        </div>
+                      ) : null;
+                    })()}
                     <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
                   </>
                 )}
@@ -652,6 +783,7 @@ function ThreadCard({
               autoFocus
               submitLabel="Reply"
               candidates={candidates}
+              quote={thread.range ? thread.quote : undefined}
               onSubmit={async (body) => {
                 await ops.reply(thread.id, body);
                 setReplying(false);
@@ -721,7 +853,123 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
   );
 }
 
-export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab }: CommentsPanelProps) {
+/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
+function ReviewCard({ review, threads, session, ops, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; ops: ReturnType<typeof useCommentOps>; onToast?: CommentsPanelProps["onToast"] }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const canEdit = session.role === "owner" || session.role === "editor";
+  const mine = threads.filter((t) => review.threadIds.includes(t.id));
+  const text = session.ytext.toString();
+  const withSuggestion = mine.map((t) => ({ t, block: parseSuggestionBlock(t.body) })).filter((x): x is { t: CommentThread; block: NonNullable<ReturnType<typeof parseSuggestionBlock>> } => x.block !== null);
+  const pending = withSuggestion.filter((x) => !x.t.suggestionState);
+  const applicable = pending.filter((x) => !isSuggestionOutdated(x.t, text));
+
+  /** Each suggestion is its own transaction (its own undo step); failures are counted, not fatal. */
+  const decideAll = async (accept: boolean) => {
+    setBusy(true);
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const { t, block } of accept ? applicable : pending) {
+        try {
+          const ok = accept ? await ops.acceptSuggestion(t.id, block.text) : await ops.rejectSuggestion(t.id);
+          if (ok) done++;
+          else failed++;
+        } catch {
+          failed++;
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+    const skipped = accept ? pending.length - applicable.length : 0;
+    const tail = [failed ? `${failed} failed` : "", skipped ? `${skipped} outdated skipped` : ""].filter(Boolean).join(", ");
+    onToast?.(`${accept ? "Accepted" : "Rejected"} ${done} suggestion${done === 1 ? "" : "s"} from ${review.authorName}${tail ? ` (${tail})` : ""}.`, failed ? "error" : "success");
+  };
+
+  return (
+    <div className="review-card" data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
+      <div className="flex items-start gap-2.5">
+        <AuthorAvatar id={review.collabAuthorId} name={review.authorName} size={28} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className={cn("text-[13px] font-semibold", verdictTone(review.verdict))} data-testid="review-verdict">
+              {reviewVerdictLabel(review.authorName, review.verdict)}
+            </span>
+            <span className="text-xs text-ink-4">{relativeTime(new Date(review.createdAt).getTime())}</span>
+          </div>
+          <div className="text-xs text-ink-3" data-testid="review-counts">
+            {reviewSummaryLabel(mine.length, withSuggestion.length)}
+            {withSuggestion.length > 0 && pending.length === 0 && <span> · all decided</span>}
+          </div>
+          {review.summary && <MentionBody body={review.summary} className="mt-1 text-[13px] leading-5 text-ink-2" />}
+        </div>
+        <button type="button" className="icon-btn h-7 w-7 shrink-0" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={open ? "Collapse review" : "Expand review"} data-testid="review-toggle">
+          {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+        </button>
+      </div>
+      {canEdit && pending.length > 0 && (
+        <div className="mt-2 flex items-center gap-2">
+          <button type="button" className="btn btn-sm btn-primary gap-1.5" disabled={busy || applicable.length === 0} onClick={() => void decideAll(true)} data-testid="review-accept-all">
+            <CheckCheck size={13} /> Accept all suggestions
+            {applicable.length !== pending.length && <span className="text-[11px] opacity-80">({applicable.length} of {pending.length})</span>}
+          </button>
+          <button type="button" className="btn btn-sm btn-outline gap-1.5" disabled={busy} onClick={() => void decideAll(false)} data-testid="review-reject-all">
+            <X size={13} /> Reject all
+          </button>
+        </div>
+      )}
+      {open && (
+        <ul className="mt-2 flex flex-col gap-1 border-t border-line pt-2" data-testid="review-threads">
+          {mine.map((t) => {
+            const block = parseSuggestionBlock(t.body);
+            const state = block ? t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending") : null;
+            return (
+              <li key={t.id}>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2"
+                  onClick={() => session.setActiveComment(t.id)}
+                  data-testid="review-thread-link"
+                  data-thread-id={t.id}
+                >
+                  {t.resolved ? <CheckCheck size={12} className="shrink-0 text-success" aria-label="Resolved" /> : <MessageSquare size={12} className="shrink-0 text-ink-4" />}
+                  <span className="min-w-0 flex-1 truncate text-ink-2" title={t.quote}>
+                    {t.quote || "(comment)"}
+                  </span>
+                  {state && <span className="suggestion-badge shrink-0">{state}</span>}
+                </button>
+              </li>
+            );
+          })}
+          {mine.length === 0 && <li className="px-1.5 text-xs italic text-ink-4">The comments of this review were deleted.</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Review cards for the document; re-fetched when a `review.create` shows up in the live activity (cheap: reviews are rare). */
+function useReviews(session: CollabSession): ReviewDto[] {
+  const [reviews, setReviews] = useState<ReviewDto[]>([]);
+  const threadCount = useSessionValue(session, (s) => s.comments.ymap.size);
+  useEffect(() => {
+    let cancelled = false;
+    api.documents
+      .reviews(session.docId)
+      .then((r) => {
+        if (!cancelled) setReviews(r.reviews);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // A review adds threads to the shared doc; a changed thread count is the cue to re-fetch.
+  }, [session.docId, threadCount]);
+  return reviews;
+}
+
+export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab, onToast }: CommentsPanelProps) {
   const { threads, suggestions, activeCommentId, activeSuggestionId, revealSeq, pending } = useSessionValue(
     session,
     (s) => ({
@@ -736,6 +984,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   );
   const ops = useCommentOps(session);
   const candidates = useMentionCandidates(session);
+  const reviews = useReviews(session);
   const unreadRefs = useUnreadRefs(session.docId);
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const [tab, setTab] = useState<Tab>("open");
@@ -789,6 +1038,13 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
         ))}
       </div>
       <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-y-auto p-3">
+        {tab === "open" && reviews.length > 0 && (
+          <div className="flex flex-col gap-2" data-testid="review-cards">
+            {reviews.map((r) => (
+              <ReviewCard key={r.id} review={r} threads={threads} session={session} ops={ops} onToast={onToast} />
+            ))}
+          </div>
+        )}
         {pending && tab === "open" && (
           <div className="rounded-xl border border-accent bg-surface p-3 shadow-md shadow-accent/10" data-testid="pending-comment">
             <div className="mb-2 truncate border-l-2 border-amber-400 pl-2 text-xs text-ink-3">
@@ -798,6 +1054,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
               placeholder="Add a comment… (⌘/Ctrl+Enter to post)"
               autoFocus
               candidates={candidates}
+              quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
               onSubmit={async (body) => {
                 const id = await ops.add(pending.from, pending.to, body);
                 session.setPendingComment(null);
@@ -825,13 +1082,13 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
               )}
             </EmptyState>
           ) : (
-            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} />)
+            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} onToast={onToast} />)
           ))}
         {tab === "resolved" &&
           (resolved.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
-            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} />)
+            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} onToast={onToast} />)
           ))}
         {tab === "suggestions" &&
           (suggestions.length === 0 ? (
