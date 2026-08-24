@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # push on main paused until main is green again (lead, #337); PR runs stay on.
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
