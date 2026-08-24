@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
+import { useCopy } from "@/lib/hooks";
 import { AgentConnectCard, mcpHttpConfigFor, useOrigin } from "@/components/settings/agent-connect-card";
 
 interface TokenRow {
@@ -23,24 +24,17 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 function CopyField({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+  const code = useRef<HTMLElement>(null);
+  const { copy, label: buttonLabel, copied } = useCopy(value, code);
   return (
     <div className="flex items-center gap-2">
-      <code className="flex-1 truncate rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink" title={value} data-testid={`copy-${label}`}>
+      {/* break-all instead of truncate: the whole token is readable and selectable (LAN, no clipboard API). */}
+      <code ref={code} className="min-w-0 flex-1 select-text break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink" data-testid={`copy-${label}`}>
         {value}
       </code>
-      <button
-        type="button"
-        className="btn btn-outline btn-sm gap-1.5"
-        onClick={async () => {
-          await navigator.clipboard.writeText(value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }}
-        aria-label={`Copy ${label}`}
-      >
+      <button type="button" className="btn btn-outline btn-sm shrink-0 gap-1.5" onClick={copy} aria-label={`Copy ${label}`} data-testid={`copy-${label}-button`}>
         {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
-        {copied ? "Copied" : "Copy"}
+        {buttonLabel}
       </button>
     </div>
   );
@@ -155,7 +149,7 @@ export function TokensPanel({ origin, userLogin, next }: { origin: string; userL
                 </div>
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-ink-3">MCP (GitHub Copilot, Claude, Cursor…)</div>
-                  <pre className="overflow-x-auto rounded-lg border border-line bg-surface p-3 font-mono text-xs text-ink-2">{mcpConfig}</pre>
+                  <pre className="select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface p-3 font-mono text-xs text-ink-2">{mcpConfig}</pre>
                 </div>
               </div>
             </details>
