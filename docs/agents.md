@@ -9,6 +9,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 - [1. Create a token](#1-create-a-token)
 - [2. Connect an MCP client](#2-connect-an-mcp-client)
   - [MCP tools](#mcp-tools)
+  - [What an agent session looks like](#what-an-agent-session-looks-like)
   - [Permissions in Copilot CLI](#permissions-in-copilot-cli)
   - [Requests](#requests)
     - [Working a request, step by step](#working-a-request-step-by-step)
@@ -16,6 +17,8 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Access levels](#access-levels)
   - [Documents](#documents)
   - [Content, suggestions and comments](#content-suggestions-and-comments)
+  - [Agent requests](#agent-requests)
+  - [Agent presence and watch](#agent-presence-and-watch)
   - [Versions, activity and export](#versions-activity-and-export)
   - [Images](#images)
   - [Sharing and GitHub](#sharing-and-github)
@@ -24,6 +27,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Formatting and reactions](#formatting-and-reactions)
   - [Notifications](#notifications)
 - [4. Recipes](#4-recipes)
+  - [Sit in a document](#sit-in-a-document)
 - [What people see](#what-people-see)
 
 ## 1. Create a token
@@ -101,6 +105,27 @@ Twenty-six tools; every `id` is the document id from the URL `/d/<id>`.
 `markdoc_suggest` and `markdoc_comment` (`add`) also take an optional `requestId` so the work they produce is counted against the request.
 
 A typical session: *"Let's write the launch plan"* → the agent calls `markdoc_create_document` and gives you the link → you open it, invite teammates, edit and comment → the agent reads `markdoc_comments`, answers with `markdoc_comment`, and revises with `markdoc_suggest` → you accept the good parts in the app.
+
+### What an agent session looks like
+
+The other shape — the agent sits in a document you already have open and reacts when you ask — is four tools in a loop: **presence** (show up), **watch** (wait for people), **suggest** (answer as tracked changes) and **complete** (close the request). Every call below is copy-pasteable against a real document id; `DOC`, `CUR` and `REQ` are the values returned by the previous calls.
+
+```json
+{ "tool": "markdoc_presence",  "arguments": { "id": "DOC", "state": "active", "status": "reading", "anchor": "## Rollout plan" } }
+{ "tool": "markdoc_watch",     "arguments": { "id": "DOC" } }
+{ "tool": "markdoc_presence",  "arguments": { "id": "DOC", "state": "idle", "status": "waiting for feedback" } }
+{ "tool": "markdoc_watch",     "arguments": { "id": "DOC", "since": "CUR", "wait": 55 } }
+{ "tool": "markdoc_claim_request",    "arguments": { "documentId": "DOC", "requestId": "REQ" } }
+{ "tool": "markdoc_presence",  "arguments": { "id": "DOC", "state": "active", "status": "tightening the rollout plan", "anchor": "In order to be able to ship on time we will need to" } }
+{ "tool": "markdoc_read_document",    "arguments": { "id": "DOC", "clean": true } }
+{ "tool": "markdoc_suggest",   "arguments": { "id": "DOC", "requestId": "REQ", "edits": [{ "find": "In order to be able to ship on time we will need to", "replace": "To ship on time we must" }] } }
+{ "tool": "markdoc_complete_request", "arguments": { "documentId": "DOC", "requestId": "REQ", "summary": "Tightened the opening sentence of the rollout plan as one tracked change." } }
+{ "tool": "markdoc_presence",  "arguments": { "id": "DOC", "state": "idle", "status": "waiting for feedback" } }
+{ "tool": "markdoc_watch",     "arguments": { "id": "DOC", "since": "CUR", "wait": 55 } }
+{ "tool": "markdoc_presence",  "arguments": { "id": "DOC", "state": "left" } }
+```
+
+Line by line, what the people in the document see: the bot avatar appears in the header with *reading* and a labelled caret lands on the *Rollout plan* heading (1); the first `watch` returns only a `cursor`, the agent goes *idle* and the avatar dims (2–3); the long-poll blocks until someone acts (4) — here the human selected a sentence, pressed **Ask an agent** with *Tighten this*, and the call returns a `request.created` event with `requestId`, `mode: "suggest"` and the `quote` (a `comment.added` or `mention` event would be answered with `markdoc_comment { action: "reply" }` instead). The agent claims it, so the header pill switches to *"Copilot CLI is working…"* (5), moves its caret onto the sentence and reads the clean text (6–7), proposes the change as a green/red tracked suggestion (8), and completes the request, which clears the pill, opens **Comments → Suggestions** and notifies the requester (9). Then it goes idle and waits again with the cursor the last `watch` returned, so nothing is delivered twice (10–11), and `left` removes the avatar the moment the session ends (12). Read-only tools (`watch`, `read_document`) never prompt in Copilot CLI; `presence` and `suggest` are on the cards' `--allow-tool` line, and `claim_request` / `complete_request` are additive too, so `markdoc(markdoc_claim_request),markdoc(markdoc_complete_request)` can be appended to it for a session that works requests — see the next section.
 
 ### Permissions in Copilot CLI
 
