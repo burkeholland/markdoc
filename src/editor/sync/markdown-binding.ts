@@ -15,15 +15,17 @@ export const markdownBindingKey = new PluginKey<{ remote: boolean }>("markdownBi
 /** Quiet time after the last incremental parse before it is verified against a full parse. */
 const VERIFY_QUIET_MS = 1000;
 /** Consecutive matching verifications after which routine (non-structural) edits are no longer verified. */
-const VERIFY_TRUST_AFTER = 20;
+export const VERIFY_TRUST_AFTER = 3;
 /** Once trusted, one in this many routine idle windows still gets a full verification. */
-const VERIFY_EVERY_NTH_WINDOW = 25;
+export const VERIFY_EVERY_NTH_WINDOW = 25;
 /**
  * An edit is structural when a changed line could alter block structure or references beyond
- * the edited block: brackets and footnotes, fences, tables, headings, list/quote markers,
- * thematic breaks, HTML, or a newline (a block boundary moved).
+ * the edited block: brackets (references, footnotes, definitions), tables, a newline (a block
+ * boundary moved), or a line that starts a heading, fence, HTML block, setext underline,
+ * list item, blockquote, thematic break or indented code.
  */
-const STRUCTURAL = /[[\]^`|#<~\n]|^[ \t]*(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/m;
+const STRUCTURAL =
+  /[[\]|\n]|^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|<|=+[ \t]*$|(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|([-*_])(?:[ \t]*\1){2,}[ \t]*$)|^(?: {4}|\t)/m;
 
 /** The lines of `text` that contain the range `[from, to]`. */
 function linesAround(text: string, from: number, to: number): string {

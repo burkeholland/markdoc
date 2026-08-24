@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { splitBlock, setBlockType } from "prosemirror-commands";
-import { MarkdownBinding, markdownBindingPlugin, isStructuralChange } from "./markdown-binding";
+import { MarkdownBinding, markdownBindingPlugin, isStructuralChange, VERIFY_TRUST_AFTER, VERIFY_EVERY_NTH_WINDOW } from "./markdown-binding";
 import { schema } from "../markdown/schema";
 import { parseMarkdown } from "../markdown/parse";
 import { textChangeSpan } from "../markdown/incremental";
@@ -294,9 +294,10 @@ describe("MarkdownBinding", () => {
       vi.advanceTimersByTime(1000);
     };
     /** Drive the binding until the incremental parser is trusted. */
+    const N = VERIFY_TRUST_AFTER;
     const trust = (binding: MarkdownBinding) => {
-      for (let i = 0; i < 20; i++) typeAndPause("x");
-      expect(binding.verifyStats).toMatchObject({ runs: 20, matches: 20, mismatches: 0, skipped: 0 });
+      for (let i = 0; i < N; i++) typeAndPause("x");
+      expect(binding.verifyStats).toMatchObject({ runs: N, matches: N, mismatches: 0, skipped: 0 });
     };
 
     it("detects structural edits", () => {
@@ -305,15 +306,19 @@ describe("MarkdownBinding", () => {
         return isStructuralChange(before, after, span);
       };
       expect(structural("Hello world", "Hello brave world")).toBe(false);
+      expect(structural("Hello world", "Hello **brave** world")).toBe(false);
+      expect(structural("Hello world", "Hello `brave` world")).toBe(false);
       expect(structural("Hello world", "Hello [world]")).toBe(true);
       expect(structural("Hello world", "Hello world[^1]")).toBe(true);
-      expect(structural("Hello world", "Hello `world`")).toBe(true);
       expect(structural("a | b", "a | bc")).toBe(true);
       expect(structural("Hello", "# Hello")).toBe(true);
       expect(structural("Hello", "- Hello")).toBe(true);
+      expect(structural("Hello", "> Hello")).toBe(true);
+      expect(structural("Hello\n", "Hello\n---")).toBe(true);
       expect(structural("Hello world", "Hello\n\nworld")).toBe(true);
       expect(structural("```\ncode\n```", "```\ncod\n```")).toBe(false);
       expect(structural("```\ncode\n```", "\ncode\n```")).toBe(true);
+      expect(structural("text\n\n    code", "text\n\n    cod")).toBe(true);
     });
 
     it("verifies an incremental parse after the quiet period and repairs drift", () => {
@@ -345,31 +350,31 @@ describe("MarkdownBinding", () => {
       trust(binding);
 
       typeAndPause("y");
-      expect(binding.verifyStats).toMatchObject({ runs: 20, skipped: 1 });
-      typeAndPause(" more");
-      expect(binding.verifyStats).toMatchObject({ runs: 20, skipped: 2 });
+      expect(binding.verifyStats).toMatchObject({ runs: N, skipped: 1 });
+      typeAndPause(" more `code`");
+      expect(binding.verifyStats).toMatchObject({ runs: N, skipped: 2 });
 
       typeAndPause(" [ref]");
-      expect(binding.verifyStats).toMatchObject({ runs: 21, matches: 21, skipped: 2 });
+      expect(binding.verifyStats).toMatchObject({ runs: N + 1, matches: N + 1, skipped: 2 });
       typeAndPause("\n\n## Heading");
-      expect(binding.verifyStats).toMatchObject({ runs: 22, matches: 22, skipped: 2 });
+      expect(binding.verifyStats).toMatchObject({ runs: N + 2, matches: N + 2, skipped: 2 });
 
       // A structural edit followed by a routine one within the same quiet period still verifies.
-      ytext.insert(ytext.length, " `code`");
+      ytext.insert(ytext.length, " [x]");
       typeAndPause("z");
-      expect(binding.verifyStats).toMatchObject({ runs: 23, skipped: 2 });
+      expect(binding.verifyStats).toMatchObject({ runs: N + 3, skipped: 2 });
     });
 
     it("still verifies a routine edit every 25th idle window once trusted", () => {
       ytext.insert(0, DOC);
       const { binding } = editor();
       trust(binding);
-      for (let i = 0; i < 24; i++) typeAndPause("r");
-      expect(binding.verifyStats).toMatchObject({ runs: 20, skipped: 24 });
+      for (let i = 0; i < VERIFY_EVERY_NTH_WINDOW - 1; i++) typeAndPause("r");
+      expect(binding.verifyStats).toMatchObject({ runs: N, skipped: VERIFY_EVERY_NTH_WINDOW - 1 });
       typeAndPause("r");
-      expect(binding.verifyStats).toMatchObject({ runs: 21, skipped: 24 });
+      expect(binding.verifyStats).toMatchObject({ runs: N + 1, skipped: VERIFY_EVERY_NTH_WINDOW - 1 });
       typeAndPause("r");
-      expect(binding.verifyStats).toMatchObject({ runs: 21, skipped: 25 });
+      expect(binding.verifyStats).toMatchObject({ runs: N + 1, skipped: VERIFY_EVERY_NTH_WINDOW });
     });
 
     it("resets the trust after a mismatch", () => {
@@ -381,7 +386,7 @@ describe("MarkdownBinding", () => {
       binding.verifyParse();
       warn.mockRestore();
       typeAndPause("q");
-      expect(binding.verifyStats).toMatchObject({ runs: 22, mismatches: 1, skipped: 0 });
+      expect(binding.verifyStats).toMatchObject({ runs: N + 2, mismatches: 1, skipped: 0 });
     });
 
     it("does not verify while the tab is hidden and catches up when it becomes visible", () => {
