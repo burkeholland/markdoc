@@ -77,12 +77,18 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/** Typography mirrors `.md-rich` in globals.css (block rhythm: see "Markdown prose rhythm" there); colors are the same palette. */
+/**
+ * Typography mirrors `.md-rich` in globals.css (block rhythm: see "Markdown prose rhythm" there); colours
+ * are the light palette (Ink & teal). Headings use Fraunces like the app (display type in globals.css):
+ * the `@import` fetches it when the reader is online; offline the stack falls through to a system serif,
+ * so the export still reads as the same design.
+ */
 const STYLES = `
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,600,30&display=swap");
 :root { color-scheme: light; }
 html { -webkit-text-size-adjust: 100%; }
 body {
-  margin: 0; background: #ffffff; color: #374151;
+  margin: 0; background: #ffffff; color: #44403c;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 16px; line-height: 1.65; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 }
@@ -95,53 +101,57 @@ main {
 h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, pre, table, figure, hr { margin: 0; }
 main > * + * { margin-top: var(--md-space); }
 main > hr, main > hr + * { margin-top: calc(var(--md-space) * 1.75); }
-h1, h2, h3, h4, h5, h6 { color: #111827; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
+h1, h2, h3, h4, h5, h6 { color: #1c1917; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
+h1, h2, h3 {
+  font-family: Fraunces, Georgia, "Times New Roman", serif; font-weight: 600; letter-spacing: -0.005em;
+  font-variation-settings: "opsz" 36, "SOFT" 30;
+}
 h1 { font-size: 2em; margin-top: var(--md-space-heading-before-h2); }
-h2 { font-size: 1.5em; margin-top: calc(var(--md-space-heading-before-h2) - 0.6em); padding-top: 0.6em; border-top: 1px solid #e5e7eb; }
+h2 { font-size: 1.5em; margin-top: calc(var(--md-space-heading-before-h2) - 0.6em); padding-top: 0.6em; border-top: 1px solid #e7e5e4; }
 h2:first-child { border-top: none; padding-top: 0; }
 h3 { font-size: 1.25em; margin-top: var(--md-space-heading-before-h3); }
 h4 { font-size: 1.05em; }
-h5, h6 { font-size: 1em; color: #374151; }
+h5, h6 { font-size: 1em; color: #44403c; }
 h4, h5, h6 { margin-top: var(--md-space-heading-before-h4); }
 main > :is(h1, h2, h3, h4, h5, h6) + * { margin-top: var(--md-space-heading-after); }
 main > :first-child { margin-top: 0; }
-a { color: #2563eb; text-decoration: none; }
+a { color: #0f766e; text-decoration: none; }
 a:hover { text-decoration: underline; }
 ul, ol { padding-left: 1.6em; }
 li + li { margin-top: 0.25em; }
 li > p + p, li > ul, li > ol { margin-top: 0.25em; }
 li.task-list-item { list-style: none; margin-left: -1.6em; padding-left: 1.6em; position: relative; }
-li.task-list-item > input[type="checkbox"] { position: absolute; left: 0; top: 0.35em; margin: 0; width: 1em; height: 1em; accent-color: #2563eb; }
-li.task-list-item:has(> input:checked) { color: #6b7280; }
-blockquote { border-left: 3px solid #d1d5db; color: #6b7280; padding: 0.1em 0 0.1em 1.1em; }
+li.task-list-item > input[type="checkbox"] { position: absolute; left: 0; top: 0.35em; margin: 0; width: 1em; height: 1em; accent-color: #0f766e; }
+li.task-list-item:has(> input:checked) { color: #57534e; }
+blockquote { border-left: 3px solid #d6d3d1; color: #57534e; padding: 0.1em 0 0.1em 1.1em; }
 pre {
-  background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; color: #111827;
+  background: #f7f5f0; border: 1px solid #e7e5e4; border-radius: 10px; color: #1c1917;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em; line-height: 1.6; overflow-x: auto; padding: 14px 16px; white-space: pre;
 }
 pre code { background: transparent; border: none; font-size: inherit; padding: 0; color: inherit; }
 code {
-  background: #f3f4f6; border-radius: 4px; color: #be185d; padding: 0.1em 0.35em; font-size: 0.875em;
+  background: #efece6; border-radius: 4px; color: #be185d; padding: 0.1em 0.35em; font-size: 0.875em;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-hr { border: none; border-top: 1px solid #e5e7eb; }
+hr { border: none; border-top: 1px solid #e7e5e4; }
 img { max-width: 100%; height: auto; border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; }
-th, td { border: 1px solid #d1d5db; padding: 6px 10px; vertical-align: top; text-align: left; }
-th { background: #f9fafb; font-weight: 600; color: #111827; }
-del { color: #6b7280; }
-.hljs-comment, .hljs-quote { color: #6b7280; font-style: italic; }
+th, td { border: 1px solid #d6d3d1; padding: 6px 10px; vertical-align: top; text-align: left; }
+th { background: #f7f5f0; font-weight: 600; color: #1c1917; }
+del { color: #57534e; }
+.hljs-comment, .hljs-quote { color: #57534e; font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-name { color: #7c3aed; }
 .hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-meta .hljs-string { color: #047857; }
 .hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link, .hljs-variable, .hljs-template-variable { color: #b45309; }
-.hljs-title, .hljs-section, .hljs-function .hljs-title, .hljs-title.function_, .hljs-title.class_ { color: #1d4ed8; }
+.hljs-title, .hljs-section, .hljs-function .hljs-title, .hljs-title.function_, .hljs-title.class_ { color: #0f766e; }
 .hljs-attr, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id, .hljs-selector-pseudo, .hljs-type, .hljs-built_in, .hljs-params { color: #0f766e; }
 .hljs-deletion { color: #b91c1c; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 @media print {
   @page { margin: 0.75in; }
-  body { font-size: 11pt; color: #111827; }
+  body { font-size: 11pt; color: #1c1917; }
   main { max-width: none; padding: 0; }
   a { color: inherit; text-decoration: underline; }
   pre, blockquote, table, img, figure { break-inside: avoid; page-break-inside: avoid; }
@@ -220,7 +230,8 @@ export function contentHash(text: string): string {
 
 /**
  * Render a Markdoc document as a standalone HTML5 page: same GFM features the editor
- * supports, sanitized, with embedded styles and no external requests except images.
+ * supports, sanitized, with embedded styles and no external requests except images and the
+ * heading font (an `@import` that degrades to a system serif offline).
  */
 export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inlineAssets = false }: RenderDocumentHtmlOptions): Promise<string> {
   const { html } = await renderMarkdownBody(markdown, { assetBaseUrl, inlineAssets });

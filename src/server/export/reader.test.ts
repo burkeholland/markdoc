@@ -43,6 +43,7 @@ const FIXTURE = [
 // Captured from renderDocumentHtml BEFORE the body renderer was split out (commit 15a728f):
 // the body between <main> and </main>, and the SHA-256 of the whole page (styles included).
 // Length and hash re-captured after the stylesheet's vertical-rhythm change (task #346); the body is unchanged.
+// Re-captured again for the Ink & teal look (task #416): Fraunces @import + stone/teal colours in the <style>; body unchanged.
 const FIXTURE_BODY_BEFORE = `<h1 id="reader-fixture">Reader Fixture</h1>
 <p>Intro paragraph with <strong>bold</strong> and <code>code</code>.</p>
 <h2 id="first-section">First Section</h2>
@@ -73,8 +74,8 @@ const FIXTURE_BODY_BEFORE = `<h1 id="reader-fixture">Reader Fixture</h1>
 <li class="task-list-item"><input type="checkbox" checked disabled> done</li>
 <li class="task-list-item"><input type="checkbox" disabled> todo</li>
 </ul>`;
-const FIXTURE_SHA256_BEFORE = "6788dacaff37d75d6c98e3d8aaa23817cd0954046ba959edf2571a07d629fdd2";
-const FIXTURE_LENGTH_BEFORE = 5506;
+const FIXTURE_SHA256_BEFORE = "5f47cd50108adb1b4d07dfcf609d476a2156c6c1ab00133f4161deec34523b92";
+const FIXTURE_LENGTH_BEFORE = 5782;
 
 describe("renderMarkdownBody", () => {
   it("returns h1-h6 headings whose ids match the anchors in the HTML", async () => {
