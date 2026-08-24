@@ -1,8 +1,10 @@
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import { applyAwarenessUpdate, removeAwarenessStates, type Awareness } from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import { getCollab } from "@/server/collab/registry";
-import { colorForUser, hashString } from "@/editor/collab/shared";
+import { TEXT_KEY } from "@/server/collab/seed";
+import { colorForUser, hashString, type RelativePositionJSON } from "@/editor/collab/shared";
+import { cleanTextWith, rawToCleanOffset, resolveCleanRange, SuggestionsModel, type CleanRangeInput } from "@/editor/collab/suggestions";
 import type { Actor } from "@/server/http";
 
 /** An agent disappears from the document this long after its last heartbeat or write. */
@@ -13,12 +15,26 @@ export const STATUS_MAX = 80;
 
 export type AgentPresenceState = "active" | "idle" | "left";
 
+/**
+ * Where an agent is in the document: offsets in the clean Markdown (what `markdoc_read_document` with
+ * `clean: true` returns) plus the same range as Yjs relative positions — the shape browsers publish as
+ * `cursor.anchor` / `cursor.head`, so every pane draws it like any remote caret.
+ */
+export interface AgentCursor {
+  from: number;
+  to: number;
+  anchor: RelativePositionJSON;
+  head: RelativePositionJSON;
+}
+
 export interface AgentPresence {
   /** `agent:<userId>:<tokenName>` — the same id comments and suggestions by this agent carry. */
   id: string;
   name: string;
   userId: string;
   userName: string;
+  /** Login of the user the token acts for (who `@login/<agent>` mentions resolve to). */
+  userLogin: string | null;
   state: Exclude<AgentPresenceState, "left">;
   status: string | null;
   cursor: { from: number; to: number } | null;
@@ -29,7 +45,8 @@ export interface AgentPresence {
   expiresAt: number;
 }
 
-interface Entry extends AgentPresence {
+interface Entry extends Omit<AgentPresence, "cursor"> {
+  cursor: AgentCursor | null;
   clientId: number;
   clock: number;
   /** Set by the presence API; implicit write marking never overrides it while it is fresh. */
@@ -77,8 +94,10 @@ function awarenessState(e: Entry) {
       status: e.status,
       agentState: e.state,
       userName: e.userName,
+      userLogin: e.userLogin,
     },
     lastActive: e.state === "idle" ? e.lastSeen - 10 * 60 * 1000 : e.lastSeen,
+    ...(e.cursor ? { cursor: { anchor: e.cursor.anchor, head: e.cursor.head } } : {}),
   };
 }
 
@@ -130,7 +149,49 @@ export function sweep(now = Date.now()) {
 export interface SetPresenceInput {
   state: AgentPresenceState;
   status?: string | null;
-  cursor?: { from: number; to: number } | null;
+  /** Resolved with {@link resolveAgentCursor}; `null` clears the caret, `undefined` leaves it. */
+  cursor?: AgentCursor | null;
+}
+
+function relativeRange(ytext: Y.Text, from: number, to: number): Pick<AgentCursor, "anchor" | "head"> {
+  return {
+    anchor: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(ytext, from)),
+    head: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(ytext, to)),
+  };
+}
+
+/**
+ * Resolve clean-text offsets or an `anchor` quote to an {@link AgentCursor} against a document. Works on
+ * the live document or a copy loaded from the database: relative positions name Yjs items, not indexes,
+ * so they resolve in every replica. Returns null when the anchor text does not occur.
+ */
+export function resolveAgentCursor(doc: Y.Doc, input: CleanRangeInput): AgentCursor | null {
+  const ytext = doc.getText(TEXT_KEY);
+  const model = new SuggestionsModel(doc, ytext);
+  try {
+    const list = model.list();
+    const clean = cleanTextWith(ytext.toString(), list);
+    const range = resolveCleanRange(clean, list, input);
+    if (!range) return null;
+    return { from: range.clean.from, to: range.clean.to, ...relativeRange(ytext, range.raw.from, range.raw.to) };
+  } finally {
+    model.destroy();
+  }
+}
+
+/** An {@link AgentCursor} for a range of the full text (what write routes know after applying an edit). */
+export function agentCursorFromRaw(doc: Y.Doc, from: number, to: number): AgentCursor {
+  const ytext = doc.getText(TEXT_KEY);
+  const model = new SuggestionsModel(doc, ytext);
+  try {
+    const list = model.list();
+    const len = ytext.length;
+    const f = Math.min(Math.max(0, from), len);
+    const t = Math.min(Math.max(f, to), len);
+    return { from: rawToCleanOffset(f, list), to: rawToCleanOffset(t, list), ...relativeRange(ytext, f, t) };
+  } finally {
+    model.destroy();
+  }
 }
 
 /** Explicit heartbeat from the presence API. Returns the agent's presence, or null after `left`. */
@@ -162,15 +223,17 @@ export function setAgentPresence(docId: string, actor: Actor, input: SetPresence
 
 /**
  * Implicit marking from agent writes (replace, append, suggest, comment): the agent shows as active with a
- * verb status for the TTL, unless it set its own status through the presence API recently.
+ * verb status for the TTL, unless it set its own status through the presence API recently. A `cursor`
+ * moves its caret to where it acted, so people watching see it "working there".
  */
-export function touchAgentPresence(docId: string, actor: Actor, status: string, now = Date.now()): AgentPresence | null {
+export function touchAgentPresence(docId: string, actor: Actor, status: string, cursor?: AgentCursor | null, now = Date.now()): AgentPresence | null {
   if (!actor.agent) return null;
   const id = agentPresenceId(actor);
   const existing = byDoc.get(docId)?.get(id);
   const entry = upsert(docId, actor, id, existing, now);
   entry.state = "active";
   if (entry.explicitStatusUntil <= now) entry.status = status;
+  if (cursor !== undefined) entry.cursor = cursor;
   const awareness = liveAwareness(docId);
   if (awareness) publish(awareness, entry);
   return toPresence(entry);
@@ -187,6 +250,7 @@ function upsert(docId: string, actor: Actor, id: string, existing: Entry | undef
     name: actor.agent!,
     userId: actor.id,
     userName: actor.name ?? actor.login ?? "someone",
+    userLogin: actor.login ?? null,
     state: "active",
     status: null,
     cursor: null,
@@ -210,9 +274,10 @@ function toPresence(e: Entry): AgentPresence {
     name: e.name,
     userId: e.userId,
     userName: e.userName,
+    userLogin: e.userLogin,
     state: e.state,
     status: e.status,
-    cursor: e.cursor,
+    cursor: e.cursor ? { from: e.cursor.from, to: e.cursor.to } : null,
     color: e.color,
     colorLight: e.colorLight,
     lastSeen: e.lastSeen,

@@ -1,8 +1,11 @@
 import type * as Y from "yjs";
+import { and, eq, gt, inArray } from "drizzle-orm";
+import { getDb, schema } from "@/server/db";
 import { makeCollabUser, type CollabUser } from "@/editor/collab/shared";
+import { agentMentionLogin } from "@/editor/collab/mentions";
 import type { Actor } from "@/server/http";
 import { META_KEY } from "@/server/collab/hocuspocus";
-import { touchAgentPresence } from "@/server/agent-presence";
+import { agentCursorFromRaw, listAgentPresence, touchAgentPresence } from "@/server/agent-presence";
 
 /**
  * Identity used for comments and suggestions created through the API.
@@ -30,13 +33,68 @@ export interface AgentActivity {
 /** Status shown on the agent's presence avatar while it works (see agent-presence.ts). */
 const PRESENCE_STATUS: Record<string, string> = { edited: "editing", suggested: "suggesting", commented: "commenting", reacted: "commenting", reviewed: "reviewing suggestions" };
 
-/** Record agent activity in the shared document so connected editors can show it. Also marks the agent present. */
-export function recordAgentActivity(doc: Y.Doc, actor: Actor, action: string) {
+/**
+ * Record agent activity in the shared document so connected editors can show it. Also marks the agent
+ * present; `at` (a range of the full text) moves its caret to where it acted.
+ */
+export function recordAgentActivity(doc: Y.Doc, actor: Actor, action: string, at?: { from: number; to: number }) {
   if (!actor.agent) return;
   const meta = doc.getMap(META_KEY);
   const activity: AgentActivity = { name: actor.agent, userName: actor.name ?? actor.login ?? "someone", action, at: Date.now() };
   meta.set("agentActivity", activity);
   // Live documents are Hocuspocus Documents and carry their id as `name`; a detached copy has nobody watching.
   const docId = (doc as Y.Doc & { name?: unknown }).name;
-  if (typeof docId === "string") touchAgentPresence(docId, actor, PRESENCE_STATUS[action] ?? action);
+  if (typeof docId === "string") touchAgentPresence(docId, actor, PRESENCE_STATUS[action] ?? action, at ? agentCursorFromRaw(doc, at.from, at.to) : undefined);
+}
+
+/** An agent people can @-mention from a document: present now, or active here in the last 30 days. */
+export interface MentionableAgent {
+  /** Token name ("Copilot CLI"). */
+  name: string;
+  /** What follows `@` in a comment: `<ownerLogin>/<slug>`. */
+  login: string;
+  ownerLogin: string;
+  ownerName: string | null;
+  /** Present in the document right now (else it only acted here recently). */
+  present: boolean;
+}
+
+export const RECENT_AGENT_DAYS = 30;
+
+/**
+ * Agents worth offering in the @-mention picker: those present on the document plus distinct agents with
+ * activity rows here in the last 30 days (token owner resolved through the user table). Agents whose
+ * owner has no login cannot be mentioned and are skipped.
+ */
+export async function listMentionableAgents(docId: string, now = new Date()): Promise<MentionableAgent[]> {
+  const out = new Map<string, MentionableAgent>();
+  for (const p of listAgentPresence(docId, now.getTime())) {
+    if (!p.userLogin) continue;
+    out.set(p.id, { name: p.name, login: agentMentionLogin(p.userLogin, p.name), ownerLogin: p.userLogin, ownerName: p.userName, present: true });
+  }
+  const db = await getDb();
+  const since = new Date(now.getTime() - RECENT_AGENT_DAYS * 24 * 60 * 60 * 1000);
+  const rows = await db
+    .selectDistinct({ actorId: schema.activity.actorId, actorName: schema.activity.actorName })
+    .from(schema.activity)
+    .where(and(eq(schema.activity.documentId, docId), eq(schema.activity.actorKind, "agent"), gt(schema.activity.createdAt, since)));
+  const userIds = new Set<string>();
+  const recent: { id: string; userId: string; name: string }[] = [];
+  for (const row of rows) {
+    // actorId is `agent:<userId>:<tokenName>`; the token name may itself contain colons.
+    const m = /^agent:([^:]+):(.+)$/.exec(row.actorId ?? "");
+    if (!m || out.has(row.actorId!)) continue;
+    userIds.add(m[1]);
+    recent.push({ id: row.actorId!, userId: m[1], name: m[2] || row.actorName });
+  }
+  if (recent.length > 0) {
+    const users = await db.select({ id: schema.users.id, login: schema.users.login, name: schema.users.name }).from(schema.users).where(inArray(schema.users.id, [...userIds]));
+    const byId = new Map(users.map((u) => [u.id, u]));
+    for (const r of recent) {
+      const u = byId.get(r.userId);
+      if (!u?.login || out.has(r.id)) continue;
+      out.set(r.id, { name: r.name, login: agentMentionLogin(u.login, r.name), ownerLogin: u.login, ownerName: u.name ?? null, present: false });
+    }
+  }
+  return [...out.values()].sort((a, b) => Number(b.present) - Number(a.present) || a.name.localeCompare(b.name));
 }
