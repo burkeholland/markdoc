@@ -1,13 +1,38 @@
 import { InputRule, inputRules, textblockTypeInputRule, wrappingInputRule } from "prosemirror-inputrules";
 import type { Plugin } from "prosemirror-state";
+import type { MarkType } from "prosemirror-model";
 import { schema } from "../markdown/schema";
 import { findParentNode } from "./utils";
 
 /**
- * Markdown-style shortcuts in the rich editor: typing `# `, `- `, `1. `, `> `,
- * `- [ ] `, ```` ``` ```` or `---` converts the block as you type — a word processor's
- * automatic formatting, but using Markdown syntax people already know.
+ * Typing Markdown inline syntax applies the mark (task #437): `**bold**`, `*em*`, `~~gone~~` and
+ * `` `code` `` become the mark the moment the closing delimiter is typed, instead of staying literal
+ * and landing in the source escaped (`\*\*bold\*\*`). The optional first group is the character
+ * before the opening delimiter, which must not be another delimiter, so `*` never fires halfway
+ * through `**bold**`; the typed text goes on unmarked.
  */
+function markInputRule(pattern: RegExp, type: MarkType): InputRule {
+  return new InputRule(pattern, (state, match, start, end) => {
+    const $start = state.doc.resolve(start);
+    if ($start.parent.type.spec.code) return null;
+    // Inside a code span the delimiters are literal.
+    if (type !== schema.marks.code && schema.marks.code.isInSet($start.marks())) return null;
+    const text = match[3];
+    if (!text || /^\s|\s$/.test(text)) return null;
+    const from = start + match[0].length - match[2].length;
+    const tr = state.tr.insertText(text, from, end);
+    tr.addMark(from, from + text.length, type.create());
+    return tr.removeStoredMark(type);
+  });
+}
+
+/**
+ * Markdown-style shortcuts in the rich editor: typing `# `, `- `, `1. `, `> `,
+ * `- [ ] `, ```` ```lang ```` + space or Enter, or `---` converts the block as you type — a word
+ * processor's automatic formatting, but using Markdown syntax people already know.
+ */
+export const CODE_FENCE_RULE = /^```([a-zA-Z0-9+#_-]*)\s$/;
+
 export function markdownInputRules(): Plugin {
   const rules: InputRule[] = [
     textblockTypeInputRule(/^(#{1,6})\s$/, schema.nodes.heading, (match) => ({ level: match[1].length })),
@@ -40,7 +65,12 @@ export function markdownInputRules(): Plugin {
       (match, node) => node.childCount + node.attrs.start === Number(match[1]),
     ),
     wrappingInputRule(/^\s*>\s$/, schema.nodes.blockquote),
-    textblockTypeInputRule(/^```([a-zA-Z0-9+#_-]*)$/, schema.nodes.code_block, (match) => ({ language: match[1] || null })),
+    // A fence closes on the space (or Enter, see codeFenceOnEnter) so a language can be typed first: "```ts ".
+    textblockTypeInputRule(CODE_FENCE_RULE, schema.nodes.code_block, (match) => ({ language: match[1] || null })),
+    markInputRule(/(^|[^*])(\*\*([^*]+)\*\*)$/, schema.marks.strong),
+    markInputRule(/(^|[^*])(\*([^*]+)\*)$/, schema.marks.em),
+    markInputRule(/(^|[^~])(~~([^~]+)~~)$/, schema.marks.strikethrough),
+    markInputRule(/(^|[^`])(`([^`]+)`)$/, schema.marks.code),
     // Horizontal rule when a paragraph consists of exactly "---", "***" or "___".
     new InputRule(/^(?:---|\*\*\*|___)$/, (state, _match, start, end) => {
       const $start = state.doc.resolve(start);

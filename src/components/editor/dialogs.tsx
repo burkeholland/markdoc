@@ -278,6 +278,8 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Task list", "Mod-Shift-9"],
       ["Quote", "Mod-Shift-."],
       ["Code block", "Mod-Alt-C"],
+      ["Code block with a language (preview)", "```lang + Enter"],
+      ["Toggle the task checkbox (preview)", "Mod-Enter"],
     ],
   },
   {

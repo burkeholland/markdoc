@@ -617,12 +617,18 @@ export class CollabSession {
     this.notify();
   }
 
+  // Y.UndoManager keeps merging edits into the newest stack item for `captureTimeout` after the
+  // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
+  // folded into the step below the one just undone, so the next undo removed both (task #437).
+  // Closing the capture window makes whatever comes after an undo/redo its own step.
   undo() {
     this.undoManager.undo();
+    this.undoManager.stopCapturing();
   }
 
   redo() {
     this.undoManager.redo();
+    this.undoManager.stopCapturing();
   }
 
   get canUndo(): boolean {

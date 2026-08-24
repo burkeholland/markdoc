@@ -166,6 +166,100 @@ export async function expectTableShape(page: Page, rows: number, cols: number) {
   await expect.poll(async () => (await tableLines(page)).length, { message: `code pane should have ${rows + 1} table lines` }).toBe(rows + 1);
 }
 
+/**
+ * Put the caret at the start or end of the text of the first element matching `selector`, with a
+ * real mouse click, and wait until the DOM selection sits there. A click is the only placement
+ * ProseMirror picks up synchronously: after a natively handled `Home` (or `Control+Home`, which
+ * goes to the document start, not the block start) Chromium fires `selectionchange` in a later
+ * task, so a key pressed right behind it is judged against ProseMirror's stale selection, the
+ * keymap declines it and the browser merges blocks natively (`# H1A quote line.` in the lead's run).
+ */
+export async function clickEdgeOf(page: Page, selector: string, edge: "start" | "end") {
+  const el = page.locator(`.md-rich ${selector}`).first();
+  await expect(el).toBeVisible();
+  const point = await el.evaluate((node, side) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const rects = range.getClientRects();
+    const rect = (side === "start" ? rects[0] : rects[rects.length - 1]) ?? range.getBoundingClientRect();
+    return { x: side === "start" ? rect.left + 1 : rect.right - 1, y: rect.top + rect.height / 2 };
+  }, edge);
+  await page.mouse.click(point.x, point.y);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          ([sel, side]) => {
+            const s = document.getSelection();
+            const block = s?.anchorNode?.parentElement?.closest(sel);
+            if (!block || !s || !s.isCollapsed) return "no caret";
+            const range = document.createRange();
+            range.selectNodeContents(block);
+            range.setEnd(s.anchorNode!, s.anchorOffset);
+            const before = range.toString().length;
+            return side === "start" ? before === 0 : before === block.textContent!.length;
+          },
+          [`.md-rich ${selector}`, edge] as const,
+        ),
+      { message: `caret should be at the ${edge} of ${selector}` },
+    )
+    .toBe(true);
+}
+
+/** Caret path inside .md-rich (e.g. "blockquote>p") from the DOM selection. */
+export const caretPath = (page: Page) =>
+  page.evaluate(() => {
+    const sel = document.getSelection();
+    let el = sel?.anchorNode instanceof Element ? sel.anchorNode : sel?.anchorNode?.parentElement;
+    const path: string[] = [];
+    while (el && !el.classList.contains("md-rich")) {
+      path.unshift(el.tagName.toLowerCase());
+      el = el.parentElement;
+    }
+    return path.join(">");
+  });
+
+/**
+ * Gap between the first `.md-rich > prev` and its next sibling, that sibling's margin-top, and the
+ * rhythm token it should resolve to. The tokens are em values resolved on the element they land on
+ * (globals.css "Markdown prose rhythm", task #346): the first block under a heading hugs it with
+ * --md-space-heading-after, a heading takes its per-level margin-top (an h2 keeps 0.6em of it as
+ * padding so the border sits closer to the text), a thematic break gets 1.75 x --md-space on both
+ * sides, everything else gets --md-space.
+ */
+export async function gapAfter(page: Page, prev: string) {
+  return page.locator(`.md-rich > ${prev}`).first().evaluate((el) => {
+    const next = el.nextElementSibling as HTMLElement | null;
+    if (!next) throw new Error(`nothing after ${el.tagName}`);
+    const a = el.getBoundingClientRect();
+    const b = next.getBoundingClientRect();
+    const prevTag = el.tagName.toLowerCase();
+    const nextTag = next.tagName.toLowerCase();
+    let token = "--md-space";
+    let factor = 1;
+    let minusEm = 0;
+    if (/^h[1-6]$/.test(prevTag)) token = "--md-space-heading-after";
+    else if (nextTag === "h1") token = "--md-space-heading-before-h2";
+    else if (nextTag === "h2") {
+      token = "--md-space-heading-before-h2";
+      minusEm = 0.6;
+    } else if (nextTag === "h3") token = "--md-space-heading-before-h3";
+    else if (/^h[4-6]$/.test(nextTag)) token = "--md-space-heading-before-h4";
+    else if (prevTag === "hr" || nextTag === "hr") factor = 1.75;
+    const root = el.closest(".md-rich")!;
+    const em = parseFloat(getComputedStyle(root).getPropertyValue(token));
+    const fontSize = parseFloat(getComputedStyle(next).fontSize);
+    return { next: nextTag, gap: b.top - a.bottom, marginTop: parseFloat(getComputedStyle(next).marginTop), token, expected: (em * factor - minusEm) * fontSize };
+  });
+}
+
+export async function expectRhythm(page: Page, prev: string, next: string) {
+  const g = await gapAfter(page, prev);
+  expect(g.next, `${prev} is followed by ${next}`).toBe(next);
+  expect(Math.abs(g.marginTop - g.expected), `the block after ${prev} gets ${g.token} (${g.expected.toFixed(1)} px), got ${g.marginTop.toFixed(1)} px`).toBeLessThan(0.5);
+  expect(Math.abs(g.gap - g.marginTop), `gap after ${prev} (${g.gap.toFixed(1)} px) equals the margin-top (${g.marginTop.toFixed(1)} px)`).toBeLessThan(1);
+}
+
 /** Open the comments side panel if it is not already visible. */
 export async function ensureCommentsOpen(page: Page) {
   if ((await page.getByTestId("comments-panel").count()) === 0) {
