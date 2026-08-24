@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, codeText, richText, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, type User } from "./helpers";
+import { LONG_DOC, h2Texts } from "./fixtures/burke-scale";
 
 test.describe("collaboration between two users", () => {
   let alice: User;
@@ -179,6 +180,60 @@ test.describe("collaboration between two users", () => {
     await dave.page.goto(`/d/${docId}`);
     await expect(dave.page.getByText(/not found|could not be found/i)).toBeVisible();
     await dave.context.close();
+  });
+});
+
+/**
+ * The same presence / cross-surface / caret checks on the Burke-scale document (~12k words, 40 H2
+ * sections; e2e/fixtures/burke-scale.ts). The small-document suite above keeps the assertions that
+ * need a known first line ("# Shared doc BBBB"); this one proves the live session behaves the same
+ * when the text is 1,200 lines long.
+ */
+test.describe("collaboration on a Burke-scale document", () => {
+  let alice: User;
+  let bob: User;
+  let docId: string;
+  const lastH2 = h2Texts(LONG_DOC)[39];
+
+  test.beforeAll(async ({ browser }) => {
+    alice = await signIn(browser, "alice-scale");
+    bob = await signIn(browser, "bob-scale");
+    docId = await createDocument(alice.page, LONG_DOC);
+    await shareWith(alice.page, docId, "bob-scale", "editor");
+    await openDocument(alice.page, docId);
+    await openDocument(bob.page, docId);
+  });
+
+  test.afterAll(async () => {
+    await alice.context.close();
+    await bob.context.close();
+  });
+
+  test("both users are present and see each other's edits on both surfaces", async () => {
+    await expect(alice.page.getByTestId("presence").locator(".avatar")).toHaveCount(2);
+    await expect(bob.page.getByTestId("presence").locator(".avatar")).toHaveCount(2);
+    expect(await codeText(bob.page)).toBe(LONG_DOC);
+
+    // Alice types at the end of the rich pane; Bob sees it in both panes.
+    await focusRichEnd(alice.page);
+    await alice.page.keyboard.type(" Alice was here.");
+    await expect.poll(() => codeText(bob.page)).toContain("Alice was here.");
+    await expect.poll(() => richText(bob.page)).toContain("Alice was here.");
+
+    // Bob adds a 41st section in the code pane; Alice's preview and outline pick it up.
+    await focusCodeEnd(bob.page);
+    await bob.page.keyboard.type("\n\n## 41. Bob's section\n\nBob typed this.");
+    await expect(alice.page.locator(".md-rich h2").last()).toHaveText("41. Bob's section");
+    await expect(alice.page.locator(".md-rich h2")).toHaveCount(41);
+    await expect(alice.page.getByTestId("outline").locator("[data-outline-item]").filter({ hasText: "41. Bob's section" })).toHaveCount(1);
+    await expect.poll(() => codeText(alice.page)).toContain("Bob typed this.");
+    // The previous last heading is still there and nothing doubled.
+    expect((await codeText(alice.page)).split(`## ${lastH2}`).length - 1).toBe(1);
+
+    // Carets: Alice's (from the rich pane) in Bob's editors, both at the end where Bob is looking.
+    await expect(bob.page.locator(".md-remote-caret").first()).toBeVisible();
+    await expect(bob.page.locator(".cm-ySelectionCaret").first()).toBeVisible();
+    await expect(bob.page.locator(".md-remote-caret-label").first()).toHaveText("alice-scale");
   });
 });
 

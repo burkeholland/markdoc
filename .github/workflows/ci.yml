@@ -30,7 +30,8 @@ jobs:
   e2e:
     # ~130 tests; one worker on the 2-vCPU runner ran past the 30-min cap. Two shards with two workers
     # each (playwright.config.ts under CI) keep every job well inside it; fail-fast off so a red shard
-    # still lets the other finish and report.
+    # still lets the other finish and report. e2e/scale.spec.ts (the Burke-scale fixture: ~3 min
+    # locally, budgets via budgetMs) rides in these shards; give it its own job if it grows past 5 min.
     name: End-to-end (Playwright) ${{ matrix.shard }}/2
     runs-on: ubuntu-latest
     timeout-minutes: 30

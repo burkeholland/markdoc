@@ -39,6 +39,7 @@ class ListItemView implements NodeView {
       this.checkbox.className = "md-task-checkbox";
       this.checkbox.contentEditable = "false";
       this.checkbox.setAttribute("role", "checkbox");
+      this.checkbox.setAttribute("aria-label", "Task");
       this.checkbox.innerHTML =
         '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>';
       this.checkbox.addEventListener("mousedown", (e) => {

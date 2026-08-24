@@ -146,7 +146,7 @@ function codeBlock(r: Rng, lang: "ts" | "json" | "bash", n: number): string {
     "```bash",
     `E2E_PORT=${3200 + n} npx playwright test e2e/scale.spec.ts --reporter=list`,
     `npm run typecheck && npm run lint`,
-    `git grep -il mooncake | wc -l`,
+    `git grep -il "fixme" -- src | wc -l`,
     "```",
   ].join("\n");
 }
@@ -439,7 +439,7 @@ export function generateCommentLoad(peer = "burke-peer"): CommentLoad {
   for (let i = 0; i < 25; i++) {
     const replyCount = [1, 2, 3, 4, 2][i % 5];
     const isResolved = i % 5 === 2 || i % 5 === 4;
-    const reacts = i % 5 === 2 || i % 5 === 4 ? [] : [EMOJIS[i % EMOJIS.length]];
+    const reacts = i % 5 === 0 ? [EMOJIS[i % EMOJIS.length], EMOJIS[(i + 1) % EMOJIS.length]] : i % 5 === 1 ? [EMOJIS[i % EMOJIS.length]] : [];
     const mention = i % 4 === 0 && mentions < 6;
     const body = mention ? `@${peer} ${sentence(r, 5, 14)}` : sentence(r, 5, 16);
     if (mention) mentions++;

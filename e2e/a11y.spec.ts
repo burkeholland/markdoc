@@ -1,6 +1,7 @@
 import { test, expect, devices, type Browser, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell } from "./helpers";
+import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
  * Accessibility sweep: axe-core (WCAG 2.1 A/AA) on every screen and floating UI, then a
@@ -142,21 +143,24 @@ test.describe("axe: pages", () => {
  * Sign in, create the fixture document, open it in split view with the outline and comments panels
  * showing. Each editor scan below starts here so a failure names the UI that broke and no single
  * test carries more than a handful of axe runs (one test used to do 15 and hit the 90 s timeout on
- * the 2-vCPU CI runner, see task #278).
+ * the 2-vCPU CI runner, see task #278). `content` defaults to the small DOC; the plain split-view
+ * scan passes the Burke-scale document so axe walks an editor with 40 sections, 6 tables and 20
+ * code blocks — the small one stays for the floating menus, which need its known text.
  */
-async function openEditorFixture(browser: Browser, login: string, { revisions = false }: { revisions?: boolean } = {}) {
+async function openEditorFixture(browser: Browser, login: string, { revisions = false, content = DOC }: { revisions?: boolean; content?: string } = {}) {
   const { page, context } = await signIn(browser, login);
-  const id = await createDocument(page, DOC, "Editor fixture");
+  const id = await createDocument(page, content, "Editor fixture");
   // A second content revision so the versions panel has something to compare.
   if (revisions) {
-    expect((await page.request.put(`/api/documents/${id}/content`, { data: { content: DOC + "\nVersion two.\n", message: "Two" } })).ok()).toBeTruthy();
+    expect((await page.request.put(`/api/documents/${id}/content`, { data: { content: content + "\nVersion two.\n", message: "Two" } })).ok()).toBeTruthy();
   }
   await openDocument(page, id);
   await ensureOutlineOpen(page);
   await ensureCommentsOpen(page);
-  await expect(page.locator(".md-rich table")).toBeVisible();
-  await expect(page.locator(".md-rich pre")).toBeVisible();
-  await expect(page.locator(".md-rich img[alt='Markdoc logo']")).toBeVisible();
+  await expect(page.locator(".md-rich table").first()).toBeVisible();
+  await expect(page.locator(".md-rich pre").first()).toBeVisible();
+  if (content === DOC) await expect(page.locator(".md-rich img[alt='Markdoc logo']")).toBeVisible();
+  else await expect(page.locator(".md-rich img").first()).toBeAttached();
   return { page, context, id };
 }
 
@@ -166,9 +170,10 @@ async function ensureOutlineOpen(page: Page) {
 }
 
 test.describe("axe: editor", () => {
-  test("split view with outline and comments panels", async ({ browser }) => {
-    const { page, context } = await openEditorFixture(browser, "a11y-editor");
-    await scan(page, "editor split + outline + comments");
+  test("split view with outline and comments panels (Burke-scale document)", async ({ browser }) => {
+    const { page, context } = await openEditorFixture(browser, "a11y-editor", { content: LONG_DOC });
+    await expect(page.locator(".md-rich h2")).toHaveCount(40);
+    await scan(page, "editor split + outline + comments (Burke-scale)");
     await context.close();
   });
 

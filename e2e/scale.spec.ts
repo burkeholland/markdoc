@@ -1,4 +1,4 @@
-import { test, expect, devices, type Browser, type Page } from "@playwright/test";
+import { test, expect, devices, type Page } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { signIn, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, type User } from "./helpers";
@@ -11,8 +11,11 @@ import { seedBurkeScale, h2Texts, firstH3Of, UNIQUE_WORD, UNIQUE_WORD_DOC_INDEX,
  * Each measurement is also printed as `[scale] <name> <ms> ms` so the numbers end up in the job log.
  */
 
-const OWNER = "burke-scale";
-const PEER = "burke-scale-peer";
+// One owner/peer pair per run: a restarted worker (CI retries) re-seeds, and a second set of 60 documents
+// on the same login would break the "exactly 10 starred / 8 in trash" counts.
+const RUN = Date.now().toString(36);
+const OWNER = `burke-scale-${RUN}`;
+const PEER = `burke-scale-peer-${RUN}`;
 
 const measured: { name: string; ms: number; budget: number }[] = [];
 function record(name: string, ms: number, budget: number) {
@@ -82,7 +85,6 @@ async function mcpClient(baseURL: string, token: string) {
 }
 
 test.describe("Burke-scale", () => {
-  test.describe.configure({ mode: "serial" });
   let owner: User;
   let seed: BurkeScaleSeed;
   let longDocId: string;
@@ -146,20 +148,26 @@ test.describe("Burke-scale", () => {
     await expect.poll(() => codeText(page)).toBe(seed.longDoc.content);
   });
 
-  test("2. reload after create without edit: content length identical on 3 reloads", async () => {
-    const { page } = owner;
-    const id = await createDocument(page, seed.longDoc.content, "Reload-after-create (Burke-scale)");
-    const lengths: number[] = [];
-    await openDocument(page, id);
-    lengths.push((await codeText(page)).length);
-    for (let i = 0; i < 3; i++) {
-      await page.reload();
+  test("2. reload after create without edit: content length identical on 3 reloads", async ({ browser }) => {
+    // A throwaway user so the extra document never changes the owner's dashboard counts.
+    const user = await signIn(browser, `${OWNER}-reload`);
+    const { page } = user;
+    try {
+      const id = await createDocument(page, seed.longDoc.content, "Reload-after-create (Burke-scale)");
+      const lengths: number[] = [];
       await openDocument(page, id);
       lengths.push((await codeText(page)).length);
+      for (let i = 0; i < 3; i++) {
+        await page.reload();
+        await openDocument(page, id);
+        lengths.push((await codeText(page)).length);
+      }
+      console.log(`[scale] reload lengths: ${lengths.join(", ")} (seed ${seed.longDoc.content.length})`);
+      expect(lengths).toEqual(Array(4).fill(seed.longDoc.content.length));
+      expect(await codeText(page)).toBe(seed.longDoc.content);
+    } finally {
+      await user.context.close();
     }
-    console.log(`[scale] reload lengths: ${lengths.join(", ")} (seed ${seed.longDoc.content.length})`);
-    expect(lengths).toEqual(Array(4).fill(seed.longDoc.content.length));
-    expect(await codeText(page)).toBe(seed.longDoc.content);
   });
 
   test("3. second browser (editor) joins: both cursors visible, 200-char paste arrives < 1 s, no doubling", async ({ browser }) => {
@@ -171,9 +179,10 @@ test.describe("Burke-scale", () => {
       await expect(a.getByTestId("presence").locator(".avatar")).toHaveCount(2);
       await expect(bob.page.getByTestId("presence").locator(".avatar")).toHaveCount(2);
 
-      // Each puts a caret in the code pane; the other sees it.
+      // Both carets at the end of the code pane: CodeMirror only renders remote carets inside its
+      // viewport, so they must share one on a 1,200-line document.
       await a.locator(".cm-content").click();
-      await a.keyboard.press("Control+Home");
+      await a.keyboard.press("Control+End");
       await bob.page.locator(".cm-content").click();
       await bob.page.keyboard.press("Control+End");
       await expect(a.locator(".cm-ySelectionCaret").first()).toBeVisible();
@@ -207,8 +216,8 @@ test.describe("Burke-scale", () => {
       expect(count(await codeText(a))).toBe(1);
       expect(count(await codeText(bob.page))).toBe(1);
       await expect.poll(async () => (await codeText(a)) === (await codeText(bob.page))).toBe(true);
-      // Undo the paste so the document stays as seeded.
-      for (let i = 0; i < paste.length + 2; i++) await bob.page.keyboard.press("Backspace");
+      // Restore the seeded text through the API (the same path an agent uses) so later tests see the fixture.
+      expect((await a.request.put(`/api/documents/${longDocId}/content`, { data: { content: seed.longDoc.content } })).ok()).toBeTruthy();
       await expect.poll(() => codeText(a)).toBe(seed.longDoc.content);
     } finally {
       await bob.context.close();
@@ -221,9 +230,13 @@ test.describe("Burke-scale", () => {
     const t0 = Date.now();
     await page.goto("/");
     await expect(page.getByTestId("document-list").getByTestId("document-card").first()).toBeVisible();
-    const paint = record("dashboard: navigation → first card", Date.now() - t0, budgetMs(2_000));
+    const paint = record("dashboard: navigation → first card (SSR)", Date.now() - t0, budgetMs(2_000));
     expect(paint).toBeLessThan(budgetMs(2_000));
     await expect(page.getByTestId("document-list").getByTestId("document-card")).toHaveCount(listed);
+    // The list is server-rendered, so the first card paints before React has hydrated; typing into the
+    // search box before that is lost. Wait for the page to settle and record that figure too.
+    await page.waitForLoadState("networkidle");
+    record("dashboard: navigation → network idle (hydrated)", Date.now() - t0, budgetMs(4_000));
 
     const t1 = Date.now();
     await page.getByTestId("search").fill(UNIQUE_WORD);
@@ -309,9 +322,13 @@ test.describe("Burke-scale", () => {
       await page.getByTestId("outline-button").click();
       const drawer = page.getByTestId("outline-drawer");
       await expect(drawer).toBeVisible();
-      const last = drawer.getByRole("button", { name: h2s[39] });
-      await last.scrollIntoViewIfNeeded();
-      await last.click();
+      // 143 headings: the last one is far below the fold of the drawer's own scroll area (the fix in
+      // outline.tsx gives the aside max-h-full so the nav scrolls instead of overflowing the viewport).
+      const last = drawer.locator("[data-outline-item]").filter({ hasText: h2s[39] });
+      await expect(last).toHaveCount(1);
+      await last.scrollIntoViewIfNeeded({ timeout: 10_000 });
+      await expect(last).toBeInViewport();
+      await last.click({ timeout: 10_000 });
       await expect(drawer).toHaveCount(0);
       const lastH2 = page.locator(".md-rich h2").last();
       await expect(lastH2).toHaveText(h2s[39]);
@@ -329,8 +346,9 @@ test.describe("Burke-scale", () => {
     expect(html.status()).toBe(200);
     expect(html.headers()["content-type"]).toContain("text/html");
     const body = await html.text();
-    expect(body.match(/<h2[\s>]/g) ?? []).toHaveLength(40);
-    for (const h of h2s) expect(body).toContain(h);
+    // remark-gfm adds an sr-only "Footnotes" H2 for the two footnotes; the document's own H2s are the 40 sections.
+    const found = [...body.matchAll(/<h2[^>]*>([\s\S]*?)<\/h2>/g)].map((m) => m[1].replace(/<[^>]+>/g, "").trim()).filter((t) => t !== "Footnotes");
+    expect(found).toEqual(h2s);
 
     const t0 = Date.now();
     const pdf = await page.request.get(`/api/documents/${longDocId}/export?format=pdf`, { timeout: 120_000 });
@@ -360,13 +378,32 @@ test.describe("Burke-scale", () => {
 
       const find = firstH3Of(seed.longDoc.content, 37).slice(4);
       const replace = `${find} (revised by the agent)`;
+      // Timed in the page: a MutationObserver stamps the moment a suggestion mark with the new text
+      // appears in the rich pane, so Playwright's polling interval is not part of the number.
+      await page.evaluate((needle) => {
+        const w = window as unknown as { __sugSeen: number };
+        w.__sugSeen = 0;
+        const root = document.querySelector(".md-rich")!;
+        const mo = new MutationObserver(() => {
+          for (const el of root.querySelectorAll(".md-suggest-insert")) {
+            if ((el.textContent ?? "").includes(needle)) {
+              w.__sugSeen = Date.now();
+              mo.disconnect();
+              return;
+            }
+          }
+        });
+        mo.observe(root, { childList: true, characterData: true, subtree: true, attributes: true });
+      }, "revised by the agent");
       const t0 = Date.now();
       const suggested = await client.callTool({ name: "markdoc_suggest", arguments: { id: longDocId, edits: [{ find, replace }] } });
       expect(suggested.isError).toBeFalsy();
       expect((suggested.structuredContent as { suggestions: number }).suggestions).toBeGreaterThan(0);
-      await expect(page.locator(".md-rich .md-suggest-insert").filter({ hasText: "revised by the agent" }).first()).toBeVisible({ timeout: 15_000 });
-      const ms = record("markdoc_suggest → visible in rich pane", Date.now() - t0, budgetMs(2_000));
+      await page.waitForFunction(() => (window as unknown as { __sugSeen: number }).__sugSeen > 0, undefined, { timeout: 15_000 });
+      const seen = await page.evaluate(() => (window as unknown as { __sugSeen: number }).__sugSeen);
+      const ms = record("markdoc_suggest → visible in rich pane", seen - t0, budgetMs(2_000));
       expect(ms).toBeLessThan(budgetMs(2_000));
+      await expect(page.locator(".md-rich .md-suggest-insert").filter({ hasText: "revised by the agent" }).first()).toBeVisible();
       await ensureCommentsOpen(page);
       await page.getByTestId("comments-tab-suggestions").click();
       await expect(page.getByTestId("suggestion-card").filter({ hasText: "revised by the agent" })).toHaveCount(1);
@@ -374,16 +411,11 @@ test.describe("Burke-scale", () => {
       await client.close();
     }
   });
-});
 
-/** The 60-document dashboard, for the report screenshot; kept separate so a failing budget above never hides it. */
-test("dashboard screenshot (Burke-scale)", async ({ browser }: { browser: Browser }) => {
-  const user = await signIn(browser, OWNER);
-  try {
-    await user.page.goto("/");
-    await expect(user.page.getByTestId("document-list").getByTestId("document-card").first()).toBeVisible();
-    await user.page.screenshot({ path: test.info().outputPath("dashboard-60-docs.png"), fullPage: false });
-  } finally {
-    await user.context.close();
-  }
+  test("dashboard screenshot (60 documents, for the report)", async () => {
+    const { page } = owner;
+    await page.goto("/");
+    await expect(page.getByTestId("document-list").getByTestId("document-card").first()).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("dashboard-60-docs.png") });
+  });
 });
