@@ -302,12 +302,17 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Delete row", "Mod-Alt-⌫"],
       ["Delete column", "Mod-Alt-Shift-⌫"],
       ["New row from the last cell", "Enter"],
+      ["Leave the table (paragraph below)", "Mod-Enter / ↓ from the last row"],
       ["Delete empty table", "⌫"],
     ],
   },
   {
     group: "Blocks",
-    items: [["Insert block menu", "/"]],
+    items: [
+      ["Insert block menu", "/"],
+      ["Leave a quote or list", "Enter on an empty line"],
+      ["Leave a code block", "Mod-Enter / Shift-Enter, or Enter ×3"],
+    ],
   },
   {
     group: "Code pane",

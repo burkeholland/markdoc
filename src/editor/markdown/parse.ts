@@ -73,6 +73,16 @@ function ensurePositions(children: Md.Node[], from: number, to: number) {
   }
 }
 
+/**
+ * Last line holding content of a block. mdast lets a list's range run on over the blank lines
+ * that follow it, so for lists the last item's content decides.
+ */
+function contentEndLine(node: Md.Node): number {
+  const children = (node as Md.Parent).children;
+  if ((node.type === "list" || node.type === "listItem") && children?.length) return contentEndLine(children[children.length - 1]);
+  return node.position?.end.line ?? 0;
+}
+
 /** Source range of a container's content, excluding its own delimiters. */
 function contentBounds(src: string, node: Md.Node): SrcRange {
   const { from, to } = offsets(node);
@@ -144,6 +154,7 @@ class Converter {
   definitions = new Map<string, Md.Definition>();
   headings: HeadingInfo[] = [];
   private lineStarts: number[] | null = null;
+  private inTableCell = false;
 
   constructor(private src: string) {}
 
@@ -212,7 +223,7 @@ class Converter {
       case "thematicBreak":
         return schema.nodes.horizontal_rule.create();
       case "blockquote": {
-        const content = this.blocks(node.children);
+        const content = this.quoteContent(node);
         return schema.nodes.blockquote.create(null, content.length ? content : [schema.nodes.paragraph.create()]);
       }
       case "list":
@@ -306,9 +317,36 @@ class Converter {
     return schema.nodes.list_item.create({ checked }, content);
   }
 
+  /**
+   * Children of a blockquote. Markdown has no empty paragraph, so the serializer writes one as a
+   * marker-only `>` line beyond the single blank line that separates (or pads) blocks; every such
+   * extra line becomes an empty paragraph here. One `>` line alone (the code pane's `> ` after
+   * Enter, or a hand-written trailing marker) still means nothing, as before.
+   */
+  private quoteContent(node: Md.Blockquote): PMNode[] {
+    const pos = node.position;
+    if (!pos) return this.blocks(node.children);
+    const out: PMNode[] = [];
+    const empties = (lines: number) => {
+      for (let i = 1; i < lines; i++) out.push(schema.nodes.paragraph.create());
+    };
+    let prevEnd = pos.start.line - 1;
+    for (const child of node.children) {
+      if (child.position) {
+        empties(child.position.start.line - prevEnd - 1);
+        prevEnd = contentEndLine(child);
+      }
+      const block = this.block(child, false);
+      if (block) out.push(block);
+    }
+    empties(pos.end.line - prevEnd);
+    return out;
+  }
+
   private table(node: Md.Table): PMNode {
     const align = node.align ?? [];
     const cols = node.children[0]?.children.length ?? 0;
+    this.inTableCell = true;
     const rows = node.children.map((row, rowIndex) => {
       const cells = row.children.map((cell, colIndex) => {
         const type = rowIndex === 0 ? schema.nodes.table_header : schema.nodes.table_cell;
@@ -322,6 +360,7 @@ class Converter {
       }
       return schema.nodes.table_row.create(null, cells);
     });
+    this.inTableCell = false;
     return schema.nodes.table.create(null, rows);
   }
 
@@ -424,6 +463,11 @@ class Converter {
         return;
       }
       case "html":
+        // `<br>` is how a table cell spells a line break (the serializer writes it back the same way).
+        if (this.inTableCell && /^<br\s*\/?>$/i.test((node as Md.Html).value)) {
+          b.leaf(schema.nodes.hard_break.create(), range);
+          return;
+        }
         b.leaf(schema.nodes.html_inline.create({ html: (node as Md.Html).value }), range);
         return;
       default:

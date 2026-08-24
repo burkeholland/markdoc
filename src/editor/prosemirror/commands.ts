@@ -2,6 +2,7 @@ import { toggleMark, setBlockType, wrapIn, lift } from "prosemirror-commands";
 import { wrapInList, liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { TextSelection, NodeSelection, type Command, type EditorState, type Transaction } from "prosemirror-state";
 import { Fragment, type Attrs, type MarkType, type NodeType, type Node as PMNode } from "prosemirror-model";
+import { liftTarget } from "prosemirror-transform";
 import {
   addRowAfter as pmAddRowAfter,
   addRowBefore as pmAddRowBefore,
@@ -436,7 +437,8 @@ export function setCodeBlockLanguage(pos: number, language: string | null): Comm
 export function insertHardBreak(): Command {
   return (state, dispatch) => {
     const { $from } = state.selection;
-    if ($from.parent.type.spec.code) return false;
+    // Code has real newlines; a heading is a single Markdown line (callers fall through to Enter).
+    if ($from.parent.type.spec.code || $from.parent.type === schema.nodes.heading) return false;
     dispatch?.(state.tr.replaceSelectionWith(schema.nodes.hard_break.create()).scrollIntoView());
     return true;
   };
@@ -449,6 +451,124 @@ export const liftEmptyListItemOnBackspace: Command = (state, dispatch) => {
   const item = findParentNode($from, (n) => n.type === schema.nodes.list_item);
   if (!item || $from.depth !== item.depth + 1 || $from.index(item.depth) !== 0) return false;
   return liftListItem(schema.nodes.list_item)(state, dispatch);
+};
+
+/* ---------- Leaving blocks with the keyboard (task #415) ---------- */
+
+/** The paragraph directly inside a blockquote that holds the cursor, or null. */
+function quoteParagraphAt(state: EditorState): { $from: EditorState["selection"]["$from"]; index: number } | null {
+  const { $from, empty } = state.selection;
+  if (!empty || $from.parent.type !== schema.nodes.paragraph || $from.depth < 2) return null;
+  if ($from.node(-1).type !== schema.nodes.blockquote) return null;
+  return { $from, index: $from.index(-1) };
+}
+
+/**
+ * Enter on an empty paragraph inside a blockquote lifts that paragraph out of the quote (one
+ * keystroke, wherever it sits; a middle paragraph splits the quote around it), so Enter twice
+ * at the end of a quoted line leaves the quote.
+ */
+export const liftEmptyQuoteParagraph: Command = (state, dispatch) => {
+  const hit = quoteParagraphAt(state);
+  if (!hit || hit.$from.parent.content.size > 0) return false;
+  const range = hit.$from.blockRange();
+  const target = range && liftTarget(range);
+  if (target == null) return false;
+  dispatch?.(state.tr.lift(range, target).scrollIntoView());
+  return true;
+};
+
+/** Backspace at the start of the first paragraph of a blockquote lifts it out of the quote. */
+export const liftFirstQuoteParagraphOnBackspace: Command = (state, dispatch) => {
+  const hit = quoteParagraphAt(state);
+  if (!hit || hit.$from.parentOffset !== 0 || hit.index !== 0) return false;
+  const range = hit.$from.blockRange();
+  const target = range && liftTarget(range);
+  if (target == null) return false;
+  dispatch?.(state.tr.lift(range, target).scrollIntoView());
+  return true;
+};
+
+/** Backspace at the start of a heading that opens the document turns it into a paragraph (nothing above to join). */
+export const headingToParagraphOnBackspace: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  if (!empty || $from.parentOffset !== 0 || $from.parent.type !== schema.nodes.heading || $from.before() !== 0) return false;
+  return setBlockType(schema.nodes.paragraph)(state, dispatch);
+};
+
+/** Enter in a list item splits it like prosemirror-schema-list does, but a new task item always starts unchecked. */
+export const splitListItemUnchecked: Command = (state, dispatch) => {
+  return splitListItem(schema.nodes.list_item)(state, dispatch
+    ? (tr) => {
+        const $from = tr.selection.$from;
+        const item = findParentNode($from, (n) => n.type === schema.nodes.list_item);
+        if (item && item.node.attrs.checked === true && item.node.content.size === 2) {
+          tr.setNodeMarkup(item.pos, undefined, { ...item.node.attrs, checked: false });
+        }
+        dispatch(tr);
+      }
+    : undefined);
+};
+
+/** Backspace at the very start of a code block turns it into a paragraph instead of joining it into the block above. */
+export const codeBlockToParagraphOnBackspace: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  if (!empty || $from.parentOffset !== 0 || $from.parent.type !== schema.nodes.code_block) return false;
+  return setBlockType(schema.nodes.paragraph)(state, dispatch);
+};
+
+/**
+ * Enter at the end of a code block whose text already ends in two newlines (Enter pressed three
+ * times on empty trailing lines) drops those newlines and continues in a paragraph below —
+ * the keyboard-only exit next to Ctrl+Enter / Shift+Enter.
+ */
+export const exitCodeBlockOnTripleEnter: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  const block = $from.parent;
+  if (!empty || block.type !== schema.nodes.code_block || $from.parentOffset !== block.content.size) return false;
+  if (!block.textContent.endsWith("\n\n")) return false;
+  if (dispatch) {
+    const tr = state.tr.delete($from.pos - 2, $from.pos);
+    const after = tr.mapping.map($from.after());
+    tr.insert(after, schema.nodes.paragraph.create());
+    tr.setSelection(TextSelection.create(tr.doc, after + 1));
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+};
+
+/** Position right after the table that holds the selection, or null outside a table. */
+function afterTable(state: EditorState): number | null {
+  const table = tableAt(state);
+  return table ? table.pos + table.node.nodeSize : null;
+}
+
+/**
+ * Leaves the table downwards: the caret moves to the start of the block after it, or to a new
+ * paragraph when the table is the last block. Bound to Ctrl+Enter and, from the last row, ArrowDown.
+ */
+export const exitTableBelow: Command = (state, dispatch) => {
+  const after = afterTable(state);
+  if (after == null) return false;
+  if (dispatch) {
+    const tr = state.tr;
+    const next = state.doc.nodeAt(after);
+    if (!next || !next.isTextblock) {
+      tr.insert(after, schema.nodes.paragraph.create());
+    }
+    tr.setSelection(TextSelection.create(tr.doc, after + 1));
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+};
+
+/** ArrowDown on the last row of a table leaves it (see {@link exitTableBelow}); elsewhere the browser moves the caret. */
+export const exitTableOnArrowDown: Command = (state, dispatch, view) => {
+  if (!isInTable(state) || !state.selection.empty) return false;
+  const rect = selectedRect(state);
+  if (rect.bottom !== rect.map.height) return false;
+  if (view && !view.endOfTextblock("down")) return false;
+  return exitTableBelow(state, dispatch);
 };
 
 export function selectAllText(state: EditorState): Transaction {
