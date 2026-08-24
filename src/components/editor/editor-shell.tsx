@@ -12,6 +12,7 @@ import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip, Dialog, DialogPortal, DialogOverlay, DialogPrimitiveContent, DialogTitle } from "@/components/ui/primitives";
@@ -414,9 +415,12 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     [doc.id, doc.title, toast],
   );
 
-  const copyMarkdown = useCallback(async () => {
-    await navigator.clipboard.writeText(session.suggestions.cleanText());
-    toast("Markdown copied to clipboard.", "success");
+  const copyMarkdown = useCallback(() => {
+    // Synchronous call: the execCommand fallback (plain-HTTP LAN origins) needs the click gesture.
+    void copyText(session.suggestions.cleanText()).then((ok) => {
+      if (ok) toast("Markdown copied to clipboard.", "success");
+      else toast("Could not copy. Select the Markdown in the code pane and press Ctrl+C.", "error");
+    });
   }, [session, toast]);
 
   // Pasted, dropped and dialog-chosen images all go through the document's asset store.
