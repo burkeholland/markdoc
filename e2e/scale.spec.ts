@@ -82,8 +82,18 @@ async function keystrokeRoundTrip(page: Page, char: string, marker: string): Pro
  * token from the outside (`keyboard.type` + poll), which includes any main-thread work still queued
  * from earlier keystrokes — the in-page number cannot see that, the lead's 1.5–2 s per 4-char token
  * could. Returns the 10 per-keystroke samples; the token time is recorded as its own `[scale]` line.
+ *
+ * One unmeasured warm-up token goes first at each position (4 chars, wait for the preview, Backspace ×4,
+ * wait for it to leave the preview): the cold first token at a new caret position paid for lazy work
+ * (585 ms against the 600 ms budget on the #360 review run) that Burke's second token never sees.
  */
 async function typeAndMeasure(page: Page, prefix: string): Promise<number[]> {
+  const warm = `${prefix.slice(0, 2)}wu`;
+  await page.keyboard.type(warm);
+  await page.waitForFunction((m) => (document.querySelector(".md-rich")?.textContent ?? "").includes(m), warm, { timeout: 15_000 });
+  for (let i = 0; i < warm.length; i++) await page.keyboard.press("Backspace");
+  await page.waitForFunction((m) => !(document.querySelector(".md-rich")?.textContent ?? "").includes(m), warm, { timeout: 15_000 });
+
   const t0 = Date.now();
   await page.keyboard.type(prefix);
   await page.waitForFunction((m) => (document.querySelector(".md-rich")?.textContent ?? "").includes(m), prefix, { timeout: 15_000 });
