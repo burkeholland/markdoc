@@ -213,6 +213,7 @@
   --cm-bracket: #ccfbf1;
   --cm-active-line: #faf9f5;
   --md-focus-line: #99f6e4;
+  --hljs-comment: #57534e;
   --hljs-title: #0f766e;
   --hljs-title-2: #0d9488;
   --scrollbar-thumb: #d6d3d1;
@@ -247,6 +248,7 @@
   --cm-bracket: #134e4a;
   --cm-active-line: #1c1f24;
   --md-focus-line: #0f766e;
+  --hljs-comment: #a8a29e;
   --hljs-title: #2dd4bf;
   --hljs-title-2: #2dd4bf;
   --scrollbar-thumb: #3a3d43;
@@ -283,6 +285,7 @@
   --cm-bracket: #fef3c7;
   --cm-active-line: #f8f9fa;
   --md-focus-line: #fcd34d;
+  --hljs-comment: #5b616b;
   --hljs-title: #b45309;
   --hljs-title-2: #d97706;
   --scrollbar-thumb: #cfd3d8;
@@ -317,6 +320,7 @@
   --cm-bracket: #78350f;
   --cm-active-line: #171a20;
   --md-focus-line: #b45309;
+  --hljs-comment: #9aa1ab;
   --hljs-title: #fbbf24;
   --hljs-title-2: #fbbf24;
   --scrollbar-thumb: #343941;
