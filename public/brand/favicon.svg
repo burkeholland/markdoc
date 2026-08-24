@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Favicon: brand-neutral ink mark (the page accent is a CSS token; a tab icon cannot read it). Inverts with the OS scheme. -->
+  <style>
+    .body { fill: #16181d; }
+    .glyph { stroke: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .body { fill: #f5f5f4; }
+      .glyph { stroke: #16181d; }
+    }
+  </style>
+  <path class="body" d="M9 2h12l9 9v12a7 7 0 0 1-7 7H9a7 7 0 0 1-7-7V9a7 7 0 0 1 7-7z"/>
+  <path d="M21 2v6a3 3 0 0 0 3 3h6z" fill="#ffffff" fill-opacity="0.35"/>
+  <path class="glyph" d="M10 13.5h13M9 19.5h13M14.5 9.5l-2 13M20 9.5l-2 13" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

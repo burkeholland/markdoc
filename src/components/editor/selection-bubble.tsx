@@ -48,8 +48,8 @@ function BubbleButton({
 }
 
 /**
- * Google Docs-style floating toolbar that appears over a non-empty selection in
- * the rich pane. It offers the most common inline actions and "Comment".
+ * Floating toolbar that appears over a non-empty selection in the rich pane, the way
+ * word processors do. It offers the most common inline actions and "Comment".
  */
 export function SelectionBubble({
   view,

@@ -36,7 +36,7 @@ describe("HTML paste fidelity (parseDOM → Markdown)", () => {
     );
   });
 
-  it("Google Docs bold via span font-weight and its font-weight:normal wrapper", () => {
+  it("word-processor bold via span font-weight and its font-weight:normal wrapper", () => {
     const html =
       '<b style="font-weight:normal;" id="docs-internal-guid-1"><p dir="ltr"><span style="font-size:11pt;font-family:Arial;">Plain </span><span style="font-weight:700;">bold</span><span style="font-style:italic;"> italic</span><span style="text-decoration:line-through;"> struck</span></p></b>';
     expect(htmlToMarkdown(html)).toBe("Plain **bold** *italic* ~~struck~~");

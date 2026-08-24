@@ -5,8 +5,8 @@ import { findParentNode } from "./utils";
 
 /**
  * Markdown-style shortcuts in the rich editor: typing `# `, `- `, `1. `, `> `,
- * `- [ ] `, ```` ``` ```` or `---` converts the block, like Google Docs'
- * automatic formatting but using Markdown syntax people already know.
+ * `- [ ] `, ```` ``` ```` or `---` converts the block as you type — a word processor's
+ * automatic formatting, but using Markdown syntax people already know.
  */
 export function markdownInputRules(): Plugin {
   const rules: InputRule[] = [

@@ -36,7 +36,8 @@ export interface EditInput {
  *  - a *delete* suggestion marks text that should be removed once accepted.
  *
  * This keeps the text the single source of truth for both editing surfaces
- * while allowing the exact accept/reject semantics of Google Docs.
+ * while allowing exact tracked-changes semantics: accept keeps the insertion and
+ * drops the deleted text, reject does the reverse, each suggestion independently.
  */
 export class SuggestionsModel {
   readonly ymap: Y.Map<Suggestion>;
