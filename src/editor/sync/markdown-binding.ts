@@ -4,7 +4,7 @@ import type { Node as PMNode } from "prosemirror-model";
 import type * as Md from "mdast";
 import * as Y from "yjs";
 import { parseMarkdown, type HeadingInfo, type ParseResult } from "../markdown/parse";
-import { reparseRange, textChangeSpan } from "../markdown/incremental";
+import { reparseRange, textChangeSpan, type ChangeSpan } from "../markdown/incremental";
 import { serializeBlocks } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
 import type { BlockRange, SourceMap } from "../markdown/sourcemap";
@@ -14,6 +14,39 @@ export const markdownBindingKey = new PluginKey<{ remote: boolean }>("markdownBi
 
 /** Quiet time after the last incremental parse before it is verified against a full parse. */
 const VERIFY_QUIET_MS = 1000;
+/** Consecutive matching verifications after which routine (non-structural) edits are no longer verified. */
+const VERIFY_TRUST_AFTER = 20;
+/** Once trusted, one in this many routine idle windows still gets a full verification. */
+const VERIFY_EVERY_NTH_WINDOW = 25;
+/**
+ * An edit is structural when a changed line could alter block structure or references beyond
+ * the edited block: brackets and footnotes, fences, tables, headings, list/quote markers,
+ * thematic breaks, HTML, or a newline (a block boundary moved).
+ */
+const STRUCTURAL = /[[\]^`|#<~\n]|^[ \t]*(?:[-*+>]|\d{1,9}[.)])(?:[ \t]|$)|^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/m;
+
+/** The lines of `text` that contain the range `[from, to]`. */
+function linesAround(text: string, from: number, to: number): string {
+  const start = text.lastIndexOf("\n", from - 1) + 1;
+  const endNl = text.indexOf("\n", to);
+  return text.slice(start, endNl === -1 ? text.length : endNl);
+}
+
+/** True when the change between `oldText` and `newText` touches a line with structural Markdown. */
+export function isStructuralChange(oldText: string, newText: string, span: ChangeSpan): boolean {
+  return STRUCTURAL.test(linesAround(newText, span.from, span.newTo)) || STRUCTURAL.test(linesAround(oldText, span.from, span.oldTo));
+}
+
+export interface VerifyStats {
+  /** Full-parse verifications that ran. */
+  runs: number;
+  /** Verifications whose result matched the incremental parse. */
+  matches: number;
+  /** Verifications that found drift and re-synchronized the editor. */
+  mismatches: number;
+  /** Idle windows where the verification was skipped because the incremental parser is trusted. */
+  skipped: number;
+}
 
 /**
  * Hook that lets a layer (for example suggesting mode) take over the text
@@ -117,7 +150,18 @@ export class MarkdownBinding {
   private currentDoc: PMNode | null = null;
   private mapCache: { text: string; phantomKey: string; map: SourceMap } | null = null;
   private parseCache: { text: string; result: ParseResult } | null = null;
-  private verifyHandle: { idle: number } | { timer: ReturnType<typeof setTimeout> } | null = null;
+  private verifyHandle:
+    | { idle: number }
+    | { timer: ReturnType<typeof setTimeout> }
+    | { visibility: () => void }
+    | null = null;
+  /** Consecutive verifications that matched the incremental parse. */
+  private verifiedStreak = 0;
+  /** Routine idle windows skipped since the last verification. */
+  private skippedWindows = 0;
+  /** An unverified incremental parse touched structural Markdown. */
+  private structuralEdit = false;
+  readonly verifyStats: VerifyStats = { runs: 0, matches: 0, mismatches: 0, skipped: 0 };
   private inLocalHandler = false;
   private pendingSync = false;
   /** True while a remote sync is being dispatched to the view. */
@@ -151,6 +195,8 @@ export class MarkdownBinding {
   /** Build the initial ProseMirror document from the current text. */
   initialDoc(): PMNode {
     this.phantoms.clear();
+    this.verifiedStreak = 0;
+    this.skippedWindows = 0;
     const built = this.buildDoc(this.ytext.toString());
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
@@ -173,10 +219,19 @@ export class MarkdownBinding {
     let result: ParseResult | null = null;
     if (cache) {
       const span = textChangeSpan(cache.text, text);
-      if (span) result = reparseRange(cache.result, cache.text, text, span);
+      if (span) {
+        result = reparseRange(cache.result, cache.text, text, span);
+        if (result && isStructuralChange(cache.text, text, span)) this.structuralEdit = true;
+      }
     }
-    if (result) this.scheduleVerify();
-    else result = parseMarkdown(text);
+    if (result) {
+      this.scheduleVerify();
+    } else {
+      // A full parse is authoritative: nothing is left to verify.
+      result = parseMarkdown(text);
+      this.cancelVerify();
+      this.structuralEdit = false;
+    }
     this.parseCache = { text, result };
     return result;
   }
@@ -186,19 +241,23 @@ export class MarkdownBinding {
    * two ever disagree the full result wins and the rich editor is re-synchronized.
    * The check is a trailing debounce: a full parse of a long document costs hundreds
    * of milliseconds, so it must never land between two keystrokes of a typing burst.
+   * A keystroke cancels a pending check; a hidden tab defers it until the tab is visible.
+   * Once the incremental parser has matched {@link VERIFY_TRUST_AFTER} times in a row,
+   * routine edits (no structural Markdown on the changed lines) are verified only every
+   * {@link VERIFY_EVERY_NTH_WINDOW}th pause, so resuming typing after a pause does not
+   * collide with a full parse.
    */
   private scheduleVerify() {
     this.cancelVerify();
     const run = () => {
       this.verifyHandle = null;
-      this.verifyParse();
+      this.runScheduledVerify();
     };
     const whenIdle = () => {
-      if (typeof requestIdleCallback === "function") {
-        this.verifyHandle = { idle: requestIdleCallback(run, { timeout: 3000 }) };
-      } else {
-        run();
-      }
+      this.verifyHandle = null;
+      if (this.tabHidden()) this.deferUntilVisible();
+      else if (typeof requestIdleCallback === "function") this.verifyHandle = { idle: requestIdleCallback(run, { timeout: 3000 }) };
+      else run();
     };
     this.verifyHandle = { timer: setTimeout(whenIdle, VERIFY_QUIET_MS) };
   }
@@ -208,12 +267,49 @@ export class MarkdownBinding {
     this.verifyHandle = null;
     if (!handle) return;
     if ("idle" in handle) cancelIdleCallback(handle.idle);
-    else clearTimeout(handle.timer);
+    else if ("timer" in handle) clearTimeout(handle.timer);
+    else document.removeEventListener("visibilitychange", handle.visibility);
   }
 
+  private tabHidden(): boolean {
+    return typeof document !== "undefined" && document.visibilityState === "hidden";
+  }
+
+  private deferUntilVisible() {
+    const onVisibility = () => {
+      if (this.tabHidden()) return;
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (this.verifyHandle && "visibility" in this.verifyHandle && this.verifyHandle.visibility === onVisibility) {
+        this.verifyHandle = null;
+        this.scheduleVerify();
+      }
+    };
+    this.verifyHandle = { visibility: onVisibility };
+    document.addEventListener("visibilitychange", onVisibility);
+  }
+
+  private runScheduledVerify() {
+    if (this.destroyed || !this.parseCache) return;
+    if (this.tabHidden()) {
+      this.deferUntilVisible();
+      return;
+    }
+    const trusted = this.verifiedStreak >= VERIFY_TRUST_AFTER;
+    if (trusted && !this.structuralEdit && this.skippedWindows < VERIFY_EVERY_NTH_WINDOW - 1) {
+      this.skippedWindows++;
+      this.verifyStats.skipped++;
+      return;
+    }
+    this.verifyParse();
+  }
+
+  /** Check the cached (incremental) parse against a full parse; repairs the editor on drift. */
   verifyParse(): boolean {
     const cache = this.parseCache;
     if (!cache || this.destroyed) return true;
+    this.skippedWindows = 0;
+    this.structuralEdit = false;
+    this.verifyStats.runs++;
     const full = parseMarkdown(cache.text);
     const same =
       full.doc.eq(cache.result.doc) &&
@@ -221,7 +317,13 @@ export class MarkdownBinding {
       full.map.blocks.every((b, i) => b.from === cache.result.map.blocks[i].from && b.to === cache.result.map.blocks[i].to);
     this.parseCache = { text: cache.text, result: full };
     this.mapCache = null;
-    if (same) return true;
+    if (same) {
+      this.verifiedStreak++;
+      this.verifyStats.matches++;
+      return true;
+    }
+    this.verifiedStreak = 0;
+    this.verifyStats.mismatches++;
     console.warn("[markdown-binding] incremental parse drifted from a full parse; resynchronizing");
     if (!this.inLocalHandler) this.syncFromText();
     return false;
