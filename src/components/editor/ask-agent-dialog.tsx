@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Bot, Loader2 } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
@@ -44,7 +44,7 @@ export interface AskAgentDialogProps {
 }
 
 /** "Ask an agent": hand the selection (or the document) plus an instruction to whichever agent picks it up. */
-export function AskAgentDialog({ open, onOpenChange, selection, canEdit, canComment, onSend, onCreateToken }: AskAgentDialogProps) {
+export const AskAgentDialog = memo(function AskAgentDialog({ open, onOpenChange, selection, canEdit, canComment, onSend, onCreateToken }: AskAgentDialogProps) {
   const [instruction, setInstruction] = useState("");
   const [mode, setMode] = useState<AskAgentMode>("suggest");
   const [busy, setBusy] = useState(false);
@@ -183,4 +183,4 @@ export function AskAgentDialog({ open, onOpenChange, selection, canEdit, canComm
       </DialogContent>
     </Dialog>
   );
-}
+});

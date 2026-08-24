@@ -20,12 +20,12 @@ export interface CodePaneProps {
   onImageError?: (message: string) => void;
   /** A dropped .md/.txt file and the source offset under the pointer. */
   onMarkdownFileDrop?: (file: File, at: number) => void;
-  /** Source offset of the rich pane's cursor when the rich pane is active (for the focus line). */
-  focusSource: number | null;
   lineWrapping: boolean;
 }
 
-export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onMarkdownFileDrop, focusSource, lineWrapping }: CodePaneProps) {
+export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onMarkdownFileDrop, lineWrapping }: CodePaneProps) {
+  // Source offset of the rich pane's cursor while the rich pane is active (for the focus line).
+  const focusSource = useSessionValue(session, (s) => (s.activeSurface === "rich" ? s.localCursor.rich : null));
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const setupRef = useRef<CodeEditorSetup | null>(null);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Dialog as RadixDialog } from "radix-ui";
 import {
   Activity, ArrowDownUp, ArrowLeft, Bold, BookOpen, Bot, Calendar, ChevronLeft, ChevronRight, Code, Columns2, Copy, CornerDownLeft, Download, Eye,
@@ -41,7 +41,7 @@ function CommandIcon({ name }: { name?: string }) {
   return <Icon size={16} className="shrink-0 text-ink-3" aria-hidden />;
 }
 
-export function CommandPalette({ open, onOpenChange, commands, groupOrder, placeholder = "Type a command…" }: CommandPaletteProps) {
+export const CommandPalette = memo(function CommandPalette({ open, onOpenChange, commands, groupOrder, placeholder = "Type a command…" }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [stack, setStack] = useState<Level[]>([]);
   const [highlight, setHighlight] = useState(0);
@@ -240,7 +240,7 @@ export function CommandPalette({ open, onOpenChange, commands, groupOrder, place
       </RadixDialog.Portal>
     </RadixDialog.Root>
   );
-}
+});
 
 /**
  * Whether a keydown should open the palette. Mod-Shift-P always; Mod-K only with a

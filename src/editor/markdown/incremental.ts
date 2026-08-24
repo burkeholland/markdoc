@@ -135,7 +135,7 @@ function shiftMdast<T extends Md.Node>(node: T, offset: number, lines: number): 
       end: { line: pos.end.line ? pos.end.line + lines : 0, column: pos.end.column, offset: (pos.end.offset ?? 0) + offset },
     };
   }
-  const children = (node as Md.Parent).children;
+  const children = (node as Md.Node as Md.Parent).children;
   if (children) (copy as Md.Parent).children = children.map((child) => shiftMdast(child, offset, lines));
   return copy as T;
 }

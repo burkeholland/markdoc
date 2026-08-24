@@ -22,13 +22,13 @@ export interface RichPaneProps {
   onImageError?: (message: string) => void;
   /** A dropped .md/.txt file and the ProseMirror position under the pointer. */
   onMarkdownFileDrop?: (file: File, pos: number) => void;
-  /** Source offset of the code pane's cursor while the code pane is active (for the focus block). */
-  focusSource: number | null;
   /** Slash command menu plumbing (stable object; see SlashMenuController). */
   slashMenu?: SlashMenuHandlers;
 }
 
-export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop, focusSource, slashMenu }: RichPaneProps) {
+export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop, slashMenu }: RichPaneProps) {
+  // Source offset of the code pane's cursor while the code pane is active (for the focus block).
+  const focusSource = useSessionValue(session, (s) => (s.activeSurface === "code" ? s.localCursor.code : null));
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const handlers = useRef({ onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop });

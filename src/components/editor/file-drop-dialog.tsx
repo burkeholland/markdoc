@@ -1,5 +1,5 @@
 "use client";
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { FilePlus2, Loader2, Replace, TextCursorInput } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
@@ -31,7 +31,7 @@ function readText(file: File): Promise<string> {
 }
 
 /** Asks what to do with a Markdown file dropped on the editor: replace, insert at the drop point, or open as a new document. */
-export function FileDropDialog({ pending, onClose, canEdit, onReplace, onInsert, onError }: FileDropDialogProps) {
+export const FileDropDialog = memo(function FileDropDialog({ pending, onClose, canEdit, onReplace, onInsert, onError }: FileDropDialogProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<"replace" | "insert" | "new" | null>(null);
 
@@ -83,4 +83,4 @@ export function FileDropDialog({ pending, onClose, canEdit, onReplace, onInsert,
       </DialogContent>
     </Dialog>
   );
-}
+});
