@@ -12,13 +12,14 @@ vi.mock("@/auth", () => ({ auth: async () => null }));
 vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 
 const { getDb, schema } = await import("@/server/db");
-const { createApiToken } = await import("@/server/tokens");
-const { GET, POST } = await import("./route");
+const { createApiToken, listApiTokens } = await import("@/server/tokens");
+const { GET, POST, mcpActivityIn } = await import("./route");
 const { listToolNames } = await import("../../../../mcp/tools.mjs");
 
 const URL_ = "http://192.168.0.10:3700/api/mcp";
 const MCP_ACCEPT = "application/json, text/event-stream";
 let token: string;
+let userId: string;
 
 const call = (method: "GET" | "POST", init: { headers?: Record<string, string>; body?: unknown } = {}) => {
   const headers = new Headers({ host: "192.168.0.10:3700", ...(init.headers ?? {}) });
@@ -32,7 +33,57 @@ const bearer = (t: string) => ({ Authorization: ["Bearer", t].join(" ") });
 beforeAll(async () => {
   const db = await getDb();
   const [user] = await db.insert(schema.users).values({ name: "Mia", login: "mia", email: "mia@example.com" }).returning();
+  userId = user.id;
   token = (await createApiToken(user.id, "Copilot CLI", 30)).token;
+});
+
+describe("/api/mcp records MCP activity on the token (Settings checklist)", () => {
+  it("mcpActivityIn reads tools/list and tools/call from single and batched bodies, ignores the rest", async () => {
+    const mk = (body: unknown, method = "POST") => new Request(URL_, { method, headers: { "Content-Type": "application/json" }, body: method === "GET" ? undefined : JSON.stringify(body) });
+    expect(await mcpActivityIn(mk(rpc("tools/list")))).toEqual(["list"]);
+    expect(await mcpActivityIn(mk(rpc("tools/call", { name: "x" })))).toEqual(["call"]);
+    expect(await mcpActivityIn(mk([rpc("initialize"), rpc("tools/list"), rpc("tools/call"), rpc("tools/list", {}, 2)]))).toEqual(["list", "call"]);
+    expect(await mcpActivityIn(mk(rpc("initialize")))).toEqual([]);
+    expect(await mcpActivityIn(mk(null, "GET"))).toEqual([]);
+    expect(await mcpActivityIn(new Request(URL_, { method: "POST", body: "{not json" }))).toEqual([]);
+  });
+
+  it("a fresh token has neither timestamp; tools/list sets lastMcpSeenAt only; tools/call sets lastMcpCallAt", async () => {
+    const fresh = await createApiToken(userId, "Checklist", 30);
+    const before = (await listApiTokens(userId)).find((t) => t.id === fresh.id)!;
+    expect(before.lastMcpSeenAt).toBeNull();
+    expect(before.lastMcpCallAt).toBeNull();
+
+    const res = await call("POST", { headers: { "Content-Type": "application/json", Accept: MCP_ACCEPT, ...bearer(fresh.token) }, body: rpc("tools/list") });
+    expect(res.status).toBe(200);
+    let row = before;
+    for (let i = 0; i < 40 && !row.lastMcpSeenAt; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      row = (await listApiTokens(userId)).find((t) => t.id === fresh.id)!;
+    }
+    expect(row.lastMcpSeenAt).toBeInstanceOf(Date);
+    expect(row.lastMcpCallAt).toBeNull();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ user: { id: userId, login: "mia", name: "Mia" }, agent: "Checklist" }), { headers: { "Content-Type": "application/json" } }));
+    try {
+      const called = await call("POST", { headers: { "Content-Type": "application/json", Accept: MCP_ACCEPT, ...bearer(fresh.token) }, body: rpc("tools/call", { name: "markdoc_whoami", arguments: {} }) });
+      expect(called.status).toBe(200);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    for (let i = 0; i < 40 && !row.lastMcpCallAt; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      row = (await listApiTokens(userId)).find((t) => t.id === fresh.id)!;
+    }
+    expect(row.lastMcpCallAt).toBeInstanceOf(Date);
+    // GET /api/tokens exposes both as ISO strings for the checklist.
+    const { GET: tokensGet } = await import("../tokens/route");
+    requestHeaders = new Headers(bearer(fresh.token));
+    const list = (await (await (tokensGet as () => Promise<Response>)()).json()) as { tokens: { id: string; lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
+    const dto = list.tokens.find((t) => t.id === fresh.id)!;
+    expect(dto.lastMcpSeenAt).toMatch(/^\d{4}-/);
+    expect(dto.lastMcpCallAt).toMatch(/^\d{4}-/);
+  });
 });
 
 describe("/api/mcp", () => {

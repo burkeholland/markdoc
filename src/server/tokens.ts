@@ -54,11 +54,28 @@ export async function listApiTokens(userId: string) {
       prefix: schema.apiTokens.prefix,
       createdAt: schema.apiTokens.createdAt,
       lastUsedAt: schema.apiTokens.lastUsedAt,
+      lastMcpSeenAt: schema.apiTokens.lastMcpSeenAt,
+      lastMcpCallAt: schema.apiTokens.lastMcpCallAt,
       expiresAt: schema.apiTokens.expiresAt,
     })
     .from(schema.apiTokens)
     .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
     .orderBy(desc(schema.apiTokens.createdAt));
+}
+
+export type McpActivity = "list" | "call";
+
+/**
+ * Record that an MCP client used this token: `list` for `tools/list` (the client is connected and
+ * discovered the tools), `call` for `tools/call` (permissions were granted and a tool ran). The
+ * Settings checklist turns its steps green from these.
+ */
+export async function recordMcpActivity(tokenId: string, kind: McpActivity, now = new Date()): Promise<void> {
+  const db = await getDb();
+  await db
+    .update(schema.apiTokens)
+    .set(kind === "list" ? { lastMcpSeenAt: now } : { lastMcpCallAt: now })
+    .where(eq(schema.apiTokens.id, tokenId));
 }
 
 export async function revokeApiToken(userId: string, tokenId: string): Promise<boolean> {

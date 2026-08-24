@@ -10,6 +10,8 @@ export const GET = handler(async () => {
       ...t,
       createdAt: t.createdAt.toISOString(),
       lastUsedAt: t.lastUsedAt?.toISOString() ?? null,
+      lastMcpSeenAt: t.lastMcpSeenAt?.toISOString() ?? null,
+      lastMcpCallAt: t.lastMcpCallAt?.toISOString() ?? null,
       expiresAt: t.expiresAt?.toISOString() ?? null,
     })),
   });

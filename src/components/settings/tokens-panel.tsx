@@ -5,6 +5,7 @@ import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lu
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
 import { AgentConnectCard, mcpHttpConfigFor, useOrigin } from "@/components/settings/agent-connect-card";
+import { CopilotChecklist } from "@/components/settings/copilot-checklist";
 
 interface TokenRow {
   id: string;
@@ -12,6 +13,8 @@ interface TokenRow {
   prefix: string;
   createdAt: string;
   lastUsedAt: string | null;
+  lastMcpSeenAt: string | null;
+  lastMcpCallAt: string | null;
   expiresAt: string | null;
 }
 
@@ -40,7 +43,7 @@ function CopyField({ value, label }: { value: string; label: string }) {
   );
 }
 
-export function TokensPanel({ origin, userLogin, next }: { origin: string; userLogin: string; next?: string | null }) {
+export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false }: { origin: string; userLogin: string; next?: string | null; hasAgentRequests?: boolean }) {
   const [tokens, setTokens] = useState<TokenRow[] | null>(null);
   const [name, setName] = useState("GitHub Copilot CLI");
   const [expires, setExpires] = useState<string>("90");
@@ -105,6 +108,8 @@ export function TokensPanel({ origin, userLogin, next }: { origin: string; userL
           </a>
         )}
       </div>
+
+      <CopilotChecklist hasAgentRequests={hasAgentRequests} />
 
       <AgentConnectCard origin={liveOrigin} token={created?.token ?? null} hideTokenStep />
 

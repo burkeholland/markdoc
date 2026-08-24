@@ -34,6 +34,8 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 
 Open **Settings → Agents & API access** (`/settings`), name the token after the agent (for example *GitHub Copilot CLI*) and copy it. Tokens have the same access as you; revoke them there at any time. Tokens cannot create other tokens.
 
+The **Set up Copilot CLI** checklist at the top of that page ticks itself from real state: a token exists, the CLI has listed Markdoc's tools over `/api/mcp` (`tools/list` stamps `lastMcpSeenAt` on the token), a tool call went through (`tools/call` stamps `lastMcpCallAt`) or a request was sent from the editor.
+
 ## 2. Connect an MCP client
 
 Markdoc serves the Model Context Protocol itself at `/api/mcp` (Streamable HTTP). Any MCP client connects with the server URL and a token — nothing to install, no checkout. The **Share** dialog of every document has a *Collaborate with an agent* card with this config filled in for the server you are on (and a *Create a token* button), as does the *Connect an agent* card in **Settings → Agents** and on the first **Ask an agent**:

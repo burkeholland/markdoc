@@ -43,6 +43,7 @@ import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FindBar } from "./find-bar";
 import { FollowBanner } from "./follow-banner";
+import { HintBar } from "./hint-bar";
 import { useScrollSync } from "./scroll-sync";
 import { CommandPalette, isPaletteShortcut } from "./command-palette";
 import { buildCommands, type EditorCommandContext } from "./commands";
@@ -509,6 +510,28 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   const goCreateToken = useCallback(() => {
     navigateTo(`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`);
   }, [doc.id]);
+  // Hint (c): open Comments on the open threads and put the caret in a composer — the reply box of the
+  // first thread (it autofocuses once opened) or any composer already showing.
+  const focusCommentComposer = useCallback(() => {
+    setSidePanel("comments");
+    setCommentsFocus({ tab: "open", nonce: Date.now() });
+    let tries = 0;
+    const tick = () => {
+      const panel = document.querySelector('[data-testid="comments-panel"]');
+      const composer = panel?.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+      if (composer) {
+        composer.focus();
+        return;
+      }
+      const reply = panel?.querySelector<HTMLButtonElement>('[data-testid="comment-reply"]');
+      if (reply) {
+        reply.click();
+        return;
+      }
+      if (++tries < 10) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, []);
 
   /** Open the comments panel on a thread (by thread or reply id) or suggestion. Returns false when nothing matches. */
   const activateRef = useCallback(
@@ -839,6 +862,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onCancelRequest={cancelAgentRequest}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onAskAgent={openAskAgent} onImage={openImage} onTable={openTable} />
+        {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onAskAgent={openAskAgent} onComment={focusCommentComposer} />}
         {findOpen && (
           <FindBar
             session={session}

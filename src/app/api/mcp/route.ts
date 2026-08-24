@@ -1,5 +1,6 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { handler, json, currentUser, HttpError } from "@/server/http";
+import { handler, json, HttpError } from "@/server/http";
+import { recordMcpActivity, resolveApiToken, type McpActivity } from "@/server/tokens";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "../../../../mcp/tools.mjs";
 
@@ -37,12 +38,35 @@ function bearerToken(req: Request): string | null {
   return authorization.slice(7).trim() || null;
 }
 
+/**
+ * Which checklist-relevant JSON-RPC methods a POST body carries (single message or batch). Parsed
+ * from a clone so the transport still gets the untouched stream; unparseable bodies record nothing.
+ */
+export async function mcpActivityIn(req: Request): Promise<McpActivity[]> {
+  if (req.method !== "POST") return [];
+  try {
+    const body: unknown = await req.clone().json();
+    const messages = Array.isArray(body) ? body : [body];
+    const out = new Set<McpActivity>();
+    for (const m of messages) {
+      const method = (m as { method?: unknown } | null)?.method;
+      if (method === "tools/list") out.add("list");
+      else if (method === "tools/call") out.add("call");
+    }
+    return Array.from(out);
+  } catch {
+    return [];
+  }
+}
+
 /** Resolve the caller and hand the request to a fresh MCP server + transport. */
 async function serve(req: Request): Promise<Response> {
   const token = bearerToken(req);
   if (!token) throw unauthorized("Authorization: Bearer <token> is required.");
-  const user = await currentUser();
-  if (!user?.agent) throw unauthorized("This endpoint is for API tokens (agents).");
+  const actor = await resolveApiToken(token);
+  if (!actor) throw unauthorized("This endpoint is for API tokens (agents).");
+  // The Settings checklist reads these: connected (tools/list) and working (tools/call). Off the hot path.
+  for (const kind of await mcpActivityIn(req)) void recordMcpActivity(actor.tokenId, kind).catch(() => {});
 
   const client = createClient({ baseUrl: publicOrigin(req), token });
   const server = createMarkdocServer(client);

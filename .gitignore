@@ -48,6 +48,7 @@ playwright-report/
 test-results/
 
 shots/
+quiet-logs/
 
 dist/
 
