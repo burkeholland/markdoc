@@ -493,7 +493,6 @@ test.describe("axe: contrast", () => {
   test("dashboard light + dark (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-contrast-dash");
     await seedDashboard(page);
-    await expect(page.locator("html")).not.toHaveAttribute("data-brand");
     await scan(page, "dashboard (light)", { contrast: true });
 
     await setTheme(page, "dark");

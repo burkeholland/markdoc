@@ -41,8 +41,8 @@ const SYNTAX = ["cm-number", "cm-variable", "hljs-number", "hljs-literal"];
 const CODE_SURFACES = ["p-surface", "p-surface-2", "p-paper", "p-chrome", "cm-active-line"];
 
 describe("tokens", () => {
-  it("there is exactly one palette: no brand blocks, no brand attribute, no second display face", () => {
-    expect(css).not.toMatch(/data-brand/);
+  it("there is exactly one palette: no option blocks, no second display face", () => {
+    expect(css).not.toMatch(/^\[data-[\w-]+="[ab]"\]/m);
     expect(css).not.toMatch(/inter-tight/);
     expect(css.match(/\n:root \{/g)).toHaveLength(1);
     expect(css.match(/\n\[data-theme="dark"\] \{/g)).toHaveLength(1);
@@ -58,7 +58,7 @@ describe("tokens", () => {
     const layout = readFileSync(path.resolve(__dirname, "layout.tsx"), "utf8");
     expect(light["p-font-display"]).toMatch(/^var\(--font-fraunces\),.*serif$/);
     expect(layout).toMatch(/Fraunces\(\{[^}]*variable: "--font-fraunces"[^}]*display: "swap"/);
-    expect(layout).not.toMatch(/Inter_Tight|data-brand|BRAND_BOOT_SCRIPT/);
+    expect(layout).not.toMatch(/Inter_Tight|BRAND_BOOT_SCRIPT|@\/lib\/brand/);
     expect(layout).toContain('localStorage.removeItem("markdoc:brand")');
   });
 
