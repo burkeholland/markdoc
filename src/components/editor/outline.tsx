@@ -7,7 +7,7 @@ import { useHydrated } from "@/lib/hooks";
 import { rovingIndex } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
-import type { KeyboardEvent } from "react";
+import { memo, type KeyboardEvent } from "react";
 
 export interface OutlineProps {
   session: CollabSession;
@@ -57,18 +57,6 @@ export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }
   const liveHeadings = useHeadings(session);
   const headings = hydrated ? liveHeadings : EMPTY_HEADINGS;
   const active = activeHeadingIndex(headings, cursorSource);
-  const minLevel = headings.reduce((m, h) => Math.min(m, h.level), 6);
-  // Roving tabindex: the active heading (or the first one) is the list's single tab stop.
-  const tabStop = active >= 0 ? active : 0;
-
-  const onListKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
-    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-outline-item]"));
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = nextOutlineIndex(e.key, current, items.length);
-    if (next < 0) return;
-    e.preventDefault();
-    items[next]?.focus();
-  };
 
   if (!open) {
     return (
@@ -91,30 +79,53 @@ export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }
         </button>
       </div>
       <nav className="scrollbar-thin flex-1 overflow-y-auto pb-6 pr-2" aria-label="Document outline">
-        <ul className="flex flex-col" onKeyDown={onListKeyDown}>
-          {headings.map((h, i) => (
-            <li key={`${h.from}-${i}`}>
-              <button
-                type="button"
-                onClick={() => onSelect(h)}
-                className={cn(
-                  "relative flex w-full items-start truncate py-2.5 pr-3 text-left text-[15px] leading-5 transition-colors hover:text-ink",
-                  i === active ? "font-medium text-accent" : "text-ink-2",
-                )}
-                style={{ paddingLeft: 24 + (h.level - minLevel) * 14 }}
-                data-active={i === active || undefined}
-                data-outline-item
-                aria-current={i === active ? "location" : undefined}
-                tabIndex={i === tabStop ? 0 : -1}
-              >
-                {i === active && <span className="absolute left-0 top-1.5 h-7 w-[3px] rounded-r bg-accent" aria-hidden />}
-                <span className="truncate">{h.text || "Untitled"}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <OutlineList headings={headings} active={active} onSelect={onSelect} />
         {hydrated && headings.length === 0 && <p className="px-6 pt-1 text-[13px] leading-5 text-ink-4">Headings you add will show up here.</p>}
       </nav>
     </aside>
   );
 }
+
+/**
+ * The heading list only depends on the headings and the active index, not on the cursor offset,
+ * so typing inside a section does not re-render a 140-item list on every keystroke (task #357).
+ */
+const OutlineList = memo(function OutlineList({ headings, active, onSelect }: { headings: HeadingInfo[]; active: number; onSelect: (heading: HeadingInfo) => void }) {
+  const minLevel = headings.reduce((m, h) => Math.min(m, h.level), 6);
+  // Roving tabindex: the active heading (or the first one) is the list's single tab stop.
+  const tabStop = active >= 0 ? active : 0;
+
+  const onListKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-outline-item]"));
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = nextOutlineIndex(e.key, current, items.length);
+    if (next < 0) return;
+    e.preventDefault();
+    items[next]?.focus();
+  };
+
+  return (
+    <ul className="flex flex-col" onKeyDown={onListKeyDown}>
+      {headings.map((h, i) => (
+        <li key={`${h.from}-${i}`}>
+          <button
+            type="button"
+            onClick={() => onSelect(h)}
+            className={cn(
+              "relative flex w-full items-start truncate py-2.5 pr-3 text-left text-[15px] leading-5 transition-colors hover:text-ink",
+              i === active ? "font-medium text-accent" : "text-ink-2",
+            )}
+            style={{ paddingLeft: 24 + (h.level - minLevel) * 14 }}
+            data-active={i === active || undefined}
+            data-outline-item
+            aria-current={i === active ? "location" : undefined}
+            tabIndex={i === tabStop ? 0 : -1}
+          >
+            {i === active && <span className="absolute left-0 top-1.5 h-7 w-[3px] rounded-r bg-accent" aria-hidden />}
+            <span className="truncate">{h.text || "Untitled"}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+});

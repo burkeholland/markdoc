@@ -11,6 +11,9 @@ import { diffOps, applyOps, type TextOp } from "./text-diff";
 
 export const markdownBindingKey = new PluginKey<{ remote: boolean }>("markdownBinding");
 
+/** Quiet time after the last incremental parse before it is verified against a full parse. */
+const VERIFY_QUIET_MS = 1000;
+
 /**
  * Hook that lets a layer (for example suggesting mode) take over the text
  * operations produced by a local rich-text edit. When it returns `true` it has
@@ -180,18 +183,23 @@ export class MarkdownBinding {
   /**
    * Incremental parses are checked against a full parse once the user pauses. If the
    * two ever disagree the full result wins and the rich editor is re-synchronized.
+   * The check is a trailing debounce: a full parse of a long document costs hundreds
+   * of milliseconds, so it must never land between two keystrokes of a typing burst.
    */
   private scheduleVerify() {
-    if (this.verifyHandle !== null) return;
+    this.cancelVerify();
     const run = () => {
       this.verifyHandle = null;
       this.verifyParse();
     };
-    if (typeof requestIdleCallback === "function") {
-      this.verifyHandle = { idle: requestIdleCallback(run, { timeout: 3000 }) };
-    } else {
-      this.verifyHandle = { timer: setTimeout(run, 1500) };
-    }
+    const whenIdle = () => {
+      if (typeof requestIdleCallback === "function") {
+        this.verifyHandle = { idle: requestIdleCallback(run, { timeout: 3000 }) };
+      } else {
+        run();
+      }
+    };
+    this.verifyHandle = { timer: setTimeout(whenIdle, VERIFY_QUIET_MS) };
   }
 
   private cancelVerify() {
