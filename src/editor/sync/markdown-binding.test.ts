@@ -7,6 +7,7 @@ import { splitBlock, setBlockType } from "prosemirror-commands";
 import { MarkdownBinding, markdownBindingPlugin, isStructuralChange, VERIFY_TRUST_AFTER, VERIFY_EVERY_NTH_WINDOW } from "./markdown-binding";
 import { schema } from "../markdown/schema";
 import { parseMarkdown } from "../markdown/parse";
+import { insertHardBreak } from "../prosemirror/commands";
 import { textChangeSpan } from "../markdown/incremental";
 import { diffOps, diffOpsWords, applyOps } from "./text-diff";
 
@@ -264,6 +265,42 @@ describe("MarkdownBinding", () => {
     typeText(view, "more");
     await new Promise<void>((r) => queueMicrotask(r));
     expect(ytext.toString()).toBe("# H1\n\n> A quote line.\n>\n> more\n\n## Heading two\n");
+  });
+
+  it("Shift+Enter inside a quote keeps the break in both panes, then the typed line follows it (task #434)", async () => {
+    // The break has nothing after it when it is inserted; it must still survive the round trip, or
+    // the binding re-syncs the quote without it and the next line is glued on: "> A quote line.second line".
+    ytext.insert(0, "# H1\n\n> A quote line.\n\n## Heading two\n");
+    const { view } = editor();
+    const endOfQuote = 4 + 1 + 1 + "A quote line.".length;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, endOfQuote)));
+    insertHardBreak()(view.state, view.dispatch);
+    await new Promise<void>((r) => queueMicrotask(r));
+    expect(ytext.toString()).toBe("# H1\n\n> A quote line.<br>\n\n## Heading two\n");
+    expect(view.state.doc.child(1).firstChild!.lastChild!.type.name).toBe("hard_break");
+    expect(view.state.selection.$from.node(-1).type.name).toBe("blockquote");
+    typeText(view, "second line");
+    await new Promise<void>((r) => queueMicrotask(r));
+    expect(ytext.toString()).toBe("# H1\n\n> A quote line.\\\n> second line\n\n## Heading two\n");
+    expect(view.state.doc.child(1).firstChild!.childCount).toBe(3);
+    expect(view.state.doc.child(1).firstChild!.child(1).type.name).toBe("hard_break");
+    // Reload from the text: the same document comes back.
+    expect(parseMarkdown(ytext.toString()).doc.eq(view.state.doc)).toBe(true);
+  });
+
+  it("Enter at the end of a code block keeps the blank last line (task #434)", async () => {
+    ytext.insert(0, "```ts\nconst a = 1;\n```\n\nEnd.\n");
+    const { view } = editor();
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1 + "const a = 1;".length)));
+    typeText(view, "\n");
+    await new Promise<void>((r) => queueMicrotask(r));
+    expect(ytext.toString()).toBe("```ts\nconst a = 1;\n\n```\n\nEnd.\n");
+    expect(view.state.doc.firstChild!.textContent).toBe("const a = 1;\n");
+    typeText(view, "\n");
+    await new Promise<void>((r) => queueMicrotask(r));
+    expect(ytext.toString()).toBe("```ts\nconst a = 1;\n\n\n```\n\nEnd.\n");
+    expect(view.state.doc.firstChild!.textContent).toBe("const a = 1;\n\n");
+    expect(parseMarkdown(ytext.toString()).doc.eq(view.state.doc)).toBe(true);
   });
 
   it("maps positions between surfaces including phantoms", () => {
