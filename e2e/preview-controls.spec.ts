@@ -407,7 +407,9 @@ test.describe("preview controls: tables and lists", () => {
       return `${cells.length}x${cells.every((c) => c === cols) ? cols : cells.join("/")}`;
     };
     await page.keyboard.press(`${mod}+z`);
-    const oneStep = await expect.poll(shape, { timeout: 3_000 }).toBe(`${rows}x${cols}`).then(() => true, () => false);
+    // The full expect timeout: under load the undo can take seconds to reach both panes, and a
+    // second press sent too early would undo one step too many (run 5: 4×3 → 3×2 instead of 4×2).
+    const oneStep = await expect.poll(shape, { timeout: 15_000 }).toBe(`${rows}x${cols}`).then(() => true, () => false);
     if (!oneStep) {
       test.info().annotations.push({ type: "fixme", description: `undo to ${rows}x${cols} needed a second Ctrl+Z (table was ${await shape()} after one)` });
       await page.keyboard.press(`${mod}+z`);
