@@ -33,6 +33,9 @@ const { GET: GET_EVENTS } = await import("@/app/api/agent/documents/[id]/events/
 const { GET: GET_ALL_EVENTS } = await import("@/app/api/agent/events/route");
 const { POST: POST_COMMENTS } = await import("@/app/api/documents/[id]/comments/route");
 const { PUT: PUT_CONTENT } = await import("@/app/api/documents/[id]/content/route");
+const { POST: POST_SUGGEST } = await import("@/app/api/documents/[id]/suggest/route");
+const { GET: GET_COLLABORATORS } = await import("@/app/api/documents/[id]/collaborators/route");
+const { GET: GET_NOTIFICATIONS } = await import("@/app/api/notifications/route");
 
 let owner: Actor;
 let docId: string;
@@ -143,12 +146,12 @@ describe("agent presence", () => {
   it("marks the agent active implicitly on writes, without overriding a fresh explicit status", () => {
     presence.resetAgentPresence();
     const t0 = 2_000_000;
-    expect(presence.touchAgentPresence("doc-b", agentActor(), "editing", t0)).toMatchObject({ state: "active", status: "editing" });
+    expect(presence.touchAgentPresence("doc-b", agentActor(), "editing", undefined, t0)).toMatchObject({ state: "active", status: "editing" });
     presence.setAgentPresence("doc-b", agentActor(), { state: "idle", status: "waiting for Burke" }, t0 + 1000);
     // Within the TTL of the explicit status, a write flips the state but keeps the agent's own words.
-    expect(presence.touchAgentPresence("doc-b", agentActor(), "commenting", t0 + 2000)).toMatchObject({ state: "active", status: "waiting for Burke" });
+    expect(presence.touchAgentPresence("doc-b", agentActor(), "commenting", undefined, t0 + 2000)).toMatchObject({ state: "active", status: "waiting for Burke" });
     // Once the explicit status is stale, the verb wins.
-    expect(presence.touchAgentPresence("doc-b", agentActor(), "commenting", t0 + 2000 + presence.AGENT_PRESENCE_TTL_MS)).toMatchObject({ status: "commenting" });
+    expect(presence.touchAgentPresence("doc-b", agentActor(), "commenting", undefined, t0 + 2000 + presence.AGENT_PRESENCE_TTL_MS)).toMatchObject({ status: "commenting" });
 
     // recordAgentActivity (called by every write route) marks presence when the doc is a live Hocuspocus document.
     const live = Object.assign(new Y.Doc(), { name: "doc-c" });
@@ -182,6 +185,12 @@ describe("agent presence", () => {
       await waitFor(() => human.agents().length === 1);
       expect(human.agents()[0].name).toBe("Scribe");
 
+      // Re-joining right after `left` is visible at once: the awareness clock keeps growing past the removal clients saw.
+      await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "active", status: "back" }), params(docId)));
+      await waitFor(() => human.agents().some((a) => a.name === "Copilot" && a.status === "back"), 1000);
+      await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "left" }), params(docId)));
+      await waitFor(() => human.agents().length === 1);
+
       // Expiry through the sweeper removes the rest.
       presence.sweep(Date.now() + presence.AGENT_PRESENCE_TTL_MS + 1);
       await waitFor(() => human.agents().length === 0);
@@ -192,6 +201,109 @@ describe("agent presence", () => {
     } finally {
       human.close();
     }
+  });
+});
+
+describe("agent caret", () => {
+  it("places the caret from an anchor or clean offsets and publishes it as relative positions browsers resolve", async () => {
+    presence.resetAgentPresence();
+    const human = await connectHuman();
+    try {
+      const text = human.ydoc.getText("content").toString();
+      const res = await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "active", status: "reading", anchor: "Second paragraph" }), params(docId)));
+      expect(res.status).toBe(200);
+      const { presence: p } = (await res.json()) as { presence: { cursor: { from: number; to: number } } };
+      const cleanIdx = text.indexOf("Second paragraph");
+      expect(p.cursor).toEqual({ from: cleanIdx, to: cleanIdx + "Second paragraph".length });
+
+      await waitFor(() => human.agents().length === 1);
+      const state = [...human.provider.awareness!.getStates().values()].find((s) => (s.user as { isAgent?: boolean })?.isAgent) as { cursor?: { anchor: unknown; head: unknown }; user: { userLogin?: string } };
+      expect(state.cursor?.anchor).toBeTruthy();
+      expect(state.user.userLogin).toBe("olive");
+      const ytext = human.ydoc.getText("content");
+      const abs = (rel: unknown) => Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(rel as Parameters<typeof Y.createRelativePositionFromJSON>[0]), human.ydoc)!;
+      expect(abs(state.cursor!.anchor).index).toBe(ytext.toString().indexOf("Second paragraph"));
+      expect(abs(state.cursor!.head).index).toBe(ytext.toString().indexOf("Second paragraph") + "Second paragraph".length);
+
+      // An anchor that does not occur is a 400; offsets are clamped to the clean text.
+      const missing = await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "active", anchor: "nowhere to be found" }), params(docId)));
+      expect(missing.status).toBe(400);
+      const far = (await (await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "active", cursor: { from: 5, to: 10_000 } }), params(docId)))).json()) as { presence: { cursor: { from: number; to: number } } };
+      expect(far.presence.cursor).toEqual({ from: 5, to: text.length });
+
+      // A suggestion moves the caret to the end of the first edit (raw offsets: the insertion lands before the struck text).
+      const sres = await asAgent(() => POST_SUGGEST(req(`/api/documents/${docId}/suggest`, { edits: [{ find: "First paragraph", replace: "Opening paragraph" }] }), params(docId)));
+      expect(sres.status).toBe(200);
+      await waitFor(() => {
+        const s = [...human.provider.awareness!.getStates().values()].find((s) => (s.user as { isAgent?: boolean })?.isAgent) as { cursor?: { head: unknown } } | undefined;
+        return !!s?.cursor && abs(s.cursor.head).index !== ytext.toString().indexOf("Second paragraph") + "Second paragraph".length;
+      });
+      const moved = [...human.provider.awareness!.getStates().values()].find((s) => (s.user as { isAgent?: boolean })?.isAgent) as { cursor: { head: unknown } };
+      const raw = ytext.toString();
+      // Word diff: "First" → "Opening" is the first edit; its end is right after the kept (struck) "First".
+      const end = abs(moved.cursor.head).index;
+      expect(raw.slice(0, end)).toContain("Opening");
+      expect(end).toBeLessThanOrEqual(raw.indexOf(" paragraph"));
+      const listed = presence.listAgentPresence(docId)[0];
+      // In clean offsets the pending insertion does not count.
+      expect(listed.cursor!.from).toBe(text.indexOf("First") + "First".length);
+
+      // `cursor: null` hides it.
+      await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "idle", cursor: null }), params(docId)));
+      await waitFor(() => {
+        const s = [...human.provider.awareness!.getStates().values()].find((s) => (s.user as { isAgent?: boolean })?.isAgent) as { cursor?: unknown } | undefined;
+        return !!s && s.cursor === undefined;
+      });
+      await asAgent(() => POST_PRESENCE(req(`/api/agent/documents/${docId}/presence`, { state: "left" }), params(docId)));
+    } finally {
+      human.close();
+    }
+  });
+});
+
+describe("agents in the @-mention picker", () => {
+  it("lists present agents and agents active in the last 30 days, not expired ones", async () => {
+    presence.resetAgentPresence();
+    const t0 = Date.now();
+    presence.setAgentPresence(docId, agentActor("Copilot CLI"), { state: "active" }, t0);
+    // An agent that only wrote here (activity row) in the past month, and one whose activity is older.
+    await recordActivity(docId, activityActor(agentActor("Scribe")), "suggestion.add", { count: 1 });
+    await recordActivity(docId, activityActor(agentActor("Old Bot")), "comment.add", {}, new Date(t0 - 31 * 24 * 60 * 60 * 1000));
+    const res = await asHuman(() => GET_COLLABORATORS(req(`/api/documents/${docId}/collaborators`), params(docId)));
+    expect(res.status).toBe(200);
+    const { agents } = (await res.json()) as { agents: { name: string; login: string; ownerLogin: string; present: boolean }[] };
+    // Present agents first, then the recently active ones; "Old Bot" (31 days) is out.
+    expect(agents[0]).toMatchObject({ name: "Copilot CLI", login: "olive/Copilot-CLI", ownerLogin: "olive", present: true });
+    expect(agents.find((a) => a.name === "Scribe")).toMatchObject({ login: "olive/Scribe", present: false });
+    expect(agents.map((a) => a.name)).not.toContain("Old Bot");
+
+    // Once the presence expires, the present one is gone too (it has no activity rows).
+    presence.sweep(t0 + presence.AGENT_PRESENCE_TTL_MS + 1);
+    const later = (await (await asHuman(() => GET_COLLABORATORS(req(`/api/documents/${docId}/collaborators`), params(docId)))).json()) as { agents: { name: string }[] };
+    expect(later.agents.map((a) => a.name)).not.toContain("Copilot CLI");
+    expect(later.agents.map((a) => a.name)).toContain("Scribe");
+  });
+
+  it("@owner/Agent by the owner reaches the agent's watch as a mention without badging the owner", async () => {
+    const { cursor } = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events`), params(docId)))).json()) as { cursor: string };
+    const before = (await (await asHuman(() => GET_NOTIFICATIONS(req(`/api/notifications?unread=1`)))).json()) as { unreadCount: number };
+    const waiting = asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${cursor}&wait=20`), params(docId)));
+    await sleep(100);
+    const add = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "Second paragraph", body: "@olive/Copilot tighten this" }), params(docId)));
+    expect(add.status).toBe(200);
+    const started = Date.now();
+    const page = (await (await waiting).json()) as { events: { type: string; snippet?: string; agent?: string | null; byLogin?: string | null }[] };
+    expect(Date.now() - started).toBeLessThan(2000);
+    const mention = page.events.find((e) => e.type === "mention");
+    expect(mention).toMatchObject({ snippet: "@olive/Copilot tighten this", agent: "Copilot", byLogin: "olive" });
+    // Pre-read for the owner: no new unread notification.
+    const after = (await (await asHuman(() => GET_NOTIFICATIONS(req(`/api/notifications?unread=1`)))).json()) as { unreadCount: number };
+    expect(after.unreadCount).toBe(before.unreadCount);
+    // A plain self-mention is still dropped entirely.
+    const self = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "Second paragraph", body: "note to @olive" }), params(docId)));
+    expect(self.status).toBe(200);
+    const all = (await (await asHuman(() => GET_NOTIFICATIONS(req(`/api/notifications?kind=mention&limit=100`)))).json()) as { items: { snippet: string }[] };
+    expect(all.items.some((i) => i.snippet === "note to @olive")).toBe(false);
   });
 });
 

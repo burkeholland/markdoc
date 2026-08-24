@@ -46,6 +46,7 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
   const body = await readJson(req, (d) => putSchema.parse(d));
   let changed = false;
   let chars = 0;
+  let at: { from: number; to: number } | undefined;
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     const ytext = doc.getText(TEXT_KEY);
     const ops = diffOps(ytext.toString(), body.content, 0);
@@ -53,8 +54,10 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
       applyOps(ytext, ops);
       changed = true;
       chars = ops.reduce((n, op) => n + op.deleteCount + (op.insert?.length ?? 0), 0);
+      const end = ops[0].index + (ops[0].insert?.length ?? 0);
+      at = { from: end, to: end };
     }
-    recordAgentActivity(doc, user!, "edited");
+    recordAgentActivity(doc, user!, "edited", at);
   });
   if (changed) void recordEdit(id, activityActor(user!), chars).catch((err) => console.error("[activity] edit failed", err));
   if (changed && (body.message || user!.agent)) {
@@ -85,7 +88,7 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
     const current = ytext.toString();
     const separator = current.length === 0 ? "" : current.endsWith("\n\n") ? "" : current.endsWith("\n") ? "\n" : "\n\n";
     ytext.insert(ytext.length, separator + body.append);
-    recordAgentActivity(doc, user!, "edited");
+    recordAgentActivity(doc, user!, "edited", { from: ytext.length, to: ytext.length });
   });
   void recordEdit(id, activityActor(user!), body.append.length).catch((err) => console.error("[activity] edit failed", err));
   return json({ ok: true });

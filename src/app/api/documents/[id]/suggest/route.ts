@@ -68,13 +68,16 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     if (ops.length === 0) return;
     const model = new SuggestionsModel(doc, ytext);
     const before = new Set(model.ymap.keys());
+    // Where the first edit ends once applied (insert + kept deletion), so the agent's caret lands there.
+    let firstEnd: number | null = null;
     try {
       doc.transact(() => {
         let shift = 0;
         for (const op of ops) {
           const idx = op.index + shift;
+          let kept = 0;
           if (op.deleteCount > 0) {
-            const kept = model.markDeleted(idx, idx + op.deleteCount, author);
+            kept = model.markDeleted(idx, idx + op.deleteCount, author);
             shift += kept;
             count++;
           }
@@ -83,13 +86,14 @@ export const POST = handler(async (req: Request, { params }: Params) => {
             model.recordInserted(idx, op.insert.length, author);
             count++;
           }
+          if (firstEnd === null) firstEnd = idx + (op.insert?.length ?? 0) + kept;
         }
       }, SUGGESTIONS_ORIGIN);
       for (const key of model.ymap.keys()) if (!before.has(key)) created.push(key);
     } finally {
       model.destroy();
     }
-    recordAgentActivity(doc, user!, "suggested");
+    recordAgentActivity(doc, user!, "suggested", firstEnd === null ? undefined : { from: firstEnd, to: firstEnd });
   });
 
   if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(body.requestId ? { requestId: body.requestId } : {}) });

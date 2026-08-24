@@ -3,17 +3,22 @@ import { signIn, createDocument, openDocument, selectTextInRich, type User } fro
 
 interface EventsDto {
   cursor: string;
-  events: { type: string; threadId?: string | null; author?: string; body?: string }[];
+  events: { type: string; threadId?: string | null; author?: string; body?: string; snippet?: string; agent?: string | null }[];
 }
 
-/** Act as an agent: the same REST calls Copilot CLI makes through mcp/server.mjs (markdoc_presence / markdoc_watch). */
+/** Act as an agent: the same REST calls Copilot CLI makes through mcp/server.mjs (markdoc_presence / markdoc_watch / markdoc_suggest). */
 function agent(page: Page, token: string) {
   const headers = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
   return {
-    presence: async (docId: string, body: { state: "active" | "idle" | "left"; status?: string }) => {
+    presence: async (docId: string, body: { state: "active" | "idle" | "left"; status?: string; anchor?: string; cursor?: { from: number; to: number } | null }) => {
       const res = await page.request.post(`/api/agent/documents/${docId}/presence`, { headers, data: body });
       expect(res.ok(), `presence -> ${res.status()} ${await res.text()}`).toBeTruthy();
-      return (await res.json()) as { presence: { name: string; status: string | null } | null };
+      return (await res.json()) as { presence: { name: string; status: string | null; cursor: { from: number; to: number } | null } | null };
+    },
+    suggest: async (docId: string, edits: { find: string; replace: string }[]) => {
+      const res = await page.request.post(`/api/documents/${docId}/suggest`, { headers, data: { edits } });
+      expect(res.ok(), `suggest -> ${res.status()} ${await res.text()}`).toBeTruthy();
+      return (await res.json()) as { suggestions: number };
     },
     events: async (docId: string, since?: string, wait = 0) => {
       const q = new URLSearchParams();
@@ -100,5 +105,83 @@ test.describe("agent presence and watch", () => {
     // Nothing is delivered twice.
     const again = await bot.events(docId, result.cursor);
     expect(again.events.filter((e) => e.type === "comment.added")).toEqual([]);
+  });
+
+  test("typing @ in a comment offers the present agent; picking it posts a bot chip and wakes the agent's watch with a mention", async () => {
+    const page = alice.page;
+    const bot = agent(page, token);
+    const { cursor } = await bot.events(docId);
+    const waiting = bot.events(docId, cursor, 30);
+    await page.waitForTimeout(200);
+
+    const announced = Date.now();
+    await bot.presence(docId, { state: "idle", status: "waiting for feedback" });
+    await selectTextInRich(page, "Second paragraph");
+    await page.getByTestId("tb-comment").click();
+    const composer = page.getByTestId("comment-composer");
+    await expect(composer).toBeFocused();
+    await page.keyboard.type("@Cop");
+    const option = page.getByTestId("mention-suggestions").locator('[data-testid="mention-option"][data-agent]');
+    // Present agents come through awareness: the picker knows the agent within a second of its heartbeat.
+    await expect(option).toHaveCount(1, { timeout: Math.max(250, 1000 - (Date.now() - announced)) });
+    await expect(option).toContainText("Copilot");
+    await expect(option).toContainText("agent");
+    await expect(option).toHaveAttribute("data-login", "alice/Copilot");
+    await page.screenshot({ path: "test-results/agent-mention-picker.png" });
+    await page.keyboard.press("Enter");
+    // Alice owns the token: the mention is not suppressed as a self-mention (the agent needs it).
+    await expect(composer).toHaveValue("@alice/Copilot ");
+    await page.keyboard.type("tighten this");
+    const posted = Date.now();
+    await page.getByTestId("comment-submit").click();
+    const thread = page.getByTestId("comment-thread").filter({ hasText: "tighten this" });
+    await expect(thread).toHaveCount(1);
+    const chip = thread.getByTestId("mention-chip");
+    await expect(chip).toHaveAttribute("data-agent", "Copilot");
+    await expect(chip).toHaveText("@Copilot");
+    await expect(chip).toHaveAttribute("title", "Copilot (agent of @alice)");
+
+    let result = await waiting;
+    // The comment's activity row and the mention notification are written by separate watchers; the first wake may carry only one.
+    let mention = result.events.find((e) => e.type === "mention");
+    for (let i = 0; !mention && i < 3; i++) {
+      result = await bot.events(docId, result.cursor, 2);
+      mention = result.events.find((e) => e.type === "mention");
+    }
+    expect(Date.now() - posted).toBeLessThan(2000);
+    expect(mention, JSON.stringify(result.events)).toMatchObject({ agent: "Copilot", snippet: "@alice/Copilot tighten this" });
+
+    // Alice's own bell does not ring for a mention of her own agent.
+    const bell = await page.request.get("/api/notifications?unread=1&kind=mention");
+    expect(((await bell.json()) as { unreadCount: number }).unreadCount).toBe(0);
+    await expect(page.getByTestId("comment-thread")).toHaveCount(2);
+  });
+
+  test("presence with an anchor draws the agent's caret in that paragraph; a suggestion moves it to the edit", async () => {
+    const page = alice.page;
+    const bot = agent(page, token);
+    const paragraph = (text: string) => page.locator(".ProseMirror p").filter({ hasText: text });
+    const caret = page.locator(".md-remote-caret[data-agent]");
+
+    const placed = Date.now();
+    const res = await bot.presence(docId, { state: "active", status: "reading", anchor: "Second paragraph" });
+    expect(res.presence?.cursor).toBeTruthy();
+    await expect(caret).toHaveCount(1, { timeout: Math.max(250, 1000 - (Date.now() - placed)) });
+    await expect(paragraph("Second paragraph").locator(".md-remote-caret[data-agent]")).toHaveCount(1);
+    await expect(caret.locator(".md-remote-caret-label")).toContainText("Copilot");
+    await expect(caret.locator(".md-remote-caret-label svg")).toHaveCount(1);
+    await expect(caret.locator(".md-remote-caret-label")).toHaveAttribute("title", "Follow Copilot (agent)");
+    // The anchored range shows as the agent's selection.
+    await expect(paragraph("Second paragraph").locator(".md-remote-selection")).toHaveCount(1);
+    await page.screenshot({ path: "test-results/agent-caret.png" });
+
+    const edited = Date.now();
+    await bot.suggest(docId, [{ find: "First paragraph for the agent", replace: "Opening paragraph for the agent" }]);
+    await expect(paragraph("for the agent to watch").locator(".md-remote-caret[data-agent]")).toHaveCount(1, { timeout: 3000 });
+    expect(Date.now() - edited).toBeLessThan(3000);
+    await expect(paragraph("Second paragraph").locator(".md-remote-caret[data-agent]")).toHaveCount(0);
+
+    await bot.presence(docId, { state: "left" });
+    await expect(caret).toHaveCount(0, { timeout: 3000 });
   });
 });

@@ -6,7 +6,7 @@ import { Bot, Check, CheckCheck, MessageSquare, MoreHorizontal, Reply, RotateCcw
 import type { CollabSession } from "@/editor/collab/session";
 import { QUICK_REACTIONS, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
-import { mentionTriggerAt } from "@/editor/collab/mentions";
+import { agentMentionLogin, mentionTriggerAt } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
@@ -16,11 +16,28 @@ import "./comments.css";
 
 type Tab = "open" | "resolved" | "suggestions";
 
-/** Someone who can be @mentioned: present in the document or a collaborator. */
+/** Someone who can be @mentioned: present in the document, a collaborator, or an agent (present or recently active). */
 export interface MentionCandidate {
+  /** What follows `@` when picked; for agents `<ownerLogin>/<slug>`. */
   login: string;
   name: string;
   image: string | null;
+  /** Set for agents (API tokens): the login of the user the token acts for. */
+  agent?: { ownerLogin: string } | null;
+}
+
+/** Candidates matching a picker query: login or name prefix; agents also by their slug. Humans first, then agents. */
+export function filterMentionCandidates(candidates: MentionCandidate[], query: string, max: number): MentionCandidate[] {
+  const q = query.toLowerCase();
+  const hit = (c: MentionCandidate) => {
+    if (c.login.toLowerCase().startsWith(q) || c.name.toLowerCase().startsWith(q)) return true;
+    if (!c.agent) return false;
+    const slug = c.login.slice(c.login.indexOf("/") + 1).toLowerCase();
+    return slug.startsWith(q) || slug.replace(/-/g, " ").startsWith(q);
+  };
+  const humans = candidates.filter((c) => !c.agent && hit(c));
+  const agents = candidates.filter((c) => c.agent && hit(c));
+  return [...humans, ...agents].slice(0, max);
 }
 
 /** Renders a comment body: inline Markdown plus `@login` chips. */
@@ -115,9 +132,10 @@ function ReactionRow({
   );
 }
 
-/** Collaborators of the document, fetched once while the panel is open, merged with who is present. */
+/** Collaborators and recently active agents of the document, fetched once while the panel is open, merged with who is present. */
 function useMentionCandidates(session: CollabSession): MentionCandidate[] {
   const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
+  const [knownAgents, setKnownAgents] = useState<MentionCandidate[]>([]);
   useEffect(() => {
     let cancelled = false;
     api.documents
@@ -128,6 +146,7 @@ function useMentionCandidates(session: CollabSession): MentionCandidate[] {
         if (res.owner?.login) list.push({ login: res.owner.login, name: res.owner.name ?? res.owner.login, image: res.owner.image });
         for (const c of res.collaborators) list.push({ login: c.login, name: c.name ?? c.login, image: c.image });
         setCollaborators(list);
+        setKnownAgents((res.agents ?? []).map((a) => ({ login: a.login, name: a.name, image: null, agent: { ownerLogin: a.ownerLogin } })));
       })
       .catch(() => {});
     return () => {
@@ -136,21 +155,30 @@ function useMentionCandidates(session: CollabSession): MentionCandidate[] {
   }, [session.docId]);
   const present = useSessionValue(
     session,
-    (s) => s.presence().filter((u) => !u.isLocal && u.login).map((u) => ({ login: u.login!, name: u.name, image: u.avatar ?? null })),
+    (s) =>
+      s
+        .presence()
+        .filter((u) => !u.isLocal && (u.isAgent ? u.ownerLogin : u.login))
+        .map((u): MentionCandidate =>
+          u.isAgent
+            ? { login: agentMentionLogin(u.ownerLogin!, u.name), name: u.name, image: null, agent: { ownerLogin: u.ownerLogin! } }
+            : { login: u.login!, name: u.name, image: u.avatar ?? null },
+        ),
     jsonEqual,
   );
   return useMemo(() => {
     const seen = new Set<string>();
     const out: MentionCandidate[] = [];
     const me = session.user.login?.toLowerCase();
-    for (const c of [...present, ...collaborators]) {
+    // Your own agent stays in the list even though you are not: it is the agent that needs the mention.
+    for (const c of [...present, ...collaborators, ...knownAgents]) {
       const key = c.login.toLowerCase();
       if (key === me || seen.has(key)) continue;
       seen.add(key);
       out.push(c);
     }
     return out;
-  }, [present, collaborators, session.user.login]);
+  }, [present, collaborators, knownAgents, session.user.login]);
 }
 
 const MAX_SUGGESTIONS = 6;
@@ -262,11 +290,7 @@ function Composer({
     });
   };
 
-  const matches = useMemo(() => {
-    if (!trigger) return [];
-    const q = trigger.query.toLowerCase();
-    return candidates.filter((c) => c.login.toLowerCase().startsWith(q) || c.name.toLowerCase().startsWith(q)).slice(0, MAX_SUGGESTIONS);
-  }, [trigger, candidates]);
+  const matches = useMemo(() => (trigger ? filterMentionCandidates(candidates, trigger.query, MAX_SUGGESTIONS) : []), [trigger, candidates]);
   const open = trigger !== null && matches.length > 0;
 
   /** Re-evaluate whether the caret is in an `@` token. */
@@ -395,10 +419,17 @@ function Composer({
                 onClick={() => pick(c)}
                 data-testid="mention-option"
                 data-login={c.login}
+                data-agent={c.agent ? "" : undefined}
               >
-                <Avatar name={c.name} src={c.image} size={20} />
+                {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
                 <span className="min-w-0 flex-1 truncate text-[13px]">{c.name}</span>
-                <span className="truncate text-xs text-ink-3">@{c.login}</span>
+                {c.agent ? (
+                  <span className="truncate text-xs text-ink-4" title={`Agent of @${c.agent.ownerLogin}`}>
+                    agent
+                  </span>
+                ) : (
+                  <span className="truncate text-xs text-ink-3">@{c.login}</span>
+                )}
               </li>
             ))}
           </ul>

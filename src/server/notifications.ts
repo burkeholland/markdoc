@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { NotificationKind } from "@/server/db/schema";
-import { parseMentions } from "@/editor/collab/mentions";
+import { parseAgentMentions, parseMentions } from "@/editor/collab/mentions";
 import { readReply, type CommentReply } from "@/editor/collab/comments";
 import { resolveAnchor, newId } from "@/editor/collab/shared";
 import type { Suggestion } from "@/editor/collab/suggestions";
@@ -26,16 +26,22 @@ export interface NotifyInput {
   /** Thread, reply or suggestion id; the document id for shares. */
   refId: string;
   snippet?: string;
+  /**
+   * Keep the row even when the actor is the recipient, but store it already read: the row reaches the
+   * recipient's agents (they watch the notifications table) without ringing the human's bell.
+   */
+  selfAsRead?: boolean;
 }
 
 /**
  * Record one notification. Idempotent per (user, kind, ref): re-running a producer never
- * duplicates. Notifying yourself is ignored. Returns true when a new row was written.
+ * duplicates. Notifying yourself is ignored (unless `selfAsRead`). Returns true when a new row was written.
  */
 export async function notify(input: NotifyInput): Promise<boolean> {
   const userLogin = input.userLogin.trim().toLowerCase();
   if (!userLogin) return false;
-  if (input.actorLogin && input.actorLogin.toLowerCase() === userLogin) return false;
+  const self = !!input.actorLogin && input.actorLogin.toLowerCase() === userLogin;
+  if (self && !input.selfAsRead) return false;
   const db = await getDb();
   const inserted = await db
     .insert(schema.notifications)
@@ -48,6 +54,7 @@ export async function notify(input: NotifyInput): Promise<boolean> {
       actorName: input.actorName ?? input.actorLogin ?? null,
       refId: input.refId,
       snippet: snippetOf(input.snippet ?? ""),
+      readAt: self ? new Date() : null,
     })
     .onConflictDoNothing({ target: [schema.notifications.userLogin, schema.notifications.kind, schema.notifications.refId] })
     .returning();
@@ -66,13 +73,21 @@ export async function notifyMany(logins: Iterable<string | null | undefined>, in
 
 /**
  * Record every `@login` in `body` as a mention notification about `commentId`.
- * Idempotent per (comment, mentioned login); mentioning yourself is ignored.
+ * Idempotent per (comment, mentioned login); mentioning yourself is ignored — except
+ * `@you/Your-Agent`, which is stored already read so your agent's watch still gets it
+ * (notifications are keyed on the token's user) without badging you.
  * Returns the number of new rows.
  */
 export async function recordMentions(docId: string, commentId: string, byLogin: string | null, body: string, byName?: string | null): Promise<number> {
   const logins = parseMentions(body);
   if (logins.length === 0) return 0;
-  return notifyMany(logins, { documentId: docId, kind: "mention", actorLogin: byLogin, actorName: byName ?? byLogin, refId: commentId, snippet: body });
+  const agentOwners = new Set(parseAgentMentions(body).map((m) => m.login));
+  let n = 0;
+  for (const login of logins) {
+    const ok = await notify({ userLogin: login, documentId: docId, kind: "mention", actorLogin: byLogin, actorName: byName ?? byLogin, refId: commentId, snippet: body, selfAsRead: agentOwners.has(login) });
+    if (ok) n++;
+  }
+  return n;
 }
 
 export interface NotificationItem {
