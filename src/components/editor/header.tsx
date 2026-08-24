@@ -58,13 +58,24 @@ import type { NotificationDto } from "@/lib/api";
 import { AgentActivityChip } from "./agent-activity";
 import { AgentRequestsPill } from "./agent-requests-pill";
 
+/** The Markdoc mark (public/brand/mark.svg): a document with a folded corner and the `#` heading glyph. Follows the accent token. */
 export function Logo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" width="32" height="32" className={className} aria-hidden>
-      <rect x="4" y="2" width="24" height="28" rx="5" fill="#2563eb" />
-      <path d="M18 2v8a2 2 0 0 0 2 2h8" fill="#93c5fd" />
-      <path d="M10 16h12M10 21h12M10 26h7" stroke="#ffffff" strokeWidth="2.2" strokeLinecap="round" />
+      <path d="M9 2h12l9 9v12a7 7 0 0 1-7 7H9a7 7 0 0 1-7-7V9a7 7 0 0 1 7-7z" fill="var(--color-accent)" />
+      <path d="M21 2v6a3 3 0 0 0 3 3h6z" fill="var(--color-on-accent)" fillOpacity="0.42" />
+      <path d="M10 13.5h13M9 19.5h13M14.5 9.5l-2 13M20 9.5l-2 13" stroke="var(--color-on-accent)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" fill="none" />
     </svg>
+  );
+}
+
+/** Mark + name, for the dashboard and landing headers. */
+export function Wordmark({ className, nameClassName }: { className?: string; nameClassName?: string }) {
+  return (
+    <span className={cn("flex items-center gap-2.5", className)}>
+      <Logo className="h-8 w-8" />
+      <span className={cn("wordmark text-lg font-semibold text-ink", nameClassName)}>Markdoc</span>
+    </span>
   );
 }
 
@@ -155,7 +166,7 @@ function TitleEditor({ session, fallback, compact }: { session: CollabSession; f
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
-      <span className={cn("truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-[22px]")}>{title}</span>
+      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-[22px]")}>{title}</span>
       {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
     </button>
   );
@@ -470,7 +481,7 @@ export const Header = memo(function Header(props: HeaderProps) {
   const canEdit = session.role === "owner" || session.role === "editor";
 
   return (
-    <header className="safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header">
+    <header className="app-header safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header">
       {compact ? (
         <button type="button" className="icon-btn h-9 w-9 shrink-0" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
           <PanelLeft size={20} />

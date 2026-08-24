@@ -930,7 +930,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                     />
                   </div>
                 </div>
-                <div className={cn("flex min-w-0 flex-col", showCode ? "flex-1 basis-0" : "flex-1", !showRich && "hidden")} data-testid="rich-column">
+                <div className={cn("rich-column flex min-w-0 flex-col", showCode ? "flex-1 basis-0" : "flex-1", !showRich && "hidden")} data-testid="rich-column">
                   <div className="flex h-12 shrink-0 items-center justify-between pl-6 pr-3">
                     <span className="pane-label">{viewingOnly ? "Preview" : "Preview"}</span>
                     <Tip label={viewingOnly ? "Switch to editing" : "View only"}>

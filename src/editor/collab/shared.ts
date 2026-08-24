@@ -10,7 +10,7 @@ export interface CollabUser {
   login?: string | null;
 }
 
-/** Palette tuned for legibility on white (Google Docs-like). */
+/** Palette tuned for legibility on white: saturated hues that stay distinct as caret and label colours. */
 export const USER_COLORS = [
   "#2563eb",
   "#db2777",

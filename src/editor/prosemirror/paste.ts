@@ -147,11 +147,11 @@ function pasteMarkdownSource(view: EditorView, session: PasteSession, text: stri
 /**
  * Smarter paste for the rich pane:
  *
- * - a URL pasted over a selection turns the selection into a link (Google Docs style);
+ * - a URL pasted over a selection turns the selection into a link (the word-processor convention);
  *   without a selection it is inserted as text and autolinked by the Markdown;
  * - multi-line plain text that looks like Markdown is inserted as Markdown source so it
  *   renders as real structure instead of escaped literal text;
- * - everything else (HTML from web pages and Google Docs, single lines of text) goes
+ * - everything else (HTML from web pages and word processors, single lines of text) goes
  *   through ProseMirror's default clipboard parsing.
  */
 export function smartPastePlugin(session: PasteSession): Plugin {

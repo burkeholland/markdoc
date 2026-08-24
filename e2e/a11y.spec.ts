@@ -41,7 +41,9 @@ const DOC = [
  *   the translucent dialog overlay and editor decorations, and reports "incomplete" rather than a verdict;
  *   the light tokens are checked by eye and by src/app/theme-contrast.test.ts (see README → Accessibility).
  *   The dark dashboard and dark editor scans enable it (`contrast: true`): every dark token pair passed
- *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught.
+ *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught. The two brand
+ *   candidates ("axe: brands" below) are scanned with it on in light and dark — their palettes were
+ *   chosen to pass (src/app/brand-tokens.test.ts).
  */
 const DISABLED_RULES = ["color-contrast"];
 
@@ -480,6 +482,52 @@ test.describe("axe: editor", () => {
     await scan(page, "editor (dark) + table menu", { contrast: true });
     await context.close();
   });
+});
+
+/**
+ * Brand candidates (task #398): the two looks behind `?brand=a|b` (src/lib/brand.ts) are scanned with
+ * color-contrast ON in light and dark, on the dashboard and the editor. This is the gate on the two
+ * palettes: a failing colour is fixed in globals.css, never here. The default look keeps the scans above.
+ */
+test.describe("axe: brands", () => {
+  for (const brand of ["a", "b"] as const) {
+    test(`brand ${brand}: dashboard light + dark (color-contrast enabled)`, async ({ browser }) => {
+      const { page, context } = await signIn(browser, `a11y-brand-${brand}-dash`);
+      await seedDashboard(page);
+      await page.goto(`/?brand=${brand}`);
+      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
+      await expect(page.getByTestId("document-card").first()).toBeVisible();
+      await expect(page.getByTestId("starred-strip")).toBeVisible();
+      await scan(page, `dashboard (brand ${brand}, light)`, { contrast: true });
+
+      await setTheme(page, "dark");
+      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
+      await expect(page.getByTestId("document-card").first()).toBeVisible();
+      await scan(page, `dashboard (brand ${brand}, dark)`, { contrast: true });
+      await context.close();
+    });
+
+    test(`brand ${brand}: editor split + outline + comments, light + dark (color-contrast enabled)`, async ({ browser }) => {
+      const { page, context } = await signIn(browser, `a11y-brand-${brand}-editor`);
+      const id = await createDocument(page, DOC, `Brand ${brand} fixture`);
+      await page.goto(`/?brand=${brand}`);
+      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
+      await openDocument(page, id);
+      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
+      await expect(page.locator(".md-rich table")).toBeVisible();
+      await ensureOutlineOpen(page);
+      await ensureCommentsOpen(page);
+      await scan(page, `editor (brand ${brand}, light) split + outline + comments`, { contrast: true });
+
+      await setTheme(page, "dark");
+      await expect(page.locator("html")).toHaveAttribute("data-brand", brand);
+      await expect(page.locator(".md-rich table")).toBeVisible();
+      await ensureOutlineOpen(page);
+      await ensureCommentsOpen(page);
+      await scan(page, `editor (brand ${brand}, dark) split + outline + comments`, { contrast: true });
+      await context.close();
+    });
+  }
 });
 
 test.describe("axe: phone (iPhone 13)", () => {

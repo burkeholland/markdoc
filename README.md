@@ -1,6 +1,6 @@
 # Markdoc
 
-Google Docs for Markdown. Write Markdown together in real time, edit the **source** or the **rendered page** (both are live for everyone), review with **comments** and **suggestions**, keep every **version**, and **publish** to a GitHub gist or repository.
+Markdown, together. Write Markdown with other people in real time, edit the **source** or the **rendered page** (both are live for everyone), review with **comments** and **suggestions**, keep every **version**, and **publish** to a GitHub gist or repository.
 
 ![Markdoc editor](docs/screenshot.png)
 

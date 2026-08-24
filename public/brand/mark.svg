@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Markdoc mark: a document with a folded corner carrying the Markdown `#` heading glyph. -->
+  <path d="M9 2h12l9 9v12a7 7 0 0 1-7 7H9a7 7 0 0 1-7-7V9a7 7 0 0 1 7-7z" fill="#0f766e"/>
+  <path d="M21 2v6a3 3 0 0 0 3 3h6z" fill="#ffffff" fill-opacity="0.42"/>
+  <path d="M10 13.5h13M9 19.5h13M14.5 9.5l-2 13M20 9.5l-2 13" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
