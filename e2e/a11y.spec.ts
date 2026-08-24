@@ -41,7 +41,9 @@ const DOC = [
  *   the translucent dialog overlay and editor decorations, and reports "incomplete" rather than a verdict;
  *   the light tokens are checked by eye and by src/app/theme-contrast.test.ts (see README → Accessibility).
  *   The dark dashboard and dark editor scans enable it (`contrast: true`): every dark token pair passed
- *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught.
+ *   once ink-4 / cm-faint moved to #7f889a (task #192), so regressions there are caught. The two brand
+ *   candidates ("axe: brands" below) are scanned with it on in light and dark — their palettes were
+ *   chosen to pass (src/app/brand-tokens.test.ts).
  */
 const DISABLED_RULES = ["color-contrast"];
 
