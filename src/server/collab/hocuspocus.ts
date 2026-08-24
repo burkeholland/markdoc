@@ -8,28 +8,14 @@ import { addVersion, latestVersion } from "@/server/documents";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 import { publishAgentPresence } from "@/server/agent-presence";
+import { hydrateDoc, META_KEY, TEXT_KEY } from "./seed";
+
+export { hydrateDoc, META_KEY, TEXT_KEY };
 
 export type CollabContext = CollabClaims;
 
 /** Interval after which a new automatic version snapshot is taken while editing. */
 export const AUTO_VERSION_INTERVAL_MS = Number(process.env.AUTO_VERSION_INTERVAL_MS ?? 10 * 60 * 1000);
-
-export const TEXT_KEY = "content";
-export const META_KEY = "meta";
-
-/** Populate a fresh Y.Doc from stored state or plain Markdown. */
-export function hydrateDoc(doc: Y.Doc, ystate: Uint8Array | null, content: string, title: string) {
-  if (ystate && ystate.byteLength > 0) {
-    Y.applyUpdate(doc, ystate);
-  } else {
-    doc.transact(() => {
-      const text = doc.getText(TEXT_KEY);
-      if (text.length === 0 && content) text.insert(0, content);
-    });
-  }
-  const meta = doc.getMap(META_KEY);
-  if (!meta.has("title")) meta.set("title", title);
-}
 
 export function createCollabServer() {
   const hocuspocus = new Hocuspocus<CollabContext>({
@@ -58,7 +44,17 @@ export function createCollabServer() {
         .from(schema.documents)
         .where(eq(schema.documents.id, documentName));
       if (!row) throw new Error("Document not found");
-      hydrateDoc(document, row.ystate ?? null, row.content, row.title);
+      const seeded = hydrateDoc(document, row.ystate ?? null, row.content, row.title);
+      if (seeded) {
+        // The row predates creation-time `ystate` (or lost it). Persist the seed now, before any
+        // client sees it: `onStoreDocument` only runs after an edit, so an opened-but-never-edited
+        // document would otherwise be re-seeded with fresh CRDT ids on its next load and any client
+        // holding this seed in IndexedDB would merge the two into doubled text. `content` is unchanged.
+        await db
+          .update(schema.documents)
+          .set({ ystate: Y.encodeStateAsUpdate(document) })
+          .where(eq(schema.documents.id, documentName));
+      }
       watchDocumentNotifications(document, documentName);
       startActivityWatch(document, documentName);
       publishAgentPresence(document, documentName);

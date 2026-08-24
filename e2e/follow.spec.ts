@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, budgetMs, type User } from "./helpers";
 
 const SECTIONS = 6;
 const LINES_PER_SECTION = 20;
@@ -70,12 +70,13 @@ test.describe("presence: jump to and follow a collaborator", () => {
     const bobRow = popover.getByTestId("presence-row").filter({ hasText: "bob" });
     await expect(bobRow.getByTestId("presence-section")).toHaveText("in ‘Section 5’");
 
-    // Jump scrolls Alice's preview to Bob's caret and flashes it.
+    // Jump flashes Bob's caret (for one second, so check it before waiting on the scroll) and scrolls
+    // Alice's preview until the caret sits inside the pane.
     await bobRow.getByTestId("presence-jump").click();
+    await expect(alice.page.locator(`.md-remote-caret[data-user-id="${bobId}"]`)).toHaveAttribute("data-flash", "");
     await expect(popover).toBeHidden();
     await expect.poll(() => richScrollTop(alice.page)).not.toBe(before);
     await expect.poll(() => caretInView(alice.page, bobId)).toBe(true);
-    await expect(alice.page.locator(`.md-remote-caret[data-user-id="${bobId}"]`)).toHaveAttribute("data-flash", "");
 
     // Follow: banner appears, followed caret is marked.
     await alice.page.getByTestId("presence").click();
@@ -85,9 +86,10 @@ test.describe("presence: jump to and follow a collaborator", () => {
     await expect(banner).toContainText("Following bob");
     await expect(alice.page.locator(`.md-remote-caret[data-user-id="${bobId}"]`)).toHaveAttribute("data-following", "");
 
-    // Bob moves to Section 1; Alice's view follows within a second.
+    // Bob moves to Section 1; Alice's view follows within a second (awareness round trip + the
+    // 150 ms debounce + a smooth scroll; CI gets the shared wider budget).
     await bob.page.locator(".md-rich h1", { hasText: "Section 1" }).click();
-    await expect.poll(() => caretInView(alice.page, bobId), { timeout: 1_000, intervals: [50, 100, 200] }).toBe(true);
+    await expect.poll(() => caretInView(alice.page, bobId), { timeout: budgetMs(1_000), intervals: [50, 100, 200] }).toBe(true);
     await expect(banner).toContainText("in ‘Section 1’");
 
     // Alice's own wheel scroll stops following.

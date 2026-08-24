@@ -191,6 +191,54 @@ describe("with IndexedDB (fake-indexeddb)", () => {
     expect(b.getText("content").toString()).toBe("bare doc");
     await pb.clearData();
   });
+
+  describe("reload of a never-edited document", () => {
+    const CONTENT = "# Template\n\n## One\n\n## Two\n";
+    // What the server sends: the document's stored `ystate`, minted once.
+    const seed = (() => {
+      const d = new Y.Doc();
+      d.getText("content").insert(0, CONTENT);
+      return Y.encodeStateAsUpdate(d);
+    })();
+
+    /** Open the doc as a browser would: IndexedDB first, then the server's state arrives. */
+    async function openAndSync(docId: string, serverState: Uint8Array): Promise<CollabSession> {
+      const session = makeSession(docId);
+      await session.whenLocalLoaded;
+      Y.applyUpdate(session.ydoc, serverState, lastProvider());
+      lastProvider().opts.onStatus({ status: "connected" });
+      lastProvider().opts.onSynced({ state: true });
+      await tick();
+      return session;
+    }
+
+    it("stays intact when the server hands back the same persisted seed", async () => {
+      const docId = `reload-${Date.now()}`;
+      const first = await openAndSync(docId, seed);
+      expect(first.ytext.toString()).toBe(CONTENT);
+      first.destroy();
+      await tick();
+
+      const second = await openAndSync(docId, seed);
+      expect(second.ytext.toString()).toBe(CONTENT);
+      second.destroy();
+      await clearLocalDocument(docId);
+    });
+
+    it("doubles when the server re-seeds from plain content (the bug the server now prevents)", async () => {
+      const docId = `reseed-${Date.now()}`;
+      const first = await openAndSync(docId, seed);
+      first.destroy();
+      await tick();
+
+      const reseeded = new Y.Doc();
+      reseeded.getText("content").insert(0, CONTENT);
+      const second = await openAndSync(docId, Y.encodeStateAsUpdate(reseeded));
+      expect(second.ytext.toString()).toHaveLength(CONTENT.length * 2);
+      second.destroy();
+      await clearLocalDocument(docId);
+    });
+  });
 });
 
 describe("save state and reconnect feedback", () => {

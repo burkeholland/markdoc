@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BookOpen, Check, Copy, Globe, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
+import { BookOpen, Bot, Check, Copy, Globe, KeyRound, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
-import { api, type CollaboratorDto } from "@/lib/api";
+import { api, type ApiTokenDto, type CollaboratorDto } from "@/lib/api";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
+import { CopyBlock, mcpConfigFor, mcpHttpConfigFor, TOKEN_PLACEHOLDER } from "@/components/settings/agent-connect-card";
 import { cn } from "@/lib/utils";
 
 const LINK_OPTIONS: { value: DocumentDto["linkAccess"]; label: string; description: string }[] = [
@@ -89,7 +90,7 @@ export function ShareDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={`Share “${doc.title}”`} description="Collaborators sign in with GitHub. Add people by their GitHub handle.">
+      <DialogContent title={`Share “${doc.title}”`} description="Collaborators sign in with GitHub. Add people by their GitHub handle." className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         {isOwner && (
           <form
             className="flex gap-2"
@@ -191,6 +192,10 @@ export function ShareDialog({
           </div>
         </div>
 
+        <div className="mt-5">
+          <AgentCollaborateCard origin={origin} open={open} />
+        </div>
+
         <div className="mt-5 flex items-center justify-between">
           <button type="button" className="btn btn-outline gap-2" onClick={() => void copyLink()} data-testid="copy-link">
             {copied ? <Check size={16} className="text-success" /> : <Link2 size={16} />}
@@ -221,5 +226,106 @@ export function CopyButton({ text, label = "Copy", testId }: { text: string; lab
       {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
       {copied ? "Copied" : label}
     </button>
+  );
+}
+
+/**
+ * "Collaborate with an agent": the ready-to-paste Copilot CLI config for this server's remote MCP
+ * endpoint. Token secrets are never shown again after creation, so the newest token is named but the
+ * config only inlines one minted right here; otherwise it carries the MARKDOC_TOKEN placeholder.
+ */
+export function AgentCollaborateCard({ origin, open }: { origin: string; open: boolean }) {
+  const [tokens, setTokens] = useState<ApiTokenDto[] | null>(null);
+  const [minted, setMinted] = useState<{ name: string; token: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showStdio, setShowStdio] = useState(false);
+  const base = origin || "http://localhost:3000";
+  const config = mcpHttpConfigFor(base, minted?.token ?? TOKEN_PLACEHOLDER);
+  const stdioConfig = mcpConfigFor(base, minted?.token ?? TOKEN_PLACEHOLDER);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api.tokens
+      .list()
+      .then((res) => {
+        if (!cancelled) setTokens(res.tokens);
+      })
+      .catch(() => {
+        if (!cancelled) setTokens(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const newest = tokens?.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+
+  const createToken = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.tokens.create("GitHub Copilot CLI", 90);
+      setMinted({ name: res.token.name, token: res.token.token });
+      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, createdAt: new Date().toISOString(), lastUsedAt: null, expiresAt: null }, ...(list ?? [])]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not create a token");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="rounded-xl border border-violet-200 bg-violet-50/60 p-3 dark:border-violet-900 dark:bg-violet-950/30" aria-label="Collaborate with an agent" data-testid="share-agent-card">
+      <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-3">
+        <Bot size={14} className="text-violet-600" /> Collaborate with an agent
+      </div>
+      <p className="text-xs leading-5 text-ink-3">
+        Connect GitHub Copilot CLI, VS Code or any MCP client to this document; the agent joins as a collaborator, acting as you via{" "}
+        {minted ? (
+          <>
+            the token <strong className="text-ink-2">{minted.name}</strong>
+          </>
+        ) : newest ? (
+          <>
+            your token <strong className="text-ink-2">{newest.name}</strong> (<code className="font-mono">{newest.prefix}…</code>) — paste it where it says{" "}
+            <code className="font-mono">{TOKEN_PLACEHOLDER}</code>, or mint a new one
+          </>
+        ) : (
+          "a token"
+        )}
+        .
+      </p>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-3">
+        <span>
+          Paste into <code className="rounded bg-surface px-1 py-0.5 font-mono">~/.copilot/mcp-config.json</code>, or in Copilot CLI run{" "}
+          <code className="rounded bg-surface px-1 py-0.5 font-mono">/mcp add</code> and enter the same URL and header.
+        </span>
+        {!minted && (
+          <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void createToken()} disabled={busy} data-testid="share-agent-create-token">
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />} Create a token
+          </button>
+        )}
+      </div>
+      {error && <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40">{error}</div>}
+      <div className="mt-2">
+        <CopyBlock value={config} label="Copilot CLI MCP configuration" testId="share-agent-config" copyTestId="share-agent-copy" />
+      </div>
+      {minted && <p className="mt-1.5 text-[11px] text-ink-3">Copy it now — the token is not shown again. Revoke it any time in Settings.</p>}
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <a className="text-accent hover:underline" href="/settings#tokens" data-testid="share-agent-setup-link">
+          Step-by-step setup and tokens
+        </a>
+        <button type="button" className="text-ink-3 hover:underline" onClick={() => setShowStdio((v) => !v)} data-testid="share-agent-stdio-toggle">
+          {showStdio ? "Hide" : "Show"} the stdio config (run from a checkout)
+        </button>
+      </div>
+      {showStdio && (
+        <div className="mt-2">
+          <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="share-agent-config-stdio" />
+        </div>
+      )}
+    </section>
   );
 }

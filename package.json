@@ -20,7 +20,8 @@
     "db:generate": "drizzle-kit generate",
     "build:server": "node scripts/build-server.mjs",
     "resume-check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/live/resume-check.ps1",
-    "mcp": "node mcp/server.mjs"
+    "mcp": "node mcp/server.mjs",
+    "mcp:smoke": "node scripts/mcp-smoke.mjs"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
-import { AgentConnectCard, useOrigin } from "@/components/settings/agent-connect-card";
+import { AgentConnectCard, mcpHttpConfigFor, useOrigin } from "@/components/settings/agent-connect-card";
 
 interface TokenRow {
   id: string;
@@ -92,19 +92,7 @@ export function TokensPanel({ origin, userLogin, next }: { origin: string; userL
     await load();
   };
 
-  const mcpConfig = JSON.stringify(
-    {
-      mcpServers: {
-        markdoc: {
-          command: "node",
-          args: ["<path-to-markdoc>/mcp/server.mjs"],
-          env: { MARKDOC_URL: base, MARKDOC_TOKEN: created?.token ?? "mdk_…" },
-        },
-      },
-    },
-    null,
-    2,
-  );
+  const mcpConfig = mcpHttpConfigFor(base, created?.token ?? "mdk_…");
 
   return (
     <div className="flex flex-col gap-6">
