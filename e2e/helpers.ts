@@ -6,6 +6,14 @@ export interface User {
   login: string;
 }
 
+/**
+ * Wall-clock budget for a timing assertion ("the view follows within a second"). The 2-vCPU CI runner
+ * shares its cores between two workers and the dev server, so it gets three times the local
+ * allowance (the same rule as the perf budgets from task #278); the local figure stays tight so a
+ * real slowdown is still caught here.
+ */
+export const budgetMs = (ms: number): number => (process.env.CI ? ms * 3 : ms);
+
 /** Sign in with the development login and land on the dashboard. */
 export async function signIn(browser: Browser, login: string): Promise<User> {
   const context = await browser.newContext();
