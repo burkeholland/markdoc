@@ -114,7 +114,8 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     const id = await createDocument(page, "# Clipboard\n\nSecure.\n", "Clipboard api");
     await openDocument(page, id);
     const origin = await page.evaluate(() => window.location.origin);
-    const readClipboard = () => page.evaluate(() => navigator.clipboard.readText());
+    // Windows puts CRLF on the system clipboard for every LF written; fold it back before comparing.
+    const readClipboard = async () => (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n");
 
     await page.getByTestId("share-button").click();
     const config = page.getByTestId("share-agent-config");
