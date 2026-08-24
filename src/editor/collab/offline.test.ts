@@ -36,6 +36,8 @@ import {
   IDB_EPOCH,
   IDB_EPOCH_KEY,
   IDB_REGISTRY_KEY,
+  LOCAL_LOAD_TIMEOUT_MS,
+  LOCAL_WIPE_TIMEOUT_MS,
   localDbName,
   openLocalPersistence,
   saveStateLabel,
@@ -378,6 +380,97 @@ describe("with IndexedDB (fake-indexeddb)", () => {
       session.destroy();
       await tick();
       expect(await readMirror(docId)).toBe("fresh");
+    });
+
+    /** `indexedDB` whose `databases()` is replaced; every other method is the real one. */
+    function withDatabases(databases: () => Promise<{ name?: string }[]>): IDBFactory {
+      const real = indexedDB;
+      const stub = Object.create(real) as IDBFactory;
+      Object.defineProperty(stub, "databases", { value: databases });
+      for (const m of ["open", "deleteDatabase", "cmp"] as const) {
+        (stub as unknown as Record<string, unknown>)[m] = (real[m] as (...a: unknown[]) => unknown).bind(real);
+      }
+      return stub;
+    }
+
+    it("a database another connection holds open blocks the wipe: no epoch, no mirror, and the next load succeeds", async () => {
+      const held = `blocked-${Date.now()}`;
+      const other = `blocked-other-${Date.now()}`;
+      await writeMirror(held, "held open elsewhere");
+      await writeMirror(other, "deletable");
+      // A connection that ignores `versionchange` (lib0's closes on it; a foreign one need not).
+      const holder = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open(localDbName(held));
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      localStorage.setItem(IDB_EPOCH_KEY, "1");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await expect(ensureLocalEpoch()).resolves.toBe(false);
+        expect(storedIdbEpoch()).toBe(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("blocked"));
+        // The session honours the verdict: no mirror this time, but the document still loads.
+        const session = makeSession(held);
+        await session.whenLocalLoaded;
+        session.ytext.insert(0, "not mirrored");
+        await tick();
+        session.destroy();
+        await tick();
+      } finally {
+        warn.mockRestore();
+        holder.close();
+      }
+      await tick();
+      // The holder is gone: the retry deletes everything and records the epoch.
+      await expect(ensureLocalEpoch()).resolves.toBe(true);
+      expect(storedIdbEpoch()).toBe(IDB_EPOCH);
+      expect(await readMirror(held)).toBe("");
+      expect(await readMirror(other)).toBe("");
+    });
+
+    it("a wipe past LOCAL_WIPE_TIMEOUT_MS gives up without writing the epoch", async () => {
+      vi.stubGlobal("indexedDB", withDatabases(() => new Promise(() => {})));
+      localStorage.removeItem(IDB_EPOCH_KEY);
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const verdict = ensureLocalEpoch();
+        await vi.advanceTimersByTimeAsync(LOCAL_WIPE_TIMEOUT_MS - 1);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(verdict).resolves.toBe(false);
+        expect(storedIdbEpoch()).toBeNull();
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${LOCAL_WIPE_TIMEOUT_MS}ms`));
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("the session stops waiting on a slow wipe after LOCAL_LOAD_TIMEOUT_MS and still opens the mirror once it lands", async () => {
+      const docId = `slow-wipe-${Date.now()}`;
+      let release!: (names: { name?: string }[]) => void;
+      const listing = new Promise<{ name?: string }[]>((resolve) => {
+        release = resolve;
+      });
+      vi.stubGlobal("indexedDB", withDatabases(() => listing));
+      localStorage.setItem(IDB_EPOCH_KEY, "1");
+      const session = makeSession(docId);
+      expect(session.localLoaded).toBe(false);
+      const started = Date.now();
+      await session.whenLocalLoaded;
+      // Loaded by the timer, not by the wipe: the epoch is still the old one.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(LOCAL_LOAD_TIMEOUT_MS - 50);
+      expect(storedIdbEpoch()).toBe(1);
+
+      release([]);
+      await tick();
+      expect(storedIdbEpoch()).toBe(IDB_EPOCH);
+      session.ytext.insert(0, "mirrored late");
+      await tick(100);
+      session.destroy();
+      await tick();
+      expect(await readMirror(docId)).toBe("mirrored late");
     });
   });
 });
