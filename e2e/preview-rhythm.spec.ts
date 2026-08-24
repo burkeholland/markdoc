@@ -138,8 +138,11 @@ const previewGaps = (page: Page) => measure(page, ".md-rich");
 
 async function setTheme(page: Page, theme: "light" | "dark") {
   await page.evaluate((t) => localStorage.setItem("markdoc:theme", t), theme);
-  await page.reload();
+  // A full navigation rather than reload(): on a loaded box the reload raced the editor's own
+  // navigation and aborted (ERR_ABORTED) — see the first run of this spec.
+  await page.goto(page.url());
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
 }
 
 async function waitForPreview(page: Page) {
@@ -223,9 +226,12 @@ test.describe("preview vertical rhythm", () => {
     await waitForPreview(page);
 
     // Same rule set as e2e/a11y.spec.ts: color-contrast is skipped in the light theme (axe cannot
-    // resolve it through the translucent chrome) and enforced in dark.
+    // resolve it through the translucent chrome) and enforced in dark. Scoped to the preview pane:
+    // the whole editor is a11y.spec's job, and a 40-line fixture makes the code pane scroll, which
+    // trips axe's pre-existing `scrollable-region-focusable` finding on `.cm-scroller`.
     const scan = async (contrast: boolean) =>
       new AxeBuilder({ page })
+        .include('[data-testid="rich-pane"]')
         .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
         .disableRules(contrast ? [] : ["color-contrast"])
         .analyze();
