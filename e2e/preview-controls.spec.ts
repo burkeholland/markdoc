@@ -281,7 +281,7 @@ test.describe("preview controls: inline marks and links", () => {
   const MARKS = [
     { name: "bold", tag: "strong", md: "**", toolbar: "Bold", keys: `${mod}+b` },
     { name: "italic", tag: "em", md: "*", toolbar: "Italic", keys: `${mod}+i` },
-    { name: "strikethrough", tag: "del", md: "~~", toolbar: "Strikethrough", keys: `${mod}+Shift+x` },
+    { name: "strikethrough", tag: "s", md: "~~", toolbar: "Strikethrough", keys: `${mod}+Shift+x` },
     { name: "inline code", tag: "code", md: "`", toolbar: "Inline code", keys: `${mod}+\`` },
   ];
 

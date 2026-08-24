@@ -40,8 +40,11 @@ export function markAttrs(state: EditorState, type: MarkType): Attrs | null {
 
 export function blockTypeActive(state: EditorState, type: NodeType, attrs?: Attrs): boolean {
   const { $from, to, node } = state.selection as { $from: typeof state.selection.$from; to: number; node?: PMNode };
-  if (node) return node.hasMarkup(type, attrs);
-  return to <= $from.end() && $from.parent.hasMarkup(type, attrs);
+  // Without `attrs` only the type counts: `hasMarkup` would compare against the default attrs, so a
+  // ```js block never read as a code block (toolbar not pressed, toggle-off refused — task #437).
+  const matches = (n: PMNode) => (attrs ? n.hasMarkup(type, attrs) : n.type === type);
+  if (node) return matches(node);
+  return to <= $from.end() && matches($from.parent);
 }
 
 export function currentHeadingLevel(state: EditorState): number {
