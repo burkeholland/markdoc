@@ -313,7 +313,8 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
   }
 
   const lineOffset = countNewlines(newText, regionFrom);
-  const lineDelta = countNewlines(newText, newText.length) - countNewlines(oldText, oldText.length);
+  // Outside the change span the two texts are identical, so only the span moves line numbers.
+  const lineDelta = countNewlines(newText.slice(span.from, span.newTo), span.newTo - span.from) - countNewlines(oldText.slice(span.from, span.oldTo), span.oldTo - span.from);
   const headings: HeadingInfo[] = [];
   for (const h of prev.headings) if (h.from < regionFrom) headings.push(h);
   for (const h of sub.headings) headings.push({ ...h, from: h.from + regionFrom, line: h.line + lineOffset });
