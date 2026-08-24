@@ -10,6 +10,7 @@ import {
   clearLocalDocument,
   ensureLocalEpoch,
   hasIndexedDB,
+  LOCAL_LOAD_TIMEOUT_MS,
   openLocalPersistence,
   type ConnectionPhase,
   type LocalPersistence,
@@ -291,12 +292,17 @@ export class CollabSession {
    * or IndexedDB is unavailable, in which case {@link localLoaded} becomes true at once).
    * Mirrors from an older {@link IDB_EPOCH} are wiped first, before y-indexeddb can
    * apply them; the provider may sync meanwhile, the fresh mirror then stores its state.
+   *
+   * The UI waits on the wipe for at most {@link LOCAL_LOAD_TIMEOUT_MS}: past that
+   * {@link localLoaded} is set anyway (a wipe never leaves local state to apply) while the
+   * wipe runs on to its own cap, and the mirror still opens once it has succeeded.
    */
   startLocalPersistence() {
     if (this.localStarted) return;
     this.localStarted = true;
     if (this.destroyed) return;
     const markLoaded = () => {
+      if (this.localLoaded) return;
       this.localLoaded = true;
       this.resolveLocalLoaded();
       this.notify();
@@ -305,7 +311,9 @@ export class CollabSession {
       markLoaded();
       return;
     }
+    const stopWaiting = setTimeout(markLoaded, LOCAL_LOAD_TIMEOUT_MS);
     void ensureLocalEpoch().then((usable) => {
+      clearTimeout(stopWaiting);
       if (!this.destroyed && usable) this.local = openLocalPersistence(this.docId, this.ydoc);
       if (!this.local) {
         markLoaded();
