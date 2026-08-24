@@ -11,24 +11,48 @@ import { signIn, createDocument, openDocument, codeText, clickCell, type User } 
 
 const DOC = ["# H1", "", "> A quote line.", "", "## Heading two", "", "- one", "- two", "", "| a | b |", "| --- | --- |", "| 1 | 2 |", ""].join("\n");
 
-/** Put the caret at the end of the text of the first element matching `selector`, with a real mouse click. */
-async function clickEndOf(page: Page, selector: string) {
+/**
+ * Put the caret at the start or end of the text of the first element matching `selector`, with a
+ * real mouse click, and wait until the DOM selection sits there. A click is the only placement
+ * ProseMirror picks up synchronously: after a natively handled `Home` (or `Control+Home`, which
+ * goes to the document start, not the block start) Chromium fires `selectionchange` in a later
+ * task, so a key pressed right behind it is judged against ProseMirror's stale selection, the
+ * keymap declines it and the browser merges blocks natively (`# H1A quote line.` in the lead's run).
+ */
+async function clickEdgeOf(page: Page, selector: string, edge: "start" | "end") {
   const el = page.locator(`.md-rich ${selector}`).first();
   await expect(el).toBeVisible();
-  const rect = await el.evaluate((node) => {
+  const point = await el.evaluate((node, side) => {
     const range = document.createRange();
     range.selectNodeContents(node);
     const rects = range.getClientRects();
-    const last = rects[rects.length - 1] ?? range.getBoundingClientRect();
-    return { x: last.right, y: last.top + last.height / 2 };
-  });
-  await page.mouse.click(rect.x - 1, rect.y);
+    const rect = (side === "start" ? rects[0] : rects[rects.length - 1]) ?? range.getBoundingClientRect();
+    return { x: side === "start" ? rect.left + 1 : rect.right - 1, y: rect.top + rect.height / 2 };
+  }, edge);
+  await page.mouse.click(point.x, point.y);
   await expect
-    .poll(() => page.evaluate((sel) => document.getSelection()?.anchorNode?.parentElement?.closest(sel) !== null, `.md-rich ${selector}`), {
-      message: `caret should be inside ${selector}`,
-    })
+    .poll(
+      () =>
+        page.evaluate(
+          ([sel, side]) => {
+            const s = document.getSelection();
+            const block = s?.anchorNode?.parentElement?.closest(sel);
+            if (!block || !s || !s.isCollapsed) return "no caret";
+            const range = document.createRange();
+            range.selectNodeContents(block);
+            range.setEnd(s.anchorNode!, s.anchorOffset);
+            const before = range.toString().length;
+            return side === "start" ? before === 0 : before === block.textContent!.length;
+          },
+          [`.md-rich ${selector}`, edge] as const,
+        ),
+      { message: `caret should be at the ${edge} of ${selector}` },
+    )
     .toBe(true);
 }
+
+const clickEndOf = (page: Page, selector: string) => clickEdgeOf(page, selector, "end");
+const clickStartOf = (page: Page, selector: string) => clickEdgeOf(page, selector, "start");
 
 /** Caret path inside .md-rich (e.g. "blockquote>p") from the DOM selection. */
 const caretPath = (page: Page) =>
@@ -43,21 +67,27 @@ const caretPath = (page: Page) =>
     return path.join(">");
   });
 
-/** Gap between the first `.md-rich > prev` and its next sibling, and that sibling's margin-top. */
+/** Gap between the first `.md-rich > prev` and its next sibling, that sibling's margin-top, and the rhythm token it should resolve to. */
 async function gapAfter(page: Page, prev: string) {
   return page.locator(`.md-rich > ${prev}`).first().evaluate((el) => {
     const next = el.nextElementSibling as HTMLElement | null;
     if (!next) throw new Error(`nothing after ${el.tagName}`);
     const a = el.getBoundingClientRect();
     const b = next.getBoundingClientRect();
-    return { next: next.tagName.toLowerCase(), gap: b.top - a.bottom, marginTop: parseFloat(getComputedStyle(next).marginTop) };
+    // The tokens are em values resolved on the element they land on (see globals.css, task #346):
+    // the first block under a heading hugs it with --md-space-heading-after, everything else gets --md-space.
+    const token = /^H[1-6]$/.test(el.tagName) ? "--md-space-heading-after" : "--md-space";
+    const root = el.closest(".md-rich")!;
+    const em = parseFloat(getComputedStyle(root).getPropertyValue(token));
+    const fontSize = parseFloat(getComputedStyle(next).fontSize);
+    return { next: next.tagName.toLowerCase(), gap: b.top - a.bottom, marginTop: parseFloat(getComputedStyle(next).marginTop), token, expected: em * fontSize };
   });
 }
 
 async function expectRhythm(page: Page, prev: string, next: string) {
   const g = await gapAfter(page, prev);
   expect(g.next, `${prev} is followed by ${next}`).toBe(next);
-  expect(g.marginTop, `the paragraph after ${prev} gets the --md-space margin`).toBeGreaterThanOrEqual(12);
+  expect(Math.abs(g.marginTop - g.expected), `the paragraph after ${prev} gets ${g.token} (${g.expected.toFixed(1)} px), got ${g.marginTop.toFixed(1)} px`).toBeLessThan(0.5);
   expect(Math.abs(g.gap - g.marginTop), `gap after ${prev} (${g.gap.toFixed(1)} px) equals the margin-top (${g.marginTop.toFixed(1)} px)`).toBeLessThan(1);
 }
 
@@ -115,12 +145,10 @@ test.describe("leaving blocks with the keyboard", () => {
     await expect.poll(() => codeText(page)).toContain("## Two\n\nSoft\n");
     await expect(page.locator(".md-rich h2")).toHaveText("Two");
     // Backspace at the start of the h3 merges it into the paragraph above; at the top the h1 becomes a paragraph.
-    await clickEndOf(page, "h3");
-    await page.keyboard.press("Home");
+    await clickStartOf(page, "h3");
     await page.keyboard.press("Backspace");
     await expect.poll(() => codeText(page)).toContain("After h2Three");
-    await clickEndOf(page, "h1");
-    await page.keyboard.press("Home");
+    await clickStartOf(page, "h1");
     await page.keyboard.press("Backspace");
     await expect.poll(() => codeText(page)).toMatch(/^One\n/);
     await context.close();
@@ -131,8 +159,7 @@ test.describe("leaving blocks with the keyboard", () => {
   // round trip (pre-existing, follow-up noted in the task report), so only Backspace is asserted here.
   test("blockquote: Backspace at the start of the first paragraph lifts it out of the quote", async ({ browser }) => {
     const { page, context } = await setup(browser, "exit-quote");
-    await clickEndOf(page, "blockquote p");
-    await page.keyboard.press("Home");
+    await clickStartOf(page, "blockquote p");
     await page.keyboard.press("Backspace");
     await expect.poll(() => codeText(page)).toContain("# H1\n\nA quote line.\n\n## Heading two");
     await expect(page.locator(".md-rich blockquote")).toHaveCount(0);
@@ -160,8 +187,7 @@ test.describe("leaving blocks with the keyboard", () => {
     await expectRhythm(page, "ul", "p");
     await expectRhythm(page, "ol", "p");
     // Backspace at the start of the first item makes it a paragraph.
-    await clickEndOf(page, "ul li:first-child p");
-    await page.keyboard.press("Home");
+    await clickStartOf(page, "ul li:first-child p");
     await page.keyboard.press("Backspace");
     await expect.poll(() => codeText(page)).toMatch(/\n\none\n\n- two/);
     await context.close();
@@ -177,10 +203,10 @@ test.describe("leaving blocks with the keyboard", () => {
     await expect.poll(() => codeText(page)).toContain("```\n\nOut by Ctrl\n\nEnd.");
     await expectRhythm(page, "pre", "p");
 
-    await clickEndOf(page, "pre code");
-    await page.keyboard.press("Control+Home");
+    await clickStartOf(page, "pre code");
     await page.keyboard.press("Backspace");
     await expect.poll(() => codeText(page)).not.toContain("```");
+    await expect.poll(() => codeText(page)).toContain("> q\n\nconst a = 1;\n\nOut by Ctrl");
     await expect(page.locator(".md-rich pre")).toHaveCount(0);
     await context.close();
   });
@@ -197,16 +223,15 @@ test.describe("leaving blocks with the keyboard", () => {
     await page.keyboard.press("ArrowDown");
     await expect.poll(() => caretPath(page)).toBe("p");
     await page.keyboard.type("After table");
-    await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x +\|\n\nAfter table$/);
+    await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x +\|\n\nAfter table\n?$/);
     await expectRhythm(page, "table", "p");
 
-    // Ctrl+Enter from any cell moves to the block below.
+    // Ctrl+Enter from any cell moves to the start of the block below.
     await clickCell(page, 0, 0);
     await page.keyboard.press("Control+Enter");
     await expect.poll(() => caretPath(page)).toBe("p");
-    await page.keyboard.press("End");
     await page.keyboard.type("!");
-    await expect.poll(() => codeText(page)).toMatch(/After table!$/);
+    await expect.poll(() => codeText(page)).toMatch(/\n\n!After table\n?$/);
     await context.close();
   });
 
