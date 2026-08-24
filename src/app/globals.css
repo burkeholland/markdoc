@@ -1396,13 +1396,6 @@ body {
   letter-spacing: -0.005em;
   font-variation-settings: "opsz" 36, "SOFT" 30;
 }
-/* Phone: a 40-character `# Title` must fit in two lines at 390 px (2em of 16px Fraunces wraps to three). */
-@media (max-width: 767.98px) {
-  .md-rich h1,
-  .reader-body h1 {
-    font-size: 1.75em;
-  }
-}
 
 /* The article is the printed page; chrome, TOC and pills are screen-only. */
 @media print {

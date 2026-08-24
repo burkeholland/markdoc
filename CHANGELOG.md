@@ -4,7 +4,11 @@ Newest first. Each entry is one merged feature or fix on `main`; test-only and w
 
 ## 2026-08-24
 
-Everything that landed on `main` after midnight, 24 August: typing speed in long documents and the long-document accessibility fixes.
+Everything that landed on `main` after midnight, 24 August: the new look, typing speed in long documents and the long-document accessibility fixes.
+
+### Look
+
+- New look: Ink & teal (Burke #1205; tasks #398 → #416). Warm stone inks, a deep teal accent (`#0f766e`, `#2dd4bf` in dark), a faintly warm paper behind the preview, header and toolbar on chrome with a hairline shadow and pill-shaped tool groups, Fraunces for the wordmark, document titles and h1–h3 in the preview, the reader and the HTML export (with a system serif fallback offline); the body stays Inter. Dark mode is the tuned warm-grey variant of the same palette. The tokens live in `:root` / `[data-theme="dark"]` in `globals.css`, so nothing is applied client-side and there is no flash of the old blue; the phase-1 `?brand=a|b` switch, Option B ("Graphite & amber", Inter Tight) and `src/lib/brand.ts` are gone, and a stored choice is cleared on boot. Favicon (legible on light and dark tab strips), OG image and `icon.svg` are re-rendered in the accent; README screenshots (dashboard, editor) are new. `src/app/tokens-contrast.test.ts` checks every AA pair for light and dark as numbers; `a11y.spec` ("axe: contrast") scans the dashboard, editor, settings and reader with `color-contrast` on in both themes.
 
 ### Writing
 
