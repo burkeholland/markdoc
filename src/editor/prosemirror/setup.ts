@@ -221,6 +221,11 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
             role: "textbox",
             "aria-multiline": "true",
             "aria-label": "Rich text editor",
+            // The pane's scroll container (editor-shell) has no focusable child other than this
+            // contenteditable. An explicit tabindex does not add a tab stop (contenteditable is
+            // already one) but lets axe's scrollable-region-focusable see it; reasoning in
+            // src/editor/codemirror/setup.ts next to the same attribute on `.cm-content`.
+            tabindex: "0",
           }),
         },
         view() {
