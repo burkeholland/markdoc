@@ -1,15 +1,15 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, JetBrains_Mono, Fraunces, Inter_Tight } from "next/font/google";
+import { Inter, JetBrains_Mono, Fraunces } from "next/font/google";
 import { THEME_BOOT_SCRIPT } from "@/lib/theme";
-import { BRAND_BOOT_SCRIPT } from "@/lib/brand";
 import "./globals.css";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"], display: "swap" });
 const mono = JetBrains_Mono({ variable: "--font-jetbrains-mono", subsets: ["latin"], display: "swap" });
-// Display faces for the two brand candidates (src/lib/brand.ts). Not preloaded: the browser only
-// fetches a face once a rule under [data-brand] uses it, so visitors without the switch pay nothing.
-const fraunces = Fraunces({ variable: "--font-fraunces", subsets: ["latin"], display: "swap", preload: false, axes: ["opsz", "SOFT"] });
-const interTight = Inter_Tight({ variable: "--font-inter-tight", subsets: ["latin"], display: "swap", preload: false });
+// Display face (--p-font-display in globals.css): wordmark, document titles, h1–h3 in the preview and reader.
+const fraunces = Fraunces({ variable: "--font-fraunces", subsets: ["latin"], display: "swap", axes: ["opsz", "SOFT"] });
+
+// The phase-1 look switch (`?brand=a|b`, task #398) is gone; a stored choice from then is dropped so it never lingers.
+const BRAND_CLEANUP_SCRIPT = `(function(){try{localStorage.removeItem("markdoc:brand");}catch(e){}})();`;
 
 export const metadata: Metadata = {
   title: { default: "Markdoc", template: "%s · Markdoc" },
@@ -30,16 +30,16 @@ export const viewport: Viewport = {
   viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b0f17" },
+    { media: "(prefers-color-scheme: dark)", color: "#14161a" },
   ],
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    // data-theme and data-brand are set by the boot scripts before React runs, so the server markup never matches them.
-    <html lang="en" className={`${inter.variable} ${mono.variable} ${fraunces.variable} ${interTight.variable} h-full antialiased`} suppressHydrationWarning>
+    // data-theme is set by the boot script before React runs, so the server markup never matches it.
+    <html lang="en" className={`${inter.variable} ${mono.variable} ${fraunces.variable} h-full antialiased`} suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_BOOT_SCRIPT }} />
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_CLEANUP_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col bg-surface text-ink">{children}</body>
     </html>
