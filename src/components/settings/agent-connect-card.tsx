@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Check, Copy, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MCP_PATH } from "@/lib/mcp";
+import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
 export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
 
@@ -162,6 +163,7 @@ export function AgentConnectCard({ origin, token, onCreateToken, onDismiss, hide
                 <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="agent-connect-config-stdio" />
               </div>
             </details>
+            <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" />
           </div>
         </li>
         <li className="flex gap-3">
