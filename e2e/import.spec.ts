@@ -116,6 +116,11 @@ test.describe("import local files", () => {
     expect(m).not.toBeNull();
     expect(text).toContain("![Missing](lost.png)");
     await expect(page.locator(`.md-rich img[src="${m![1]}"]`)).toHaveCount(1);
+    // The rewrite must live in ystate, not just the content column: a reload (re-hydration) still shows the asset.
+    await page.reload();
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+    await expect(page.locator(`.md-rich img[src="${m![1]}"]`)).toHaveCount(1);
+    expect(await codeText(page)).not.toContain("beach.png");
     const res = await page.request.get(m![1]);
     expect(res.status()).toBe(200);
     expect(res.headers()["content-type"]).toBe("image/png");
