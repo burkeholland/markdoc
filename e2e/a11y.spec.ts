@@ -176,9 +176,9 @@ async function ensureOutlineOpen(page: Page) {
  * tabindex as focusable, and the Burke-scale fixture passed by accident because its links inside the
  * rich pane satisfied the rule.
  */
-const LONG_PLAIN_DOC = ["# Long plain fixture", ""]
+const LONG_PLAIN_DOC = ["# Long plain fixture"]
   .concat(Array.from({ length: 60 }, (_, i) => `Line ${i + 1} of plain prose, long enough to make both panes scroll at 1280×900.`))
-  .join("\n");
+  .join("\n\n");
 
 /** Selector of each pane's scroll container: CodeMirror's own scroller and the rich pane's parent in the shell. */
 const CODE_SCROLLER = ".cm-scroller";
@@ -238,7 +238,7 @@ async function expectScrollablePanesAccessible(page: Page, state: string, { cont
   await page.keyboard.press("Escape");
   await page.keyboard.press("Tab");
   await tabUntil(page, ".md-rich");
-  expect(await tabStops(page, "[data-testid=rich-pane]"), `${state}: one tab stop in the rich pane`).toEqual(["div.md-rich"]);
+  expect(await tabStops(page, "[data-testid=rich-pane]"), `${state}: one tab stop in the rich pane`).toEqual(["div.ProseMirror"]);
   await page.keyboard.press("Control+Home");
   const richBefore = await scrollTop(page, RICH_SCROLLER);
   await page.keyboard.press("PageDown");
