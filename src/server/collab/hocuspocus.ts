@@ -1,4 +1,4 @@
-import { Hocuspocus, type onAuthenticatePayload, type onLoadDocumentPayload, type onStoreDocumentPayload } from "@hocuspocus/server";
+import { Hocuspocus, type onAuthenticatePayload, type onChangePayload, type onLoadDocumentPayload, type onStoreDocumentPayload } from "@hocuspocus/server";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
@@ -8,7 +8,7 @@ import { addVersion, latestVersion } from "@/server/documents";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 import { publishAgentPresence } from "@/server/agent-presence";
-import { hydrateDoc, META_KEY, TEXT_KEY } from "./seed";
+import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 
 export { hydrateDoc, META_KEY, TEXT_KEY };
 
@@ -18,6 +18,11 @@ export type CollabContext = CollabClaims;
 export const AUTO_VERSION_INTERVAL_MS = Number(process.env.AUTO_VERSION_INTERVAL_MS ?? 10 * 60 * 1000);
 
 export function createCollabServer() {
+  // Documents seeded from a legacy row during this process lifetime, by id → seed text, until their
+  // first incoming change. A client still holding an IndexedDB mirror of the *previous* (never
+  // persisted) seed merges it with this one into the text twice; that exact shape is reverted.
+  const freshlySeeded = new Map<string, string>();
+
   const hocuspocus = new Hocuspocus<CollabContext>({
     name: "markdoc",
     quiet: true,
@@ -54,6 +59,7 @@ export function createCollabServer() {
           .update(schema.documents)
           .set({ ystate: Y.encodeStateAsUpdate(document) })
           .where(eq(schema.documents.id, documentName));
+        freshlySeeded.set(documentName, row.content);
       }
       watchDocumentNotifications(document, documentName);
       startActivityWatch(document, documentName);
@@ -61,7 +67,18 @@ export function createCollabServer() {
       return document;
     },
 
+    async onChange({ document, documentName, context }: onChangePayload<CollabContext>) {
+      const seed = freshlySeeded.get(documentName);
+      if (seed === undefined) return;
+      // Only the first change after seeding can be the mirror artefact; anything later is an edit.
+      freshlySeeded.delete(documentName);
+      if (revertDoubledSeed(document, seed, { source: "local", context })) {
+        console.warn(`[collab] ${documentName}: reverted doubled text from a stale IndexedDB mirror of a pre-persistence seed`);
+      }
+    },
+
     async afterUnloadDocument({ documentName }) {
+      freshlySeeded.delete(documentName);
       await stopActivityWatch(documentName);
     },
 
