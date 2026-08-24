@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, codeText, richText, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, codeText, richText, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, budgetMs, type User } from "./helpers";
 import { LONG_DOC, h2Texts } from "./fixtures/burke-scale";
 
 test.describe("collaboration between two users", () => {
@@ -190,6 +190,10 @@ test.describe("collaboration between two users", () => {
  * when the text is 1,200 lines long.
  */
 test.describe("collaboration on a Burke-scale document", () => {
+  // 56 characters are typed one keystroke at a time below; on the 2-vCPU runner each round-trips the
+  // 150 KB document in 0.5–1.2 s (scale.spec's keystroke → preview samples), which alone can exceed
+  // the default 90 s. Same 3× CI allowance as every other budget.
+  test.describe.configure({ timeout: budgetMs(90_000) });
   let alice: User;
   let bob: User;
   let docId: string;
