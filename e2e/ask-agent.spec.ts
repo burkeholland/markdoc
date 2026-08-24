@@ -146,8 +146,12 @@ test.describe("ask an agent", () => {
       const card = page.getByTestId("agent-connect-card");
       await expect(card).toBeVisible();
       const origin = await page.evaluate(() => window.location.origin);
-      await expect(page.getByTestId("agent-connect-config")).toContainText(`"MARKDOC_URL": "${origin}"`);
-      await expect(page.getByTestId("agent-connect-config")).toContainText('"MARKDOC_TOKEN": "MARKDOC_TOKEN"');
+      await expect(page.getByTestId("agent-connect-config")).toContainText(`"url": "${origin}/api/mcp"`);
+      await expect(page.getByTestId("agent-connect-config")).toContainText('"type": "http"');
+      await expect(page.getByTestId("agent-connect-config")).toContainText(["Bearer", "MARKDOC_TOKEN"].join(" "));
+      // The stdio config is still there, one click away.
+      await page.getByTestId("agent-connect-stdio-toggle").click();
+      await expect(page.getByTestId("agent-connect-config-stdio")).toContainText(`"MARKDOC_URL": "${origin}"`);
       await expect(card).toContainText("Check Markdoc for requests");
 
       // Dismiss is remembered.
@@ -167,7 +171,7 @@ test.describe("ask an agent", () => {
       expect(new URL(page.url()).hash).toBe("#tokens");
       await expect(page.getByTestId("token-name")).toBeVisible();
       await expect(page.getByTestId("agent-connect-card")).toBeVisible();
-      await expect(page.getByTestId("agent-connect-config")).toContainText(`"MARKDOC_URL": "${origin}"`);
+      await expect(page.getByTestId("agent-connect-config")).toContainText(`"url": "${origin}/api/mcp"`);
       await page.getByTestId("settings-back-to-document").click();
       await page.waitForURL((u) => u.pathname === `/d/${id}`);
     } finally {
