@@ -21,6 +21,10 @@ const BLOCKS = [
   "    indented code",
   "Trailing paragraph with an ![image](https://example.com/i.png) inside.",
   "* star list\n\n* loose item",
+  "Paragraph with a [reference][ref], a [shortcut] and a footnote[^n1].",
+  "[ref]: https://example.com/ref",
+  "[^n1]: Footnote text with *emphasis*.",
+  "> quoted [shortcut] reference\n>\n> [shortcut]: https://example.com/q",
 ];
 
 const SNIPPETS = ["x", " ", "\n", "\n\n", "**", "`", "- ", "# ", "> ", "```", "|", "[", "]", "(", ")", "*", "\n- item", "\n\n## New", "~~~", "1. ", "<div>", "text with\nbreak", "---", "---\ntitle: t\n---\n"];
@@ -156,10 +160,70 @@ describe("reparseRange", () => {
     expect(parseMarkdown("---\ntitle: x\n---\n\n* a").doc.child(0).type.name).toBe("frontmatter");
   });
 
-  it("falls back when the document has reference definitions", () => {
+  it("falls back when the edit touches a reference definition", () => {
     const oldText = "[link][ref]\n\nbody\n\n[ref]: https://example.com";
-    const newText = "[link][ref]\n\nbody!\n\n[ref]: https://example.com";
+    const newText = "[link][ref]\n\nbody\n\n[ref]: https://example.org";
     expect(reparseRange(parseMarkdown(oldText), oldText, newText, textChangeSpan(oldText, newText)!)).toBeNull();
+    const added = "[link][ref]\n\nbody\n\n[ref]: https://example.com\n\n[^n]: note";
+    expect(reparseRange(parseMarkdown(oldText), oldText, added, textChangeSpan(oldText, added)!)).toBeNull();
+  });
+
+  it("matches a full parse for edits in documents with definitions and footnotes (task #357)", () => {
+    // Shaped like the Burke-scale hero document: headings, prose with footnote references and
+    // reference-style links, a fenced block, a table, and the definitions far from the edits.
+    const doc = [
+      "# Briefing",
+      "## 1. Intro",
+      "Prose with a footnote[^fn1] and a [reference link][docs] and a [shortcut].",
+      "```ts\nconst x = 1;\n```",
+      "| a | b |\n| - | - |\n| 1 | 2 |",
+      "[^fn1]: The footnote text.",
+      "[docs]: https://example.com/docs",
+      "[shortcut]: https://example.com/s 'Title'",
+      "## 2. Middle",
+      "- item one\n- item two[^fn2]",
+      "[^fn2]: Second note.",
+      "## 40. Last",
+      "The final paragraph of the document, with a [shortcut] and a footnote[^fn1] at the end.",
+    ].join("\n\n");
+    const end = doc.length;
+    const mid = doc.indexOf("## 2. Middle") + "## 2. Middle".length;
+    const edits: { name: string; at: number; del?: number; insert: string }[] = [
+      { name: "insert char at end", at: end, insert: "x" },
+      { name: "insert word at end", at: end, insert: " typed" },
+      { name: "delete char at end", at: end - 1, del: 1, insert: "" },
+      { name: "newline at end", at: end, insert: "\n\nNew paragraph" },
+      { name: "heading change", at: mid, insert: " section" },
+      { name: "heading level", at: doc.indexOf("## 40."), insert: "#" },
+      { name: "in code block", at: doc.indexOf("const x = 1;") + 6, insert: "y" },
+      { name: "in table", at: doc.indexOf("| 1 | 2 |") + 2, insert: "0" },
+      { name: "new footnote reference at end", at: end, insert: "[^fn2]" },
+      { name: "new shortcut reference mid", at: mid, insert: " [docs]" },
+      { name: "reference to nothing", at: end, insert: " [nowhere]" },
+      { name: "delete a footnote reference", at: doc.indexOf("[^fn2]"), del: 6, insert: "" },
+    ];
+    let incremental = 0;
+    for (const edit of edits) {
+      const next = doc.slice(0, edit.at) + edit.insert + doc.slice(edit.at + (edit.del ?? 0));
+      const span = textChangeSpan(doc, next)!;
+      const inc = reparseRange(parseMarkdown(doc), doc, next, span);
+      expect(inc, edit.name).not.toBeNull();
+      incremental++;
+      expect(plain(inc!), edit.name).toEqual(plain(parseMarkdown(next)));
+    }
+    expect(incremental).toBe(edits.length);
+
+    // Consecutive keystrokes at the end, each building on the previous incremental result.
+    let text = doc;
+    let result = parseMarkdown(doc);
+    for (const ch of " and more words[^fn1].") {
+      const next = text + ch;
+      const inc = reparseRange(result, text, next, textChangeSpan(text, next)!);
+      expect(inc).not.toBeNull();
+      expect(plain(inc!)).toEqual(plain(parseMarkdown(next)));
+      text = next;
+      result = inc!;
+    }
   });
 
   it("computes change spans", () => {

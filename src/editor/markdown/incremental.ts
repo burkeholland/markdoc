@@ -29,9 +29,17 @@ export function textChangeSpan(oldText: string, newText: string): ChangeSpan | n
 /** Constructs whose meaning depends on text anywhere else in the document (link reference definitions, footnotes). */
 const GLOBAL_CONTEXT = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[[^\]\n]*\]:|\[\^/m;
 
+/** A link reference definition or footnote definition, possibly nested in a blockquote or list item. */
+const DEFINITION = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[[^\]\n]*\]:/m;
+
 /** True when a region cannot be parsed in isolation because of document-wide constructs. */
 export function hasGlobalContext(text: string): boolean {
   return GLOBAL_CONTEXT.test(text);
+}
+
+/** True when the text defines a link reference or footnote, which changes how the rest of the document reads. */
+export function hasDefinition(text: string): boolean {
+  return DEFINITION.test(text);
 }
 
 /**
@@ -101,17 +109,26 @@ interface RegionParse {
   size: number;
 }
 
-/** Parse a region on its own; `followed` means more document comes after it. */
-function parseRegion(region: string, followed: boolean): RegionParse | null {
+/**
+ * Parse a region on its own; `followed` means more document comes after it. `definitions`
+ * are the definition blocks found elsewhere in the document: micromark only reads `[label]`
+ * and `[^note]` as references when a matching definition exists, so they are appended after
+ * the sentinel to give the region the same context a full parse would have.
+ */
+function parseRegion(region: string, followed: boolean, definitions: readonly string[]): RegionParse | null {
   if (region.trim() === "") return { nodes: [], blocks: [], segments: [], headings: [], size: 0 };
-  const text = followed ? region + "\n\n" + SENTINEL : region;
+  const sentinel = followed || definitions.length > 0;
+  const tail = definitions.length > 0 ? "\n\n" + definitions.join("\n\n") : "";
+  const text = sentinel ? region + "\n\n" + SENTINEL + tail : region;
   const parsed = parseMarkdown(text);
   let count = parsed.doc.childCount;
-  if (followed) {
-    const last = parsed.doc.child(count - 1);
-    const range = parsed.map.blocks[count - 1];
-    if (last.type !== schema.nodes.paragraph || last.textContent !== SENTINEL || range.from !== region.length + 2) return null;
-    count--;
+  if (sentinel) {
+    const sentinelFrom = region.length + 2;
+    let i = 0;
+    while (i < count && parsed.map.blocks[i].from < sentinelFrom) i++;
+    const node = i < count ? parsed.doc.child(i) : null;
+    if (!node || node.type !== schema.nodes.paragraph || node.textContent !== SENTINEL || parsed.map.blocks[i].from !== sentinelFrom) return null;
+    count = i;
     if (count === 0) return null;
   }
   const nodes: PMNode[] = [];
@@ -142,16 +159,17 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
   const blocks = prev.map.blocks;
   const n = blocks.length;
   if (n === 0 || n !== prev.doc.childCount || oldText.trim() === "" || newText.trim() === "") return null;
-  if (hasGlobalContext(oldText) || hasGlobalContext(newText)) return null;
   if (hasFrontmatter(oldText) !== hasFrontmatter(newText)) return null;
   const delta = span.newTo - span.oldTo;
 
   // Blocks overlapping the change, extended by one neighbour on each side.
   let a = blocks.findIndex((b) => b.to >= span.from);
   if (a === -1) a = n - 1;
+  const touchedFirst = a;
   a = Math.max(0, a - 1);
   let b = n - 1;
   while (b > 0 && blocks[b].from > span.oldTo) b--;
+  const touchedLast = Math.max(b, touchedFirst);
   b = Math.min(n - 1, Math.max(b + 1, a));
 
   const regionFrom = a === 0 ? 0 : lineStart(oldText, blocks[a].from);
@@ -173,7 +191,21 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
   if (regionFrom > 0 && region.startsWith("---")) return null;
   if (regionFrom === 0 && hasFrontmatter(region) !== hasFrontmatter(newText)) return null;
 
-  const sub = parseRegion(region, b < n - 1);
+  // A definition among the changed lines (before or after the edit) changes how every reference
+  // in the document reads; that needs a full parse. Unchanged definitions elsewhere are handed to
+  // the region parse instead (see parseRegion).
+  const touchedFrom = lineStart(oldText, Math.min(span.from, blocks[touchedFirst].from));
+  const touchedToOld = lineEnd(oldText, Math.max(span.oldTo, blocks[touchedLast].to));
+  if (hasDefinition(oldText.slice(touchedFrom, touchedToOld)) || hasDefinition(newText.slice(touchedFrom, touchedToOld + delta))) return null;
+  const definitions: string[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i >= a && i <= b) continue;
+    const node = prev.doc.child(i);
+    const text = oldText.slice(blocks[i].from, blocks[i].to);
+    if (node.type === schema.nodes.link_definition || node.type === schema.nodes.footnote_definition || hasDefinition(text)) definitions.push(text);
+  }
+
+  const sub = parseRegion(region, b < n - 1, definitions);
   if (!sub) return null;
   if (sub.nodes.length === 0 && a === 0 && b === n - 1) return null;
 
