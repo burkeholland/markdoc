@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { BookOpen, Bot, Check, Copy, Globe, KeyRound, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
 import { api, type ApiTokenDto, type CollaboratorDto } from "@/lib/api";
+import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CopyBlock, mcpConfigFor, mcpHttpConfigFor, TOKEN_PLACEHOLDER } from "@/components/settings/agent-connect-card";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
@@ -36,10 +37,29 @@ export function ShareDialog({
   const [role, setRole] = useState<Exclude<Role, "owner">>("editor");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [origin, setOrigin] = useState("");
   useEffect(() => setOrigin(window.location.origin), []);
   const readerLink = `${origin}/p/${doc.id}`;
+  const editorLink = `${origin}/d/${doc.id}`;
+  const readerLinkEl = useRef<HTMLElement>(null);
+  // Copy link has no visible text of its own; when both copy paths fail the URL is shown selected instead
+  // and stays until it is copied or the dialog closes.
+  const linkFallback = useRef<HTMLInputElement>(null);
+  const link = useCopy(editorLink, linkFallback, "Copy link");
+  const [showLinkFallback, setShowLinkFallback] = useState(false);
+  useEffect(() => {
+    if (link.status === "fallback") setShowLinkFallback(true);
+    else if (link.status === "copied") setShowLinkFallback(false);
+  }, [link.status]);
+  useEffect(() => {
+    if (!open) setShowLinkFallback(false);
+  }, [open]);
+  useEffect(() => {
+    if (showLinkFallback) {
+      linkFallback.current?.focus({ preventScroll: true });
+      linkFallback.current?.select();
+    }
+  }, [showLinkFallback]);
 
   useEffect(() => {
     if (!open) return;
@@ -81,12 +101,6 @@ export function ShareDialog({
   const setLink = async (value: DocumentDto["linkAccess"]) => {
     const res = await api.documents.patch(doc.id, { linkAccess: value });
     onDocChange(res.document);
-  };
-
-  const copyLink = async () => {
-    await navigator.clipboard.writeText(window.location.origin + `/d/${doc.id}`);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
   };
 
   return (
@@ -185,8 +199,10 @@ export function ShareDialog({
                 <div className="mt-2 flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs" data-testid="reader-link">
                   <BookOpen size={13} className="shrink-0 text-ink-3" />
                   <span className="shrink-0 text-ink-3">Reader link:</span>
-                  <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2">{readerLink}</code>
-                  <CopyButton text={readerLink} label="Copy" testId="copy-reader-link" />
+                  <code ref={readerLinkEl} className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2">
+                    {readerLink}
+                  </code>
+                  <CopyButton text={readerLink} label="Copy" testId="copy-reader-link" target={readerLinkEl} />
                 </div>
               )}
             </div>
@@ -197,12 +213,25 @@ export function ShareDialog({
           <AgentCollaborateCard origin={origin} open={open} />
         </div>
 
-        <div className="mt-5 flex items-center justify-between">
-          <button type="button" className="btn btn-outline gap-2" onClick={() => void copyLink()} data-testid="copy-link">
-            {copied ? <Check size={16} className="text-success" /> : <Link2 size={16} />}
-            {copied ? "Copied" : "Copy link"}
-          </button>
-          <button type="button" className="btn btn-primary" onClick={() => onOpenChange(false)}>
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <button type="button" className="btn btn-outline shrink-0 gap-2" onClick={link.copy} data-testid="copy-link">
+              {link.copied ? <Check size={16} className="text-success" /> : <Link2 size={16} />}
+              {link.label}
+            </button>
+            {showLinkFallback && (
+              <input
+                ref={linkFallback}
+                className="input h-9 min-w-0 flex-1 font-mono text-xs"
+                value={editorLink}
+                readOnly
+                aria-label="Document link"
+                onFocus={(e) => e.currentTarget.select()}
+                data-testid="copy-link-fallback"
+              />
+            )}
+          </div>
+          <button type="button" className="btn btn-primary shrink-0" onClick={() => onOpenChange(false)}>
             Done
           </button>
         </div>
@@ -211,21 +240,12 @@ export function ShareDialog({
   );
 }
 
-export function CopyButton({ text, label = "Copy", testId }: { text: string; label?: string; testId?: string }) {
-  const [copied, setCopied] = useState(false);
+export function CopyButton({ text, label = "Copy", testId, target }: { text: string; label?: string; testId?: string; target?: RefObject<HTMLElement | null> }) {
+  const { copy, label: buttonLabel, copied } = useCopy(text, target, label);
   return (
-    <button
-      type="button"
-      className="btn btn-sm btn-ghost gap-1.5"
-      data-testid={testId}
-      onClick={async () => {
-        await navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
-      }}
-    >
+    <button type="button" className="btn btn-sm btn-ghost gap-1.5" data-testid={testId} onClick={copy}>
       {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
-      {copied ? "Copied" : label}
+      {buttonLabel}
     </button>
   );
 }

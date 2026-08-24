@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCopy } from "@/lib/hooks";
 import { MCP_PATH } from "@/lib/mcp";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
@@ -59,25 +60,21 @@ export function useOrigin(fallback = ""): string {
 }
 
 export function CopyBlock({ value, label, testId, copyTestId }: { value: string; label: string; testId?: string; copyTestId?: string }) {
-  const [copied, setCopied] = useState(false);
+  const pre = useRef<HTMLPreElement>(null);
+  const { copy, label: buttonLabel, copied } = useCopy(value, pre);
   return (
     <div className="relative">
-      <pre className="overflow-x-auto rounded-lg border border-line bg-surface-2 p-3 pr-24 font-mono text-xs leading-5 text-ink-2" data-testid={testId}>
+      {/* pre-wrap + break-all: the Bearer line wraps instead of being clipped; what is copied is `value`, not this rendering. */}
+      <pre
+        ref={pre}
+        className="select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 p-3 pr-24 font-mono text-xs leading-5 text-ink-2"
+        data-testid={testId}
+      >
         {value}
       </pre>
-      <button
-        type="button"
-        className="btn btn-outline btn-sm absolute right-2 top-2 gap-1.5"
-        onClick={async () => {
-          await navigator.clipboard.writeText(value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        }}
-        aria-label={`Copy ${label}`}
-        data-testid={copyTestId}
-      >
+      <button type="button" className="btn btn-outline btn-sm absolute right-2 top-2 gap-1.5" onClick={copy} aria-label={`Copy ${label}`} data-testid={copyTestId}>
         {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
-        {copied ? "Copied" : "Copy"}
+        {buttonLabel}
       </button>
     </div>
   );

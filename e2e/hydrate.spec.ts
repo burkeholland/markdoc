@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import * as Y from "yjs";
-import { signIn, createDocument, openDocument, codeText, type User } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, budgetMs, type User } from "./helpers";
 
 /**
  * Regression for doubled content on reload. A document created with content through the API
@@ -138,10 +138,11 @@ test.describe("hydration happens once", () => {
       await openDocument(old.page, docId);
       expect(await codeText(old.page)).toBe(CONTENT);
       await expect(old.page.getByTestId("outline").locator("[data-outline-item]")).toHaveCount(headingCount(CONTENT));
-      expect(await old.page.evaluate((key) => localStorage.getItem(key), EPOCH_KEY)).toBe("2");
+      // The wipe runs alongside the connect and the editor does not wait on it; on a loaded runner the
+      // deletions land a beat after the document is in (see LOCAL_WIPE_TIMEOUT_MS in offline.ts).
+      await expect.poll(() => old.page.evaluate((key) => localStorage.getItem(key), EPOCH_KEY), { timeout: budgetMs(5_000) }).toBe("2");
       // Every markdoc:* database went; the one for this document was then recreated from the server's state.
-      const names = await localDbNames(old.page);
-      expect(names).not.toContain("markdoc:bystander");
+      await expect.poll(() => localDbNames(old.page), { timeout: budgetMs(5_000) }).not.toContain("markdoc:bystander");
 
       // Still single after a reload (the fresh mirror matches the server), and nothing doubled was pushed.
       await old.page.reload();

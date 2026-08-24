@@ -51,6 +51,14 @@ export const IDB_REGISTRY_KEY = "markdoc:idb-docs";
 /** How long to wait for IndexedDB before the UI stops waiting on it. */
 export const LOCAL_LOAD_TIMEOUT_MS = 1500;
 
+/**
+ * Cap on the epoch wipe ({@link ensureLocalEpoch}). Listing and deleting a handful of databases
+ * takes tens of milliseconds on an idle machine but ran past 1.5 s on a loaded 2-vCPU CI runner;
+ * the UI never waits on this (see `CollabSession.startLocalPersistence`), so the cap only bounds
+ * how long a session keeps hoping to open its mirror.
+ */
+export const LOCAL_WIPE_TIMEOUT_MS = 15_000;
+
 export function localDbName(docId: string): string {
   return `${LOCAL_DB_PREFIX}${docId}`;
 }
@@ -118,6 +126,20 @@ async function listLocalDbNames(): Promise<string[]> {
   return readRegistry().map(localDbName);
 }
 
+/**
+ * Delete one IndexedDB database. Unlike y-indexeddb's `clearDocument` this also settles on
+ * `blocked` (another connection — a tab not running this client — keeps it open): the request
+ * would otherwise hang until that connection closes, and a wipe must not wait on another tab.
+ */
+function deleteDatabase(name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(name);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error ?? new Error(`deleteDatabase(${name}) failed`));
+    req.onblocked = () => reject(new Error(`deleteDatabase(${name}) blocked by another open connection`));
+  });
+}
+
 /** The epoch the stored mirrors belong to, or null when nothing was ever recorded. */
 export function storedIdbEpoch(): number | null {
   const raw = storage()?.getItem(IDB_EPOCH_KEY);
@@ -133,10 +155,15 @@ let epochCheck: Promise<boolean> | null = null;
  * not, delete every `markdoc:*` database and record the new epoch. Must complete before
  * any {@link openLocalPersistence} call so a stale mirror is never applied to a document.
  *
- * Resolves true when mirrors may be opened. Resolves false when the wipe did not finish
- * within {@link LOCAL_LOAD_TIMEOUT_MS} (a database held open by another tab blocks its
- * deletion): the caller must then not open a mirror this session, and the epoch stays
- * unwritten so the next load tries again.
+ * Resolves true when mirrors may be opened: every deletion succeeded and the epoch is
+ * written (as soon as the deletions complete). Resolves false when a deletion failed or
+ * was blocked (a database held open by a tab not running this client), or when the wipe
+ * did not finish within {@link LOCAL_WIPE_TIMEOUT_MS}: the caller must then not open a
+ * mirror this session, and the epoch stays unwritten so the next load tries again.
+ *
+ * Callers must not make the UI wait on this promise — it is bounded by the wipe cap, not
+ * by {@link LOCAL_LOAD_TIMEOUT_MS} — which is safe because a wipe never leaves local state
+ * to apply: the mirror opened afterwards is always empty.
  */
 export function ensureLocalEpoch(): Promise<boolean> {
   if (!hasIndexedDB()) return Promise.resolve(true);
@@ -145,25 +172,25 @@ export function ensureLocalEpoch(): Promise<boolean> {
   epochCheck = (async () => {
     const wipe = (async () => {
       const names = await listLocalDbNames();
-      await Promise.all(
-        names.map(async (name) => {
-          try {
-            await clearDocument(name);
-          } catch {
-            // Best effort; a failed delete leaves the database for the next attempt.
-          }
-        }),
-      );
-      return names.length;
+      const results = await Promise.allSettled(names.map(deleteDatabase));
+      const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      return { total: names.length, failed };
     })();
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), LOCAL_LOAD_TIMEOUT_MS);
+      timer = setTimeout(() => resolve(null), LOCAL_WIPE_TIMEOUT_MS);
     });
     try {
-      const wiped = await Promise.race([wipe, timeout]);
-      if (wiped === null) {
-        console.warn(`[markdoc] local mirror reset did not finish in ${LOCAL_LOAD_TIMEOUT_MS}ms; not opening IndexedDB this session`);
+      const outcome = await Promise.race([wipe, timeout]);
+      if (outcome === null) {
+        console.warn(`[markdoc] local mirror reset did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms; not opening IndexedDB this session`);
+        return false;
+      }
+      if (outcome.failed.length > 0) {
+        const reasons = outcome.failed.map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason))).join("; ");
+        console.warn(
+          `[markdoc] local mirror reset left ${outcome.failed.length} of ${outcome.total} database${outcome.total === 1 ? "" : "s"} in place (${reasons}); not opening IndexedDB this session, retrying on the next load`,
+        );
         return false;
       }
       writeRegistry([]);
@@ -172,7 +199,7 @@ export function ensureLocalEpoch(): Promise<boolean> {
       } catch {
         // Without localStorage the wipe repeats on the next load; harmless for a doc that just synced.
       }
-      if (wiped > 0) console.info(`[markdoc] local mirrors reset to epoch ${IDB_EPOCH} (${wiped} database${wiped === 1 ? "" : "s"} removed)`);
+      if (outcome.total > 0) console.info(`[markdoc] local mirrors reset to epoch ${IDB_EPOCH} (${outcome.total} database${outcome.total === 1 ? "" : "s"} removed)`);
       return true;
     } finally {
       if (timer) clearTimeout(timer);
