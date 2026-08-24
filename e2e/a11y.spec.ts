@@ -169,11 +169,114 @@ async function ensureOutlineOpen(page: Page) {
   await expect(page.getByTestId("outline")).toBeVisible();
 }
 
+/**
+ * Sixty lines of prose with no links, checkboxes or other natively focusable content, so each pane's
+ * only focusable child is the editor itself. This is the case that used to fail
+ * `scrollable-region-focusable` (task #361): axe does not count a contenteditable without an explicit
+ * tabindex as focusable, and the Burke-scale fixture passed by accident because its links inside the
+ * rich pane satisfied the rule.
+ */
+const LONG_PLAIN_DOC = ["# Long plain fixture"]
+  .concat(Array.from({ length: 60 }, (_, i) => `Line ${i + 1} of plain prose, long enough to make both panes scroll at 1280×900.`))
+  .join("\n\n");
+
+/** Selector of each pane's scroll container: CodeMirror's own scroller and the rich pane's parent in the shell. */
+const CODE_SCROLLER = ".cm-scroller";
+const RICH_SCROLLER = "[data-testid=rich-pane] >> xpath=..";
+const OUTLINE_SCROLLER = "[data-testid=outline] nav";
+
+/** Whether `selector` scrolls vertically (the same 13 px buffer axe's scrollable-region-focusable uses). */
+const scrolls = (page: Page, selector: string) => page.locator(selector).first().evaluate((el) => el.scrollHeight > el.clientHeight + 13);
+
+const scrollTop = (page: Page, selector: string) => page.locator(selector).first().evaluate((el) => el.scrollTop);
+
+/** Elements in the Tab order inside `selector` (tabindex ≥ 0 or natively focusable, not disabled, rendered). */
+const tabStops = (page: Page, selector: string) =>
+  page.locator(selector).first().evaluate((root) => {
+    const out: string[] = [];
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+      const ti = el.getAttribute("tabindex");
+      const native = el.matches("a[href], button, input:not([type=hidden]), select, textarea, summary, [contenteditable='true'], [contenteditable='']");
+      const inOrder = ti !== null ? Number(ti) >= 0 : native;
+      if (!inOrder || el.matches(":disabled") || getComputedStyle(el).display === "none") continue;
+      out.push(`${el.tagName.toLowerCase()}.${String(el.className).split(" ")[0]}`);
+    }
+    return out;
+  });
+
+/** Press Tab until focus lands inside `selector` (no traps on the way). */
+async function tabUntil(page: Page, selector: string, max = 60) {
+  for (let i = 0; i < max; i++) {
+    if (await page.evaluate((s) => document.activeElement?.closest(s) !== null, selector)) return;
+    await page.keyboard.press("Tab");
+  }
+  throw new Error(`Tab never reached ${selector}`);
+}
+
+/**
+ * Both panes (and the outline) scroll at this size, the scanners see 0 violations, and a keyboard user
+ * can reach each pane with Tab and scroll it with PageDown — one tab stop per pane, never two.
+ */
+async function expectScrollablePanesAccessible(page: Page, state: string, { contrast = false, outline = false }: { contrast?: boolean; outline?: boolean } = {}) {
+  expect(await scrolls(page, CODE_SCROLLER), `${state}: the code pane scrolls`).toBe(true);
+  expect(await scrolls(page, RICH_SCROLLER), `${state}: the rich pane scrolls`).toBe(true);
+  if (outline) expect(await scrolls(page, OUTLINE_SCROLLER), `${state}: the outline scrolls`).toBe(true);
+  await scan(page, state, { contrast });
+
+  // Tab into the code pane → PageDown scrolls it. CodeMirror moves the cursor by a page and scrolls
+  // it into view, so the second PageDown is the first one that has to move the scroller.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await tabUntil(page, ".cm-content");
+  expect(await tabStops(page, "[data-testid=code-pane]"), `${state}: one tab stop in the code pane`).toEqual(["div.cm-content"]);
+  const codeBefore = await scrollTop(page, CODE_SCROLLER);
+  await page.keyboard.press("PageDown");
+  await page.keyboard.press("PageDown");
+  await expect.poll(() => scrollTop(page, CODE_SCROLLER), `${state}: PageDown scrolls the code pane`).toBeGreaterThan(codeBefore);
+
+  // Esc then Tab leaves CodeMirror (Tab indents there); Tab into the preview → PageDown scrolls it.
+  await page.keyboard.press("Control+Home");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Tab");
+  await tabUntil(page, ".md-rich");
+  expect(await tabStops(page, "[data-testid=rich-pane]"), `${state}: one tab stop in the rich pane`).toEqual(["div.ProseMirror"]);
+  await page.keyboard.press("Control+Home");
+  const richBefore = await scrollTop(page, RICH_SCROLLER);
+  await page.keyboard.press("PageDown");
+  await page.keyboard.press("PageDown");
+  await expect.poll(() => scrollTop(page, RICH_SCROLLER), `${state}: PageDown scrolls the rich pane`).toBeGreaterThan(richBefore);
+  await page.keyboard.press("Control+Home");
+}
+
 test.describe("axe: editor", () => {
   test("split view with outline and comments panels (Burke-scale document)", async ({ browser }) => {
     const { page, context } = await openEditorFixture(browser, "a11y-editor", { content: LONG_DOC });
     await expect(page.locator(".md-rich h2")).toHaveCount(40);
     await scan(page, "editor split + outline + comments (Burke-scale)");
+
+    // Narrower and shorter: the outline list (40 h2 + their h3s) scrolls too, and both panes scroll
+    // (task #361: scrollable-region-focusable on every scroller of a long document).
+    await page.setViewportSize({ width: 1280, height: 900 });
+    expect(await page.getByTestId("outline").locator("li").count()).toBeGreaterThan(100);
+    expect(await tabStops(page, OUTLINE_SCROLLER), "the outline list is one roving tab stop").toHaveLength(1);
+    await scan(page, "editor split + outline + comments (Burke-scale, 1280×900, light)");
+    expect(await scrolls(page, CODE_SCROLLER), "the code pane scrolls").toBe(true);
+    expect(await scrolls(page, RICH_SCROLLER), "the rich pane scrolls").toBe(true);
+    expect(await scrolls(page, OUTLINE_SCROLLER), "the outline scrolls").toBe(true);
+    await context.close();
+  });
+
+  test("long document without links: both panes scroll, light and dark, one tab stop per pane", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-editor-long");
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const id = await createDocument(page, LONG_PLAIN_DOC, "Long plain fixture");
+    await openDocument(page, id);
+    await ensureOutlineOpen(page);
+    await expect(page.locator(".md-rich p")).toHaveCount(60);
+    await expectScrollablePanesAccessible(page, "editor split, 60 lines (light)");
+
+    await setTheme(page, "dark");
+    await expect(page.locator(".md-rich p")).toHaveCount(60);
+    await expectScrollablePanesAccessible(page, "editor split, 60 lines (dark)", { contrast: true });
     await context.close();
   });
 

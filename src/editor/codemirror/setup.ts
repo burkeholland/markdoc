@@ -119,9 +119,18 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
         }
       }
     }),
-    // tabindex: contenteditable is natively focusable, but a scrollable `.cm-scroller` needs an explicitly
-    // focusable descendant for keyboard users (axe scrollable-region-focusable; surfaced by the
-    // Burke-scale a11y scan, where the code pane is the first one tall enough to scroll).
+    // tabindex="0" on `.cm-content`, the editor's single tab stop (task #321, verified in #361).
+    // Why it is needed: CodeMirror gives `.cm-scroller` (overflow: auto) tabindex="-1", so the
+    // scroller is not in the tab order itself, and axe's scrollable-region-focusable rule then wants
+    // a *tabbable descendant*. axe's isNativelyFocusable() does not treat contenteditable as focusable
+    // (only focusable-element does, and only for the scroller itself), so without an explicit
+    // tabindex the contenteditable `.cm-content` is invisible to that check on every document tall
+    // enough to scroll. Browsers already put contenteditable in the tab order, so this adds no second
+    // tab stop; Tab reaches the source and PageUp/PageDown/arrows scroll it (CodeMirror's defaultKeymap).
+    // Do not put tabindex="0" on `.cm-scroller` instead: that would be two tab stops for one editor.
+    // The rich pane needs the same attribute on `.ProseMirror` for the same reason (prosemirror/setup.ts);
+    // the #346 finding attributed to `.cm-scroller` was in fact the rich pane's scroller on a fixture
+    // without links (a link inside the contenteditable happened to satisfy the rule on other fixtures).
     EditorView.contentAttributes.of({ "aria-label": "Markdown source", spellcheck: "true", tabindex: "0" }),
   ];
 
