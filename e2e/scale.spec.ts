@@ -264,11 +264,24 @@ test.describe("Burke-scale", () => {
     if ((await page.getByTestId("comments-panel").count()) > 0) await page.getByTestId("comments-toggle").click();
     await expect(page.getByTestId("comments-panel")).toHaveCount(0);
 
-    const t0 = Date.now();
+    // Timed in the page: start on the toggle's click event, stop when the 15th open thread card is in the DOM.
+    await page.evaluate((count) => {
+      const w = window as unknown as { __panel: { start: number; end: number } };
+      w.__panel = { start: 0, end: 0 };
+      document.querySelector('[data-testid="comments-toggle"]')!.addEventListener("click", () => (w.__panel.start = performance.now()), { capture: true, once: true });
+      const mo = new MutationObserver(() => {
+        if (document.querySelectorAll('[data-testid="comment-thread"]').length >= count) {
+          w.__panel.end = performance.now();
+          mo.disconnect();
+        }
+      });
+      mo.observe(document.body, { childList: true, subtree: true });
+    }, openThreads);
     await page.getByTestId("comments-toggle").click();
     await expect(page.getByTestId("comments-panel")).toBeVisible();
     await expect(page.getByTestId("comment-thread")).toHaveCount(openThreads);
-    const ms = record(`comments panel: click → ${openThreads} open threads`, Date.now() - t0, budgetMs(1_000));
+    const panel = await page.evaluate(() => (window as unknown as { __panel: { start: number; end: number } }).__panel);
+    const ms = record(`comments panel: click → ${openThreads} open threads`, panel.end - panel.start, budgetMs(1_000));
     expect(ms).toBeLessThan(budgetMs(1_000));
     const chips = page.getByTestId("comments-panel").getByTestId("reaction-chip");
     await expect(chips).toHaveCount(totals.reactions);
