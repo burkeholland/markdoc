@@ -30,6 +30,17 @@ test.describe("share dialog · collaborate with an agent", () => {
     await expect(config).toContainText(["Bearer", "MARKDOC_TOKEN"].join(" "));
     await expect(page.getByTestId("share-agent-setup-link")).toHaveAttribute("href", "/settings#tokens");
 
+    // "Stop the permission prompts": the --allow-tool line uses the same server key as the config above it.
+    const ALLOW_LINE = "copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence),markdoc(markdoc_append),markdoc(markdoc_create_document)'";
+    await expect(card).toContainText("Stop the permission prompts");
+    const allowLine = page.getByTestId("share-agent-allow-line");
+    await expect(allowLine).toContainText("markdoc(markdoc_suggest)");
+    expect((await allowLine.innerText()).trim()).toBe(ALLOW_LINE);
+    await page.getByTestId("share-agent-allow-copy").click();
+    await expect(page.getByTestId("share-agent-allow-copy")).toContainText("Copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(ALLOW_LINE);
+    if (process.env.SHOT_DIR) await card.screenshot({ path: `${process.env.SHOT_DIR}/share-agent-card-permissions.png` });
+
     // The URL in the card is live: a plain GET is the liveness card, tools > 0.
     const alive = await page.request.get(`${origin}/api/mcp`);
     expect(alive.ok()).toBeTruthy();
