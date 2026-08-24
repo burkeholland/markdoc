@@ -62,7 +62,8 @@
   --cm-string: #16a34a;
   --cm-function: #2563eb;
   --cm-variable: #b45309;
-  --cm-number: #ea580c;
+  /* 5.2:1 on white, ≥ 4.7 on every light code surface incl. brand paper/chrome (#ea580c was 3.6). */
+  --cm-number: #c2410c;
   --cm-active-line: #f8fafc;
   --cm-selection: #bfdbfe88;
   --cm-bracket: #dbeafe;
@@ -85,7 +86,7 @@
   --hljs-string: #047857;
   --hljs-string-2: #16a34a;
   --hljs-number: #b45309;
-  --hljs-literal: #ea580c;
+  --hljs-literal: #c2410c;
   --hljs-title: #1d4ed8;
   --hljs-title-2: #2563eb;
   --hljs-attr: #0f766e;

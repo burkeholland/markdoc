@@ -33,8 +33,25 @@ const blocks = {
   "b dark": tokens(block('[data-brand="b"][data-theme="dark"]')),
 };
 
+// The base palettes; the brand blocks only override some tokens, so anything they leave alone (the
+// syntax colours below) resolves from these, exactly as the cascade does in the browser.
+const base = { light: tokens(block(":root")), dark: tokens(block('[data-theme="dark"]')) };
+// Unbranded, `--p-paper` / `--p-chrome` are `var(--p-surface)` (second :root block); mirror that with literals.
+for (const p of Object.values(base)) if (p["p-surface"]) Object.assign(p, { "p-paper": p["p-surface"], "p-chrome": p["p-surface"] });
+const resolved = {
+  light: base.light,
+  dark: { ...base.light, ...base.dark },
+  "a light": { ...base.light, ...blocks["a light"] },
+  "a dark": { ...base.light, ...base.dark, ...blocks["a dark"] },
+  "b light": { ...base.light, ...blocks["b light"] },
+  "b dark": { ...base.light, ...base.dark, ...blocks["b dark"] },
+};
+
 const SEMANTIC = ["ink", "ink-2", "ink-3", "ink-4", "line", "line-2", "surface", "surface-2", "surface-3", "accent", "accent-hover", "accent-soft", "success", "warning", "danger", "on-accent", "inverse"];
 const BRAND_KNOBS = ["font-display", "paper", "chrome", "radius-control", "selection"];
+// Syntax colours axe sees as small text: CodeMirror on the editor surface / active line, highlight.js inside `pre` (surface-2).
+const SYNTAX = ["cm-number", "cm-variable", "hljs-number", "hljs-literal"];
+const CODE_SURFACES = ["p-surface", "p-surface-2", "p-paper", "p-chrome", "cm-active-line"];
 
 describe("brand tokens", () => {
   it("the four brand blocks define exactly the same token set", () => {
@@ -93,6 +110,21 @@ describe("brand tokens", () => {
       it("faint text stays dimmer than secondary text", () => {
         expect(contrast(hex("p-ink-4"), hex("p-surface"))).toBeLessThan(contrast(hex("p-ink-3"), hex("p-surface")));
       });
+    });
+  }
+
+  // The editor's axe scan (color-contrast on) is the live gate for these; the numbers are checked here
+  // for the default look and both brands so a palette edit cannot quietly reintroduce the 3.6:1 orange.
+  for (const [name, p] of Object.entries(resolved)) {
+    it(`${name}: syntax number/literal colours are AA (≥ 4.5) on every surface code renders on`, () => {
+      const hex = (t: string) => {
+        const v = p[t];
+        if (!/^#[0-9a-f]{6}$/i.test(v ?? "")) throw new Error(`${name}: ${t} is not a hex colour: ${v}`);
+        return v;
+      };
+      for (const bg of CODE_SURFACES) {
+        for (const fg of SYNTAX) expect(contrast(hex(fg), hex(bg)), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      }
     });
   }
 });
