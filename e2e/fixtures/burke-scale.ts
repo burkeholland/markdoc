@@ -490,7 +490,7 @@ export interface SeedUsers {
 export interface SeedOptions {
   /** Also mint an API token for the owner (used by the MCP checks). Default true. */
   token?: boolean;
-  /** Parallel document creations (default 6). */
+  /** Parallel document creations and comment threads in flight (default 8). */
   concurrency?: number;
   log?: (line: string) => void;
 }
@@ -559,11 +559,16 @@ async function rewriteImages(request: SeedRequest, docId: string, content: strin
 export async function seedBurkeScale(request: SeedRequest, users: SeedUsers, options: SeedOptions = {}): Promise<BurkeScaleSeed> {
   const started = Date.now();
   const log = options.log ?? (() => undefined);
-  const concurrency = options.concurrency ?? 6;
+  const concurrency = options.concurrency ?? 8;
   const commentLoad = generateCommentLoad(users.peer);
   const t = () => `${String(Date.now() - started).padStart(6)} ms`;
 
-  // 1. Sixty documents (POST), long ones get their images uploaded and the content rewritten (PUT).
+  // 1. Sixty documents (POST), each followed by its own star / share / trash so the whole phase runs at
+  //    `concurrency` with no barrier in between. Long ones get their images uploaded and the content
+  //    rewritten (PUT) first.
+  const starredIds: string[] = [];
+  const trashedIds: string[] = [];
+  const sharedIds: string[] = [];
   const docs = await mapLimit(MANY_DOCS, concurrency, async (spec): Promise<SeededDoc> => {
     const created = (await expectOk(await request.post("/api/documents", { data: { title: spec.title, content: spec.content } }), `POST /api/documents (${spec.title})`)) as {
       document: { id: string };
@@ -574,45 +579,41 @@ export async function seedBurkeScale(request: SeedRequest, users: SeedUsers, opt
       content = await rewriteImages(request, id, spec.content);
       if (content !== spec.content) await expectOk(await request.put(`/api/documents/${id}/content`, { data: { content } }), `PUT /api/documents/${id}/content`);
     }
+    if (spec.starred) {
+      await expectOk(await request.put(`/api/documents/${id}/star`), `PUT /api/documents/${id}/star`);
+      starredIds.push(id);
+    }
+    if (spec.sharedAs) {
+      await expectOk(await request.post(`/api/documents/${id}/collaborators`, { data: { login: users.peer, role: spec.sharedAs } }), `POST /api/documents/${id}/collaborators`);
+      sharedIds.push(id);
+    }
+    if (spec.trashed) {
+      await expectOk(await request.delete(`/api/documents/${id}`), `DELETE /api/documents/${id}`);
+      trashedIds.push(id);
+    }
     return { id, spec, content };
   });
-  log(`[burke-scale] ${t()}  ${docs.length} documents created`);
+  log(`[burke-scale] ${t()}  ${docs.length} documents created; ${starredIds.length} starred, ${trashedIds.length} trashed, ${sharedIds.length} shared`);
 
-  // 2. Stars, trash, shares.
-  const starredIds: string[] = [];
-  const trashedIds: string[] = [];
-  const sharedIds: string[] = [];
-  await mapLimit(docs, concurrency, async (d) => {
-    if (d.spec.starred) {
-      await expectOk(await request.put(`/api/documents/${d.id}/star`), `PUT /api/documents/${d.id}/star`);
-      starredIds.push(d.id);
-    }
-    if (d.spec.sharedAs) {
-      await expectOk(await request.post(`/api/documents/${d.id}/collaborators`, { data: { login: users.peer, role: d.spec.sharedAs } }), `POST /api/documents/${d.id}/collaborators`);
-      sharedIds.push(d.id);
-    }
-    if (d.spec.trashed) {
-      await expectOk(await request.delete(`/api/documents/${d.id}`), `DELETE /api/documents/${d.id}`);
-      trashedIds.push(d.id);
-    }
-  });
-  log(`[burke-scale] ${t()}  ${starredIds.length} starred, ${trashedIds.length} trashed, ${sharedIds.length} shared`);
-
-  // 3. Comments on the hero doc — sequential: they all mutate the same live document.
+  // 2. Comments on the hero doc. Threads run `concurrency` at a time (each anchors on its own H2); inside a
+  //    thread add → replies → reactions → resolve stays sequential so reply order is deterministic.
+  //    Concurrent POSTs are safe: the collab server dedupes the document load, keeps the document in
+  //    memory while any direct connection is open and serialises stores through its save mutex. Run
+  //    one at a time, every request paid a full load → store → unload of the ~150 KB Y.Doc (≈ 480 ms on
+  //    a 2-vCPU runner, 53 s for the 110 requests).
   const longDoc = docs[0];
   if (longDoc.spec.content !== LONG_DOC) throw new Error("MANY_DOCS[0] must be LONG_DOC");
   const comments = `/api/documents/${longDoc.id}/comments`;
-  const threadIds: string[] = [];
-  for (const thread of commentLoad.threads) {
+  const threadIds = await mapLimit(commentLoad.threads, concurrency, async (thread) => {
     const added = (await expectOk(await request.post(comments, { data: { action: "add", quote: thread.quote, body: thread.body } }), `POST ${comments} add`)) as { id: string };
-    threadIds.push(added.id);
     for (const body of thread.replies) await expectOk(await request.post(comments, { data: { action: "reply", threadId: added.id, body } }), `POST ${comments} reply`);
     for (const emoji of thread.reactions) await expectOk(await request.post(comments, { data: { action: "react", threadId: added.id, emoji } }), `POST ${comments} react`);
     if (thread.resolved) await expectOk(await request.post(comments, { data: { action: "resolve", threadId: added.id, resolved: true } }), `POST ${comments} resolve`);
-  }
+    return added.id;
+  });
   log(`[burke-scale] ${t()}  ${threadIds.length} threads, ${commentLoad.totals.replies} replies, ${commentLoad.totals.resolved} resolved, ${commentLoad.totals.reactions} reactions`);
 
-  // 4. A token for the agent path.
+  // 3. A token for the agent path.
   let token: string | null = null;
   if (options.token !== false) {
     const minted = (await expectOk(await request.post("/api/tokens", { data: { name: "Burke-scale seed", expiresInDays: 30 } }), "POST /api/tokens")) as { token: { token: string } };
