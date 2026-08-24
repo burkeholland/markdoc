@@ -58,6 +58,8 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 ### Agents
 
 - Personal API tokens, a REST API, and an MCP server (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes and answer comments; the app shows who did what. See [docs/agents.md](docs/agents.md).
+- Copilot CLI as a collaborator: Markdoc serves MCP itself at `/api/mcp` (Streamable HTTP) — paste the config from the Share dialog's *Collaborate with an agent* card and the agent sits in the document with a bot avatar, a status and its own caret (`markdoc_presence`), waits for comments, edits, mentions and requests with `markdoc_watch`, and can be called by name as `@you/Copilot-CLI` from the `@` picker in any comment. See [What an agent session looks like](docs/agents.md#what-an-agent-session-looks-like).
+- Fewer permission prompts: every tool carries MCP annotations (read-only, additive, destructive), so Copilot CLI never asks before a read, and the Share and Connect cards carry a `copilot --allow-tool …` line that pre-allows the safe writes for a session. See [Permissions in Copilot CLI](docs/agents.md#permissions-in-copilot-cli).
 - **Ask an agent** from the document: select text (or nothing), pick an instruction and how the agent should answer (tracked changes, comment only, rewrite). The request waits in an inbox agents read over MCP (`markdoc_list_requests` → `markdoc_claim_request` → work with `requestId` → `markdoc_complete_request`); a header pill tracks it live, and the result comes back as suggestions plus a notification. Nothing runs server-side — your own Copilot CLI does the work. First-time users get a *Connect an agent* card with the MCP config for the host they are on. See [Requests](docs/agents.md#requests).
 
 Sign in is GitHub only (OAuth), with a development login for local work.
@@ -123,6 +125,8 @@ npm run typecheck
 npm run lint
 ```
 
+- Burke-scale fixture: `e2e/fixtures/burke-scale.ts` seeds a ~12k-word document with 25 comment threads, 60 documents (starred, shared, trashed) and an API token; `e2e/scale.spec.ts` runs the long-document flows against it with measured budgets (`npx playwright test --project scale`; its own CI job), and `npm run seed:burke-scale` loads the same fixture into a dev server so you can try the app with real volume.
+
 ### Working in a worktree
 
 A second checkout (`git worktree add ../markdoc-task-x -b task-x`) needs its own `npm ci --ignore-scripts`: Turbopack refuses to run from a junctioned or symlinked `node_modules`, so linking the main checkout's dependencies is not enough. No `.env.local` is needed — `PORT=3800 npm run dev:port` starts with dev-only auth defaults (see below) and a private PGlite directory, and `E2E_PORT=3218 npm run test:e2e` gives the suite its own port and Next cache.
@@ -147,6 +151,8 @@ Every `npm run` script, and the environment variables the test tooling reads:
 | `typecheck` / `lint` | `next typegen && tsc --noEmit` / `eslint` (Markdown files are not linted). |
 | `db:generate` | `drizzle-kit generate`: a new migration under `drizzle/` after a schema change. |
 | `mcp` | Run the MCP server from a checkout (`MARKDOC_URL`, `MARKDOC_TOKEN`). |
+| `mcp:smoke` | Checks a running server's `/api/mcp` with a real MCP client (`MARKDOC_URL`, `MARKDOC_TOKEN`): the `GET` card, the `401` without a token, `tools/list` against the stdio list with annotations, whoami, create and read. |
+| `repair:imported-ystate` | Re-seeds `ystate` for documents imported before `8e1f8c9` whose stored text disagrees with it (`-- --dry-run` reports, `-- --id <docId>` targets one); run with the live server stopped. |
 | `E2E_PORT` | Private port and Next cache (`.next-e2e-<port>`) for one e2e run; give each worktree its own on a shared machine. |
 | `E2E_SERVER_LOG` | `1` pipes the e2e dev server's stdout into the Playwright output so hydration warnings can be grepped. |
 | `PROD_BASE_URL` | Makes `e2e/prod-smoke.spec.ts` run against a built server instead of starting the dev server; the rest of the suite is skipped. |
