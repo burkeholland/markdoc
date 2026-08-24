@@ -147,8 +147,9 @@ async function waitForPreview(page: Page) {
   await expect(page.locator(".md-rich pre")).toBeVisible();
   await expect(page.locator(".md-rich hr")).toBeVisible();
   await expect(page.locator(".md-rich h2").nth(1)).toBeVisible();
-  // The image decides the hr's and the second h2's position; wait for it so the gaps are final.
-  await page.locator(".md-rich img").evaluate((img: HTMLImageElement) => img.complete || new Promise((r) => img.addEventListener("load", r, { once: true })));
+  // The image decides the hr's and the second h2's position; wait for it so the gaps are final
+  // (ProseMirror adds its own `img.ProseMirror-separator`, hence the alt filter).
+  await page.locator(".md-rich img[alt='Markdoc logo']").evaluate((img: HTMLImageElement) => img.complete || new Promise((r) => img.addEventListener("load", r, { once: true })));
 }
 
 test.describe("preview vertical rhythm", () => {
