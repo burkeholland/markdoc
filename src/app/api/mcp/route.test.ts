@@ -63,7 +63,7 @@ describe("/api/mcp", () => {
     const res = await call("POST", { headers: { "Content-Type": "application/json", Accept: MCP_ACCEPT, ...bearer(token) }, body: rpc("tools/list") });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    const body = (await res.json()) as { jsonrpc: string; id: number; result: { tools: { name: string; description: string; inputSchema: unknown }[] } };
+    const body = (await res.json()) as { jsonrpc: string; id: number; result: { tools: { name: string; description: string; inputSchema: unknown; annotations?: { readOnlyHint?: boolean; openWorldHint?: boolean } }[] } };
     expect(body.jsonrpc).toBe("2.0");
     expect(body.id).toBe(1);
     const names = body.result.tools.map((t) => t.name);
@@ -72,6 +72,13 @@ describe("/api/mcp", () => {
     expect(names).toContain("markdoc_read_document");
     expect(names).toContain("markdoc_presence");
     expect(names).toContain("markdoc_watch");
+    // The HTTP transport carries the same annotations as stdio (see annotations.test.ts for the sets).
+    for (const t of body.result.tools) {
+      expect(typeof t.annotations?.readOnlyHint, `${t.name}.annotations`).toBe("boolean");
+      expect(t.annotations?.openWorldHint).toBe(false);
+    }
+    expect(body.result.tools.find((t) => t.name === "markdoc_read_document")?.annotations?.readOnlyHint).toBe(true);
+    expect(body.result.tools.find((t) => t.name === "markdoc_suggest")?.annotations?.readOnlyHint).toBe(false);
   });
 
   it("initialize advertises the markdoc server and its instructions", async () => {

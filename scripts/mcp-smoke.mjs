@@ -4,12 +4,12 @@
 //
 //   MARKDOC_URL=http://localhost:3820 MARKDOC_TOKEN=mdk_... npm run mcp:smoke
 //
-// Lists the tools (same set as the stdio server), calls markdoc_whoami, creates a document and
-// reads it back. Exits non-zero on the first mismatch. See scripts/mcp-smoke.mts for the stdio run.
+// Lists the tools (same set as the stdio server, each with its annotations), calls markdoc_whoami,
+// creates a document and reads it back. Exits non-zero on the first mismatch. See scripts/mcp-smoke.mts for the stdio run.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { listToolNames } from "../mcp/tools.mjs";
+import { listToolDefinitions, listToolNames } from "../mcp/tools.mjs";
 
 const baseUrl = (process.env.MARKDOC_URL ?? "").replace(/\/$/, "");
 const token = process.env.MARKDOC_TOKEN;
@@ -54,6 +54,18 @@ const names = tools.map((t) => t.name).sort();
 const expected = listToolNames().sort();
 check(names.length === expected.length && names.every((n, i) => n === expected[i]), `tool list differs from mcp/tools.mjs:\n  http:  ${names.join(", ")}\n  stdio: ${expected.join(", ")}`);
 console.log(`tools: ${tools.length} (same as stdio) — ${names.join(", ")}`);
+
+// 4. Every tool carries the MCP annotations Copilot CLI reads to decide whether to prompt.
+const defined = new Map(listToolDefinitions().map((t) => [t.name, t.annotations]));
+const hint = (a) => (!a ? "MISSING" : a.readOnlyHint ? "read-only" : a.destructiveHint ? "destructive" : "additive");
+for (const t of tools) {
+  check(t.annotations && typeof t.annotations.readOnlyHint === "boolean", `${t.name} has no annotations over HTTP`);
+  check(JSON.stringify(t.annotations) === JSON.stringify(defined.get(t.name)), `${t.name} annotations differ from mcp/tools.mjs: ${JSON.stringify(t.annotations)}`);
+  check(t.annotations.openWorldHint === false, `${t.name} should have openWorldHint: false`);
+  console.log(`  ${t.name.padEnd(28)} ${hint(t.annotations).padEnd(12)} ${t.title ?? ""}`);
+}
+const byHint = tools.reduce((acc, t) => ((acc[hint(t.annotations)] = (acc[hint(t.annotations)] ?? 0) + 1), acc), {});
+console.log(`annotations: ${Object.entries(byHint).map(([k, v]) => `${v} ${k}`).join(", ")}`);
 
 const who = await client.callTool({ name: "markdoc_whoami", arguments: {} });
 check(!who.isError, `markdoc_whoami failed: ${text(who)}`);

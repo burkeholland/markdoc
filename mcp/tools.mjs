@@ -14,11 +14,25 @@ export const INSTRUCTIONS = [
   "Markdoc is a collaborative Markdown editor (Google Docs for Markdown).",
   "Use markdoc_create_document to start a document people can open in their browser and edit with you in real time;",
   "always give the user the returned URL.",
-  "Prefer markdoc_suggest over markdoc_replace_content when revising someone else's text: suggestions show up as tracked",
-  "changes the humans accept or reject. Use markdoc_comments to read feedback left for you and markdoc_comment to reply.",
+  "markdoc_suggest is the preferred way to change text: suggestions show up as tracked changes the humans review and accept or reject in the app.",
+  "Use markdoc_replace_content only when the user explicitly asks you to rewrite the document in place.",
+  "Use markdoc_comments to read feedback left for you and markdoc_comment to reply.",
   "When the user asks you to check Markdoc for requests (or says an agent was asked for something in a document), call markdoc_list_requests,",
   "claim a request, do what its instruction says with the requestId, and call markdoc_complete_request with a one-line summary.",
 ].join(" ");
+
+/**
+ * MCP `ToolAnnotations` (https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations).
+ * Clients such as GitHub Copilot CLI read them to decide whether to ask the user before a call, so
+ * every tool below carries one of these three sets. `openWorldHint` is false everywhere: the server
+ * only ever talks to the Markdoc it is configured for.
+ */
+/** Pure reads: nothing changes, safe to repeat. */
+export const READ_ONLY = Object.freeze({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+/** Additive or reversible writes (a suggestion, a comment, a new document, a commit): not destructive, not idempotent. */
+export const ADDITIVE = Object.freeze({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+/** Writes that replace or remove what others wrote, or decide on their work. */
+export const DESTRUCTIVE = Object.freeze({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
 
 /**
  * A small REST client: `{ baseUrl, request, get, post, put, patch, delete }` over fetch with the
@@ -79,7 +93,18 @@ export function createMarkdocServer(client) {
 
 /** The tool names `registerTools` registers (same order), without a live server or client. */
 export function listToolNames() {
-  return registerTools({ registerTool: () => {} }, null);
+  return listToolDefinitions().map((t) => t.name);
+}
+
+/**
+ * `{ name, title, annotations }` for every tool, in registration order, without a live server or
+ * client — what docs, the smoke script and the tests compare `tools/list` against.
+ * @returns {{ name: string, title: string, annotations: typeof READ_ONLY | typeof ADDITIVE | typeof DESTRUCTIVE }[]}
+ */
+export function listToolDefinitions() {
+  const defs = [];
+  registerTools({ registerTool: (name, config) => defs.push({ name, title: config.title, annotations: config.annotations }) }, null);
+  return defs;
 }
 
 /**
@@ -92,6 +117,8 @@ export function listToolNames() {
 export function registerTools(server, client) {
   const names = [];
   const tool = (name, config, handler) => {
+    // Every tool must say what it does to the document; a missing set is a bug, not a default.
+    if (!config.annotations || typeof config.annotations.readOnlyHint !== "boolean") throw new Error(`Tool ${name} has no annotations`);
     server.registerTool(name, config, handler);
     names.push(name);
   };
@@ -101,7 +128,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_whoami",
-    { title: "Who am I", description: "Show which user and agent identity this token acts as.", inputSchema: {} },
+    { title: "Who am I", description: "Show which user and agent identity this token acts as.", inputSchema: {}, annotations: READ_ONLY },
     async () => {
       const me = await api("GET", "/api/me");
       return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}". Server: ${baseUrl}`, me);
@@ -115,6 +142,7 @@ export function registerTools(server, client) {
       description:
         "List the documents the user owns or that are shared with them (id, title, storage, last edit, starred, lastOpenedAt). Most recently opened first; never-opened documents follow by last edit.",
       inputSchema: { starred: z.boolean().optional().describe("Only documents the user has starred"), trash: z.boolean().optional().describe("List the user's own documents in the trash instead (each has deletedAt)") },
+      annotations: READ_ONLY,
     },
     async ({ starred, trash }) => {
       const { documents } = await api("GET", `/api/documents${trash ? "?trash=1" : starred ? "?starred=1" : ""}`);
@@ -132,6 +160,7 @@ export function registerTools(server, client) {
       title: "Search documents",
       description: "Search the user's documents by title or body text (case-insensitive). Returns matching documents with a short snippet around the first content match.",
       inputSchema: { query: z.string().min(2).max(200).describe("Text to look for in titles and content"), limit: z.number().int().min(1).max(100).optional().describe("Max results (default 20)") },
+      annotations: READ_ONLY,
     },
     async ({ query, limit }) => {
       const { documents } = await api("GET", `/api/documents?q=${encodeURIComponent(query)}${limit ? `&limit=${limit}` : ""}`);
@@ -151,6 +180,7 @@ export function registerTools(server, client) {
         content: z.string().optional().describe("Markdown content (omit when using `template`)"),
         template: z.string().optional().describe("Template id; fills title and content when `content` is omitted"),
       },
+      annotations: ADDITIVE,
     },
     async ({ title, content, template }) => {
       if (content === undefined && !template) throw new Error("Provide `content` or `template`.");
@@ -170,6 +200,7 @@ export function registerTools(server, client) {
         content: z.string().describe("The text to import (≤ 2 MB)"),
         format: z.enum(["markdown", "text", "html"]).default("markdown").describe("How to read `content`"),
       },
+      annotations: ADDITIVE,
     },
     async ({ title, content, format }) => {
       const { documents } = await api("POST", "/api/import/file", { title, content, format });
@@ -181,7 +212,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_list_templates",
-    { title: "List templates", description: "List the document templates markdoc_create_document accepts (id, name, description).", inputSchema: {} },
+    { title: "List templates", description: "List the document templates markdoc_create_document accepts (id, name, description).", inputSchema: {}, annotations: READ_ONLY },
     async () => {
       const { templates } = await api("GET", "/api/templates");
       return ok(templates.map((t) => `- ${t.id}: ${t.name} — ${t.description}`).join("\n"), { templates });
@@ -194,6 +225,7 @@ export function registerTools(server, client) {
       title: "Read document",
       description: "Read a document's current Markdown. `clean` excludes text that is still a pending suggestion.",
       inputSchema: { id: z.string().describe("Document id (from the URL /d/<id>)"), clean: z.boolean().optional().describe("Return the text without pending suggestions (default false)") },
+      annotations: READ_ONLY,
     },
     async ({ id, clean }) => {
       const data = await api("GET", `/api/documents/${id}/content`);
@@ -207,8 +239,9 @@ export function registerTools(server, client) {
     "markdoc_replace_content",
     {
       title: "Replace content",
-      description: "Replace the whole document with new Markdown. Applied live as a minimal edit (collaborators keep their cursors). Use for your own drafts; use markdoc_suggest for other people's text.",
+      description: "Replace the whole document with new Markdown. Applied live as a minimal edit (collaborators keep their cursors). Use for your own drafts, or when the user explicitly asks for an in-place rewrite; use markdoc_suggest for other people's text.",
       inputSchema: { id: z.string(), content: z.string().describe("The complete new Markdown"), message: z.string().optional().describe("Short description saved in version history") },
+      annotations: DESTRUCTIVE,
     },
     async ({ id, content, message }) => {
       const res = await api("PUT", `/api/documents/${id}/content`, { content, message });
@@ -218,7 +251,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_append",
-    { title: "Append", description: "Append Markdown to the end of a document.", inputSchema: { id: z.string(), markdown: z.string() } },
+    { title: "Append", description: "Append Markdown to the end of a document.", inputSchema: { id: z.string(), markdown: z.string() }, annotations: ADDITIVE },
     async ({ id, markdown }) => {
       await api("PATCH", `/api/documents/${id}/content`, { append: markdown });
       return ok(`Appended to ${id}. ${docUrl(id)}`);
@@ -237,6 +270,7 @@ export function registerTools(server, client) {
         edits: z.array(z.object({ find: z.string(), replace: z.string(), all: z.boolean().optional() })).optional(),
         requestId: z.string().optional().describe("Link to an \"Ask an agent\" request you are working on (from markdoc_list_requests)"),
       },
+      annotations: ADDITIVE,
     },
     async ({ id, content, edits, requestId }) => {
       if (!content && !edits?.length) throw new Error("Provide `content` or `edits`.");
@@ -247,7 +281,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_suggestions",
-    { title: "List suggestions", description: "List pending suggestions (tracked changes) on a document with author and surrounding context.", inputSchema: { id: z.string() } },
+    { title: "List suggestions", description: "List pending suggestions (tracked changes) on a document with author and surrounding context.", inputSchema: { id: z.string() }, annotations: READ_ONLY },
     async ({ id }) => {
       const { suggestions } = await api("GET", `/api/documents/${id}/suggestions`);
       const lines = suggestions.map((s) => `- [${s.id}] ${s.type} by ${s.author}: ${JSON.stringify(s.text)} — context: ${JSON.stringify(s.context)}`);
@@ -261,6 +295,7 @@ export function registerTools(server, client) {
       title: "Accept or reject suggestions",
       description: "Accept or reject a suggestion by id, or all of them. Only do this when the user asked you to.",
       inputSchema: { id: z.string(), action: z.enum(["accept", "reject", "acceptAll", "rejectAll"]), suggestionId: z.string().optional() },
+      annotations: DESTRUCTIVE,
     },
     async ({ id, action, suggestionId }) => {
       await api("POST", `/api/documents/${id}/suggestions`, { action, id: suggestionId });
@@ -270,7 +305,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_comments",
-    { title: "List comments", description: "Read the comment threads on a document (open and resolved), with the text each one is anchored to.", inputSchema: { id: z.string() } },
+    { title: "List comments", description: "Read the comment threads on a document (open and resolved), with the text each one is anchored to.", inputSchema: { id: z.string() }, annotations: READ_ONLY },
     async ({ id }) => {
       const { comments } = await api("GET", `/api/documents/${id}/comments`);
       const reactions = (r) => (r && Object.keys(r).length ? " " + Object.entries(r).map(([e, ids]) => `${e}${ids.length}`).join(" ") : "");
@@ -297,6 +332,7 @@ export function registerTools(server, client) {
         emoji: z.string().optional().describe("With `react`: the emoji to toggle, e.g. 👍 ❤️ 🎉 👀 😄 🚀"),
         requestId: z.string().optional().describe("With `add`: link the comment to an \"Ask an agent\" request you are working on"),
       },
+      annotations: ADDITIVE,
     },
     async ({ id, action, quote, threadId, replyId, body, emoji, requestId }) => {
       if (action === "add") {
@@ -322,7 +358,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_versions",
-    { title: "Version history", description: "List saved versions of a document.", inputSchema: { id: z.string() } },
+    { title: "Version history", description: "List saved versions of a document.", inputSchema: { id: z.string() }, annotations: READ_ONLY },
     async ({ id }) => {
       const { versions } = await api("GET", `/api/documents/${id}/versions`);
       const lines = versions.map((v) => `- v${v.number} ${v.kind}${v.title ? ` "${v.title}"` : ""} by ${v.createdByName ?? "?"} at ${v.createdAt}${v.commitSha ? ` (commit ${v.commitSha.slice(0, 7)})` : ""}`);
@@ -335,8 +371,9 @@ export function registerTools(server, client) {
     {
       title: "Publish to GitHub",
       description:
-        "Publish the document to its linked gist or repository file (creates a commit). The document must already be connected to GitHub in the app. Refuses (status remote-ahead / diverged) when GitHub moved since the last sync; force: true overwrites.",
+        "Publish the document to its linked gist or repository file (creates a commit). The document must already be connected to GitHub in the app. Refuses (status remote-ahead / diverged) when GitHub moved since the last sync; force: true overwrites GitHub's version — only when the user asks.",
       inputSchema: { id: z.string(), message: z.string().optional(), force: z.boolean().optional() },
+      annotations: ADDITIVE,
     },
     async ({ id, message, force }) => {
       try {
@@ -354,8 +391,9 @@ export function registerTools(server, client) {
     {
       title: "Pull from GitHub",
       description:
-        "Bring the linked GitHub file into the document. Refuses (status local-ahead / diverged) when unpublished edits would be lost; merge: true three-way merges a diverged document (conflicts come back as status \"conflict\" with the marked text), force: true replaces the text regardless.",
+        "Bring the linked GitHub file into the document. Refuses (status local-ahead / diverged) when unpublished edits would be lost; merge: true three-way merges a diverged document (conflicts come back as status \"conflict\" with the marked text), force: true replaces the text regardless — only when the user asks.",
       inputSchema: { id: z.string(), merge: z.boolean().optional(), force: z.boolean().optional() },
+      annotations: ADDITIVE,
     },
     async ({ id, merge, force }) => {
       const q = [force && "force=1", merge && "merge=1"].filter(Boolean).join("&");
@@ -373,7 +411,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_sync_status",
-    { title: "GitHub sync status", description: "Where a GitHub-linked document stands: in-sync, local-ahead (publish is safe), remote-ahead (pull is safe) or diverged (merge or force one side).", inputSchema: { id: z.string() } },
+    { title: "GitHub sync status", description: "Where a GitHub-linked document stands: in-sync, local-ahead (publish is safe), remote-ahead (pull is safe) or diverged (merge or force one side).", inputSchema: { id: z.string() }, annotations: READ_ONLY },
     async ({ id }) => {
       const s = await api("GET", `/api/documents/${id}/sync?fresh=1`);
       return ok(`${s.status} (local ${s.lines.local} line(s) changed, GitHub ${s.lines.remote}).`, s);
@@ -387,6 +425,7 @@ export function registerTools(server, client) {
       description:
         "Create a copy of a document owned by the user: \"Copy of <title>\" with the current text (pending suggestions dropped, comments not copied), images included. The copy is always a Markdoc document even when the source is linked to GitHub. Returns the new id and URL.",
       inputSchema: { id: z.string().describe("Document id to copy") },
+      annotations: ADDITIVE,
     },
     async ({ id }) => {
       const copy = await api("POST", `/api/documents/${id}/duplicate`);
@@ -401,6 +440,7 @@ export function registerTools(server, client) {
       description:
         "Move a document the user owns to the trash (soft delete). It disappears from lists and search and nobody can open it; the owner can restore it with markdoc_restore_document for 30 days, after which it is deleted for good. Pass permanent: true to delete it immediately and irreversibly.",
       inputSchema: { id: z.string(), permanent: z.boolean().optional().describe("Delete for good instead of moving to the trash (default false)") },
+      annotations: DESTRUCTIVE,
     },
     async ({ id, permanent }) => {
       await api("DELETE", `/api/documents/${id}${permanent ? "?permanent=1" : ""}`);
@@ -410,7 +450,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_restore_document",
-    { title: "Restore from trash", description: "Take a document the user owns out of the trash so it is listed and editable again.", inputSchema: { id: z.string() } },
+    { title: "Restore from trash", description: "Take a document the user owns out of the trash so it is listed and editable again.", inputSchema: { id: z.string() }, annotations: ADDITIVE },
     async ({ id }) => {
       const res = await api("POST", `/api/documents/${id}/restore`);
       return ok(`Restored "${res.document.title}" (id ${id}). Open it: ${docUrl(id)}`, { id, title: res.document.title, url: docUrl(id) });
@@ -427,6 +467,7 @@ export function registerTools(server, client) {
         status: z.enum(["open", "claimed", "done", "cancelled"]).optional().describe("Default: open"),
         limit: z.number().int().min(1).max(200).optional(),
       },
+      annotations: READ_ONLY,
     },
     async ({ status, limit }) => {
       const q = new URLSearchParams();
@@ -448,6 +489,7 @@ export function registerTools(server, client) {
       title: "Claim a request",
       description: "Take an open request so the human sees who is working on it. Then read the document (markdoc_read_document), do the work with markdoc_suggest / markdoc_comment / markdoc_replace_content passing the same requestId, and finish with markdoc_complete_request.",
       inputSchema: { documentId: z.string(), requestId: z.string() },
+      annotations: ADDITIVE,
     },
     async ({ documentId, requestId }) => {
       const { request } = await api("POST", `/api/documents/${documentId}/requests/${requestId}/claim`);
@@ -468,6 +510,7 @@ export function registerTools(server, client) {
         requestId: z.string(),
         summary: z.string().max(2000).optional().describe("One sentence for the human: what you changed or found"),
       },
+      annotations: ADDITIVE,
     },
     async ({ documentId, requestId, summary }) => {
       const { request } = await api("POST", `/api/documents/${documentId}/requests/${requestId}/complete`, summary ? { summary } : {});
@@ -489,6 +532,7 @@ export function registerTools(server, client) {
         anchor: z.string().min(1).max(2000).optional().describe("Exact text you are looking at; your caret selects its first occurrence"),
         cursor: z.object({ from: z.number().int().min(0), to: z.number().int().min(0) }).nullable().optional().describe("Offsets in the clean Markdown to put your caret at; null hides it"),
       },
+      annotations: ADDITIVE,
     },
     async ({ id, state, status, anchor, cursor }) => {
       const res = await api("POST", `/api/agent/documents/${id}/presence`, { state, ...(status !== undefined ? { status } : {}), ...(anchor !== undefined ? { anchor } : {}), ...(cursor !== undefined ? { cursor } : {}) });
@@ -512,6 +556,7 @@ export function registerTools(server, client) {
         since: z.string().optional().describe("Cursor from the previous call"),
         wait: z.number().int().min(0).max(55).optional().describe("Seconds to wait for events (default 30)"),
       },
+      annotations: READ_ONLY,
     },
     async ({ id, since, wait }) => {
       const q = new URLSearchParams();

@@ -8,6 +8,7 @@ import { api, type ApiTokenDto, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CopyBlock, mcpConfigFor, mcpHttpConfigFor, TOKEN_PLACEHOLDER } from "@/components/settings/agent-connect-card";
+import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 import { cn } from "@/lib/utils";
 
 const LINK_OPTIONS: { value: DocumentDto["linkAccess"]; label: string; description: string }[] = [
@@ -333,6 +334,7 @@ export function AgentCollaborateCard({ origin, open }: { origin: string; open: b
         <CopyBlock value={config} label="Copilot CLI MCP configuration" testId="share-agent-config" copyTestId="share-agent-copy" />
       </div>
       {minted && <p className="mt-1.5 text-[11px] text-ink-3">Copy it now — the token is not shown again. Revoke it any time in Settings.</p>}
+      <CopilotPermissionsHint testIdPrefix="share-agent" className="mt-2" />
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <a className="text-accent hover:underline" href="/settings#tokens" data-testid="share-agent-setup-link">
           Step-by-step setup and tokens

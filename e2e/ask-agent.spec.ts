@@ -153,6 +153,9 @@ test.describe("ask an agent", () => {
       await page.getByTestId("agent-connect-stdio-toggle").click();
       await expect(page.getByTestId("agent-connect-config-stdio")).toContainText(`"MARKDOC_URL": "${origin}"`);
       await expect(card).toContainText("Check Markdoc for requests");
+      // The same "Stop the permission prompts" block as the Share card, with the allow line for the `markdoc` server key.
+      await expect(card).toContainText("Stop the permission prompts");
+      await expect(page.getByTestId("agent-connect-allow-line")).toContainText("copilot --allow-tool 'markdoc(markdoc_suggest)");
 
       // Dismiss is remembered.
       await page.getByTestId("agent-connect-dismiss").click();

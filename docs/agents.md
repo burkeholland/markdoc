@@ -9,6 +9,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 - [1. Create a token](#1-create-a-token)
 - [2. Connect an MCP client](#2-connect-an-mcp-client)
   - [MCP tools](#mcp-tools)
+  - [Permissions in Copilot CLI](#permissions-in-copilot-cli)
   - [Requests](#requests)
     - [Working a request, step by step](#working-a-request-step-by-step)
 - [3. Or call the REST API directly](#3-or-call-the-rest-api-directly)
@@ -100,6 +101,30 @@ Twenty-six tools; every `id` is the document id from the URL `/d/<id>`.
 `markdoc_suggest` and `markdoc_comment` (`add`) also take an optional `requestId` so the work they produce is counted against the request.
 
 A typical session: *"Let's write the launch plan"* → the agent calls `markdoc_create_document` and gives you the link → you open it, invite teammates, edit and comment → the agent reads `markdoc_comments`, answers with `markdoc_comment`, and revises with `markdoc_suggest` → you accept the good parts in the app.
+
+### Permissions in Copilot CLI
+
+Copilot CLI runs MCP tools under its own permission layer: reads are allowed automatically, anything that can change something asks you first — *Allow once*, *Allow for this session*, or *Don't ask again in this directory*, which is saved to `~/.copilot/permissions-config.json` (scoped to the Git root or working directory you started in). That is why a session that only suggests and comments can still prompt several times. Three ways to quieten it, from narrowest to widest (full reference: [Allowing and denying tool use](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools)):
+
+1. **Pre-allow the safe tools for a session** with `--allow-tool`. Patterns are `<server key>(<tool>)`, comma-separated in one argument, and the server key is the one in your config (`markdoc` in the blocks above). The Share card and the Connect card carry this line with a Copy button:
+
+   ```sh
+   copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence),markdoc(markdoc_append),markdoc(markdoc_create_document)'
+   ```
+
+   `markdoc(markdoc_*)` is not a pattern the CLI understands; `--allow-tool markdoc` (no parentheses) allows every Markdoc tool, including the destructive ones below. Command-line allows last for that session only and are never written to disk.
+2. **Answer *Don't ask again in this directory* once per tool** when prompted. The approval lands in `~/.copilot/permissions-config.json`; `/reset-allowed-tools` clears it for the current location.
+3. `/allow-all` (or `--allow-all-tools`) allows everything, shell included — not recommended outside a sandbox.
+
+Every Markdoc tool carries the MCP `annotations` clients use to decide whether to ask (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false` — the server only talks to Markdoc). `tools/list` returns them; `npm run mcp:smoke` prints them.
+
+| Hint | Tools | Meaning for the client |
+| --- | --- | --- |
+| `readOnlyHint: true` | `whoami`, `list_documents`, `search_documents`, `list_templates`, `read_document`, `suggestions`, `comments`, `versions`, `sync_status`, `list_requests`, `watch` | Pure reads; a client that honours hints never asks. |
+| `destructiveHint: false`, `idempotentHint: false` | `create_document`, `import_text`, `duplicate_document`, `append`, `suggest`, `comment`, `presence`, `claim_request`, `complete_request`, `restore_document`, `publish`, `pull` | Additive or reversible: a new document, a tracked change the humans review, a comment, a commit. `publish` / `pull` with `force: true` overwrite one side — the tool descriptions tell the model to do that only when asked. |
+| `destructiveHint: true` | `replace_content`, `review_suggestions`, `delete_document` | Rewrites text in place (versioned, but live), decides on other people's suggestions, or removes a document. These are meant to stay behind a prompt. |
+
+The server-level instructions tell the model that `markdoc_suggest` is the preferred way to change text and `markdoc_replace_content` is for an explicit "rewrite it in place", so the destructive tool is rarely even attempted.
 
 ### Requests
 
