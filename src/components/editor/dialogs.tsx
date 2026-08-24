@@ -322,7 +322,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Column right / left", "Mod-Alt-→ / ←"],
       ["Delete row", "Mod-Alt-⌫"],
       ["Delete column", "Mod-Alt-Shift-⌫"],
-      ["New row from the last cell", "Enter"],
+      ["New row from the last cell", "Enter / Tab"],
       ["Leave the table (paragraph below)", "Mod-Enter / ↓ from the last row"],
       ["Delete empty table", "⌫"],
     ],

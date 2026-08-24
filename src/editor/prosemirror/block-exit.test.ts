@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { EditorState, TextSelection, type Command, type Transaction } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import { baseKeymap, chainCommands, createParagraphNear, exitCode, liftEmptyBlock, newlineInCode, splitBlock } from "prosemirror-commands";
+import { goToNextCell } from "prosemirror-tables";
+import { sinkListItem } from "prosemirror-schema-list";
 import { parseMarkdown } from "../markdown/parse";
 import { serializeMarkdown } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
@@ -252,6 +254,15 @@ describe("table", () => {
     expect(withNext.selection.$from.parent.textContent).toBe("After.");
     const last = type(press(caretIn(TABLE, "table_cell", undefined, 1), modEnter), "Out");
     expect(md(last)).toBe("| a   | b   |\n| --- | --- |\n| 1   | 2   |\n\nOut");
+  });
+
+  it("Tab in the bottom-right cell adds a row (Tab elsewhere moves to the next cell)", () => {
+    const tab = chainCommands(goToNextCell(1), addRowOnEnterAtEnd, sinkListItem(schema.nodes.list_item));
+    const moved = press(caretIn(TABLE, "table_cell", undefined, 0), tab);
+    expect(md(moved)).toBe("| a   | b   |\n| --- | --- |\n| 1   | 2   |");
+    expect(moved.selection.$from.parent.textContent).toBe("2");
+    const grown = type(press(caretIn(TABLE, "table_cell", undefined, 1), tab), "3");
+    expect(md(grown)).toBe("| a   | b   |\n| --- | --- |\n| 1   | 2   |\n| 3   |     |");
   });
 
   it("Shift+Enter is a line break in the cell; Backspace in an empty first cell is a no-op", () => {
