@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import * as Y from "yjs";
 import { signIn, createDocument, openDocument, codeText, budgetMs, type User } from "./helpers";
+import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
  * Regression for doubled content on reload. A document created with content through the API
@@ -63,25 +64,32 @@ test.describe("hydration happens once", () => {
     await alice.context.close();
   });
 
-  test("an API-created document is unchanged after a reload without edits", async () => {
-    const { page } = alice;
-    const docId = await createDocument(page, CONTENT);
-    await openDocument(page, docId);
-    const outline = page.getByTestId("outline").locator("[data-outline-item]");
-    expect(await codeText(page)).toBe(CONTENT);
-    await expect(outline).toHaveCount(headingCount(CONTENT));
+  // The one-paragraph document catches the bug; the Burke-scale one (~12k words, 143 headings,
+  // e2e/fixtures/burke-scale.ts) catches it at the size where a doubled seed is also a slow one.
+  for (const [label, content] of [
+    ["small", CONTENT],
+    ["Burke-scale", LONG_DOC],
+  ] as const) {
+    test(`an API-created ${label} document is unchanged after a reload without edits`, async () => {
+      const { page } = alice;
+      const docId = await createDocument(page, content);
+      await openDocument(page, docId);
+      const outline = page.getByTestId("outline").locator("[data-outline-item]");
+      expect(await codeText(page)).toBe(content);
+      await expect(outline).toHaveCount(headingCount(content));
 
-    await page.reload();
-    await openDocument(page, docId);
-    expect(await codeText(page)).toBe(CONTENT);
-    await expect(outline).toHaveCount(headingCount(CONTENT));
+      await page.reload();
+      await openDocument(page, docId);
+      expect(await codeText(page)).toBe(content);
+      await expect(outline).toHaveCount(headingCount(content));
 
-    // Once more: the second load must not have minted a new seed either.
-    await page.reload();
-    await openDocument(page, docId);
-    expect(await codeText(page)).toBe(CONTENT);
-    await expect(outline).toHaveCount(headingCount(CONTENT));
-  });
+      // Once more: the second load must not have minted a new seed either.
+      await page.reload();
+      await openDocument(page, docId);
+      expect(await codeText(page)).toBe(content);
+      await expect(outline).toHaveCount(headingCount(content));
+    });
+  }
 
   test("a template document opened from the dashboard survives a refresh", async () => {
     const { page } = alice;

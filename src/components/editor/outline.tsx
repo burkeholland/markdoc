@@ -81,7 +81,9 @@ export function OutlinePanel({ session, open, onToggle, cursorSource, onSelect }
   }
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-line" data-testid="outline">
+    // max-h-full: inside the phone drawer (a fixed-height flex column) a long outline must scroll in the
+    // nav instead of growing past the viewport; on the desktop row it already stretches to the main height.
+    <aside className="flex max-h-full min-h-0 w-56 shrink-0 flex-col border-r border-line" data-testid="outline">
       <div className="flex h-12 items-center justify-between pl-6 pr-2">
         <span className="pane-label">Outline</span>
         <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Hide outline" title="Hide outline">

@@ -110,6 +110,9 @@ export default async function globalSetup(config: FullConfig) {
       "/api/documents?q=warm",
       "/api/templates",
       `/api/documents/${docId}/export?format=html`,
+      // A plain GET answers the liveness card (200) and compiles the route: scale.spec.ts test 8 measured
+      // 14,504 ms for its first timed `markdoc_suggest` on CI (Turbopack's cold compile) vs 1,204 ms on retry.
+      "/api/mcp",
     ];
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {

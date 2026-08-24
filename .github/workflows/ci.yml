@@ -31,7 +31,8 @@ jobs:
   e2e:
     # ~130 tests; one worker on the 2-vCPU runner ran past the 30-min cap. Two shards with two workers
     # each (playwright.config.ts under CI) keep every job well inside it; fail-fast off so a red shard
-    # still lets the other finish and report.
+    # still lets the other finish and report. `--project default` leaves e2e/scale.spec.ts to the job
+    # below so these two keep their pre-#321 weight.
     name: End-to-end (Playwright) ${{ matrix.shard }}/2
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -47,7 +48,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e -- --shard=${{ matrix.shard }}/2
+      - run: npm run test:e2e -- --project default --shard=${{ matrix.shard }}/2
         env:
           CI: "1"
           NEXT_TELEMETRY_DISABLED: "1"
@@ -55,6 +56,35 @@ jobs:
         if: failure()
         with:
           name: playwright-report-${{ matrix.shard }}
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7
+
+  scale:
+    # e2e/scale.spec.ts alone: the Burke-scale fixture (60 documents, a 12k-word doc, 25 comment
+    # threads) seeds in 60+ s on the runner and the spec takes 3+ min; riding in a shard above tipped
+    # unrelated specs over their timeouts (PR 72). Every number it asserts is a budgetMs budget and is
+    # printed as `[scale] <name> <ms> ms` in this job's log.
+    name: End-to-end (Playwright) scale
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e -- --project scale
+        env:
+          CI: "1"
+          NEXT_TELEMETRY_DISABLED: "1"
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: playwright-report-scale
           path: |
             playwright-report
             test-results

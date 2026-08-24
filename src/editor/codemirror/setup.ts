@@ -119,7 +119,10 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
         }
       }
     }),
-    EditorView.contentAttributes.of({ "aria-label": "Markdown source", spellcheck: "true" }),
+    // tabindex: contenteditable is natively focusable, but a scrollable `.cm-scroller` needs an explicitly
+    // focusable descendant for keyboard users (axe scrollable-region-focusable; surfaced by the
+    // Burke-scale a11y scan, where the code pane is the first one tall enough to scroll).
+    EditorView.contentAttributes.of({ "aria-label": "Markdown source", spellcheck: "true", tabindex: "0" }),
   ];
 
   return {
