@@ -311,7 +311,7 @@ describe("slash menu undo", () => {
 
     const quote = SLASH_ITEMS.find((item) => item.id === "quote")!;
     const seen = observe(() => applySlashCommand(view, quote.command!(""), undoManager));
-    expect(ytext.toString()).toBe("Hello\n\nWorld\n\n> ");
+    expect(ytext.toString()).toBe("Hello\n\nWorld\n\n>");
     expect(seen.transactions).toBe(1);
     expect(seen.stackItems).toBe(1);
 

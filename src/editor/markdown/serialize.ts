@@ -12,6 +12,9 @@ interface InternalState {
   marks: Record<string, unknown>;
   options: SerializerOptions;
   out: string;
+  delim: string;
+  closed: PMNode | null;
+  flushClose(size?: number): void;
 }
 
 const StateCtor = MarkdownSerializerState as unknown as new (
@@ -72,9 +75,44 @@ function renderCell(state: State, cell: PMNode): string {
   return (sub as unknown as InternalState).out.replace(/\n/g, "<br>").trim();
 }
 
+const isEmptyParagraph = (node: PMNode) => node.type === schema.nodes.paragraph && node.content.size === 0;
+
 const nodes: Record<string, NodeSerializer> = {
+  /**
+   * Like `wrapBlock("> ", ...)`, but an empty paragraph inside the quote (the line Enter creates
+   * at the end of a quoted paragraph) becomes one marker-only `>` line beyond the blank line that
+   * separates blocks; `parse.ts` reads it back the same way, so the rich document round-trips
+   * exactly and the caret stays where the user put it.
+   */
   blockquote(state, node) {
-    state.wrapBlock("> ", null, node, () => state.renderContent(node));
+    const internal = state as unknown as InternalState;
+    state.write("> ");
+    const oldDelim = internal.delim;
+    internal.delim += "> ";
+    const marker = internal.delim.replace(/\s+$/, "");
+    if (node.childCount === 1 && isEmptyParagraph(node.firstChild!)) {
+      // An empty quote is a single `>`.
+      internal.out = internal.out.replace(/[ \t]+$/, "");
+    } else {
+      let lastEmpty = false;
+      node.forEach((child, _, i) => {
+        if (!isEmptyParagraph(child)) {
+          state.render(child, node, i);
+          lastEmpty = false;
+          return;
+        }
+        if (i === 0) internal.out = internal.out.replace(/[ \t]+$/, "") + "\n" + marker + "\n";
+        else {
+          internal.flushClose(2);
+          internal.out += marker + "\n";
+        }
+        internal.closed = null;
+        lastEmpty = true;
+      });
+      if (lastEmpty) internal.out = internal.out.replace(/\n$/, "");
+    }
+    internal.delim = oldDelim;
+    state.closeBlock(node);
   },
   code_block(state, node) {
     const fence = fenceFor(node.textContent);
@@ -127,7 +165,8 @@ const nodes: Record<string, NodeSerializer> = {
   hard_break(state, node, parent, index) {
     for (let i = index + 1; i < parent.childCount; i++) {
       if (parent.child(i).type !== node.type) {
-        state.write("\\\n");
+        // A GFM table row is one line: the break has to be a `<br>` there.
+        state.write((state as State).inTable ? "<br>" : "\\\n");
         return;
       }
     }

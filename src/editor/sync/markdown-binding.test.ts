@@ -246,6 +246,26 @@ describe("MarkdownBinding", () => {
     expect(view.state.doc.child(0).childCount).toBe(3);
   });
 
+  it("Enter at the end of a quoted line keeps the caret in the quote and never re-syncs it away (task #415)", async () => {
+    // Burke #1240: the empty paragraph splitBlock created inside the blockquote had no Markdown form,
+    // the binding fell back to a full re-sync that dropped it, and the caret landed in the next block.
+    ytext.insert(0, "# H1\n\n> A quote line.\n\n## Heading two\n");
+    const { view, binding } = editor();
+    const endOfQuote = 4 + 1 + 1 + "A quote line.".length;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, endOfQuote)));
+    splitBlock(view.state, view.dispatch);
+    await new Promise<void>((r) => queueMicrotask(r));
+    expect(ytext.toString()).toBe("# H1\n\n> A quote line.\n>\n>\n\n## Heading two\n");
+    expect(view.state.doc.child(1).childCount).toBe(2);
+    expect(view.state.selection.$from.node(-1).type.name).toBe("blockquote");
+    expect(view.state.selection.$from.parent.content.size).toBe(0);
+    expect(binding.blocks[1]).toEqual({ from: 6, to: 25 });
+    // Typing lands in the new quote line, not at the top of the document or in the heading.
+    typeText(view, "more");
+    await new Promise<void>((r) => queueMicrotask(r));
+    expect(ytext.toString()).toBe("# H1\n\n> A quote line.\n>\n> more\n\n## Heading two\n");
+  });
+
   it("maps positions between surfaces including phantoms", () => {
     ytext.insert(0, "First.\n\nThird.");
     const { view, binding } = editor();
