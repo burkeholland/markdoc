@@ -58,6 +58,27 @@ function definitionIds(text: string): Set<string> {
  */
 const SENTINEL = "MARKDOC\u00b7SENTINEL";
 
+/**
+ * True when the last thing in `node` (a top-level block ending the region) is a fenced code block
+ * whose closing fence is missing: the region's last non-blank line, minus container prefixes, is
+ * not a fence at least as long as the opener.
+ */
+function endsInUnclosedFence(node: Md.Node, region: string): boolean {
+  let last: Md.Node = node;
+  while (last.type !== "code" && (last as Md.Parent).children?.length) {
+    const children = (last as Md.Parent).children;
+    last = children[children.length - 1];
+  }
+  if (last.type !== "code") return false;
+  const start = last.position?.start.offset ?? 0;
+  const opener = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(region.slice(start, lineEnd(region, start)));
+  if (!opener) return false;
+  const trimmed = region.trimEnd();
+  const lastLine = trimmed.slice(lineStart(trimmed, trimmed.length)).replace(/^[ \t>]*/, "");
+  const closer = /^(`{3,}|~{3,})[ \t]*$/.exec(lastLine);
+  return !closer || closer[1][0] !== opener[1][0] || closer[1].length < opener[1].length || lineStart(trimmed, trimmed.length) <= start;
+}
+
 function countNewlines(text: string, end: number): number {
   let n = 0;
   for (let i = 0; i < end; i++) if (text.charCodeAt(i) === 10) n++;
@@ -165,6 +186,9 @@ function parseRegion(region: string, followed: boolean, definitions: readonly st
     // sentinel behind it it also swallows the trailing line endings: its range then reaches
     // past the last content line, which an isolated parse never does.
     if (!followed && parsed.map.blocks[count - 1].to > lineEnd(region, region.trimEnd().length)) return null;
+    // Inside a quote the same unclosed fence ends one character apart in the two parses while the
+    // quote itself does not, so the range check above cannot see it.
+    if (!followed && endsInUnclosedFence(parsed.tree.children[count - 1], region)) return null;
   }
   const nodes: PMNode[] = [];
   let size = 0;

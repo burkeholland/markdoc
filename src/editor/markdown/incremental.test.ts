@@ -25,9 +25,20 @@ const BLOCKS = [
   "[ref]: https://example.com/ref",
   "[^n1]: Footnote text with *emphasis*.",
   "> quoted [shortcut] reference\n>\n> [shortcut]: https://example.com/q",
+  // Task #434: hard breaks inside containers, with and without a line after them, and code blocks with 0–3 trailing newlines.
+  "> quote line\\\n> second line",
+  "> quote line<br>",
+  "- item\\\n  continued\n- plain<br>",
+  "1. first\\\n   more\n2. second",
+  "| a | b |\n| - | - |\n| 1<br>2 | 3<br> |",
+  "```ts\nconst a = 1;\n```",
+  "```ts\nconst a = 1;\n\n```",
+  "```ts\nconst a = 1;\n\n\n```",
+  "```ts\nconst a = 1;\n\n\n\n```",
+  "> ```\n> quoted code\n> \n> ```",
 ];
 
-const SNIPPETS = ["x", " ", "\n", "\n\n", "**", "`", "- ", "# ", "> ", "```", "|", "[", "]", "(", ")", "*", "\n- item", "\n\n## New", "~~~", "1. ", "<div>", "text with\nbreak", "---", "---\ntitle: t\n---\n"];
+const SNIPPETS = ["x", " ", "\n", "\n\n", "**", "`", "- ", "# ", "> ", "```", "|", "[", "]", "(", ")", "*", "\n- item", "\n\n## New", "~~~", "1. ", "<div>", "text with\nbreak", "---", "---\ntitle: t\n---\n", "\\\n", "<br>"];
 
 function rng(seed: number) {
   let s = seed >>> 0;

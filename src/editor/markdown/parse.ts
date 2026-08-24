@@ -110,6 +110,19 @@ function contentBounds(src: string, node: Md.Node): SrcRange {
   }
 }
 
+const isBr = (node: Md.Node) => node.type === "html" && /^<br\s*\/?>$/i.test((node as Md.Html).value);
+
+/**
+ * A `<br>` that only has other `<br>`s after it and some content before it ends its block: it is
+ * the hard break `serialize.ts` writes for a break at the end of a paragraph (the `\` form would
+ * be a literal backslash there). A block of nothing but `<br>` is an HTML block, never inline.
+ */
+function isTrailingBreak(siblings: Md.Node[], index: number): boolean {
+  for (let i = index + 1; i < siblings.length; i++) if (!isBr(siblings[i])) return false;
+  for (let i = 0; i < index; i++) if (!isBr(siblings[i])) return true;
+  return false;
+}
+
 /**
  * Accumulates inline nodes while merging adjacent text nodes that carry the
  * same marks. Merging ourselves (instead of letting ProseMirror do it) keeps the
@@ -380,7 +393,7 @@ class Converter {
       const gap = this.src.slice(lineStart, first);
       if (/^[ \t]{1,3}$/.test(gap)) b.text(gap, [], { from: lineStart, to: first });
     }
-    for (const child of children) this.inline(child, [], b);
+    for (let i = 0; i < children.length; i++) this.inline(children[i], [], b, children, i);
     if ((parent.type === "paragraph" || parent.type === "heading") && children.length) {
       const last = offsets(children[children.length - 1]).to;
       let lineEnd = this.src.indexOf("\n", last);
@@ -391,7 +404,11 @@ class Converter {
     return b.nodes;
   }
 
-  private inline(node: Md.PhrasingContent | Md.Node, marks: readonly Mark[], b: InlineBuilder) {
+  /**
+   * `siblings`/`index` are given for the direct children of a block so that a `<br>` ending the
+   * block can be recognised (see `isTrailingBreak`).
+   */
+  private inline(node: Md.PhrasingContent | Md.Node, marks: readonly Mark[], b: InlineBuilder, siblings?: Md.Node[], index = 0) {
     const range = offsets(node);
     switch (node.type) {
       case "text":
@@ -463,8 +480,9 @@ class Converter {
         return;
       }
       case "html":
-        // `<br>` is how a table cell spells a line break (the serializer writes it back the same way).
-        if (this.inTableCell && /^<br\s*\/?>$/i.test((node as Md.Html).value)) {
+        // `<br>` is how a table cell spells a line break, and how any block spells a break at its
+        // end (CommonMark has no trailing hard break); the serializer writes both back the same way.
+        if (isBr(node) && (this.inTableCell || (siblings && isTrailingBreak(siblings, index)))) {
           b.leaf(schema.nodes.hard_break.create(), range);
           return;
         }

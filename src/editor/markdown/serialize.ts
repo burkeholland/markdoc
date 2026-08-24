@@ -114,12 +114,16 @@ const nodes: Record<string, NodeSerializer> = {
     internal.delim = oldDelim;
     state.closeBlock(node);
   },
+  /**
+   * The closing fence always goes on the line after the last line of text. mdast reads the
+   * content as the lines between the fences minus that one final line ending, so a text that
+   * ends with newlines (a blank last line the user typed) keeps exactly those newlines.
+   */
   code_block(state, node) {
     const fence = fenceFor(node.textContent);
     const info = [node.attrs.language, node.attrs.meta].filter(Boolean).join(" ");
     state.write(fence + info + "\n");
-    state.text(node.textContent, false);
-    state.ensureNewLine();
+    if (node.textContent) state.text(node.textContent + "\n", false);
     state.write(fence);
     state.closeBlock(node);
   },
@@ -162,11 +166,28 @@ const nodes: Record<string, NodeSerializer> = {
         ")",
     );
   },
+  /**
+   * `\` + newline is the CommonMark hard break, but only between content: at the end of a block
+   * the backslash is literal and trailing spaces are dropped, so a break that ends the paragraph
+   * (Shift+Enter before the next line is typed) is spelled `<br>`, which `parse.ts` reads back as
+   * the same node. A GFM table row is one line, so a cell always uses `<br>`.
+   */
   hard_break(state, node, parent, index) {
-    for (let i = index + 1; i < parent.childCount; i++) {
-      if (parent.child(i).type !== node.type) {
-        // A GFM table row is one line: the break has to be a `<br>` there.
-        state.write((state as State).inTable ? "<br>" : "\\\n");
+    if ((state as State).inTable) {
+      state.write("<br>");
+      return;
+    }
+    const isBlank = (n: PMNode) => n.type === node.type || (n.isText && !/\S/.test(n.text!));
+    let trailing = true;
+    for (let i = index + 1; i < parent.childCount && trailing; i++) if (!isBlank(parent.child(i))) trailing = false;
+    if (!trailing) {
+      state.write("\\\n");
+      return;
+    }
+    // A paragraph of nothing but breaks has no Markdown form (`<br>` alone on a line is an HTML block).
+    for (let i = 0; i < index; i++) {
+      if (!isBlank(parent.child(i))) {
+        state.write("<br>");
         return;
       }
     }

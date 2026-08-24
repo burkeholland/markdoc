@@ -206,6 +206,70 @@ describe("serializeMarkdown", () => {
     expect(roundTrip(src)).toBe(src);
   });
 
+  describe("hard break at the end of a quote line, list item or table cell (task #434)", () => {
+    const p = (...content: ReturnType<typeof schema.text>[]) => schema.nodes.paragraph.create(null, content);
+    const br = () => schema.nodes.hard_break.create();
+    const stable = (src: string) => {
+      const out = roundTrip(src);
+      expect(out, src).toBe(src);
+      expect(parseMarkdown(out).doc.eq(parseMarkdown(src).doc), `${src} keeps its shape`).toBe(true);
+    };
+
+    it("a break between two lines is a trailing backslash in quotes and list items, <br> in cells", () => {
+      for (const src of ["> A quote line.\\\n> second line", "- one\\\n  two", "1. one\\\n   two", "- [ ] one\\\n  two", "> - a\\\n>   b"]) stable(src);
+      stable("| a      | b   |\n| ------ | --- |\n| 1<br>2 | 3   |");
+    });
+
+    it("a break that ends the block (Shift+Enter before the next line is typed) is <br>, which reads back as the same node", () => {
+      // CommonMark has no trailing hard break: `\` at the end of a paragraph is a literal backslash.
+      const quote = schema.nodes.doc.create(null, [schema.nodes.blockquote.create(null, [p(schema.text("A quote line."), br())])]);
+      expect(serializeMarkdown(quote)).toBe("> A quote line.<br>");
+      expect(parseMarkdown("> A quote line.<br>").doc.eq(quote)).toBe(true);
+      const item = schema.nodes.doc.create(null, [
+        schema.nodes.bullet_list.create({ bullet: "-", tight: true }, [schema.nodes.list_item.create(null, [p(schema.text("one"), br())])]),
+      ]);
+      expect(serializeMarkdown(item)).toBe("- one<br>");
+      expect(parseMarkdown("- one<br>").doc.eq(item)).toBe(true);
+      const cell = parseMarkdown("| a | b |\n| --- | --- |\n| 1<br> | <br> |").doc;
+      expect(cell.child(0).child(1).child(0).lastChild!.type.name).toBe("hard_break");
+      expect(cell.child(0).child(1).child(1).childCount).toBe(1);
+      expect(serializeMarkdown(cell)).toBe("| a     | b    |\n| ----- | ---- |\n| 1<br> | <br> |");
+      // Typing after the break turns it into the backslash form.
+      const typed = schema.nodes.doc.create(null, [schema.nodes.blockquote.create(null, [p(schema.text("A quote line."), br(), schema.text("second line"))])]);
+      expect(serializeMarkdown(typed)).toBe("> A quote line.\\\n> second line");
+      for (const src of ["A<br>", "A<br><br>", "> A<br>", "- a<br>\n- b", "A<br> ", "<br>A", "\\\nA", "> \\\n> A"]) stable(src);
+    });
+
+    it("keeps a <br> between text as inline HTML and a paragraph of breaks alone has no form", () => {
+      expect(parseMarkdown("A<br>B").doc.child(0).child(1).type.name).toBe("html_inline");
+      expect(parseMarkdown("<br>").doc.child(0).type.name).toBe("html_block");
+      expect(serializeMarkdown(schema.nodes.doc.create(null, [p(br())]))).toBe("");
+    });
+  });
+
+  describe("trailing newlines in a fenced code block (task #434)", () => {
+    const code = (text: string) => schema.nodes.doc.create(null, [schema.nodes.code_block.create({ language: "ts" }, text ? [schema.text(text)] : [])]);
+
+    it("keeps 0, 1, 2 and 3 trailing newlines through serialize → parse", () => {
+      for (const tail of ["", "\n", "\n\n", "\n\n\n"]) {
+        const doc = code("const a = 1;" + tail);
+        const md = serializeMarkdown(doc);
+        expect(md, JSON.stringify(tail)).toBe("```ts\nconst a = 1;" + tail + "\n```");
+        expect(parseMarkdown(md).doc.eq(doc), JSON.stringify(tail)).toBe(true);
+        expect(roundTrip(md)).toBe(md);
+      }
+      expect(serializeMarkdown(code(""))).toBe("```ts\n```");
+      expect(serializeMarkdown(code("\n"))).toBe("```ts\n\n\n```");
+      expect(parseMarkdown("```ts\n\n\n```").doc.firstChild!.textContent).toBe("\n");
+    });
+
+    it("also inside a quote", () => {
+      const src = "> ```\n> a\n> \n> ```";
+      expect(roundTrip(src)).toBe(src);
+      expect(parseMarkdown(src).doc.firstChild!.firstChild!.textContent).toBe("a\n");
+    });
+  });
+
   it("preserves trailing spaces in paragraphs", () => {
     expect(roundTrip("hello ")).toBe("hello ");
   });
