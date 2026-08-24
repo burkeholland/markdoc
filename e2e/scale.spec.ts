@@ -76,6 +76,31 @@ async function keystrokeRoundTrip(page: Page, char: string, marker: string): Pro
   });
 }
 
+/**
+ * Type at the current code-pane cursor the way the lead measured task #357: a unique `prefix`, then
+ * 10 single characters, each timed keydown → preview inside the page. Also times the whole prefix
+ * token from the outside (`keyboard.type` + poll), which includes any main-thread work still queued
+ * from earlier keystrokes — the in-page number cannot see that, the lead's 1.5–2 s per 4-char token
+ * could. Returns the 10 per-keystroke samples; the token time is recorded as its own `[scale]` line.
+ */
+async function typeAndMeasure(page: Page, prefix: string): Promise<number[]> {
+  const t0 = Date.now();
+  await page.keyboard.type(prefix);
+  await page.waitForFunction((m) => (document.querySelector(".md-rich")?.textContent ?? "").includes(m), prefix, { timeout: 15_000 });
+  const tokenMs = Date.now() - t0;
+  const tokenBudget = budgetMs(300) * prefix.length;
+  record(`  ${prefix.length}-char token typed → in preview (outside view)`, tokenMs, tokenBudget);
+  expect(tokenMs).toBeLessThan(tokenBudget);
+  const samples: number[] = [];
+  let typed = prefix;
+  for (let i = 0; i < 10; i++) {
+    const ch = String(i);
+    typed += ch;
+    samples.push(await keystrokeRoundTrip(page, ch, typed));
+  }
+  return samples;
+}
+
 /** MCP client over /api/mcp with a bearer token — what Copilot CLI does with the config from Settings. */
 async function mcpClient(baseURL: string, token: string) {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseURL}/api/mcp`), { requestInit: { headers: { Authorization: ["Bearer", token].join(" ") } } });
@@ -127,27 +152,32 @@ test.describe("Burke-scale", () => {
     const texts = await items.allInnerTexts();
     expect(texts.filter((t) => /^\d{1,2}\. /.test(t.trim()))).toEqual(h2s);
 
-    // Jump to the last section through the outline, then type at the very end of the code pane.
+    // Type where Burke types: at the very end of the last paragraph (Ctrl+End, no new block — the
+    // lead's method in task #357; a fresh empty paragraph after two Enters was ~10× cheaper because
+    // the incremental parser bailed on this document's footnotes and re-parsed all 86 KB per keystroke).
     await items.filter({ hasText: h2s[39] }).click();
     await expect(page.locator(".md-rich h2").last()).toBeInViewport();
     await page.locator(".cm-content").click();
     await page.keyboard.press("Control+End");
-    await page.keyboard.press("Enter");
-    await page.keyboard.press("Enter");
-    const prefix = "zqx";
-    await page.keyboard.type(prefix);
-    await expect.poll(() => page.locator(".md-rich").textContent()).toContain(prefix);
-    const samples: number[] = [];
-    let typed = prefix;
-    for (let i = 0; i < 10; i++) {
-      const ch = String(i);
-      typed += ch;
-      samples.push(await keystrokeRoundTrip(page, ch, typed));
-    }
-    const med = record(`keystroke → preview (median of 10; samples ${samples.map((s) => Math.round(s)).join("/")})`, median(samples), budgetMs(300));
-    expect(med).toBeLessThan(budgetMs(300));
+    const endSamples = await typeAndMeasure(page, "zqxa");
+    const endMed = record(`keystroke → preview, end of doc (median of 10; ${endSamples.map((s) => Math.round(s)).join("/")})`, median(endSamples), budgetMs(300));
+    expect(endMed).toBeLessThan(budgetMs(300));
+    for (let i = 0; i < "zqxa".length + 10; i++) await page.keyboard.press("Backspace");
+    await expect.poll(() => codeText(page)).toBe(seed.longDoc.content);
+
+    // And once in the middle: the outline puts the code cursor on the §20 heading; two lines down is
+    // its first paragraph (every later heading and block shifts by one character per keystroke).
+    await items.filter({ hasText: h2s[19] }).click();
+    await expect(page.locator(".md-rich h2").filter({ hasText: h2s[19] })).toBeInViewport();
+    await expect(items.filter({ hasText: h2s[19] })).toHaveAttribute("data-active", "true");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("End");
+    const midSamples = await typeAndMeasure(page, "zqyb");
+    const midMed = record(`keystroke → preview, mid doc §20 (median of 10; ${midSamples.map((s) => Math.round(s)).join("/")})`, median(midSamples), budgetMs(300));
+    expect(midMed).toBeLessThan(budgetMs(300));
     // Leave the document as seeded for the tests that follow.
-    for (let i = 0; i < typed.length + 2; i++) await page.keyboard.press("Backspace");
+    for (let i = 0; i < "zqyb".length + 10; i++) await page.keyboard.press("Backspace");
     await expect.poll(() => codeText(page)).toBe(seed.longDoc.content);
   });
 
