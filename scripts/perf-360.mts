@@ -47,7 +47,7 @@ await context.addInitScript(() => {
         const f = stack.pop()!;
         const t = f.type as FiberType | null;
         if (t && (typeof t === "function" || typeof t === "object")) {
-          const inner = typeof t === "object" ? (t.type ?? t.render) : t;
+          const inner = typeof t === "object" ? ((t as unknown as { type?: FiberType; render?: FiberType }).type ?? (t as unknown as { render?: FiberType }).render) : t;
           const name = (typeof inner === "function" && (inner.displayName || inner.name)) || (typeof t === "function" ? t.displayName || t.name : "") || "";
           if (name && INTEREST.test(name) && (f.flags & 1) !== 0) rendered.push(name);
         }
