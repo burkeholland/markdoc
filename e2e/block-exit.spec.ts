@@ -154,14 +154,33 @@ test.describe("leaving blocks with the keyboard", () => {
     await context.close();
   });
 
-  // Shift+Enter (hard break) inside a quote / list item / cell is covered at the command level in
-  // src/editor/prosemirror/block-exit.test.ts; in the browser the binding still drops the break on the
-  // round trip (pre-existing, follow-up noted in the task report), so only Backspace is asserted here.
-  test("blockquote: Backspace at the start of the first paragraph lifts it out of the quote", async ({ browser }) => {
+  test("blockquote: Shift+Enter keeps the line break in both panes, Backspace at the start of the first paragraph lifts it out of the quote", async ({ browser }) => {
     const { page, context } = await setup(browser, "exit-quote");
+    // Task #434: the break is inserted before anything follows it; it must survive the round trip
+    // (spelled `<br>` until the next line exists, then as a trailing backslash).
+    await clickEndOf(page, "blockquote p");
+    await page.keyboard.press("Shift+Enter");
+    await expect.poll(() => caretPath(page)).toBe("blockquote>p");
+    await expect.poll(() => codeText(page)).toContain("> A quote line.<br>\n\n## Heading two");
+    await page.keyboard.type("second line");
+    await expect.poll(() => codeText(page)).toContain("> A quote line.\\\n> second line\n\n## Heading two");
+    await expect(page.locator(".md-rich blockquote p")).toHaveCount(1);
+    await expect(page.locator(".md-rich blockquote p br")).toHaveCount(1);
+    await expect(page.locator(".md-rich blockquote p")).toHaveText("A quote line.second line");
+    const lines = await page.locator(".md-rich blockquote p").evaluate((p) => {
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      return new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top))).size;
+    });
+    expect(lines, "the quote paragraph renders as two lines").toBe(2);
+    // After a reload the text still has the break.
+    await page.reload();
+    await expect(page.locator(".md-rich blockquote p br")).toHaveCount(1);
+    await expect.poll(() => codeText(page)).toContain("> A quote line.\\\n> second line");
+
     await clickStartOf(page, "blockquote p");
     await page.keyboard.press("Backspace");
-    await expect.poll(() => codeText(page)).toContain("# H1\n\nA quote line.\n\n## Heading two");
+    await expect.poll(() => codeText(page)).toContain("# H1\n\nA quote line.\\\nsecond line\n\n## Heading two");
     await expect(page.locator(".md-rich blockquote")).toHaveCount(0);
     await context.close();
   });
@@ -186,21 +205,40 @@ test.describe("leaving blocks with the keyboard", () => {
     }
     await expectRhythm(page, "ul", "p");
     await expectRhythm(page, "ol", "p");
+    // Shift+Enter inside an item keeps the break (task #434): `<br>` until the next line is typed, then a trailing backslash.
+    await clickEndOf(page, "ul li:first-child p");
+    await page.keyboard.press("Shift+Enter");
+    await expect.poll(() => codeText(page)).toContain("- one<br>\n- two");
+    await page.keyboard.type("more");
+    await expect.poll(() => codeText(page)).toContain("- one\\\n  more\n- two");
+    await expect(page.locator(".md-rich ul li:first-child p br")).toHaveCount(1);
     // Backspace at the start of the first item makes it a paragraph.
     await clickStartOf(page, "ul li:first-child p");
     await page.keyboard.press("Backspace");
-    await expect.poll(() => codeText(page)).toMatch(/\n\none\n\n- two/);
+    await expect.poll(() => codeText(page)).toMatch(/\n\none\\\nmore\n\n- two/);
     await context.close();
   });
 
-  test("code block: Ctrl+Enter leaves it, Backspace at the start demotes it", async ({ browser }) => {
-    // Enter ×3 (newline round trip through the binding) is asserted at the command level; see the note above.
+  test("code block: Enter ×3 at the end leaves it, Ctrl+Enter leaves it, Backspace at the start demotes it", async ({ browser }) => {
     const { page, context } = await setup(browser, "exit-code", "> q\n\n```ts\nconst a = 1;\n```\n\nEnd.\n");
+    // Task #434: the first Enter adds a blank last line that must survive the round trip through the binding.
+    await clickEndOf(page, "pre code");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toContain("```ts\nconst a = 1;\n\n```\n\nEnd.");
+    await expect.poll(() => caretPath(page)).toMatch(/^pre>code/);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toContain("```ts\nconst a = 1;\n\n\n```\n\nEnd.");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => caretPath(page)).toBe("p");
+    await page.keyboard.type("Out by Enter");
+    await expect.poll(() => codeText(page)).toContain("```ts\nconst a = 1;\n```\n\nOut by Enter\n\nEnd.");
+    await expectRhythm(page, "pre", "p");
+
     await clickEndOf(page, "pre code");
     await page.keyboard.press("Control+Enter");
     await expect.poll(() => caretPath(page)).toBe("p");
     await page.keyboard.type("Out by Ctrl");
-    await expect.poll(() => codeText(page)).toContain("```\n\nOut by Ctrl\n\nEnd.");
+    await expect.poll(() => codeText(page)).toContain("```\n\nOut by Ctrl\n\nOut by Enter\n\nEnd.");
     await expectRhythm(page, "pre", "p");
 
     await clickStartOf(page, "pre code");
@@ -211,19 +249,25 @@ test.describe("leaving blocks with the keyboard", () => {
     await context.close();
   });
 
-  test("table: Tab moves cells, Ctrl+Enter and ArrowDown from the last row leave it", async ({ browser }) => {
+  test("table: Tab moves cells, Shift+Enter is a <br> in the cell, Ctrl+Enter and ArrowDown from the last row leave it", async ({ browser }) => {
     const { page, context } = await setup(browser, "exit-table");
     await clickCell(page, 1, 0);
     // Tab selects the next cell's content, so typing replaces it.
     await page.keyboard.press("Tab");
     await page.keyboard.type("x");
     await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x +\|/);
+    // Shift+Enter keeps the break in the cell (task #434); GFM has no multi-line cells, so it is a `<br>`.
+    await page.keyboard.press("Shift+Enter");
+    await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x<br> +\|/);
+    await page.keyboard.type("y");
+    await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x<br>y +\|/);
+    await expect(page.locator(".md-rich table td br")).toHaveCount(1);
 
     // The table is the last block: ArrowDown from the last row makes a paragraph after it.
     await page.keyboard.press("ArrowDown");
     await expect.poll(() => caretPath(page)).toBe("p");
     await page.keyboard.type("After table");
-    await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x +\|\n\nAfter table\n?$/);
+    await expect.poll(() => codeText(page)).toMatch(/\| 1 +\| x<br>y +\|\n\nAfter table\n?$/);
     await expectRhythm(page, "table", "p");
 
     // Ctrl+Enter from any cell moves to the start of the block below.
