@@ -524,19 +524,22 @@ export function registerTools(server, client) {
     {
       title: "Show up in a document",
       description:
-        "Announce yourself in a document's presence list (a bot avatar next to the people in the header) with a short status such as \"reading\", \"drafting the summary\" or \"waiting for Burke\". state: active while you work, idle while you wait (markdoc_watch), left when you are done. Presence lapses 90 s after the last call unless you keep writing (every suggest/comment/replace marks you active too).",
+        "Announce yourself in a document's presence list (a bot avatar next to the people in the header) with a short status such as \"reading\", \"drafting the summary\" or \"waiting for Burke\". state: active while you work, idle while you wait (markdoc_watch), left when you are done. Presence lapses 90 s after the last call unless you keep writing (every suggest/comment/replace marks you active too). Place your caret with `anchor` (text you are looking at; first occurrence, like a comment quote) or `cursor` ({ from, to } offsets in the clean Markdown from markdoc_read_document clean: true): people see a labelled caret there, like another collaborator's. Writes move it to where you acted.",
       inputSchema: {
         id: z.string().describe("Document id"),
         state: z.enum(["active", "idle", "left"]),
         status: z.string().max(80).optional().describe("Short free text shown next to your name"),
+        anchor: z.string().min(1).max(2000).optional().describe("Exact text you are looking at; your caret selects its first occurrence"),
+        cursor: z.object({ from: z.number().int().min(0), to: z.number().int().min(0) }).nullable().optional().describe("Offsets in the clean Markdown to put your caret at; null hides it"),
       },
       annotations: ADDITIVE,
     },
-    async ({ id, state, status }) => {
-      const res = await api("POST", `/api/agent/documents/${id}/presence`, { state, ...(status !== undefined ? { status } : {}) });
+    async ({ id, state, status, anchor, cursor }) => {
+      const res = await api("POST", `/api/agent/documents/${id}/presence`, { state, ...(status !== undefined ? { status } : {}), ...(anchor !== undefined ? { anchor } : {}), ...(cursor !== undefined ? { cursor } : {}) });
       if (!res.presence) return ok(`Left document ${id}.`, { id, state: "left" });
+      const at = res.presence.cursor ? ` Caret at ${res.presence.cursor.from}–${res.presence.cursor.to} of the clean text.` : "";
       return ok(
-        `Now ${res.presence.state} in document ${id}${res.presence.status ? ` (“${res.presence.status}”)` : ""} as ${res.presence.name}; expires in ${Math.round(res.ttlMs / 1000)} s without another call or write.`,
+        `Now ${res.presence.state} in document ${id}${res.presence.status ? ` (“${res.presence.status}”)` : ""} as ${res.presence.name}; expires in ${Math.round(res.ttlMs / 1000)} s without another call or write.${at}`,
         { id, presence: res.presence },
       );
     },
@@ -547,7 +550,7 @@ export function registerTools(server, client) {
     {
       title: "Wait for humans",
       description:
-        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, mention (someone @-mentioned your user), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
+        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
       inputSchema: {
         id: z.string().optional().describe("Document id; omit for the cross-document inbox"),
         since: z.string().optional().describe("Cursor from the previous call"),
@@ -571,7 +574,7 @@ export function registerTools(server, client) {
           case "comment.resolved":
             return `- ${e.type}${doc} by ${e.author} [thread ${e.threadId}]: ${e.body}`;
           case "mention":
-            return `- mention${doc} by ${e.by ?? "someone"}: ${e.snippet}`;
+            return `- mention${doc} by ${e.by ?? "someone"}${e.agent ? ` (addressed to you as @…/${e.agent})` : ""}: ${e.snippet}`;
           case "request.created":
             return `- request.created${doc} [${e.requestId}] ${e.mode} from ${e.by ?? "someone"}: ${e.instruction}${e.quote ? ` — selection: ${JSON.stringify(e.quote)}` : ""}`;
           default:

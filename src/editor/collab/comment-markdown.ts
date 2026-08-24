@@ -7,11 +7,12 @@
  * HTML strings, so escaping is React's job and no `dangerouslySetInnerHTML` is used.
  */
 import { createElement, Fragment, type ReactNode } from "react";
+import { Bot } from "lucide-react";
 import { splitMentions } from "./mentions";
 
 export type InlineNode =
   | { type: "text"; value: string }
-  | { type: "mention"; login: string }
+  | { type: "mention"; login: string; agent: string | null }
   | { type: "code"; value: string }
   | { type: "strong"; children: InlineNode[] }
   | { type: "em"; children: InlineNode[] }
@@ -42,7 +43,7 @@ function trimUrl(url: string): string {
 
 function textNodes(text: string): InlineNode[] {
   if (!text) return [];
-  return splitMentions(text).map((p) => (p.type === "mention" ? { type: "mention", login: p.value } : { type: "text", value: p.value }));
+  return splitMentions(text).map((p) => (p.type === "mention" ? { type: "mention", login: p.value, agent: p.agent ?? null } : { type: "text", value: p.value }));
 }
 
 /** Find the closing `marker` after `from` whose content is non-empty and does not start with whitespace. */
@@ -144,6 +145,15 @@ function renderNodes(nodes: InlineNode[]): ReactNode[] {
       case "br":
         return createElement("br", { key: i });
       case "mention":
+        if (n.agent) {
+          // An agent (API token) of `login`: bot glyph + the token slug; the title says whose agent it is.
+          return createElement(
+            "span",
+            { key: i, className: "mention-chip mention-chip-agent rounded bg-violet-100 px-1 font-medium text-violet-700 dark:bg-violet-950 dark:text-violet-300", title: `${n.agent} (agent of @${n.login})`, "data-testid": "mention-chip", "data-agent": n.agent, "data-login": n.login },
+            createElement(Bot, { size: 12, "aria-hidden": true, className: "mention-chip-bot" }),
+            `@${n.agent}`,
+          );
+        }
         return createElement("span", { key: i, className: "mention-chip rounded bg-accent-soft px-1 font-medium text-accent", title: n.login, "data-testid": "mention-chip" }, `@${n.login}`);
       case "code":
         return createElement("code", { key: i, className: "comment-code" }, n.value);
