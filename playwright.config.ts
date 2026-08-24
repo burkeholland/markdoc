@@ -54,6 +54,15 @@ export default defineConfig({
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 1000 },
   },
+  // Two projects over the same browser/baseURL so CI can give e2e/scale.spec.ts its own job: the
+  // Burke-scale seed takes 60+ s on the runner and the spec 3+ min, which tipped the shard it rode in
+  // (PR 72: versions.spec.ts timed out twice on shard 2). `--project default --shard=N/2` keeps the two
+  // existing shards at their previous weight; `--project scale` runs only the scale spec. A plain
+  // `npx playwright test [files]` still runs every selected file exactly once (each matches one project).
+  projects: [
+    { name: "default", testIgnore: /scale\.spec\.ts$/ },
+    { name: "scale", testMatch: /scale\.spec\.ts$/ },
+  ],
   webServer: prodBaseURL
     ? undefined
     : {
