@@ -6,12 +6,12 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Star, Trash2, Users, X } from "lucide-react";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
 import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { takePendingNotice, type PendingNotice } from "@/lib/notice";
-import { TEMPLATES, type Template, type TemplateIcon } from "@/lib/templates";
+import { PICKER_TEMPLATES, TEMPLATES, WELCOME_TEMPLATE_ID, getTemplate, type Template, type TemplateIcon } from "@/lib/templates";
 
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
@@ -102,13 +102,14 @@ const TEMPLATE_ICONS: Record<TemplateIcon, typeof File> = {
   PenLine,
   Scale,
   ListChecks,
+  Sparkles,
 };
 
 /** Grid of template cards; `busy` is the id currently being created (disables the grid). */
 export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) => void; busy: string | null; compact?: boolean }) {
   return (
     <ul className={cn("grid gap-3", compact ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" : "sm:grid-cols-2 lg:grid-cols-3")} data-testid="template-grid">
-      {TEMPLATES.map((t) => {
+      {PICKER_TEMPLATES.map((t) => {
         const Icon = TEMPLATE_ICONS[t.icon];
         const isBusy = busy === t.id;
         return (
@@ -587,7 +588,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
               <div className="mb-5 text-center">
                 <FileText className="mx-auto mb-3 text-ink-4" size={28} />
                 <p className="text-sm font-medium text-ink-2">No documents yet</p>
-                <p className="mt-1 text-sm text-ink-3">Start from a template, or open a Markdown file from GitHub.</p>
+                <p className="mt-1 text-sm text-ink-3">Start with a short guided document, pick a template, or open a Markdown file from GitHub.</p>
+                <button
+                  type="button"
+                  className="btn btn-primary mt-4 gap-2"
+                  onClick={() => void create(getTemplate(WELCOME_TEMPLATE_ID))}
+                  disabled={creating !== null}
+                  aria-busy={creating === WELCOME_TEMPLATE_ID || undefined}
+                  data-testid="start-guided-doc"
+                >
+                  {creating === WELCOME_TEMPLATE_ID ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} Start with a guided doc
+                </button>
               </div>
               <TemplateGrid compact onPick={(t) => void create(t)} busy={creating} />
             </div>

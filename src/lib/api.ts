@@ -136,6 +136,10 @@ export interface ApiTokenDto {
   prefix: string;
   createdAt: string;
   lastUsedAt: string | null;
+  /** Last `tools/list` over /api/mcp with this token (an MCP client is connected). */
+  lastMcpSeenAt: string | null;
+  /** Last `tools/call` over /api/mcp with this token (a tool ran). */
+  lastMcpCallAt: string | null;
   expiresAt: string | null;
 }
 

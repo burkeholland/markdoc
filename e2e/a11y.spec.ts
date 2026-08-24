@@ -124,7 +124,25 @@ test.describe("axe: pages", () => {
     const { page, context } = await signIn(browser, "a11y-settings");
     await page.goto("/settings");
     await expect(page.getByTestId("theme-row")).toBeVisible();
-    await scan(page, "settings");
+    await expect(page.getByTestId("copilot-checklist")).toBeVisible();
+    await scan(page, "settings (with Copilot CLI checklist)");
+    await context.close();
+  });
+
+  test("onboarding: dashboard empty state with the guided-doc action, editor hint bar", async ({ browser }) => {
+    const { page, context } = await signIn(browser, `a11y-onboard-${Date.now().toString(36)}`);
+    await expect(page.getByTestId("empty-state")).toBeVisible();
+    await expect(page.getByTestId("start-guided-doc")).toBeVisible();
+    await scan(page, "dashboard empty state");
+
+    // A comment thread opens hint (c); the bar sits under the toolbar.
+    const id = await createDocument(page, "# Hint fixture\n\nA paragraph with enough words to comment on.\n", "Hint fixture");
+    expect((await page.request.post(`/api/documents/${id}/comments`, { data: { action: "add", quote: "enough words", body: "Thread" } })).ok()).toBeTruthy();
+    await openDocument(page, id);
+    const bar = page.getByTestId("hint-bar");
+    await expect(bar).toBeVisible();
+    await expect(bar).toHaveAttribute("data-hint", "mention-copilot");
+    await scan(page, "editor + hint bar");
     await context.close();
   });
 

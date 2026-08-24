@@ -5,6 +5,7 @@ import { auth } from "@/auth";
 import { Logo } from "@/components/editor/header";
 import { TokensPanel } from "@/components/settings/tokens-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
+import { listRequestsForUser } from "@/server/agent-requests";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
@@ -17,6 +18,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const nextParam = Array.isArray(rawNext) ? rawNext[0] : rawNext;
   // Only relative document paths: never bounce the user off-site.
   const next = nextParam && /^\/d\/[a-z0-9]+$/i.test(nextParam) ? nextParam : null;
+  // "Try read my doc" in the setup checklist also counts a request sent from the editor.
+  const requests = await listRequestsForUser(
+    { id: session.user.id, login: session.user.login ?? null, name: session.user.name ?? null, image: session.user.image ?? null },
+    { status: ["open", "claimed", "done", "cancelled"], limit: 1 },
+  ).catch(() => []);
   return (
     <main className="min-h-screen bg-surface-2">
       <header className="border-b border-line bg-surface">
@@ -40,7 +46,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           </div>
           <ThemePicker />
         </div>
-        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} />
+        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} hasAgentRequests={requests.length > 0} />
       </section>
     </main>
   );

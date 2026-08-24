@@ -289,7 +289,7 @@ export function AgentCollaborateCard({ origin, open }: { origin: string; open: b
     try {
       const res = await api.tokens.create("GitHub Copilot CLI", 90);
       setMinted({ name: res.token.name, token: res.token.token });
-      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, createdAt: new Date().toISOString(), lastUsedAt: null, expiresAt: null }, ...(list ?? [])]);
+      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, createdAt: new Date().toISOString(), lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null }, ...(list ?? [])]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create a token");
     } finally {

@@ -71,6 +71,13 @@
       "when": 1787517892374,
       "tag": "0009_agent_requests",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787583789119,
+      "tag": "0010_mcp_seen",
+      "breakpoints": true
     }
   ]
 }

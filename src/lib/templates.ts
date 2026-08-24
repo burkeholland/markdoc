@@ -9,7 +9,7 @@
  * (YYYY-MM-DD) and the creator's login.
  */
 
-export type TemplateIcon = "File" | "Users" | "BookOpen" | "DraftingCompass" | "CalendarCheck" | "PenLine" | "Scale" | "ListChecks";
+export type TemplateIcon = "File" | "Users" | "BookOpen" | "DraftingCompass" | "CalendarCheck" | "PenLine" | "Scale" | "ListChecks" | "Sparkles";
 
 export interface Template {
   id: string;
@@ -20,6 +20,8 @@ export interface Template {
   title: string;
   /** Markdown body; may contain placeholders. */
   content: string;
+  /** `false` hides the template from the picker and GET /api/templates; it stays creatable by id. Default true. */
+  showInPicker?: boolean;
 }
 
 export interface TemplateVars {
@@ -29,6 +31,8 @@ export interface TemplateVars {
 }
 
 export const BLANK_TEMPLATE_ID = "blank";
+/** The first-run tutorial document ("Start with a guided doc" on the empty dashboard). Hidden from the picker. */
+export const WELCOME_TEMPLATE_ID = "welcome";
 
 export const TEMPLATES: Template[] = [
   {
@@ -349,7 +353,50 @@ State the decision in full sentences, in the active voice.
 > Tip: click a checkbox in the rich view, or type \`[x]\` in the source, to mark an item done.
 `,
   },
+  {
+    id: WELCOME_TEMPLATE_ID,
+    name: "Welcome to Markdoc",
+    description: "A short guided document: the three things that make Markdoc different, each with something to try.",
+    icon: "Sparkles",
+    title: "Welcome to Markdoc",
+    showInPicker: false,
+    content: `# Welcome to Markdoc
+
+This document is the tutorial. Each section ends with something to do. Hi @{{user}} — nothing here is precious.
+
+## 1. Two surfaces, one document
+
+The Markdown source is on the left and the rendered page on the right. Type in either one; the other follows. Headings build the outline in the sidebar.
+
+**Try it:** Type \`/\` here for a block menu.
+
+## 2. Comments that stick to words
+
+Select any text and press **Comment** in the toolbar. The thread follows the words as the document changes, and everyone with access sees it live.
+
+**Try it:** Select this sentence and press Comment.
+
+## 3. Collaborate with an agent
+
+Markdoc is built so people *and* agents can work on the same document. GitHub Copilot CLI joins through a personal token: it reads, comments and proposes suggestions you accept or reject.
+
+**Try it:** Open **Share → Collaborate with an agent** to let Copilot CLI join.
+
+Once it is connected, select a sentence and use **Ask an agent** in the toolbar, or @-mention Copilot in a comment.
+
+## Your first three tasks
+
+- [ ] Type \`/\` and insert a block from the menu
+- [ ] Select a sentence and press Comment
+- [ ] Open Share → Collaborate with an agent
+
+Delete this doc when you're done — it's just a doc.
+`,
+  },
 ];
+
+/** Templates offered by the picker (dashboard dialog, empty state, palette, GET /api/templates). */
+export const PICKER_TEMPLATES: Template[] = TEMPLATES.filter((t) => t.showInPicker !== false);
 
 export function getTemplate(id: string): Template | undefined {
   return TEMPLATES.find((t) => t.id === id);

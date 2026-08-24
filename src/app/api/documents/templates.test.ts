@@ -15,7 +15,7 @@ const { eq } = await import("drizzle-orm");
 const getDocument = async (id: string) => (await getDb()).query.documents.findFirst({ where: eq(schema.documents.id, id) });
 const { POST } = await import("./route");
 const { GET: GET_TEMPLATES } = await import("../templates/route");
-const { TEMPLATES } = await import("@/lib/templates");
+const { TEMPLATES, PICKER_TEMPLATES } = await import("@/lib/templates");
 
 const post = (body: unknown) => POST(new Request("http://localhost:3700/api/documents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
 
@@ -75,12 +75,19 @@ describe("POST /api/documents with a template", () => {
 });
 
 describe("GET /api/templates", () => {
-  it("lists the eight templates with id, name and description only", async () => {
+  it("lists the eight picker templates with id, name and description only; the hidden welcome doc is creatable but not listed", async () => {
     const res = await GET_TEMPLATES();
     expect(res.status).toBe(200);
     const { templates } = (await res.json()) as { templates: { id: string; name: string; description: string }[] };
     expect(templates).toHaveLength(8);
-    expect(templates.map((t) => t.id)).toEqual(TEMPLATES.map((t) => t.id));
+    expect(templates.map((t) => t.id)).toEqual(PICKER_TEMPLATES.map((t) => t.id));
+    expect(templates.map((t) => t.id)).not.toContain("welcome");
+    expect(TEMPLATES.map((t) => t.id)).toContain("welcome");
     for (const t of templates) expect(Object.keys(t).sort()).toEqual(["description", "id", "name"]);
+    const created = await post({ template: "welcome" });
+    expect(created.status).toBe(201);
+    const { document } = (await created.json()) as { document: { id: string; title: string } };
+    expect(document.title).toBe("Welcome to Markdoc");
+    expect((await getDocument(document.id))?.content).toContain("- [ ] Open Share → Collaborate with an agent");
   });
 });
