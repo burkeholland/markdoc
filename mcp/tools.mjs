@@ -476,5 +476,66 @@ export function registerTools(server, client) {
     },
   );
 
+  tool(
+    "markdoc_presence",
+    {
+      title: "Show up in a document",
+      description:
+        "Announce yourself in a document's presence list (a bot avatar next to the people in the header) with a short status such as \"reading\", \"drafting the summary\" or \"waiting for Burke\". state: active while you work, idle while you wait (markdoc_watch), left when you are done. Presence lapses 90 s after the last call unless you keep writing (every suggest/comment/replace marks you active too).",
+      inputSchema: {
+        id: z.string().describe("Document id"),
+        state: z.enum(["active", "idle", "left"]),
+        status: z.string().max(80).optional().describe("Short free text shown next to your name"),
+      },
+    },
+    async ({ id, state, status }) => {
+      const res = await api("POST", `/api/agent/documents/${id}/presence`, { state, ...(status !== undefined ? { status } : {}) });
+      if (!res.presence) return ok(`Left document ${id}.`, { id, state: "left" });
+      return ok(
+        `Now ${res.presence.state} in document ${id}${res.presence.status ? ` (“${res.presence.status}”)` : ""} as ${res.presence.name}; expires in ${Math.round(res.ttlMs / 1000)} s without another call or write.`,
+        { id, presence: res.presence },
+      );
+    },
+  );
+
+  tool(
+    "markdoc_watch",
+    {
+      title: "Wait for humans",
+      description:
+        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, mention (someone @-mentioned your user), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
+      inputSchema: {
+        id: z.string().optional().describe("Document id; omit for the cross-document inbox"),
+        since: z.string().optional().describe("Cursor from the previous call"),
+        wait: z.number().int().min(0).max(55).optional().describe("Seconds to wait for events (default 30)"),
+      },
+    },
+    async ({ id, since, wait }) => {
+      const q = new URLSearchParams();
+      if (since) q.set("since", since);
+      q.set("wait", String(since ? wait ?? 30 : 0));
+      const res = await api("GET", `${id ? `/api/agent/documents/${id}/events` : "/api/agent/events"}?${q}`);
+      if (!since) return ok(`Watching from now. Call markdoc_watch again with since: ${res.cursor}`, res);
+      const lines = res.events.map((e) => {
+        const doc = id ? "" : ` (document ${e.documentId}${e.documentTitle ? ` “${e.documentTitle}”` : ""})`;
+        switch (e.type) {
+          case "content.changed":
+            return `- content.changed${doc} → ${e.contentHash}${e.diff ? `\n${e.diff}` : " (diff unavailable; re-read the document)"}`;
+          case "comment.added":
+          case "comment.replied":
+          case "comment.resolved":
+            return `- ${e.type}${doc} by ${e.author} [thread ${e.threadId}]: ${e.body}`;
+          case "mention":
+            return `- mention${doc} by ${e.by ?? "someone"}: ${e.snippet}`;
+          case "request.created":
+            return `- request.created${doc} [${e.requestId}] ${e.mode} from ${e.by ?? "someone"}: ${e.instruction}${e.quote ? ` — selection: ${JSON.stringify(e.quote)}` : ""}`;
+          default:
+            return `- ${e.action ?? e.type}${doc} by ${e.actor ?? "someone"}`;
+        }
+      });
+      return ok(lines.length ? `${lines.join("\n")}\n\nNext cursor: ${res.cursor}` : `Nothing happened in ${wait ?? 30} s. Next cursor: ${res.cursor}`, res);
+    },
+  );
+
   return names;
 }

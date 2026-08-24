@@ -42,7 +42,7 @@ describe("/api/mcp", () => {
     const body = (await res.json()) as { name: string; version: string; tools: number; docs: string };
     expect(body.name).toBe("markdoc");
     expect(body.tools).toBe(listToolNames().length);
-    expect(body.tools).toBeGreaterThanOrEqual(24);
+    expect(body.tools).toBe(26);
     expect(body.docs).toContain("docs/agents");
   });
 
@@ -70,6 +70,8 @@ describe("/api/mcp", () => {
     expect(names).toEqual(listToolNames());
     expect(names).toContain("markdoc_whoami");
     expect(names).toContain("markdoc_read_document");
+    expect(names).toContain("markdoc_presence");
+    expect(names).toContain("markdoc_watch");
   });
 
   it("initialize advertises the markdoc server and its instructions", async () => {

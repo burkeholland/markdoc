@@ -261,6 +261,7 @@ export type Notification = typeof notifications.$inferSelect;
 export type ActivityAction =
   | "edit"
   | "comment.add"
+  | "comment.reply"
   | "comment.resolve"
   | "suggestion.add"
   | "suggestion.accept"

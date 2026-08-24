@@ -7,6 +7,7 @@ import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
+import { publishAgentPresence } from "@/server/agent-presence";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 
 export { hydrateDoc, META_KEY, TEXT_KEY };
@@ -62,6 +63,7 @@ export function createCollabServer() {
       }
       watchDocumentNotifications(document, documentName);
       startActivityWatch(document, documentName);
+      publishAgentPresence(document, documentName);
       return document;
     },
 

@@ -57,6 +57,10 @@ export interface PresenceUser extends CollabUser {
   /** The user's role on this document, when their client published it. */
   role: Role | null;
   isLocal: boolean;
+  /** An agent (API token) announced by the server, not a person in a browser. */
+  isAgent: boolean;
+  /** Agent status text ("reading", "drafting the summary"); null for people. */
+  status: string | null;
 }
 
 export interface CollabSessionOptions {
@@ -474,7 +478,7 @@ export class CollabSession {
     const byUser = new Map<string, PresenceUser>();
     const localId = this.ydoc.clientID;
     this.awareness.getStates().forEach((state, clientId) => {
-      const u = state.user as (Partial<CollabUser> & { role?: Role }) | undefined;
+      const u = state.user as (Partial<CollabUser> & { role?: Role; isAgent?: boolean; status?: string | null }) | undefined;
       if (!u?.id) return;
       let cursor: number | null = null;
       const head = (state.cursor as { head?: unknown } | undefined)?.head;
@@ -503,6 +507,8 @@ export class CollabSession {
         idleSince: typeof lastActive === "number" ? lastActive : null,
         role: u.role ?? null,
         isLocal: clientId === localId,
+        isAgent: u.isAgent === true,
+        status: typeof u.status === "string" && u.status ? u.status : null,
       };
       const existing = byUser.get(u.id);
       if (!existing || (existing.cursor === null && cursor !== null) || entry.isLocal) byUser.set(u.id, entry);

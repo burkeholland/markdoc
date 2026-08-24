@@ -7,6 +7,7 @@ import { readReply, type CommentReply } from "@/editor/collab/comments";
 import { resolveAnchor, newId } from "@/editor/collab/shared";
 import type { Suggestion } from "@/editor/collab/suggestions";
 import type { CollabClaims } from "@/server/collab/token";
+import { wakeDocument } from "@/server/agent-events";
 
 export const SNIPPET_MAX = 120;
 
@@ -50,6 +51,7 @@ export async function notify(input: NotifyInput): Promise<boolean> {
     })
     .onConflictDoNothing({ target: [schema.notifications.userLogin, schema.notifications.kind, schema.notifications.refId] })
     .returning();
+  if (inserted.length > 0) wakeDocument(input.documentId);
   return inserted.length > 0;
 }
 

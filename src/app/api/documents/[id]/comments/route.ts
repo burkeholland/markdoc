@@ -125,6 +125,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       const threadId = (result as { id?: string }).id;
       await attachWork(id, body.requestId, user, { comments: 1, commentIds: threadId ? [threadId] : [] });
     }
+  } else if (body.action === "reply") {
+    await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
   } else if (body.action === "resolve" && body.resolved) {
     await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
   }
