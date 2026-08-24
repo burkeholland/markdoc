@@ -67,6 +67,7 @@ function plain(result: ParseResult) {
     blocks: result.map.blocks,
     segments: result.map.segments,
     headings: result.headings,
+    tree: result.tree,
   };
 }
 

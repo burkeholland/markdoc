@@ -1,6 +1,7 @@
 import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
+import type * as Md from "mdast";
 import * as Y from "yjs";
 import { parseMarkdown, type HeadingInfo, type ParseResult } from "../markdown/parse";
 import { reparseRange, textChangeSpan } from "../markdown/incremental";
@@ -234,6 +235,15 @@ export class MarkdownBinding {
   /** Headings of the current text, from the (incrementally maintained) parse. */
   getHeadings(): HeadingInfo[] {
     return this.parse(this.ytext.toString()).headings;
+  }
+
+  /**
+   * The current text and its mdast, from the same incrementally maintained parse. Callers that
+   * walk the tree (the linter) get it without a second parse of the document.
+   */
+  getTree(): { text: string; tree: Md.Root } {
+    const text = this.ytext.toString();
+    return { text, tree: this.parse(text).tree };
   }
 
   /**

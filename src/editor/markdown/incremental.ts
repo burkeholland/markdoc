@@ -1,4 +1,5 @@
 import type { Node as PMNode } from "prosemirror-model";
+import type * as Md from "mdast";
 import { hasFrontmatter, parseMarkdown, type HeadingInfo, type ParseResult } from "./parse";
 import { schema } from "./schema";
 import { buildSourceMap, type BlockRange, type Segment } from "./sourcemap";
@@ -114,7 +115,29 @@ interface RegionParse {
   blocks: BlockRange[];
   segments: Segment[];
   headings: HeadingInfo[];
+  /** Top-level mdast nodes of the region, positioned relative to the region start. */
+  mdast: Md.RootContent[];
   size: number;
+}
+
+/**
+ * Copy of an mdast subtree with every position moved by `offset` characters and `lines` lines.
+ * Columns are unchanged because regions and their tails always start at a line start.
+ * Positions the parser had to synthesize (line 0, see parse.ts) stay on line 0 so the result
+ * is indistinguishable from a full parse.
+ */
+function shiftMdast<T extends Md.Node>(node: T, offset: number, lines: number): T {
+  const copy: Md.Node = { ...node };
+  const pos = node.position;
+  if (pos) {
+    copy.position = {
+      start: { line: pos.start.line ? pos.start.line + lines : 0, column: pos.start.column, offset: (pos.start.offset ?? 0) + offset },
+      end: { line: pos.end.line ? pos.end.line + lines : 0, column: pos.end.column, offset: (pos.end.offset ?? 0) + offset },
+    };
+  }
+  const children = (node as Md.Parent).children;
+  if (children) (copy as Md.Parent).children = children.map((child) => shiftMdast(child, offset, lines));
+  return copy as T;
 }
 
 /**
@@ -124,7 +147,7 @@ interface RegionParse {
  * the sentinel to give the region the same context a full parse would have.
  */
 function parseRegion(region: string, followed: boolean, definitions: readonly string[]): RegionParse | null {
-  if (region.trim() === "") return { nodes: [], blocks: [], segments: [], headings: [], size: 0 };
+  if (region.trim() === "") return { nodes: [], blocks: [], segments: [], headings: [], mdast: [], size: 0 };
   const sentinel = followed || definitions.length > 0;
   const tail = definitions.length > 0 ? "\n\n" + definitions.join("\n\n") : "";
   const text = sentinel ? region + "\n\n" + SENTINEL + tail : region;
@@ -149,11 +172,16 @@ function parseRegion(region: string, followed: boolean, definitions: readonly st
     nodes.push(parsed.doc.child(i));
     size += parsed.doc.child(i).nodeSize;
   }
+  // Top-level mdast nodes and ProseMirror blocks are 1:1 (see Converter.root); the region's are
+  // the first `count`, the sentinel and the appended definitions come after.
+  if (parsed.tree.children.length !== parsed.doc.childCount) return null;
+  const mdast = parsed.tree.children.slice(0, count);
   return {
     nodes,
     blocks: parsed.map.blocks.slice(0, count),
     segments: parsed.map.segments.filter((s) => s.pmTo <= size),
     headings: parsed.headings.filter((h) => h.from < region.length),
+    mdast,
     size,
   };
 }
@@ -170,7 +198,7 @@ function parseRegion(region: string, followed: boolean, definitions: readonly st
 export function reparseRange(prev: ParseResult, oldText: string, newText: string, span: ChangeSpan): ParseResult | null {
   const blocks = prev.map.blocks;
   const n = blocks.length;
-  if (n === 0 || n !== prev.doc.childCount || oldText.trim() === "" || newText.trim() === "") return null;
+  if (n === 0 || n !== prev.doc.childCount || n !== prev.tree.children.length || oldText.trim() === "" || newText.trim() === "") return null;
   if (hasFrontmatter(oldText) !== hasFrontmatter(newText)) return null;
   const delta = span.newTo - span.oldTo;
 
@@ -291,6 +319,19 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
   for (const h of sub.headings) headings.push({ ...h, from: h.from + regionFrom, line: h.line + lineOffset });
   for (const h of prev.headings) if (h.from >= regionToOld) headings.push({ ...h, from: h.from + delta, line: h.line + lineDelta });
 
+  // The mdast follows the same splice: nodes before the region are shared, the region's are moved
+  // to their place in the document, the ones after it by the size of the change.
+  const mdastChildren: Md.RootContent[] = prev.tree.children.slice(0, a);
+  for (const node of sub.mdast) mdastChildren.push(shiftMdast(node, regionFrom, lineOffset));
+  for (let i = b + 1; i < n; i++) mdastChildren.push(shiftMdast(prev.tree.children[i], delta, lineDelta));
+  const tree: Md.Root = { ...prev.tree, children: mdastChildren };
+  if (prev.tree.position) {
+    tree.position = {
+      start: prev.tree.position.start,
+      end: { line: countNewlines(newText, newText.length) + 1, column: newText.length - lineStart(newText, newText.length) + 1, offset: newText.length },
+    };
+  }
+
   const doc = schema.nodes.doc.create(null, children);
-  return { doc, map: buildSourceMap(doc, newBlocks, segments), headings };
+  return { doc, map: buildSourceMap(doc, newBlocks, segments), headings, tree };
 }

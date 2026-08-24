@@ -34,12 +34,13 @@ export interface StatusBarProps {
 }
 
 export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage, compact = false }: StatusBarProps) {
-  // Linting re-parses the whole document and statistics walk it: wait for a pause in typing.
-  const source = useDebouncedSessionValue(session, (s) => s.ytext.toString(), 500);
+  // Linting walks the document and statistics count it: wait for a pause in typing. The tree is the
+  // binding's incrementally maintained parse, so no second parse of the document happens here.
+  const { text: source, tree } = useDebouncedSessionValue(session, (s) => s.binding.getTree(), 500, (a, b) => a.text === b.text);
   // The server renders an empty session; by the time this part of the page hydrates the client
   // may already hold the local copy. Show placeholders until hydrated so the markup matches.
   const hydrated = useHydrated();
-  const issues = useMemo(() => (hydrated ? lintMarkdown(source) : []), [hydrated, source]);
+  const issues = useMemo(() => (hydrated ? lintMarkdown(source, tree) : []), [hydrated, source, tree]);
   const selection = useLocalSelection(session);
   const errors = issues.filter((i) => i.severity === "error").length;
 

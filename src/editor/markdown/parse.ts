@@ -23,6 +23,8 @@ export interface ParseResult {
   doc: PMNode;
   map: SourceMap;
   headings: HeadingInfo[];
+  /** The mdast the document was built from, with absolute source positions; the linter reads it. */
+  tree: Md.Root;
 }
 
 interface SrcRange {
@@ -476,7 +478,7 @@ export function parseMarkdown(src: string): ParseResult {
     }
     return true;
   });
-  return { doc, map: buildSourceMap(doc, blocks, segments), headings: converter.headings };
+  return { doc, map: buildSourceMap(doc, blocks, segments), headings: converter.headings, tree };
 }
 
 /** Extract headings only (cheap; used for the outline of the code editor). */
