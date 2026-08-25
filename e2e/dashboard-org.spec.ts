@@ -136,3 +136,37 @@ test.describe("dashboard organisation", () => {
     await expect(page.getByTestId("document-card")).toHaveCount(3);
   });
 });
+
+test.describe("card excerpt (#158)", () => {
+  test("reads like the rendered text: image alt without the asset URL, link text without the href, table cells without pipes — cards and trash", async ({ browser }) => {
+    const user = await signIn(browser, `excerpt-${Date.now().toString(36)}`);
+    const { page } = user;
+    const imageId = await createDocument(page, "# Dropped doc\n\nHello ![pixel](/api/assets/y7j816vpf1wvljmy) world.\n", "Dropped doc");
+    await createDocument(
+      page,
+      "---\ntitle: HTML Title\n---\n\n# HTML Title\n\nPara **bold** [link](https://x.y)\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+      "HTML Title",
+    );
+    await goHome(page);
+
+    const cards = page.getByTestId("document-card");
+    await expect(cards).toHaveCount(2);
+    await expect(cards.filter({ hasText: "Dropped doc" })).toContainText("Hello pixel world.");
+    await expect(cards.filter({ hasText: "HTML Title" })).toContainText("Para bold link a b 1 2");
+    for (const text of await cards.allTextContents()) {
+      expect(text).not.toContain("(/api/assets/");
+      expect(text).not.toContain("https://x.y");
+      expect(text).not.toContain("|");
+    }
+
+    // The Trash card carries the same excerpt.
+    expect((await page.request.delete(`/api/documents/${imageId}`)).ok()).toBeTruthy();
+    await goHome(page);
+    await page.getByTestId("filter-trash").click();
+    const trashCard = page.getByTestId("trash-card");
+    await expect(trashCard).toHaveCount(1);
+    await expect(trashCard).toContainText("Hello pixel world.");
+    expect(await trashCard.textContent()).not.toContain("(/api/assets/");
+    await user.context.close();
+  });
+});

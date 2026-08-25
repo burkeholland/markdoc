@@ -6,6 +6,7 @@ Newest first. Each entry is one merged feature or fix on `main`; test-only and w
 
 ### Organising
 
+- Dashboard card excerpts read like the rendered text (#158, #159): the one-line excerpt under a card's title used to strip a handful of Markdown characters and let everything else through — `pixel(/api/assets/…)` for an image, `link(https://x.y)` for a link, `| a | b | | | | | 1 |` for a table. `excerpt()` now runs on the linear `excerptOf` helper next to the document stats (front matter anywhere at the top and fenced code skipped, headings passed over, images → alt text, links → text, table separator rows dropped, cells joined by spaces, emphasis / code delimiters removed, 160 chars, stops scanning once it has enough) so the cards say `Hello pixel world.` and `Para bold link a b 1 2`; the excerpt is computed from the content on every list request, so existing documents are right without a repair step. In the version history, an unnamed row no longer repeats itself (`Autosaved · v1 / Auto / v1`): the title is `Autosaved`, the kind chip appears only on named rows, and the number stays once in the meta line.
 - Dashboard cards carry a storage chip only when the document is linked to GitHub — it reads **GitHub** with the repo path or gist in its tooltip — so plain documents no longer all say "Markdoc" in the grid, the list or the Trash (#114); on phone, *Show all starred* has a 44 px tap target (24 px on desktop) and the phone dashboard axe scan now enforces WCAG 2.2 `target-size` (#116).
 
 ### Writing

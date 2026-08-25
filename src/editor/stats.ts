@@ -107,10 +107,10 @@ function stripAngleTags(s: string): string {
 
 /**
  * Turn one Markdown line into prose: drop block markers (heading, list, quote, table pipes),
- * images, link URLs, emphasis and inline code delimiters. Returns the prose text and whether
- * the line was a heading.
+ * images (or keep their alt text with `imageAlt`), link URLs, emphasis and inline code
+ * delimiters. Returns the prose text and whether the line was a heading.
  */
-function proseOfLine(line: string): { text: string; heading: boolean } {
+function proseOfLine(line: string, imageAlt = false): { text: string; heading: boolean } {
   let s = line;
   let heading = false;
   // Block quotes (possibly nested), then heading markers, list bullets, task boxes.
@@ -123,12 +123,12 @@ function proseOfLine(line: string): { text: string; heading: boolean } {
     s = s.replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/, "");
   }
   // Horizontal rules, table separator rows.
-  if (/^\s*(?:[-*_]\s*){3,}$/.test(s) || /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(s)) return { text: "", heading };
+  if (/^\s*(?:[-*_]\s*){3,}$/.test(s) || /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(s)) return { text: "", heading };
   // Table pipes become spaces so cells stay separate words.
   if (s.includes("|")) s = s.replace(/\|/g, " ");
-  // Images are dropped entirely; links keep their text; reference definitions vanish.
-  s = stripLinkLike(s, "![", "(", ")", false);
-  s = stripLinkLike(s, "![", "[", "]", false);
+  // Images are dropped (or reduced to their alt text); links keep their text; reference definitions vanish.
+  s = stripLinkLike(s, "![", "(", ")", imageAlt);
+  s = stripLinkLike(s, "![", "[", "]", imageAlt);
   s = stripLinkLike(s, "[", "(", ")", true);
   s = stripLinkLike(s, "[", "[", "]", true);
   if (/^\s{0,3}\[[^\]]+\]:\s*\S+/.test(s)) return { text: "", heading };
@@ -144,6 +144,62 @@ function countWords(text: string): number {
   return m ? m.length : 0;
 }
 
+/**
+ * Index of the first line after a YAML front matter block (a `---` line, possibly after blank
+ * lines, closed by `---` or `...`), or 0 when there is none.
+ */
+function afterFrontMatter(lines: string[]): number {
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === "") i++;
+  if (lines[i]?.trim() !== "---") return 0;
+  let j = i + 1;
+  while (j < lines.length && lines[j].trim() !== "---" && lines[j].trim() !== "...") j++;
+  return j < lines.length ? j + 1 : 0;
+}
+
+/** Whether `line` closes the fence opened with `fence`. */
+function closesFence(line: string, fence: string): boolean {
+  const m = FENCE_RE.exec(line);
+  return !!m && m[2][0] === fence[0] && m[2].length >= fence.length && line.trim() === m[2];
+}
+
+/**
+ * The first `max` characters of a document's prose, for the dashboard card under the title:
+ * front matter and fenced code are skipped, headings are passed over (the title is already on
+ * the card), images become their alt text, links their text, table cells are joined by spaces
+ * and the remaining Markdown punctuation is removed. A document with no prose at all falls back
+ * to its heading text. Linear in the input and stops once `max` characters are collected.
+ */
+export function excerptOf(markdown: string, max = 160): string {
+  if (!markdown) return "";
+  const lines = markdown.split("\n");
+  let out = "";
+  let headingsOnly = "";
+  let inFence: string | null = null;
+  for (let i = afterFrontMatter(lines); i < lines.length && out.length < max; i++) {
+    const line = lines[i];
+    if (inFence) {
+      if (closesFence(line, inFence)) inFence = null;
+      continue;
+    }
+    const fence = FENCE_RE.exec(line);
+    if (fence) {
+      inFence = fence[2];
+      continue;
+    }
+    if (line.trim() === "") continue;
+    const { text, heading } = proseOfLine(line, true);
+    const t = text.replace(/\s+/g, " ").trim();
+    if (t === "") continue;
+    if (heading) {
+      if (headingsOnly.length < max) headingsOnly += (headingsOnly ? " " : "") + t;
+      continue;
+    }
+    out += (out ? " " : "") + t;
+  }
+  return (out || headingsOnly).slice(0, max).trim();
+}
+
 function countSentences(text: string): number {
   const m = text.match(SENTENCE_RE);
   return m ? m.length : 0;
@@ -151,13 +207,7 @@ function countSentences(text: string): number {
 
 function compute(markdown: string): DocStats {
   const lines = markdown.split("\n");
-  let i = 0;
-  // YAML front matter: a leading `---` block closed by `---` or `...`.
-  if (lines[0]?.trim() === "---") {
-    let j = 1;
-    while (j < lines.length && lines[j].trim() !== "---" && lines[j].trim() !== "...") j++;
-    if (j < lines.length) i = j + 1;
-  }
+  let i = afterFrontMatter(lines);
   let words = 0;
   let characters = 0;
   let charactersNoSpaces = 0;
@@ -185,8 +235,7 @@ function compute(markdown: string): DocStats {
   for (; i < lines.length; i++) {
     const line = lines[i];
     if (inFence) {
-      const m = FENCE_RE.exec(line);
-      if (m && m[2][0] === inFence[0] && m[2].length >= inFence.length && line.trim() === m[2]) inFence = null;
+      if (closesFence(line, inFence)) inFence = null;
       continue;
     }
     const fence = FENCE_RE.exec(line);

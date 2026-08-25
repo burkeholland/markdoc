@@ -122,12 +122,21 @@ test.describe("version compare", () => {
     await focusCodeEnd(page);
     await page.keyboard.type("\n\nTyped later.");
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
-    const autoNumber = await rows
-      .filter({ has: page.locator('[data-testid="version-kind"]', { hasText: "Auto" }) })
-      .first()
-      .getAttribute("data-version-number");
+    const autoRow = page.locator('[data-testid="version-item"][data-version-kind="auto"]').first();
+    await expect(autoRow).toBeVisible();
+    const autoNumber = await autoRow.getAttribute("data-version-number");
     const auto = page.locator(`[data-testid="version-item"][data-version-number="${autoNumber}"]`);
     await expect(auto).toBeVisible();
+    // #159: each fact once — the title says "Autosaved" (no chip, no number), the number is in the meta line only.
+    const autoText = (await auto.textContent()) ?? "";
+    expect(autoText.match(new RegExp(`v${autoNumber}(?!\\d)`, "g"))?.length).toBe(1);
+    expect(autoText.match(/Auto/g)?.length).toBe(1);
+    expect(autoText).toContain("Autosaved");
+    await expect(auto.getByTestId("version-kind")).toHaveCount(0);
+    // A named row: the name, one chip, one vN.
+    const oneText = (await row(page, "One").textContent()) ?? "";
+    expect(oneText.match(new RegExp(`v${n1}(?!\\d)`, "g"))?.length).toBe(1);
+    await expect(row(page, "One").getByTestId("version-kind")).toHaveCount(1);
     await auto.getByRole("button").first().click();
     await expect(diff).toBeVisible();
     await auto.getByTestId("version-rename").click();
