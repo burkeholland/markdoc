@@ -7,7 +7,7 @@
 #   -MinWaitSec, at most -TimeoutSec, and ends early only if the launcher process exits.
 # Exit 0 on healthy, 1 otherwise (prints a "NOT HEALTHY: <reason>" line and the log tail).
 param(
-  # Live worktree; defaults to the sibling ../markdoc-live (see Get-FactoryRoot in common.ps1).
+  # Live worktree; defaults to live.json's root, else the sibling ../markdoc-live (see Get-LiveRoot in common.ps1).
   [string]$Root,
   [int]$Port = 3000,
   # Defaults to ../markdoc-data/live.log next to the repo.
@@ -20,7 +20,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
-if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
+if (-not $Root) { $Root = Get-LiveRoot }
 if (-not $LogPath) { $LogPath = Join-Path (Get-FactoryRoot) 'markdoc-data\live.log' }
 
 if (-not $Restart) {

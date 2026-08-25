@@ -9,6 +9,8 @@ export type Db = PgDb | LiteDb;
 interface DbGlobal {
   promise?: Promise<Db>;
   migrated?: Promise<void>;
+  /** Whatever holds the connection, so closeDb() can release it: a pg Pool or a PGlite instance. */
+  close?: () => Promise<void>;
 }
 
 // The Next.js server bundle and the custom collaboration server each load their own
@@ -32,6 +34,7 @@ async function create(): Promise<Db> {
       ssl: /sslmode=require/.test(url) || process.env.DATABASE_SSL === "1" ? { rejectUnauthorized: false } : undefined,
     });
     const db = drizzle(pool, { schema });
+    registry.close = () => pool.end();
     const { migrate } = await import("drizzle-orm/node-postgres/migrator");
     await migrate(db, { migrationsFolder: migrationsFolder() });
     return db;
@@ -44,6 +47,7 @@ async function create(): Promise<Db> {
   if (dataDir !== "memory://") fs.mkdirSync(dataDir, { recursive: true });
   const client = dataDir === "memory://" ? new PGlite() : new PGlite(dataDir);
   await client.waitReady;
+  registry.close = () => client.close();
   const db = drizzle(client, { schema });
   const { migrate } = await import("drizzle-orm/pglite/migrator");
   await migrate(db, { migrationsFolder: migrationsFolder() });
@@ -55,10 +59,26 @@ export function getDb(): Promise<Db> {
   if (!registry.promise) {
     registry.promise = create().catch((err) => {
       registry.promise = undefined;
+      registry.close = undefined;
       throw err;
     });
   }
   return registry.promise;
+}
+
+/**
+ * Close the shared connection and forget it, so the next getDb() opens whatever PGLITE_DATA_DIR /
+ * DATABASE_URL say at that moment. Used by the standby handover in server/index.ts: the server warms
+ * up on a throwaway database, then releases it and opens the real one once the old process is gone
+ * (PGlite is single-writer, so the two can never be open at once).
+ */
+export async function closeDb(): Promise<void> {
+  const pending = registry.promise;
+  const close = registry.close;
+  registry.promise = undefined;
+  registry.close = undefined;
+  if (pending) await pending.catch(() => undefined);
+  if (close) await close();
 }
 
 export { schema };
