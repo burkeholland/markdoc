@@ -15,6 +15,8 @@ export interface EditorUser {
 
 /** Create one collaboration session per mounted editor and tear it down on unmount. */
 export function useCollabSession(docId: string, user: EditorUser, role: Role): CollabSession {
+  // StrictMode (development) runs this initializer twice and keeps one result: the session connects in
+  // the effect below, so the twin never opens a socket and frees itself (see CollabSessionOptions.autoConnect).
   const [session] = useState(
     () =>
       new CollabSession({
@@ -23,10 +25,11 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role): C
         role,
         getToken: async () => (await api.documents.collabToken(docId)).token,
         deferLocal: true,
+        autoConnect: false,
       }),
   );
   useEffect(() => {
-    session.keepAlive();
+    session.connect();
     // Only after hydration: locally stored content must not change the first client render.
     session.startLocalPersistence();
     if (process.env.NODE_ENV !== "production") {

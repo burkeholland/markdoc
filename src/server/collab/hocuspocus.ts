@@ -9,6 +9,7 @@ import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 import { publishAgentPresence } from "@/server/agent-presence";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
+import { installOriginAwareBroadcast } from "./broadcast";
 
 export { hydrateDoc, META_KEY, TEXT_KEY };
 
@@ -29,6 +30,9 @@ export function createCollabServer() {
     debounce: 1500,
     maxDebounce: 8000,
     unloadImmediately: false,
+    // Outgoing fan-out is handled per document by installOriginAwareBroadcast (see collab/broadcast.ts):
+    // no buffering here, so every update / awareness change reaches it with its origin still known.
+    flushDelay: false,
 
     async onAuthenticate({ token, documentName, connectionConfig }: onAuthenticatePayload<CollabContext>) {
       let claims: CollabClaims;
@@ -43,6 +47,7 @@ export function createCollabServer() {
     },
 
     async onLoadDocument({ document, documentName }: onLoadDocumentPayload<CollabContext>) {
+      installOriginAwareBroadcast(document);
       const db = await getDb();
       const [row] = await db
         .select({ ystate: schema.documents.ystate, content: schema.documents.content, title: schema.documents.title })
