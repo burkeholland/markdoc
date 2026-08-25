@@ -93,4 +93,46 @@ test.describe("dashboard organisation", () => {
     await page.getByTestId("sort-select").selectOption("recent");
     await expect.poll(() => cardTitles(page)).toEqual(["Mike", "Zulu", "Alpha"]);
   });
+
+  test("storage badge only on GitHub-linked cards: none for local documents in the grid or the trash (#114)", async () => {
+    const page = user.page;
+    // Three local documents, no chips at all.
+    await goHome(page);
+    await expect(page.getByTestId("document-card")).toHaveCount(3);
+    await expect(page.getByTestId("storage-badge")).toHaveCount(0);
+
+    // Link Zulu to a fake repo (GITHUB_MOCK=1 in the e2e server): exactly one chip, reading "GitHub",
+    // with the repo detail in its tooltip.
+    const path = `docs/badge-${Date.now()}.md`;
+    const seed = await page.request.post("/api/github/mock", { data: { kind: "repo", owner: "mock", repo: "scratch", branch: "main", path, content: "# Zulu\n\nOpened first.\n" } });
+    expect(seed.ok()).toBeTruthy();
+    const link = await page.request.post(`/api/documents/${idB}/link`, { data: { storage: "repo", owner: "mock", repo: "scratch", branch: "main", path } });
+    expect(link.ok()).toBeTruthy();
+
+    await goHome(page);
+    const badges = page.getByTestId("storage-badge");
+    await expect(badges).toHaveCount(1);
+    await expect(badges).toHaveText("GitHub");
+    await expect(badges).toHaveAttribute("data-storage", "repo");
+    await expect(badges).toHaveAttribute("title", `mock/scratch: ${path}`);
+    await expect(page.getByTestId("document-card").filter({ hasText: "Zulu" }).getByTestId("storage-badge")).toHaveCount(1);
+    await expect(page.getByTestId("document-card").filter({ hasText: "Mike" }).getByTestId("storage-badge")).toHaveCount(0);
+
+    // Phone width: the local card's title row has nothing next to the heading.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mikeRow = page.getByTestId("document-card").filter({ hasText: "Mike" }).getByRole("heading").locator("..");
+    await expect(mikeRow.locator(":scope > *")).toHaveCount(1);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Trash: a local document carries no chip there either.
+    expect((await page.request.delete(`/api/documents/${idA}`)).ok()).toBeTruthy();
+    await goHome(page);
+    await page.getByTestId("filter-trash").click();
+    await expect(page.getByTestId("trash-card")).toHaveCount(1);
+    await expect(page.getByTestId("trash-card")).toContainText("Mike");
+    await expect(page.getByTestId("trash-view").getByTestId("storage-badge")).toHaveCount(0);
+    expect((await page.request.post(`/api/documents/${idA}/restore`)).ok()).toBeTruthy();
+    await goHome(page);
+    await expect(page.getByTestId("document-card")).toHaveCount(3);
+  });
 });

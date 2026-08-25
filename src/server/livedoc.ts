@@ -2,11 +2,13 @@ import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { getCollab } from "@/server/collab/registry";
-import { hydrateDoc, withDocument, TEXT_KEY, type CollabContext } from "@/server/collab/hocuspocus";
+import { hydrateDoc, withDocument, META_KEY, TEXT_KEY, type CollabContext } from "@/server/collab/hocuspocus";
 import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { CommentsModel } from "@/editor/collab/comments";
 import { diffOps, applyOps } from "@/editor/sync/text-diff";
 import { HttpError } from "@/server/http";
+import { noteContentWrite, type WriterRef } from "@/server/agent-events";
+import type { AgentActivity } from "@/server/agents";
 
 export interface LiveText {
   /** Full Markdown including pending suggested insertions. */
@@ -67,20 +69,51 @@ export async function readLiveDoc<T>(docId: string, fn: (doc: Y.Doc) => T): Prom
   }
 }
 
+/** The Markdown as it would read with every pending suggestion rejected (what `content.changed` hashes). */
+export function cleanTextOf(doc: Y.Doc): string {
+  const model = new SuggestionsModel(doc, doc.getText(TEXT_KEY));
+  try {
+    return model.cleanText();
+  } finally {
+    model.destroy();
+  }
+}
+
+/**
+ * Run `fn` and tell the agent-events module who moved the clean text, so a token's watch can skip its own
+ * writes. The writer is the agent that stamped `meta.agentActivity` during `fn` (recordAgentActivity does
+ * that on every agent write), else the human behind `ctx`.
+ */
+function attributed(docId: string, ctx: CollabContext, fn: (doc: Y.Doc) => void): (doc: Y.Doc) => void {
+  return (doc) => {
+    const meta = doc.getMap(META_KEY);
+    const stampBefore = meta.get("agentActivity");
+    const before = cleanTextOf(doc);
+    fn(doc);
+    // Y.Map.get returns the very object recordAgentActivity stored, so a new reference means `fn` stamped
+    // (two stamps within one millisecond would compare equal as JSON).
+    const stamp = meta.get("agentActivity") as AgentActivity | undefined;
+    const agent = stamp && stamp !== stampBefore ? stamp.name : null;
+    const writer: WriterRef = agent ? { id: `agent:${ctx.userId}:${agent}`, name: agent, kind: "agent" } : { id: ctx.userId, name: ctx.name, kind: "user" };
+    noteContentWrite(docId, writer, before, cleanTextOf(doc));
+  };
+}
+
 /**
  * Mutate a document's shared state. Goes through the collaboration server when
  * it is running (so connected users see the change instantly); otherwise loads,
  * mutates and stores the document directly.
  */
 export async function mutateLiveDoc(docId: string, ctx: CollabContext, fn: (doc: Y.Doc) => void): Promise<void> {
+  const run = attributed(docId, ctx, fn);
   const collab = getCollab();
   if (collab) {
-    await withDocument(collab, docId, ctx, fn);
+    await withDocument(collab, docId, ctx, run);
     return;
   }
   const doc = await loadFromDb(docId);
   try {
-    doc.transact(() => fn(doc), { source: "local", context: ctx });
+    doc.transact(() => run(doc), { source: "local", context: ctx });
     const db = await getDb();
     await db
       .update(schema.documents)

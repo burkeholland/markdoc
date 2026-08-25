@@ -325,4 +325,62 @@ test.describe("suggesting mode: one typed word is one suggestion, even with an u
     await expect(page.locator(".cm-content .md-suggest-insert")).toHaveCount(1);
     expect(await markedCodeLines(page)).toEqual([12]);
   });
+
+  test("the panel lands on Suggestions in Suggesting mode, switches there once when the first suggestion arrives, and the Open empty state links to it (#117)", async () => {
+    const docId = await createDocument(alice.page, TABLE_DOC, "Scout doc");
+    await openDocument(alice.page, docId);
+    const page = alice.page;
+    const suggestionsTab = page.getByRole("tab", { name: /Suggestions/ });
+    const openTab = page.getByRole("tab", { name: /Open/ });
+
+    // Repro from the issue: Suggesting → type → open the panel with the header toggle.
+    await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    await switchToSuggesting();
+    await focusRichEnd(page);
+    await page.keyboard.type(" suggested-words");
+    await expect.poll(() => codeText(page)).toContain("Last paragraph. suggested-words");
+    await page.getByTestId("comments-toggle").click();
+    await expect(page.getByTestId("comments-panel")).toBeVisible();
+    await expect(suggestionsTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("suggestion-card")).toHaveCount(1);
+    await expect(page.getByText("No open comments")).toHaveCount(0);
+
+    // Open tab, no comments, one suggestion: the empty state links to the Suggestions tab.
+    await openTab.click();
+    await expect(openTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("No open comments")).toBeVisible();
+    await expect(page.getByTestId("comments-empty-suggestions-button")).toHaveText(/1 suggestion waiting/);
+    await page.getByTestId("comments-empty-suggestions-button").click();
+    await expect(suggestionsTab).toHaveAttribute("aria-selected", "true");
+
+    // Back in Editing mode with the panel closed and the suggestion rejected: the panel opens on Open again.
+    await page.getByTestId("reject-all").click();
+    await expect(page.getByTestId("suggestion-card")).toHaveCount(0);
+    await page.getByTestId("mode-switcher").click();
+    await page.getByRole("menuitemradio", { name: /^Editing/ }).click();
+    await expect(page.getByTestId("mode-switcher")).toContainText("Editing");
+    await page.getByTestId("comments-toggle").click();
+    await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    await page.getByTestId("comments-toggle").click();
+    await expect(openTab).toHaveAttribute("aria-selected", "true");
+
+    // Panel already open on Open: the first suggestion of the session moves it to Suggestions…
+    await switchToSuggesting();
+    await focusRichEnd(page);
+    await page.keyboard.type(" again");
+    await expect.poll(() => codeText(page)).toContain("Last paragraph. again");
+    await expect(suggestionsTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("suggestion-card")).toHaveCount(1);
+    // …but only once: a user who switched back to Open is not fought when the next suggestion appears.
+    await openTab.click();
+    await expect(openTab).toHaveAttribute("aria-selected", "true");
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("Control+Home");
+    await page.keyboard.press("End");
+    await page.keyboard.type(" more");
+    await expect.poll(() => codeText(page)).toContain("# Scout doc more");
+    await expect(page.getByTestId("comments-tab-suggestions")).toHaveText(/Suggestions\s*2$/);
+    await expect(openTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("comments-empty-suggestions-button")).toHaveText(/2 suggestions waiting/);
+  });
 });
