@@ -9,6 +9,7 @@ import { serializeBlocks } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
 import type { BlockRange, SourceMap } from "../markdown/sourcemap";
 import { diffOps, applyOps, type TextOp } from "./text-diff";
+import { perfMark } from "../collab/shared";
 
 export const markdownBindingKey = new PluginKey<{ remote: boolean }>("markdownBinding");
 
@@ -18,6 +19,8 @@ const VERIFY_QUIET_MS = 1000;
 export const VERIFY_TRUST_AFTER = 3;
 /** Once trusted, one in this many routine idle windows still gets a full verification. */
 export const VERIFY_EVERY_NTH_WINDOW = 25;
+/** Quiet time after a held remote change before the coalesced rebuild runs without waiting for `synced`. */
+export const HOLD_QUIET_MS = 50;
 /**
  * An edit is structural when a changed line could alter block structure or references beyond
  * the edited block: brackets (references, footnotes, definitions), tables, a newline (a block
@@ -190,6 +193,15 @@ export class MarkdownBinding {
   /** True while a remote sync is being dispatched to the view. */
   syncing = false;
   private destroyed = false;
+  /**
+   * While held, text changes from Yjs are coalesced: the initial load may apply the IndexedDB copy and
+   * the server state (or, on older servers, dozens of chunks) as separate transactions, and a full
+   * parse + ProseMirror render per transaction is what made the 12k-word document slow to open (#118).
+   * {@link releaseRemoteSync} (on `synced`) or a {@link HOLD_QUIET_MS} pause runs the one rebuild.
+   */
+  private holding = false;
+  private heldTimer: ReturnType<typeof setTimeout> | null = null;
+  private heldSync = false;
 
   constructor(
     public readonly ytext: Y.Text,
@@ -211,8 +223,47 @@ export class MarkdownBinding {
   destroy() {
     this.destroyed = true;
     this.cancelVerify();
+    if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = null;
     this.ytext.unobserve(this.onTextChange);
     this.view = null;
+  }
+
+  /**
+   * Coalesce remote text changes until {@link releaseRemoteSync} or a {@link HOLD_QUIET_MS} pause.
+   * Local edits (the rich pane's own transactions) are never held.
+   */
+  holdRemoteSync() {
+    if (this.destroyed) return;
+    this.holding = true;
+  }
+
+  /** Stop coalescing and, if a remote change was held back, rebuild now (synchronously). */
+  releaseRemoteSync() {
+    if (!this.holding) return;
+    this.holding = false;
+    if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = null;
+    if (this.heldSync) {
+      this.heldSync = false;
+      this.syncFromText();
+    }
+  }
+
+  /** Whether a remote change is waiting for the coalesced rebuild. */
+  get hasHeldSync(): boolean {
+    return this.heldSync;
+  }
+
+  private holdSync() {
+    this.heldSync = true;
+    if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = setTimeout(() => {
+      this.heldTimer = null;
+      if (this.destroyed || !this.heldSync) return;
+      this.heldSync = false;
+      this.syncFromText();
+    }, HOLD_QUIET_MS);
   }
 
   /** Build the initial ProseMirror document from the current text. */
@@ -354,6 +405,10 @@ export class MarkdownBinding {
 
   private onTextChange = (_event: Y.YTextEvent, tr: Y.Transaction) => {
     if (this.destroyed || tr.origin === this) return;
+    if (this.holding) {
+      this.holdSync();
+      return;
+    }
     this.syncFromText();
   };
 
@@ -693,6 +748,13 @@ export class MarkdownBinding {
       this.pendingSync = true;
       return;
     }
+    // Any rebuild covers a held remote change too.
+    this.heldSync = false;
+    if (this.heldTimer) {
+      clearTimeout(this.heldTimer);
+      this.heldTimer = null;
+    }
+    perfMark("markdoc:rebuild-start");
     const view = this.view;
     const built = this.buildDoc(this.ytext.toString());
     this.blocks = built.blocks;
@@ -711,6 +773,7 @@ export class MarkdownBinding {
         this.syncing = false;
       }
     }
+    perfMark("markdoc:rebuild-end");
     this.options.onSync?.("remote");
   }
 

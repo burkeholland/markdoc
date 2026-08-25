@@ -15,7 +15,7 @@ import {
   type ConnectionPhase,
   type LocalPersistence,
 } from "./offline";
-import type { CollabUser } from "./shared";
+import { perfMark, type CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
   carryActiveIndex,
@@ -200,6 +200,12 @@ export class CollabSession {
       },
       onSynced: ({ state }) => {
         this.synced = state;
+        if (state) {
+          perfMark("markdoc:synced");
+          // The first sync ends the coalesced initial load: one rebuild of the rich pane, before
+          // the UI learns it is synced (so the stand-in is never swapped for an empty editor).
+          this.binding.releaseRemoteSync();
+        }
         this.updateRecovery();
         this.notify();
       },
@@ -259,6 +265,8 @@ export class CollabSession {
     this.comments = new CommentsModel(this.ydoc, this.ytext);
     this.suggestions = new SuggestionsModel(this.ydoc, this.ytext);
     this.binding = new MarkdownBinding(this.ytext, { onSync: () => this.notify() });
+    // Coalesce the text the local copy and the server deliver into one rich-pane rebuild (released on the first sync).
+    this.binding.holdRemoteSync();
     this.undoManager.addTrackedOrigin(this.binding);
     this.undoManager.on("stack-item-added", this.notify);
     this.undoManager.on("stack-item-popped", this.notify);
@@ -280,6 +288,7 @@ export class CollabSession {
     this.keepAlive();
     if (this.connectRequested || this.destroyed || this.trashed) return;
     this.connectRequested = true;
+    perfMark("markdoc:connect");
     void this.provider.connect();
   }
 
@@ -337,6 +346,7 @@ export class CollabSession {
     const markLoaded = () => {
       if (this.localLoaded) return;
       this.localLoaded = true;
+      perfMark("markdoc:local-loaded");
       this.resolveLocalLoaded();
       this.notify();
     };
