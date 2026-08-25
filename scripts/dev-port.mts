@@ -11,7 +11,9 @@
  *
  * A fresh worktree has no .env.local, and Auth.js refuses to start without AUTH_SECRET. This
  * script (and only this script — never server/index.ts) fills in dev-only defaults so it works out
- * of the box: AUTH_SECRET=dev-only-secret-<port> and AUTH_DEV_LOGIN=1. Anything already set wins.
+ * of the box: AUTH_SECRET=dev-only-secret-<port>, AUTH_DEV_LOGIN=1 and RATE_LIMIT=off (so
+ * `npm run seed:burke-scale` and other API-heavy dev scripts are not throttled; set RATE_LIMIT=on
+ * to exercise the limiter). Anything already set wins.
  */
 import nextEnv from "@next/env";
 import { revertTsconfigChurn } from "./tsconfig-churn";
@@ -34,6 +36,7 @@ nextEnv.loadEnvConfig(process.cwd(), true);
 const devDefaults: Record<string, string> = {};
 if (!process.env.AUTH_SECRET) devDefaults.AUTH_SECRET = `dev-only-secret-${port}`;
 if (!process.env.AUTH_DEV_LOGIN) devDefaults.AUTH_DEV_LOGIN = "1";
+if (!process.env.RATE_LIMIT) devDefaults.RATE_LIMIT = "off";
 const applied = Object.keys(devDefaults);
 if (applied.length > 0) {
   Object.assign(process.env, devDefaults);
