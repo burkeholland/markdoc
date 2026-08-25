@@ -71,14 +71,18 @@ async function measureSwap(page: Page, id: string): Promise<{ before: Snapshot; 
     await route.continue();
   });
 
-  await page.goto(`/d/${id}`);
+  // "load" (and DOMContentLoaded, which waits for deferred scripts) never fires while the scripts are held.
+  await page.goto(`/d/${id}`, { waitUntil: "commit" });
   const placeholder = page.getByTestId("rich-placeholder");
   await expect(placeholder).toBeVisible();
+  // The stylesheet and the fonts are not gated; wait for them so the measurement is the settled one.
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="rich-placeholder"]')!).maxWidth === "820px");
   await page.evaluate(() => document.fonts.ready);
   const before = await snapshot(page, '[data-testid="rich-placeholder"]');
 
   release();
-  await page.unroute(scripts);
+  // The route stays installed (it now continues every script at once); unrouting while the held
+  // requests are still being continued trips "Route is already handled".
   await expect(placeholder).toBeHidden({ timeout: 30_000 });
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
   await expect(page.locator(".md-rich")).toBeVisible();
