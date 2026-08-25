@@ -130,8 +130,15 @@ export async function markRefsRead(documentId: string, refIds: string[]) {
   }
 }
 
-export function useNotifications(): State {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+const noopSubscribe = () => () => {};
+
+/**
+ * Live notifications. `ready: false` renders the empty snapshot without subscribing (so nothing is
+ * fetched yet); the editor passes it until the document is synced so the first poll does not
+ * compete with the open (#118).
+ */
+export function useNotifications(ready = true): State {
+  return useSyncExternalStore(ready ? subscribe : noopSubscribe, ready ? getSnapshot : getServerSnapshot, getServerSnapshot);
 }
 
 // Lets tests (and the console) pull instead of waiting for the next poll, like `__markdocSession`.

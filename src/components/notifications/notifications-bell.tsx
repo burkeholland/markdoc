@@ -37,11 +37,13 @@ export interface NotificationsBellProps {
   currentDocId?: string;
   /** Called after the item is marked read; the caller navigates or opens the thread. */
   onOpen: (n: NotificationDto) => void;
+  /** False while the page is still opening: the bell renders without fetching or polling yet. */
+  ready?: boolean;
 }
 
 /** Bell with an unread badge; the popover lists the latest notifications. */
-export function NotificationsBell({ currentDocId, onOpen }: NotificationsBellProps) {
-  const { items, unreadCount } = useNotifications();
+export function NotificationsBell({ currentDocId, onOpen, ready = true }: NotificationsBellProps) {
+  const { items, unreadCount } = useNotifications(ready);
   const [open, setOpen] = useState(false);
 
   const openItem = (n: NotificationDto) => {

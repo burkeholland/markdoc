@@ -233,6 +233,7 @@ export class CollabSession {
         // Pending changes while not connected (e.g. restored from IndexedDB after a reload
         // that happened offline) should also get the "All changes saved" confirmation.
         if (number > 0 && this.status !== "connected") this.wasOffline = true;
+        if (number === 0 && this.synced) perfMark("markdoc:sync-acked");
         this.updateRecovery();
         this.notify();
       },
@@ -327,8 +328,15 @@ export class CollabSession {
     if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
     if (this.status !== "connected") return "offline";
     if (!this.synced || this.unsyncedChanges > 0) return "saving";
+    if (!this.savedMarked) {
+      // First "saved" of this open: the server has acked our sync step 2, the header can flip.
+      this.savedMarked = true;
+      perfMark("markdoc:saved");
+    }
     return "saved";
   }
+
+  private savedMarked = false;
 
   /**
    * After a connection drop, the first time everything is synced again set

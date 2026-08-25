@@ -53,10 +53,11 @@ test.describe("dashboard organisation", () => {
     await goHome(page);
     await expect(page.getByTestId("starred-strip").getByTestId("starred-card")).toContainText("Mike");
 
-    // Unstar from the editor header.
+    // Unstar from the editor header. The star state is fetched after the first sync (#118), so it must
+    // show within 3 s of "saved" (openDocument waited for it).
     await openDocument(page, idA);
     const headerStar = page.getByTestId("header-star");
-    await expect(headerStar).toHaveAttribute("data-starred", "true");
+    await expect(headerStar).toHaveAttribute("data-starred", "true", { timeout: 3_000 });
     await headerStar.click();
     await expect(headerStar).toHaveAttribute("data-starred", "false");
 
