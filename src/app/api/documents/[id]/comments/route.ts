@@ -44,8 +44,9 @@ const schema = z.discriminatedUnion("action", [
  */
 export const POST = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
-  const { user, role } = await requireAccess(id, "comment");
-  if (!user) throw new HttpError(401, "Sign in required");
+  const { user: caller, role } = await requireAccess(id, "comment");
+  if (!caller) throw new HttpError(401, "Sign in required");
+  const user = caller;
   const body = await readJson(req, (d) => schema.parse(d));
   const author = collabIdentity(user);
   const actor = { login: user.login ?? null, name: author.name };
@@ -146,27 +147,53 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     recordAgentActivity(doc, user, body.action === "react" ? "reacted" : "commented", at);
   });
   // Editors' comments are picked up by the live-document watcher; this covers the no-collab path too (idempotent).
-  if (body.action === "add" || body.action === "reply" || body.action === "edit") {
-    const created = result as { id?: string | null };
-    const target = body.action === "edit" ? body.replyId ?? body.threadId : created.id;
-    if (target) await recordMentions(id, target, user.login, body.body, author.name);
-  }
-  for (const fn of after) await fn();
-  if (body.action === "add") {
-    await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
-    if (body.requestId) {
-      const threadId = (result as { id?: string }).id;
-      await attachWork(id, body.requestId, user, { comments: 1, commentIds: threadId ? [threadId] : [] });
-    }
-  } else if (body.action === "reply") {
-    await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
-  } else if (body.action === "resolve" && body.resolved) {
-    await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
-  } else if (body.action === "suggestion") {
-    const d = decided as { thread: CommentThread; accepted: boolean } | null;
-    if (d) await recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null });
+  try {
+    await afterMutation();
+  } catch (err) {
+    // The thread/reply is already in the shared document; a failed mention, notification or activity row
+    // must not leave it half-written ("a non-2xx status means nothing changed"), so take it back out.
+    await undoWrite().catch((undoErr) => console.error("[comments] could not undo after a failed side effect", undoErr));
+    throw err;
   }
   return json(result);
+
+  async function afterMutation() {
+    if (body.action === "add" || body.action === "reply" || body.action === "edit") {
+      const created = result as { id?: string | null };
+      const target = body.action === "edit" ? body.replyId ?? body.threadId : created.id;
+      if (target) await recordMentions(id, target, user.login, body.body, author.name);
+    }
+    for (const fn of after) await fn();
+    if (body.action === "add") {
+      await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
+      if (body.requestId) {
+        const threadId = (result as { id?: string }).id;
+        await attachWork(id, body.requestId, user, { comments: 1, commentIds: threadId ? [threadId] : [] });
+      }
+    } else if (body.action === "reply") {
+      await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
+    } else if (body.action === "resolve" && body.resolved) {
+      await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
+    } else if (body.action === "suggestion") {
+      const d = decided as { thread: CommentThread; accepted: boolean } | null;
+      if (d) await recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null });
+    }
+  }
+
+  async function undoWrite() {
+    const createdId = (result as { id?: string | null }).id;
+    if (!createdId || (body.action !== "add" && body.action !== "reply")) return;
+    const action = body;
+    await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
+      const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
+      try {
+        if (action.action === "add") model.remove(createdId);
+        else model.deleteReply(action.threadId, createdId);
+      } finally {
+        model.destroy();
+      }
+    });
+  }
 });
 
 /** All comment threads with their current text ranges (agents use this to read feedback). */
