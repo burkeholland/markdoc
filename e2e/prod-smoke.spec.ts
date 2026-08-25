@@ -33,6 +33,12 @@ test.describe("production build", () => {
     await page.waitForURL((url) => url.pathname === "/");
     await page.waitForLoadState("networkidle");
 
+    // The API limiter is on in production: every /api/* response says how much budget is left.
+    const me = await page.request.get("/api/me");
+    expect(me.status()).toBe(200);
+    expect(me.headers()["x-ratelimit-remaining"]).toMatch(/^\d+$/);
+    expect(me.headers()["x-ratelimit-limit"]).toMatch(/^\d+$/);
+
     // Fresh user: the dashboard shows the template gallery; pick Meeting notes.
     await expect(page.getByTestId("empty-state")).toBeVisible();
     await page.getByTestId("empty-state").getByTestId("template-meeting-notes").click();

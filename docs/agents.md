@@ -26,6 +26,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Mentioning people](#mentioning-people)
   - [Formatting and reactions](#formatting-and-reactions)
   - [Notifications](#notifications)
+  - [Rate limits](#rate-limits)
 - [4. Recipes](#4-recipes)
   - [Review a document](#review-a-document)
   - [Sit in a document](#sit-in-a-document)
@@ -353,6 +354,19 @@ Reactions are emoji on a thread or a reply: `POST … { action: "react", threadI
 ### Notifications
 
 People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, @mentions them, or when an agent completes a request they made with **Ask an agent** (`request.done`, attributed to the agent by name). Emoji reactions never notify. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner — except `request.done`, which always reaches the requester, even when the agent's token is their own.
+
+### Rate limits
+
+Every `/api/*` route spends one request from a budget, counted **per token** (a looping agent cannot starve the others), per browser session for cookie callers, and per IP for anyone else. A budget is a token bucket: it holds a *burst* of requests and refills at a *sustained* rate.
+
+| Budget | Applies to | Burst | Sustained |
+| --- | --- | --- | --- |
+| read | `GET`/`HEAD`/`OPTIONS`, and JSON-RPC posts to `/api/mcp` (each tool call is also counted at the REST route it uses) | 60 | 600 / min |
+| write | every other method | 30 | 120 / min |
+| create | `POST /api/documents`, `POST /api/import`, `POST /api/import/file`, `POST /api/documents/:id/assets`, `POST /api/documents/:id/duplicate` | 20 | 20 / min |
+| failed auth | bearer tokens that do not resolve, per IP — the 31st wrong token in a minute (and any token from that IP until one failure refills) is refused before the database is asked | 30 | 30 / min |
+
+Every response carries `X-RateLimit-Limit` (the burst) and `X-RateLimit-Remaining`. Past the budget the answer is `429 { error, retryAfter }` with a `Retry-After` header (whole seconds); nothing was done — wait that long and send the request again. `/api/health` and the collaboration WebSocket are never limited. Operators: `RATE_LIMIT=off` disables the limiter (the e2e dev server does this); `TRUST_PROXY=1` makes the per-IP buckets use the first `X-Forwarded-For` hop instead of the socket address when Markdoc sits behind a reverse proxy.
 
 ## 4. Recipes
 
