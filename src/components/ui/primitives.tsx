@@ -45,11 +45,14 @@ export const MenuRadioGroup = RadixDropdown.RadioGroup;
 export function MenuContent({ className, children, ...props }: React.ComponentProps<typeof RadixDropdown.Content>) {
   return (
     <RadixDropdown.Portal>
-      {/* Long menus (the phone ⋮ menu has 22 rows) cap at the room Radix measures below the trigger and scroll inside, so the last item is always reachable. */}
+      {/* Long menus (the phone ⋮ menu has 22 rows) cap at the room Radix measures below the trigger and scroll inside, so the last item is always reachable.
+          Radix leaves the content at tabindex -1 (items are the roving tab stops); tabindex 0 keeps the scroller itself keyboard-reachable
+          (axe scrollable-region-focusable) — Tab is swallowed by the menu anyway, so nothing else changes. */}
       <RadixDropdown.Content
         sideOffset={6}
         align="end"
         collisionPadding={8}
+        tabIndex={0}
         className={cn("menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto", className)}
         {...props}
       >

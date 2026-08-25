@@ -173,7 +173,8 @@ test.describe("phone", () => {
       await expect(menu).toBeVisible();
       await settled(menu);
       // The phone menu folds Share / Publish / Mode in, so it is taller than the screen without a cap.
-      expect(await menu.getByRole("menuitem").count()).toBeGreaterThanOrEqual(20);
+      const rows = (await menu.getByRole("menuitem").count()) + (await menu.getByRole("menuitemradio").count());
+      expect(rows).toBeGreaterThanOrEqual(20);
       const box = (await menu.boundingBox())!;
       expect(box.y).toBeGreaterThanOrEqual(0);
       expect(box.y + box.height).toBeLessThanOrEqual(phone.viewport.height);
@@ -181,7 +182,13 @@ test.describe("phone", () => {
       const trash = menu.getByRole("menuitem", { name: "Move to trash" });
       await trash.scrollIntoViewIfNeeded();
       await expect(trash).toBeInViewport();
-      const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).disableRules(["color-contrast"]).analyze();
+      // Scoped to the menu: the rest of the page is aria-hidden by Radix while a menu is open (the skip link
+      // there is a page-level finding, not this menu's).
+      const results = await new AxeBuilder({ page })
+        .include('[role="menu"]')
+        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+        .disableRules(["color-contrast"])
+        .analyze();
       expect(results.violations, `${theme} menu: ${JSON.stringify(results.violations.map((v) => v.id))}`).toHaveLength(0);
       await page.keyboard.press("Escape");
       await expect(menu).toHaveCount(0);
