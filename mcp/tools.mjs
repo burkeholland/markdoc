@@ -294,13 +294,22 @@ export function registerTools(server, client) {
     "markdoc_review_suggestions",
     {
       title: "Accept or reject suggestions",
-      description: "Accept or reject a suggestion by id, or all of them. Only do this when the user asked you to.",
-      inputSchema: { id: z.string(), action: z.enum(["accept", "reject", "acceptAll", "rejectAll"]), suggestionId: z.string().optional() },
+      description: "Accept or reject one suggestion by `suggestionId` (required for accept/reject; list ids with markdoc_suggestions), or all of them with acceptAll/rejectAll. Only do this when the user asked you to.",
+      inputSchema: {
+        id: z.string(),
+        action: z.enum(["accept", "reject", "acceptAll", "rejectAll"]),
+        suggestionId: z.string().optional().describe("Required for accept/reject: the suggestion id from markdoc_suggestions"),
+      },
       annotations: DESTRUCTIVE,
     },
     async ({ id, action, suggestionId }) => {
-      await api("POST", `/api/documents/${id}/suggestions`, { action, id: suggestionId });
-      return ok(`${action} done on ${id}.`);
+      const single = action === "accept" || action === "reject";
+      if (single && !suggestionId) throw new Error("`suggestionId` is required for accept/reject (list them with markdoc_suggestions).");
+      const res = await api("POST", `/api/documents/${id}/suggestions`, { action, ...(single ? { id: suggestionId } : {}) });
+      const decided = Number(res?.decided ?? 0);
+      if (decided === 0) throw new Error(`${action} decided nothing on ${id}: no pending suggestions.`);
+      const verb = action.startsWith("accept") ? "Accepted" : "Rejected";
+      return ok(single ? `${verb} suggestion ${suggestionId} on ${id}.` : `${verb} ${decided} suggestion(s) on ${id}.`, { ok: true, action, decided, ...(single ? { suggestionId } : {}) });
     },
   );
 
