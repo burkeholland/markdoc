@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -80,6 +80,50 @@ function EditedMarker({ at }: { at?: number | null }) {
   );
 }
 
+/**
+ * Mounts a Radix Popover/DropdownMenu root only once the user reaches for its trigger. A Radix root is
+ * ~20 fibers (Popper, Presence, DismissableLayer, FocusScope…) even while closed; the comments panel has
+ * one menu and one reaction picker per thread and per reply — 150 roots for Burke's 15 threads, which
+ * was most of the panel-open time (task #487). Until armed, `trigger` is rendered as a plain button
+ * that arms on hover and arms-and-opens on pointer down / Enter / Space / ArrowDown, so the first
+ * interaction behaves exactly like the Radix trigger. Once armed it stays mounted (focus return, etc.).
+ */
+function useLazyTrigger() {
+  const [armed, setArmed] = useState(false);
+  const [open, setOpen] = useState(false);
+  const plainProps = useMemo(
+    () => ({
+      "aria-haspopup": "menu" as const,
+      "aria-expanded": false,
+      onPointerEnter: () => setArmed(true),
+      onPointerDown: (e: React.PointerEvent) => {
+        if (e.button !== 0 || e.ctrlKey) return;
+        setArmed(true);
+        setOpen(true);
+      },
+      onKeyDown: (e: React.KeyboardEvent) => {
+        if (e.key !== "Enter" && e.key !== " " && e.key !== "ArrowDown") return;
+        e.preventDefault();
+        setArmed(true);
+        setOpen(true);
+      },
+    }),
+    [],
+  );
+  return { armed, open, setOpen, plainProps };
+}
+
+function LazyMenu({ trigger, children, ...content }: { trigger: React.ReactElement<React.ComponentProps<"button">>; children: React.ReactNode } & Omit<React.ComponentProps<typeof MenuContent>, "children">) {
+  const { armed, open, setOpen, plainProps } = useLazyTrigger();
+  if (!armed) return cloneElement(trigger, plainProps);
+  return (
+    <Menu open={open} onOpenChange={setOpen}>
+      <MenuTrigger asChild>{trigger}</MenuTrigger>
+      <MenuContent {...content}>{children}</MenuContent>
+    </Menu>
+  );
+}
+
 /** Reaction chips plus the quick picker for one thread body or reply. */
 function ReactionRow({
   reactions,
@@ -94,9 +138,14 @@ function ReactionRow({
   canReact: boolean;
   onToggle: (emoji: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const { armed, open, setOpen, plainProps } = useLazyTrigger();
   const entries = Object.entries(reactions).filter(([, ids]) => ids.length > 0);
   if (entries.length === 0 && !canReact) return null;
+  const addButton = (
+    <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" data-testid="reaction-add">
+      <SmilePlus size={14} />
+    </button>
+  );
   return (
     <div className="reaction-row" onClick={(e) => e.stopPropagation()} data-testid="reaction-row">
       {entries.map(([emoji, ids]) => {
@@ -119,35 +168,34 @@ function ReactionRow({
           </button>
         );
       })}
-      {canReact && (
-        <Popover open={open} onOpenChange={setOpen}>
-          <PopoverTrigger asChild>
-            <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" data-testid="reaction-add">
-              <SmilePlus size={14} />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent side="top" align="start" className="p-1" data-testid="reaction-picker">
-            <div className="reaction-picker" role="group" aria-label="Pick a reaction">
-              {QUICK_REACTIONS.map((emoji) => (
-                <button
-                  key={emoji}
-                  type="button"
-                  data-mine={reactions[emoji]?.includes(me) ? "true" : undefined}
-                  aria-label={`React with ${emoji}`}
-                  onClick={() => {
-                    onToggle(emoji);
-                    setOpen(false);
-                  }}
-                  data-testid="reaction-option"
-                  data-emoji={emoji}
-                >
-                  {emoji}
-                </button>
-              ))}
-            </div>
-          </PopoverContent>
-        </Popover>
-      )}
+      {canReact &&
+        (!armed ? (
+          cloneElement(addButton, { ...plainProps, "aria-haspopup": "dialog" })
+        ) : (
+          <Popover open={open} onOpenChange={setOpen}>
+            <PopoverTrigger asChild>{addButton}</PopoverTrigger>
+            <PopoverContent side="top" align="start" className="p-1" data-testid="reaction-picker">
+              <div className="reaction-picker" role="group" aria-label="Pick a reaction">
+                {QUICK_REACTIONS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    data-mine={reactions[emoji]?.includes(me) ? "true" : undefined}
+                    aria-label={`React with ${emoji}`}
+                    onClick={() => {
+                      onToggle(emoji);
+                      setOpen(false);
+                    }}
+                    data-testid="reaction-option"
+                    data-emoji={emoji}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+        ))}
     </div>
   );
 }
@@ -202,6 +250,13 @@ function useMentionCandidates(session: CollabSession): MentionCandidate[] {
 }
 
 const MAX_SUGGESTIONS = 6;
+
+/**
+ * Mention candidates reach the composers through context rather than as a ThreadCard prop: the list
+ * arrives a moment after the panel opens (collaborators fetch) and would otherwise re-render every
+ * memoised card for a value only an open composer reads.
+ */
+const MentionCandidatesContext = createContext<MentionCandidate[]>([]);
 
 /** Avatar for a comment/suggestion author; agents (API tokens) get a bot badge. */
 function AuthorAvatar({ id, name, src, size }: { id: string; name: string; src?: string | null; size: number }) {
@@ -287,7 +342,6 @@ function Composer({
   onCancel,
   submitLabel = "Comment",
   initial = "",
-  candidates = [],
   quote,
 }: {
   placeholder: string;
@@ -296,10 +350,10 @@ function Composer({
   onCancel?: () => void;
   submitLabel?: string;
   initial?: string;
-  candidates?: MentionCandidate[];
   /** Anchored text; when set, "Suggest a change" (Ctrl+Shift+S) inserts a ```suggestion block pre-filled with it. */
   quote?: string;
 }) {
+  const candidates = useContext(MentionCandidatesContext);
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -538,13 +592,12 @@ function Composer({
   );
 }
 
-function ThreadCard({
+const ThreadCard = memo(function ThreadCard({
   thread,
   session,
   active,
   onReveal,
   ops,
-  candidates,
   unread,
   onToast,
 }: {
@@ -553,7 +606,6 @@ function ThreadCard({
   active: boolean;
   onReveal: (offset: number) => void;
   ops: ReturnType<typeof useCommentOps>;
-  candidates: MentionCandidate[];
   /** The current user has unread notifications about this thread. */
   unread?: boolean;
   onToast?: CommentsPanelProps["onToast"];
@@ -627,7 +679,6 @@ function ThreadCard({
                 initial={thread.body}
                 autoFocus
                 submitLabel="Save"
-                candidates={candidates}
                 onSubmit={async (body) => {
                   await ops.edit(thread.id, body);
                   setEditing(null);
@@ -683,23 +734,24 @@ function ThreadCard({
             </button>
           )}
           {(thread.authorId === me || canModerate) && (
-            <Menu>
-              <MenuTrigger asChild>
+            <LazyMenu
+              align="end"
+              className="w-40"
+              trigger={
                 <button type="button" className="icon-btn h-7 w-7" aria-label="Comment actions">
                   <MoreHorizontal size={16} />
                 </button>
-              </MenuTrigger>
-              <MenuContent align="end" className="w-40">
-                {thread.authorId === me && (
-                  <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
-                    Edit
-                  </MenuItem>
-                )}
-                <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id)}>
-                  Delete thread
+              }
+            >
+              {thread.authorId === me && (
+                <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
+                  Edit
                 </MenuItem>
-              </MenuContent>
-            </Menu>
+              )}
+              <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id)}>
+                Delete thread
+              </MenuItem>
+            </LazyMenu>
           )}
         </div>
       </div>
@@ -722,7 +774,6 @@ function ThreadCard({
                       initial={r.body}
                       autoFocus
                       submitLabel="Save"
-                      candidates={candidates}
                       onSubmit={async (body) => {
                         await ops.edit(thread.id, body, r.id);
                         setEditing(null);
@@ -751,23 +802,24 @@ function ThreadCard({
               </div>
               {(r.authorId === me || canModerate) && (
                 <div onClick={(e) => e.stopPropagation()}>
-                  <Menu>
-                    <MenuTrigger asChild>
+                  <LazyMenu
+                    align="end"
+                    className="w-36"
+                    trigger={
                       <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
                         <MoreHorizontal size={14} />
                       </button>
-                    </MenuTrigger>
-                    <MenuContent align="end" className="w-36">
-                      {r.authorId === me && (
-                        <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
-                          Edit
-                        </MenuItem>
-                      )}
-                      <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
-                        Delete
+                    }
+                  >
+                    {r.authorId === me && (
+                      <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
+                        Edit
                       </MenuItem>
-                    </MenuContent>
-                  </Menu>
+                    )}
+                    <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
+                      Delete
+                    </MenuItem>
+                  </LazyMenu>
                 </div>
               )}
             </div>
@@ -782,7 +834,6 @@ function ThreadCard({
               placeholder="Reply…"
               autoFocus
               submitLabel="Reply"
-              candidates={candidates}
               quote={thread.range ? thread.quote : undefined}
               onSubmit={async (body) => {
                 await ops.reply(thread.id, body);
@@ -804,7 +855,7 @@ function ThreadCard({
       )}
     </div>
   );
-}
+});
 
 function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestion; session: CollabSession; active: boolean; onReveal: (offset: number) => void }) {
   const canAct = session.role === "owner" || session.role === "editor";
@@ -970,10 +1021,12 @@ function useReviews(session: CollabSession): ReviewDto[] {
 }
 
 export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab, onToast }: CommentsPanelProps) {
-  const { threads, suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode } = useSessionValue(
+  // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
+  // keeps the same thread objects and the memoised cards skip their render.
+  const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
+  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode } = useSessionValue(
     session,
     (s) => ({
-      threads: s.comments.list(),
       suggestions: s.suggestions.list(),
       activeCommentId: s.activeCommentId,
       activeSuggestionId: s.activeSuggestionId,
@@ -1032,6 +1085,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   ];
 
   return (
+    <MentionCandidatesContext.Provider value={candidates}>
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="comments-panel">
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Comments</span>
@@ -1073,7 +1127,6 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
             <Composer
               placeholder="Add a comment… (⌘/Ctrl+Enter to post)"
               autoFocus
-              candidates={candidates}
               quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
               onSubmit={async (body) => {
                 const id = await ops.add(pending.from, pending.to, body);
@@ -1109,13 +1162,13 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
               )}
             </EmptyState>
           ) : (
-            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} onToast={onToast} />)
+            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
           ))}
         {tab === "resolved" &&
           (resolved.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
-            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} candidates={candidates} onToast={onToast} />)
+            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
           ))}
         {tab === "suggestions" &&
           (suggestions.length === 0 ? (
@@ -1141,6 +1194,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           ))}
       </div>
     </aside>
+    </MentionCandidatesContext.Provider>
   );
 }
 

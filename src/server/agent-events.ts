@@ -177,6 +177,21 @@ function rememberText(docId: string, hash: string, text: string) {
   while (m.size > TEXT_CACHE_PER_DOC) m.delete(m.keys().next().value!);
 }
 
+/**
+ * Remember the clean text a caller just read under its hash, so a later write that sends that hash back
+ * (`ifContentHash` / `If-Match`) can be answered with a diff of what moved in between.
+ */
+export function rememberCleanText(docId: string, text: string): string {
+  const hash = contentHash(text);
+  rememberText(docId, hash, text);
+  return hash;
+}
+
+/** The clean text last seen under `hash` on this document, if it is still cached. */
+export function cachedCleanText(docId: string, hash: string): string | null {
+  return textCache.get(docId)?.get(hash) ?? null;
+}
+
 /** Unified diff of two texts, capped to `DIFF_MAX_LINES` lines. */
 export function unifiedDiff(before: string, after: string, title = "document.md"): { diff: string; truncated: boolean } {
   const patch = createTwoFilesPatch(title, title, before, after, "before", "after", { context: 2 });

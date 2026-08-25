@@ -26,6 +26,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Mentioning people](#mentioning-people)
   - [Formatting and reactions](#formatting-and-reactions)
   - [Notifications](#notifications)
+  - [Rate limits](#rate-limits)
 - [4. Recipes](#4-recipes)
   - [Review a document](#review-a-document)
   - [Sit in a document](#sit-in-a-document)
@@ -87,12 +88,12 @@ Twenty-seven tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_duplicate_document` | `id` | "Make a copy": a new document you own, titled *Copy of …*, with the current clean text and images. Always a Markdoc document, even when the source lives on GitHub. |
 | `markdoc_delete_document` | `id`, `permanent?` | Move a document you own to the trash (restorable for 30 days). `permanent: true` deletes it for good. |
 | `markdoc_restore_document` | `id` | Take a document out of the trash. |
-| `markdoc_read_document` | `id`, `clean?` | Current Markdown (`clean: true` excludes pending suggestions). |
-| `markdoc_replace_content` | `id`, `content`, `message?` | Replace the whole text, applied live as a minimal diff (collaborators keep their cursors); `message` names a version. |
+| `markdoc_read_document` | `id`, `clean?` | Current Markdown (`clean: true` excludes pending suggestions). The header line carries the document's `contentHash` (`# Title (id …, hash …)`) to pass back as `ifContentHash`. |
+| `markdoc_replace_content` | `id`, `content`, `message?`, `ifContentHash?` | Replace the whole text, applied live as a minimal diff (collaborators keep their cursors); `message` names a version. With `ifContentHash` (the hash you read) the write is refused — *"Document changed since you read it … re-read and retry"*, with a diff of what moved — when anyone edited the document in between, so a person typing alongside you never loses their words. Always pass it. |
 | `markdoc_append` | `id`, `markdown` | Append Markdown to the end. |
-| `markdoc_suggest` | `id`, `content` or `edits: [{ find, replace, all? }]` | Propose changes as tracked suggestions, from a full revised text or find → replace edits. |
+| `markdoc_suggest` | `id`, `content` or `edits: [{ find, replace, all? }]`, `ifContentHash?` | Propose changes as tracked suggestions, from a full revised text or find → replace edits. `ifContentHash` works as for `markdoc_replace_content`. |
 | `markdoc_suggestions` | `id` | List pending suggestions with author and surrounding context. |
-| `markdoc_review_suggestions` | `id`, `action: accept \| reject \| acceptAll \| rejectAll`, `suggestionId` (required for accept/reject) | Accept or reject (only when asked to). Errors instead of "done" when the id is missing or unknown, or when nothing was decided. |
+| `markdoc_review_suggestions` | `id`, `action: accept \| reject \| acceptAll \| rejectAll`, `suggestionId` (required for accept/reject) | Accept or reject (only when asked to). Errors instead of "done" when the id is missing or unknown; `acceptAll` / `rejectAll` with nothing pending is a plain success — *Nothing to decide on … (0 pending)*, `decided: 0` — since the document is already in the asked-for state. |
 | `markdoc_comments` | `id` | Read threads, open and resolved, with the text they anchor to. |
 | `markdoc_comment` | `id`, `action: add \| reply \| resolve \| reopen \| react`, `quote?`, `threadId?`, `replyId?`, `body?`, `emoji?` | Add a comment on a quote, reply to a thread, resolve or reopen it, or toggle an emoji reaction (`react` with `emoji`, optionally on a `replyId`). A body may carry one ` ```suggestion ` fenced block (GitHub's syntax) proposing a rewrite of the quoted text; people see a diff with **Accept** / **Reject**, and nothing changes until they accept. |
 | `markdoc_review` | `id`, `summary`, `verdict: approve \| request_changes \| comment`, `comments: [{ quote, body }]` | Leave a GitHub-style review: one thread per finding (bodies may carry ` ```suggestion ` blocks) plus a review card at the top of the Comments panel with **Accept all** / **Reject all**. Atomic: one quote that is not found fails the whole call and creates nothing. See [Review a document](#review-a-document). |
@@ -206,7 +207,7 @@ Quote the selection exactly as the request gives it: `markdoc_suggest` `edits[].
   "summary": "Left one comment: the preference claim needs a source or softer wording." } }
 ```
 
-**Rewrite directly (`mode: "rewrite"`)** — *"Turn into a checklist"* with no selection (whole document). The change lands in place for everyone, so only do this when the mode says so; `message` names the version it creates:
+**Rewrite directly (`mode: "rewrite"`)** — *"Turn into a checklist"* with no selection (whole document). The change lands in place for everyone, so only do this when the mode says so; `message` names the version it creates, and `ifContentHash` (the `hash` from the read) makes sure nothing a person typed while you worked is overwritten — on a conflict the tool errors with the diff; re-read and retry:
 
 ```json
 { "tool": "markdoc_list_requests", "arguments": {} }
@@ -214,7 +215,8 @@ Quote the selection exactly as the request gives it: `markdoc_suggest` `edits[].
 { "tool": "markdoc_read_document", "arguments": { "id": "DOC", "clean": true } }
 { "tool": "markdoc_replace_content", "arguments": { "id": "DOC",
   "content": "# Launch checklist\n\n- [ ] Cut the release branch\n- [ ] Run the e2e suite\n- [ ] Publish the changelog\n",
-  "message": "Rewritten as a checklist (Ask an agent)" } }
+  "message": "Rewritten as a checklist (Ask an agent)",
+  "ifContentHash": "<hash from the read_document header>" } }
 { "tool": "markdoc_complete_request", "arguments": { "documentId": "DOC", "requestId": "REQ",
   "summary": "Rewrote the document as a three-item checklist; see version history to compare." } }
 ```
@@ -253,14 +255,14 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 
 | Method & path | Body | Access | Purpose |
 | --- | --- | --- | --- |
-| `GET /api/documents/:id/content` | | view | `{ content, clean, title, contentHash, pendingSuggestions, openComments, stats }`. `contentHash` is the SHA-256 of `clean`; `stats` are prose statistics of `clean`: `{ words, characters, charactersNoSpaces, sentences, paragraphs, headings, readingMinutes (200 wpm), speakingMinutes (130 wpm) }` (fenced code and front matter excluded). |
-| `PUT /api/documents/:id/content` | `{ content, message? }` | edit | Replace the whole text (minimal live diff; `message` names a version). |
+| `GET /api/documents/:id/content` | | view | `{ content, clean, title, contentHash, pendingSuggestions, openComments, stats }`. `contentHash` is the SHA-256 of `clean` — send it back with your write as `ifContentHash` (below); `stats` are prose statistics of `clean`: `{ words, characters, charactersNoSpaces, sentences, paragraphs, headings, readingMinutes (200 wpm), speakingMinutes (130 wpm) }` (fenced code and front matter excluded). |
+| `PUT /api/documents/:id/content` | `{ content, message?, ifContentHash? }` or header `If-Match: "<contentHash>"` | edit | Replace the whole text (minimal live diff; `message` names a version). With `ifContentHash` / `If-Match`, the write only lands when the clean text still hashes to that value; otherwise **`409 { error: "Document changed since you read it", contentHash, diff, truncated }`** — `contentHash` is the current one, `diff` a unified diff of the clean text since the hash you sent (≤ 200 lines; `null` when that state is no longer cached) — and nothing is applied. Returns `{ ok, changed, contentHash }` with the new hash. |
 | `PATCH /api/documents/:id/content` | `{ append }` | edit | Append Markdown. |
-| `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }`, plus `requestId?` | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`. Returns `{ suggestions, suggestionIds }`; with `requestId` the suggestions count against that request. |
+| `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }`, plus `requestId?`, `ifContentHash?` (or `If-Match`) | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`; `409` as for `PUT /content` when `ifContentHash` no longer matches. Returns `{ suggestions, suggestionIds, contentHash }`; with `requestId` the suggestions count against that request. |
 | `GET /api/documents/:id/suggestions` | | view | Pending suggestions with ranges and context. |
 | `POST /api/documents/:id/suggestions` | `{ action: accept \| reject, id }` or `{ action: acceptAll \| rejectAll }` | edit | Review suggestions. `accept` / `reject` decide one suggestion: `400` without `id`, `404` when no pending suggestion has that `id`. Returns `{ ok, decided }` (the number decided; plus `id` for a single decision). |
 | `GET /api/documents/:id/comments` | | view | `{ comments: [thread] }`: threads with the text they anchor to, a `mentions` array, `reactions` (`{ "👍": [userId, …] }`) and `editedAt` per thread and reply. |
-| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body, requestId? }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }`, `{ action: "suggestion", threadId, decision: accept \| reject }` | comment | Comment. `quote` must appear in the text (`400` otherwise). Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. A body may carry one ` ```suggestion ` fenced block proposing a rewrite of the quoted text; `suggestion` decides on it — `accept` (editors only; `409` when the quoted text changed, i.e. the suggestion is outdated) replaces the quote, resolves the thread and notifies the author; `reject` only records the decision. |
+| `POST /api/documents/:id/comments` | `{ action: "add", quote \| from,to, body, requestId? }`, `{ action: "reply", threadId, body }`, `{ action: "resolve", threadId, resolved }`, `{ action: "edit", threadId, replyId?, body }`, `{ action: "delete", threadId, replyId? }`, `{ action: "react", threadId, replyId?, emoji }`, `{ action: "suggestion", threadId, decision: accept \| reject }` | comment | Comment. `quote` must appear in the text (`400` otherwise). A `reply` to an unknown `threadId` answers `404 { error: "Comment not found" }` and nothing is recorded. Editing and deleting is limited to your own comments unless you own the document. `react` toggles your reaction (`{ ok, reacted }`) and notifies nobody. A body may carry one ` ```suggestion ` fenced block proposing a rewrite of the quoted text; `suggestion` decides on it — `accept` (editors only; `409` when the quoted text changed, i.e. the suggestion is outdated) replaces the quote, resolves the thread and notifies the author; `reject` only records the decision. |
 | `POST /api/documents/:id/reviews` | `{ summary, verdict: approve \| request_changes \| comment, comments: [{ quote, body }] }` | comment | A review: one thread per comment (bodies may carry ` ```suggestion ` blocks) and a review card. Atomic: if any `quote` is not found, `400 { notFound: [...] }` and nothing is created. Returns `201 { review }`; the document owner is notified. |
 | `GET /api/documents/:id/reviews` | | view | `{ reviews: [{ id, authorName, agent, verdict, summary, threadIds, createdAt }] }`, newest first. |
 
@@ -352,6 +354,19 @@ Reactions are emoji on a thread or a reply: `POST … { action: "react", threadI
 ### Notifications
 
 People are notified — bell in the editor header, strip on the dashboard, `GET /api/notifications` for you — when someone replies to a thread they started or replied in, resolves or re-opens such a thread, accepts or rejects their suggestion, shares a document with them, @mentions them, or when an agent completes a request they made with **Ask an agent** (`request.done`, attributed to the agent by name). Emoji reactions never notify. Whatever you do through the API produces the same notifications for the humans involved (never for the actor). Actions through an agent token count as the token owner's: they notify everyone else involved and never the owner — except `request.done`, which always reaches the requester, even when the agent's token is their own.
+
+### Rate limits
+
+Every `/api/*` route spends one request from a budget, counted **per token** (a looping agent cannot starve the others), per browser session for cookie callers, and per IP for anyone else. A budget is a token bucket: it holds a *burst* of requests and refills at a *sustained* rate.
+
+| Budget | Applies to | Burst | Sustained |
+| --- | --- | --- | --- |
+| read | `GET`/`HEAD`/`OPTIONS`, and JSON-RPC posts to `/api/mcp` (each tool call is also counted at the REST route it uses) | 60 | 600 / min |
+| write | every other method | 30 | 120 / min |
+| create | `POST /api/documents`, `POST /api/import`, `POST /api/import/file`, `POST /api/documents/:id/assets`, `POST /api/documents/:id/duplicate` | 20 | 20 / min |
+| failed auth | bearer tokens that do not resolve, per IP — the 31st wrong token in a minute (and any token from that IP until one failure refills) is refused before the database is asked | 30 | 30 / min |
+
+Every response carries `X-RateLimit-Limit` (the burst) and `X-RateLimit-Remaining`. Past the budget the answer is `429 { error, retryAfter }` with a `Retry-After` header (whole seconds); nothing was done — wait that long and send the request again. `/api/health` and the collaboration WebSocket are never limited. Operators: `RATE_LIMIT=off` disables the limiter (the e2e dev server does this); `TRUST_PROXY=1` makes the per-IP buckets use the first `X-Forwarded-For` hop instead of the socket address when Markdoc sits behind a reverse proxy.
 
 ## 4. Recipes
 
