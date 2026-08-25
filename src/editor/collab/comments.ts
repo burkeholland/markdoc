@@ -26,6 +26,18 @@ export type Reactions = Record<string, string[]>;
 /** Emoji offered by the quick picker, and the order reactions are shown in. */
 export const QUICK_REACTIONS = ["👍", "❤️", "🎉", "👀", "😄", "🚀"];
 
+/**
+ * Exactly one emoji: a pictograph (with optional variation selector, skin tone and ZWJ-joined
+ * parts, e.g. 👍🏽 or 👨‍👩‍👧), a keycap (1️⃣), a flag (🇫🇷) or a tag-sequence flag (🏴󠁧󠁢󠁳󠁣󠁴󠁿). Words and
+ * punctuation are not reactions.
+ */
+const PICTOGRAPH = "\\p{Extended_Pictographic}\\uFE0F?\\p{Emoji_Modifier}?";
+export const EMOJI_RE = new RegExp(`^(?:\\p{Regional_Indicator}{2}|[0-9#*]\\uFE0F?\\u20E3|${PICTOGRAPH}(?:\\u200D${PICTOGRAPH})*[\\u{E0020}-\\u{E007F}]*)$`, "u");
+
+export function isEmoji(value: string): boolean {
+  return EMOJI_RE.test(value);
+}
+
 export interface CommentThread {
   id: string;
   anchor: TextAnchor;

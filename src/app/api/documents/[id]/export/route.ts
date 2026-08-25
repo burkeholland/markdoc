@@ -1,4 +1,4 @@
-import { handler, requireAccess, json } from "@/server/http";
+import { handler, requireAccess, json, HttpError } from "@/server/http";
 import { readLiveText } from "@/server/livedoc";
 import { renderDocumentHtml } from "@/server/export/html";
 import { renderPdf, PdfUnavailableError } from "@/server/export/pdf";
@@ -13,8 +13,13 @@ const CONTENT_TYPES: Record<Format, string> = {
   pdf: "application/pdf",
 };
 
+const FORMATS = Object.keys(CONTENT_TYPES) as Format[];
+
+/** `md` when absent; anything other than `md|html|pdf` is a 400 rather than a silent Markdown fallback. */
 function parseFormat(value: string | null): Format {
-  return value === "html" || value === "pdf" ? value : "md";
+  if (value === null || value === "") return "md";
+  if ((FORMATS as string[]).includes(value)) return value as Format;
+  throw new HttpError(400, "Unknown format", { format: value, formats: FORMATS });
 }
 
 /**

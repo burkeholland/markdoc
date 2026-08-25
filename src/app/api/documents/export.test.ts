@@ -46,9 +46,13 @@ describe("GET /api/documents/[id]/export", () => {
     expect(dl.headers.get("Content-Disposition")).toBe('attachment; filename="Export Me.md"');
   });
 
-  it("ignores unknown formats and falls back to Markdown", async () => {
+  it("rejects unknown formats with 400 instead of silently falling back to Markdown", async () => {
     const res = await call("?format=docx");
-    expect(res.headers.get("Content-Type")).toBe("text/markdown; charset=utf-8");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    expect(await res.json()).toEqual({ error: "Unknown format", format: "docx", formats: ["md", "html", "pdf"] });
+    // An empty `format=` still means the default.
+    expect((await call("?format=")).headers.get("Content-Type")).toBe("text/markdown; charset=utf-8");
   });
 
   it("returns a standalone HTML page for format=html", async () => {

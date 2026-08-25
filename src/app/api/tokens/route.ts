@@ -2,8 +2,10 @@ import { z } from "zod";
 import { handler, json, readJson, requireUser, HttpError } from "@/server/http";
 import { createApiToken, listApiTokens } from "@/server/tokens";
 
+/** List your API tokens. Sessions only: a leaked token must not be able to enumerate its siblings. */
 export const GET = handler(async () => {
   const user = await requireUser();
+  if (user.agent) throw new HttpError(403, "API tokens can only be listed from a signed-in browser session");
   const tokens = await listApiTokens(user.id);
   return json({
     tokens: tokens.map((t) => ({
