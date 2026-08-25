@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test, expect } from "@playwright/test";
+import { createDocument } from "./helpers";
 
 /**
  * Settings → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
@@ -75,6 +76,19 @@ test.describe("settings · webhooks", () => {
     expect(received[0].event).toBe("test");
     expect(received[0].signature).toMatch(/^sha256=[0-9a-f]{64}$/);
     if (process.env.SHOT_DIR) await card.screenshot({ path: `${process.env.SHOT_DIR}/settings-webhooks.png` });
+
+    // The push path through the real server: a comment on a document lands as a signed `comment.added` delivery.
+    const docId = await createDocument(page, "# Pushed\n\nA paragraph to comment on.\n", "Pushed");
+    const comment = await page.request.post(`/api/documents/${docId}/comments`, { data: { action: "add", quote: "A paragraph", body: "Pushed to the hook." } });
+    expect(comment.ok()).toBeTruthy();
+    await expect.poll(() => received.filter((r) => r.event === "comment.added").length, { timeout: 15_000 }).toBe(1);
+    const pushed = received.find((r) => r.event === "comment.added")!;
+    const payload = JSON.parse(pushed.body) as { type: string; documentId: string; documentTitle: string; body: string; cursor: string };
+    expect(payload).toMatchObject({ type: "comment.added", documentId: docId, documentTitle: "Pushed", body: "Pushed to the hook." });
+    expect(typeof payload.cursor).toBe("string");
+    expect(pushed.signature).toMatch(/^sha256=[0-9a-f]{64}$/);
+    await page.reload();
+    await expect(page.getByTestId("webhook-status")).toContainText("200");
 
     page.once("dialog", (d) => void d.accept());
     await page.getByTestId("webhook-delete").click();
