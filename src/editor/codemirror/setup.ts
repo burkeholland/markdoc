@@ -25,6 +25,7 @@ import { suggestingMode } from "./suggesting";
 import { toggleInlineMark, setHeading, toggleLinePrefix } from "./commands";
 import { codeImageUpload } from "./images";
 import { codePasteGuard } from "./paste-guard";
+import { pathologicalParagraphs } from "./pathological";
 import { codeMarkdownFileDrop } from "./file-drop";
 import type { MarkdownFileDropHandler } from "../prosemirror/file-drop";
 import { markdownEditingKeymap } from "./continue-markup";
@@ -92,7 +93,8 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     highlightSelectionMatches(),
     placeholder("Start writing Markdown…"),
     // Enter/Backspace come from markdownEditingKeymap (Enter on an empty `> ` or `- ` line exits the block).
-    markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
+    // pathologicalParagraphs keeps the #115 bracket soup out of the inline parser (seconds per keystroke otherwise).
+    markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false, extensions: [pathologicalParagraphs] }),
     markdownEditingKeymap,
     codeEditorTheme,
     wrapping.of(EditorView.lineWrapping),

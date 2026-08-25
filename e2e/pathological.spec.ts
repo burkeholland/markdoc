@@ -133,8 +133,7 @@ test.describe("pathological Markdown never freezes the tab", () => {
     expect(await typingEcho(page, "Z")).toBeLessThan(2_000);
 
     const tasks = await page.evaluate(() => (window.__longTasks ?? []).filter((d) => d > 1_000));
-    // Next's dev-mode hydration can itself run long; only the editor's parse is ours to bound.
-    expect(tasks.length, `long tasks > 1 s: ${tasks.join(", ")}`).toBeLessThanOrEqual(1);
+    expect(tasks, `long tasks > 1 s: ${tasks.join(", ")}`).toEqual([]);
 
     // The status bar stats stay linear (#476): the word count is up.
     await expect(page.getByTestId("word-count")).toContainText("words");

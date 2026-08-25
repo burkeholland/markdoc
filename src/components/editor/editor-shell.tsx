@@ -449,7 +449,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
       const after = pos < len && src[pos] !== "\n" && !text.endsWith("\n") ? "\n" : "";
       session.replaceSource([{ from: pos, to: pos, text: before + text + after }]);
     },
-    [session],
+    [session, guardImport],
   );
 
   // Set once this client has decided to leave (own delete or server eviction) so the two paths do not race.
