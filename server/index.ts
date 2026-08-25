@@ -21,7 +21,7 @@ if (dev) nextEnv.updateInitialEnv({ __NEXT_DEV_SERVER: "1" });
 import { createCollabServer, shutdownCollab } from "@/server/collab/hocuspocus";
 import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
-import { getDb } from "@/server/db";
+import { closeDb, getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { lanAddresses } from "../scripts/lib/dev-origins.mjs";
@@ -36,6 +36,40 @@ const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const bindHost = process.env.HOST ?? "0.0.0.0";
 const hostname = bindHost === "0.0.0.0" || bindHost === "::" ? undefined : bindHost;
 const port = Number(process.env.PORT ?? 3000);
+
+// Standby mode (scripts/live/promote.ps1): with STANDBY_PORT set, the server comes up on
+// 127.0.0.1:<STANDBY_PORT> against a throwaway in-memory database so the ops script can compile every
+// route while the previous build keeps serving :PORT. `POST /_standby/takeover` on the standby port
+// then closes the throwaway database, opens the real PGLITE_DATA_DIR and listens on :PORT — the whole
+// handover is a database open plus a listen, with every route already compiled in memory.
+const standbyPort = Number(process.env.STANDBY_PORT ?? 0);
+const STANDBY_TAKEOVER_PATH = "/_standby/takeover";
+const realDataDir = process.env.PGLITE_DATA_DIR;
+if (standbyPort > 0) {
+  process.env.PGLITE_DATA_DIR = "memory://";
+  nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: "memory://" });
+}
+
+function listenWithRetry(server: ReturnType<typeof createServer>, onPort: number, host: string, deadlineMs: number): Promise<void> {
+  // The old process may still be releasing the port when the takeover arrives; retry EADDRINUSE briefly.
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        server.off("listening", onListening);
+        if (err.code === "EADDRINUSE" && Date.now() < deadlineMs) setTimeout(attempt, 200);
+        else reject(err);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(onPort, host);
+    };
+    attempt();
+  });
+}
 
 async function main() {
   // Fail fast on database problems before accepting traffic.
@@ -56,7 +90,41 @@ async function main() {
   void purgeTrash();
   setInterval(purgeTrash, TRASH_PURGE_INTERVAL_MS).unref();
 
+  let takeover: Promise<void> | null = null;
+  const runTakeover = async () => {
+    if (hocuspocus.getDocumentsCount() > 0) {
+      hocuspocus.closeConnections();
+      hocuspocus.flushPendingStores();
+      const until = Date.now() + 3000;
+      while (hocuspocus.getDocumentsCount() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+      if (hocuspocus.getDocumentsCount() > 0) throw new Error("standby still holds documents from the throwaway database");
+    }
+    const t0 = Date.now();
+    await closeDb();
+    if (realDataDir === undefined) delete process.env.PGLITE_DATA_DIR;
+    else process.env.PGLITE_DATA_DIR = realDataDir;
+    nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: realDataDir ?? "" });
+    await getDb();
+    const dbMs = Date.now() - t0;
+    await listenWithRetry(server, port, bindHost, Date.now() + 15_000);
+    console.log(`> Standby took over :${port} (database open ${dbMs} ms, listen ${Date.now() - t0 - dbMs} ms)`);
+    standby?.close();
+  };
+
   const server = createServer((req, res) => {
+    if (standbyPort > 0 && req.url === STANDBY_TAKEOVER_PATH && req.socket.localPort === standbyPort) {
+      if (req.method !== "POST") { res.statusCode = 405; res.end("POST"); return; }
+      takeover ??= runTakeover();
+      takeover.then(
+        () => { res.statusCode = 200; res.end(JSON.stringify({ ok: true, port })); },
+        (err: unknown) => {
+          console.error("[standby] takeover failed", err);
+          res.statusCode = 500;
+          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        },
+      );
+      return;
+    }
     // The address the socket saw, for the per-IP rate limiter: always overwritten so a client cannot forge it.
     const remote = req.socket.remoteAddress;
     if (remote) req.headers[REMOTE_ADDR_HEADER] = remote;
@@ -70,18 +138,28 @@ async function main() {
 
   attachCollab(server, hocuspocus, { path: COLLAB_PATH, fallback: upgrade });
 
-  server.listen(port, bindHost, () => {
-    const shownHost = hostname ?? "localhost";
-    console.log(`> Markdoc ready on http://${shownHost}:${port} (${dev ? "development" : "production"})`);
-    console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);
-    if (!hostname) {
-      for (const ip of lanAddresses()) console.log(`> Also reachable on the LAN at http://${ip}:${port}`);
-    }
-  });
+  // In standby the same request handler also answers on the loopback side port; closing it after the
+  // takeover leaves only :PORT.
+  const standby = standbyPort > 0 ? createServer((req, res) => server.emit("request", req, res)) : null;
+  if (standby) {
+    standby.listen(standbyPort, "127.0.0.1", () => {
+      console.log(`> Markdoc STANDBY on http://127.0.0.1:${standbyPort} (throwaway database; POST ${STANDBY_TAKEOVER_PATH} to take :${port})`);
+    });
+  } else {
+    server.listen(port, bindHost, () => {
+      const shownHost = hostname ?? "localhost";
+      console.log(`> Markdoc ready on http://${shownHost}:${port} (${dev ? "development" : "production"})`);
+      console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);
+      if (!hostname) {
+        for (const ip of lanAddresses()) console.log(`> Also reachable on the LAN at http://${ip}:${port}`);
+      }
+    });
+  }
 
   const shutdown = async () => {
     console.log("> Shutting down, flushing documents...");
     server.close();
+    standby?.close();
     try {
       await shutdownCollab(hocuspocus);
     } finally {

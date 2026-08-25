@@ -28,7 +28,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
+if (-not $Root) { $Root = Get-LiveRoot }
 if (-not $DataDir) { $DataDir = Join-Path (Get-FactoryRoot) 'markdoc-data\pglite' }
 if (-not $From) { $From = Join-Path (Get-FactoryRoot) 'markdoc-data\snapshots\latest' }
 

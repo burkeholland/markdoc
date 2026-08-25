@@ -30,7 +30,7 @@ $ErrorActionPreference = 'Stop'
 # Windows PowerShell's download progress bar makes -OutFile 50x slower.
 $ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'common.ps1')
-if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
+if (-not $Root) { $Root = Get-LiveRoot }
 if (-not $Out) { $Latest = $true }
 if ($Latest -and $Out) { Write-Step "-Latest and -Out are exclusive"; exit 1 }
 
