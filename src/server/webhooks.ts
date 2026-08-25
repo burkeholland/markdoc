@@ -49,6 +49,14 @@ export function verifyWebhookSignature(secret: string, body: string, signature: 
 
 export class WebhookValidationError extends Error {}
 
+/** A `documentIds` entry the user cannot see. Answered as `404 Document not found: <id>`, exactly like `POST /api/tokens`, so a restriction is not a way to name documents you do not have. */
+export class WebhookDocumentNotFoundError extends Error {
+  readonly status = 404;
+  constructor(public readonly documentId: string) {
+    super(`Document not found: ${documentId}`);
+  }
+}
+
 export interface WebhookInput {
   url: string;
   events: string[];
@@ -131,12 +139,19 @@ function toDto(row: schema.Webhook, last: schema.WebhookDelivery | null): Webhoo
   };
 }
 
-/** Add a webhook. `ownOrigins` (see `ownOriginKeys`) are the server's own `host:port`s, which a webhook may not target. */
-export async function createWebhook(userId: string, input: WebhookInput, ownOrigins: readonly string[] = []): Promise<CreatedWebhook> {
+/**
+ * Add a webhook. `ownOrigins` (see `ownOriginKeys`) are the server's own `host:port`s, which a webhook may not target.
+ * Every `documentIds` entry must be a document `user` can see, else `WebhookDocumentNotFoundError` (404): the
+ * dispatcher only delivers what the owner could read anyway, and a bogus or foreign id must not be stored either.
+ */
+export async function createWebhook(user: SessionUser, input: WebhookInput, ownOrigins: readonly string[] = []): Promise<CreatedWebhook> {
   const { url, events, documentIds } = validate(input, ownOrigins);
+  for (const id of documentIds ?? []) {
+    if (!(await getDocumentAccess(id, user))) throw new WebhookDocumentNotFoundError(id);
+  }
   const db = await getDb();
   const secret = "whsec_" + randomBytes(24).toString("base64url");
-  const [row] = await db.insert(schema.webhooks).values({ id: newId(), userId, url, secret, events, documentIds }).returning();
+  const [row] = await db.insert(schema.webhooks).values({ id: newId(), userId: user.id, url, secret, events, documentIds }).returning();
   state.cursors.delete(row.id);
   state.hooksCache = null;
   return { ...toDto(row, null), secret };
@@ -381,7 +396,13 @@ async function sweepOnce(now: number): Promise<number> {
       const doc = docs.get(docId);
       if (!doc || doc.deletedAt) continue;
       if (hook.documentIds && !hook.documentIds.includes(docId)) continue;
-      if (!hook.documentIds && !(await getDocumentAccess(docId, user).catch(() => null))) continue;
+      // Always re-check at delivery time, `documentIds` or not: shares get revoked, link access gets closed, and a
+      // hook created before the share was revoked must not keep receiving that document's comments and diffs.
+      // Dropping the cursor means a later re-share starts from that sweep, not from the events missed meanwhile.
+      if (!(await getDocumentAccess(docId, user).catch(() => null))) {
+        cursors.delete(docId);
+        continue;
+      }
       const cursor = cursors.get(docId) ?? startCursor(since);
       const page = await collectDocumentEvents(docId, user, decodeCursor(cursor), { includeSelf: true }).catch((err) => {
         console.error("[webhooks] collect failed", docId, err);
