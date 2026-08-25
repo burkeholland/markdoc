@@ -604,35 +604,38 @@ export function registerTools(server, client) {
     {
       title: "Wait for humans",
       description:
-        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
+        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (Ask an agent), activity. Without `id`, mentions and requests across every document you can see. Every event carries `actor` ({ name, login, kind: user|agent, agent, self }); your own writes (append, suggest, comment, review) are not delivered, so the call keeps waiting after your own actions — pass includeSelf: true to see them, marked (you). The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
       inputSchema: {
         id: z.string().optional().describe("Document id; omit for the cross-document inbox"),
         since: z.string().optional().describe("Cursor from the previous call"),
         wait: z.number().int().min(0).max(55).optional().describe("Seconds to wait for events (default 30)"),
+        includeSelf: z.boolean().optional().describe("Also return events caused by this token's own writes (default false)"),
       },
       annotations: READ_ONLY,
     },
-    async ({ id, since, wait }) => {
+    async ({ id, since, wait, includeSelf }) => {
       const q = new URLSearchParams();
       if (since) q.set("since", since);
       q.set("wait", String(since ? wait ?? 30 : 0));
+      if (includeSelf) q.set("includeSelf", "1");
       const res = await api("GET", `${id ? `/api/agent/documents/${id}/events` : "/api/agent/events"}?${q}`);
       if (!since) return ok(`Watching from now. Call markdoc_watch again with since: ${res.cursor}`, res);
+      const who = (e) => (e.actor?.self ? " (you)" : e.actor?.kind === "agent" ? " (agent)" : "");
       const lines = res.events.map((e) => {
         const doc = id ? "" : ` (document ${e.documentId}${e.documentTitle ? ` “${e.documentTitle}”` : ""})`;
         switch (e.type) {
           case "content.changed":
-            return `- content.changed${doc} → ${e.contentHash}${e.diff ? `\n${e.diff}` : " (diff unavailable; re-read the document)"}`;
+            return `- content.changed${doc} by ${e.actor?.name ?? "someone"}${who(e)} → ${e.contentHash}${e.diff ? `\n${e.diff}` : " (diff unavailable; re-read the document)"}`;
           case "comment.added":
           case "comment.replied":
           case "comment.resolved":
-            return `- ${e.type}${doc} by ${e.author} [thread ${e.threadId}]: ${e.body}`;
+            return `- ${e.type}${doc} by ${e.author}${who(e)} [thread ${e.threadId}]: ${e.body}`;
           case "mention":
-            return `- mention${doc} by ${e.by ?? "someone"}${e.agent ? ` (addressed to you as @…/${e.agent})` : ""}: ${e.snippet}`;
+            return `- mention${doc} by ${e.by ?? "someone"}${who(e)}${e.agent ? ` (addressed to you as @…/${e.agent})` : ""}: ${e.snippet}`;
           case "request.created":
             return `- request.created${doc} [${e.requestId}] ${e.mode} from ${e.by ?? "someone"}: ${e.instruction}${e.quote ? ` — selection: ${JSON.stringify(e.quote)}` : ""}`;
           default:
-            return `- ${e.action ?? e.type}${doc} by ${e.actor ?? "someone"}`;
+            return `- ${e.action ?? e.type}${doc} by ${e.actor?.name ?? e.by ?? "someone"}${who(e)}`;
         }
       });
       return ok(lines.length ? `${lines.join("\n")}\n\nNext cursor: ${res.cursor}` : `Nothing happened in ${wait ?? 30} s. Next cursor: ${res.cursor}`, res);
