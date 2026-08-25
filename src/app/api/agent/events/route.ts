@@ -1,4 +1,4 @@
-import { handler, json, requireUser, HttpError } from "@/server/http";
+import { handler, json, requireUser, tokenAllowsDocument, HttpError } from "@/server/http";
 import { clampWait, pollEvents, parseIncludeSelf, InvalidCursorError, WAIT_MAX_S } from "@/server/agent-events";
 
 /**
@@ -14,7 +14,7 @@ export const GET = handler(async (req: Request) => {
     if (err instanceof InvalidCursorError) throw new HttpError(400, err.message);
     throw err;
   });
-  return json({ ...page, agent: user.agent, waitMax: WAIT_MAX_S });
+  return json({ ...page, events: page.events.filter((e) => tokenAllowsDocument(user, e.documentId)), agent: user.agent, waitMax: WAIT_MAX_S });
 });
 
 export const dynamic = "force-dynamic";

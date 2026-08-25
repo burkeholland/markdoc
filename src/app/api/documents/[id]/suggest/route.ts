@@ -43,7 +43,8 @@ const schema = z.union([
  */
 export const POST = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
-  const { user } = await requireAccess(id, "edit");
+  // A comment-scoped token may propose suggestions (humans accept them); the user still needs edit access.
+  const { user } = await requireAccess(id, "edit", { tokenScope: "comment" });
   const body = await readJson(req, (d) => schema.parse(d));
   const author = collabIdentity(user!);
   let count = 0;

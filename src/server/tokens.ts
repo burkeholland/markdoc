@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
+import type { TokenScope } from "@/server/db/schema";
 import type { SessionUser } from "@/server/documents";
 
 const TOKEN_PREFIX = "mdk_";
@@ -29,20 +30,41 @@ export interface CreatedToken {
   prefix: string;
   /** The full secret. Shown once; never stored. */
   token: string;
+  scope: TokenScope;
+  documentIds: string[] | null;
   createdAt: Date;
   expiresAt: Date | null;
 }
 
-export async function createApiToken(userId: string, name: string, expiresInDays?: number | null): Promise<CreatedToken> {
+export const TOKEN_SCOPES: readonly TokenScope[] = ["read", "comment", "full"];
+const SCOPE_RANK: Record<TokenScope, number> = { read: 0, comment: 1, full: 2 };
+
+/** True when `scope` grants at least `minimum` (`read` < `comment` < `full`). */
+export function scopeSatisfies(scope: TokenScope, minimum: TokenScope): boolean {
+  return SCOPE_RANK[scope] >= SCOPE_RANK[minimum];
+}
+
+export interface CreateTokenOptions {
+  expiresInDays?: number | null;
+  /** Defaults to `full` so existing callers (and scripts) keep today's behaviour. */
+  scope?: TokenScope;
+  /** Restrict the token to these documents; empty or omitted = all of the user's documents. */
+  documentIds?: string[] | null;
+}
+
+export async function createApiToken(userId: string, name: string, options: number | null | CreateTokenOptions = {}): Promise<CreatedToken> {
+  const opts: CreateTokenOptions = typeof options === "number" || options === null ? { expiresInDays: options } : options;
   const db = await getDb();
   const token = TOKEN_PREFIX + randomSecret();
   const prefix = token.slice(0, TOKEN_PREFIX.length + 6);
-  const expiresAt = expiresInDays ? new Date(Date.now() + expiresInDays * 86_400_000) : null;
+  const expiresAt = opts.expiresInDays ? new Date(Date.now() + opts.expiresInDays * 86_400_000) : null;
+  const scope = opts.scope ?? "full";
+  const documentIds = opts.documentIds?.length ? Array.from(new Set(opts.documentIds)) : null;
   const [row] = await db
     .insert(schema.apiTokens)
-    .values({ id: newId(), userId, name: name.trim().slice(0, 80) || "Token", prefix, tokenHash: hashToken(token), expiresAt })
+    .values({ id: newId(), userId, name: name.trim().slice(0, 80) || "Token", prefix, tokenHash: hashToken(token), expiresAt, scope, documentIds })
     .returning();
-  return { id: row.id, name: row.name, prefix: row.prefix, token, createdAt: row.createdAt, expiresAt: row.expiresAt };
+  return { id: row.id, name: row.name, prefix: row.prefix, token, scope: row.scope, documentIds: row.documentIds, createdAt: row.createdAt, expiresAt: row.expiresAt };
 }
 
 export async function listApiTokens(userId: string) {
@@ -52,6 +74,8 @@ export async function listApiTokens(userId: string) {
       id: schema.apiTokens.id,
       name: schema.apiTokens.name,
       prefix: schema.apiTokens.prefix,
+      scope: schema.apiTokens.scope,
+      documentIds: schema.apiTokens.documentIds,
       createdAt: schema.apiTokens.createdAt,
       lastUsedAt: schema.apiTokens.lastUsedAt,
       lastMcpSeenAt: schema.apiTokens.lastMcpSeenAt,
@@ -92,6 +116,9 @@ export interface TokenActor extends SessionUser {
   /** Name of the token (agent) acting for the user. */
   agent: string;
   tokenId: string;
+  scope: TokenScope;
+  /** Documents the token is restricted to; null = all of the user's. */
+  documentIds: string[] | null;
 }
 
 const lastUsedWrites = new Map<string, number>();
@@ -121,6 +148,8 @@ export async function resolveApiToken(token: string): Promise<TokenActor | null>
     image: row.user.image,
     agent: row.token.name,
     tokenId: row.token.id,
+    scope: row.token.scope,
+    documentIds: row.token.documentIds?.length ? row.token.documentIds : null,
   };
 }
 

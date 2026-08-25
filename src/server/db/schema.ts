@@ -81,6 +81,8 @@ export const verificationTokens = pgTable(
 export type StorageKind = "local" | "gist" | "repo";
 export type LinkAccess = "private" | "view" | "comment" | "edit";
 export type Role = "owner" | "editor" | "commenter" | "viewer";
+/** How much of its user's access an API token carries: `read` < `comment` < `full` (everything the user can do). */
+export type TokenScope = "read" | "comment" | "full";
 
 export const documents = pgTable(
   "document",
@@ -195,6 +197,10 @@ export const apiTokens = pgTable(
     /** First characters of the token for identification in lists. */
     prefix: text("prefix").notNull(),
     tokenHash: text("token_hash").notNull().unique(),
+    /** What the token may do, never more than its user: `read` (GET, watch, presence), `comment` (+ comments, suggestions, reviews, requests) or `full`. */
+    scope: text("scope").$type<TokenScope>().notNull().default("full"),
+    /** When set, the token only sees these documents; every other id answers 404. Null = all the user's documents. */
+    documentIds: text("document_ids").array(),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { mode: "date", withTimezone: true }),
     /** Last time an MCP client listed tools with this token (`tools/list` on /api/mcp): the CLI is connected. */
