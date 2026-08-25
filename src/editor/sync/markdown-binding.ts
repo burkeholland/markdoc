@@ -19,8 +19,11 @@ const VERIFY_QUIET_MS = 1000;
 export const VERIFY_TRUST_AFTER = 3;
 /** Once trusted, one in this many routine idle windows still gets a full verification. */
 export const VERIFY_EVERY_NTH_WINDOW = 25;
-/** Quiet time after a held remote change before the coalesced rebuild runs without waiting for `synced`. */
+/** Quiet time after a held remote change's parse before the coalesced rebuild runs without waiting for `synced`. */
 export const HOLD_QUIET_MS = 50;
+/** Longest the held text waits for an idle period before it is parsed anyway. */
+export const HELD_PARSE_TIMEOUT_MS = 1000;
+const NO_HEADINGS: HeadingInfo[] = [];
 /**
  * An edit is structural when a changed line could alter block structure or references beyond
  * the edited block: brackets (references, footnotes, definitions), tables, a newline (a block
@@ -202,6 +205,8 @@ export class MarkdownBinding {
   private holding = false;
   private heldTimer: ReturnType<typeof setTimeout> | null = null;
   private heldSync = false;
+  /** Pending {@link scheduleHeldParse} task (the full parse of the held text, in a task of its own). */
+  private heldParse: { idle: number } | { timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor(
     public readonly ytext: Y.Text,
@@ -225,6 +230,7 @@ export class MarkdownBinding {
     this.cancelVerify();
     if (this.heldTimer) clearTimeout(this.heldTimer);
     this.heldTimer = null;
+    this.cancelHeldParse();
     this.ytext.unobserve(this.onTextChange);
     this.view = null;
   }
@@ -238,15 +244,27 @@ export class MarkdownBinding {
     this.holding = true;
   }
 
-  /** Stop coalescing and, if a remote change was held back, rebuild now (synchronously). */
+  /**
+   * Stop coalescing. A held remote change is rebuilt now when its parse is already cached, else the
+   * parse runs in its own task first ({@link scheduleHeldParse}) and the rebuild follows: a cold full
+   * parse inside the `synced` handler would sit between the server's sync and its ack. The rich
+   * pane's stand-in stays up until the rebuild (see `hasHeldSync`).
+   */
   releaseRemoteSync() {
     if (!this.holding) return;
     this.holding = false;
-    if (this.heldTimer) clearTimeout(this.heldTimer);
-    this.heldTimer = null;
-    if (this.heldSync) {
+    if (!this.heldSync) {
+      this.cancelHeldParse();
+      return;
+    }
+    if (this.parseCache?.text === this.ytext.toString()) {
+      this.cancelHeldParse();
+      if (this.heldTimer) clearTimeout(this.heldTimer);
+      this.heldTimer = null;
       this.heldSync = false;
       this.syncFromText();
+    } else {
+      this.scheduleHeldParse();
     }
   }
 
@@ -258,12 +276,53 @@ export class MarkdownBinding {
   private holdSync() {
     this.heldSync = true;
     if (this.heldTimer) clearTimeout(this.heldTimer);
+    this.heldTimer = null;
+    this.scheduleHeldParse();
+  }
+
+  /** After the held text is parsed: the coalesced rebuild, once the changes pause for {@link HOLD_QUIET_MS}. */
+  private scheduleHeldRebuild() {
+    if (this.heldTimer) clearTimeout(this.heldTimer);
     this.heldTimer = setTimeout(() => {
       this.heldTimer = null;
       if (this.destroyed || !this.heldSync) return;
       this.heldSync = false;
       this.syncFromText();
     }, HOLD_QUIET_MS);
+  }
+
+  /**
+   * Parse the held text in a task of its own (an idle callback, {@link HELD_PARSE_TIMEOUT_MS} at the
+   * latest), then schedule the rebuild. The full parse the coalesced rebuild and the outline need is
+   * then neither part of the task that applies the IndexedDB copy into Y.Text and the code pane, nor
+   * of the rebuild, nor of the `synced` handler: on the 12k-word document it was the bulk of an
+   * ~900 ms main-thread task that kept the WebSocket `open` and the server's sync waiting (#118).
+   */
+  private scheduleHeldParse() {
+    if (this.heldParse) return;
+    const run = () => {
+      this.heldParse = null;
+      if (this.destroyed) return;
+      const text = this.ytext.toString();
+      if (this.parseCache?.text !== text) {
+        perfMark("markdoc:held-parse-start");
+        this.parse(text);
+        perfMark("markdoc:held-parse-end");
+        // No notify here: the rebuild that follows notifies the session, and the outline reads the
+        // headings then (a notify now would put a React render into the parse's task).
+      }
+      if (this.heldSync) this.scheduleHeldRebuild();
+    };
+    this.heldParse =
+      typeof requestIdleCallback === "function" ? { idle: requestIdleCallback(run, { timeout: HELD_PARSE_TIMEOUT_MS }) } : { timer: setTimeout(run, 0) };
+  }
+
+  private cancelHeldParse() {
+    const handle = this.heldParse;
+    this.heldParse = null;
+    if (!handle) return;
+    if ("idle" in handle) cancelIdleCallback(handle.idle);
+    else clearTimeout(handle.timer);
   }
 
   /** Build the initial ProseMirror document from the current text. */
@@ -412,9 +471,22 @@ export class MarkdownBinding {
     this.syncFromText();
   };
 
-  /** Headings of the current text, from the (incrementally maintained) parse. */
+  /**
+   * Headings of the current text, from the (incrementally maintained) parse. While the initial load
+   * is held (see {@link holdRemoteSync}) a stale parse is not refreshed here: the outline asks for the
+   * headings from inside the React render that the IndexedDB copy triggers, and a full parse there is
+   * what made that task ~900 ms on the 12k-word document (#118). The held text is parsed in its own
+   * task ({@link scheduleHeldParse}) and the session notified, so the outline fills in right after.
+   */
   getHeadings(): HeadingInfo[] {
-    return this.parse(this.ytext.toString()).headings;
+    const text = this.ytext.toString();
+    if (this.heldSync) {
+      const cache = this.parseCache;
+      if (cache && cache.text === text) return cache.result.headings;
+      this.scheduleHeldParse();
+      return cache ? cache.result.headings : NO_HEADINGS;
+    }
+    return this.parse(text).headings;
   }
 
   /**
@@ -431,7 +503,9 @@ export class MarkdownBinding {
    * they are valid for the live ProseMirror document.
    */
   getSourceMap(): SourceMap {
-    const text = this.ytext.toString();
+    // While a remote change is held (initial load) the live document still describes the previous
+    // text: map against that, not against the new text, whose full parse runs in its own task.
+    const text = this.heldSync ? (this.parseCache?.text ?? "") : this.ytext.toString();
     const phantomKey = Array.from(this.phantoms.keys()).join(",");
     if (this.mapCache && this.mapCache.text === text && this.mapCache.phantomKey === phantomKey) {
       return this.mapCache.map;

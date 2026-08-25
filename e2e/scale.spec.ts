@@ -30,21 +30,42 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 };
 
+// Warm-open budgets for test 1 (local figures; `budgetMs` triples them on CI). Task #551: the achieved
+// medians + 25 % on the shared dev box, see the PR for the interleaved A/B against main.
+const SAVED_BUDGET_MS = 2_800;
+const LONGEST_TASK_BUDGET_MS = 1_000;
+
+/**
+ * Installed with `addInitScript` before the open: records every main-thread long task (PerformanceObserver
+ * `longtask`, ≥ 50 ms) as `window.__longTasks` so the open can be asserted on its longest task, not only
+ * on its end-to-end time (task #551: the IndexedDB copy used to be applied in one ~900 ms task).
+ */
+const LONG_TASKS = `(() => {
+  const tasks = [];
+  window.__longTasks = tasks;
+  new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) tasks.push({ start: Math.round(e.startTime), dur: Math.round(e.duration) });
+  }).observe({ type: "longtask", buffered: true });
+})();`;
+
 /**
  * Navigate to the document and return the milliseconds until the header says "saved", plus the
  * time until the rich column first showed a heading (the server-rendered stand-in counts: that is
- * what the reader sees first; the live editor replaces it in place once the text is in).
+ * what the reader sees first; the live editor replaces it in place once the text is in), plus the
+ * longest main-thread task between navigation and `saved`.
  */
-async function timeOpen(page: Page, id: string): Promise<{ savedMs: number; richPaintMs: number }> {
+async function timeOpen(page: Page, id: string): Promise<{ savedMs: number; richPaintMs: number; longestTaskMs: number; longTasks: string }> {
+  await page.addInitScript(LONG_TASKS);
   const t0 = Date.now();
   await page.goto(`/d/${id}`);
   await expect(page.getByTestId("rich-column").locator(":is(h1, h2)").first()).toBeVisible({ timeout: 60_000 });
   const richPaintMs = Date.now() - t0;
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
   const savedMs = Date.now() - t0;
+  const tasks = await page.evaluate(() => (window as unknown as { __longTasks: { start: number; dur: number }[] }).__longTasks);
   await expect(page.locator(".cm-content")).toBeVisible();
   await expect(page.locator(".md-rich")).toBeVisible();
-  return { savedMs, richPaintMs };
+  return { savedMs, richPaintMs, longestTaskMs: Math.max(0, ...tasks.map((t) => t.dur)), longTasks: tasks.map((t) => `${t.start}+${t.dur}`).join(" ") };
 }
 
 /**
@@ -210,8 +231,13 @@ test.describe("Burke-scale", () => {
     // in the same interleaved run; the 3.3 s budget is that median + 25 %, not a target).
     const paintMs = record("long doc: navigation → first rich paint", open.richPaintMs, budgetMs(1_500));
     expect(paintMs).toBeLessThan(budgetMs(1_500));
-    const openMs = record("long doc: navigation → saved", open.savedMs, budgetMs(3_300));
-    expect(openMs).toBeLessThan(budgetMs(3_300));
+    const openMs = record("long doc: navigation → saved", open.savedMs, budgetMs(SAVED_BUDGET_MS));
+    expect(openMs).toBeLessThan(budgetMs(SAVED_BUDGET_MS));
+    // Task #551: the IndexedDB copy, the code pane update and the React render of the shell are one task,
+    // the Markdown parse and the rich rebuild run in tasks of their own after `saved`; the parse of 86 KB
+    // is the longest (dev, see the PR for the before/after profile). Printed so a regression shows where.
+    const longestTaskMs = record(`long doc: longest main-thread task during open (${open.longTasks})`, open.longestTaskMs, budgetMs(LONGEST_TASK_BUDGET_MS));
+    expect(longestTaskMs).toBeLessThan(budgetMs(LONGEST_TASK_BUDGET_MS));
     expect((await codeText(page)).length).toBe(seed.longDoc.content.length);
 
     if ((await page.getByTestId("outline").count()) === 0) await page.getByTestId("outline-button").click();

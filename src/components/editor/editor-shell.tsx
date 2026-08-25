@@ -756,9 +756,9 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
   const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
   // The rich pane holds the live text once the local copy or the server state put something in
   // it and the binding has rebuilt the ProseMirror document from it (the rebuild is coalesced
-  // while the document loads, see MarkdownBinding.holdRemoteSync) or the server confirmed the
-  // document really is empty.
-  const richHasContent = useSessionValue(session, (s) => s.synced || (s.ytext.length > 0 && !s.binding.hasHeldSync));
+  // while the document loads and its parse runs in a task of its own, see MarkdownBinding.holdRemoteSync)
+  // or the server confirmed the document really is empty.
+  const richHasContent = useSessionValue(session, (s) => (s.synced || s.ytext.length > 0) && !s.binding.hasHeldSync);
   // Until then the server-rendered preview stands in for the rich pane; the server and the
   // hydrating client both render it (the session has no content on either), so markup matches.
   const showRichPlaceholder = initialHtml !== null && !richHasContent;
