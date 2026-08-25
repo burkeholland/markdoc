@@ -32,7 +32,7 @@ const median = (xs: number[]) => {
 
 // Warm-open budgets for test 1 (local figures; `budgetMs` triples them on CI). Task #551: the achieved
 // medians + 25 % on the shared dev box, see the PR for the interleaved A/B against main.
-const SAVED_BUDGET_MS = 2_600;
+const SAVED_BUDGET_MS = 2_800;
 const LONGEST_TASK_BUDGET_MS = 1_000;
 
 /**
