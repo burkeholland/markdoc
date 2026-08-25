@@ -1,17 +1,10 @@
 import { createHash } from "node:crypto";
-import { unified, type Plugin } from "unified";
-import remarkParse from "remark-parse";
-import remarkGfm from "remark-gfm";
-import remarkRehype from "remark-rehype";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import rehypeHighlight from "rehype-highlight";
-import rehypeSlug from "rehype-slug";
-import rehypeStringify from "rehype-stringify";
-import { frontmatter } from "micromark-extension-frontmatter";
-import { frontmatterFromMarkdown } from "mdast-util-frontmatter";
-import type { Root as HastRoot, Element } from "hast";
-import type { Root as MdastRoot } from "mdast";
 import { getAsset } from "@/server/assets";
+import { findUnrenderable, UnrenderableDocumentError } from "@/editor/markdown/renderable";
+import { ASSET_PATH, type RenderedHeading } from "./render-markdown";
+import { renderOffThread, RenderTimeoutError, RENDER_TIMEOUT_MS } from "./render-pool";
+
+export type { RenderedHeading };
 
 export interface RenderDocumentHtmlOptions {
   title: string;
@@ -20,63 +13,13 @@ export interface RenderDocumentHtmlOptions {
   assetBaseUrl: string;
   /** Embed images stored as document assets as `data:` URIs so the file works offline. */
   inlineAssets?: boolean;
-}
-
-const ASSET_PATH = /^\/api\/assets\/([0-9a-z]+)$/i;
-
-/** Same front matter tokenizer as the editor's parser, so `---` blocks are not rendered as text or rules. */
-const remarkFrontmatter: Plugin<[], MdastRoot> = function () {
-  const data = this.data() as { micromarkExtensions?: unknown[]; fromMarkdownExtensions?: unknown[] };
-  (data.micromarkExtensions ??= []).push(frontmatter(["yaml", "toml"]));
-  (data.fromMarkdownExtensions ??= []).push(frontmatterFromMarkdown(["yaml", "toml"]));
-};
-
-const sanitizeSchema = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    "*": [...(defaultSchema.attributes?.["*"] ?? []), "data*"],
-    code: ["className"],
-    pre: ["className"],
-    span: [...(defaultSchema.attributes?.span ?? []), "className"],
-  },
-};
-
-function visitElements(node: HastRoot | Element, fn: (el: Element) => void) {
-  for (const child of node.children) {
-    if (child.type === "element") {
-      fn(child);
-      visitElements(child, fn);
-    }
-  }
-}
-
-/** Rewrite asset image URLs to absolute (or embedded) form. Runs after sanitize so data: URIs are not stripped. */
-function rehypeAssets(options: { assetBaseUrl: string; inlineAssets: boolean }): (tree: HastRoot) => Promise<void> {
-  const base = options.assetBaseUrl.replace(/\/+$/, "");
-  return async (tree) => {
-    const images: Element[] = [];
-    visitElements(tree, (el) => {
-      if (el.tagName === "img" && typeof el.properties?.src === "string" && ASSET_PATH.test(el.properties.src)) images.push(el);
-    });
-    await Promise.all(
-      images.map(async (el) => {
-        const src = el.properties.src as string;
-        const id = src.match(ASSET_PATH)![1];
-        el.properties.src = base + src;
-        if (!options.inlineAssets) return;
-        const asset = await getAsset(id);
-        if (!asset) return;
-        el.properties.src = `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`;
-      }),
-    );
-  };
+  /** Parse budget; the render is abandoned (worker terminated) and `UnrenderableDocumentError` thrown past it. */
+  timeoutMs?: number;
 }
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-
 /**
  * Typography mirrors `.md-rich` in globals.css (block rhythm: see "Markdown prose rhythm" there); colours
  * are the light palette (Ink & teal). Headings use Fraunces like the app (display type in globals.css):
@@ -161,17 +104,12 @@ del { color: #57534e; }
 }
 `;
 
-export interface RenderedHeading {
-  /** The `id` attribute rehype-slug put on the heading element (the anchor target). */
-  id: string;
-  level: number;
-  text: string;
-}
-
 export interface RenderMarkdownBodyOptions {
   /** Origin (and optional base path) that relative `/api/assets/<id>` URLs are resolved against; "" keeps them relative. */
   assetBaseUrl: string;
   inlineAssets?: boolean;
+  /** Parse budget; defaults to RENDER_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export interface RenderedMarkdownBody {
@@ -180,47 +118,48 @@ export interface RenderedMarkdownBody {
   headings: RenderedHeading[];
 }
 
-const HEADING_TAG = /^h([1-6])$/;
-
-function textOf(node: Element): string {
-  let out = "";
-  for (const child of node.children) {
-    if (child.type === "text") out += child.value;
-    else if (child.type === "element") out += textOf(child);
-  }
-  return out;
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Collect headings (after rehype-slug has assigned ids) into the sink. */
-function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => void {
-  return (tree) => {
-    visitElements(tree, (el) => {
-      const m = HEADING_TAG.exec(el.tagName);
-      if (!m || typeof el.properties?.id !== "string") return;
-      sink.push({ id: el.properties.id, level: Number(m[1]), text: textOf(el).trim() });
-    });
-  };
+/**
+ * Replace the absolute asset URLs the worker produced with `data:` URIs. The fragment came out of
+ * rehype-stringify, so `src` values are double-quoted and the ids are `[0-9a-z]+`: a plain string
+ * replacement on the attribute is exact. Assets that no longer exist keep their URL, as before.
+ */
+async function inlineAssetUrls(html: string, base: string, assetIds: string[]): Promise<string> {
+  if (assetIds.length === 0) return html;
+  const prefix = base.replace(/\/+$/, "");
+  const assets = await Promise.all(assetIds.map((id) => getAsset(id)));
+  let out = html;
+  assets.forEach((asset, i) => {
+    if (!asset) return;
+    const uri = `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`;
+    out = out.replace(new RegExp(`src="${escapeRegExp(`${prefix}/api/assets/${assetIds[i]}`)}"`, "g"), () => `src="${uri}"`);
+  });
+  return out;
 }
 
 /**
  * Render Markdown to a sanitized HTML fragment with the same pipeline the HTML export and
  * the reader page share: GFM, front matter stripped, rehype-sanitize, slug ids, hljs classes.
+ *
+ * Parsing happens on a worker thread behind a time-out, after a cheap guard on the text; a
+ * document that is refused by either throws `UnrenderableDocumentError` (HTTP 422 in routes),
+ * so one pathological document can never block the event loop for everyone else (#115).
  */
-export async function renderMarkdownBody(markdown: string, { assetBaseUrl, inlineAssets = false }: RenderMarkdownBodyOptions): Promise<RenderedMarkdownBody> {
-  const headings: RenderedHeading[] = [];
-  const file = await unified()
-    .use(remarkParse)
-    .use(remarkFrontmatter)
-    .use(remarkGfm)
-    .use(remarkRehype, { handlers: { yaml: () => undefined, toml: () => undefined } })
-    .use(rehypeSanitize, sanitizeSchema)
-    .use(rehypeSlug)
-    .use(() => rehypeCollectHeadings(headings))
-    .use(rehypeHighlight)
-    .use(() => rehypeAssets({ assetBaseUrl, inlineAssets }))
-    .use(rehypeStringify)
-    .process(markdown);
-  return { html: String(file), headings };
+export async function renderMarkdownBody(markdown: string, { assetBaseUrl, inlineAssets = false, timeoutMs = RENDER_TIMEOUT_MS }: RenderMarkdownBodyOptions): Promise<RenderedMarkdownBody> {
+  const reason = findUnrenderable(markdown);
+  if (reason) throw new UnrenderableDocumentError(reason);
+  let fragment;
+  try {
+    fragment = await renderOffThread(markdown, assetBaseUrl, timeoutMs);
+  } catch (err) {
+    if (err instanceof RenderTimeoutError) throw new UnrenderableDocumentError("timeout");
+    throw err;
+  }
+  const html = inlineAssets ? await inlineAssetUrls(fragment.html, assetBaseUrl, fragment.assetIds) : fragment.html;
+  return { html, headings: fragment.headings };
 }
 
 /** SHA-256 of the document text; the reader polls this to detect changes without diffing bodies. */
@@ -233,8 +172,8 @@ export function contentHash(text: string): string {
  * supports, sanitized, with embedded styles and no external requests except images and the
  * heading font (an `@import` that degrades to a system serif offline).
  */
-export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inlineAssets = false }: RenderDocumentHtmlOptions): Promise<string> {
-  const { html } = await renderMarkdownBody(markdown, { assetBaseUrl, inlineAssets });
+export async function renderDocumentHtml({ title, markdown, assetBaseUrl, inlineAssets = false, timeoutMs }: RenderDocumentHtmlOptions): Promise<string> {
+  const { html } = await renderMarkdownBody(markdown, { assetBaseUrl, inlineAssets, timeoutMs });
 
   const safeTitle = escapeHtml(title || "Document");
   return `<!DOCTYPE html>
