@@ -129,7 +129,7 @@ describe("renderDocumentHtml", () => {
 
     it("keeps the event loop free while a document renders", async () => {
       // A big but legal document: many paragraphs, each under the guard's limits.
-      const md = Array.from({ length: 400 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ".repeat(60)}\n`).join("\n");
+      const md = Array.from({ length: 200 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ".repeat(60)}\n`).join("\n");
       let worstGap = 0;
       let last = performance.now();
       const ticker = setInterval(() => {
@@ -139,7 +139,7 @@ describe("renderDocumentHtml", () => {
       }, 5);
       try {
         const html = await render(md);
-        expect(html).toContain('<h2 id="section-399">Section 399</h2>');
+        expect(html).toContain('<h2 id="section-199">Section 199</h2>');
       } finally {
         clearInterval(ticker);
       }

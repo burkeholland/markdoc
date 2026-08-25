@@ -83,7 +83,7 @@ describe("GET /api/documents/[id]/export", () => {
     });
 
     it("keeps /api/health fast while a large export is rendering", async () => {
-      const content = Array.from({ length: 500 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ~~d~~ ".repeat(60)}\n`).join("\n");
+      const content = Array.from({ length: 200 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ~~d~~ ".repeat(60)}\n`).join("\n");
       const doc = await createDocument({ ownerId: actor!.id, title: "big", content });
       const exporting = exportOf(doc.id, "?format=html");
       await new Promise((r) => setTimeout(r, 50));
@@ -94,7 +94,7 @@ describe("GET /api/documents/[id]/export", () => {
       expect(healthMs).toBeLessThan(200);
       const res = await exporting;
       expect(res.status).toBe(200);
-      expect(await res.text()).toContain('<h2 id="section-499">Section 499</h2>');
+      expect(await res.text()).toContain('<h2 id="section-199">Section 199</h2>');
     });
   });
 

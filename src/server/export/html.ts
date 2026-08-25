@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { getAsset } from "@/server/assets";
 import { findUnrenderable, UnrenderableDocumentError } from "@/editor/markdown/renderable";
-import { ASSET_PATH, type RenderedHeading } from "./render-markdown";
+import { type RenderedHeading } from "./render-markdown";
 import { renderOffThread, RenderTimeoutError, RENDER_TIMEOUT_MS } from "./render-pool";
 
 export type { RenderedHeading };

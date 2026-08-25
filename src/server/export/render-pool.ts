@@ -8,11 +8,16 @@
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { Worker } from "node:worker_threads";
+import type { Worker } from "node:worker_threads";
 import { WORKER_ROLE, type RenderedFragment, type WorkerRequest, type WorkerResponse } from "./render-markdown";
 
-/** Default budget for one render; the guard keeps ordinary documents far below this. */
-export const RENDER_TIMEOUT_MS = 5_000;
+/**
+ * Default budget for one render (`MARKDOWN_RENDER_TIMEOUT_MS` overrides). The guard keeps ordinary
+ * documents far below this; the pipeline itself needs ~5 s per MB of link-dense text, so a legal
+ * 2 MB document still fits. Because parsing is off the event loop, the budget only bounds wasted
+ * CPU on a worker, not how long other requests wait.
+ */
+export const RENDER_TIMEOUT_MS = Number(process.env.MARKDOWN_RENDER_TIMEOUT_MS) || 15_000;
 const IDLE_EXIT_MS = 30_000;
 
 export class RenderTimeoutError extends Error {
@@ -49,6 +54,13 @@ function workerPath(): string {
   throw new Error(`Markdown render worker not found (looked for ${candidates.join(", ")} under ${process.cwd()})`);
 }
 
+/**
+ * Resolved at runtime rather than imported: Turbopack statically analyses `new Worker(<dynamic>)`
+ * from a `worker_threads` import and tries to bundle every file under the project root as a
+ * possible worker entry, which breaks the dev build on Markdown/JSONC files.
+ */
+const { Worker: WorkerCtor } = process.getBuiltinModule("node:worker_threads") as typeof import("node:worker_threads");
+
 class RenderPool {
   private worker: Worker | null = null;
   private queue: Job[] = [];
@@ -80,7 +92,7 @@ class RenderPool {
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
-    const worker = new Worker(workerPath(), { workerData: { role: WORKER_ROLE }, stderr: false, stdout: false });
+    const worker = new WorkerCtor(workerPath(), { workerData: { role: WORKER_ROLE }, stderr: false, stdout: false });
     // Never keep the server (or a test runner) alive just because a render thread exists.
     worker.unref();
     worker.on("message", (msg: WorkerResponse) => {
