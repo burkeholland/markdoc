@@ -71,7 +71,39 @@ export interface CreatedWebhook extends WebhookDto {
   secret: string;
 }
 
-function validate(input: WebhookInput): { url: string; events: WebhookEventType[]; documentIds: string[] | null } {
+/** `hostname:port` with the default port made explicit, so `https://x` and `https://x:443` compare equal. */
+function hostKey(u: URL): string {
+  return `${u.hostname.toLowerCase()}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+}
+
+/**
+ * `host:port` keys of this server's own origins, for refusing webhooks that would call Markdoc back:
+ * the request's `Host` header (its scheme is unknown, so both default ports count) and `MARKDOC_URL`
+ * when set (the public origin behind a proxy). Other localhost ports stay allowed — LAN bridges are real.
+ */
+export function ownOriginKeys(hostHeader: string | null | undefined, markdocUrl: string | undefined = process.env.MARKDOC_URL): string[] {
+  const keys = new Set<string>();
+  const host = hostHeader?.trim();
+  if (host) {
+    for (const proto of ["http:", "https:"]) {
+      try {
+        keys.add(hostKey(new URL(`${proto}//${host}`)));
+      } catch {
+        // A malformed Host header is nothing to compare against.
+      }
+    }
+  }
+  if (markdocUrl) {
+    try {
+      keys.add(hostKey(new URL(markdocUrl)));
+    } catch {
+      // Unparseable MARKDOC_URL: ignore here; the MCP route reports it.
+    }
+  }
+  return [...keys];
+}
+
+function validate(input: WebhookInput, ownOrigins: readonly string[]): { url: string; events: WebhookEventType[]; documentIds: string[] | null } {
   let parsed: URL;
   try {
     parsed = new URL(input.url.trim());
@@ -79,6 +111,7 @@ function validate(input: WebhookInput): { url: string; events: WebhookEventType[
     throw new WebhookValidationError("Enter a valid URL");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new WebhookValidationError("Webhook URLs must be http(s)");
+  if (ownOrigins.includes(hostKey(parsed))) throw new WebhookValidationError("A webhook cannot point at Markdoc itself");
   const events = [...new Set(input.events)].filter((e): e is WebhookEventType => (WEBHOOK_EVENTS as readonly string[]).includes(e));
   if (events.length === 0) throw new WebhookValidationError("Pick at least one event");
   const documentIds = input.documentIds && input.documentIds.length > 0 ? [...new Set(input.documentIds.map((d) => d.trim()).filter(Boolean))] : null;
@@ -98,8 +131,9 @@ function toDto(row: schema.Webhook, last: schema.WebhookDelivery | null): Webhoo
   };
 }
 
-export async function createWebhook(userId: string, input: WebhookInput): Promise<CreatedWebhook> {
-  const { url, events, documentIds } = validate(input);
+/** Add a webhook. `ownOrigins` (see `ownOriginKeys`) are the server's own `host:port`s, which a webhook may not target. */
+export async function createWebhook(userId: string, input: WebhookInput, ownOrigins: readonly string[] = []): Promise<CreatedWebhook> {
+  const { url, events, documentIds } = validate(input, ownOrigins);
   const db = await getDb();
   const secret = "whsec_" + randomBytes(24).toString("base64url");
   const [row] = await db.insert(schema.webhooks).values({ id: newId(), userId, url, secret, events, documentIds }).returning();
