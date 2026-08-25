@@ -80,7 +80,7 @@ export const DELETE = handler(async (_req: Request, { params }: Params) => {
   const deleted = await db
     .delete(schema.versions)
     .where(and(eq(schema.versions.documentId, id), eq(schema.versions.id, vid)))
-    .returning({ id: schema.versions.id });
+    .returning();
   if (deleted.length === 0) throw new HttpError(404, "Version not found");
   return json({ ok: true });
 });
