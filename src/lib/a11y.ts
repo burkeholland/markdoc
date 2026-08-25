@@ -67,3 +67,30 @@ export function focusedElement(): HTMLElement | null {
   const active = document.activeElement;
   return active instanceof HTMLElement && active !== document.body ? active : null;
 }
+
+/**
+ * The element a dialog opened right now should hand focus back to when it closes: whatever has focus,
+ * except that a menu item resolves to the menu's trigger. A dropdown item that opens a dialog is gone by
+ * the time the dialog closes (the ⋮ menu unmounts in the same commit the dialog mounts), so focusing it
+ * later would fall through to <body>; its trigger button stays in the header. Radix wires the trigger to
+ * the menu with `aria-controls` while open and `aria-labelledby` on the menu; either finds it. Must be
+ * called before that commit — a lazy `useState` initializer in the dialog's render is early enough, an
+ * effect is not. Null when focus is on <body>.
+ */
+export function focusReturnTarget(): HTMLElement | null {
+  const active = focusedElement();
+  if (!active) return null;
+  const menu = active.closest<HTMLElement>('[role="menu"]');
+  if (!menu) return active;
+  return menuTrigger(menu) ?? active;
+}
+
+function menuTrigger(menu: HTMLElement): HTMLElement | null {
+  if (menu.id) {
+    const controller = document.querySelector<HTMLElement>(`[aria-controls="${menu.id}"]`);
+    if (controller) return controller;
+  }
+  const labelledBy = menu.getAttribute("aria-labelledby");
+  const label = labelledBy ? document.getElementById(labelledBy) : null;
+  return label instanceof HTMLElement && label !== menu && !menu.contains(label) ? label : null;
+}
