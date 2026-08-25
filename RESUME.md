@@ -80,7 +80,7 @@ ignored) runs `scripts\live\watchdog.ps1`, which does one `GET /api/health` on :
   `<ts> down -> restart FAILED: <reason>`. Worst case from death to back: two ticks + the start (~2–3 min).
 - It never acts while `markdoc-data\promote.lock` exists and is younger than 10 min — `promote.ps1` holds
   that file for its whole run (a stale one from a crashed promote is ignored) — nor while the newest
-  `==== start-live` marker in `live.log` is younger than 180 s (a cold start answers nothing for ~90 s).
+  `==== start-live` marker in the live worktree's log (`live.log` / `live-b.log`) is younger than 180 s (a cold start answers nothing for ~90 s).
 
 Rehearse against a copy, never the real server: `.\watchdog.ps1 -Root <copy worktree> -Port 3993 -DataRoot <tmp>`
 (state, log and lock all live under `-DataRoot`). `Get-Content ..\markdoc-data\watchdog.log` shows every
