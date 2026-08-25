@@ -337,6 +337,95 @@ describe("MarkdownBinding", () => {
     expect(map.pmToSrc(9)).toBe(6); // inside the phantom → end of previous block
   });
 
+  describe("typing in the trailing paragraph of a document with an unpadded table (task #475)", () => {
+    const FIXTURE =
+      "# Scout doc\n\nFirst paragraph with some words to select here.\n\n- item one\n- item two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nLast paragraph.\n";
+    const TABLE_LINES = ["| a | b |", "| --- | --- |", "| 1 | 2 |"];
+    const tick = () => new Promise<void>((r) => queueMicrotask(r));
+    const typeChars = async (view: EditorView, text: string) => {
+      for (const ch of text) {
+        view.dispatch(view.state.tr.insertText(ch));
+        await tick();
+      }
+    };
+    /** Every Y.Text delta as { retain, insert, delete } so a test can check the exact writes. */
+    const recordDeltas = (t: Y.Text) => {
+      const deltas: { retain: number; insert: string; delete: number }[] = [];
+      t.observe((event) => {
+        let retain = 0;
+        let insert = "";
+        let del = 0;
+        for (const d of event.delta) {
+          if (d.retain) retain += d.retain;
+          if (typeof d.insert === "string") insert += d.insert;
+          if (d.delete) del += d.delete;
+        }
+        deltas.push({ retain, insert, delete: del });
+      });
+      return deltas;
+    };
+    /** Enter at the end of the document, then "/" and Backspace (the slash menu), as in the issue. */
+    const makeTrailingParagraph = async (view: EditorView) => {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+      splitBlock(view.state, view.dispatch);
+      await tick();
+      await typeChars(view, "/");
+      view.dispatch(view.state.tr.delete(view.state.selection.from - 1, view.state.selection.from));
+      await tick();
+      expect(ytext.toString()).toBe(FIXTURE);
+      expect(view.state.doc.childCount).toBe(6);
+    };
+    const tableLinesOf = (text: string) => text.split("\n").slice(7, 10);
+    const lastParagraphEnd = FIXTURE.indexOf("Last paragraph.") + "Last paragraph.".length;
+
+    it("editing mode: the text delta is exactly the typed word and the table is untouched", async () => {
+      ytext.insert(0, FIXTURE);
+      const { view } = editor();
+      await makeTrailingParagraph(view);
+      const deltas = recordDeltas(ytext);
+      await typeChars(view, " suggested-words");
+      expect(ytext.toString()).toBe(FIXTURE.trimEnd() + "\n\n suggested-words\n");
+      expect(tableLinesOf(ytext.toString())).toEqual(TABLE_LINES);
+      // One write per keystroke, each an insertion at or after the end of "Last paragraph.", never a delete.
+      expect(deltas.map((d) => d.insert).join("")).toBe("\n\n suggested-words");
+      expect(deltas.every((d) => d.delete === 0 && d.retain >= lastParagraphEnd)).toBe(true);
+      expect(view.state.doc.childCount).toBe(6);
+      expect(view.state.doc.lastChild!.textContent).toBe(" suggested-words");
+    });
+
+    it("suggesting mode: the interceptor sees only the typed word and the filled phantom does not come back", async () => {
+      ytext.insert(0, FIXTURE);
+      const { view, binding } = editor();
+      await makeTrailingParagraph(view);
+      const seen: { index: number; deleteCount: number; insert: string }[] = [];
+      // Like richSuggestingPlugin: apply the ops verbatim under another origin and let the binding re-sync.
+      binding.setInterceptor((ops, text, origin) => {
+        seen.push(...ops);
+        text.doc!.transact(() => applyOps(text, ops), origin);
+        return true;
+      });
+      await typeChars(view, " suggested-words");
+      expect(seen.map((op) => op.insert).join("")).toBe("\n\n suggested-words");
+      expect(seen.every((op) => op.deleteCount === 0 && op.index >= lastParagraphEnd)).toBe(true);
+      expect(tableLinesOf(ytext.toString())).toEqual(TABLE_LINES);
+      expect(ytext.toString()).toBe(FIXTURE.trimEnd() + "\n\n suggested-words\n");
+      // The empty paragraph the word was typed into is now a real block, not an extra blank line before it.
+      expect(view.state.doc.childCount).toBe(6);
+      expect(view.state.doc.lastChild!.textContent).toBe(" suggested-words");
+    });
+
+    it("control: typing at the end of the last paragraph stays a minimal diff", async () => {
+      ytext.insert(0, FIXTURE);
+      const { view } = editor();
+      const deltas = recordDeltas(ytext);
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+      await typeChars(view, " suggested-words");
+      expect(deltas.map((d) => d.insert).join("")).toBe(" suggested-words");
+      expect(deltas.every((d) => d.delete === 0 && d.retain >= lastParagraphEnd)).toBe(true);
+      expect(tableLinesOf(ytext.toString())).toEqual(TABLE_LINES);
+    });
+  });
+
   it("supports an interceptor taking over local changes", async () => {
     ytext.insert(0, "Hello world.");
     const { view, binding } = editor();
