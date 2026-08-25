@@ -224,18 +224,49 @@ test.describe("server restart while typing", () => {
       await expect(saveState).toHaveAttribute("data-state", "saved", { timeout: 180_000 });
       await expect(page.locator(".cm-content")).toBeVisible();
       await recordSaveStates(page);
+      const t0 = Date.now();
+      const at = () => Date.now() - t0;
+      // Every WebSocket the page opens from here on, with its fate: Chromium lets only one handshake per
+      // host:port be pending at a time, so a socket that never settles blocks all later ones.
+      const sockets: { url: string; opened: number; fate: string }[] = [];
+      page.on("websocket", (ws) => {
+        const entry = { url: ws.url().replace(/^ws:\/\/[^/]+/, ""), opened: at(), fate: "pending" };
+        sockets.push(entry);
+        ws.on("framereceived", () => {
+          if (entry.fate === "pending") entry.fate = `open@${at()}`;
+        });
+        ws.on("close", () => {
+          entry.fate = `${entry.fate === "pending" ? "failed" : entry.fate + " closed"}@${at()}`;
+        });
+        ws.on("socketerror", (e) => {
+          entry.fate = `error(${e})@${at()}`;
+        });
+      });
 
       await page.locator(".cm-content").click();
       await page.keyboard.press("Control+End");
       await page.keyboard.press("Enter");
       await page.keyboard.press("Enter");
 
-      const t0 = Date.now();
-      const at = () => Date.now() - t0;
       let killedAt = 0;
       let respawnedAt = 0;
+      // Next's dev HMR client reloads the page when the dev server comes back; keystrokes sent while
+      // no editor exists are not a product bug, so every token waits for the pane (production never reloads).
+      const reloads: number[] = [];
+      page.on("load", () => reloads.push(at()));
+      const typeToken = async (token: string) => {
+        if (reloads.length > 0) {
+          await page.locator(".cm-content").waitFor({ timeout: 60_000 });
+          await page.waitForFunction(() => Boolean((window as unknown as { __markdocSession?: unknown }).__markdocSession), undefined, { timeout: 60_000 });
+          if (!(await page.locator(".cm-content").evaluate((el) => el.contains(document.activeElement)))) {
+            await page.locator(".cm-content").click();
+            await page.keyboard.press("Control+End");
+          }
+        }
+        await page.keyboard.type(`${token} `, { delay: 15 });
+      };
       for (let i = 0; i < TOKENS_TOTAL; i++) {
-        await page.keyboard.type(`${ALL_TOKENS[i]} `, { delay: 15 });
+        await typeToken(ALL_TOKENS[i]);
         if (i + 1 === TOKENS_BEFORE_KILL) {
           killServer(server);
           killedAt = at();
@@ -251,8 +282,10 @@ test.describe("server restart while typing", () => {
 
       const healthMs = await waitForHealth(server.baseURL, 240_000);
       const healthAt = at();
+      // Give the dev HMR client its reload (if it takes one) before the last tokens go in.
+      await page.waitForTimeout(2_000);
       for (let i = TOKENS_TOTAL; i < TOKENS_TOTAL + TOKENS_AFTER_HEALTH; i++) {
-        await page.keyboard.type(`${ALL_TOKENS[i]} `, { delay: 15 });
+        await typeToken(ALL_TOKENS[i]);
         await page.waitForTimeout(120);
       }
 
@@ -260,9 +293,10 @@ test.describe("server restart while typing", () => {
       const savedDeadline = 10_000 + TOKENS_AFTER_HEALTH * 300;
       const diagnostics = async () =>
         [
-          `kill@${killedAt} respawn@${respawnedAt} health@${healthAt} (${healthMs} ms after the poll started)`,
+          `kill@${killedAt} respawn@${respawnedAt} health@${healthAt} (${healthMs} ms after the poll started) · page reloads@${reloads.join(",") || "none"}`,
           `save-state timeline: ${(await saveStates(page)).join(" ")}`,
           `probe: ${await probeFromPage(page)}`,
+          `sockets: ${sockets.map((s) => `${s.url}@${s.opened}→${s.fate}`).join(" ")}`,
           `provider: ${JSON.stringify(
             await page.evaluate(() => {
               type Win = Window & {
