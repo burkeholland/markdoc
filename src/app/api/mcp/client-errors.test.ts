@@ -38,6 +38,11 @@ const fakeFetch: typeof fetch = async (input, init) => {
     }
     return reply(200, { ok: true, changed: true, contentHash: "c".repeat(64) });
   }
+  if (url.pathname === "/api/documents/doc-1/content" && method === "PATCH") {
+    const body = JSON.parse(String(init?.body)) as { append: string; ifContentHash?: string };
+    if (body.ifContentHash && body.ifContentHash !== "b".repeat(64)) return reply(409, { error: "Document changed since you read it", contentHash: "b".repeat(64), diff: null, truncated: false });
+    return reply(200, { ok: true, contentHash: "d".repeat(64) });
+  }
   if (url.pathname === "/api/documents/doc-1/suggest" && method === "POST") {
     const body = JSON.parse(String(init?.body)) as { ifContentHash?: string };
     if (body.ifContentHash && body.ifContentHash !== "b".repeat(64)) return reply(409, { error: "Document changed since you read it", contentHash: "b".repeat(64), diff: null, truncated: false });
@@ -129,6 +134,24 @@ describe("tools over a real MCP client", () => {
     expect(fresh.isError).toBeFalsy();
     expect(text(fresh)).toContain(`updated (hash ${"c".repeat(64)})`);
     expect(fresh.structuredContent?.contentHash).toBe("c".repeat(64));
+  });
+
+  it("markdoc_append with a stale ifContentHash is an error that says to re-read; a current one (or none) appends", async () => {
+    const stale = (await mcp.callTool({ name: "markdoc_append", arguments: { id: "doc-1", markdown: "\nLate paragraph.", ifContentHash: "a".repeat(64) } })) as Result;
+    expect(stale.isError).toBe(true);
+    expect(text(stale)).toContain("Document changed since you read it");
+    expect(text(stale)).toContain("re-read and retry");
+    expect(text(stale)).not.toContain("Appended");
+    expect(stale.structuredContent?.contentHash).toBe("b".repeat(64));
+
+    const fresh = (await mcp.callTool({ name: "markdoc_append", arguments: { id: "doc-1", markdown: "\nLate paragraph.", ifContentHash: "b".repeat(64) } })) as Result;
+    expect(fresh.isError).toBeFalsy();
+    expect(text(fresh)).toContain(`Appended to doc-1 (hash ${"d".repeat(64)})`);
+    expect(fresh.structuredContent?.contentHash).toBe("d".repeat(64));
+
+    const unconditional = (await mcp.callTool({ name: "markdoc_append", arguments: { id: "doc-1", markdown: "\nLate paragraph." } })) as Result;
+    expect(unconditional.isError).toBeFalsy();
+    expect(text(unconditional)).toContain("Appended to doc-1");
   });
 
   it("markdoc_suggest with a stale ifContentHash is an error even without a diff; a current one succeeds", async () => {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName, HttpError } from "@/server/http";
-import { mutateLiveDoc, cleanTextOf, expectedContentHash, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
+import { mutateLiveDoc, cleanTextOf, readPrecondition, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
 import { diffOpsWords } from "@/editor/sync/text-diff";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
@@ -51,7 +51,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // A comment-scoped token may propose suggestions (humans accept them); the user still needs edit access.
   const { user } = await requireAccess(id, "edit", { tokenScope: "comment" });
   const body = await readJson(req, (d) => schema.parse(d));
-  const expected = expectedContentHash(req, body.ifContentHash);
+  const expected = readPrecondition(req, body);
   const author = collabIdentity(user!);
   let count = 0;
   const created: string[] = [];
