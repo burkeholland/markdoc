@@ -64,6 +64,11 @@ function classFor(h: SourceHighlight): string {
 }
 
 function build(session: CollabSession, doc: PMNode, getFocus: () => number | null): DecorationSet {
+  // While the initial load is held the ProseMirror document does not hold the text yet, so there is
+  // nothing to decorate — and the source map would cost a full parse of the new text inside the task
+  // that applied it (the ~900 ms local-apply task on the 12k-word document, #118). The rebuild that
+  // follows notifies the session, and that refresh builds the real set.
+  if (session.binding.hasHeldSync) return DecorationSet.empty;
   const map = session.binding.getSourceMap();
   const max = doc.content.size;
   const clamp = (n: number) => Math.min(max, Math.max(0, n));
