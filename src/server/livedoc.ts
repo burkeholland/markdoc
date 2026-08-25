@@ -83,27 +83,37 @@ export function cleanTextOf(doc: Y.Doc): string {
 
 // --- Optimistic concurrency -----------------------------------------------------
 
-/** Body field shared by the conditional write routes: the `contentHash` from `GET /content` (64 hex chars). */
-export const ifContentHashSchema = z
-  .string()
-  .trim()
-  .regex(/^[0-9a-f]{64}$/i, "Expected the 64-character contentHash from GET /content")
-  .optional();
+/**
+ * Body field shared by the conditional write routes: the `contentHash` from `GET /content`. Any string
+ * is accepted here — a malformed value (wrong length, stray characters) is not a schema error but a
+ * precondition that cannot match, so the caller gets the documented 409 with the current hash and its
+ * retry loop works instead of stalling on a 400.
+ */
+export const ifContentHashSchema = z.string().trim().optional();
+
+/** A weak `If-Match` validator, which RFC 9110 §13.1.1 says must never match. Never equal to a hex hash. */
+const WEAK_PREFIX = "w/";
 
 /**
  * The clean-text hash a write is conditional on: the body's `ifContentHash`, else the `If-Match`
- * header (`"<hash>"`, quotes and a weak `W/` prefix tolerated); null when the caller sent neither.
+ * header (`"<hash>"`, quotes tolerated; `*` means unconditional); null when the caller sent neither.
+ * A weak tag (`W/"<hash>"`) is kept with its `w/` prefix so it never compares equal to the current hash.
  */
-export function expectedContentHash(req: Request, bodyHash?: string | null): string | null {
-  if (bodyHash) return bodyHash.trim().toLowerCase();
+export function readPrecondition(req: Request, body?: { ifContentHash?: string | null } | null): string | null {
+  const bodyHash = body?.ifContentHash?.trim();
+  if (bodyHash) return bodyHash.toLowerCase();
   const header = req.headers.get("if-match");
   if (!header) return null;
-  const raw = header
-    .trim()
+  const trimmed = header.trim();
+  const weak = /^W\//i.test(trimmed);
+  const raw = trimmed
     .replace(/^W\//i, "")
+    .trim()
     .replace(/^"(.*)"$/, "$1")
     .trim();
-  return raw && raw !== "*" ? raw.toLowerCase() : null;
+  if (!raw) return null;
+  if (!weak && raw === "*") return null;
+  return (weak ? WEAK_PREFIX : "") + raw.toLowerCase();
 }
 
 /**
