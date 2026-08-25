@@ -1,4 +1,4 @@
-import { handler, json, requireUser, HttpError } from "@/server/http";
+import { handler, json, requireUser, tokenAllowsDocument, HttpError } from "@/server/http";
 import { listRequestsForUser } from "@/server/agent-requests";
 import type { AgentRequestStatus } from "@/server/db/schema";
 
@@ -21,6 +21,6 @@ export const GET = handler(async (req: Request) => {
         .filter((s): s is AgentRequestStatus => (STATUSES as string[]).includes(s))
     : ["open" as const];
   const limit = q.get("limit") ? Number(q.get("limit")) : undefined;
-  const requests = await listRequestsForUser(user, { status: status.length ? status : ["open"], limit: Number.isFinite(limit) ? limit : undefined });
+  const requests = (await listRequestsForUser(user, { status: status.length ? status : ["open"], limit: Number.isFinite(limit) ? limit : undefined })).filter((r) => tokenAllowsDocument(user, r.documentId));
   return json({ requests, agent: user.agent });
 });

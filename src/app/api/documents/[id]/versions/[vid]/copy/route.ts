@@ -1,16 +1,18 @@
-import { handler, json, requireAccess, HttpError } from "@/server/http";
+import { handler, json, requireAccess, requireCanCreateDocuments, HttpError } from "@/server/http";
 import { duplicateDocument, getVersion } from "@/server/documents";
 
 type Params = { params: Promise<{ id: string; vid: string }> };
 
 /**
  * "Copy version as new document": like `POST /api/documents/:id/duplicate`, but the new document
- * holds this version's text and is titled "Copy of <title> (v<n>)". Anyone who can view may copy.
+ * holds this version's text and is titled "Copy of <title> (v<n>)". Anyone who can view may copy;
+ * a token needs full scope and no document restriction, as for duplicate.
  */
 export const POST = handler(async (_req: Request, { params }: Params) => {
   const { id, vid } = await params;
   const { user } = await requireAccess(id, "view");
   if (!user) throw new HttpError(401, "Sign in required");
+  requireCanCreateDocuments(user, "copy documents");
   const version = await getVersion(id, vid);
   if (!version) throw new HttpError(404, "Version not found");
   const doc = await duplicateDocument(id, user.id, {

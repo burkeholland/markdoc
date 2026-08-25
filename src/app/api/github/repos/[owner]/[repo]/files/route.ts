@@ -1,4 +1,4 @@
-import { handler, json, requireUser, HttpError } from "@/server/http";
+import { handler, json, requireScope, requireUser, HttpError } from "@/server/http";
 import { getGitHubToken } from "@/server/documents";
 import { githubClient, listMarkdownFiles } from "@/server/github";
 
@@ -6,6 +6,7 @@ type Params = { params: Promise<{ owner: string; repo: string }> };
 
 export const GET = handler(async (req: Request, { params }: Params) => {
   const user = await requireUser();
+  requireScope(user, "full", "browse GitHub");
   const { owner, repo } = await params;
   const ref = new URL(req.url).searchParams.get("ref") || "HEAD";
   const token = await getGitHubToken(user.id);

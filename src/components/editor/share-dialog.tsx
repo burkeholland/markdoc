@@ -9,6 +9,7 @@ import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CopyBlock, mcpConfigFor, mcpHttpConfigFor, TOKEN_PLACEHOLDER } from "@/components/settings/agent-connect-card";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
+import type { TokenScopeName } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
 
 const LINK_OPTIONS: { value: DocumentDto["linkAccess"]; label: string; description: string }[] = [
@@ -257,7 +258,7 @@ export function CopyButton({ text, label = "Copy", testId, target }: { text: str
  */
 export function AgentCollaborateCard({ origin, open }: { origin: string; open: boolean }) {
   const [tokens, setTokens] = useState<ApiTokenDto[] | null>(null);
-  const [minted, setMinted] = useState<{ name: string; token: string } | null>(null);
+  const [minted, setMinted] = useState<{ name: string; token: string; scope: TokenScopeName } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showStdio, setShowStdio] = useState(false);
@@ -287,9 +288,10 @@ export function AgentCollaborateCard({ origin, open }: { origin: string; open: b
     setBusy(true);
     setError(null);
     try {
-      const res = await api.tokens.create("GitHub Copilot CLI", 90);
-      setMinted({ name: res.token.name, token: res.token.token });
-      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, createdAt: new Date().toISOString(), lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null }, ...(list ?? [])]);
+      // Least privilege for the credential that leaves the browser: comment & suggest, the humans accept the result here.
+      const res = await api.tokens.create("GitHub Copilot CLI", 90, { scope: "comment" });
+      setMinted({ name: res.token.name, token: res.token.token, scope: res.token.scope });
+      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, scope: res.token.scope, documentIds: res.token.documentIds, createdAt: new Date().toISOString(), lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null }, ...(list ?? [])]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create a token");
     } finally {
@@ -333,8 +335,13 @@ export function AgentCollaborateCard({ origin, open }: { origin: string; open: b
       <div className="mt-2">
         <CopyBlock value={config} label="Copilot CLI MCP configuration" testId="share-agent-config" copyTestId="share-agent-copy" />
       </div>
-      {minted && <p className="mt-1.5 text-[11px] text-ink-3">Copy it now — the token is not shown again. Revoke it any time in Settings.</p>}
-      <CopilotPermissionsHint testIdPrefix="share-agent" className="mt-2" />
+      {minted && (
+        <p className="mt-1.5 text-[11px] text-ink-3">
+          Copy it now — the token is not shown again. It is <strong className="font-mono text-ink-2">{minted.scope}</strong>-scoped: it can read, comment and propose suggestions you accept here, not rewrite,
+          publish or delete. Need more? Create a full-access token in Settings. Revoke it any time there.
+        </p>
+      )}
+      <CopilotPermissionsHint testIdPrefix="share-agent" className="mt-2" scope={minted?.scope ?? newest?.scope ?? null} />
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <a className="text-accent hover:underline" href="/settings#tokens" data-testid="share-agent-setup-link">
           Step-by-step setup and tokens

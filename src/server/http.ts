@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { auth } from "@/auth";
 import { getDocumentAccess, type AccessOptions, type DocumentAccess, type SessionUser } from "@/server/documents";
-import { resolveApiToken, looksLikeApiToken } from "@/server/tokens";
-import type { Role } from "@/server/db/schema";
+import { resolveApiToken, looksLikeApiToken, scopeSatisfies } from "@/server/tokens";
+import type { Role, TokenScope } from "@/server/db/schema";
 import { UnrenderableDocumentError } from "@/editor/markdown/renderable";
 import { failedAuthAllowed, rateLimitingEnabled, recordFailedAuth, takeApiRequest, withRateLimitHeaders, type TakeResult } from "@/server/rate-limit";
 
@@ -50,6 +50,10 @@ export interface Actor extends SessionUser {
   agent?: string;
   /** Id of the API token when acting as an agent. */
   tokenId?: string;
+  /** The token's scope when acting as an agent; a browser session has none (full access). */
+  scope?: TokenScope;
+  /** Documents the token is restricted to; null/undefined = all of the user's documents. */
+  documentIds?: string[] | null;
 }
 
 /**
@@ -64,7 +68,7 @@ export async function currentUser(): Promise<Actor | null> {
     if (looksLikeApiToken(token)) {
       const actor = await resolveBearer(token, h);
       if (!actor) throw new HttpError(401, "Invalid or revoked API token");
-      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId };
+      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds };
     }
   }
   const session = await auth();
@@ -90,22 +94,86 @@ export function actorName(actor: Actor | null | undefined): string | null {
   return actor.agent ? `${base} via ${actor.agent}` : base;
 }
 
-export async function requireAccess(
-  docId: string,
-  minimum: "view" | "comment" | "edit" | "own" = "view",
-  options: AccessOptions = {},
-): Promise<DocumentAccess & { user: Actor | null }> {
-  const user = await currentUser();
-  const access = await getDocumentAccess(docId, user, options);
-  if (!access) throw new HttpError(user ? 404 : 401, user ? "Document not found" : "Sign in required");
-  if (!roleSatisfies(access.role, minimum)) throw new HttpError(403, "You do not have permission to do that");
-  return { ...access, user };
+type AccessLevel = "view" | "comment" | "edit" | "own";
+
+/** The narrowest token scope that may ask for each access level. */
+const SCOPE_FOR_LEVEL: Record<AccessLevel, TokenScope> = { view: "read", comment: "comment", edit: "full", own: "full" };
+/** What a token's scope caps the user's role at (`full` does not cap). */
+const ROLE_CAP: Record<TokenScope, Role | null> = { read: "viewer", comment: "commenter", full: null };
+
+const SCOPE_VERB: Record<TokenScope, string> = { read: "read documents", comment: "comment and suggest", full: "do everything you can" };
+
+/** The 403 an out-of-scope token gets: says what the token is and where to mint a wider one. */
+export function scopeError(scope: TokenScope, needed: TokenScope, action?: string): HttpError {
+  const what = action ?? (needed === "full" ? "rewrite documents" : SCOPE_VERB[needed]);
+  const wider = needed === "full" ? "full-access" : `${needed} or full-access`;
+  return new HttpError(403, `This token is ${scope}-scoped; create a ${wider} token at /settings to ${what}`, { scope, requiredScope: needed });
 }
 
-export function roleSatisfies(role: Role, minimum: "view" | "comment" | "edit" | "own"): boolean {
-  const rank: Record<Role, number> = { viewer: 0, commenter: 1, editor: 2, owner: 3 };
+/**
+ * Refuse when the caller is a token below `minimum`. Browser sessions always pass. For routes that
+ * are not about one document (create, import, GitHub); document routes go through `requireAccess`.
+ */
+export function requireScope(user: Actor, minimum: TokenScope, action?: string): void {
+  if (!user.scope) return;
+  if (!scopeSatisfies(user.scope, minimum)) throw scopeError(user.scope, minimum, action);
+}
+
+/**
+ * Refuse when the caller is a token that may not mint documents: below `full` scope, or restricted to
+ * a document list (a new document would sit outside it). Create, import, duplicate and copy-version go through here.
+ */
+export function requireCanCreateDocuments(user: Actor, action = "create documents"): void {
+  requireScope(user, "full", action);
+  if (user.documentIds?.length) throw new HttpError(403, `This token is restricted to specific documents; create an unrestricted token at /settings to ${action}`);
+}
+
+/** True when the token may see this document (no restriction, or the id is on its list). Sessions see everything. */
+export function tokenAllowsDocument(user: Actor | null | undefined, docId: string): boolean {
+  if (!user?.documentIds?.length) return true;
+  return user.documentIds.includes(docId);
+}
+
+export interface RequireAccessOptions extends AccessOptions {
+  /**
+   * The scope a token needs for this action when it is narrower than what `minimum` implies: e.g.
+   * `suggest` needs an `edit` role from the user but a `comment`-scoped token may propose suggestions.
+   */
+  tokenScope?: TokenScope;
+}
+
+/**
+ * Resolve the caller's access to a document. A token narrows what its user could do: documents
+ * outside its `documentIds` answer 404 as if they did not exist, and a `read` / `comment` scope
+ * lowers the effective role to viewer / commenter (403 with a pointer to /settings when the route
+ * asks for more). Browser sessions are untouched.
+ */
+export async function requireAccess(
+  docId: string,
+  minimum: AccessLevel = "view",
+  options: RequireAccessOptions = {},
+): Promise<DocumentAccess & { user: Actor | null }> {
+  const { tokenScope, ...accessOptions } = options;
+  const user = await currentUser();
+  if (user && !tokenAllowsDocument(user, docId)) throw new HttpError(404, "Document not found");
+  const access = await getDocumentAccess(docId, user, accessOptions);
+  if (!access) throw new HttpError(user ? 404 : 401, user ? "Document not found" : "Sign in required");
+  if (user?.scope) {
+    const needed = tokenScope ?? SCOPE_FOR_LEVEL[minimum];
+    if (!scopeSatisfies(user.scope, needed)) throw scopeError(user.scope, needed);
+  }
+  if (!roleSatisfies(access.role, minimum)) throw new HttpError(403, "You do not have permission to do that");
+  const cap = user?.scope ? ROLE_CAP[user.scope] : null;
+  const role = cap && roleRank(cap) < roleRank(access.role) ? cap : access.role;
+  return { ...access, role, user };
+}
+
+const ROLE_RANK: Record<Role, number> = { viewer: 0, commenter: 1, editor: 2, owner: 3 };
+const roleRank = (role: Role) => ROLE_RANK[role];
+
+export function roleSatisfies(role: Role, minimum: AccessLevel): boolean {
   const need = { view: 0, comment: 1, edit: 2, own: 3 }[minimum];
-  return rank[role] >= need;
+  return ROLE_RANK[role] >= need;
 }
 
 export function json(data: unknown, init?: ResponseInit) {

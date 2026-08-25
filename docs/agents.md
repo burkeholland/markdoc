@@ -34,7 +34,15 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 
 ## 1. Create a token
 
-Open **Settings → Agents & API access** (`/settings`), name the token after the agent (for example *GitHub Copilot CLI*) and copy it. Tokens have the same access as you; revoke them there at any time. Tokens cannot create other tokens.
+Open **Settings → Agents & API access** (`/settings`), name the token after the agent (for example *GitHub Copilot CLI*), pick a **scope** and copy it. A token is never wider than you and can be narrower:
+
+| Scope | What the token may do |
+| --- | --- |
+| `read` | Every `GET` route, `watch` and `presence`. Cannot comment, suggest, write, star, copy or delete. |
+| `comment` | `read` plus comments, `suggest`, reviews and `requests/*` (claim, complete, cancel). Cannot rewrite, publish, rename, share, copy or delete. The Settings dialog and the Share card default to this. |
+| `full` | Everything you can do (the default for `POST /api/tokens` without a `scope`, so scripts keep working). |
+
+Optionally tick **Only these documents** to restrict the token to a few documents: every other document answers `404` as if it did not exist (direct reads, lists, search, events, requests and notifications), and such a token cannot create, import or copy documents (`403`). Out-of-scope calls answer `403 { error: "This token is comment-scoped; create a full-access token at /settings to rewrite documents", scope, requiredScope }`; `GET /api/me` and `markdoc_whoami` report `scope` and `documentIds`. Browser sessions are unaffected. Revoke tokens at any time in Settings. Tokens cannot create other tokens.
 
 The **Set up Copilot CLI** checklist at the top of that page ticks itself from real state: a token exists, the CLI has listed Markdoc's tools over `/api/mcp` (`tools/list` stamps `lastMcpSeenAt` on the token), a tool call went through (`tools/call` stamps `lastMcpCallAt`) or a request was sent from the editor.
 
@@ -79,7 +87,7 @@ Twenty-seven tools; every `id` is the document id from the URL `/d/<id>`.
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
-| `markdoc_whoami` | | Which user and agent identity the token acts as. |
+| `markdoc_whoami` | | Which user and agent identity the token acts as, its scope (`read` / `comment` / `full`) and any document restriction. |
 | `markdoc_list_documents` | `starred?`, `trash?` | Documents you own or that are shared with you, most recently opened first; each has `starred` and `lastOpenedAt`. `starred: true` for only starred ones, `trash: true` for your own documents in the trash. |
 | `markdoc_search_documents` | `query` (2+ chars), `limit?` | Find documents by title or body text; each hit includes a snippet around the match. |
 | `markdoc_create_document` | `title?`, `content?`, `template?` | New document from Markdown or from a template id; returns the URL to open in the browser. |
@@ -234,7 +242,7 @@ TOKEN=mdk_…
 
 ### Access levels
 
-The *Access* column is the minimum role on the document: **view** (owner, any collaborator, or anyone when link access allows it), **comment** (commenter or above), **edit** (editor or owner), **own** (owner only). Documents in the trash answer `404` everywhere except `DELETE ?permanent=1` and `restore`.
+The *Access* column is the minimum role on the document: **view** (owner, any collaborator, or anyone when link access allows it), **comment** (commenter or above), **edit** (editor or owner), **own** (owner only). A token's scope caps the role it gets: `read` acts as a viewer, `comment` as a commenter (`suggest` is the one exception: a comment token may propose suggestions on a document its user can edit), `full` as the user. Documents in the trash answer `404` everywhere except `DELETE ?permanent=1` and `restore`.
 
 ### Documents
 
@@ -331,11 +339,11 @@ Sharing a document with an audience: `/p/:id` is the read-only **reader view** (
 
 | Method & path | Body / query | Access | Purpose |
 | --- | --- | --- | --- |
-| `GET /api/me` | | signed in | Current user and agent name. |
+| `GET /api/me` | | signed in | Current user, agent name, and for a token its `scope` (`read` / `comment` / `full`) and `documentIds` (`null` = all). |
 | `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` (`limit` 1–100; anything else → `400`) | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you), `request.done` (an agent finished a request you made; `actorName` is the agent, `snippet` its summary); `refId` is the thread, reply, suggestion or request id (`<docId>:<login>` for shares). |
 | `POST /api/notifications/:id/read` / `POST /api/notifications/read-all` / `POST /api/notifications/thread-read` | `{ documentId, refIds }` for thread-read | signed in | Mark one, all, or everything about the given threads/replies read. |
 | `GET /api/mentions` / `POST /api/mentions/:id/read` | | signed in | **Deprecated, removed next release**: alias of `GET /api/notifications?unread=1&kind=mention` (also returns the old `mentions` array) and of `POST /api/notifications/:id/read`. |
-| `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays? }` | session only | List your API tokens; create one (`201`, the secret is returned once). Tokens cannot call these (`403`), so a leaked token cannot enumerate its siblings. |
+| `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays?, scope?, documentIds? }` | session only | List your API tokens (each with `scope` and `documentIds`); create one (`201`, the secret is returned once). `scope` is `read`, `comment` or `full` (default `full`); `documentIds` restricts the token to documents you can see (an unknown id → `404`; empty or omitted = all). Tokens cannot call these (`403`), so a leaked token cannot enumerate its siblings. |
 | `DELETE /api/tokens/:id` | | session only | Revoke a token. |
 | `GET /api/health` | | public | `{ ok, version }`. |
 

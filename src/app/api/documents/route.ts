@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, HttpError, json, readJson, requireUser } from "@/server/http";
+import { handler, HttpError, json, readJson, requireCanCreateDocuments, requireUser, tokenAllowsDocument } from "@/server/http";
 import { createDocument, listDocumentsForUser, listTrashForUser, searchDocumentsForUser } from "@/server/documents";
 import { applyTemplate, getTemplate } from "@/lib/templates";
 
@@ -26,15 +26,17 @@ export const GET = handler(async (req: Request) => {
     starred: params.get("starred") ?? undefined,
     trash: params.get("trash") ?? undefined,
   });
+  // A document-restricted token only ever sees its documents, in lists as in direct reads.
+  const only = <T extends { id: string }>(docs: T[]) => docs.filter((d) => tokenAllowsDocument(user, d.id));
   if (trash) {
-    const documents = await listTrashForUser(user);
+    const documents = only(await listTrashForUser(user));
     return json({ documents });
   }
   if (q !== undefined) {
-    const documents = await searchDocumentsForUser(user, q, { limit });
+    const documents = only(await searchDocumentsForUser(user, q, { limit }));
     return json({ documents, query: q });
   }
-  const documents = await listDocumentsForUser(user, { starred });
+  const documents = only(await listDocumentsForUser(user, { starred }));
   return json({ documents });
 });
 
@@ -47,6 +49,7 @@ const createSchema = z.object({
 
 export const POST = handler(async (req: Request) => {
   const user = await requireUser();
+  requireCanCreateDocuments(user);
   const body = await readJson(req, (d) => createSchema.parse(d ?? {}));
   let title = body.title;
   let content = body.content;

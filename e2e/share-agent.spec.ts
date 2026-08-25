@@ -53,6 +53,12 @@ test.describe("share dialog · collaborate with an agent", () => {
     await expect(config).toContainText(["Bearer", "mdk_"].join(" "));
     await expect(config).not.toContainText("MARKDOC_TOKEN");
     await expect(page.getByTestId("share-agent-create-token")).toHaveCount(0);
+    // The card mints a comment-scoped token (#124): the scope is printed next to the allow line, which no longer
+    // pre-allows the tools that scope cannot run (append, create_document).
+    await expect(page.getByTestId("share-agent-scope-chip")).toHaveText("comment");
+    await expect(page.getByTestId("share-agent-scope")).toContainText("Comment & suggest");
+    expect((await allowLine.innerText()).trim()).toBe("copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence)'");
+    await expect(card).toContainText("comment-scoped");
     const shown = (await config.innerText()).trim();
     const parsed = JSON.parse(shown) as { mcpServers: { markdoc: { type: string; url: string; headers: { Authorization: string }; tools: string[] } } };
     expect(parsed.mcpServers.markdoc.url).toBe(`${origin}/api/mcp`);
@@ -75,11 +81,49 @@ test.describe("share dialog · collaborate with an agent", () => {
     expect(list.result.tools.map((t) => t.name)).toContain("markdoc_read_document");
     expect(list.result.tools.length).toBe(body.tools);
 
+    // …and it is really comment-scoped: reading works, rewriting is a 403 whose text says what to do instead.
+    const bearer = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
+    expect((await page.request.get(`${origin}/api/documents/${id}/content`, { headers: bearer })).status()).toBe(200);
+    const refused = await page.request.put(`${origin}/api/documents/${id}/content`, { headers: bearer, data: { content: "# Rewritten\n" } });
+    expect(refused.status()).toBe(403);
+    expect(((await refused.json()) as { error: string }).error).toBe("This token is comment-scoped; create a full-access token at /settings to rewrite documents");
+    const who = (await (await page.request.get(`${origin}/api/me`, { headers: bearer })).json()) as { scope: string; documentIds: string[] | null };
+    expect(who).toMatchObject({ scope: "comment", documentIds: null });
+
     // The stdio alternative is one click away.
     await page.getByTestId("share-agent-stdio-toggle").click();
     await expect(page.getByTestId("share-agent-config-stdio")).toContainText(`"MARKDOC_URL": "${origin}"`);
 
     await page.keyboard.press("Escape");
+
+    // Settings lists the token with its scope chip and document count.
+    await page.goto("/settings");
+    const row = page.getByTestId("token-row").filter({ hasText: "GitHub Copilot CLI" }).first();
+    await expect(row.getByTestId("token-scope-chip")).toHaveText("comment");
+    await expect(row.getByTestId("token-documents-count")).toHaveText("all documents");
+    // The create form: scope radio (default Comment & suggest) and a document picker; a Read token for this document only.
+    await expect(page.getByTestId("token-scope-comment")).toBeChecked();
+    await page.getByTestId("token-name").fill("Read bot");
+    await page.getByTestId("token-scope-read").check();
+    await page.getByTestId("token-restrict").check();
+    await page.getByTestId(`token-document-${id}`).check();
+    await page.getByTestId("token-create").click();
+    const createdBox = page.getByTestId("token-created");
+    await expect(createdBox).toContainText("Read bot");
+    await expect(createdBox.getByTestId("token-scope-chip")).toHaveText("read");
+    await expect(createdBox).toContainText("1 document");
+    const readRow = page.getByTestId("token-row").filter({ hasText: "Read bot" }).first();
+    await expect(readRow.getByTestId("token-scope-chip")).toHaveText("read");
+    await expect(readRow.getByTestId("token-documents-count")).toHaveText("1 document");
+    await expect(page.getByTestId("agent-connect-scope-chip")).toHaveText("read");
+    const readToken = (await page.getByTestId("copy-token").innerText()).trim();
+    const ro = { Authorization: ["Bearer", readToken].join(" "), "Content-Type": "application/json" };
+    expect((await page.request.get(`${origin}/api/documents/${id}/content`, { headers: ro })).status()).toBe(200);
+    const noComment = await page.request.post(`${origin}/api/documents/${id}/comments`, { headers: ro, data: { action: "add", quote: "Hello agent.", body: "nope" } });
+    expect(noComment.status()).toBe(403);
+    expect(((await noComment.json()) as { error: string }).error).toContain("read-scoped");
+    const other = await createDocument(page, "# Other\n\nNot for the bot.\n", "Other");
+    expect((await page.request.get(`${origin}/api/documents/${other}/content`, { headers: ro })).status()).toBe(404);
     await context.close();
   });
 });

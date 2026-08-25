@@ -16,9 +16,27 @@ export const MCP_SERVER_KEY = "markdoc";
  */
 export const COPILOT_PREALLOW_TOOLS = ["markdoc_suggest", "markdoc_comment", "markdoc_presence", "markdoc_append", "markdoc_create_document"] as const;
 
+/** Token scopes, narrowest first (mirrors `TokenScope` in the schema without importing the server). */
+export type TokenScopeName = "read" | "comment" | "full";
+
+/** The pre-allow tools a token of this scope can actually run: no point pre-allowing what the server refuses with 403. */
+const PREALLOW_BY_SCOPE: Record<TokenScopeName, readonly (typeof COPILOT_PREALLOW_TOOLS)[number][]> = {
+  read: ["markdoc_presence"],
+  comment: ["markdoc_suggest", "markdoc_comment", "markdoc_presence"],
+  full: COPILOT_PREALLOW_TOOLS,
+};
+
+/** Short labels for the scope chips and the line under the config blocks. */
+export const TOKEN_SCOPE_LABEL: Record<TokenScopeName, string> = { read: "Read", comment: "Comment & suggest", full: "Full" };
+export const TOKEN_SCOPE_SUMMARY: Record<TokenScopeName, string> = {
+  read: "reads documents, watches and shows presence — cannot write",
+  comment: "reads, comments, proposes suggestions and reviews, picks up requests — cannot rewrite, publish or delete",
+  full: "everything you can do",
+};
+
 /** The one-liner that starts Copilot CLI with those tools pre-allowed, byte-for-byte what the cards copy. */
-export function copilotAllowToolLine(serverKey: string = MCP_SERVER_KEY): string {
-  return `copilot --allow-tool '${COPILOT_PREALLOW_TOOLS.map((tool) => `${serverKey}(${tool})`).join(",")}'`;
+export function copilotAllowToolLine(serverKey: string = MCP_SERVER_KEY, scope: TokenScopeName = "full"): string {
+  return `copilot --allow-tool '${PREALLOW_BY_SCOPE[scope].map((tool) => `${serverKey}(${tool})`).join(",")}'`;
 }
 
 /** Official reference for `--allow-tool`, `/allow-all` and the persisted "don't ask again" approvals. */

@@ -3,17 +3,18 @@
 import { useRef } from "react";
 import { Check, Copy, ShieldCheck } from "lucide-react";
 import { useCopy } from "@/lib/hooks";
-import { COPILOT_ALLOWING_TOOLS_URL, copilotAllowToolLine } from "@/lib/mcp";
+import { COPILOT_ALLOWING_TOOLS_URL, copilotAllowToolLine, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
 
 /**
  * "Stop the permission prompts": under the MCP config in the Share card and the Connect card, the
  * `copilot --allow-tool …` line that pre-allows Markdoc's safe tools for a session, plus the two
  * alternatives (the CLI's own "don't ask again" answer, and /allow-all). The pattern uses the same
- * server key as the config block above it, so it matches what the user pasted.
+ * server key as the config block above it, so it matches what the user pasted. When the token's
+ * `scope` is known the line only lists tools that scope can run, and the scope is printed next to it.
  */
-export function CopilotPermissionsHint({ testIdPrefix, className }: { testIdPrefix: string; className?: string }) {
-  const line = copilotAllowToolLine();
+export function CopilotPermissionsHint({ testIdPrefix, className, scope }: { testIdPrefix: string; className?: string; scope?: TokenScopeName | null }) {
+  const line = copilotAllowToolLine(undefined, scope ?? "full");
   const pre = useRef<HTMLPreElement>(null);
   const { copy, label, copied } = useCopy(line, pre);
   return (
@@ -35,6 +36,17 @@ export function CopilotPermissionsHint({ testIdPrefix, className }: { testIdPref
           {label}
         </button>
       </div>
+      {scope && (
+        <p className="mt-1.5 flex flex-wrap items-center gap-1.5" data-testid={`${testIdPrefix}-scope`}>
+          <span className="font-semibold text-ink-2">Token scope:</span>
+          <span className="rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-ink-2" data-testid={`${testIdPrefix}-scope-chip`}>
+            {scope}
+          </span>
+          <span>
+            {TOKEN_SCOPE_LABEL[scope]} — {TOKEN_SCOPE_SUMMARY[scope]}.
+          </span>
+        </p>
+      )}
       <p className="mt-1.5">
         or answer <em>don&rsquo;t ask again in this directory</em> once per tool; <code className="rounded bg-surface-2 px-1 py-0.5 font-mono">/allow-all</code> allows everything (not
         recommended). Reading and watching never prompt.{" "}

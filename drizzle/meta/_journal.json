@@ -85,6 +85,13 @@
       "when": 1787587984125,
       "tag": "0011_reviews",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787642770015,
+      "tag": "0012_token_scope",
+      "breakpoints": true
     }
   ]
 }

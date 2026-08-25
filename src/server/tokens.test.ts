@@ -4,7 +4,7 @@ process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
 
 const { getDb, schema } = await import("./db");
-const { createApiToken, listApiTokens, revokeApiToken, resolveApiToken, looksLikeApiToken, hashToken } = await import("./tokens");
+const { createApiToken, listApiTokens, revokeApiToken, resolveApiToken, looksLikeApiToken, hashToken, scopeSatisfies } = await import("./tokens");
 
 describe("api tokens", () => {
   let userId: string;
@@ -28,6 +28,23 @@ describe("api tokens", () => {
     const rows = await db.select().from(schema.apiTokens);
     expect(rows.every((r) => r.tokenHash !== created.token)).toBe(true);
     expect(rows.some((r) => r.tokenHash === hashToken(created.token))).toBe(true);
+  });
+
+  it("carries scope and document restriction; defaults to full and unrestricted", async () => {
+    const plain = await createApiToken(userId, "plain");
+    expect(plain).toMatchObject({ scope: "full", documentIds: null });
+    expect(await resolveApiToken(plain.token)).toMatchObject({ scope: "full", documentIds: null });
+    const scoped = await createApiToken(userId, "reviewer", { scope: "comment", documentIds: ["d1", "d2", "d1"], expiresInDays: 7 });
+    expect(scoped).toMatchObject({ scope: "comment", documentIds: ["d1", "d2"] });
+    expect(scoped.expiresAt).not.toBeNull();
+    expect(await resolveApiToken(scoped.token)).toMatchObject({ scope: "comment", documentIds: ["d1", "d2"], agent: "reviewer" });
+    const empty = await createApiToken(userId, "empty", { scope: "read", documentIds: [] });
+    expect(empty.documentIds).toBeNull();
+    const list = await listApiTokens(userId);
+    expect(list.find((t) => t.id === scoped.id)).toMatchObject({ scope: "comment", documentIds: ["d1", "d2"] });
+    expect(scopeSatisfies("comment", "read")).toBe(true);
+    expect(scopeSatisfies("comment", "full")).toBe(false);
+    expect(scopeSatisfies("full", "full")).toBe(true);
   });
 
   it("rejects unknown, revoked and expired tokens", async () => {
