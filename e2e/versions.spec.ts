@@ -57,7 +57,6 @@ test.describe("version compare", () => {
     await openDocument(page, id);
     await openHistory(page);
 
-    const rows = page.getByTestId("version-item");
     await expect(row(page, "Three")).toBeVisible();
     await expect(row(page, "One").getByTestId("version-kind")).toHaveText("Named");
 
@@ -122,7 +121,7 @@ test.describe("version compare", () => {
     await focusCodeEnd(page);
     await page.keyboard.type("\n\nTyped later.");
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
-    const autoRow = page.locator('[data-testid="version-item"][data-version-kind="auto"]').first();
+    const autoRow = page.getByTestId("version-item").and(page.locator('[data-version-kind="auto"]')).first();
     await expect(autoRow).toBeVisible();
     const autoNumber = await autoRow.getAttribute("data-version-number");
     const auto = page.locator(`[data-testid="version-item"][data-version-number="${autoNumber}"]`);
