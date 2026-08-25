@@ -6,7 +6,7 @@ import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, GitCommit, History
 import type { CollabSession } from "@/editor/collab/session";
 import { api, type VersionSummary } from "@/lib/api";
 import { collapseSegment, detectMoves, diffStats, hunkCounter, hunks, wordDiff, type Collapsed, type DiffSegment } from "@/editor/diff";
-import { cn, formatDateTime, relativeTime } from "@/lib/utils";
+import { cn, formatDateTime, formatDayHeading, relativeTime } from "@/lib/utils";
 import { setPendingNotice } from "@/lib/notice";
 import { EmptyState, Spinner } from "@/components/ui/primitives";
 import { useSessionValue } from "./use-session";
@@ -64,17 +64,43 @@ function KindIcon({ kind }: { kind: VersionSummary["kind"] }) {
 function groupByDay(versions: VersionSummary[]): { day: string; items: VersionSummary[] }[] {
   const groups = new Map<string, VersionSummary[]>();
   for (const v of versions) {
-    const d = new Date(v.createdAt);
-    const key = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+    const key = formatDayHeading(v.createdAt);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(v);
   }
   return Array.from(groups, ([day, items]) => ({ day, items }));
 }
 
+/**
+ * Last list seen per document, shared by every panel mount. A re-open renders the rows from here in
+ * the same frame and refreshes behind them; `prefetchVersions` fills it while the ⋯ menu is open so the
+ * first open usually finds it warm too (task #487).
+ */
+const listCache = new Map<string, VersionSummary[]>();
+const inflight = new Map<string, Promise<VersionSummary[]>>();
+
+function fetchVersions(docId: string): Promise<VersionSummary[]> {
+  const pending = inflight.get(docId);
+  if (pending) return pending;
+  const p = api.documents
+    .versions(docId)
+    .then((res) => {
+      listCache.set(docId, res.versions);
+      return res.versions;
+    })
+    .finally(() => inflight.delete(docId));
+  inflight.set(docId, p);
+  return p;
+}
+
+/** Warm the version list for `docId` (no-op while a fetch is already running). Errors are left to the panel. */
+export function prefetchVersions(docId: string): void {
+  void fetchVersions(docId).catch(() => {});
+}
+
 export function VersionsPanel({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
   const router = useRouter();
-  const [versions, setVersions] = useState<VersionSummary[] | null>(null);
+  const [versions, setVersions] = useState<VersionSummary[] | null>(() => listCache.get(session.docId) ?? null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
@@ -86,8 +112,8 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
 
   const load = useCallback(async () => {
     try {
-      const res = await api.documents.versions(session.docId);
-      setVersions(res.versions);
+      const list = await fetchVersions(session.docId);
+      setVersions(list);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load versions");
