@@ -321,7 +321,8 @@ export function registerTools(server, client) {
       if (single && !suggestionId) throw new Error("`suggestionId` is required for accept/reject (list them with markdoc_suggestions).");
       const res = await api("POST", `/api/documents/${id}/suggestions`, { action, ...(single ? { id: suggestionId } : {}) });
       const decided = Number(res?.decided ?? 0);
-      if (decided === 0) throw new Error(`${action} decided nothing on ${id}: no pending suggestions.`);
+      // acceptAll / rejectAll with nothing pending is an idempotent no-op, not a failure: the document is already in the asked-for state.
+      if (decided === 0) return ok(`Nothing to decide on ${id} (0 pending).`, { ok: true, action, decided: 0 });
       const verb = action.startsWith("accept") ? "Accepted" : "Rejected";
       return ok(single ? `${verb} suggestion ${suggestionId} on ${id}.` : `${verb} ${decided} suggestion(s) on ${id}.`, { ok: true, action, decided, ...(single ? { suggestionId } : {}) });
     },
