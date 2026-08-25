@@ -30,15 +30,21 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 };
 
-/** Navigate to the document and return the milliseconds until the header says "saved". */
-async function timeOpen(page: Page, id: string): Promise<number> {
+/**
+ * Navigate to the document and return the milliseconds until the header says "saved", plus the
+ * time until the rich column first showed a heading (the server-rendered stand-in counts: that is
+ * what the reader sees first; the live editor replaces it in place once the text is in).
+ */
+async function timeOpen(page: Page, id: string): Promise<{ savedMs: number; richPaintMs: number }> {
   const t0 = Date.now();
   await page.goto(`/d/${id}`);
+  await expect(page.getByTestId("rich-column").locator(":is(h1, h2)").first()).toBeVisible({ timeout: 60_000 });
+  const richPaintMs = Date.now() - t0;
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
-  const ms = Date.now() - t0;
+  const savedMs = Date.now() - t0;
   await expect(page.locator(".cm-content")).toBeVisible();
   await expect(page.locator(".md-rich")).toBeVisible();
-  return ms;
+  return { savedMs, richPaintMs };
 }
 
 /**
@@ -195,9 +201,15 @@ test.describe("Burke-scale", () => {
     await owner?.context.close();
   });
 
-  test("1. long doc opens < 6 s, outline lists 40 H2s, keystroke → preview < 300 ms median", async () => {
+  test("1. long doc opens: first rich paint < 1.5 s, saved < 6 s, outline lists 40 H2s, keystroke → preview < 300 ms median", async () => {
     const { page } = owner;
-    const openMs = record("long doc: navigation → saved", await timeOpen(page, longDocId), budgetMs(6_000));
+    const open = await timeOpen(page, longDocId);
+    // Issue #118: the server-rendered stand-in makes the document readable as soon as the page loads; before it
+    // the rich pane painted its first heading at 2.3–4.6 s (warm). `saved` still waits for hydration, the Yjs
+    // sync and the full ProseMirror render (warm median 3.0 s on this box) — the 6 s ceiling is not a target.
+    const paintMs = record("long doc: navigation → first rich paint", open.richPaintMs, budgetMs(1_500));
+    expect(paintMs).toBeLessThan(budgetMs(1_500));
+    const openMs = record("long doc: navigation → saved", open.savedMs, budgetMs(6_000));
     expect(openMs).toBeLessThan(budgetMs(6_000));
     expect((await codeText(page)).length).toBe(seed.longDoc.content.length);
 
@@ -406,7 +418,7 @@ test.describe("Burke-scale", () => {
     await expect(page.getByTestId("document-list").getByTestId("document-card")).toHaveCount(listed);
   });
 
-  test("5. comments panel with 25 threads opens < 1 s; resolving removes exactly one; reactions survive a reload", async () => {
+  test("5. comments panel with 25 threads opens < 200 ms; resolving removes exactly one; reactions survive a reload", async () => {
     const { page } = owner;
     const { totals } = seed.commentLoad;
     const openThreads = totals.threads - totals.resolved;
@@ -432,8 +444,9 @@ test.describe("Burke-scale", () => {
     await expect(page.getByTestId("comments-panel")).toBeVisible();
     await expect(page.getByTestId("comment-thread")).toHaveCount(openThreads);
     const panel = await page.evaluate(() => (window as unknown as { __panel: { start: number; end: number } }).__panel);
-    const ms = record(`comments panel: click → ${openThreads} open threads`, panel.end - panel.start, budgetMs(1_000));
-    expect(ms).toBeLessThan(budgetMs(1_000));
+    // Task #487: 200 ms once the document is loaded (the threads are local; no fetch on the path).
+    const ms = record(`comments panel open (${openThreads} threads)`, panel.end - panel.start, budgetMs(200));
+    expect(ms).toBeLessThan(budgetMs(200));
     const chips = page.getByTestId("comments-panel").getByTestId("reaction-chip");
     await expect(chips).toHaveCount(totals.reactions);
 
@@ -451,8 +464,23 @@ test.describe("Burke-scale", () => {
     await threads.nth(target).getByTestId("comment-resolve").click();
     await expect(threads).toHaveCount(before - 1);
     await expect(page.getByTestId("comments-badge")).toHaveText(String(openThreads - 1));
+    // Tab switch: timed in the page from the click to the moment the resolved cards are all in the DOM.
+    await page.evaluate((count) => {
+      const w = window as unknown as { __tab: { start: number; end: number } };
+      w.__tab = { start: 0, end: 0 };
+      document.querySelector('[data-testid="comments-tab-resolved"]')!.addEventListener("click", () => (w.__tab.start = performance.now()), { capture: true, once: true });
+      const mo = new MutationObserver(() => {
+        if (document.querySelectorAll('[data-testid="comment-thread"]').length === count) {
+          w.__tab.end = performance.now();
+          mo.disconnect();
+        }
+      });
+      mo.observe(document.body, { childList: true, subtree: true });
+    }, totals.resolved + 1);
     await page.getByTestId("comments-tab-resolved").click();
     await expect(page.getByTestId("comment-thread")).toHaveCount(totals.resolved + 1);
+    const tab = await page.evaluate(() => (window as unknown as { __tab: { start: number; end: number } }).__tab);
+    record(`comments resolved tab switch (${totals.resolved + 1} threads)`, tab.end - tab.start, budgetMs(100));
     await page.getByTestId("comments-tab-open").click();
 
     await page.reload();
@@ -464,6 +492,46 @@ test.describe("Burke-scale", () => {
     expect(api.comments).toHaveLength(totals.threads);
     expect(api.comments.filter((c) => c.resolved)).toHaveLength(totals.resolved + 1);
     expect(api.comments.reduce((n, c) => n + c.replies.length, 0)).toBe(totals.replies);
+  });
+
+  test("5b. version history with 41 versions opens < 200 ms (task #487)", async () => {
+    const { page } = owner;
+    const paragraphs = Array.from({ length: 300 }, (_, i) => `Paragraph ${i + 1} of the version-history fixture, long enough to wrap once in the preview pane.`).join("\n\n");
+    const id = await createDocument(page, `# Versions at volume\n\n${paragraphs}\n`, "Versions at volume");
+    for (let i = 1; i <= 40; i++) {
+      const patched = await page.request.patch(`/api/documents/${id}/content`, { data: { append: `\nAppended line ${i}.\n` } });
+      expect(patched.ok()).toBeTruthy();
+      const named = await page.request.post(`/api/documents/${id}/versions`, { data: { title: `v${i}` } });
+      expect(named.ok()).toBeTruthy();
+    }
+    const listed = (await (await page.request.get(`/api/documents/${id}/versions`)).json()) as { versions: unknown[] };
+    const count = listed.versions.length;
+    expect(count).toBeGreaterThanOrEqual(41);
+    await openDocument(page, id);
+
+    // Timed in the page from the menu item's click to the moment every row is in the DOM.
+    await page.getByTestId("more-menu").click();
+    const item = page.getByRole("menuitem", { name: "Version history" });
+    await expect(item).toBeVisible();
+    await page.evaluate((n) => {
+      const w = window as unknown as { __versions: { start: number; end: number } };
+      w.__versions = { start: 0, end: 0 };
+      document.querySelector('[role="menuitem"][data-testid="menu-history"]')!.addEventListener("click", () => (w.__versions.start = performance.now()), { capture: true, once: true });
+      const mo = new MutationObserver(() => {
+        if (document.querySelectorAll('[data-testid="version-item"]').length >= n) {
+          w.__versions.end = performance.now();
+          mo.disconnect();
+        }
+      });
+      mo.observe(document.body, { childList: true, subtree: true });
+    }, count);
+    await item.click();
+    await expect(page.getByTestId("version-item")).toHaveCount(count);
+    const timing = await page.evaluate(() => (window as unknown as { __versions: { start: number; end: number } }).__versions);
+    const ms = record(`versions panel open (${count})`, timing.end - timing.start, budgetMs(200));
+    expect(ms).toBeLessThan(budgetMs(200));
+    await page.getByRole("button", { name: "Close version history" }).click();
+    await expect(page.getByTestId("versions-panel")).toHaveCount(0);
   });
 
   test("6. phone viewport: long doc opens, outline tap scrolls to the last heading, no horizontal overflow", async ({ browser }) => {

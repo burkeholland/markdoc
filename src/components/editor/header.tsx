@@ -420,6 +420,8 @@ export interface HeaderProps {
   /** Three-way status against the linked GitHub file; null while unknown or when not linked. */
   sync: SyncStatusDto | null;
   onHistory: () => void;
+  /** The ⋯ menu opened; the shell warms what its items need (the version list, task #487). */
+  onMoreMenuOpen?: () => void;
   onActivity: () => void;
   onShortcuts: () => void;
   onCommandPalette?: () => void;
@@ -521,7 +523,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             )}
           </button>
         </Tip>
-        <Menu>
+        <Menu onOpenChange={(o) => o && props.onMoreMenuOpen?.()}>
           <MenuTrigger asChild>
             <button type="button" className="icon-btn" aria-label="More" data-testid="more-menu">
               <MoreVertical size={20} />
@@ -546,7 +548,7 @@ export const Header = memo(function Header(props: HeaderProps) {
                 <MenuSeparator />
               </>
             )}
-            <MenuItem icon={<History size={15} />} onSelect={props.onHistory}>
+            <MenuItem icon={<History size={15} />} onSelect={props.onHistory} data-testid="menu-history">
               Version history
             </MenuItem>
             <MenuItem icon={<Activity size={15} />} onSelect={props.onActivity} data-testid="menu-activity">
