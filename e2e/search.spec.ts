@@ -48,6 +48,44 @@ test.describe("dashboard search", () => {
     await expect(page.getByTestId("document-card")).toHaveCount(2);
   });
 
+  test("Escape clears the query, then blurs; the clear button and empty-state link clear it too", async () => {
+    const page = searcher.page;
+    const search = page.getByTestId("search");
+
+    // Empty field: no clear button.
+    await expect(page.getByTestId("search-clear")).toHaveCount(0);
+
+    await search.fill("zzzzqqq");
+    await expect(page.getByTestId("empty-state")).toContainText('No matches for "zzzzqqq"');
+    await expect(page.getByTestId("search-clear")).toBeVisible();
+
+    // First Esc clears the query but keeps focus in the field.
+    await search.press("Escape");
+    await expect(search).toHaveValue("");
+    await expect(search).toBeFocused();
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+    await expect(page.getByTestId("search-clear")).toHaveCount(0);
+
+    // Second Esc leaves the field.
+    await search.press("Escape");
+    await expect(search).not.toBeFocused();
+
+    // The ✕ button clears and refocuses the field.
+    await search.fill("zzzzqqq");
+    await expect(page.getByTestId("search-result")).toHaveCount(0);
+    await page.getByRole("button", { name: "Clear search" }).first().click();
+    await expect(search).toHaveValue("");
+    await expect(search).toBeFocused();
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+
+    // The empty state offers a "Clear search" action.
+    await search.fill("zzzzqqq");
+    await expect(page.getByTestId("empty-state")).toContainText('No matches for "zzzzqqq"');
+    await page.getByTestId("empty-state-clear-search").click();
+    await expect(search).toHaveValue("");
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+  });
+
   test("filter chips apply to search results", async () => {
     const page = searcher.page;
     await page.getByTestId("search").fill("quokka");

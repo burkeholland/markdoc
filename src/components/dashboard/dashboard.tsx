@@ -3,7 +3,7 @@ import { navigateTo } from "@/lib/nav";
 import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -203,6 +203,11 @@ function StorageBadge({ doc }: { doc: Doc }) {
 export function Dashboard({ user, documents: initialDocuments, githubAvailable }: DashboardProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const clearSearch = useCallback(() => {
+    setQuery("");
+    searchRef.current?.focus();
+  }, []);
   const [openPicker, setOpenPicker] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
@@ -424,8 +429,33 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
             </Link>
             <div className="relative mx-auto w-full max-w-xl">
               <Search size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
-              <input className="input pl-9 pr-9" placeholder="Search documents" value={query} onChange={(e) => setQuery(e.target.value)} data-testid="search" />
-              {searching && <Loader2 size={16} className="pointer-events-none absolute right-3 top-2.5 animate-spin text-ink-4" data-testid="search-loading" />}
+              <input
+                ref={searchRef}
+                className={cn("input pl-9", query && searching ? "pr-16" : "pr-9")}
+                placeholder="Search documents"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Escape") return;
+                  e.preventDefault();
+                  // First press clears the query, second press leaves the field (the find bar's Esc convention).
+                  if (query) setQuery("");
+                  else e.currentTarget.blur();
+                }}
+                data-testid="search"
+              />
+              {searching && <Loader2 size={16} className={cn("pointer-events-none absolute top-2.5 animate-spin text-ink-4", query ? "right-9" : "right-3")} data-testid="search-loading" />}
+              {query && (
+                <button
+                  type="button"
+                  className="absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center text-ink-3 transition-colors hover:text-ink max-sm:-right-1 max-sm:-top-1 max-sm:h-11 max-sm:w-11"
+                  onClick={clearSearch}
+                  aria-label="Clear search"
+                  data-testid="search-clear"
+                >
+                  <X size={16} />
+                </button>
+              )}
             </div>
             <ThemeToggle className="shrink-0" />
             <Menu>
@@ -611,6 +641,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
               <p className="mt-1 text-sm text-ink-3">
                 {pending ? "Looking through titles and content." : filter === "starred" && !trimmed ? "Hover a document and click the star to keep it close." : "Try a different search."}
               </p>
+              {trimmed && !pending && (
+                <button type="button" className="mt-3 text-sm font-medium text-accent hover:underline" onClick={clearSearch} data-testid="empty-state-clear-search">
+                  Clear search
+                </button>
+              )}
             </div>
           ) : (
             <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">

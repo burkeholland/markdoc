@@ -204,13 +204,33 @@ class Converter {
       const node = this.block(child, true);
       if (!node) continue;
       children.push(node);
-      blocks.push(offsets(child));
+      blocks.push(this.blockRange(child));
     }
     if (children.length === 0) {
       children.push(schema.nodes.paragraph.create());
       blocks.push({ from: 0, to: this.src.length });
     }
     return { doc: schema.nodes.doc.create(null, children), blocks };
+  }
+
+  /**
+   * Source range of a top-level block. mdast starts a paragraph at its first non-blank character,
+   * but `inlineContent` puts the 1–3 spaces of indentation before it back into the node, so the
+   * range has to start at the line start too: the binding diffs the serialized node (which has
+   * the spaces) against the text in this range, and a range that misses them doubles the
+   * indentation on the next keystroke and forces a full re-serialization of the document.
+   */
+  private blockRange(node: Md.RootContent): SrcRange {
+    const range = offsets(node);
+    if (node.type !== "paragraph" || node.children.length === 0) return range;
+    const start = this.leadingGapStart(offsets(node.children[0]).from);
+    return start === null ? range : { from: start, to: range.to };
+  }
+
+  /** Start of the line when `first` is preceded on its line only by 1–3 spaces or tabs (paragraph indentation), else null. */
+  private leadingGapStart(first: number): number | null {
+    const lineStart = this.src.lastIndexOf("\n", first - 1) + 1;
+    return /^[ \t]{1,3}$/.test(this.src.slice(lineStart, first)) ? lineStart : null;
   }
 
   blocks(children: Md.Node[]): PMNode[] {
@@ -389,9 +409,8 @@ class Converter {
     ensurePositions(children, bounds.from, bounds.to);
     if (parent.type === "paragraph" && topLevelParagraph && children.length) {
       const first = offsets(children[0]).from;
-      const lineStart = this.src.lastIndexOf("\n", first - 1) + 1;
-      const gap = this.src.slice(lineStart, first);
-      if (/^[ \t]{1,3}$/.test(gap)) b.text(gap, [], { from: lineStart, to: first });
+      const lineStart = this.leadingGapStart(first);
+      if (lineStart !== null) b.text(this.src.slice(lineStart, first), [], { from: lineStart, to: first });
     }
     for (let i = 0; i < children.length; i++) this.inline(children[i], [], b, children, i);
     if ((parent.type === "paragraph" || parent.type === "heading") && children.length) {

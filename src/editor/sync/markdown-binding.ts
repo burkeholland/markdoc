@@ -569,6 +569,9 @@ export class MarkdownBinding {
     const oldText = fullText.slice(srcFrom, srcTo);
     const ops = diffOps(oldText, newText, srcFrom);
     if (ops.length > 0 && this.options.interceptor?.(ops, this.ytext, this)) {
+      // The interceptor wrote the text its own way, so block ranges are rebuilt from the text by
+      // the sync. Phantoms the edit turned into real blocks must not be re-inserted by that rebuild.
+      if (chunks.every((c) => !c.phantom)) for (let i = k; i < oldTo; i++) this.phantoms.delete(i);
       this.requestSync();
       this.options.onSync?.("local");
       return true;
