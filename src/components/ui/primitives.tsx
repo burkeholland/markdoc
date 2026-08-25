@@ -45,7 +45,14 @@ export const MenuRadioGroup = RadixDropdown.RadioGroup;
 export function MenuContent({ className, children, ...props }: React.ComponentProps<typeof RadixDropdown.Content>) {
   return (
     <RadixDropdown.Portal>
-      <RadixDropdown.Content sideOffset={6} align="end" className={cn("menu animate-fade-in", className)} {...props}>
+      {/* Long menus (the phone ⋮ menu has 22 rows) cap at the room Radix measures below the trigger and scroll inside, so the last item is always reachable. */}
+      <RadixDropdown.Content
+        sideOffset={6}
+        align="end"
+        collisionPadding={8}
+        className={cn("menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto", className)}
+        {...props}
+      >
         {children}
       </RadixDropdown.Content>
     </RadixDropdown.Portal>
