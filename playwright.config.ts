@@ -87,7 +87,8 @@ export default defineConfig({
           SYNC_CACHE_MS: "500",
           // The Burke-scale fixture seeds 60 documents and hundreds of writes through the API from one
           // session; the limiter would refuse them. Production keeps it on (e2e/prod-smoke.spec.ts checks).
-          RATE_LIMIT: "off",
+          // `RATE_LIMIT=on npx playwright test …` runs a spec with the limiter on (e2e/rate-limit.spec.ts).
+          RATE_LIMIT: process.env.RATE_LIMIT ?? "off",
           NODE_ENV: "development",
         },
       },
