@@ -8,6 +8,10 @@ Newest first. Each entry is one merged feature or fix on `main`; test-only and w
 
 - Dashboard cards carry a storage chip only when the document is linked to GitHub — it reads **GitHub** with the repo path or gist in its tooltip — so plain documents no longer all say "Markdoc" in the grid, the list or the Trash (#114); on phone, *Show all starred* has a 44 px tap target (24 px on desktop) and the phone dashboard axe scan now enforces WCAG 2.2 `target-size` (#116).
 
+### Writing
+
+- One typed word is one suggestion (task #475, issue #111): typing into the empty paragraph Enter leaves at the end of a document — in Suggesting or Editing mode — no longer re-serializes the whole document on the second keystroke, which padded every unpadded table cell (`| a | b |` → `| a   | b   |`) and, in Suggesting mode, recorded each run of spaces as a tracked insertion (*Suggestions 6* for one word). The parser started an indented paragraph's block range at its first non-blank character while the rich node kept the 1–3 leading spaces, so the binding's diff doubled the indentation, failed its round-trip check and fell back to a full rewrite; the range now starts at the indentation. The binding also drops the empty "phantom" paragraph once suggesting mode has written the text typed into it, so no blank paragraph appears above the suggestion. Unit tests assert that the Y.Text delta for ` suggested-words` is exactly that text in both modes and that the table lines are byte-identical; `review-suggestions.spec.ts` asserts *Suggestions 1*, unchanged lines 8–10 and a single insertion mark on the last line.
+
 ## 2026-08-24
 
 Everything that landed on `main` after midnight, 24 August: the new look, typing speed in long documents and the long-document accessibility fixes.

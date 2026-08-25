@@ -142,6 +142,20 @@ describe("source map", () => {
     expect(map.blockIndexAt(4)).toBe(1);
   });
 
+  it("starts an indented paragraph's block range at its indentation, which the node keeps (task #475)", () => {
+    // mdast starts the paragraph at "s"; the node text is " s", so the range must cover the space too,
+    // or the binding doubles the indentation on the next keystroke and re-serializes the whole document.
+    const { doc, map } = parseMarkdown("A\n\n s\n\n   three\n\n    code");
+    expect(doc.child(1).textContent).toBe(" s");
+    expect(doc.child(2).textContent).toBe("   three");
+    expect(doc.child(3).type.name).toBe("code_block");
+    expect(map.blocks.slice(0, 3)).toEqual([
+      { from: 0, to: 1 },
+      { from: 3, to: 5 },
+      { from: 7, to: 15 },
+    ]);
+  });
+
   it("maps positions inside code blocks", () => {
     const src = "```js\nlet a = 1;\n```\n";
     const { doc, map } = parseMarkdown(src);
