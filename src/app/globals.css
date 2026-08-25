@@ -504,10 +504,9 @@ body {
   outline: none;
 }
 /* Server-rendered stand-in for the rich pane while the live text loads (editor-shell): same box as
-   .md-rich, the reader's rhythm rules (class reader-body), never interactive. */
+   .md-rich, the reader's markup rules (class reader-body), never interactive. The type scale is
+   re-pinned to .md-rich's in "Rich-pane placeholder scale" below, after the reader block. */
 .rich-placeholder {
-  font-size: 16px;
-  line-height: 1.65;
   color: var(--color-ink-2);
   min-height: 100%;
   padding: 8px 40px 80px 24px;
@@ -1400,6 +1399,55 @@ body {
 }
 .reader-body .hljs-strong {
   font-weight: 700;
+}
+
+/* ---------- Rich-pane placeholder scale ----------
+   The server-rendered preview in the editor (editor-shell, `.rich-placeholder.reader-body`) keeps the
+   reader's markup rules above (its HTML is the reader's GFM output) but must lay out exactly like the
+   `.md-rich` pane that replaces it, or the text jumps the instant the editor mounts (issue #164: the
+   17 px reader scale moved the second paragraph 55 px). Every rule here mirrors a .md-rich rule with
+   the same value — keep the two in step; e2e/ssr-preview.spec.ts measures block tops across the swap. */
+.rich-placeholder.reader-body {
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-variant-ligatures: none;
+  font-variant-ligatures: none;
+}
+.rich-placeholder.reader-body pre {
+  font-size: 0.9em;
+}
+.rich-placeholder.reader-body li {
+  margin: 0.3em 0;
+}
+.rich-placeholder.reader-body li > p {
+  margin: 0;
+}
+.rich-placeholder.reader-body li > ul,
+.rich-placeholder.reader-body li > ol {
+  margin-top: 0.3em;
+}
+/* A loose list (GFM wraps its items in <p>) is `ul[data-tight="false"]` in the editor. */
+.rich-placeholder.reader-body :is(ul, ol):has(> li > p) > li {
+  margin: 0.75em 0;
+}
+.rich-placeholder.reader-body li.task-list-item {
+  margin-left: 0;
+  padding-left: 0.25em;
+}
+.rich-placeholder.reader-body li.task-list-item > input[type="checkbox"] {
+  left: -1.55em;
+  top: 0.3em;
+  width: 1.05em;
+  height: 1.05em;
+}
+.rich-placeholder.reader-body table {
+  display: table;
+  table-layout: fixed;
+  overflow: hidden;
+}
+.rich-placeholder.reader-body th,
+.rich-placeholder.reader-body td {
+  min-width: 40px;
 }
 
 /* ---------- Display type ----------
