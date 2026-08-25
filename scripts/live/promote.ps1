@@ -107,7 +107,7 @@ function Invoke-WarmUp {
     } catch { $null = $_ }
     $body = @{ title = 'promote warm-up'; content = "# Warm-up`n`nCompiles the editor route.`n" } | ConvertTo-Json
     $created = Invoke-RestMethod -UseBasicParsing -Uri "$standbyBase/api/documents" -Method Post -Body $body -ContentType 'application/json' -WebSession $session -TimeoutSec 150
-    $docId = $created.id
+    $docId = $created.document.id
     Write-Step "  warm dev login + POST /api/documents -> $docId"
   } catch {
     Write-Step "  warm dev login / create document failed ($($_.Exception.Message)); /d/<id> is warmed unauthenticated"

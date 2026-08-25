@@ -181,10 +181,11 @@ function Get-LiveLogPath {
 }
 
 function Get-LiveProcesses {
-  # node.exe processes whose command line carries the live worktree folder as a path segment
-  # ("\markdoc-live\" — not "\markdoc-live-b\", the twin).
+  # node.exe processes whose command line carries the live worktree path as a folder
+  # ("...\markdoc-live\" — not "...\markdoc-live-b\", the twin, nor a sibling with the same leaf).
   param([string]$Root)
-  $marker = '\' + (Split-Path -Leaf $Root) + '\'
+  $full = if (Test-Path -LiteralPath $Root) { (Resolve-Path -LiteralPath $Root).Path } else { $Root }
+  $marker = $full.TrimEnd('\') + '\'
   Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
     Where-Object { $_.CommandLine -and $_.CommandLine -like "*$marker*" }
 }
