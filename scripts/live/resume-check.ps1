@@ -1,7 +1,9 @@
 # Is Markdoc back after a machine wipe? Prints a checklist and exits 0 when everything is in place,
 # non-zero on the first hard failure. Fixes what it safely can (creates the live worktree, writes a
 # missing .env.local, installs the scheduled tasks, starts the server, restores data from a snapshot)
-# unless -DryRun. A fresh box needs nothing from a human: every .env.local value is generated or derived.
+# unless -DryRun. A fresh box needs nothing from a human: every .env.local value is generated or derived, and
+# AUTH_SECRET is taken back from the snapshot's sealed copy (FACTORY_STATE_KEY) when there is one, so a restore
+# does not sign everyone out.
 #   .\resume-check.ps1            check and repair
 #   .\resume-check.ps1 -DryRun    only report; change nothing, start nothing
 #   .\resume-check.ps1 -LiveRoot <dir> -DataRoot <dir> -Port <n>   rehearse against scratch folders
@@ -114,18 +116,35 @@ if (Test-Path (Join-Path $liveRoot 'package.json')) {
   } else { Write-Check 'ok' 'live deps' 'node_modules present' }
 }
 
-# 4. .env.local with the four keys. None is a secret a human holds: AUTH_SECRET and BACKUP_TOKEN are fresh
-# random strings (changing them only signs everyone out), AUTH_DEV_LOGIN is 1, PGLITE_DATA_DIR is derived.
-# So missing keys are written here - create the file or append only the missing lines, never change an
-# existing value - and the step is a fix, not a failure. Runs before step 7 so the server starts with the file.
+# 4. .env.local with the four keys. None is a secret a human holds: BACKUP_TOKEN is a fresh random string, AUTH_DEV_LOGIN
+# is 1, PGLITE_DATA_DIR is derived. AUTH_SECRET is reused from the snapshot when it carries a sealed copy
+# (auth-secret.enc.json, opened with FACTORY_STATE_KEY - see env-vault.mjs) so nobody is signed out by a restore; only
+# without one is it regenerated, which signs everyone out once (#1139). Missing keys are written here - create the file
+# or append only the missing lines, never change an existing value - and the step is a fix, not a failure. Runs before
+# step 7 so the server starts with the file. Values are never printed: the file is their copy.
+$snapshotDir = $env:FACTORY_SNAPSHOT
+if (-not $snapshotDir) { $snapshotDir = Join-Path $dataRoot 'snapshots\latest' }
 $envPath = Join-Path $liveRoot '.env.local'
 $envVars = Read-EnvFile -Path $envPath
 $envKeys = @('AUTH_SECRET', 'AUTH_DEV_LOGIN', 'PGLITE_DATA_DIR', 'BACKUP_TOKEN')
 $missing = @($envKeys | Where-Object { -not $envVars.ContainsKey($_) -or -not $envVars[$_] })
 if ($missing.Count -gt 0) {
+  $authSecretNote = ''
   $newLines = @(foreach ($key in $missing) {
     $value = switch ($key) {
-      'AUTH_SECRET' { Get-RandomSecret }
+      'AUTH_SECRET' {
+        $sealed = Join-Path $snapshotDir 'auth-secret.enc.json'
+        $reused = $null
+        if ((Test-Path -LiteralPath $sealed) -and $env:FACTORY_STATE_KEY) {
+          $ErrorActionPreference = 'Continue'
+          $reused = & node (Join-Path $PSScriptRoot 'env-vault.mjs') open --in $sealed 2>$null
+          $vaultCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($vaultCode -ne 0 -or -not $reused) { $reused = $null; $authSecretNote = "sealed copy in $snapshotDir could not be opened (env-vault exit $vaultCode)" }
+        } elseif (-not (Test-Path -LiteralPath $sealed)) { $authSecretNote = "no auth-secret.enc.json in $snapshotDir" }
+        else { $authSecretNote = 'FACTORY_STATE_KEY is unset' }
+        if ($reused) { $authSecretNote = "reused from $sealed - existing sessions stay valid"; $reused } else { Get-RandomSecret }
+      }
       'BACKUP_TOKEN' { Get-RandomSecret }
       'AUTH_DEV_LOGIN' { '1' }
       'PGLITE_DATA_DIR' { $pgliteDir }
@@ -134,20 +153,20 @@ if ($missing.Count -gt 0) {
   })
   $envExists = Test-Path -LiteralPath $envPath
   $action = if ($envExists) { "append $($missing -join ', ') to $envPath" } else { "create $envPath with $($missing -join ', ')" }
+  # Secrets never go to the console (the board's backup scrub refuses logs that carry one); the file is the copy.
+  $shown = @(foreach ($line in $newLines) { $k = $line.Substring(0, $line.IndexOf('=')); if ($k -in @('AUTH_SECRET', 'BACKUP_TOKEN')) { "$k=<set>" } else { $line } })
   if ($DryRun) {
     Write-Check 'fix' '.env.local' "would $action (fresh secrets generated now):"
-    foreach ($line in $newLines) { Write-Host "    $line" }
+    foreach ($line in $shown) { Write-Host "    $line" }
   } else {
     # Probe before writing: the dev server watches .env.local and answers 500 for a while after a change.
     $serverWasUp = $null -ne (Get-LiveHealth -Port $Port)
-    Write-Check 'fix' '.env.local' "$action (keep these; they are the only copy of the new secrets):"
+    Write-Check 'fix' '.env.local' "$action (the file is the only copy of the new secrets):"
     $existing = if ($envExists) { Get-Content -LiteralPath $envPath -Raw } else { '' }
     $prefix = if ($existing -and -not $existing.EndsWith("`n")) { "`r`n" } else { '' }
     [IO.File]::AppendAllText($envPath, $prefix + (($newLines -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
-    foreach ($line in $newLines) {
-      Write-Host "    $line"
-      $envVars[$line.Substring(0, $line.IndexOf('='))] = $line.Substring($line.IndexOf('=') + 1)
-    }
+    foreach ($line in $shown) { Write-Host "    $line" }
+    foreach ($line in $newLines) { $envVars[$line.Substring(0, $line.IndexOf('='))] = $line.Substring($line.IndexOf('=') + 1) }
     # A server that was already up started without these values (or with other ones): restart it so it
     # reads the file, otherwise its BACKUP_TOKEN would differ from .env.local and step 8 would warn.
     if ($serverWasUp) {
@@ -156,14 +175,16 @@ if ($missing.Count -gt 0) {
       if ($LASTEXITCODE -ne 0) { Fail 'server' 'start-live.ps1 -Restart did not get a 200 from /api/health' }
     }
   }
+  if ($missing -contains 'AUTH_SECRET') {
+    if ($authSecretNote.StartsWith('reused')) { Write-Check 'ok' 'AUTH_SECRET' $authSecretNote }
+    else { Write-Check 'warn' 'AUTH_SECRET' "regenerated ($authSecretNote): users will be signed out once and land on the signed-out page; their old cookie is cleared on the next request" }
+  }
 } else {
   Write-Check 'ok' '.env.local' 'AUTH_SECRET, AUTH_DEV_LOGIN, PGLITE_DATA_DIR, BACKUP_TOKEN present'
 }
 $token = $envVars['BACKUP_TOKEN']
 
 # 5. data dir (restore from the snapshot if missing: $env:FACTORY_SNAPSHOT, else ../markdoc-data/snapshots/latest)
-$snapshotDir = $env:FACTORY_SNAPSHOT
-if (-not $snapshotDir) { $snapshotDir = Join-Path $dataRoot 'snapshots\latest' }
 if (-not (Test-Path (Join-Path $pgliteDir 'PG_VERSION'))) {
   if (Test-Path (Join-Path $snapshotDir 'markdoc-pglite.tar.gz')) {
     if ($DryRun) { Write-Check 'fix' 'data dir' "$pgliteDir missing; would run restore-data.ps1 -From $snapshotDir -SkipServer" }

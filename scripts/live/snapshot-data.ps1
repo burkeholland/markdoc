@@ -2,6 +2,7 @@
 # Calls GET /api/admin/backup (PGlite dumpDataDir as .tar.gz, gated by BACKUP_TOKEN) and writes
 #   <Out>\markdoc-pglite.tar.gz
 #   <Out>\manifest.json   { sha, takenAt, bytes, documents, users, port, sha256 }
+#   <Out>\auth-secret.enc.json   AUTH_SECRET sealed under FACTORY_STATE_KEY (env-vault.mjs); absent when the key is unset
 # It is read-only for the server.
 #   .\snapshot-data.ps1                      -Latest (the default when -Out is omitted)
 #   .\snapshot-data.ps1 -Out C:\snapshots\markdoc
@@ -111,6 +112,19 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
+# AUTH_SECRET travels with the snapshot sealed under FACTORY_STATE_KEY (env-vault.mjs), so a restore after a wipe
+# can keep everyone's session instead of regenerating the key. Never in the clear: factory-state refuses secrets.
+# Skipped quietly (exit 3) when the key is unset or .env.local has no AUTH_SECRET; a failure here never fails the snapshot.
+$vaultPath = Join-Path $Out 'auth-secret.enc.json'
+$envPath = Join-Path $Root '.env.local'
+$ErrorActionPreference = 'Continue'
+$vaultOut = & node (Join-Path $PSScriptRoot 'env-vault.mjs') seal --env $envPath --name AUTH_SECRET --out $vaultPath 2>&1
+$vaultCode = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($vaultCode -eq 0) { Write-Step "AUTH_SECRET sealed into the snapshot (FACTORY_STATE_KEY)" }
+elseif ($vaultCode -eq 3) { Write-Step "AUTH_SECRET not carried in the snapshot ($vaultOut); a restore will regenerate it and sign users out once" }
+else { Write-Step "warning: env-vault.mjs exit ${vaultCode}: $vaultOut" }
+
 if ($Latest) {
   $latestDir = Join-Path $snapRoot 'latest'
   $prevDir = Join-Path $snapRoot 'prev'
@@ -126,6 +140,7 @@ if ($Latest) {
   $stampDir = Join-Path $snapRoot $stamp
   if (-not (Test-Path -LiteralPath $stampDir)) { New-Item -ItemType Directory -Path $stampDir -Force | Out-Null }
   Copy-Item -LiteralPath (Join-Path $latestDir 'markdoc-pglite.tar.gz'), (Join-Path $latestDir 'manifest.json') -Destination $stampDir -Force
+  if (Test-Path -LiteralPath (Join-Path $latestDir 'auth-secret.enc.json')) { Copy-Item -LiteralPath (Join-Path $latestDir 'auth-secret.enc.json') -Destination $stampDir -Force }
   $stamped = @(Get-ChildItem -LiteralPath $snapRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{4,6}$' } | Sort-Object Name -Descending)
   foreach ($old in ($stamped | Select-Object -Skip $Keep)) {
     Write-Step "pruning $($old.FullName)"

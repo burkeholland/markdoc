@@ -4,6 +4,7 @@ import Credentials from "next-auth/providers/credentials";
 import { DrizzleAdapter } from "@auth/drizzle-adapter";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
+import { logAuthError } from "@/server/session-cookie";
 
 declare module "next-auth" {
   interface Session {
@@ -94,6 +95,7 @@ async function buildConfig(): Promise<NextAuthConfig> {
     session: { strategy: "jwt" },
     trustHost: true,
     pages: { signIn: "/login" },
+    logger: { error: logAuthError },
     callbacks: {
       async jwt({ token, user }) {
         if (user) {
