@@ -194,6 +194,7 @@ test.describe("phone", () => {
       await expect(menu).toHaveCount(0);
     }
     // Tapping the last row actually works: the document lands in the trash.
+    page.on("dialog", (dialog) => void dialog.accept());
     await page.getByTestId("more-menu").click();
     const trash = page.getByRole("menuitem", { name: "Move to trash" });
     await trash.scrollIntoViewIfNeeded();
