@@ -478,6 +478,11 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // shared document (meta.agentRequests, mirrored by the server) so the pill and toast are realtime.
   const [askAgent, setAskAgent] = useState<{ selection: AskAgentSelection | null } | null>(null);
   const [commentsFocus, setCommentsFocus] = useState<{ tab: "open" | "resolved" | "suggestions"; nonce: number } | null>(null);
+  // A focus request only applies to the panel it opened; once the panel closes, a later reopen picks
+  // its own landing tab (Suggestions in Suggesting mode, #117) instead of replaying the stale request.
+  useEffect(() => {
+    if (sidePanel !== "comments") setCommentsFocus(null);
+  }, [sidePanel]);
   const openAskAgent = useCallback(() => {
     if (!session.canComment) return;
     const range = actions.selectionSourceRange();
