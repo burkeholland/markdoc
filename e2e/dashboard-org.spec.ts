@@ -95,6 +95,71 @@ test.describe("dashboard organisation", () => {
     await expect.poll(() => cardTitles(page)).toEqual(["Mike", "Zulu", "Alpha"]);
   });
 
+  test("a saved sort is in the server markup and the cards never reorder while the page hydrates (#165)", async ({ browser }) => {
+    // A fresh context on the same account: a cookie holds the sort, so no localStorage is needed for it.
+    const context = await browser.newContext({ storageState: await user.context.storageState() });
+    const page = await context.newPage();
+    try {
+      await goHome(page);
+      await page.getByTestId("sort-select").selectOption("title");
+      await expect.poll(() => cardTitles(page)).toEqual(["Alpha", "Mike", "Zulu"]);
+      const cookie = (await context.cookies()).find((c) => c.name === "markdoc.dashboardSort");
+      expect(cookie?.value).toBe("title");
+      expect(cookie?.sameSite).toBe("Lax");
+
+      // Sample the select value and the card order on every frame from the first paint for 3 s. The script
+      // runs before any of the page's own scripts, so the first sample is the server markup, before hydration.
+      await page.addInitScript(() => {
+        const samples: string[] = [];
+        const started = performance.now();
+        let firstSeen = 0;
+        const tick = () => {
+          const select = document.querySelector<HTMLSelectElement>('[data-testid="sort-select"]');
+          const titles = Array.from(document.querySelectorAll('[data-testid="document-card"] h3'), (h) => h.textContent?.trim() ?? "");
+          if (select && titles.length) {
+            firstSeen ||= performance.now();
+            const snapshot = `${select.value}:${titles.join("|")}`;
+            if (samples[samples.length - 1] !== snapshot) samples.push(snapshot);
+          }
+          if (!firstSeen || performance.now() - firstSeen < 3000) requestAnimationFrame(tick);
+          else (window as unknown as { __sortSamples: { samples: string[]; firstSeen: number; started: number } }).__sortSamples = { samples, firstSeen, started };
+        };
+        requestAnimationFrame(tick);
+      });
+      const response = await page.goto("/");
+      const html = await response!.text();
+      // The HTML the server sent already has "Title A–Z" selected and Alpha as the first card.
+      const selectHtml = html.slice(html.indexOf('data-testid="sort-select"'), html.indexOf("</select>"));
+      expect(selectHtml).toMatch(/<option[^>]*\bselected\b[^>]*value="title"|<option[^>]*value="title"[^>]*\bselected\b/);
+      const firstCard = html.slice(html.indexOf('data-testid="document-card"'));
+      expect(firstCard.match(/<h3[^>]*>(.*?)<\/h3>/)?.[1]).toBe("Alpha");
+
+      const result = await page.waitForFunction(() => (window as unknown as { __sortSamples?: unknown }).__sortSamples, null, { timeout: 30_000 });
+      const { samples } = (await result.jsonValue()) as { samples: string[] };
+      expect(samples).toEqual(["title:Alpha|Mike|Zulu"]);
+      await page.waitForLoadState("networkidle");
+      await expect(page.getByTestId("sort-select")).toHaveValue("title");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("a sort stored only in localStorage (before the cookie existed) is adopted and written to the cookie", async ({ browser }) => {
+    const context = await browser.newContext({ storageState: await user.context.storageState() });
+    const page = await context.newPage();
+    try {
+      await goHome(page);
+      await page.evaluate(() => window.localStorage.setItem("markdoc:dashboardSort", "created"));
+      await context.clearCookies({ name: "markdoc.dashboardSort" });
+      await goHome(page);
+      await expect(page.getByTestId("sort-select")).toHaveValue("created");
+      await expect.poll(() => cardTitles(page)).toEqual(["Alpha", "Zulu", "Mike"]);
+      await expect.poll(async () => (await context.cookies()).find((c) => c.name === "markdoc.dashboardSort")?.value).toBe("created");
+    } finally {
+      await context.close();
+    }
+  });
+
   test("storage badge only on GitHub-linked cards: none for local documents in the grid or the trash (#114)", async () => {
     const page = user.page;
     // Three local documents, no chips at all.
