@@ -49,12 +49,15 @@ const DISABLED_RULES = ["color-contrast"];
 
 const softMode = process.env.A11Y_SOFT === "1";
 
-async function scan(page: Page, state: string, { contrast = false }: { contrast?: boolean } = {}) {
+async function scan(page: Page, state: string, { contrast = false, targetSize = false }: { contrast?: boolean; targetSize?: boolean } = {}) {
   const results = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .disableRules(contrast ? [] : DISABLED_RULES)
     .analyze();
-  const { violations } = results;
+  const violations = [...results.violations];
+  // WCAG 2.2 target size (24×24 px, SC 2.5.8) is outside the 2.1 tag set and `withRules` replaces
+  // `withTags`, so touch scans run it as a second pass (#116: "Show all starred" was 117×16 px).
+  if (targetSize) violations.push(...(await new AxeBuilder({ page }).withRules(["target-size"]).analyze()).violations);
   const lines = violations.map(
     (v) =>
       `  ${v.id} [${v.impact ?? "n/a"}] ×${v.nodes.length} — ${v.help}\n` +
@@ -551,7 +554,31 @@ test.describe("axe: phone (iPhone 13)", () => {
   test("dashboard + editor", async ({ browser }) => {
     const { page, context } = await signInPhone(browser, "a11y-phone");
     await seedDashboard(page);
-    await scan(page, "phone dashboard");
+    // Seven starred documents so the strip overflows and renders "Show all starred" (#116).
+    for (let i = 2; i <= 7; i++) {
+      const id = await createDocument(page, `# Starred ${i}\n\nBody.\n`, `Starred ${i}`);
+      expect((await page.request.put(`/api/documents/${id}/star`)).ok()).toBeTruthy();
+    }
+    await page.goto("/");
+    const showAll = page.getByTestId("show-all-starred");
+    await expect(showAll).toBeVisible();
+    const box = await showAll.boundingBox();
+    expect(box, "show-all-starred bounding box").not.toBeNull();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    expect(box!.width).toBeGreaterThanOrEqual(44);
+    await scan(page, "phone dashboard", { targetSize: true });
+
+    // Desktop keeps a ≥ 24 px target (WCAG 2.2 minimum) without the phone padding.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const desktopBox = await showAll.boundingBox();
+    expect(desktopBox!.height).toBeGreaterThanOrEqual(24);
+    await page.setViewportSize(devices["iPhone 13"].viewport);
+    expect((await showAll.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+    // Tapping it filters to the starred documents.
+    await showAll.tap();
+    await expect(page.getByTestId("document-card")).toHaveCount(7);
+    await expect(page.getByTestId("starred-strip")).toHaveCount(0);
 
     const id = await createDocument(page, DOC, "Phone fixture");
     await page.goto(`/d/${id}`);
@@ -747,7 +774,8 @@ test.describe("keyboard-only walkthrough", () => {
     await page.keyboard.type("Keyboard named");
     await page.keyboard.press("Enter");
     await expect(nameDialog).toHaveCount(0);
-    await expect(page.getByTestId("toast")).toContainText("Saved version “Keyboard named”");
+    // The "Theme:" toast from above may still be showing (4.5 s), so pick the version toast by text.
+    await expect(page.getByTestId("toast").filter({ hasText: "Saved version" })).toContainText("Saved version “Keyboard named”");
     await context.close();
   });
 });

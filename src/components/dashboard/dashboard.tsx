@@ -6,7 +6,7 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, HardDrive, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
 import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -178,24 +178,21 @@ function StarButton({ starred, onToggle, className }: { starred: boolean; onTogg
   );
 }
 
+/**
+ * Source chip for GitHub-linked documents only; plain Markdoc documents render nothing (#114 — with
+ * nothing linked, 52 identical "Markdoc" chips said nothing and wrapped titles early on phone).
+ */
 function StorageBadge({ doc }: { doc: Doc }) {
-  if (doc.storage === "repo") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-md bg-surface-3 px-1.5 py-0.5 text-[11px] font-medium text-ink-2" title={`${doc.repoOwner}/${doc.repoName}: ${doc.repoPath}`}>
-        <GitBranch size={11} /> {doc.repoOwner}/{doc.repoName}
-      </span>
-    );
-  }
-  if (doc.storage === "gist") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-md bg-surface-3 px-1.5 py-0.5 text-[11px] font-medium text-ink-2">
-        <GitHubIcon size={11} /> Gist
-      </span>
-    );
-  }
+  if (doc.storage === "local") return null;
+  const detail = doc.storage === "repo" ? `${doc.repoOwner}/${doc.repoName}: ${doc.repoPath}` : `Gist${doc.gistId ? ` ${doc.gistId}` : ""}`;
   return (
-    <span className="inline-flex items-center gap-1 rounded-md bg-surface-3 px-1.5 py-0.5 text-[11px] font-medium text-ink-3">
-      <HardDrive size={11} /> Markdoc
+    <span
+      className="inline-flex shrink-0 items-center gap-1 rounded-md bg-surface-3 px-1.5 py-0.5 text-[11px] font-medium text-ink-2"
+      title={detail}
+      data-testid="storage-badge"
+      data-storage={doc.storage}
+    >
+      {doc.storage === "repo" ? <GitBranch size={11} /> : <GitHubIcon size={11} />} GitHub
     </span>
   );
 }
@@ -552,7 +549,14 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
                   <Star size={14} className="text-amber-500" fill="currentColor" /> Starred
                 </h2>
                 {starred.length > STARRED_STRIP_MAX && (
-                  <button type="button" className="ml-auto text-xs font-medium text-accent hover:underline" onClick={() => setFilter("starred")} data-testid="show-all-starred">
+                  // ≥ 44 px hit area on phone, ≥ 24 px on desktop (WCAG 2.2 target size, #116); negative
+                  // margins pull the padding back so the strip header barely moves.
+                  <button
+                    type="button"
+                    className="-my-2 ml-auto inline-flex min-h-11 items-center px-3 py-2 text-xs font-medium text-accent hover:underline md:-my-0.5 md:min-h-6 md:px-2 md:py-1"
+                    onClick={() => setFilter("starred")}
+                    data-testid="show-all-starred"
+                  >
                     Show all starred ({starred.length})
                   </button>
                 )}
