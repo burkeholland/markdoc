@@ -16,7 +16,7 @@ folder of this checkout; `Get-FactoryRoot` in `scripts/live/common.ps1`).
 | --- | --- | --- |
 | Source | `markdoc/` (this repo, branch `main`) | From GitHub `burkeholland/markdoc` |
 | Live worktree | `markdoc-live/` — detached at the promoted sha (`git worktree add --detach ../markdoc-live main`) | Yes, `resume-check.ps1` creates it |
-| Live env | `markdoc-live/.env.local` — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Yes, `resume-check.ps1` writes it (see Secrets below) |
+| Live env | `markdoc-live/.env.local` — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Yes, `resume-check.ps1` writes it; `AUTH_SECRET` comes back from the snapshot's sealed copy when there is one (see Secrets below) |
 | **Data** | `markdoc-data/pglite/` — the embedded PGlite database (~39 MB, ~1050 files): documents, versions, assets, comments, notifications, users, API tokens | **Only from the snapshot** |
 | Snapshot | `markdoc-data/snapshots/latest/` — current hot backup (`markdoc-pglite.tar.gz` + `manifest.json`), rewritten every 15 min; `markdoc-data/snapshots/<yyyyMMdd-HHmmss>/` — the last 3 copies | Recreated by the "Markdoc snapshot" task while the server runs |
 | Log | `markdoc-data/live.log` (+ `.1` rotation) | Disposable |
@@ -40,6 +40,10 @@ PGlite process, so no query can interleave: the copy is consistent without a sto
 - `<dir>\markdoc-pglite.tar.gz` — the backup
 - `<dir>\manifest.json` — `{ sha, takenAt, bytes, documents, users, port, file, sha256, durationMs }`
   (`sha` is the live worktree's HEAD; `documents` counts non-deleted documents)
+- `<dir>\auth-secret.enc.json` — `AUTH_SECRET` from `markdoc-live\.env.local`, **sealed** under `FACTORY_STATE_KEY`
+  (`scripts/live/env-vault.mjs`: scrypt → AES-256-GCM, random salt and iv per file; base64 fields in a small JSON).
+  Written only when that key is in the snapshot task's environment and `.env.local` has the value; otherwise the
+  script says so and the snapshot is still good. Never the value in the clear — factory-state refuses secrets.
 
 With `-Latest` (the default when `-Out` is omitted) `<dir>` is `markdoc-data\snapshots\latest`, written
 **atomically**: the download goes to `latest.tmp`, then `latest` → `prev`, `latest.tmp` → `latest`,
@@ -101,11 +105,12 @@ tarball in memory).
 A fresh box needs **nothing from a human** for Markdoc: every value in `markdoc-live\.env.local`
 is either a fresh random string or derived from the paths, so step 4 of `resume-check.ps1`
 creates the file (or appends only the missing keys — existing values are never changed) and
-prints the lines it wrote. `-DryRun` prints what it would write instead.
+prints the *names* it wrote (values stay in the file; the board's backup scrub refuses a log that
+carries one). `-DryRun` prints what it would write instead.
 
 | Key | What | Where the value comes from |
 | --- | --- | --- |
-| `AUTH_SECRET` | Auth.js session signing key | Fresh random string. Changing it signs everyone out — fine. |
+| `AUTH_SECRET` | Auth.js session signing key | **Reused** from `<snapshot>\auth-secret.enc.json` when the snapshot has one and `FACTORY_STATE_KEY` is set (`env-vault.mjs open`), so nobody is signed out by a restore. Otherwise a fresh random string — the script then warns `users will be signed out once`: every browser lands on the signed-out page once and its old cookie is cleared by the first response (#1139), no error logged. |
 | `AUTH_DEV_LOGIN` | `1` — sign in with any handle, no GitHub | Just `1` |
 | `PGLITE_DATA_DIR` | Absolute path of the data dir | `<FACTORY_ROOT>\markdoc-data\pglite` |
 | `BACKUP_TOKEN` | Gate for `/api/admin/backup` | Fresh random string. The snapshot job reads it from the same file, so they always match. |
@@ -123,7 +128,7 @@ it safely can unless `-DryRun`:
 1. repo present; if `$env:FACTORY_MANIFEST` points at the board's manifest, HEAD == its markdoc sha (else skipped)
 2. `node`, `npm`, `git` on PATH
 3. `../markdoc-live` exists and is detached (created with `git worktree add --detach` if missing; `npm ci --ignore-scripts` if `node_modules` is missing); warns when it is behind `main` (that is `promote.ps1`'s job)
-4. `.env.local` has `AUTH_SECRET`, `AUTH_DEV_LOGIN`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` — missing keys are written (file created or lines appended, existing values untouched) and printed; a server that was already running is restarted so it reads them
+4. `.env.local` has `AUTH_SECRET`, `AUTH_DEV_LOGIN`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` — missing keys are written (file created or lines appended, existing values untouched) and their names printed; `AUTH_SECRET` is taken from the snapshot's `auth-secret.enc.json` when `FACTORY_STATE_KEY` can open it (`[ok] AUTH_SECRET - reused …`), else regenerated with a `[warn] … users will be signed out once`; a server that was already running is restarted so it reads them
 5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` or, when that is unset, `../markdoc-data/snapshots/latest` (folder with the tarball + manifest); without a tarball in either it warns and the server starts with an empty database (PGlite creates the folder) — not a failure
 6. scheduled tasks "Markdoc live server" and "Markdoc snapshot" registered (runs `install-autostart.ps1` if either is missing)
 7. `/api/health` 200 with `db:true` within 180 s (`start-live.ps1` if not)
