@@ -32,6 +32,7 @@ import { markdownEditingKeymap } from "./continue-markup";
 import { markdownTyping } from "./markdown-typing";
 import { remoteCaretInteractions } from "./remote-cursors";
 import type { ImageUploader } from "../prosemirror/images";
+import type { NoticeAction } from "../markdown/tsv";
 
 export interface CodeEditorHandlers {
   onFocus?: () => void;
@@ -41,7 +42,7 @@ export interface CodeEditorHandlers {
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
   /** Non-blocking notice for the user (a toast), e.g. when pasted text had to be inserted as code. */
-  onNotice?: (message: string) => void;
+  onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file with the source offset under the pointer. */
   onMarkdownFileDrop?: MarkdownFileDropHandler;
 }
@@ -106,7 +107,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     suggesting.of(session.mode === "suggesting" ? suggestingMode(session) : []),
     formattingKeymap,
     handlers.uploadImage ? codeImageUpload(session, handlers.uploadImage, { onError: handlers.onImageError }) : [],
-    codePasteGuard({ onNotice: handlers.onNotice }),
+    codePasteGuard({ onNotice: handlers.onNotice, undoManager: session.undoManager }),
     handlers.onMarkdownFileDrop ? codeMarkdownFileDrop(handlers.onMarkdownFileDrop) : [],
     // No searchKeymap: Mod-F is handled by the shared find bar in the editor shell.
     keymap.of([...yUndoManagerKeymap, ...closeBracketsKeymap, ...defaultKeymap, indentWithTab]),

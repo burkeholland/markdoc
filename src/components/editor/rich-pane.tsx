@@ -8,6 +8,7 @@ import type { ImageUploader } from "@/editor/prosemirror/images";
 import type { SlashMenuHandlers } from "@/editor/prosemirror/slash-menu";
 import { createNodeViews } from "@/editor/prosemirror/nodeviews";
 import { refreshRichHighlights } from "@/editor/prosemirror/highlights";
+import type { NoticeAction } from "@/editor/markdown/tsv";
 import { useSessionValue } from "./use-session";
 
 export interface RichPaneProps {
@@ -20,7 +21,7 @@ export interface RichPaneProps {
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
-  onNotice?: (message: string) => void;
+  onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file and the ProseMirror position under the pointer. */
   onMarkdownFileDrop?: (file: File, pos: number) => void;
   /** Slash command menu plumbing (stable object; see SlashMenuController). */
@@ -50,7 +51,7 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
       onCommentShortcut: () => handlers.current.onCommentShortcut(),
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
       onImageError: (message) => handlers.current.onImageError?.(message),
-      onNotice: (message) => handlers.current.onNotice?.(message),
+      onNotice: (message, action) => handlers.current.onNotice?.(message, action),
       onMarkdownFileDrop: (file, pos) => handlers.current.onMarkdownFileDrop?.(file, pos),
       getFocusSource: () => (session.activeSurface === "code" ? focusRef.current : null),
       slashMenu,

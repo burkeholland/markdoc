@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, codeText, focusRichEnd, selectTextInRich } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, focusRichEnd, focusCodeEnd, selectTextInRich } from "./helpers";
 
 /**
  * Paste into the rich pane by dispatching a synthetic ClipboardEvent with the given
@@ -117,6 +117,88 @@ test.describe("smart paste in the rich pane", () => {
     const source = await codeText(page);
     expect(source).toContain("Some **bold** text");
     expect(source).toContain("- first\n- second");
+    await user.context.close();
+  });
+});
+
+const TSV = "Name\tQty\tPrice\nApple\t3\t1.20\nPear\t5\t0.80\n";
+const TSV_TABLE = "| Name  | Qty | Price |\n| ----- | --- | ----- |\n| Apple | 3   | 1.20  |\n| Pear  | 5   | 0.80  |";
+
+async function pasteInCode(page: Page, text: string) {
+  await page.evaluate((text) => {
+    const root = document.querySelector(".cm-content") as HTMLElement | null;
+    if (!root) throw new Error(".cm-content not found");
+    const dt = new DataTransfer();
+    dt.setData("text/plain", text);
+    root.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, text);
+}
+
+test.describe("smart paste of tab-separated text (#166)", () => {
+  test("TSV pasted into the rich pane becomes a table; Undo restores the document", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "| a | b |\n| - | - |\n| 1 | 2 |\n\nIntro paragraph.\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+    await expect(page.locator(".md-rich table")).toHaveCount(1);
+
+    await focusRichEnd(page);
+    await page.keyboard.press("Enter");
+    await pasteInRich(page, { text: TSV });
+
+    await expect(page.locator(".md-rich table")).toHaveCount(2);
+    const pasted = page.locator(".md-rich table").nth(1);
+    await expect(pasted.locator("th")).toHaveText(["Name", "Qty", "Price"]);
+    await expect(pasted.locator("tr")).toHaveCount(3);
+    await expect.poll(() => codeText(page)).toContain(TSV_TABLE);
+    expect(await codeText(page)).not.toContain("\t");
+
+    const toast = page.getByTestId("toast").filter({ hasText: "Pasted tab-separated text as a table" });
+    await expect(toast).toBeVisible();
+    await toast.getByTestId("toast-action").click();
+    await expect.poll(() => codeText(page)).not.toContain("| Name");
+    await expect(page.locator(".md-rich table")).toHaveCount(1);
+    await user.context.close();
+  });
+
+  test("TSV pasted into the code pane inserts the Markdown table text", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "Intro paragraph.\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+
+    await focusCodeEnd(page);
+    await pasteInCode(page, TSV);
+
+    await expect.poll(() => codeText(page)).toContain(TSV_TABLE);
+    await expect(page.locator(".md-rich table")).toHaveCount(1);
+    await expect(page.locator(".md-rich table th")).toHaveText(["Name", "Qty", "Price"]);
+
+    // Ctrl+Z takes the whole table out in one step.
+    await page.keyboard.press("Control+z");
+    await expect.poll(() => codeText(page)).not.toContain("| Name");
+    await expect(page.locator(".md-rich table")).toHaveCount(0);
+    await user.context.close();
+  });
+
+  test("a single line with tabs and ragged rows stay plain text", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "Start\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+
+    await focusRichEnd(page);
+    await page.keyboard.press("Enter");
+    await pasteInRich(page, { text: "Name\tQty\tPrice" });
+    await expect.poll(() => codeText(page)).toContain("Name\tQty\tPrice");
+    await expect(page.locator(".md-rich table")).toHaveCount(0);
+
+    await focusRichEnd(page);
+    await page.keyboard.press("Enter");
+    await pasteInRich(page, { text: "a\tb\nc\td\te" });
+    await expect.poll(() => codeText(page)).toContain("c\td\te");
+    await expect(page.locator(".md-rich table")).toHaveCount(0);
+    expect(await codeText(page)).not.toContain("|");
     await user.context.close();
   });
 });

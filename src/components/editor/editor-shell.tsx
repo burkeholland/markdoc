@@ -52,6 +52,7 @@ import type { NotificationDto } from "@/lib/api";
 import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
 import type { PresenceUser } from "@/editor/collab/session";
+import type { NoticeAction } from "@/editor/markdown/tsv";
 import { isMac } from "@/lib/utils";
 
 export interface EditorShellProps {
@@ -424,7 +425,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
   // Pasted, dropped and dialog-chosen images all go through the document's asset store.
   const uploadImage = useCallback((file: File) => uploadAsset(doc.id, file), [doc.id]);
   const onImageError = useCallback((message: string) => toast(`Image upload failed: ${message}`, "error"), [toast]);
-  const onNotice = useCallback((message: string) => toast(message, "info"), [toast]);
+  const onNotice = useCallback((message: string, action?: NoticeAction) => toast(message, "info", action), [toast]);
 
   // A .md/.txt file dropped on either pane: ask whether to replace, insert at the drop point or open as a new document.
   const [fileDrop, setFileDrop] = useState<PendingFileDrop | null>(null);
