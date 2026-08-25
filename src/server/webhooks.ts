@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import os from "node:os";
 import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
@@ -81,34 +82,87 @@ export interface CreatedWebhook extends WebhookDto {
 
 /** `hostname:port` with the default port made explicit, so `https://x` and `https://x:443` compare equal. */
 function hostKey(u: URL): string {
-  return `${u.hostname.toLowerCase()}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  return `${u.hostname.toLowerCase()}:${portOf(u)}`;
+}
+
+function portOf(u: URL): string {
+  return u.port || (u.protocol === "https:" ? "443" : "80");
+}
+
+/**
+ * Literals that always mean this machine, whatever interfaces are up: `localhost` and `*.localhost`,
+ * all of `127.0.0.0/8`, `::1`, the bind-all addresses `0.0.0.0` / `::`, and their IPv4-mapped forms.
+ * `hostname` is WHATWG-canonical (`URL#hostname`): `127.1`, `2130706433` and `0x7f.0.0.1` have
+ * already become `127.0.0.1`, and `[::ffff:127.0.0.1]` has become `[::ffff:7f00:1]`.
+ */
+function isLoopbackLiteral(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "0.0.0.0" || h === "[::]" || h === "[::1]" || h === "[::ffff:0:0]") return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  return /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(h);
+}
+
+/** Every address of every interface (`os.networkInterfaces()`), plus the machine name and `<name>.local`. */
+function selfAddresses(): string[] {
+  const out: string[] = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) out.push(entry.address);
+  }
+  const name = os.hostname();
+  if (name) out.push(name, `${name}.local`);
+  return out;
+}
+
+/** A bare IPv6 address as a URL host: zone id (`%eth0`) dropped, brackets added. Anything else passes through. */
+function bracketIpv6(address: string): string {
+  if (!address.includes(":") || address.startsWith("[")) return address;
+  return `[${address.replace(/%.*$/, "")}]`;
+}
+
+export interface OwnOriginSelf {
+  /** The port this server listens on; defaults to `PORT` (3000 when unset), as `server/index.ts` binds it. */
+  port?: number;
+  /** Addresses and names that reach this machine; defaults to `selfAddresses()`. Loopback literals are always included. */
+  addresses?: readonly string[];
 }
 
 /**
  * `host:port` keys of this server's own origins, for refusing webhooks that would call Markdoc back:
- * the request's `Host` header (its scheme is unknown, so both default ports count) and `MARKDOC_URL`
- * when set (the public origin behind a proxy). Other localhost ports stay allowed — LAN bridges are real.
+ * the request's `Host` header (its scheme is unknown, so both default ports count), `MARKDOC_URL`
+ * when set (the public origin behind a proxy), and — on each of those ports and the listening port —
+ * every other spelling of this machine: `localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`, `[::]`, the
+ * interface addresses `server/index.ts` prints at startup and the machine name. Other localhost ports
+ * stay allowed — LAN bridges are real. Pass `self` to pin the port and addresses (tests).
  */
-export function ownOriginKeys(hostHeader: string | null | undefined, markdocUrl: string | undefined = process.env.MARKDOC_URL): string[] {
+export function ownOriginKeys(hostHeader: string | null | undefined, markdocUrl: string | undefined = process.env.MARKDOC_URL, self: OwnOriginSelf = {}): string[] {
   const keys = new Set<string>();
-  const host = hostHeader?.trim();
-  if (host) {
-    for (const proto of ["http:", "https:"]) {
-      try {
-        keys.add(hostKey(new URL(`${proto}//${host}`)));
-      } catch {
-        // A malformed Host header is nothing to compare against.
-      }
-    }
-  }
-  if (markdocUrl) {
+  const ports = new Set<string>();
+  const add = (url: string) => {
     try {
-      keys.add(hostKey(new URL(markdocUrl)));
+      const u = new URL(url);
+      keys.add(hostKey(u));
+      ports.add(portOf(u));
     } catch {
-      // Unparseable MARKDOC_URL: ignore here; the MCP route reports it.
+      // A malformed Host header, MARKDOC_URL or machine name is nothing to compare against.
     }
-  }
+  };
+  const host = hostHeader?.trim();
+  if (host) for (const proto of ["http:", "https:"]) add(`${proto}//${host}`);
+  if (markdocUrl) add(markdocUrl);
+  const listening = self.port ?? Number(process.env.PORT ?? 3000);
+  if (Number.isInteger(listening) && listening > 0 && listening <= 65535) ports.add(String(listening));
+  const names = ["localhost", "127.0.0.1", "[::1]", "0.0.0.0", "[::]", ...(self.addresses ?? selfAddresses()).map(bracketIpv6)];
+  for (const port of ports) for (const name of names) add(`http://${name}:${port}`);
   return [...keys];
+}
+
+/** Whether `url` targets one of `ownOrigins` (see `ownOriginKeys`): an exact key, or any loopback literal on one of their ports. */
+export function isOwnOrigin(url: URL, ownOrigins: readonly string[]): boolean {
+  if (ownOrigins.includes(hostKey(url))) return true;
+  if (!isLoopbackLiteral(url.hostname)) return false;
+  const port = portOf(url);
+  return ownOrigins.some((key) => key.slice(key.lastIndexOf(":") + 1) === port);
 }
 
 function validate(input: WebhookInput, ownOrigins: readonly string[]): { url: string; events: WebhookEventType[]; documentIds: string[] | null } {
@@ -119,7 +173,7 @@ function validate(input: WebhookInput, ownOrigins: readonly string[]): { url: st
     throw new WebhookValidationError("Enter a valid URL");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new WebhookValidationError("Webhook URLs must be http(s)");
-  if (ownOrigins.includes(hostKey(parsed))) throw new WebhookValidationError("A webhook cannot point at Markdoc itself");
+  if (isOwnOrigin(parsed, ownOrigins)) throw new WebhookValidationError("A webhook cannot point at Markdoc itself");
   const events = [...new Set(input.events)].filter((e): e is WebhookEventType => (WEBHOOK_EVENTS as readonly string[]).includes(e));
   if (events.length === 0) throw new WebhookValidationError("Pick at least one event");
   const documentIds = input.documentIds && input.documentIds.length > 0 ? [...new Set(input.documentIds.map((d) => d.trim()).filter(Boolean))] : null;
@@ -243,6 +297,8 @@ async function recordDelivery(webhookId: string, event: string, status: number, 
 }
 
 async function postOnce(url: string, headers: Record<string, string>, body: string): Promise<number> {
+  // A hook stored before the own-origin check (or under a spelling it missed) must not loop Markdoc into itself.
+  if (targetsSelf(url)) return 0;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), DELIVERY_TIMEOUT_MS);
   try {
@@ -272,12 +328,27 @@ async function disableWebhook(hook: schema.Webhook, documentId: string | null) {
   await notify({ userLogin: owner.login, documentId: docId, kind: "webhook.disabled", actorLogin: null, actorName: "Markdoc", refId: `webhook:${hook.id}:${Date.now()}`, snippet: hook.url }).catch(() => false);
 }
 
+/** Whether a stored webhook URL points back at this server. No request `Host` here: `MARKDOC_URL`, the listening port and this machine's addresses decide. */
+function targetsSelf(url: string): boolean {
+  try {
+    return isOwnOrigin(new URL(url), ownOriginKeys(null));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * POST one event to a webhook, record the attempt, and on failure count it towards disabling the hook
  * and schedule a retry (10 s / 1 min / 10 min). Resolves with the first attempt's result; retries run
- * in the background.
+ * in the background. A hook that targets this server is never sent and is disabled at once: retrying
+ * cannot fix it, and each attempt would be the self-loop the own-origin check exists to prevent.
  */
 export async function deliverWebhook(hook: schema.Webhook, payload: WebhookPayload, attempt = 1, deliveryId = randomUUID()): Promise<DeliveryResult> {
+  if (targetsSelf(hook.url)) {
+    const rowId = await recordDelivery(hook.id, payload.type, 0, 0, attempt);
+    if (hook.active) await disableWebhook(hook, payload.documentId);
+    return { deliveryId: rowId, status: 0, ok: false, durationMs: 0, attempt };
+  }
   const body = JSON.stringify(payload);
   const headers = {
     "Content-Type": "application/json",
