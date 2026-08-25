@@ -25,7 +25,7 @@ type Conflict = { error: string; contentHash: string; diff: string | null; trunc
  * refused — with a diff of what moved — when someone edited the document in between, and land
  * normally when the hash is current.
  */
-describe("ifContentHash / If-Match on PUT /content and POST /suggest", () => {
+describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /suggest", () => {
   let agent: User;
   let human: User;
   let docId: string;
@@ -96,7 +96,7 @@ describe("ifContentHash / If-Match on PUT /content and POST /suggest", () => {
     expect(again.status).toBe(200);
   });
 
-  it("If-Match header (quoted, weak) works like the body field", async () => {
+  it("If-Match header (quoted) works like the body field; a weak W/ tag never matches (RFC 9110)", async () => {
     await freshDoc();
     actor = agent;
     const { contentHash: h1, clean } = await read();
@@ -109,9 +109,20 @@ describe("ifContentHash / If-Match on PUT /content and POST /suggest", () => {
     expect(stale.status).toBe(409);
     expect(((await stale.json()) as Conflict).diff).toContain("+Typed meanwhile.");
 
-    const { contentHash: h2 } = await read();
-    const ok = await call(content.PUT, "PUT", { content: clean + "\nAgent line.\n" }, "content", { "If-Match": `W/"${h2}"` });
-    expect(ok.status).toBe(200);
+    const { contentHash: h2, clean: clean2 } = await read();
+    const weak = await call(content.PUT, "PUT", { content: clean + "\nAgent line.\n" }, "content", { "If-Match": `W/"${h2}"` });
+    expect(weak.status).toBe(409);
+    const weakBody = (await weak.json()) as Conflict;
+    expect(weakBody.error).toBe("Document changed since you read it");
+    expect(weakBody.contentHash).toBe(h2);
+    expect((await read()).clean).toBe(clean2);
+
+    const strong = await call(content.PUT, "PUT", { content: clean + "\nAgent line.\n" }, "content", { "If-Match": `"${h2}"` });
+    expect(strong.status).toBe(200);
+
+    // `*` is the RFC's "any current representation": unconditional.
+    const any = await call(content.PUT, "PUT", { content: clean + "\nAnother line.\n" }, "content", { "If-Match": "*" });
+    expect(any.status).toBe(200);
   });
 
   it("without a hash the write is unconditional, as before", async () => {
@@ -126,13 +137,80 @@ describe("ifContentHash / If-Match on PUT /content and POST /suggest", () => {
     expect((await read()).clean).not.toContain("Typed meanwhile.");
   });
 
-  it("a malformed hash is a 400, not a silent unconditional write", async () => {
+  it("a malformed hash is a mismatch: 409 with the current hash (so the retry loop works), never a write", async () => {
     await freshDoc();
     actor = agent;
-    const { clean } = await read();
-    const res = await call(content.PUT, "PUT", { content: clean + "\nx\n", ifContentHash: "e20e7c25" });
-    expect(res.status).toBe(400);
+    const { clean, contentHash } = await read();
+    for (const bad of ["e20e7c25", "deadbeef", "not a hash at all"]) {
+      const res = await call(content.PUT, "PUT", { content: clean + "\nx\n", ifContentHash: bad });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as Conflict;
+      expect(body.error).toBe("Document changed since you read it");
+      expect(body.contentHash).toBe(contentHash);
+      expect(body.diff).toBeNull();
+      expect((await read()).clean).toBe(clean);
+    }
+    const header = await call(content.PUT, "PUT", { content: clean + "\nx\n" }, "content", { "If-Match": '"deadbeef"' });
+    expect(header.status).toBe(409);
+    expect(((await header.json()) as Conflict).contentHash).toBe(contentHash);
     expect((await read()).clean).toBe(clean);
+  });
+
+  it("PATCH /content honours ifContentHash / If-Match like PUT: stale → 409 and nothing appended, current → 200 with the new hash", async () => {
+    await freshDoc();
+    actor = agent;
+    const { contentHash: h1 } = await read();
+
+    actor = human;
+    await call(content.PATCH, "PATCH", { append: "The human's new sentence." });
+
+    actor = agent;
+    const stale = await call(content.PATCH, "PATCH", { append: "\nstale append", ifContentHash: h1 });
+    expect(stale.status).toBe(409);
+    const body = (await stale.json()) as Conflict;
+    expect(body.error).toBe("Document changed since you read it");
+    expect(body.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.contentHash).not.toBe(h1);
+    expect(body.diff).toContain("+The human's new sentence.");
+    let after = await read();
+    expect(after.clean).not.toContain("stale append");
+    expect(after.contentHash).toBe(body.contentHash);
+
+    // The header form and a stale header + stale body together are refused the same way.
+    const staleHeader = await call(content.PATCH, "PATCH", { append: "\nstale append", ifContentHash: "deadbeef" }, "content", { "If-Match": '"deadbeef"' });
+    expect(staleHeader.status).toBe(409);
+    expect(((await staleHeader.json()) as Conflict).contentHash).toBe(body.contentHash);
+    expect((await read()).clean).not.toContain("stale append");
+
+    const weak = await call(content.PATCH, "PATCH", { append: "\nweak append" }, "content", { "If-Match": `W/"${body.contentHash}"` });
+    expect(weak.status).toBe(409);
+    expect((await read()).clean).not.toContain("weak append");
+
+    const fresh = await call(content.PATCH, "PATCH", { append: "Agent's paragraph.", ifContentHash: body.contentHash });
+    expect(fresh.status).toBe(200);
+    const ok = (await fresh.json()) as { ok: boolean; contentHash: string };
+    expect(ok.ok).toBe(true);
+    expect(ok.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(ok.contentHash).not.toBe(body.contentHash);
+    after = await read();
+    expect(after.clean).toContain("The human's new sentence.");
+    expect(after.clean).toContain("Agent's paragraph.");
+    expect(after.contentHash).toBe(ok.contentHash);
+
+    const viaHeader = await call(content.PATCH, "PATCH", { append: "Second paragraph from the agent." }, "content", { "If-Match": `"${ok.contentHash}"` });
+    expect(viaHeader.status).toBe(200);
+    expect((await read()).clean).toContain("Second paragraph from the agent.");
+  });
+
+  it("PATCH /content without a hash stays unconditional", async () => {
+    await freshDoc();
+    actor = agent;
+    const before = await read();
+    const res = await call(content.PATCH, "PATCH", { append: "Unconditional." });
+    expect(res.status).toBe(200);
+    const after = await read();
+    expect(after.clean).toContain("Unconditional.");
+    expect(after.contentHash).not.toBe(before.contentHash);
   });
 
   it("POST /suggest honours the hash too and returns it on success", async () => {

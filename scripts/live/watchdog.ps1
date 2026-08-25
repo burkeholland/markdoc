@@ -13,14 +13,14 @@
 # is younger than -StartGraceSec, so a cold start (90 s of "connection refused" is normal) is not mistaken
 # for a death. State: ..\markdoc-data\watchdog.state (JSON); log: ..\markdoc-data\watchdog.log, one line
 # per event only (nothing on a healthy tick). Exit 0 always unless the restart failed (1).
-#   .\watchdog.ps1                                      real server (:3000, ..\markdoc-live, ..\markdoc-data)
+#   .\watchdog.ps1                                      real server (:3000, live.json's worktree, ..\markdoc-data)
 #   .\watchdog.ps1 -Root <copy> -Port 3993 -DataRoot <tmp>   test copy; touches nothing of the live server
 # Windows PowerShell 5.1 compatible (the scheduled task runs powershell.exe).
 param(
-  # Live worktree; defaults to the sibling ../markdoc-live (see Get-FactoryRoot in common.ps1).
+  # Live worktree; defaults to live.json's root, else the sibling ../markdoc-live (see Get-LiveRoot in common.ps1).
   [string]$Root,
   [int]$Port = 3000,
-  # Folder with live.log, watchdog.log, watchdog.state and promote.lock; defaults to ../markdoc-data.
+  # Folder with live.json, live.log / live-b.log, watchdog.log, watchdog.state and promote.lock; defaults to ../markdoc-data.
   [string]$DataRoot,
   [int]$TimeoutSec = 10,
   # Misses in a row before start-live.ps1 is called.
@@ -35,10 +35,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
-if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
 if (-not $DataRoot) { $DataRoot = Join-Path (Get-FactoryRoot) 'markdoc-data' }
 $DataRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DataRoot)
-$liveLog = Join-Path $DataRoot 'live.log'
+if (-not $Root) { $Root = Get-LiveRoot -DataRoot $DataRoot }
+$liveLog = Get-LiveLogPath -Root $Root -DataRoot $DataRoot
 $watchdogLog = Join-Path $DataRoot 'watchdog.log'
 $statePath = Join-Path $DataRoot 'watchdog.state'
 $lockPath = Join-Path $DataRoot 'promote.lock'
