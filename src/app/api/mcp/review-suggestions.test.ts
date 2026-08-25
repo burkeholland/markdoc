@@ -5,7 +5,9 @@ import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
 
 /**
  * `markdoc_review_suggestions` must not say "done" when nothing was decided: a model that forgot
- * `suggestionId` or mistyped it would otherwise believe the human's suggestion was applied. The
+ * `suggestionId` or mistyped it would otherwise believe the human's suggestion was applied. `acceptAll` /
+ * `rejectAll` with nothing pending is the one exception: an idempotent no-op that answers plain success
+ * with `decided: 0`, so a "make sure nothing is pending" call is not a failure to retry. The
  * REST route is faked here with the answers it gives (see documents/suggestions.test.ts for the
  * real ones), and the tool result is read through a real MCP client so `isError` is what a model sees.
  */
@@ -86,7 +88,7 @@ describe("markdoc_review_suggestions", () => {
     expect(pendingIds.has("sug-1")).toBe(false);
   });
 
-  it("rejectAll reports the count, and a second rejectAll with nothing pending is an error", async () => {
+  it("rejectAll reports the count, and a second rejectAll with nothing pending is a plain no-op success", async () => {
     const res = await review({ action: "rejectAll" });
     expect(res.isError).toBeFalsy();
     expect(res.text).toBe("Rejected 1 suggestion(s) on doc-1.");
@@ -94,7 +96,15 @@ describe("markdoc_review_suggestions", () => {
     expect(calls.at(-1)?.body).toEqual({ action: "rejectAll" });
 
     const nothing = await review({ action: "rejectAll" });
-    expect(nothing.isError).toBe(true);
-    expect(nothing.text).toContain("decided nothing");
+    expect(nothing.isError).toBeFalsy();
+    expect(nothing.text).toBe("Nothing to decide on doc-1 (0 pending).");
+    expect(nothing.structuredContent).toEqual({ ok: true, action: "rejectAll", decided: 0 });
+  });
+
+  it("acceptAll with nothing pending is the same idempotent no-op", async () => {
+    const res = await review({ action: "acceptAll" });
+    expect(res.isError).toBeFalsy();
+    expect(res.text).toBe("Nothing to decide on doc-1 (0 pending).");
+    expect(res.structuredContent).toEqual({ ok: true, action: "acceptAll", decided: 0 });
   });
 });

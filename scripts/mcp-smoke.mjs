@@ -100,6 +100,12 @@ check(text(bogus).includes("Suggestion not found"), `bogus id error should say S
 const noId = await client.callTool({ name: "markdoc_review_suggestions", arguments: { id, action: "accept" } });
 check(noId.isError === true, `review_suggestions without suggestionId should be isError, got: ${text(noId)}`);
 console.log(`review_suggestions bogus/missing id: both isError`);
+// acceptAll / rejectAll on a document with nothing pending is an idempotent no-op: plain success, decided 0, never isError.
+const noop = await client.callTool({ name: "markdoc_review_suggestions", arguments: { id, action: "rejectAll" } });
+check(!noop.isError, `rejectAll with nothing pending should not be isError, got: ${text(noop)}`);
+check(text(noop).includes("Nothing to decide") && text(noop).includes("(0 pending)"), `rejectAll no-op text: ${text(noop)}`);
+check(noop.structuredContent?.decided === 0, `rejectAll no-op should report decided 0, got: ${JSON.stringify(noop.structuredContent)}`);
+console.log(`review_suggestions rejectAll with nothing pending → ${text(noop)}`);
 
 // A reply to a thread that does not exist must surface as a tool error, not a false "Replied to thread …".
 const ghost = await client.callTool({ name: "markdoc_comment", arguments: { id, action: "reply", threadId: "bogus", body: "ghost reply" } });
