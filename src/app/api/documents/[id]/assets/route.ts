@@ -1,4 +1,4 @@
-import { handler, json, requireAccess, HttpError } from "@/server/http";
+import { handler, json, requireAccess, HttpError, NUL_MESSAGE, nulFree, ValidationError } from "@/server/http";
 import { AssetError, MAX_ASSET_BYTES, normalizeMime, putAsset } from "@/server/assets";
 import { activityActor, recordActivity } from "@/server/activity";
 
@@ -12,6 +12,12 @@ interface Upload {
 
 function stripExtension(name: string): string {
   return name.replace(/\.[a-z0-9]{2,5}$/i, "");
+}
+
+/** The asset name is stored in a `text` column, which cannot hold NUL. */
+function assetName(name: string): string {
+  if (!nulFree(name)) throw new ValidationError([{ code: "custom", path: ["name"], message: NUL_MESSAGE }]);
+  return name;
 }
 
 /** Accept either a multipart form with a `file` field or a raw image body (`Content-Type: image/*`, `?name=`). */
@@ -31,12 +37,12 @@ async function readUpload(req: Request): Promise<Upload> {
     if (!(file instanceof Blob)) throw new HttpError(400, "Missing `file` field");
     const fileName = "name" in file && typeof file.name === "string" ? file.name : "";
     const name = (typeof form.get("name") === "string" && (form.get("name") as string)) || fileName || "image";
-    return { name, mime: normalizeMime(file.type), bytes: new Uint8Array(await file.arrayBuffer()) };
+    return { name: assetName(name), mime: normalizeMime(file.type), bytes: new Uint8Array(await file.arrayBuffer()) };
   }
 
   if (contentType.startsWith("image/")) {
     const name = new URL(req.url).searchParams.get("name") ?? "image";
-    return { name, mime: contentType, bytes: new Uint8Array(await req.arrayBuffer()) };
+    return { name: assetName(name), mime: contentType, bytes: new Uint8Array(await req.arrayBuffer()) };
   }
 
   throw new HttpError(415, "Send multipart/form-data with a `file` field, or an image body with an image/* Content-Type");

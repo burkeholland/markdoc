@@ -28,15 +28,17 @@ const comments = await import("@/app/api/documents/[id]/comments/route");
 const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const versions = await import("@/app/api/documents/[id]/versions/route");
 const tokens = await import("@/app/api/tokens/route");
+const assets = await import("@/app/api/documents/[id]/assets/route");
 const importFile = await import("@/app/api/import/file/route");
 
 const BASE = "http://localhost:3700";
 const NUL = "\u0000";
 type Route = (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+type SingleRoute = (req: Request) => Promise<Response>;
 const params = (id: string) => ({ params: Promise.resolve({ id }) });
-const sendJson = (route: Route, method: string, path: string, body: unknown, id = "") =>
-  route(new Request(`${BASE}${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), params(id));
-const postForm = (form: FormData) => importFile.POST(new Request(`${BASE}/api/import/file`, { method: "POST", body: form }), params(""));
+const sendJson = (route: Route | SingleRoute, method: string, path: string, body: unknown, id = "") =>
+  (route as Route)(new Request(`${BASE}${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), params(id));
+const postForm = (form: FormData) => importFile.POST(new Request(`${BASE}/api/import/file`, { method: "POST", body: form }));
 
 type Issue = { path: (string | number)[]; message: string };
 /** Asserts the 400 shape the docs promise and returns the offending paths. */
@@ -125,13 +127,21 @@ describe("a NUL in a JSON text field is a 400 naming the field, and nothing is w
   });
 
   it("POST /api/import/file as JSON", async () => {
-    const res = await importFile.POST(new Request(`${BASE}/api/import/file`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: `# A${NUL}\n`, format: "markdown" }) }), params(""));
+    const res = await importFile.POST(new Request(`${BASE}/api/import/file`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: `# A${NUL}\n`, format: "markdown" }) }));
     expect(await expectNulRefused(res)).toEqual([["content"]]);
   });
 
   it("GET /api/documents?q= with a NUL", async () => {
-    const res = await documents.GET(new Request(`${BASE}/api/documents?q=a%00b`), params(""));
+    const res = await documents.GET(new Request(`${BASE}/api/documents?q=a%00b`));
     expect(await expectNulRefused(res)).toEqual([["q"]]);
+  });
+
+  it("POST /api/documents/:id/assets with a NUL in the name", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+    const res = await assets.POST(new Request(`${BASE}/api/documents/${docId}/assets?name=pic${encodeURIComponent(NUL)}.png`, { method: "POST", headers: { "content-type": "image/png" }, body: png }), params(docId));
+    expect(await expectNulRefused(res)).toEqual([["name"]]);
+    const db = await getDb();
+    expect(await db.select().from(schema.assets).where(eq(schema.assets.documentId, docId))).toHaveLength(0);
   });
 });
 
