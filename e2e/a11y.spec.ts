@@ -363,9 +363,10 @@ test.describe("axe: editor", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("notifications-popover")).not.toBeVisible();
 
-    // Share dialog.
+    // Share dialog. Opening focus lands on the first control of the body, not the header Close button.
     await page.getByTestId("share-button").click();
     await expect(page.getByRole("dialog", { name: /share/i })).toBeVisible();
+    await expect(page.getByTestId("share-login")).toBeFocused();
     await scan(page, "editor + share dialog");
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /share/i })).not.toBeVisible();
@@ -374,6 +375,7 @@ test.describe("axe: editor", () => {
     await page.evaluate(() => window.localStorage.removeItem("markdoc:agent-connect-dismissed"));
     await page.getByTestId("ask-agent-button").click();
     await expect(page.getByTestId("ask-agent-dialog")).toBeVisible();
+    await expect(page.getByRole("dialog", { name: /ask an agent/i }).getByRole("button", { name: "Close" })).not.toBeFocused();
     await page.getByTestId("ask-agent-instruction").fill("Tighten this");
     await scan(page, "editor + ask-agent dialog");
     await page.getByTestId("ask-agent-send").click();
@@ -389,13 +391,15 @@ test.describe("axe: editor", () => {
     // Image dialog.
     await page.getByTestId("tb-image").click();
     await expect(page.getByRole("dialog", { name: /image/i })).toBeVisible();
+    await expect(page.getByTestId("image-url")).toBeFocused();
     await scan(page, "editor + image dialog");
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /image/i })).not.toBeVisible();
 
-    // Shortcuts dialog.
+    // Shortcuts dialog: nothing tabbable in the body, so the Close button takes focus.
     await page.getByTestId("status-bar").getByRole("button", { name: "Help and shortcuts" }).click();
     await expect(page.getByRole("dialog", { name: /shortcuts/i })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: /shortcuts/i }).getByRole("button", { name: "Close" })).toBeFocused();
     await scan(page, "editor + shortcuts dialog");
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /shortcuts/i })).not.toBeVisible();
@@ -703,6 +707,7 @@ test.describe("keyboard-only walkthrough", () => {
     await page.keyboard.press("Enter");
     const share = page.getByRole("dialog", { name: /share/i });
     await expect(share).toBeVisible();
+    await expect(page.getByTestId("share-login")).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(share).toHaveCount(0);
     await expect.poll(() => activeIn(".md-rich")).toBe(true);
@@ -714,13 +719,28 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(page.getByTestId("palette-input")).toHaveCount(0);
     await expect.poll(() => activeIn(".md-rich")).toBe(true);
 
-    // Share from the header button (keyboard): Esc returns focus to that button.
+    // Share from the header button (keyboard): focus starts in the handle field; Esc returns it to that button.
     await page.getByTestId("share-button").focus();
     await page.keyboard.press("Enter");
     await expect(share).toBeVisible();
+    await expect(page.getByTestId("share-login")).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(share).toHaveCount(0);
     await expect(page.getByTestId("share-button")).toBeFocused();
+
+    // Name current version from the ⋮ menu (keyboard only): focus must be in the name field, not on the
+    // dialog's Close button, so typing + Enter names the version (#110).
+    await page.getByTestId("more-menu").focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("menuitem", { name: "Name current version" }).focus();
+    await page.keyboard.press("Enter");
+    const nameDialog = page.getByRole("dialog", { name: "Name this version" });
+    await expect(nameDialog).toBeVisible();
+    await expect(page.getByTestId("version-name")).toBeFocused();
+    await page.keyboard.type("Keyboard named");
+    await page.keyboard.press("Enter");
+    await expect(nameDialog).toHaveCount(0);
+    await expect(page.getByTestId("toast")).toContainText("Saved version “Keyboard named”");
     await context.close();
   });
 });
