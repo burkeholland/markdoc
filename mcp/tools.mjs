@@ -143,10 +143,13 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_whoami",
-    { title: "Who am I", description: "Show which user and agent identity this token acts as.", inputSchema: {}, annotations: READ_ONLY },
+    { title: "Who am I", description: "Show which user and agent identity this token acts as, its scope (read / comment / full) and whether it is restricted to certain documents.", inputSchema: {}, annotations: READ_ONLY },
     async () => {
       const me = await api("GET", "/api/me");
-      return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}". Server: ${baseUrl}`, me);
+      const scope = me.scope ?? "full";
+      const restriction = me.documentIds?.length ? ` Restricted to ${me.documentIds.length} document(s): ${me.documentIds.join(", ")}.` : "";
+      const limits = scope === "full" ? "" : scope === "comment" ? " It can read, comment, suggest and review but not rewrite, publish or delete (ask for a full-access token at /settings for that)." : " It can only read; comments and edits need a comment or full-access token from /settings.";
+      return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}" with ${scope} scope.${limits}${restriction} Server: ${baseUrl}`, me);
     },
   );
 

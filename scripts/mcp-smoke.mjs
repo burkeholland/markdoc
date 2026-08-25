@@ -3,6 +3,7 @@
 // running Markdoc, the way GitHub Copilot CLI does with a URL and a token.
 //
 //   MARKDOC_URL=http://localhost:3820 MARKDOC_TOKEN=mdk_... npm run mcp:smoke
+//   (optionally MARKDOC_READ_TOKEN=mdk_... — a Read-scoped token — to check that writes are refused with 403)
 //
 // Lists the tools (same set as the stdio server, each with its annotations), calls markdoc_whoami,
 // creates a document, reads it back and checks that reviewing a suggestion that does not exist is an
@@ -149,4 +150,24 @@ console.log(`watch after own append → "${text(quiet).split("\n")[0].slice(0, 4
 
 await client.callTool({ name: "markdoc_delete_document", arguments: { id } });
 await client.close();
+
+// Scoped tokens (#124): with MARKDOC_READ_TOKEN set to a `read`-scoped token, whoami says so and a write is a
+// tool error that points at /settings — not a silent success.
+const readToken = process.env.MARKDOC_READ_TOKEN;
+if (readToken) {
+  const ro = new Client({ name: "mcp-smoke-http-read", version: "0.0.0" });
+  await ro.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), { requestInit: { headers: { Authorization: ["Bearer", readToken].join(" ") } } }));
+  const roWho = await ro.callTool({ name: "markdoc_whoami", arguments: {} });
+  check(!roWho.isError && roWho.structuredContent?.scope === "read", `read token whoami should report scope read: ${text(roWho)}`);
+  check(text(roWho).includes("with read scope"), `read token whoami text should name the scope: ${text(roWho)}`);
+  const refused = await ro.callTool({ name: "markdoc_create_document", arguments: { content: "# Nope\n", title: "read token" } });
+  check(refused.isError === true, `markdoc_create_document with a read token should be isError, got: ${text(refused)}`);
+  check(text(refused).includes("(403)") && text(refused).includes("read-scoped") && text(refused).includes("/settings"), `read token 403 should say read-scoped and point at /settings: ${text(refused)}`);
+  const roList = await ro.callTool({ name: "markdoc_list_documents", arguments: {} });
+  check(!roList.isError, `markdoc_list_documents with a read token failed: ${text(roList)}`);
+  await ro.close();
+  console.log(`read token → whoami scope read; create_document isError (${text(refused).split("\n")[0].slice(0, 100)})`);
+} else {
+  console.log("MARKDOC_READ_TOKEN not set — skipping the read-scope check (mint a Read token at /settings to run it)");
+}
 console.log(`ALL GOOD — ${tools.length} tools over ${baseUrl}/api/mcp`);

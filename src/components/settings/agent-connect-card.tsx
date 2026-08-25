@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Copy, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
-import { MCP_PATH } from "@/lib/mcp";
+import { MCP_PATH, type TokenScopeName } from "@/lib/mcp";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
 export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
@@ -85,6 +85,8 @@ export interface AgentConnectCardProps {
   origin: string;
   /** A freshly created token to inline instead of the placeholder. */
   token?: string | null;
+  /** That token's scope, printed next to the allow-tool line (and narrowing it). */
+  scope?: TokenScopeName | null;
   /** Shown for step 1; when omitted a link to /settings#tokens is rendered. */
   onCreateToken?: () => void;
   /** Renders a close button; the caller remembers the dismissal. */
@@ -98,7 +100,7 @@ export interface AgentConnectCardProps {
  * "Connect an agent" in three steps: a token, the MCP config for this host, and the sentence to say to
  * Copilot. Used by the Ask-an-agent dialog (first run) and the Settings › Agents section.
  */
-export function AgentConnectCard({ origin, token, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
+export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
   const base = origin || "http://localhost:3000";
   const config = mcpHttpConfigFor(base, token ?? undefined);
   const stdioConfig = mcpConfigFor(base, token ?? undefined);
@@ -160,7 +162,7 @@ export function AgentConnectCard({ origin, token, onCreateToken, onDismiss, hide
                 <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="agent-connect-config-stdio" />
               </div>
             </details>
-            <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" />
+            <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" scope={scope} />
           </div>
         </li>
         <li className="flex gap-3">

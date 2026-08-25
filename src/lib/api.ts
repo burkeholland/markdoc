@@ -1,6 +1,6 @@
 import type { DocumentDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
-import type { NotificationKind, Role } from "@/server/db/schema";
+import type { NotificationKind, Role, TokenScope } from "@/server/db/schema";
 import type { ReviewDto } from "@/server/reviews";
 
 export class ApiError extends Error {
@@ -135,6 +135,10 @@ export interface ApiTokenDto {
   id: string;
   name: string;
   prefix: string;
+  /** `read` (GET, watch, presence) · `comment` (+ comments, suggestions, reviews, requests) · `full` (everything the user can do). */
+  scope: TokenScope;
+  /** Documents the token is restricted to; null = all of the user's. */
+  documentIds: string[] | null;
   createdAt: string;
   lastUsedAt: string | null;
   /** Last `tools/list` over /api/mcp with this token (an MCP client is connected). */
@@ -237,9 +241,12 @@ export const api = {
   },
   tokens: {
     list: () => request<{ tokens: ApiTokenDto[] }>("/api/tokens"),
-    /** Mint a personal access token (browser sessions only); the secret comes back once. */
-    create: (name: string, expiresInDays: number | null = 90) =>
-      request<{ token: { id: string; name: string; token: string; prefix: string } }>("/api/tokens", { method: "POST", body: JSON.stringify({ name, expiresInDays }) }),
+    /** Mint a personal access token (browser sessions only); the secret comes back once. `scope` defaults to `full` server-side. */
+    create: (name: string, expiresInDays: number | null = 90, options: { scope?: TokenScope; documentIds?: string[] } = {}) =>
+      request<{ token: { id: string; name: string; token: string; prefix: string; scope: TokenScope; documentIds: string[] | null } }>("/api/tokens", {
+        method: "POST",
+        body: JSON.stringify({ name, expiresInDays, ...options }),
+      }),
   },
   github: {
     gists: () =>
