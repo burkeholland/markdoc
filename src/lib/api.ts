@@ -205,7 +205,7 @@ export const api = {
         agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean }[];
       }>(`/api/documents/${id}/collaborators`),
     addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">) =>
-      request<{ ok: true; login: string }>(`/api/documents/${id}/collaborators`, { method: "POST", body: JSON.stringify({ login, role }) }),
+      request<{ ok: true; login: string; role: string; pending: boolean }>(`/api/documents/${id}/collaborators`, { method: "POST", body: JSON.stringify({ login, role }) }),
     removeCollaborator: (id: string, login: string) =>
       request<{ ok: true }>(`/api/documents/${id}/collaborators`, { method: "DELETE", body: JSON.stringify({ login }) }),
     publish: (id: string, message?: string, options: { force?: boolean } = {}) =>

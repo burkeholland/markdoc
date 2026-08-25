@@ -561,6 +561,17 @@ export async function getUserById(id: string) {
   return u ?? null;
 }
 
+/** The user who has signed in with this GitHub handle (case-insensitive), or null if nobody has. */
+export async function getUserByLogin(login: string) {
+  const db = await getDb();
+  const [u] = await db
+    .select()
+    .from(schema.users)
+    .where(sql`lower(${schema.users.login}) = ${login.trim().replace(/^@/, "").toLowerCase()}`)
+    .limit(1);
+  return u ?? null;
+}
+
 /** GitHub OAuth access token for a user, or the GITHUB_TOKEN fallback in development. */
 export async function getGitHubToken(userId: string): Promise<string | null> {
   const db = await getDb();
