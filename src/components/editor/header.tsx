@@ -84,12 +84,15 @@ function SaveIndicator({ session, compact }: { session: CollabSession; compact?:
   const liveState = useSessionValue(session, (s) => s.saveState);
   const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
+  const liveProlonged = useSessionValue(session, (s) => s.prolongedOffline);
   // The server renders a fresh session ("Connecting…"); an offline client may already have
   // failed to connect by the time React hydrates. Match the server markup first, then switch.
   const hydrated = useHydrated();
   const state: SaveState = hydrated ? liveState : "connecting";
   const unsynced = hydrated ? liveUnsynced : 0;
   const recovered = hydrated && liveRecovered;
+  const prolonged = hydrated && liveProlonged;
+  const label = saveStateLabel(state, unsynced, recovered, prolonged);
   const map: Record<SaveState, { icon: React.ReactNode; className: string }> = {
     saved: { icon: <Check size={16} strokeWidth={2.5} />, className: "text-success" },
     saving: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
@@ -107,11 +110,12 @@ function SaveIndicator({ session, compact }: { session: CollabSession; compact?:
       data-state={state}
       data-unsynced={unsynced}
       data-recovered={flash || undefined}
+      data-prolonged={prolonged || undefined}
       role="status"
-      title={compact ? saveStateLabel(state, unsynced, recovered) : undefined}
+      title={compact ? label : undefined}
     >
       {m.icon}
-      <span className={cn(compact && "sr-only")}>{saveStateLabel(state, unsynced, recovered)}</span>
+      <span className={cn(compact && "sr-only")}>{label}</span>
     </span>
   );
 }

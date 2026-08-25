@@ -302,8 +302,12 @@ export async function clearLocalDocument(docId: string): Promise<void> {
 
 export type ConnectionPhase = "saved" | "saving" | "offline" | "connecting" | "reconnecting" | "error";
 
-/** Human-readable label for the header's save-state chip. */
-export function saveStateLabel(state: ConnectionPhase, unsyncedChanges: number, recovered = false): string {
+/**
+ * Human-readable label for the header's save-state chip. `prolonged` is set once the connection has
+ * been down for a while (see `OFFLINE_PROLONGED_MS`): the chip then says where the edits are instead
+ * of promising a reconnect that may never come.
+ */
+export function saveStateLabel(state: ConnectionPhase, unsyncedChanges: number, recovered = false, prolonged = false): string {
   switch (state) {
     case "saved":
       return recovered ? "All changes saved" : "Saved";
@@ -312,8 +316,10 @@ export function saveStateLabel(state: ConnectionPhase, unsyncedChanges: number, 
     case "connecting":
       return "Connecting…";
     case "reconnecting":
+      if (prolonged && unsyncedChanges > 0) return "Offline — changes kept on this device";
       return "Reconnecting…";
     case "offline":
+      if (prolonged && unsyncedChanges > 0) return "Offline — changes kept on this device";
       if (unsyncedChanges > 0) return `Offline — ${unsyncedChanges} unsaved ${unsyncedChanges === 1 ? "change" : "changes"}`;
       return "Offline — changes will sync";
     case "error":
