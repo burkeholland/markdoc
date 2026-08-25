@@ -185,10 +185,19 @@ export class CollabSession {
       ...socketOptions,
       name: options.docId,
       document: this.ydoc,
-      token: () => options.getToken(),
+      token: async () => {
+        perfMark("markdoc:token-start");
+        // The provider asks for the token only once the socket is open; `connect()` fetched it meanwhile.
+        const prefetched = this.tokenPrefetch;
+        this.tokenPrefetch = null;
+        const token = prefetched ? await prefetched : await options.getToken();
+        perfMark("markdoc:token");
+        return token;
+      },
       onStatus: ({ status }) => {
         this.status = status;
         if (status === "connected") {
+          perfMark("markdoc:ws-connected");
           this.everConnected = true;
         } else {
           // The provider resets its own synced flag on close without emitting; mirror it.
@@ -289,8 +298,16 @@ export class CollabSession {
     if (this.connectRequested || this.destroyed || this.trashed) return;
     this.connectRequested = true;
     perfMark("markdoc:connect");
+    // Fetch the collaboration token while the socket opens instead of after: the REST round trip
+    // used to sit between the socket opening and the first sync on every open (#118).
+    const prefetch = this.options.getToken();
+    prefetch.catch(() => undefined);
+    this.tokenPrefetch = prefetch;
     void this.provider.connect();
   }
+
+  /** Token fetched by {@link connect}, consumed by the provider on the first socket open. */
+  private tokenPrefetch: Promise<string> | null = null;
 
   get canEdit(): boolean {
     return (this.role === "owner" || this.role === "editor") && this.mode !== "viewing";
