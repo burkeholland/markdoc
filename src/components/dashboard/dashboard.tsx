@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { takePendingNotice, type PendingNotice } from "@/lib/notice";
 import { PICKER_TEMPLATES, TEMPLATES, WELCOME_TEMPLATE_ID, getTemplate, type Template, type TemplateIcon } from "@/lib/templates";
+import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, SORT_COOKIE_MAX_AGE, SORT_OPTIONS, SORT_STORAGE_KEY, isDashboardSort, type DashboardSort } from "@/lib/dashboard-sort";
 
 import { Logo } from "@/components/editor/header";
 import { GitHubPicker } from "@/components/editor/github-dialog";
@@ -28,17 +29,15 @@ const MIN_QUERY_LENGTH = 2;
 const STARRED_STRIP_MAX = 6;
 const DASHBOARD_GROUPS = ["Recent", "Create", "Navigation", "Account"] as const;
 
-export type DashboardSort = "recent" | "modified" | "title" | "created";
-export const SORT_STORAGE_KEY = "markdoc:dashboardSort";
-const SORT_OPTIONS: { value: DashboardSort; label: string }[] = [
-  { value: "recent", label: "Recently opened" },
-  { value: "modified", label: "Last modified" },
-  { value: "title", label: "Title A–Z" },
-  { value: "created", label: "Created" },
-];
+function readSortCookie(): string | null {
+  const prefix = `${SORT_COOKIE}=`;
+  const part = document.cookie.split("; ").find((c) => c.startsWith(prefix));
+  return part ? decodeURIComponent(part.slice(prefix.length)) : null;
+}
 
-function isDashboardSort(v: unknown): v is DashboardSort {
-  return SORT_OPTIONS.some((o) => o.value === v);
+function writeSortCookie(sort: DashboardSort) {
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${SORT_COOKIE}=${sort}; Path=/; Max-Age=${SORT_COOKIE_MAX_AGE}; SameSite=Lax${secure}`;
 }
 
 /** Most recently opened first; never-opened documents follow, most recently edited first. */
@@ -139,6 +138,8 @@ export interface DashboardProps {
   user: { id: string; name: string; login: string | null; image: string | null };
   documents: Doc[];
   githubAvailable: boolean;
+  /** Sort read from the `markdoc.dashboardSort` cookie by the server, so the first paint is already in the saved order (#165). */
+  initialSort?: DashboardSort;
 }
 
 type Filter = "all" | "mine" | "shared" | "starred" | "trash";
@@ -197,7 +198,7 @@ function StorageBadge({ doc }: { doc: Doc }) {
   );
 }
 
-export function Dashboard({ user, documents: initialDocuments, githubAvailable }: DashboardProps) {
+export function Dashboard({ user, documents: initialDocuments, githubAvailable, initialSort = DEFAULT_DASHBOARD_SORT }: DashboardProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -283,19 +284,26 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable }
     [],
   );
 
-  // Sort is remembered per browser. Start with the default so server and client markup match, then read storage.
-  const [sort, setSort] = useState<DashboardSort>("recent");
+  // Sort is remembered per browser in a cookie the server reads (`initialSort`), so the markup already
+  // has the saved order and the select's value. localStorage is the fallback for browsers that stored
+  // the sort before the cookie existed: when no cookie is set yet, adopt the stored value and write the
+  // cookie so the next load is right from the first paint.
+  const [sort, setSort] = useState<DashboardSort>(initialSort);
   useEffect(() => {
     try {
+      if (readSortCookie() !== null) return;
       const saved = window.localStorage.getItem(SORT_STORAGE_KEY);
-      if (isDashboardSort(saved)) setSort(saved);
+      if (!isDashboardSort(saved)) return;
+      writeSortCookie(saved);
+      setSort(saved);
     } catch {
-      // storage unavailable: keep the default
+      // storage unavailable: keep the server's value
     }
   }, []);
   const changeSort = (next: DashboardSort) => {
     setSort(next);
     try {
+      writeSortCookie(next);
       window.localStorage.setItem(SORT_STORAGE_KEY, next);
     } catch {
       // ignore
