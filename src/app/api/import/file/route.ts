@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, readJson, requireScope, requireUser, HttpError } from "@/server/http";
+import { handler, json, readJson, requireCanCreateDocuments, requireUser, HttpError } from "@/server/http";
 import { normalizeMime } from "@/server/assets";
 import { ImportError, importFiles, importText, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, type ImportFileInput, type ImportImageInput } from "@/server/import-file";
 
@@ -28,7 +28,7 @@ function blobs(form: FormData, field: string): File[] {
  */
 export const POST = handler(async (req: Request) => {
   const user = await requireUser();
-  requireScope(user, "full", "import documents");
+  requireCanCreateDocuments(user, "import documents");
   const contentType = normalizeMime(req.headers.get("content-type"));
   try {
     if (contentType === "application/json") {

@@ -119,6 +119,15 @@ export function requireScope(user: Actor, minimum: TokenScope, action?: string):
   if (!scopeSatisfies(user.scope, minimum)) throw scopeError(user.scope, minimum, action);
 }
 
+/**
+ * Refuse when the caller is a token that may not mint documents: below `full` scope, or restricted to
+ * a document list (a new document would sit outside it). Create, import, duplicate and copy-version go through here.
+ */
+export function requireCanCreateDocuments(user: Actor, action = "create documents"): void {
+  requireScope(user, "full", action);
+  if (user.documentIds?.length) throw new HttpError(403, `This token is restricted to specific documents; create an unrestricted token at /settings to ${action}`);
+}
+
 /** True when the token may see this document (no restriction, or the id is on its list). Sessions see everything. */
 export function tokenAllowsDocument(user: Actor | null | undefined, docId: string): boolean {
   if (!user?.documentIds?.length) return true;

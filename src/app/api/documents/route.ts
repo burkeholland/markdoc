@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, HttpError, json, readJson, requireScope, requireUser, tokenAllowsDocument } from "@/server/http";
+import { handler, HttpError, json, readJson, requireCanCreateDocuments, requireUser, tokenAllowsDocument } from "@/server/http";
 import { createDocument, listDocumentsForUser, listTrashForUser, searchDocumentsForUser } from "@/server/documents";
 import { applyTemplate, getTemplate } from "@/lib/templates";
 
@@ -49,8 +49,7 @@ const createSchema = z.object({
 
 export const POST = handler(async (req: Request) => {
   const user = await requireUser();
-  requireScope(user, "full", "create documents");
-  if (user.documentIds?.length) throw new HttpError(403, "This token is restricted to specific documents; create an unrestricted token at /settings to create documents");
+  requireCanCreateDocuments(user);
   const body = await readJson(req, (d) => createSchema.parse(d ?? {}));
   let title = body.title;
   let content = body.content;

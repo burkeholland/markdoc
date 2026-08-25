@@ -26,6 +26,8 @@ const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const document = await import("@/app/api/documents/[id]/route");
 const documents = await import("@/app/api/documents/route");
 const presence = await import("@/app/api/agent/documents/[id]/presence/route");
+const duplicate = await import("@/app/api/documents/[id]/duplicate/route");
+const star = await import("@/app/api/documents/[id]/star/route");
 const me = await import("@/app/api/me/route");
 const tokens = await import("@/app/api/tokens/route");
 
@@ -95,6 +97,12 @@ describe("a read token", () => {
     const create = await as(readToken, () => documents.POST(jsonReq(`/api/documents`, "POST", { title: "Nope" })));
     expect(create.status).toBe(403);
     expect(((await create.json()) as Err).error).toMatch(/read-scoped.*create documents/);
+    // Copying is creating; starring is a write.
+    const copy = await as(readToken, () => duplicate.POST(jsonReq(`/api/documents/${d1}/duplicate`, "POST"), params(d1)));
+    expect(copy.status).toBe(403);
+    expect(((await copy.json()) as Err).error).toMatch(/read-scoped.*copy documents/);
+    expect((await as(readToken, () => star.GET(jsonReq(`/api/documents/${d1}/star`, "GET"), params(d1)))).status).toBe(200);
+    expect((await as(readToken, () => star.PUT(jsonReq(`/api/documents/${d1}/star`, "PUT"), params(d1)))).status).toBe(403);
     // Nothing changed.
     const after = await as(readToken, () => content.GET(jsonReq(`/api/documents/${d1}/content`, "GET"), params(d1)));
     expect(((await after.json()) as { content: string }).content).toContain("Alpha");
@@ -150,6 +158,10 @@ describe("a token restricted to one document", () => {
     // It cannot mint new documents either: they would be outside its list.
     const create = await as(d1Token, () => documents.POST(jsonReq(`/api/documents`, "POST", { title: "Three" })));
     expect(create.status).toBe(403);
+    expect(((await create.json()) as Err).error).toMatch(/restricted to specific documents/);
+    const copy = await as(d1Token, () => duplicate.POST(jsonReq(`/api/documents/${d1}/duplicate`, "POST"), params(d1)));
+    expect(copy.status).toBe(403);
+    expect((await as(commentToken, () => star.PUT(jsonReq(`/api/documents/${d1}/star`, "PUT"), params(d1)))).status).toBe(200);
   });
 });
 

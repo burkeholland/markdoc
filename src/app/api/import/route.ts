@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, readJson, requireScope, requireUser, HttpError } from "@/server/http";
+import { handler, json, readJson, requireCanCreateDocuments, requireUser, HttpError } from "@/server/http";
 import { createDocument, getGitHubToken, titleFromContent } from "@/server/documents";
 import { githubClient, readGistFile, readRepoFile } from "@/server/github";
 
@@ -17,7 +17,7 @@ const schema = z.discriminatedUnion("source", [
 /** Create a document backed by an existing gist or repository file. */
 export const POST = handler(async (req: Request) => {
   const user = await requireUser();
-  requireScope(user, "full", "import documents");
+  requireCanCreateDocuments(user, "import documents");
   const body = await readJson(req, (d) => schema.parse(d));
   const token = await getGitHubToken(user.id);
   if (!token) throw new HttpError(400, "No GitHub token. Sign in with GitHub.");

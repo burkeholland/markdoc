@@ -1,4 +1,4 @@
-import { handler, json, requireUser } from "@/server/http";
+import { handler, json, requireUser, tokenAllowsDocument } from "@/server/http";
 import { listNotifications } from "@/server/notifications";
 import { toDto } from "@/app/api/notifications/route";
 
@@ -7,6 +7,6 @@ export const GET = handler(async () => {
   const user = await requireUser();
   if (!user.login) return json({ items: [], unreadCount: 0, mentions: [] });
   const page = await listNotifications(user.login, { unread: true, kind: "mention" });
-  const items = page.items.map(toDto);
-  return json({ items, unreadCount: page.unreadCount, mentions: items.map((n) => ({ ...n, commentId: n.refId, byLogin: n.actorLogin })) });
+  const items = page.items.filter((n) => tokenAllowsDocument(user, n.documentId)).map(toDto);
+  return json({ items, unreadCount: user.documentIds?.length ? items.length : page.unreadCount, mentions: items.map((n) => ({ ...n, commentId: n.refId, byLogin: n.actorLogin })) });
 });

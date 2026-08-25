@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, requireUser } from "@/server/http";
+import { handler, json, requireUser, tokenAllowsDocument } from "@/server/http";
 import { listNotifications, type NotificationItem } from "@/server/notifications";
 import type { NotificationKind } from "@/server/db/schema";
 
@@ -31,5 +31,7 @@ export const GET = handler(async (req: Request) => {
     kind: kindParam && (KINDS as string[]).includes(kindParam) ? kindParam : undefined,
   });
   const page = await listNotifications(user.login, { unread, limit, kind });
-  return json({ items: page.items.map(toDto), unreadCount: page.unreadCount });
+  // A document-restricted token only hears about its documents.
+  const items = page.items.filter((n) => tokenAllowsDocument(user, n.documentId)).map(toDto);
+  return json({ items, unreadCount: user.documentIds?.length ? items.filter((n) => !n.readAt).length : page.unreadCount });
 });
