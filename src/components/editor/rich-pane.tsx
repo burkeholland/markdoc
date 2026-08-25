@@ -24,9 +24,11 @@ export interface RichPaneProps {
   onMarkdownFileDrop?: (file: File, pos: number) => void;
   /** Slash command menu plumbing (stable object; see SlashMenuController). */
   slashMenu?: SlashMenuHandlers;
+  /** Keep the pane mounted but not displayed (the shell shows its server-rendered stand-in meanwhile). */
+  hidden?: boolean;
 }
 
-export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop, slashMenu }: RichPaneProps) {
+export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop, slashMenu, hidden = false }: RichPaneProps) {
   // Source offset of the code pane's cursor while the code pane is active (for the focus block).
   const focusSource = useSessionValue(session, (s) => (s.activeSurface === "code" ? s.localCursor.code : null));
   const host = useRef<HTMLDivElement>(null);
@@ -94,6 +96,6 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     if (viewRef.current) refreshRichHighlights(viewRef.current);
   }, [focusSource]);
 
-  return <div ref={host} className="relative h-full min-h-0 w-full" data-testid="rich-pane" />;
+  return <div ref={host} className={hidden ? "relative hidden h-full min-h-0 w-full" : "relative h-full min-h-0 w-full"} data-testid="rich-pane" />;
 }
 

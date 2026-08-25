@@ -972,20 +972,19 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onAskAgent={openAskAgent} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
                     <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} />
-                    <div className={cn("h-full min-h-0", showRichPlaceholder && "hidden")}>
-                      <RichPane
-                        session={session}
-                        onReady={onRichReady}
-                        onSelection={onRichSelection}
-                        onHighlightClick={onHighlightClick}
-                        onLinkShortcut={openLink}
-                        onCommentShortcut={startComment}
-                        uploadImage={uploadImage}
-                        onImageError={onImageError}
-                        onMarkdownFileDrop={onRichFileDrop}
-                        slashMenu={slashMenu.handlers}
-                      />
-                    </div>
+                    <RichPane
+                      session={session}
+                      hidden={showRichPlaceholder}
+                      onReady={onRichReady}
+                      onSelection={onRichSelection}
+                      onHighlightClick={onHighlightClick}
+                      onLinkShortcut={openLink}
+                      onCommentShortcut={startComment}
+                      uploadImage={uploadImage}
+                      onImageError={onImageError}
+                      onMarkdownFileDrop={onRichFileDrop}
+                      slashMenu={slashMenu.handlers}
+                    />
                   </div>
                 </div>
               </>
