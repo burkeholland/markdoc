@@ -10,6 +10,8 @@
 #      listens on :<Port> with everything already compiled (~1-2 s), live.json points at the twin.
 # Rollback: anything that fails before step 3 leaves the old server running untouched (gap 0) and prints
 # ROLLBACK REASON; a failed handover restarts the old worktree with start-live.ps1.
+# Holds <DataRoot>\promote.lock from the first change to the twin until exit so watchdog.ps1 (every minute)
+# never restarts a server this script is stopping on purpose.
 param(
   [Parameter(Mandatory = $true)][string]$Sha,
   # Live worktree; defaults to live.json's root, else the sibling ../markdoc-live (see common.ps1).
@@ -37,6 +39,8 @@ $TwinLogPath = Get-LiveLogPath -Root $Twin -DataRoot $DataRoot
 $Twin = Get-LiveTwinRoot -Root $Root
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
 $standbyBase = "http://127.0.0.1:$StandbyPort"
+# The watchdog ignores a lock older than 10 min, so a crashed promote cannot block it for good.
+$lockPath = Join-Path $DataRoot 'promote.lock'
 
 function Invoke-Git {
   param([string]$In, [Parameter(ValueFromRemainingArguments = $true)][string[]]$GitArgs)
@@ -84,7 +88,8 @@ function Start-Standby {
   $env:PORT = "$Port"
   $env:STANDBY_PORT = "$StandbyPort"
   try {
-    $cmdLine = '/d /c "npm run dev >> "' + $TwinLogPath + '" 2>&1"'
+    # run-live.cmd: both streams to the log, `==== exit code N` marker when the process ends (it becomes the live server).
+    $cmdLine = '/d /c ""' + (Join-Path $PSScriptRoot 'run-live.cmd') + '" "' + $TwinLogPath + '""'
     Write-Step "starting standby 'npm run dev' in $Twin on 127.0.0.1:$StandbyPort (log: $TwinLogPath)"
     return (Start-Process -FilePath "$env:ComSpec" -ArgumentList $cmdLine -WorkingDirectory $Twin -WindowStyle Hidden -PassThru)
   } finally {
@@ -163,67 +168,74 @@ if ($dirty.Count -gt 0) {
 $previous = (Invoke-Git -In $Root rev-parse HEAD) | Select-Object -First 1
 Write-Step "promoting $previous -> $target (live: $Root, standby: $Twin)"
 
-# 1. the twin: a second worktree of the same repo, detached, with its own node_modules.
-if (-not (Test-Path (Join-Path $Twin 'package.json'))) {
-  Write-Step "creating twin worktree $Twin"
-  Invoke-Git -In $Root worktree add --detach $Twin $target | Out-Null
-  Invoke-NpmCi -In $Twin
-}
-$twinDirty = @(Invoke-Git -In $Twin status --porcelain --untracked-files=no)
-if ($twinDirty.Count -gt 0) {
-  Write-Step "twin worktree $Twin has local changes to tracked files; refusing to promote:`n$($twinDirty -join "`n")"
-  exit 1
-}
-Stop-LiveProcesses -Root $Twin
-$twinPrevious = (Invoke-Git -In $Twin rev-parse HEAD) | Select-Object -First 1
-Write-Step "git checkout --detach $target in $Twin"
-Invoke-Git -In $Twin checkout --detach $target | Out-Null
-$depsChanged = @(Invoke-Git -In $Twin diff --name-only $twinPrevious $target -- package.json package-lock.json).Count -gt 0
-if ($depsChanged -or -not (Test-Path (Join-Path $Twin 'node_modules\next\package.json'))) { Invoke-NpmCi -In $Twin } else { Write-Step 'dependencies unchanged; skipping npm ci' }
-Remove-NextCache -Root $Twin
-$envFile = Join-Path $Root '.env.local'
-if (Test-Path -LiteralPath $envFile) { Copy-Item -LiteralPath $envFile -Destination (Join-Path $Twin '.env.local') -Force }
-else { Write-Step "no .env.local in $Root; the standby starts with the environment only" }
+$lockDir = Split-Path -Parent $lockPath
+if (-not (Test-Path -LiteralPath $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
+Set-Content -LiteralPath $lockPath -Value ("pid={0} sha={1} started={2}" -f $PID, $target, (Get-Date -Format 's')) -Encoding UTF8
+try {
+  # 1. the twin: a second worktree of the same repo, detached, with its own node_modules.
+  if (-not (Test-Path (Join-Path $Twin 'package.json'))) {
+    Write-Step "creating twin worktree $Twin"
+    Invoke-Git -In $Root worktree add --detach $Twin $target | Out-Null
+    Invoke-NpmCi -In $Twin
+  }
+  $twinDirty = @(Invoke-Git -In $Twin status --porcelain --untracked-files=no)
+  if ($twinDirty.Count -gt 0) {
+    Write-Step "twin worktree $Twin has local changes to tracked files; refusing to promote:`n$($twinDirty -join "`n")"
+    exit 1
+  }
+  Stop-LiveProcesses -Root $Twin
+  $twinPrevious = (Invoke-Git -In $Twin rev-parse HEAD) | Select-Object -First 1
+  Write-Step "git checkout --detach $target in $Twin"
+  Invoke-Git -In $Twin checkout --detach $target | Out-Null
+  $depsChanged = @(Invoke-Git -In $Twin diff --name-only $twinPrevious $target -- package.json package-lock.json).Count -gt 0
+  if ($depsChanged -or -not (Test-Path (Join-Path $Twin 'node_modules\next\package.json'))) { Invoke-NpmCi -In $Twin } else { Write-Step 'dependencies unchanged; skipping npm ci' }
+  Remove-NextCache -Root $Twin
+  $envFile = Join-Path $Root '.env.local'
+  if (Test-Path -LiteralPath $envFile) { Copy-Item -LiteralPath $envFile -Destination (Join-Path $Twin '.env.local') -Force }
+  else { Write-Step "no .env.local in $Root; the standby starts with the environment only" }
 
-# 2. standby up and warm while the old server keeps serving.
-$proc = Start-Standby
-Write-Step "standby launcher PID $($proc.Id)"
-$result = Wait-LiveStartup -Port $StandbyPort -TimeoutSec $TimeoutSec -MinWaitSec $MinWaitSec -Process $proc -LogPath $TwinLogPath
-$reason = ''
-if (-not $result.Healthy) { $reason = "standby never healthy: $($result.Reason)" }
-else {
-  Write-Step "standby healthy after $($result.Elapsed)s; warming routes"
-  $reason = Invoke-WarmUp
-}
-if ($reason) {
-  Write-Step "promotion of $target FAILED before the handover; the live server on :$Port was never stopped"
+  # 2. standby up and warm while the old server keeps serving.
+  $proc = Start-Standby
+  Write-Step "standby launcher PID $($proc.Id)"
+  $result = Wait-LiveStartup -Port $StandbyPort -TimeoutSec $TimeoutSec -MinWaitSec $MinWaitSec -Process $proc -LogPath $TwinLogPath
+  $reason = ''
+  if (-not $result.Healthy) { $reason = "standby never healthy: $($result.Reason)" }
+  else {
+    Write-Step "standby healthy after $($result.Elapsed)s; warming routes"
+    $reason = Invoke-WarmUp
+  }
+  if ($reason) {
+    Write-Step "promotion of $target FAILED before the handover; the live server on :$Port was never stopped"
+    Write-Step "ROLLBACK REASON: $reason"
+    Show-LogTail -LogPath $TwinLogPath -Lines 30
+    Stop-LiveProcesses -Root $Twin
+    exit 1
+  }
+
+  # 3. handover.
+  $swapStarted = Get-Date
+  $healthy = $false
+  if (Invoke-Takeover) {
+    $up = Wait-LiveStartup -Port $Port -TimeoutSec 30 -MinWaitSec 0 -Process $proc -LogPath $TwinLogPath -PollSec 1
+    $healthy = $up.Healthy
+    if (-not $healthy) { $reason = "after takeover: $($up.Reason)" }
+  } else { $reason = 'standby did not take over the port' }
+
+  if ($healthy) {
+    Write-LiveState -Root $Twin -Sha $target -Port $Port -DataRoot $DataRoot
+    Write-Step ("PROMOTED: live server on :{0} now runs {1} from {2} (was {3} in {4}); handover {5:n1}s" -f $Port, $target, $Twin, $previous, $Root, ((Get-Date) - $swapStarted).TotalSeconds)
+    exit 0
+  }
+
+  Write-Step "promotion of $target FAILED during the handover; restarting $previous in $Root"
   Write-Step "ROLLBACK REASON: $reason"
   Show-LogTail -LogPath $TwinLogPath -Lines 30
-  Stop-LiveProcesses -Root $Twin
+  if (Restore-OldServer) {
+    Write-Step "ROLLED BACK: live server on :$Port runs $previous again from $Root"
+  } else {
+    Write-Step "ROLLBACK FAILED: live server is down; inspect $LogPath"
+  }
   exit 1
+} finally {
+  Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
 }
-
-# 3. handover.
-$swapStarted = Get-Date
-$healthy = $false
-if (Invoke-Takeover) {
-  $up = Wait-LiveStartup -Port $Port -TimeoutSec 30 -MinWaitSec 0 -Process $proc -LogPath $TwinLogPath -PollSec 1
-  $healthy = $up.Healthy
-  if (-not $healthy) { $reason = "after takeover: $($up.Reason)" }
-} else { $reason = 'standby did not take over the port' }
-
-if ($healthy) {
-  Write-LiveState -Root $Twin -Sha $target -Port $Port -DataRoot $DataRoot
-  Write-Step ("PROMOTED: live server on :{0} now runs {1} from {2} (was {3} in {4}); handover {5:n1}s" -f $Port, $target, $Twin, $previous, $Root, ((Get-Date) - $swapStarted).TotalSeconds)
-  exit 0
-}
-
-Write-Step "promotion of $target FAILED during the handover; restarting $previous in $Root"
-Write-Step "ROLLBACK REASON: $reason"
-Show-LogTail -LogPath $TwinLogPath -Lines 30
-if (Restore-OldServer) {
-  Write-Step "ROLLED BACK: live server on :$Port runs $previous again from $Root"
-} else {
-  Write-Step "ROLLBACK FAILED: live server is down; inspect $LogPath"
-}
-exit 1
