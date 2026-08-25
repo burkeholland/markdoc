@@ -19,6 +19,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Content, suggestions and comments](#content-suggestions-and-comments)
   - [Agent requests](#agent-requests)
   - [Agent presence and watch](#agent-presence-and-watch)
+  - [Webhooks](#webhooks)
   - [Versions, activity and export](#versions-activity-and-export)
   - [Images](#images)
   - [Sharing and GitHub](#sharing-and-github)
@@ -181,7 +182,7 @@ The first time someone without a token clicks **Ask an agent**, the dialog shows
 
 The agent side is always the same four moves; only the middle one changes with the request's `mode`.
 
-1. **Find work.** `markdoc_list_requests` with no arguments lists `open` requests (`status` can also be `claimed`, `done` or `cancelled`; `limit` caps the list at 1–200). Each item carries `id`, `documentId`, `documentTitle`, `userName`, `instruction`, `selection` (`{ from, to, quote }`, or `null` for the whole document), `mode`, `status`, `claimedBy` and `createdAt`. There is no push channel to the agent — check when the human asks, or poll on a timer; the human's side updates live.
+1. **Find work.** `markdoc_list_requests` with no arguments lists `open` requests (`status` can also be `claimed`, `done` or `cancelled`; `limit` caps the list at 1–200). Each item carries `id`, `documentId`, `documentTitle`, `userName`, `instruction`, `selection` (`{ from, to, quote }`, or `null` for the whole document), `mode`, `status`, `claimedBy` and `createdAt`. For an interactive session, check when the human asks or poll with `markdoc_watch`; an unattended agent (a GitHub Actions job, a bot) can have the same events pushed to it instead — see [Webhooks](#webhooks). The human's side updates live.
 2. **Claim it.** `markdoc_claim_request { documentId, requestId }`. Claiming a request you already hold is a no-op; one that another agent holds, or that was cancelled, answers `409`. Sending `markdoc_suggest` or `markdoc_comment` with the `requestId` claims it implicitly, but claim first so the pill shows your name while you read.
 3. **Do the work** with the tools you already use, matching the mode the human chose:
    - `suggest` → `markdoc_suggest` with `requestId`.
@@ -298,6 +299,24 @@ Request status is also mirrored into the live document (`meta.agentRequests`), w
 
 Agents are published into the document's awareness by the server, so the bot avatar, its status, the "Agent" badge in the presence popover and its caret appear in every open browser without any client-side polling. The caret is sent as the same Yjs relative positions browsers publish, so it follows the text as people edit around it.
 
+### Webhooks
+
+Instead of holding a 55 s long-poll open forever, an unattended agent can have the events pushed to it. **Settings → Agents & API access → Webhooks → Add webhook**: a URL, the events to deliver (`request.created`, `mention`, `comment.added`, `comment.replied`, `review.created`, `suggestion.accepted` / `suggestion.rejected`, `content.changed`) and optionally the documents to watch (default: every document you can see). The signing secret is shown once. The list shows the last delivery (`200 · 2 min ago` / `failed ×3`) and **Send test** posts a `test` event.
+
+Each delivery is `POST <url>` with the same JSON event `GET /api/agent/documents/:id/events` returns, plus `documentId`, `documentTitle` and `cursor` (the long-poll cursor after this event, so a receiver can fall back to polling from where the pushes left off). Headers: `X-Markdoc-Event` (the type), `X-Markdoc-Delivery` (a UUID, the same across retries), `X-Markdoc-Attempt` and `X-Markdoc-Signature: sha256=<hex HMAC-SHA256 of the raw body with the secret>`. Answer `2xx` within 5 s; anything else is retried after 10 s, 1 min and 10 min, and after 20 consecutive failures the webhook is disabled and you get a `webhook.disabled` notification. Events you caused yourself are delivered too (there is no token to be "self"). Delivery logs are kept for 7 days.
+
+| Method & path | Body / query | Access | Purpose |
+| --- | --- | --- | --- |
+| `GET /api/webhooks`, `POST /api/webhooks` | `{ url, events: [...], documentIds?: [...] \| null }` | session only | List your webhooks with `active`, `failures` and `lastDelivery { status, at, attempt, event }`; add one (`201`, `secret` returned once). Tokens get `403`, like `/api/tokens`. |
+| `DELETE /api/webhooks/:id` | | session only | Remove a webhook. |
+| `POST /api/webhooks/:id/test` | | session only | Send a `test` event once (no retries) and return `{ delivery: { status, ok, durationMs } }`. |
+
+Verifying a delivery in Node:
+
+```js
+const expected = "sha256=" + crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+const ok = expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
+```
 ### Versions, activity and export
 
 | Method & path | Body / query | Access | Purpose |
@@ -339,8 +358,8 @@ Sharing a document with an audience: `/p/:id` is the read-only **reader view** (
 
 | Method & path | Body / query | Access | Purpose |
 | --- | --- | --- | --- |
-| `GET /api/me` | | signed in | Current user, agent name, and for a token its `scope` (`read` / `comment` / `full`) and `documentIds` (`null` = all). |
-| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` (`limit` 1–100; anything else → `400`) | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you), `request.done` (an agent finished a request you made; `actorName` is the agent, `snippet` its summary); `refId` is the thread, reply, suggestion or request id (`<docId>:<login>` for shares). |
+| `GET /api/me` | | signed in | Current user, agent name, for a token its `scope` (`read` / `comment` / `full`) and `documentIds` (`null` = all), and the user's active `webhooks` (`id`, `url`, `events`, `documentIds`; never the secret) so an agent knows events are also pushed somewhere. |
+| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` (`limit` 1–100; anything else → `400`) | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you), `request.done` (an agent finished a request you made; `actorName` is the agent, `snippet` its summary), `webhook.disabled` (a webhook of yours failed 20 deliveries in a row and was turned off; `snippet` is its URL); `refId` is the thread, reply, suggestion or request id (`<docId>:<login>` for shares). |
 | `POST /api/notifications/:id/read` / `POST /api/notifications/read-all` / `POST /api/notifications/thread-read` | `{ documentId, refIds }` for thread-read | signed in | Mark one, all, or everything about the given threads/replies read. |
 | `GET /api/mentions` / `POST /api/mentions/:id/read` | | signed in | **Deprecated, removed next release**: alias of `GET /api/notifications?unread=1&kind=mention` (also returns the old `mentions` array) and of `POST /api/notifications/:id/read`. |
 | `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays?, scope?, documentIds? }` | session only | List your API tokens (each with `scope` and `documentIds`); create one (`201`, the secret is returned once). `scope` is `read`, `comment` or `full` (default `full`); `documentIds` restricts the token to documents you can see (an unknown id → `404`; empty or omitted = all). Tokens cannot call these (`403`), so a leaked token cannot enumerate its siblings. |

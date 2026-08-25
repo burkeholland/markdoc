@@ -181,6 +181,8 @@ export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "sn
       return `shared \u2018${n.documentTitle}\u2019 with you${n.snippet ? ` as ${n.snippet}` : ""}`;
     case "request.done":
       return `finished your request${n.snippet ? `: ${n.snippet}` : ""}`;
+    case "webhook.disabled":
+      return `disabled your webhook after 20 failed deliveries${n.snippet ? ` (${n.snippet})` : ""} \u2014 re-add it in Settings`;
   }
 }
 
@@ -195,4 +197,5 @@ export const KIND_LABEL: Record<NotificationKind, string> = {
   review: "Review",
   share: "Shared",
   "request.done": "Agent done",
+  "webhook.disabled": "Webhook disabled",
 };

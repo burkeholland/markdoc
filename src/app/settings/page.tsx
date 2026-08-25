@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { auth } from "@/auth";
 import { Logo } from "@/components/editor/header";
 import { TokensPanel } from "@/components/settings/tokens-panel";
+import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { listRequestsForUser } from "@/server/agent-requests";
 
@@ -47,6 +48,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <ThemePicker />
         </div>
         <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} hasAgentRequests={requests.length > 0} />
+        <div className="mt-6">
+          <WebhooksPanel />
+        </div>
       </section>
     </main>
   );
