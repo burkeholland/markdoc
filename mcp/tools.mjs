@@ -61,7 +61,7 @@ export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fet
       }
       // Sync refusals (409 with a `status`) are answers, not failures: let publish/pull surface them.
       if (res.status === 409 && data?.status) throw Object.assign(new Error(message), { sync: data });
-      throw new Error(`${method} ${path} failed (${res.status}): ${message}`);
+      throw Object.assign(new Error(`${method} ${path} failed (${res.status}): ${message}${describeIssues(data?.issues)}`), { status: res.status, data });
     }
     if (res.headers.get("content-type")?.includes("application/json")) return JSON.parse(text);
     return text;
@@ -78,6 +78,20 @@ export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fet
 }
 
 const ok = (text, structured) => ({ content: [{ type: "text", text }], ...(structured ? { structuredContent: structured } : {}) });
+
+/**
+ * Zod `issues` from a 400, as " — content: Too big: expected string to have <=2000000 characters (+2 more)":
+ * the path and message of the first issue are what tells a model *why* the request was invalid.
+ * @param {unknown} issues
+ */
+export function describeIssues(issues) {
+  if (!Array.isArray(issues) || issues.length === 0) return "";
+  const [first] = issues;
+  const path = Array.isArray(first?.path) && first.path.length ? first.path.join(".") : "body";
+  const message = typeof first?.message === "string" && first.message ? first.message : JSON.stringify(first);
+  const more = issues.length > 1 ? ` (+${issues.length - 1} more)` : "";
+  return ` — ${path}: ${message}${more}`;
+}
 
 const SYNC_HINT = {
   "remote-ahead": "GitHub has changes the document does not. Call markdoc_pull first (or publish with force: true to overwrite).",
@@ -490,7 +504,7 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_restore_document",
-    { title: "Restore from trash", description: "Take a document the user owns out of the trash so it is listed and editable again.", inputSchema: { id: z.string() }, annotations: ADDITIVE },
+    { title: "Restore from trash", description: "Take a document the user owns out of the trash so it is listed and editable again. An error (409) when the document is not in the trash: nothing changed.", inputSchema: { id: z.string() }, annotations: ADDITIVE },
     async ({ id }) => {
       const res = await api("POST", `/api/documents/${id}/restore`);
       return ok(`Restored "${res.document.title}" (id ${id}). Open it: ${docUrl(id)}`, { id, title: res.document.title, url: docUrl(id) });
