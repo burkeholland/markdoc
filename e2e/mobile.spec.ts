@@ -170,6 +170,17 @@ test.describe("phone", () => {
     expect(await noHorizontalScroll(page)).toBe(true);
     await expect(page.getByTestId("search")).toBeVisible();
     await expect(page.getByTestId("filter-starred")).toBeVisible();
+    // The search ✕ is a finger-sized target on phone, and clears the query.
+    await page.getByTestId("search").fill("zzzzqqq");
+    const clear = page.getByTestId("search-clear");
+    await expect(clear).toBeVisible();
+    const clearBox = (await clear.boundingBox())!;
+    expect(clearBox.width).toBeGreaterThanOrEqual(44);
+    expect(clearBox.height).toBeGreaterThanOrEqual(44);
+    expect(await noHorizontalScroll(page)).toBe(true);
+    await clear.click();
+    await expect(page.getByTestId("search")).toHaveValue("");
+    await expect(page.getByTestId("document-list")).toBeVisible();
     await page.getByTestId("new-from-template").click();
     const dialog = page.getByTestId("template-dialog");
     await expect(dialog).toBeVisible();
