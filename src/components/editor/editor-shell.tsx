@@ -58,6 +58,12 @@ export interface EditorShellProps {
   role: Role;
   user: EditorUser;
   githubAvailable: boolean;
+  /**
+   * Server-rendered HTML of the document, shown in the rich column until the editor holds the
+   * live text, so a long document is readable as soon as the page loads (issue #118). Null when
+   * the document is empty or could not be rendered.
+   */
+  initialHtml?: string | null;
 }
 
 interface Toast {
@@ -71,7 +77,7 @@ type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
 
-export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: EditorShellProps) {
+export function EditorShell({ doc: initialDoc, role, user, githubAvailable, initialHtml = null }: EditorShellProps) {
   const router = useRouter();
   const session = useCollabSession(initialDoc.id, user, role);
   const [doc, setDoc] = useState(initialDoc);
@@ -478,6 +484,11 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // shared document (meta.agentRequests, mirrored by the server) so the pill and toast are realtime.
   const [askAgent, setAskAgent] = useState<{ selection: AskAgentSelection | null } | null>(null);
   const [commentsFocus, setCommentsFocus] = useState<{ tab: "open" | "resolved" | "suggestions"; nonce: number } | null>(null);
+  // A focus request only applies to the panel it opened; once the panel closes, a later reopen picks
+  // its own landing tab (Suggestions in Suggesting mode, #117) instead of replaying the stale request.
+  useEffect(() => {
+    if (sidePanel !== "comments") setCommentsFocus(null);
+  }, [sidePanel]);
   const openAskAgent = useCallback(() => {
     if (!session.canComment) return;
     const range = actions.selectionSourceRange();
@@ -727,6 +738,13 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
   // and renders without the overlay, so only show it after hydration to keep markup in sync.
   const contentReady = useSessionValue(session, (s) => s.localLoaded || s.synced);
   const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  // The rich pane holds the live text once the local copy or the server state put something in
+  // it (the binding rebuilds the ProseMirror document in the same Yjs transaction, before this
+  // value changes) or the server confirmed the document really is empty.
+  const richHasContent = useSessionValue(session, (s) => s.synced || s.ytext.length > 0);
+  // Until then the server-rendered preview stands in for the rich pane; the server and the
+  // hydrating client both render it (the session has no content on either), so markup matches.
+  const showRichPlaceholder = initialHtml !== null && !richHasContent;
   const showLoading = hydrated && !contentReady;
   const showCode = shownLayout !== "rich" && !versionPreview;
   const showRich = shownLayout !== "code" && !versionPreview;
@@ -899,7 +917,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
             <OutlinePanel session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
           )}
           <div className="relative flex min-w-0 flex-1">
-            {showLoading && (
+            {showLoading && !showRichPlaceholder && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                 Loading…
               </div>
@@ -918,7 +936,12 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
               </div>
             ) : (
               <>
-                <div className={cn("flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden")} data-testid="code-column">
+                <div className={cn("relative flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden")} data-testid="code-column">
+                  {showLoading && showRichPlaceholder && (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
+                      Loading…
+                    </div>
+                  )}
                   <div className="min-h-0 flex-1">
                     <CodePane
                       session={session}
@@ -949,11 +972,16 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
                     </Tip>
                   </div>
                   <div ref={setRichScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
+                    {showRichPlaceholder && (
+                      // Read-only stand-in until the live text is in; `inert` keeps its links and headings out of focus and a11y order.
+                      <div className="rich-placeholder reader-body" data-testid="rich-placeholder" aria-hidden="true" inert dangerouslySetInnerHTML={{ __html: initialHtml }} />
+                    )}
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onAskAgent={openAskAgent} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
                     <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} />
                     <RichPane
                       session={session}
+                      hidden={showRichPlaceholder}
                       onReady={onRichReady}
                       onSelection={onRichSelection}
                       onHighlightClick={onHighlightClick}

@@ -19,13 +19,99 @@ function Write-Step {
 function Get-LiveHealth {
   # Returns the parsed /api/health body on HTTP 200, otherwise $null.
   param([int]$Port)
+  $probe = Get-LiveHealthProbe -Port $Port
+  if ($probe.Status -eq 200) { return $probe.Body }
+  return $null
+}
+
+function Get-LiveHealthProbe {
+  # One GET /api/health. Returns @{ Status = <int>; Body = <parsed json or $null>; Error = <string> }.
+  # Status 0 means nothing answered (connection refused / timeout), which is what a starting server does.
+  param([int]$Port)
+  $result = @{ Status = 0; Body = $null; Error = '' }
   try {
     $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/api/health" -TimeoutSec 5
-    if ($resp.StatusCode -eq 200) { return ($resp.Content | ConvertFrom-Json) }
+    $result.Status = [int]$resp.StatusCode
+    if ($result.Status -eq 200) { try { $result.Body = $resp.Content | ConvertFrom-Json } catch { $result.Error = 'body is not JSON' } }
   } catch {
-    $null = $_  # connection refused / timeout while starting is expected
+    $response = $_.Exception.Response
+    if ($response -and $response.StatusCode) { $result.Status = [int]$response.StatusCode }
+    $result.Error = $_.Exception.Message
   }
-  return $null
+  return $result
+}
+
+# Dev-server log lines that mean "Next answered 500 because .next/dev/required-server-files.json does not
+# exist". That file is a production-build artefact `next dev` never writes; the route modules only ask
+# for it when they believe they are not in dev (server/index.ts explains how a custom server gets there).
+$script:ColdStart500Pattern = 'required-server-files\.json'
+
+function Test-ColdStart500Signature {
+  # $true when the log (after its last start marker) carries the cold-start 500 signature.
+  param([string]$LogPath)
+  if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath)) { return $false }
+  $tail = @(Get-Content -LiteralPath $LogPath -Tail 400 -ErrorAction SilentlyContinue)
+  $lastStart = -1
+  for ($i = 0; $i -lt $tail.Count; $i++) { if ($tail[$i] -like '==== start-live *') { $lastStart = $i } }
+  $since = if ($lastStart -ge 0) { $tail[$lastStart..($tail.Count - 1)] } else { $tail }
+  return (@($since | Where-Object { $_ -match $script:ColdStart500Pattern }).Count -gt 0)
+}
+
+function Wait-LiveStartup {
+  # Polls /api/health every 2 s until it answers 200 with ok:true and db:true, the launcher process exits,
+  # or the deadline passes. While starting, "connection refused", timeouts and ANY 5xx count as "still
+  # starting", never as unhealthy: a cold Next.js server compiles the route on the first hit (well over the
+  # probe's 5 s), and the cold-start 500 (see $ColdStart500Pattern) is a 500 with a running, compiling
+  # process behind it. The deadline is at least $MinWaitSec after the process started, whatever $TimeoutSec
+  # says, so a rollback never happens before the server had 90 s to come up.
+  # Returns @{ Healthy = <bool>; Health = <body or $null>; Reason = <string>; Elapsed = <seconds> }.
+  param(
+    [int]$Port,
+    [int]$TimeoutSec = 180,
+    [int]$MinWaitSec = 90,
+    # The launcher (cmd.exe -> npm run dev); when it has exited the server is gone and waiting is pointless.
+    [System.Diagnostics.Process]$Process,
+    # Server log; only read to name the cold-start 500 signature in the reason line.
+    [string]$LogPath,
+    [int]$PollSec = 2
+  )
+  $started = Get-Date
+  $deadline = $started.AddSeconds([Math]::Max($TimeoutSec, $MinWaitSec))
+  $counts = @{}
+  $last = $null
+  $lastStatus = 0
+  $announced5xx = $false
+  while ($true) {
+    Start-Sleep -Seconds $PollSec
+    $probe = Get-LiveHealthProbe -Port $Port
+    $lastStatus = $probe.Status
+    $counts[$lastStatus] = 1 + [int]$counts[$lastStatus]
+    $elapsed = [int]((Get-Date) - $started).TotalSeconds
+    if ($probe.Status -eq 200 -and $probe.Body) {
+      $last = $probe.Body
+      if ($probe.Body.ok -eq $true -and $probe.Body.db -eq $true) {
+        return @{ Healthy = $true; Health = $probe.Body; Reason = "ok:true db:true after ${elapsed}s"; Elapsed = $elapsed }
+      }
+    } elseif ($probe.Status -ge 500 -and -not $announced5xx) {
+      $announced5xx = $true
+      $note = if (Test-ColdStart500Signature -LogPath $LogPath) { ' (cold-start 500: required-server-files.json missing; the process is up and compiling, keep waiting)' } else { '' }
+      Write-Step "/api/health answered $($probe.Status) after ${elapsed}s; treating as still starting$note"
+    }
+    if ($Process -and $Process.HasExited) {
+      return @{ Healthy = $false; Health = $last; Elapsed = $elapsed
+        Reason = "launcher process exited with code $($Process.ExitCode) after ${elapsed}s (server crashed or failed to start)" }
+    }
+    if ((Get-Date) -ge $deadline) { break }
+  }
+  $elapsed = [int]((Get-Date) - $started).TotalSeconds
+  $seen = ($counts.Keys | Sort-Object | ForEach-Object { $label = if ($_ -eq 0) { 'no answer' } else { "HTTP $_" }; "$label x$($counts[$_])" }) -join ', '
+  $why = if ($lastStatus -eq 200 -and $last) { "last body ok=$($last.ok) db=$($last.db)" }
+         elseif ($lastStatus -ge 500 -and (Test-ColdStart500Signature -LogPath $LogPath)) { 'cold-start 500 signature (ENOENT required-server-files.json) never cleared; restarting the process usually fixes it, server/index.ts has the real fix' }
+         elseif ($lastStatus -ge 500) { "last answer HTTP $lastStatus" }
+         elseif ($lastStatus -eq 0) { 'nothing ever listened on the port' }
+         else { "last answer HTTP $lastStatus" }
+  return @{ Healthy = $false; Health = $last; Elapsed = $elapsed
+    Reason = "no ok:true,db:true from /api/health within ${elapsed}s ($seen); $why" }
 }
 
 function Wait-LiveHealth {

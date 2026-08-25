@@ -21,14 +21,39 @@ export class InvalidCursorError extends Error {
   }
 }
 
+/**
+ * Who caused an event. `self` is true when it was the polling token itself (its own append, comment,
+ * review…); such events are dropped unless the watch asks for `includeSelf`. `kind` tells a person's
+ * action from another agent's; `agent` is the token name when `kind` is "agent".
+ */
+export interface EventActor {
+  /** User id, or `agent:<userId>:<tokenName>` for an agent; null when unknown. */
+  id: string | null;
+  name: string;
+  login: string | null;
+  kind: "user" | "agent";
+  agent: string | null;
+  self: boolean;
+}
+
 export type AgentEvent =
-  | { type: "content.changed"; documentId: string; contentHash: string; previousHash: string | null; diff: string | null; truncated: boolean; at: string }
-  | { type: "comment.added" | "comment.replied" | "comment.resolved"; documentId: string; threadId: string | null; author: string; authorKind: string; body: string; quote: string | null; at: string }
-  | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; by: string; byKind: string; author: string | null; quote: string | null; at: string }
-  | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; at: string }
-  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; at: string }
-  | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; at: string }
-  | { type: "activity"; documentId: string; action: string; actor: string; actorKind: string; detail: Record<string, unknown>; at: string };
+  | { type: "content.changed"; documentId: string; contentHash: string; previousHash: string | null; diff: string | null; truncated: boolean; actor: EventActor; at: string }
+  | { type: "comment.added" | "comment.replied" | "comment.resolved"; documentId: string; threadId: string | null; author: string; authorKind: string; body: string; quote: string | null; actor: EventActor; at: string }
+  | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
+  | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; actor: EventActor; at: string }
+  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; actor: EventActor; at: string }
+  | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; actor: EventActor; at: string }
+  | { type: "activity"; documentId: string; action: string; actor: EventActor; actorName: string; actorKind: string; detail: Record<string, unknown>; at: string };
+
+export interface WatchOptions {
+  /** Deliver the polling token's own events too (default: they are skipped). */
+  includeSelf?: boolean;
+}
+
+/** The actor id an agent token writes activity rows under (see activityActor in activity.ts). */
+export function selfActorId(user: SessionUser & { agent?: string }): string | null {
+  return user.agent ? `agent:${user.id}:${user.agent}` : null;
+}
 
 /** What the opaque cursor carries: activity/notification/request high-water marks plus the last seen content hash. */
 interface CursorState {
@@ -67,14 +92,33 @@ export function decodeCursor(cursor: string | null | undefined): CursorState | n
 // --- Wake-ups -----------------------------------------------------------------
 
 const GLOBAL = "*";
+/** A writer as known at write time: an activity actor id/name/kind (the token's `agent:<userId>:<name>` id for agents). */
+export interface WriterRef {
+  id: string | null;
+  name: string;
+  kind: "user" | "agent";
+}
+/** One API write that moved the clean-text hash of a document. */
+interface ContentWrite {
+  from: string;
+  to: string;
+  writer: WriterRef;
+}
 interface SharedState {
   seqs: Map<string, number>;
   waiters: Map<string, Set<() => void>>;
   textCache: Map<string, Map<string, string>>;
+  /** Recent hash transitions caused by API writes, oldest first. */
+  writes: Map<string, ContentWrite[]>;
+  /** The last person seen typing in the editor (WebSocket), per document. */
+  typists: Map<string, WriterRef>;
 }
 const g = globalThis as typeof globalThis & { __markdocAgentEvents?: SharedState };
-const shared: SharedState = (g.__markdocAgentEvents ??= { seqs: new Map(), waiters: new Map(), textCache: new Map() });
-const { seqs, waiters, textCache } = shared;
+const shared: SharedState = (g.__markdocAgentEvents ??= { seqs: new Map(), waiters: new Map(), textCache: new Map(), writes: new Map(), typists: new Map() });
+shared.writes ??= new Map();
+shared.typists ??= new Map();
+const { seqs, waiters, textCache, writes, typists } = shared;
+const WRITES_PER_DOC = 32;
 
 function bump(key: string) {
   seqs.set(key, (seqs.get(key) ?? 0) + 1);
@@ -143,6 +187,53 @@ export function unifiedDiff(before: string, after: string, title = "document.md"
   return { diff: lines.slice(0, DIFF_MAX_LINES).join("\n") + `\n… ${lines.length - DIFF_MAX_LINES} more lines`, truncated: true };
 }
 
+// --- Who wrote what ------------------------------------------------------------
+
+/**
+ * An API write landed (see mutateLiveDoc): remember that `writer` moved the clean text from `before` to
+ * `after`, so a watch can tell its own edits from everyone else's. Text changes that do not move the hash
+ * (comments, pending suggestions) are ignored. Both texts are cached for diffs.
+ */
+export function noteContentWrite(docId: string, writer: WriterRef, before: string, after: string) {
+  const from = contentHash(before);
+  const to = contentHash(after);
+  if (from === to) return;
+  rememberText(docId, from, before);
+  rememberText(docId, to, after);
+  let list = writes.get(docId);
+  if (!list) {
+    list = [];
+    writes.set(docId, list);
+  }
+  list.push({ from, to, writer });
+  while (list.length > WRITES_PER_DOC) list.shift();
+}
+
+/** Someone typed in the editor over WebSocket: remembered as the likely author of content changes no API write explains. */
+export function noteTypist(docId: string, writer: WriterRef) {
+  typists.set(docId, writer);
+}
+
+/**
+ * Who changed the clean text from `fromHash` to `toHash`, as far as API writes tell: `{ selfOnly: true }`
+ * when every recorded transition between the two was made by `selfId`; otherwise the most recent writer
+ * that was not self — falling back to the last person seen typing when a change has no API record.
+ */
+function explainContentChange(docId: string, fromHash: string, toHash: string, selfId: string | null): { selfOnly: boolean; writer: WriterRef | null } {
+  const list = writes.get(docId) ?? [];
+  const seen = new Set<string>();
+  let hash = toHash;
+  for (let i = list.length - 1; i >= 0 && hash !== fromHash; i--) {
+    const w = list[i];
+    if (w.to !== hash || seen.has(hash)) continue;
+    seen.add(hash);
+    if (selfId === null || w.writer.id !== selfId) return { selfOnly: false, writer: w.writer };
+    hash = w.from;
+  }
+  if (hash === fromHash) return { selfOnly: true, writer: null };
+  return { selfOnly: false, writer: typists.get(docId) ?? null };
+}
+
 // --- Event collection ---------------------------------------------------------
 
 /** The agent slug when the snippet mentions one of `login`'s agents (`@login/Agent`), else null. */
@@ -150,10 +241,49 @@ function mentionedAgent(snippet: string, login: string): string | null {
   return parseAgentMentions(snippet).find((m) => m.login === login)?.agent ?? null;
 }
 
-function activityToEvent(row: typeof schema.activity.$inferSelect): AgentEvent | null {
+/** Actor id → user id: plain ids are users, agents are `agent:<userId>:<name>`. */
+function userIdOf(actorId: string | null): string | null {
+  if (!actorId) return null;
+  const m = /^agent:([^:]+):/.exec(actorId);
+  return m ? m[1] : actorId;
+}
+
+function agentOf(actorId: string | null, kind: string): string | null {
+  if (kind !== "agent") return null;
+  const m = /^agent:[^:]+:(.+)$/.exec(actorId ?? "");
+  return m ? m[1] : null;
+}
+
+/** Build the actor of an event from an activity-style writer; `login` is filled in later by `resolveLogins`. */
+function eventActor(writer: WriterRef | null, selfId: string | null, login: string | null = null): EventActor {
+  if (!writer) return { id: null, name: "someone", login: null, kind: "user", agent: null, self: false };
+  const kind = writer.kind === "agent" ? "agent" : "user";
+  return { id: writer.id, name: writer.name, login, kind, agent: agentOf(writer.id, kind), self: selfId !== null && writer.id === selfId };
+}
+
+/** Fill `actor.login` on events whose actor is a known user or an agent of one, with one lookup. */
+async function resolveLogins(events: AgentEvent[]) {
+  const ids = new Set<string>();
+  for (const e of events) {
+    const uid = e.actor.login === null ? userIdOf(e.actor.id) : null;
+    if (uid) ids.add(uid);
+  }
+  if (ids.size === 0) return;
+  const db = await getDb();
+  const users = await db.select({ id: schema.users.id, login: schema.users.login }).from(schema.users).where(inArray(schema.users.id, [...ids]));
+  const byId = new Map(users.map((u) => [u.id, u.login ?? null]));
+  for (const e of events) {
+    if (e.actor.login !== null) continue;
+    const uid = userIdOf(e.actor.id);
+    if (uid && byId.has(uid)) e.actor.login = byId.get(uid) ?? null;
+  }
+}
+
+function activityToEvent(row: typeof schema.activity.$inferSelect, selfId: string | null): AgentEvent | null {
   const d = (row.detail ?? {}) as Record<string, unknown>;
   const at = row.createdAt.toISOString();
-  const base = { documentId: row.documentId, at };
+  const actor = eventActor({ id: row.actorId, name: row.actorName, kind: row.actorKind }, selfId);
+  const base = { documentId: row.documentId, actor, at };
   switch (row.action) {
     case "edit":
       return null; // content.changed carries the diff
@@ -199,8 +329,21 @@ function activityToEvent(row: typeof schema.activity.$inferSelect): AgentEvent |
         quote: typeof d.quote === "string" ? d.quote : null,
       };
     default:
-      return { type: "activity", ...base, action: row.action, actor: row.actorName, actorKind: row.actorKind, detail: d };
+      return { type: "activity", ...base, action: row.action, actorName: row.actorName, actorKind: row.actorKind, detail: d };
   }
+}
+
+/**
+ * The actor of a mention notification. Mentions are stored under the author's login with the author's
+ * display name — the token name when an agent wrote the comment — so the token's own comments are `self`.
+ */
+function mentionActor(n: { actorLogin: string | null; actorName: string | null }, user: SessionUser & { agent?: string }): EventActor {
+  const self = !!user.agent && !!n.actorLogin && n.actorLogin.toLowerCase() === (user.login ?? "").toLowerCase() && n.actorName === user.agent;
+  return { id: self ? selfActorId(user) : null, name: n.actorName ?? n.actorLogin ?? "someone", login: n.actorLogin, kind: self ? "agent" : "user", agent: self ? user.agent! : null, self };
+}
+
+function keep(events: AgentEvent[], opts: WatchOptions): AgentEvent[] {
+  return opts.includeSelf ? events : events.filter((e) => !e.actor.self);
 }
 
 export interface EventsPage {
@@ -213,7 +356,7 @@ export interface EventsPage {
  * token's user, and a `content.changed` with a diff when the clean text hash moved. With no cursor, only
  * the current cursor is returned so the caller can start watching from "now".
  */
-export async function collectDocumentEvents(docId: string, user: SessionUser, cursor: CursorState | null, now = new Date()): Promise<EventsPage> {
+export async function collectDocumentEvents(docId: string, user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   // Lazy: livedoc pulls in http.ts (next/headers), which must not load in the custom server's module graph.
   const { readLiveText } = await import("@/server/livedoc");
   const live = await readLiveText(docId);
@@ -222,6 +365,7 @@ export async function collectDocumentEvents(docId: string, user: SessionUser, cu
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: hash }), events: [] };
 
   const db = await getDb();
+  const selfId = selfActorId(user);
   const events: AgentEvent[] = [];
   const next: CursorState = { ...cursor, ids: [...cursor.ids], h: hash };
 
@@ -238,7 +382,7 @@ export async function collectDocumentEvents(docId: string, user: SessionUser, cu
       next.a = ms;
       next.ids = [row.id];
     } else if (ms === next.a && !next.ids.includes(row.id)) next.ids.push(row.id);
-    const ev = activityToEvent(row);
+    const ev = activityToEvent(row, selfId);
     if (ev) events.push(ev);
   }
 
@@ -252,25 +396,30 @@ export async function collectDocumentEvents(docId: string, user: SessionUser, cu
       .limit(200);
     for (const m of mentions) {
       next.n = Math.max(next.n, m.createdAt.getTime());
-      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, agent: mentionedAgent(m.snippet, login), at: m.createdAt.toISOString() });
+      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, agent: mentionedAgent(m.snippet, login), actor: mentionActor(m, user), at: m.createdAt.toISOString() });
     }
   }
 
   if (cursor.h !== null && cursor.h !== hash) {
+    // Own API writes move the hash too; when nothing but the token's writes explain the move, it is `self`.
+    const who = explainContentChange(docId, cursor.h, hash, selfId);
+    const actor = who.selfOnly ? eventActor({ id: selfId, name: user.agent ?? "you", kind: "agent" }, selfId) : eventActor(who.writer, selfId);
     const previous = textCache.get(docId)?.get(cursor.h) ?? null;
     const d = previous === null ? null : unifiedDiff(previous, live.clean, `${live.title || "document"}.md`);
-    events.push({ type: "content.changed", documentId: docId, contentHash: hash, previousHash: cursor.h, diff: d?.diff ?? null, truncated: d?.truncated ?? false, at: now.toISOString() });
+    events.push({ type: "content.changed", documentId: docId, contentHash: hash, previousHash: cursor.h, diff: d?.diff ?? null, truncated: d?.truncated ?? false, actor, at: now.toISOString() });
   }
   next.r = Math.max(next.r, now.getTime());
-  events.sort((x, y) => x.at.localeCompare(y.at));
-  return { cursor: encodeCursor(next), events };
+  const kept = keep(events, opts);
+  await resolveLogins(kept);
+  kept.sort((x, y) => x.at.localeCompare(y.at));
+  return { cursor: encodeCursor(next), events: kept };
 }
 
 /**
  * Cross-document inbox: @mentions of the token's user and new "Ask an agent" requests on every document
  * they own or collaborate on. Content changes are not included (watch a document for those).
  */
-export async function collectUserEvents(user: SessionUser, cursor: CursorState | null, now = new Date()): Promise<EventsPage> {
+export async function collectUserEvents(user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: null }), events: [] };
   const db = await getDb();
   const events: AgentEvent[] = [];
@@ -287,7 +436,7 @@ export async function collectUserEvents(user: SessionUser, cursor: CursorState |
       .limit(200);
     for (const { n, title } of mentions) {
       next.n = Math.max(next.n, n.createdAt.getTime());
-      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: mentionedAgent(n.snippet, login), at: n.createdAt.toISOString() });
+      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: mentionedAgent(n.snippet, login), actor: mentionActor(n, user), at: n.createdAt.toISOString() });
     }
   }
 
@@ -318,31 +467,41 @@ export async function collectUserEvents(user: SessionUser, cursor: CursorState |
       mode: request.mode,
       instruction: request.instruction,
       quote: request.selection?.quote ?? null,
+      // Requests are asked by people in the editor; a token never asks itself.
+      actor: { id: request.userId ?? null, name: userName ?? userLogin ?? "someone", login: userLogin ?? null, kind: "user", agent: null, self: false },
       at: request.createdAt.toISOString(),
     });
   }
   next.a = Math.max(next.a, now.getTime());
   next.ids = [];
-  events.sort((x, y) => x.at.localeCompare(y.at));
-  return { cursor: encodeCursor(next), events };
+  const kept = keep(events, opts);
+  kept.sort((x, y) => x.at.localeCompare(y.at));
+  return { cursor: encodeCursor(next), events: kept };
 }
 
 /**
  * Long-poll: collect events; when there are none and `waitS` > 0, sleep until the document (or any
- * document) is woken by an activity insert, a notification or a text change, then collect again.
+ * document) is woken by an activity insert, a notification or a text change, then collect again. The
+ * token's own events do not count as "something happened" unless `opts.includeSelf` is set.
  */
-export async function pollEvents(docId: string | null, user: SessionUser, since: string | null, waitS: number): Promise<EventsPage> {
+export async function pollEvents(docId: string | null, user: SessionUser & { agent?: string }, since: string | null, waitS: number, opts: WatchOptions = {}): Promise<EventsPage> {
   const cursor = decodeCursor(since);
   const deadline = Date.now() + waitS * 1000;
+  const collect = () => (docId ? collectDocumentEvents(docId, user, cursor, opts) : collectUserEvents(user, cursor, opts));
   for (;;) {
     const seq = wakeSeq(docId);
-    const page = docId ? await collectDocumentEvents(docId, user, cursor) : await collectUserEvents(user, cursor);
+    const page = await collect();
     if (page.events.length > 0 || !cursor) return page;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return page;
     await waitForWake(docId, seq, remaining);
-    if (Date.now() >= deadline) return docId ? collectDocumentEvents(docId, user, cursor) : collectUserEvents(user, cursor);
+    if (Date.now() >= deadline) return collect();
   }
+}
+
+/** `includeSelf` query parameter: `1`, `true` or `yes` turn own events on. */
+export function parseIncludeSelf(raw: string | null | undefined): boolean {
+  return raw !== null && raw !== undefined && ["1", "true", "yes"].includes(raw.trim().toLowerCase());
 }
 
 /** Tests only. */
@@ -350,4 +509,6 @@ export function resetAgentEvents() {
   seqs.clear();
   waiters.clear();
   textCache.clear();
+  writes.clear();
+  typists.clear();
 }

@@ -2,7 +2,7 @@
 
 import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
-import { Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
+import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { QUICK_REACTIONS, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
@@ -1024,7 +1024,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
-  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending } = useSessionValue(
+  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode } = useSessionValue(
     session,
     (s) => ({
       suggestions: s.suggestions.list(),
@@ -1032,6 +1032,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
       activeSuggestionId: s.activeSuggestionId,
       revealSeq: s.revealSeq,
       pending: s.pendingComment,
+      mode: s.mode,
     }),
     jsonEqual,
   );
@@ -1040,10 +1041,25 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   const reviews = useReviews(session);
   const unreadRefs = useUnreadRefs(session.docId);
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
-  const [tab, setTab] = useState<Tab>("open");
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
+  // Land on Suggestions when the user is suggesting or when that is the only tab with anything to review (#117).
+  const [tab, setTab] = useState<Tab>(() => (mode === "suggesting" || (open.length === 0 && suggestions.length > 0) ? "suggestions" : "open"));
   const canAct = session.role === "owner" || session.role === "editor";
+
+  // The first suggestion that appears while the panel is open switches to the Suggestions tab, once per mount,
+  // so a user who switched back is not fought. Skipped while a comment is being composed on the Open tab.
+  const autoSwitched = useRef(false);
+  const prevSuggestionCount = useRef(suggestions.length);
+  useEffect(() => {
+    const arrived = prevSuggestionCount.current === 0 && suggestions.length > 0;
+    prevSuggestionCount.current = suggestions.length;
+    if (!arrived || autoSwitched.current || pending) return;
+    if (mode !== "suggesting" && open.length > 0) return;
+    autoSwitched.current = true;
+    setTab("suggestions");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestions.length]);
 
   useEffect(() => {
     if (activeSuggestionId) setTab("suggestions");
@@ -1077,11 +1093,15 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           <X size={16} />
         </button>
       </div>
-      <div className="flex gap-1 border-b border-line px-3 py-2">
+      <div className="flex gap-1 border-b border-line px-3 py-2" role="tablist" aria-label="Comment lists">
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
+            role="tab"
+            id={`comments-tab-${t.id}`}
+            aria-selected={tab === t.id}
+            aria-controls="comments-tabpanel"
             className={cn("rounded-md px-2.5 py-1 text-xs font-medium", tab === t.id ? "bg-surface text-ink shadow-sm ring-1 ring-line" : "text-ink-3 hover:text-ink")}
             onClick={() => setTab(t.id)}
             data-testid={`comments-tab-${t.id}`}
@@ -1091,7 +1111,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           </button>
         ))}
       </div>
-      <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-y-auto p-3">
+      <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
         {tab === "open" && reviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {reviews.map((r) => (
@@ -1124,6 +1144,13 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
         {tab === "open" &&
           (open.length === 0 && !pending ? (
             <EmptyState icon={<MessageSquare size={28} />} title="No open comments">
+              {suggestions.length > 0 && (
+                <span className="mb-3 flex flex-wrap items-center justify-center gap-1 text-ink-3" data-testid="comments-empty-suggestions">
+                  <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={() => setTab("suggestions")} data-testid="comments-empty-suggestions-button">
+                    <Sparkles size={13} /> {suggestions.length === 1 ? "1 suggestion" : `${suggestions.length} suggestions`} waiting <ArrowRight size={13} />
+                  </button>
+                </span>
+              )}
               Select some text and press <kbd className="kbd">⌘/Ctrl</kbd>+<kbd className="kbd">Alt</kbd>+<kbd className="kbd">M</kbd> or use the Comment button.
               {onAskAgent && session.canComment && (
                 <span className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-ink-3" data-testid="comments-empty-ask-agent">
