@@ -1,8 +1,9 @@
 "use client";
 
 import * as Y from "yjs";
-import { HocuspocusProvider, type CompleteHocuspocusProviderWebsocketConfiguration, type WebSocketStatus } from "@hocuspocus/provider";
+import type { CompleteHocuspocusProviderWebsocketConfiguration, WebSocketStatus } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
+import { MarkdocProvider } from "./provider";
 import { CommentsModel, COMMENTS_ORIGIN } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
@@ -103,7 +104,7 @@ export class CollabSession {
   readonly ydoc = new Y.Doc();
   readonly ytext: Y.Text;
   readonly meta: Y.Map<unknown>;
-  readonly provider: HocuspocusProvider;
+  readonly provider: MarkdocProvider;
   readonly awareness: Awareness;
   readonly undoManager: Y.UndoManager;
   readonly comments: CommentsModel;
@@ -169,8 +170,9 @@ export class CollabSession {
     this.ytext = this.ydoc.getText("content");
     this.meta = this.ydoc.getMap("meta");
 
-    // Mirror the document into IndexedDB so offline edits survive a refresh. Yjs merges
-    // the local and server states whichever arrives first, so this need not block connecting.
+    // Mirror the document into IndexedDB so offline edits survive a refresh. `connect` waits for the
+    // mirror (bounded) before opening the socket, so the sync handshake starts from what this device
+    // already has and only the difference travels (issue #189).
     this.whenLocalLoaded = new Promise<void>((resolve) => {
       this.resolveLocalLoaded = resolve;
     });
@@ -180,7 +182,7 @@ export class CollabSession {
     // The websocket provider reads `autoConnect` from the same configuration object at runtime; the
     // public provider type only names `url`, so the socket options come in from a socket-typed fragment.
     const socketOptions: Partial<CompleteHocuspocusProviderWebsocketConfiguration> = options.autoConnect === false ? { autoConnect: false } : {};
-    this.provider = new HocuspocusProvider({
+    this.provider = new MarkdocProvider({
       url,
       ...socketOptions,
       name: options.docId,
@@ -202,7 +204,9 @@ export class CollabSession {
         } else {
           // The provider resets its own synced flag on close without emitting; mirror it.
           this.synced = false;
-          if (this.everConnected) this.wasOffline = true;
+          // A drop after being connected, or a first connection that fails while the local copy
+          // holds changes (a reload while offline): the next "saved" gets the confirmation flash.
+          if (this.everConnected || this.unsyncedChanges > 0) this.wasOffline = true;
         }
         this.updateRecovery();
         this.notify();
@@ -230,9 +234,10 @@ export class CollabSession {
       },
       onUnsyncedChanges: ({ number }) => {
         this.unsyncedChanges = number;
-        // Pending changes while not connected (e.g. restored from IndexedDB after a reload
-        // that happened offline) should also get the "All changes saved" confirmation.
-        if (number > 0 && this.status !== "connected") this.wasOffline = true;
+        // Changes made while the connection is down should also get the "All changes saved"
+        // confirmation. Only a failed connection counts: the local copy loading while the very
+        // first socket is still opening (every warm open) is not an outage.
+        if (number > 0 && this.status === "disconnected") this.wasOffline = true;
         if (number === 0 && this.synced) perfMark("markdoc:sync-acked");
         this.updateRecovery();
         this.notify();
@@ -293,7 +298,14 @@ export class CollabSession {
 
   private connectRequested = false;
 
-  /** Open the connection of a session created with `autoConnect: false` (once) and keep the session alive. */
+  /**
+   * Open the connection of a session created with `autoConnect: false` (once) and keep the session alive.
+   *
+   * The socket opens only once the local copy has been applied (bounded by the local-load timeout):
+   * sync step 1 then carries the state vector of what this device already has and the server answers
+   * with the difference — a few hundred bytes on a warm open instead of the whole document (issue #189).
+   * The collaboration token is fetched meanwhile, so nothing is serialised behind the IndexedDB read.
+   */
   connect() {
     this.keepAlive();
     if (this.connectRequested || this.destroyed || this.trashed) return;
@@ -304,7 +316,17 @@ export class CollabSession {
     const prefetch = this.options.getToken();
     prefetch.catch(() => undefined);
     this.tokenPrefetch = prefetch;
-    void this.provider.connect();
+    // A deferred mirror nobody started yet would keep the socket waiting; connect runs after hydration too.
+    this.startLocalPersistence();
+    if (this.localLoaded) {
+      void this.provider.connect();
+      return;
+    }
+    void this.whenLocalLoaded.then(() => {
+      if (this.destroyed || this.trashed) return;
+      perfMark("markdoc:ws-open");
+      void this.provider.connect();
+    });
   }
 
   /** Token fetched by {@link connect}, consumed by the provider on the first socket open. */
@@ -387,6 +409,8 @@ export class CollabSession {
         markLoaded();
         return;
       }
+      // The mirror's restore must not be pushed to the server as an update; the handshake carries the difference.
+      this.provider.setLocalOrigin(this.local.origin);
       void this.local.whenLoaded.then(markLoaded);
     });
   }

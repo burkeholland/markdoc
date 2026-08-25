@@ -5,6 +5,7 @@ import WebSocket from "ws";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
+import { MarkdocProvider } from "@/editor/collab/provider";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -211,6 +212,116 @@ describe("collaboration server", () => {
     expect(countBy(b.received).update).toBe(50);
 
     for (const client of [a, b]) {
+      client.provider.destroy();
+      client.socket.destroy();
+    }
+  });
+
+  /**
+   * A browser that holds the document in IndexedDB, the way `CollabSession` wires it (issue #189): the
+   * mirror is applied under its own origin before the socket opens, and the provider must let the sync
+   * handshake — not a raw update — carry whatever the server is missing.
+   */
+  function warmClient(token: string, name: string) {
+    const ydoc = new Y.Doc();
+    const sent: { type: string; bytes: number }[] = [];
+    // Counts the frames that actually leave: the provider's own `send` also runs for queued messages on flush.
+    class CountingSocket extends WebSocket {
+      send(data: Parameters<WebSocket["send"]>[0], ...rest: unknown[]) {
+        sent.push(describeMessage(data as Uint8Array));
+        return (super.send as (...a: unknown[]) => void)(data, ...rest);
+      }
+    }
+    const socket = new HocuspocusProviderWebsocket({ url, autoConnect: false, WebSocketPolyfill: CountingSocket as unknown as typeof globalThis.WebSocket });
+    const received: { type: string; bytes: number }[] = [];
+    const provider = new MarkdocProvider({
+      websocketProvider: socket,
+      name,
+      document: ydoc,
+      token,
+      onMessage: ({ message }) => received.push(describeMessage((message as unknown as { data: ArrayBuffer | Uint8Array }).data)),
+    });
+    provider.attach();
+    const localOrigin = { name: "indexeddb mirror" };
+    provider.setLocalOrigin(localOrigin);
+    const total = (list: { bytes: number }[]) => list.reduce((n, m) => n + m.bytes, 0);
+    return { ydoc, provider, socket, received, sent, localOrigin, total };
+  }
+
+  it("a client whose local copy is current exchanges state vectors, not the document (issue #189)", async () => {
+    const body = `# Warm open\n\n${"the quick brown fox jumps over the lazy dog. ".repeat(2500)}`;
+    const doc = await createDocument({ ownerId: userId, content: body });
+    const token = await signCollabToken({ userId, docId: doc.id, role: "owner", name: "Alice", login: "alice", avatar: null });
+
+    // Cold open: the whole state once, downstream only.
+    const cold = warmClient(token, doc.id);
+    void cold.socket.connect();
+    await waitFor(() => cold.provider.isSynced && !cold.provider.hasUnsyncedChanges);
+    const state = Y.encodeStateAsUpdate(cold.ydoc);
+    expect(state.byteLength).toBeGreaterThan(body.length);
+    expect(cold.total(cold.received)).toBeGreaterThan(state.byteLength);
+    expect(cold.total(cold.received)).toBeLessThan(state.byteLength * 1.1);
+    expect(cold.total(cold.sent)).toBeLessThan(state.byteLength * 0.05);
+    cold.provider.destroy();
+    cold.socket.destroy();
+
+    // Warm open, nothing changed: the mirror restores the state before the socket opens.
+    const warm = warmClient(token, doc.id);
+    Y.transact(warm.ydoc, () => Y.applyUpdate(warm.ydoc, state), warm.localOrigin);
+    expect(warm.ydoc.getText("content").toString()).toBe(body);
+    // Counted as pending (the copy may hold offline edits) but not pushed: nothing has been sent yet.
+    expect(warm.provider.hasUnsyncedChanges).toBe(true);
+    expect(warm.sent).toHaveLength(0);
+    void warm.socket.connect();
+    await waitFor(() => warm.provider.isSynced && !warm.provider.hasUnsyncedChanges);
+    await sleep(200);
+    const recvKinds = countBy(warm.received);
+    const sentKinds = countBy(warm.sent);
+    console.log(`[collab] warm open: recv ${warm.total(warm.received)} B ${JSON.stringify(recvKinds)} · sent ${warm.total(warm.sent)} B ${JSON.stringify(sentKinds)} · state ${state.byteLength} B`);
+    expect(warm.total(warm.received)).toBeLessThan(state.byteLength * 0.05);
+    expect(warm.total(warm.sent)).toBeLessThan(state.byteLength * 0.05);
+    expect(sentKinds.update).toBeUndefined();
+    expect(recvKinds["sync-step2"]).toBe(1);
+    expect(warm.ydoc.getText("content").toString()).toBe(body);
+
+    /** The IndexedDB copy of a browser that typed `text` at `index` while offline (under that session's own client id). */
+    const mirrorWith = (index: number, text: string) => {
+      const offline = new Y.Doc();
+      Y.applyUpdate(offline, state);
+      offline.getText("content").insert(index, text);
+      return Y.encodeStateAsUpdate(offline);
+    };
+
+    // Warm open with an edit made offline: only the edit travels, and it reaches the server.
+    const edited = warmClient(token, doc.id);
+    Y.transact(edited.ydoc, () => Y.applyUpdate(edited.ydoc, mirrorWith(0, "Typed offline. ")), edited.localOrigin);
+    expect(edited.provider.hasUnsyncedChanges).toBe(true);
+    void edited.socket.connect();
+    await waitFor(() => edited.provider.isSynced && !edited.provider.hasUnsyncedChanges);
+    await waitFor(() => warm.ydoc.getText("content").toString().startsWith("Typed offline. "));
+    await sleep(200);
+    expect(edited.total(edited.sent)).toBeLessThan(state.byteLength * 0.05);
+    expect(edited.total(edited.received)).toBeLessThan(state.byteLength * 0.05);
+    expect(countBy(edited.sent).update).toBeUndefined();
+    expect(countBy(edited.sent)["sync-step2"]).toBe(1);
+
+    // Mirror slower than the socket (applied after the handshake): the state vectors are exchanged again.
+    const late = warmClient(token, doc.id);
+    void late.socket.connect();
+    await waitFor(() => late.provider.isSynced && !late.provider.hasUnsyncedChanges);
+    late.sent.length = 0;
+    late.received.length = 0;
+    Y.transact(late.ydoc, () => Y.applyUpdate(late.ydoc, mirrorWith(body.length, " Late mirror.")), late.localOrigin);
+    await waitFor(() => warm.ydoc.getText("content").toString().includes(" Late mirror."));
+    await waitFor(() => !late.provider.hasUnsyncedChanges);
+    await sleep(200);
+    expect(late.total(late.sent)).toBeLessThan(state.byteLength * 0.05);
+    expect(late.total(late.received)).toBeLessThan(state.byteLength * 0.05);
+    expect(countBy(late.sent).update).toBeUndefined();
+    expect(countBy(late.sent)["sync-step1"]).toBe(1);
+    expect(countBy(late.sent)["sync-step2"]).toBe(1);
+
+    for (const client of [warm, edited, late]) {
       client.provider.destroy();
       client.socket.destroy();
     }

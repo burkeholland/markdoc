@@ -8,6 +8,7 @@ vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
   class HocuspocusProvider {
     awareness: InstanceType<typeof Awareness>;
+    connectCalls = 0;
     static last: HocuspocusProvider | null = null;
     constructor(readonly opts: {
       document: Y.Doc;
@@ -18,6 +19,10 @@ vi.mock("@hocuspocus/provider", async () => {
     }) {
       this.awareness = new Awareness(opts.document);
       HocuspocusProvider.last = this;
+    }
+    connect() {
+      this.connectCalls++;
+      return Promise.resolve();
     }
     destroy() {
       this.awareness.destroy();
@@ -45,6 +50,7 @@ import {
 } from "./offline";
 
 type FakeProvider = {
+  connectCalls: number;
   opts: {
     onStatus: (e: { status: string }) => void;
     onSynced: (e: { state: boolean }) => void;
@@ -169,6 +175,42 @@ describe("with IndexedDB (fake-indexeddb)", () => {
     await second.whenLocalLoaded;
     expect(second.ytext.toString()).toBe("# Written while offline\n\nStill here after a refresh.");
     second.destroy();
+  });
+
+  it("connect() opens the socket only once the local copy has been applied, so sync step 1 carries its state vector (#189)", async () => {
+    const docId = `order-${Date.now()}`;
+    const first = makeSession(docId);
+    await first.whenLocalLoaded;
+    first.ytext.insert(0, "# Mirrored\n\nKnown to this device.");
+    await tick();
+    first.destroy();
+    await tick();
+
+    // What the editor shell does: a deferred session, then startLocalPersistence() and connect() in one effect.
+    const second = new CollabSession({ docId, user: makeCollabUser("a", "Alice"), role: "owner", getToken: async () => "token", deferLocal: true, autoConnect: false });
+    const provider = lastProvider();
+    second.startLocalPersistence();
+    second.connect();
+    expect(provider.connectCalls).toBe(0);
+    expect(second.ytext.toString()).toBe("");
+    await second.whenLocalLoaded;
+    await tick(0);
+    expect(second.ytext.toString()).toBe("# Mirrored\n\nKnown to this device.");
+    expect(provider.connectCalls).toBe(1);
+    // The mirror's origin is what the provider filters on (see collab/provider.ts).
+    expect((second.provider as unknown as { localOrigin: unknown }).localOrigin).toBeInstanceOf(IndexeddbPersistence);
+    second.destroy();
+  });
+
+  it("connect() on a session whose mirror was never started starts it, so the socket never waits forever", async () => {
+    const session = new CollabSession({ docId: `lazy-${Date.now()}`, user: makeCollabUser("a", "Alice"), role: "owner", getToken: async () => "token", deferLocal: true, autoConnect: false });
+    const provider = lastProvider();
+    session.connect();
+    expect(provider.connectCalls).toBe(0);
+    await session.whenLocalLoaded;
+    await tick(0);
+    expect(provider.connectCalls).toBe(1);
+    session.destroy();
   });
 
   it("clearLocal() removes the stored copy", async () => {
@@ -529,17 +571,36 @@ describe("save state and reconnect feedback", () => {
 
   it("flashes after a first connection that uploads changes restored from local storage", () => {
     const p = lastProvider().opts;
-    // A reload while offline: the IndexedDB copy has edits the server never saw.
+    // A reload while offline: the IndexedDB copy has edits the server never saw, and the first
+    // connection attempt fails before the network comes back.
     p.onUnsyncedChanges({ number: 2 });
     expect(session.saveState).toBe("connecting");
     expect(session.recovered).toBe(false);
+    p.onStatus({ status: "disconnected" });
+    expect(session.saveState).toBe("offline");
+    expect(saveStateLabel(session.saveState, session.unsyncedChanges)).toBe("Offline — 2 unsaved changes");
 
+    p.onStatus({ status: "connecting" });
     p.onStatus({ status: "connected" });
     p.onSynced({ state: true });
     p.onUnsyncedChanges({ number: 0 });
     expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(true);
     vi.advanceTimersByTime(RECOVERED_FLASH_MS + 1);
+    expect(session.recovered).toBe(false);
+  });
+
+  it("does not flash on a warm open whose local copy loads while the first socket is still opening (#189)", () => {
+    const p = lastProvider().opts;
+    // The mirror restores the document before the handshake: the provider counts it as one pending change.
+    p.onUnsyncedChanges({ number: 1 });
+    expect(session.saveState).toBe("connecting");
+    p.onStatus({ status: "connected" });
+    // startSync resets the counter, the server's ack clears it.
+    p.onUnsyncedChanges({ number: 1 });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(false);
   });
 
