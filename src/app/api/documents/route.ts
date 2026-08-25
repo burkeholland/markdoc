@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, HttpError, json, readJson, requireCanCreateDocuments, requireUser, tokenAllowsDocument } from "@/server/http";
+import { handler, HttpError, json, NUL_MESSAGE, nulFree, readJson, requireCanCreateDocuments, requireUser, tokenAllowsDocument } from "@/server/http";
 import { createDocument, listDocumentsForUser, listTrashForUser, searchDocumentsForUser } from "@/server/documents";
 import { applyTemplate, getTemplate } from "@/lib/templates";
 
@@ -9,7 +9,7 @@ const flag = z
   .transform((v) => v === "1" || v === "true");
 
 const querySchema = z.object({
-  q: z.string().max(200).optional(),
+  q: z.string().max(200).refine(nulFree, NUL_MESSAGE).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   /** `starred=1|true` lists only the caller's starred documents (ignored when searching). */
   starred: flag,

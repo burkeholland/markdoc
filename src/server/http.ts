@@ -204,12 +204,43 @@ async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, a
     if (err && typeof err === "object" && "issues" in err) {
       return json({ error: "Invalid request", issues: (err as { issues: unknown }).issues }, { status: 400 });
     }
+    // Anything else is a bug or an infrastructure failure: a driver's message carries the SQL statement
+    // and its bound parameters, so it goes to the log only.
     console.error(err);
-    const message = err instanceof Error ? err.message : "Unexpected error";
-    return json({ error: message }, { status: 500 });
+    return json({ error: "Unexpected error" }, { status: 500 });
   }
 }
 
+export const NUL_MESSAGE = "Text may not contain NUL characters";
+
+/** True when `s` can be stored in a Postgres `text` column (no U+0000). For zod `.refine()` on query strings. */
+export const nulFree = (s: string) => !s.includes("\0");
+
+/** A zod-shaped validation failure (`handler()` answers `400 { error: "Invalid request", issues }`). */
+export class ValidationError extends Error {
+  constructor(public issues: { path: (string | number)[]; message: string; code?: string }[]) {
+    super(issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; "));
+  }
+}
+
+/** Paths of every string in `value` that contains a NUL character, depth-first. */
+export function nulPaths(value: unknown, path: (string | number)[] = [], out: (string | number)[][] = []): (string | number)[][] {
+  if (typeof value === "string") {
+    if (!nulFree(value)) out.push(path);
+  } else if (Array.isArray(value)) {
+    value.forEach((v, i) => nulPaths(v, [...path, i], out));
+  } else if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) nulPaths(v, [...path, k], out);
+  }
+  return out;
+}
+
+/**
+ * Parse a JSON body. Any string anywhere in it that contains U+0000 is refused up front as
+ * `400 { issues: [{ path, message }] }`: Postgres `text` columns cannot hold NUL, so letting one
+ * through would fail the insert after earlier steps (the live document, a comment thread) had already
+ * been written, and the driver's error would carry the statement and its parameters.
+ */
 export async function readJson<T>(req: Request, parse: (data: unknown) => T): Promise<T> {
   let body: unknown;
   try {
@@ -217,5 +248,7 @@ export async function readJson<T>(req: Request, parse: (data: unknown) => T): Pr
   } catch {
     throw new HttpError(400, "Invalid JSON body");
   }
+  const nuls = nulPaths(body);
+  if (nuls.length) throw new ValidationError(nuls.map((path) => ({ code: "custom", path, message: NUL_MESSAGE })));
   return parse(body);
 }
