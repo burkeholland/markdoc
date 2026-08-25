@@ -5,7 +5,8 @@
 //   MARKDOC_URL=http://localhost:3820 MARKDOC_TOKEN=mdk_... npm run mcp:smoke
 //
 // Lists the tools (same set as the stdio server, each with its annotations), calls markdoc_whoami,
-// creates a document and reads it back. Exits non-zero on the first mismatch. See scripts/mcp-smoke.mts for the stdio run.
+// creates a document, reads it back and checks that reviewing a suggestion that does not exist is an
+// error. Exits non-zero on the first mismatch. See scripts/mcp-smoke.mts for the stdio run.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -83,6 +84,23 @@ const read = await client.callTool({ name: "markdoc_read_document", arguments: {
 check(!read.isError, `markdoc_read_document failed: ${text(read)}`);
 check(text(read).includes("Written through /api/mcp."), `read back: ${text(read)}`);
 console.log(`read ${id}: ${text(read).split("\n")[0]}`);
+
+// A decision on a suggestion that does not exist (or with no id at all) must be an error, not "done".
+const bogus = await client.callTool({ name: "markdoc_review_suggestions", arguments: { id, action: "accept", suggestionId: "bogus" } });
+check(bogus.isError === true, `review_suggestions with a bogus id should be isError, got: ${text(bogus)}`);
+check(text(bogus).includes("Suggestion not found"), `bogus id error should say Suggestion not found: ${text(bogus)}`);
+const noId = await client.callTool({ name: "markdoc_review_suggestions", arguments: { id, action: "accept" } });
+check(noId.isError === true, `review_suggestions without suggestionId should be isError, got: ${text(noId)}`);
+console.log(`review_suggestions bogus/missing id: both isError`);
+
+// A reply to a thread that does not exist must surface as a tool error, not a false "Replied to thread …".
+const ghost = await client.callTool({ name: "markdoc_comment", arguments: { id, action: "reply", threadId: "bogus", body: "ghost reply" } });
+check(ghost.isError === true, `markdoc_comment reply to an unknown thread should be isError, got: ${text(ghost)}`);
+check(text(ghost).includes("404"), `markdoc_comment reply to an unknown thread should report 404: ${text(ghost)}`);
+console.log(`reply to unknown thread → isError (${text(ghost).split("\n")[0]})`);
+const threads = await client.callTool({ name: "markdoc_comments", arguments: { id } });
+check(!threads.isError, `markdoc_comments failed: ${text(threads)}`);
+check(!text(threads).includes("ghost reply"), `phantom reply stored: ${text(threads)}`);
 
 await client.callTool({ name: "markdoc_delete_document", arguments: { id } });
 await client.close();

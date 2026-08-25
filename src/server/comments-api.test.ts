@@ -24,6 +24,7 @@ const { attachCollab } = await import("@/server/collab/ws");
 const { signCollabToken } = await import("@/server/collab/token");
 const { registerCollab } = await import("@/server/collab/registry");
 const { listNotifications } = await import("@/server/notifications");
+const { listActivity } = await import("@/server/activity");
 const { CommentsModel } = await import("@/editor/collab/comments");
 const { POST, GET } = await import("@/app/api/documents/[id]/comments/route");
 
@@ -163,6 +164,32 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     const thread = comments.find((c) => c.id === aliceThread.id);
     expect(thread?.body).toBe("Title looks good.");
     expect(thread?.replies).toEqual([expect.objectContaining({ id: replyId, body: "Agreed!" })]);
+  });
+
+  it("answers 404 for a reply to an unknown thread and records nothing", async () => {
+    actor = carol;
+    const { comments: commentsBefore } = (await (await get(docId)).json()) as { comments: ThreadJson[] };
+    const activityBefore = await listActivity(docId, { limit: 100 });
+
+    const res = await post(docId, { action: "reply", threadId: "bogus", body: "ghost reply" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Comment not found" });
+
+    // Same answer as the sibling actions for the same unknown thread.
+    expect((await post(docId, { action: "edit", threadId: "bogus", body: "x" })).status).toBe(404);
+    expect((await post(docId, { action: "delete", threadId: "bogus" })).status).toBe(404);
+
+    const { comments } = (await (await get(docId)).json()) as { comments: ThreadJson[] };
+    expect(comments).toEqual(commentsBefore);
+
+    // No phantom comment.reply row (and no other activity) for the failed reply.
+    const activity = await listActivity(docId, { limit: 100 });
+    expect(activity.items).toHaveLength(activityBefore.items.length);
+    expect(activity.items.filter((a) => a.action === "comment.reply" && (a.detail as { threadId?: string }).threadId === "bogus")).toEqual([]);
+
+    const db = await getDb();
+    const rows = await db.select().from(schema.notifications).where(eq(schema.notifications.refId, "bogus"));
+    expect(rows).toHaveLength(0);
   });
 
   it("rejects viewers and anonymous callers", async () => {
