@@ -305,7 +305,7 @@ test.describe("suggesting mode: one typed word is one suggestion, even with an u
     await expect(page.locator(".md-rich > p").last()).toHaveText(/^\s?suggested-words$/);
 
     // Accept all: only the typed word lands.
-    await page.getByTestId("review-accept-all").click();
+    await page.getByTestId("accept-all").click();
     await expect(page.getByTestId("suggestion-card")).toHaveCount(0);
     const accepted = await codeText(page);
     expect(accepted).toBe(TABLE_DOC.trimEnd() + "\n\n suggested-words\n");
