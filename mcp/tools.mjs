@@ -261,8 +261,8 @@ export function registerTools(server, client) {
   const staleOr = (err) => {
     const data = err?.status === 409 && err?.data && typeof err.data.contentHash === "string" ? err.data : null;
     if (!data) throw err;
-    const what = data.diff ? `here is what changed:\n${data.diff}${data.truncated ? "\n… (diff truncated)" : ""}` : "what changed is not available; re-read the document.";
-    return { isError: true, content: [{ type: "text", text: `Document changed since you read it — nothing was written. Re-read it (markdoc_read_document) and retry with the new hash ${data.contentHash}; ${what}` }], structuredContent: data };
+    const what = data.diff ? `here is what changed:\n${data.diff}${data.truncated ? "\n… (diff truncated)" : ""}` : "what changed is not available, so re-read the document.";
+    return { isError: true, content: [{ type: "text", text: `Document changed since you read it — nothing was written; re-read and retry (markdoc_read_document, then pass its hash; the current one is ${data.contentHash}); ${what}` }], structuredContent: data };
   };
 
   tool(
