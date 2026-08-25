@@ -15,13 +15,13 @@ folder of this checkout; `Get-FactoryRoot` in `scripts/live/common.ps1`).
 | Piece | Where | Recreatable? |
 | --- | --- | --- |
 | Source | `markdoc/` (this repo, branch `main`) | From GitHub `burkeholland/markdoc` |
-| Live worktree | `markdoc-live/` — detached at the promoted sha (`git worktree add --detach ../markdoc-live main`) | Yes, `resume-check.ps1` creates it |
-| Live env | `markdoc-live/.env.local` — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Yes, `resume-check.ps1` writes it; `AUTH_SECRET` comes back from the snapshot's sealed copy when there is one (see Secrets below) |
+| Live worktree | `markdoc-live/` **and** `markdoc-live-b/` — a pair of detached worktrees; `promote.ps1` compiles the new sha in the idle one and hands :3000 over to it, so the live one alternates. `markdoc-data/live.json` (`{ root, sha, port, promotedAt }`) says which is live; without it, `markdoc-live/` (`Get-LiveRoot` in `common.ps1`) | Yes, `resume-check.ps1` creates `markdoc-live`; `promote.ps1` creates the twin on first use |
+| Live env | `<live worktree>/.env.local` (copied into the twin on every promote) — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Yes, `resume-check.ps1` writes it; `AUTH_SECRET` comes back from the snapshot's sealed copy when there is one (see Secrets below) |
 | **Data** | `markdoc-data/pglite/` — the embedded PGlite database (~39 MB, ~1050 files): documents, versions, assets, comments, notifications, users, API tokens | **Only from the snapshot** |
 | Snapshot | `markdoc-data/snapshots/latest/` — current hot backup (`markdoc-pglite.tar.gz` + `manifest.json`), rewritten every 15 min; `markdoc-data/snapshots/<yyyyMMdd-HHmmss>/` — the last 3 copies | Recreated by the "Markdoc snapshot" task while the server runs |
-| Log | `markdoc-data/live.log` (+ `.1` rotation) | Disposable |
+| Log | `markdoc-data/live.log` for `markdoc-live`, `markdoc-data/live-b.log` for `markdoc-live-b` (+ `.1` rotation) | Disposable |
 | Scheduled tasks | "Markdoc live server" (per user, at logon) → `markdoc-live\scripts\live\start-live.ps1`; "Markdoc snapshot" (per user, every 15 min) → `snapshot-data.ps1 -Latest` | `scripts/live/install-autostart.ps1` registers both, `-Uninstall` removes both |
-| Ports | 3000 live; 3100/31xx Playwright; 32xx–39xx dev servers (`npm run dev:port`) | — |
+| Ports | 3000 live; 3001 loopback standby during a promote; 3100/31xx Playwright; 32xx–39xx dev servers (`npm run dev:port`) | — |
 
 Nothing else. No external database, no cloud storage; GitHub publish/login use per-user tokens
 that are not on disk outside `.env.local`.
@@ -83,6 +83,28 @@ If the server is stopped anyway (e.g. the box is going down), a plain `robocopy 
 `markdoc-data\pglite` is also a valid snapshot — a stopped PGlite directory is consistent — and
 `restore-data.ps1` is not needed for it: copy it back to `PGLITE_DATA_DIR` before starting.
 
+## Promoting without downtime (`scripts/live/promote.ps1 -Sha <sha>`)
+
+The live server alternates between `markdoc-live` and `markdoc-live-b`. A promote never stops the running server
+until its replacement is compiled:
+
+1. in the idle twin: `git checkout --detach <sha>`, `npm ci --ignore-scripts` if `package*.json` changed, delete `.next`,
+   copy the live `.env.local`, start `npm run dev` with `STANDBY_PORT=3001` — `server/index.ts` comes up on
+   `127.0.0.1:3001` against an **in-memory** PGlite (the real data dir is single-writer and still open in the old process);
+2. warm it: `/api/health` until `ok:true,db:true`, then `/`, a dev login + `POST /api/documents`, `/d/<that id>`,
+   `/api/documents?q=`, `/api/templates`, `/api/mcp`. A 500 or no answer here is a failed build: `ROLLBACK REASON` is
+   printed, the standby is stopped and the old server was never touched;
+3. handover: stop the old worktree's node processes, `POST http://127.0.0.1:3001/_standby/takeover` — the standby
+   closes the throwaway database, opens `PGLITE_DATA_DIR`, listens on :3000 (retrying while the port is released) and
+   closes :3001 — then `/api/health` on :3000 is polled and `markdoc-data/live.json` is rewritten. Measured gap on a
+   copy: 0.5–1.9 s of no listener (the board tolerates two missed minutes). If the takeover fails, the old worktree is
+   restarted with `start-live.ps1 -Restart` (a cold start, ~40 s).
+
+Rehearse against a copy, never :3000: two detached worktrees `<dir>\live` and `<dir>\live-b` with their own
+`node_modules`, `-Root <dir>\live -DataRoot <dir>\data -Port 3991 -StandbyPort 3992 -AnyRef`, and
+`node scripts/live/promote-gap.mjs --port 3991 --seconds 300` in a second shell prints the longest run of non-200
+answers. Open editors reconnect on their own (y-websocket backoff); the old process is stopped hard, so its last
+≤ 1.5 s of unflushed Yjs stores are re-sent by the clients after they reconnect.
 ## Restore
 
 `scripts/live/restore-data.ps1 [-From <dir>]` — `-From` defaults to `markdoc-data\snapshots\latest`;

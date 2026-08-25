@@ -29,6 +29,13 @@ function endGap(now) {
   current.ms = now - current.startedAt;
   gaps.push(current);
   current = null;
+  // Written after every gap as well as at the end, so a killed poller still leaves its numbers.
+  if (jsonPath) writeJson();
+}
+
+function writeJson() {
+  const max = gaps.reduce((m, g) => Math.max(m, g.ms), 0);
+  writeFileSync(jsonPath, JSON.stringify({ port, total, ok, maxGapMs: max, gaps }, null, 2));
 }
 
 async function probe() {
@@ -66,7 +73,7 @@ function report() {
     ...gaps.filter((g) => g.ms >= 1000).map((g) => `  gap ${fmt(g)}`),
   ];
   console.log(lines.join("\n"));
-  if (jsonPath) writeFileSync(jsonPath, JSON.stringify({ port, total, ok, maxGapMs: max, gaps }, null, 2));
+  if (jsonPath) writeJson();
 }
 
 process.on("SIGINT", () => { stopping = true; });

@@ -30,8 +30,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $factoryRoot = Get-FactoryRoot
-$liveRoot = if ($LiveRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LiveRoot) } else { Join-Path $factoryRoot 'markdoc-live' }
 $dataRoot = if ($DataRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DataRoot) } else { Join-Path $factoryRoot 'markdoc-data' }
+$liveRoot = if ($LiveRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LiveRoot) } else { Get-LiveRoot -DataRoot $dataRoot }
 $pgliteDir = Join-Path $dataRoot 'pglite'
 $liveLog = Join-Path $dataRoot 'live.log'
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
