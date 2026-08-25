@@ -100,6 +100,10 @@ test.describe("notifications", () => {
     await expect.poll(() => unreadCount(alice.page)).toBe(1);
     await refresh(alice.page);
     await expect(alice.page.getByTestId("notifications-badge")).toHaveText("1");
+    // The first poll is deferred until the document is synced (#118): after a reload the badge must
+    // still be there within 3 s of "saved" (openDocument waits for it), without a manual refresh.
+    await openDocument(alice.page, docId);
+    await expect(alice.page.getByTestId("notifications-badge")).toHaveText("1", { timeout: 3_000 });
     await alice.page.getByTestId("notifications-bell").click();
     const item = alice.page.getByTestId("notifications-popover").getByTestId("notification-item").first();
     await expect(item).toHaveAttribute("data-kind", "resolve");

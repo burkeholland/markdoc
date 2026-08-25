@@ -52,7 +52,7 @@ import type { Layout } from "@/lib/viewport";
 
 import { cn, shortcut } from "@/lib/utils";
 import { useHydrated } from "@/lib/hooks";
-import { jsonEqual, useSessionValue } from "./use-session";
+import { jsonEqual, useOpenSettled, useSessionValue } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { AgentActivityChip } from "./agent-activity";
@@ -174,13 +174,15 @@ function TitleEditor({ session, fallback, compact }: { session: CollabSession; f
 
 /**
  * Personal star for the open document. Stars live on the dashboard, so the header asks the API for
- * the current state on mount and stays hidden for anonymous visitors (who cannot star).
+ * the current state once the open has settled (the editor does not need it to become editable) and
+ * stays hidden for anonymous visitors (who cannot star).
  */
-function HeaderStar({ docId }: { docId: string }) {
+function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) {
   const [starred, setStarred] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
     setStarred(null);
+    if (!ready) return;
     api.documents
       .starred(docId)
       .then((r) => !cancelled && setStarred(r.starred))
@@ -188,7 +190,7 @@ function HeaderStar({ docId }: { docId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [docId]);
+  }, [docId, ready]);
   if (starred === null) return null;
   const toggle = () => {
     const next = !starred;
@@ -481,6 +483,9 @@ export const Header = memo(function Header(props: HeaderProps) {
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
+  // Star state and the notifications poll wait for the first sync: the socket handshake and the
+  // collab-token call get the server to themselves on open (#118).
+  const settled = useOpenSettled(session);
 
   return (
     <header className="app-header safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header">
@@ -495,7 +500,7 @@ export const Header = memo(function Header(props: HeaderProps) {
       )}
       <div className="flex min-w-0 flex-1 items-center gap-2 md:gap-4">
         <TitleEditor session={session} fallback={doc.title} compact={compact} />
-        {!compact && <HeaderStar docId={doc.id} />}
+        {!compact && <HeaderStar docId={doc.id} ready={settled} />}
         <SaveIndicator session={session} compact={compact} />
       </div>
       <div className="flex shrink-0 items-center gap-1 md:gap-3">
@@ -506,7 +511,7 @@ export const Header = memo(function Header(props: HeaderProps) {
           <ModeSwitcher session={session} />
           <PresenceStack session={session} onJump={props.onJumpToUser} />
         </div>
-        {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} />}
+        {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
         {!compact && (
           <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
             <UserPlus size={17} />

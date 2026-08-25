@@ -17,7 +17,7 @@ import {
   type HintsRecord,
 } from "@/lib/hints";
 import { useMediaQuery } from "@/lib/viewport-hooks";
-import { shallowEqual, useSessionValue } from "./use-session";
+import { shallowEqual, useOpenSettled, useSessionValue } from "./use-session";
 import type { EditorActions } from "./actions";
 
 export interface HintBarProps {
@@ -50,9 +50,11 @@ export function HintBar({ session, actions, onShare, onAskAgent, onComment }: Hi
   const wide = useMediaQuery(`(min-width: ${HINTS_MIN_WIDTH}px)`);
   const active = hydrated && loaded && wide && !allHintsDismissed(record.dismissed);
 
-  // Share list and token usage: fetched once per document, only while the hint that needs them is still open.
+  // Share list and token usage: fetched once per document, only while the hint that needs them is still
+  // open, and not before the document is synced (they are not needed to edit; #118).
+  const settled = useOpenSettled(session);
   const [shared, setShared] = useState<{ collaborators: number; agentUsed: boolean } | null>(null);
-  const needsShareInfo = active && !record.dismissed.includes("collab-agent") && !record.agentSeen;
+  const needsShareInfo = active && settled && !record.dismissed.includes("collab-agent") && !record.agentSeen;
   useEffect(() => {
     if (!needsShareInfo || shared) return;
     let cancelled = false;
