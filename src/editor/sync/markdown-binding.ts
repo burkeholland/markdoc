@@ -111,22 +111,43 @@ function blockIndexAtEnd(starts: number[], pos: number): number {
   return lo;
 }
 
-/** Minimal replacement transaction that turns `state.doc` into `newDoc`. */
+/**
+ * Minimal replacement transaction that turns `state.doc` into `newDoc`.
+ *
+ * The diff range is replaced with the corresponding slice of `newDoc`. `tr.replace` *fits* an open
+ * slice into the surrounding structure, and fitting is not guaranteed to reproduce `newDoc`: when
+ * the diff starts inside one table cell and ends inside another row (a column removed by undo, for
+ * example) the fitter keeps the header's cells and drops body cells, and prosemirror-tables'
+ * `fixTables` then pads the rows back out — the rich pane shows a 4×3 table while the text says
+ * 4×2 (task #459). When the fitted result differs from `newDoc`, the whole top-level blocks that
+ * contain the diff are replaced instead (a closed slice is never fitted), so the result is exact
+ * and the selection in untouched blocks still maps through.
+ */
 export function minimalReplaceTransaction(state: EditorState, newDoc: PMNode): Transaction {
   const oldDoc = state.doc;
-  const tr = state.tr;
   const start = oldDoc.content.findDiffStart(newDoc.content);
   const end = oldDoc.content.findDiffEnd(newDoc.content);
-  if (start != null && end != null) {
-    let { a: endA, b: endB } = end;
-    const overlap = start - Math.min(endA, endB);
-    if (overlap > 0) {
-      endA += overlap;
-      endB += overlap;
-    }
-    tr.replace(start, endA, newDoc.slice(start, endB));
+  if (start == null || end == null) return state.tr;
+  let { a: endA, b: endB } = end;
+  const overlap = start - Math.min(endA, endB);
+  if (overlap > 0) {
+    endA += overlap;
+    endB += overlap;
   }
-  return tr;
+  const fitted = state.tr.replace(start, endA, newDoc.slice(start, endB));
+  if (fitted.doc.eq(newDoc)) return fitted;
+
+  // Widen to top-level block boundaries. The prefix before `start` is shared, so the block start
+  // is the same position in both documents; the suffix after the diff end is shared too, so the
+  // old block end maps to the new document by the length difference.
+  const $start = oldDoc.resolve(start);
+  const blockFrom = $start.depth > 0 ? $start.before(1) : start;
+  const $endA = oldDoc.resolve(endA);
+  const blockToA = $endA.depth > 0 ? $endA.after(1) : endA;
+  const blockToB = blockToA - endA + endB;
+  const exact = state.tr.replaceWith(blockFrom, blockToA, newDoc.slice(blockFrom, blockToB).content);
+  if (exact.doc.eq(newDoc)) return exact;
+  return state.tr.replaceWith(0, oldDoc.content.size, newDoc.content);
 }
 
 /**

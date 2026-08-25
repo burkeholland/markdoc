@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { splitBlock, setBlockType } from "prosemirror-commands";
-import { MarkdownBinding, markdownBindingPlugin, isStructuralChange, VERIFY_TRUST_AFTER, VERIFY_EVERY_NTH_WINDOW } from "./markdown-binding";
+import { MarkdownBinding, markdownBindingPlugin, minimalReplaceTransaction, isStructuralChange, VERIFY_TRUST_AFTER, VERIFY_EVERY_NTH_WINDOW } from "./markdown-binding";
 import { schema } from "../markdown/schema";
 import { parseMarkdown } from "../markdown/parse";
 import { insertHardBreak } from "../prosemirror/commands";
@@ -118,6 +118,28 @@ describe("MarkdownBinding", () => {
     ytext.insert(0, "Oh! ");
     expect(view.state.doc.textContent).toBe("Oh! Hello world.");
     expect(view.state.selection.head).toBe(1 + 16);
+  });
+
+  it("reproduces a table column removed in the text exactly in the rich editor (task #459)", () => {
+    // Undo of "add column" in the table menu: one Y transaction deletes a cell from every row. The
+    // diff starts inside the header's second cell and ends inside the last row; ProseMirror's fitted
+    // replace kept the header's empty cell (a 4×3 header over 4×2 bodies, then padded by fixTables)
+    // while the text already said 4×2.
+    const before = "Intro.\n\n| Column 1 |     | c1  |\n| -------- | --- | --- |\n| c2       |     | c3  |\n|          |     |     |\n|          |     |     |\n\nAfter text.\n";
+    const after = "Intro.\n\n| Column 1 | c1  |\n| -------- | --- |\n| c2       | c3  |\n|          |     |\n|          |     |\n\nAfter text.\n";
+    const expected = parseMarkdown(after).doc;
+    const fitted = minimalReplaceTransaction(EditorState.create({ doc: parseMarkdown(before).doc }), expected);
+    expect(fitted.doc.eq(expected)).toBe(true);
+    expect(fitted.doc.child(1).child(0).childCount).toBe(2);
+
+    ytext.insert(0, before);
+    const { view } = editor();
+    // Caret at the end of "After text." keeps its place relative to the paragraph.
+    const tail = view.state.doc.content.size - 2;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, tail)));
+    applyOps(ytext, diffOps(before, after));
+    expect(view.state.doc.eq(expected)).toBe(true);
+    expect(view.state.selection.head).toBe(view.state.doc.content.size - 2);
   });
 
   it("syncs two clients through Yjs updates in both directions", () => {
