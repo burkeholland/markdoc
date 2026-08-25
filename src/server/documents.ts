@@ -3,6 +3,7 @@ import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
 import { encodeSeedState } from "@/server/collab/seed";
+import { excerptOf } from "@/editor/stats";
 
 const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
 
@@ -92,14 +93,9 @@ export interface DocumentSummary {
   deletedAt: Date | null;
 }
 
-function excerpt(content: string): string {
-  return content
-    .replace(/^---[\s\S]*?---\s*/m, "")
-    .replace(/^#+\s.*$/m, "")
-    .replace(/[#*_`>\-\[\]!]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 160);
+/** The card excerpt: the document's first prose, Markdown removed (see `excerptOf`). */
+export function excerpt(content: string): string {
+  return excerptOf(content, 160);
 }
 
 interface VisibleRow {
