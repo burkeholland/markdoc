@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Tooltip as RadixTooltip, DropdownMenu as RadixDropdown, Dialog as RadixDialog, Popover as RadixPopover } from "radix-ui";
 import { X } from "lucide-react";
-import { focusedElement, restoreFocus } from "@/lib/a11y";
+import { firstTabbable, focusedElement, restoreFocus } from "@/lib/a11y";
 import { cn, initials } from "@/lib/utils";
 
 /* ---------------- Tooltip ---------------- */
@@ -142,13 +142,24 @@ export function DialogContent({
   // Dialogs here open from state (no Radix Trigger), so Radix would leave focus on <body> when they
   // close. Remember the opener — editor pane, toolbar or header button — and hand focus back to it.
   const returnRef = React.useRef<HTMLElement | null>(null);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
   return (
     <RadixDialog.Portal>
       <RadixDialog.Overlay className="dialog-overlay animate-fade-in" />
       <RadixDialog.Content
+        ref={contentRef}
         className={cn("dialog animate-fade-in", wide && "w-[min(94vw,760px)]", className)}
-        onOpenAutoFocus={() => {
+        onOpenAutoFocus={(e) => {
           returnRef.current = focusedElement();
+          // Radix only gets here when focus is outside the dialog — e.g. the ⋮ menu that opened it gave
+          // focus back to its trigger after the input's `autoFocus` had already run (task #474) — and
+          // would then focus the first tabbable control, the Close button in the header. Start on the
+          // first control of the body instead so typing goes into the form and Enter submits it.
+          const first = firstTabbable(contentRef.current);
+          if (first) {
+            e.preventDefault();
+            first.focus({ preventScroll: true });
+          }
         }}
         onCloseAutoFocus={(e) => {
           e.preventDefault();
@@ -157,7 +168,7 @@ export function DialogContent({
           onClosed?.();
         }}
       >
-        <div className="mb-4 flex items-start justify-between gap-4">
+        <div className="mb-4 flex items-start justify-between gap-4" data-focus-skip>
           <div>
             <RadixDialog.Title className="text-lg font-semibold text-ink">{title}</RadixDialog.Title>
             {description ? (

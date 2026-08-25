@@ -74,6 +74,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
         }
         case "reply": {
           const replyId = model.reply(body.threadId, body.body, author);
+          if (!replyId) throw new HttpError(404, "Comment not found");
           result = { id: replyId };
           at = model.get(body.threadId)?.range ?? undefined;
           const map = model.ymap.get(body.threadId);

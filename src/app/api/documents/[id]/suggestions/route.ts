@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, readJson, requireAccess, actorName } from "@/server/http";
+import { handler, json, readJson, requireAccess, actorName, HttpError } from "@/server/http";
 import { readLiveDoc, mutateLiveDoc } from "@/server/livedoc";
 import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { recordAgentActivity } from "@/server/agents";
@@ -41,11 +41,18 @@ const actionSchema = z.object({
   id: z.string().optional(),
 });
 
-/** Accept or reject suggestions. */
+/**
+ * Accept or reject suggestions. `accept` / `reject` decide exactly one suggestion and need its `id`
+ * (400 without one, 404 when no pending suggestion has it); `acceptAll` / `rejectAll` decide every
+ * pending one. Answers `{ ok, decided }` — and `id` for a single decision — so callers can check
+ * that something actually happened.
+ */
 export const POST = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const { user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => actionSchema.parse(d));
+  const single = body.action === "accept" || body.action === "reject";
+  if (single && !body.id) throw new HttpError(400, "`id` is required for accept/reject");
   let count = 0;
   let decided: ResolvedSuggestion[] = [];
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
@@ -53,13 +60,15 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     try {
       const pending = model.list();
       const before = pending.length;
-      decided = body.id ? pending.filter((s) => s.id === body.id) : pending;
+      decided = single ? pending.filter((s) => s.id === body.id) : pending;
+      // Unknown or already-decided id: leave the document untouched and tell the caller.
+      if (single && decided.length === 0) throw new HttpError(404, "Suggestion not found");
       switch (body.action) {
         case "accept":
-          if (body.id) model.accept(body.id);
+          model.accept(body.id!);
           break;
         case "reject":
-          if (body.id) model.reject(body.id);
+          model.reject(body.id!);
           break;
         case "acceptAll":
           model.acceptAll();
@@ -80,5 +89,5 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     const actor = { login: user!.login ?? null, name: actorName(user) ?? null };
     for (const s of decided) await notifySuggestionDecision(id, s, accepted, actor);
   }
-  return json({ ok: true });
+  return json({ ok: true, decided: count, ...(single ? { id: body.id } : {}) });
 });

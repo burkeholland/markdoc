@@ -19,6 +19,33 @@ async function openHistory(page: Page) {
 
 const row = (page: Page, title: string) => page.getByTestId("version-item").filter({ hasText: title });
 
+test.describe("name current version", () => {
+  test("dialog opens with focus in the name field; typing + Enter names the version (#110)", async ({ browser }) => {
+    const user = await signIn(browser, "vicky");
+    const { page } = user;
+    const id = await createDocument(page, "# Named\n\nSome words.\n");
+    await openDocument(page, id);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+
+    // Opening from the ⋮ menu: the menu hands focus back to its trigger as it closes, which used to let
+    // the dialog's own autofocus land on the header Close button — typing went nowhere and Enter dismissed.
+    await page.getByTestId("more-menu").click();
+    await page.getByRole("menuitem", { name: "Name current version" }).click();
+    const dialog = page.getByRole("dialog", { name: "Name this version" });
+    await expect(dialog).toBeVisible();
+    await expect(page.getByTestId("version-name")).toBeFocused();
+    await page.keyboard.type("v-scout");
+    await expect(page.getByTestId("version-name")).toHaveValue("v-scout");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+
+    await openHistory(page);
+    await expect(row(page, "v-scout")).toBeVisible();
+    await expect(row(page, "v-scout").getByTestId("version-kind")).toHaveText("Named");
+    await user.context.close();
+  });
+});
+
 test.describe("version compare", () => {
   test("compare two versions, swap, navigate hunks, moved paragraph, rename, copy as new document", async ({ browser }) => {
     const user = await signIn(browser, "vera");

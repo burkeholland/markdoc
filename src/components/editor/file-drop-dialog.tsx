@@ -75,7 +75,8 @@ export const FileDropDialog = memo(function FileDropDialog({ pending, onClose, c
   return (
     <Dialog open={pending !== null} onOpenChange={(o) => !o && busy === null && onClose()}>
       <DialogContent title="Dropped file" description={pending ? `What should happen with “${pending.file.name}”?` : undefined}>
-        <div className="flex flex-col gap-2" data-testid="file-drop-dialog">
+        {/* Every option changes the document; keep the opening focus on Close rather than an option Enter would fire. */}
+        <div className="flex flex-col gap-2" data-testid="file-drop-dialog" data-focus-skip>
           {option("replace", <Replace size={16} />, "Replace document content", "The whole document becomes the file's text (undoable).", !canEdit)}
           {option("insert", <TextCursorInput size={16} />, "Insert at cursor", "Put the file's text where you dropped it.", !canEdit)}
           {option("new", <FilePlus2 size={16} />, "Open as new document", "Import the file as a separate document and open it.")}
