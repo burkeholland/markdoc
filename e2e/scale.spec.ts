@@ -354,9 +354,10 @@ test.describe("Burke-scale", () => {
     }
   });
 
-  test("3b. collab WebSocket: initial sync < 150 KB per browser, typist receives ≤ 1.2 messages per keystroke (task #480)", async ({ browser }) => {
-    // Both contexts count their /collab frames from the next navigation on. The owner's IndexedDB already
-    // mirrors the document (tests 1 and 3), the peer's context is cold: the peer is the full-state case.
+  test("3b. collab WebSocket: warm open < 150 KB down / < 20 KB up (medians of 3), cold < 400 KB, typist receives ≤ 1.2 messages per keystroke (tasks #480, #593)", async ({ browser }) => {
+    // Both contexts count their /collab frames from the next navigation on. The peer's context is cold: the peer
+    // is the full-state case. The owner's first open below is warm in the full suite (tests 1 and 3 mirrored the
+    // document) and cold in a targeted run; either way its IndexedDB copy is current for the warm opens after it.
     await owner.context.addInitScript(WS_COUNTER);
     const bob = await signIn(browser, PEER);
     await bob.context.addInitScript(WS_COUNTER);
@@ -370,15 +371,37 @@ test.describe("Burke-scale", () => {
       const aOpen = await wsStats(a);
       const bOpen = await wsStats(bob.page);
       const textBytes = seed.longDoc.content.length;
-      console.log(`[ws] initial sync (text ${textBytes} B): A recv ${aOpen.recvBytes} B in ${aOpen.recv} msgs (max ${aOpen.maxRecv} B, ${aOpen.sockets} sockets) · B recv ${bOpen.recvBytes} B in ${bOpen.recv} msgs (max ${bOpen.maxRecv} B, ${bOpen.sockets} sockets)`);
-      // Budget from issue #119: < 150 KB for this document (86 KB of text plus 25 comment threads). Before the
-      // fix every tab ran two connections (StrictMode twin session) and the first one also got the hydration
-      // update: 389 KB for the first browser, 266 KB for the second.
+      console.log(`[ws] initial sync (text ${textBytes} B): A recv ${aOpen.recvBytes} B in ${aOpen.recv} msgs (max ${aOpen.maxRecv} B, ${aOpen.sockets} sockets) · sent ${aOpen.sentBytes} B in ${aOpen.sent} msgs · B recv ${bOpen.recvBytes} B in ${bOpen.recv} msgs (max ${bOpen.maxRecv} B, ${bOpen.sockets} sockets) · sent ${bOpen.sentBytes} B in ${bOpen.sent} msgs`);
+      // Before #480 every tab ran two connections (StrictMode twin session) and the first one also got the
+      // hydration update: 389 KB for the first browser, 266 KB for the second. The cold browser gets the whole
+      // state once, downstream only (issue #189: state vector + awareness upstream).
       expect(aOpen.sockets).toBe(1);
       expect(bOpen.sockets).toBe(1);
-      expect(aOpen.recvBytes).toBeLessThan(150_000);
+      // Budget from issue #119 (task #480): < 150 KB for this document (86 KB of text plus 25 comment threads).
       expect(bOpen.recvBytes).toBeLessThan(150_000);
       expect(bOpen.recvBytes).toBeGreaterThan(textBytes);
+      expect(bOpen.sentBytes).toBeLessThan(20_000);
+
+      // Warm opens (issue #189): the owner's IndexedDB copy is current after the open above, so sync step 1 carries
+      // its state vector and only the difference travels — state vectors + awareness, not the document. Before the
+      // fix each warm open received the whole state (~127 KB) and uploaded the IndexedDB copy as one update (~125 KB).
+      const warm: WsStats[] = [];
+      for (let i = 0; i < 3; i++) {
+        await openDocument(a, longDocId);
+        await expect(a.getByTestId("presence").locator(".avatar")).toHaveCount(2);
+        await a.waitForTimeout(1_500);
+        warm.push(await wsStats(a));
+      }
+      const warmRecvKB = median(warm.map((w) => w.recvBytes)) / 1000;
+      const warmSentKB = median(warm.map((w) => w.sentBytes)) / 1000;
+      console.log(`[ws] warm open ×3: recv ${warm.map((w) => `${w.recvBytes} B/${w.recv}`).join(", ")} · sent ${warm.map((w) => `${w.sentBytes} B/${w.sent}`).join(", ")} · medians ${warmRecvKB.toFixed(1)} KB down / ${warmSentKB.toFixed(1)} KB up`);
+      expect(warmRecvKB).toBeLessThan(150);
+      expect(warmSentKB).toBeLessThan(20);
+      for (const w of warm) {
+        expect(w.sockets).toBe(1);
+        expect(w.recvBytes).toBeLessThan(textBytes);
+      }
+      expect((await codeText(a)).length).toBe(textBytes);
 
       // A types 200 characters at the end of the document while B watches.
       await a.locator(".cm-content").click();
