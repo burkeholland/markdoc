@@ -22,7 +22,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Slash menu: type `/` in the rich pane for headings, lists, tables, code blocks with a language, images, links, comments, today's date.
 - Command palette (`Ctrl+Shift+P`, or `Ctrl+K` with nothing selected) for every editor and dashboard command.
 - Find & replace across both panes (`Ctrl+F` / `Ctrl+H`), with live highlights.
-- Smart paste: a URL over a selection becomes a link, Markdown-looking text is inserted as source, HTML keeps bold/lists.
+- Smart paste: a URL over a selection becomes a link, Markdown-looking text is inserted as source, HTML keeps bold/lists, and tab-separated plain text (a spreadsheet range, `psql` or `jq -r @tsv` output) becomes a table in either pane.
 - Tables with a floating menu and shortcuts for rows, columns and alignment.
 - Images by paste, drop or upload, stored as assets behind `/api/assets`.
 - Document statistics and a shared writing goal (`Ctrl+Shift+C`): words, sentences, reading time, selection counts.
