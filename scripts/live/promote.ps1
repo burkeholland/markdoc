@@ -5,6 +5,7 @@
 # start-live. Rolls back to the previous sha only when the server process exited or
 # /api/health has not answered ok:true,db:true for at least -MinWaitSec (5xx while the
 # cold server compiles counts as "still starting"); the reason is printed as ROLLBACK REASON.
+# Holds ..\markdoc-data\promote.lock (next to the log) for its duration so watchdog.ps1 stays out of the way.
 param(
   [Parameter(Mandatory = $true)][string]$Sha,
   # Live worktree; defaults to the sibling ../markdoc-live (see Get-FactoryRoot in common.ps1).
@@ -21,6 +22,9 @@ $ErrorActionPreference = 'Stop'
 if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
 if (-not $LogPath) { $LogPath = Join-Path (Get-FactoryRoot) 'markdoc-data\live.log' }
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
+# Held for the whole promote so watchdog.ps1 (every minute) does not restart the server we are stopping on
+# purpose; the watchdog ignores a lock older than 10 min, so a crashed promote cannot block it for good.
+$lockPath = Join-Path (Split-Path -Parent $LogPath) 'promote.lock'
 $script:lastFailure = ''
 
 function Invoke-Git {
@@ -86,17 +90,24 @@ if ($dirty.Count -gt 0) {
 $previous = (Invoke-Git rev-parse HEAD) | Select-Object -First 1
 Write-Step "promoting $previous -> $target"
 
-if (Switch-LiveTo -From $previous -To $target) {
-  Write-Step "PROMOTED: live server on :$Port now runs $target (was $previous)"
-  exit 0
-}
+$lockDir = Split-Path -Parent $lockPath
+if (-not (Test-Path -LiteralPath $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
+Set-Content -LiteralPath $lockPath -Value ("pid={0} sha={1} started={2}" -f $PID, $target, (Get-Date -Format 's')) -Encoding UTF8
+try {
+  if (Switch-LiveTo -From $previous -To $target) {
+    Write-Step "PROMOTED: live server on :$Port now runs $target (was $previous)"
+    exit 0
+  }
 
-Write-Step "promotion of $target FAILED; rolling back to $previous"
-Write-Step "ROLLBACK REASON: $script:lastFailure"
-Show-LogTail -LogPath $LogPath -Lines 30
-if (Switch-LiveTo -From $target -To $previous) {
-  Write-Step "ROLLED BACK: live server on :$Port runs $previous again"
-} else {
-  Write-Step "ROLLBACK FAILED: live server is down ($script:lastFailure); inspect $LogPath"
+  Write-Step "promotion of $target FAILED; rolling back to $previous"
+  Write-Step "ROLLBACK REASON: $script:lastFailure"
+  Show-LogTail -LogPath $LogPath -Lines 30
+  if (Switch-LiveTo -From $target -To $previous) {
+    Write-Step "ROLLED BACK: live server on :$Port runs $previous again"
+  } else {
+    Write-Step "ROLLBACK FAILED: live server is down ($script:lastFailure); inspect $LogPath"
+  }
+  exit 1
+} finally {
+  Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
 }
-exit 1

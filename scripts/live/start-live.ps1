@@ -1,7 +1,9 @@
 # Idempotent start of Burke's live test server (http://localhost:3000).
 # - If /api/health already answers 200: exit 0, touch nothing.
 # - Otherwise: kill stale node processes from the live worktree, delete .next,
-#   start `npm run dev` hidden with output appended to the log, wait for ok:true,db:true.
+#   start `npm run dev` hidden (via run-live.cmd) with output appended to the log, wait for ok:true,db:true.
+#   The log gets a `==== start-live <ts> ...` marker now and an `==== exit code N ...` marker when the
+#   server process ends, however it ends (see scripts/live/watchdog.ps1 for what restarts it).
 #   While waiting, "connection refused" and any 5xx count as "still starting" (a cold Next.js
 #   server compiles on the first hit and may answer 500 meanwhile); the wait is at least
 #   -MinWaitSec, at most -TimeoutSec, and ends early only if the launcher process exits.
@@ -49,8 +51,10 @@ if ((Test-Path $LogPath) -and (Get-Item -LiteralPath $LogPath).Length -gt 20MB) 
 Add-Content -LiteralPath $LogPath -Value ("==== start-live {0} root={1} port={2} ====" -f (Get-Date -Format 's'), $Root, $Port)
 
 $env:PORT = "$Port"
-# cmd.exe handles appending both streams to one file; Start-Process alone cannot.
-$cmdLine = '/d /c "npm run dev >> "' + $LogPath + '" 2>&1"'
+# run-live.cmd appends both streams to the log and writes the `==== exit code N` marker when the server
+# process ends; Start-Process alone can do neither.
+$runLive = Join-Path $PSScriptRoot 'run-live.cmd'
+$cmdLine = '/d /c ""' + $runLive + '" "' + $LogPath + '""'
 Write-Step "starting 'npm run dev' in $Root (log: $LogPath)"
 $proc = Start-Process -FilePath "$env:ComSpec" -ArgumentList $cmdLine -WorkingDirectory $Root -WindowStyle Hidden -PassThru
 Write-Step "launcher PID $($proc.Id)"

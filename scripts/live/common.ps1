@@ -27,10 +27,10 @@ function Get-LiveHealth {
 function Get-LiveHealthProbe {
   # One GET /api/health. Returns @{ Status = <int>; Body = <parsed json or $null>; Error = <string> }.
   # Status 0 means nothing answered (connection refused / timeout), which is what a starting server does.
-  param([int]$Port)
+  param([int]$Port, [int]$TimeoutSec = 5)
   $result = @{ Status = 0; Body = $null; Error = '' }
   try {
-    $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/api/health" -TimeoutSec 5
+    $resp = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/api/health" -TimeoutSec $TimeoutSec
     $result.Status = [int]$resp.StatusCode
     if ($result.Status -eq 200) { try { $result.Body = $resp.Content | ConvertFrom-Json } catch { $result.Error = 'body is not JSON' } }
   } catch {

@@ -204,13 +204,13 @@ if (-not (Test-Path (Join-Path $pgliteDir 'PG_VERSION'))) {
   Write-Check 'ok' 'data dir' "$pgliteDir ($($files.Count) files, $mb MB)"
 }
 
-# 6. scheduled tasks ("Markdoc live server" at logon, "Markdoc snapshot" every 15 min)
-$taskNames = @('Markdoc live server', 'Markdoc snapshot')
+# 6. scheduled tasks ("Markdoc live server" at logon, "Markdoc snapshot" every 15 min, "Markdoc watchdog" every 1 min)
+$taskNames = @('Markdoc live server', 'Markdoc snapshot', 'Markdoc watchdog')
 $missingTasks = @($taskNames | Where-Object { -not (Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue) })
 if ($missingTasks.Count -gt 0) {
   $installer = Join-Path $liveRoot 'scripts\live\install-autostart.ps1'
-  # Prefer the live worktree's copy (tasks then point at the permanent location), unless it predates the snapshot task.
-  if (-not (Test-Path $installer) -or -not (Select-String -LiteralPath $installer -Pattern 'Markdoc snapshot' -Quiet)) { $installer = Join-Path $PSScriptRoot 'install-autostart.ps1' }
+  # Prefer the live worktree's copy (tasks then point at the permanent location), unless it predates the watchdog task.
+  if (-not (Test-Path $installer) -or -not (Select-String -LiteralPath $installer -Pattern 'Markdoc watchdog' -Quiet)) { $installer = Join-Path $PSScriptRoot 'install-autostart.ps1' }
   if ($DryRun) { Write-Check 'fix' 'scheduled tasks' "missing $($missingTasks -join ', '); would run $installer" }
   else {
     Write-Check 'fix' 'scheduled tasks' "registering $($missingTasks -join ', ') via $installer"
