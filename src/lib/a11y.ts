@@ -48,7 +48,8 @@ const TABBABLE = 'input:not([type="hidden"]), select, textarea, button, a[href],
  * First element inside `root` a Tab press could land on: enabled, not `tabindex="-1"`, and rendered
  * (display:none controls such as a hidden file input have no client rects). Elements inside a
  * `[data-focus-skip]` ancestor are passed over — the dialog header uses it so its Close button never
- * takes the opening focus ahead of the form.
+ * takes the opening focus ahead of the form, and a dialog body can opt out the same way when its first
+ * control is an action Enter should not fire by accident.
  */
 export function firstTabbable(root: HTMLElement | null): HTMLElement | null {
   if (!root) return null;
