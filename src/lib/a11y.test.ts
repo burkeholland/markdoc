@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { firstTabbable, focusReturnTarget, restoreFocus, rovingIndex } from "./a11y";
+import { firstTabbable, focusReturnTarget, gridCell, restoreFocus, rovingIndex } from "./a11y";
 
 describe("rovingIndex", () => {
   it("ignores non-navigation keys and empty lists", () => {
@@ -39,6 +39,40 @@ describe("rovingIndex", () => {
     expect(rovingIndex("End", 0, 4)).toBe(3);
     expect(rovingIndex("Home", 2, 4, { orientation: "horizontal", wrap: true })).toBe(0);
     expect(rovingIndex("End", 0, 4, { orientation: "horizontal", wrap: true })).toBe(3);
+  });
+});
+
+describe("gridCell (insert-table size picker, 6 × 8)", () => {
+  const at = (row: number, col: number) => ({ row, col });
+
+  it("ignores non-navigation keys and empty grids", () => {
+    expect(gridCell("Enter", at(0, 0), 6, 8)).toBeNull();
+    expect(gridCell("Tab", at(0, 0), 6, 8)).toBeNull();
+    expect(gridCell("a", at(0, 0), 6, 8)).toBeNull();
+    expect(gridCell("ArrowRight", at(0, 0), 0, 8)).toBeNull();
+    expect(gridCell("ArrowRight", at(0, 0), 6, 0)).toBeNull();
+  });
+
+  it("arrows move one cell and clamp at the edges (the issue's ArrowRight ×2, ArrowDown ×2 → 3 by 3)", () => {
+    let cell = at(0, 0);
+    for (const key of ["ArrowRight", "ArrowRight", "ArrowDown", "ArrowDown"]) cell = gridCell(key, cell, 6, 8)!;
+    expect(cell).toEqual(at(2, 2));
+    expect(gridCell("ArrowLeft", at(2, 0), 6, 8)).toEqual(at(2, 0));
+    expect(gridCell("ArrowUp", at(0, 3), 6, 8)).toEqual(at(0, 3));
+    expect(gridCell("ArrowRight", at(1, 7), 6, 8)).toEqual(at(1, 7));
+    expect(gridCell("ArrowDown", at(5, 7), 6, 8)).toEqual(at(5, 7));
+  });
+
+  it("Home / End stay in the row; with Ctrl they jump to the grid's corners", () => {
+    expect(gridCell("Home", at(2, 5), 6, 8)).toEqual(at(2, 0));
+    expect(gridCell("End", at(2, 5), 6, 8)).toEqual(at(2, 7));
+    expect(gridCell("Home", at(2, 5), 6, 8, { ctrl: true })).toEqual(at(0, 0));
+    expect(gridCell("End", at(2, 5), 6, 8, { ctrl: true })).toEqual(at(5, 7));
+  });
+
+  it("clamps an off-grid position before moving", () => {
+    expect(gridCell("ArrowDown", at(-1, 20), 6, 8)).toEqual(at(1, 7));
+    expect(gridCell("ArrowUp", at(9, 9), 6, 8)).toEqual(at(4, 7));
   });
 });
 

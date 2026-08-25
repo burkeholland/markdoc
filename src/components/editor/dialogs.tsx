@@ -2,6 +2,7 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
+import { gridCell, type GridCell } from "@/lib/a11y";
 import { shortcut } from "@/lib/utils";
 
 /**
@@ -200,32 +201,72 @@ export const ImageDialog = memo(function ImageDialog({
   );
 });
 
+const GRID_ROWS = 6;
+const GRID_COLS = 8;
+
+/**
+ * Size picker as a WAI-ARIA grid (issue #160): one Tab stop (the focused cell is the only `tabIndex=0`),
+ * arrows / Home / End move focus, the "rows × columns" label follows the keyboard as well as the mouse,
+ * Enter or a click inserts, Tab leaves straight for the dialog's Close button.
+ */
 export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (rows: number, cols: number) => void }) {
-  const [hover, setHover] = useState<{ r: number; c: number }>({ r: 3, c: 3 });
+  const [focused, setFocused] = useState<GridCell>({ row: 0, col: 0 });
+  // Mouse hover overrides the label and highlight while the pointer is over the grid; null = follow focus.
+  const [hover, setHover] = useState<GridCell | null>(null);
+  const cells = useRef<(HTMLButtonElement | null)[]>([]);
   const after = useAfterClose();
+  useEffect(() => {
+    if (!open) {
+      setFocused({ row: 0, col: 0 });
+      setHover(null);
+    }
+  }, [open]);
+  const shown = hover ?? focused;
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const next = gridCell(e.key, focused, GRID_ROWS, GRID_COLS, { ctrl: e.ctrlKey || e.metaKey });
+    if (!next) return;
+    e.preventDefault();
+    setFocused(next);
+    setHover(null);
+    cells.current[next.row * GRID_COLS + next.col]?.focus();
+  };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Insert table" description="Pick a size. The first row becomes the header." onClosed={after.onClosed}>
         <div className="flex flex-col items-center gap-3">
-          <div className="grid grid-cols-8 gap-1" onMouseLeave={() => setHover({ r: 3, c: 3 })} data-testid="table-grid">
-            {Array.from({ length: 6 }, (_, r) =>
-              Array.from({ length: 8 }, (_, c) => (
-                <button
-                  key={`${r}-${c}`}
-                  type="button"
-                  className={`h-6 w-6 rounded border ${r < hover.r && c < hover.c ? "border-accent bg-accent-soft" : "border-line-2 bg-surface"}`}
-                  onMouseEnter={() => setHover({ r: r + 1, c: c + 1 })}
-                  onClick={() => {
-                    after.defer(() => onSubmit(r + 1, c + 1));
-                    onOpenChange(false);
-                  }}
-                  aria-label={`${r + 1} by ${c + 1}`}
-                />
-              )),
-            )}
+          <div className="flex flex-col gap-1" role="grid" aria-label="Table size" onMouseLeave={() => setHover(null)} onKeyDown={onKeyDown} data-testid="table-grid">
+            {Array.from({ length: GRID_ROWS }, (_, r) => (
+              <div key={r} role="row" className="flex gap-1">
+                {Array.from({ length: GRID_COLS }, (_, c) => {
+                  const isFocused = focused.row === r && focused.col === c;
+                  return (
+                    <div key={c} role="gridcell">
+                      <button
+                        ref={(el) => {
+                          cells.current[r * GRID_COLS + c] = el;
+                        }}
+                        type="button"
+                        tabIndex={isFocused ? 0 : -1}
+                        className={`block h-6 w-6 rounded border ${r < shown.row + 1 && c < shown.col + 1 ? "border-accent bg-accent-soft" : "border-line-2 bg-surface"}`}
+                        onMouseEnter={() => setHover({ row: r, col: c })}
+                        onFocus={() => {
+                          setFocused({ row: r, col: c });
+                          setHover(null);
+                        }}
+                        onClick={() => {
+                          after.defer(() => onSubmit(r + 1, c + 1));
+                          onOpenChange(false);
+                        }}
+                        aria-label={`${r + 1} by ${c + 1}`}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
           </div>
-          <div className="text-sm text-ink-3">
-            {hover.r} rows × {hover.c} columns
+          <div className="text-sm text-ink-3" data-testid="table-grid-label">
+            {shown.row + 1} rows × {shown.col + 1} columns
           </div>
         </div>
       </DialogContent>
@@ -312,6 +353,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Find and replace", "Mod-H"],
       ["Next / previous match", "Enter / Shift-Enter"],
       ["Close find", "Esc"],
+      ["Clear the selection / hide the table menu", "Esc"],
     ],
   },
   {
@@ -375,6 +417,9 @@ export const ShortcutsDialog = memo(function ShortcutsDialog({ open, onOpenChang
             </div>
           ))}
         </div>
+        <p className="mt-5 text-xs text-ink-3" data-testid="shortcuts-panels-note">
+          Esc dismisses floating things — menus, the find bar, dialogs. The docked Comments and Version history panels close from the × in their header.
+        </p>
       </DialogContent>
     </Dialog>
   );

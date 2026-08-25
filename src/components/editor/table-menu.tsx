@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { TableAlign } from "@/editor/prosemirror/commands";
+import { isTableMenuHidden, TABLE_MENU_EVENT } from "@/editor/prosemirror/setup";
 import type { EditorActions, FormatState } from "./actions";
 import { Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
@@ -82,7 +83,7 @@ export function TableMenu({
 
   const compute = useCallback(() => {
     const container = containerRef.current;
-    if (!view || !container || format.tablePos < 0 || !canEdit || activeSurface !== "rich") {
+    if (!view || !container || format.tablePos < 0 || !canEdit || activeSurface !== "rich" || isTableMenuHidden(view.state)) {
       setPos(null);
       return;
     }
@@ -120,9 +121,13 @@ export function TableMenu({
     const scroller = containerRef.current;
     scroller?.addEventListener("scroll", schedule, { passive: true });
     window.addEventListener("resize", schedule);
+    // Esc hides the menu (and the next caret move shows it again) through plugin state; the editor
+    // announces each flip here because a meta-only transaction changes nothing the shell re-renders on.
+    view.dom.addEventListener(TABLE_MENU_EVENT, schedule);
     return () => {
       scroller?.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", schedule);
+      view.dom.removeEventListener(TABLE_MENU_EVENT, schedule);
     };
   }, [view, schedule, containerRef]);
 
