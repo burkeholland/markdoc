@@ -803,14 +803,12 @@ test.describe("dialog focus return (#161)", () => {
 
     // 1. Insert image from the toolbar with the mouse: the button does not take focus (it keeps the caret
     //    in the editor), so the editor is the opener and gets focus — and its selection — back.
-    await focusRichEnd(page);
-    await page.keyboard.press("Shift+Control+ArrowLeft");
-    await expect.poll(() => page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie.");
+    await selectTextInRich(page, "charlie");
     await page.getByTestId("tb-image").click();
     await expect(page.getByTestId("image-url")).toBeFocused();
     await closedWith("Insert image", "Escape");
     await expect.poll(active).toBe("rich");
-    expect(await page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie.");
+    expect(await page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie");
 
     // 2. Insert link with Ctrl+K on a selection (a shortcut): back to the rich pane, selection intact.
     await selectTextInRich(page, "bravo");
