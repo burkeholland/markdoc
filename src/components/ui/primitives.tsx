@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Tooltip as RadixTooltip, DropdownMenu as RadixDropdown, Dialog as RadixDialog, Popover as RadixPopover } from "radix-ui";
 import { X } from "lucide-react";
-import { firstTabbable, focusedElement, restoreFocus } from "@/lib/a11y";
+import { firstTabbable, focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { cn, initials } from "@/lib/utils";
 
 /* ---------------- Tooltip ---------------- */
@@ -128,6 +128,22 @@ export const DialogTitle = RadixDialog.Title;
 /** Unstyled Radix content for drawers and sheets; `DialogContent` below is the centred card. */
 export const DialogPrimitiveContent = RadixDialog.Content;
 
+/**
+ * Mounted with the dialog body, so its first render is the one that mounts the dialog. React has not
+ * committed yet at that point: the element that opened the dialog still exists and still has focus — the
+ * ⋮ menu item about to unmount (resolved to its trigger), the toolbar button, the editor pane. Capturing it
+ * in `onOpenAutoFocus` does not work: Radix skips that event when a child's `autoFocus` already put focus
+ * inside the content (Image, Link, Name this version, Ask an agent), and by the time any effect runs a menu
+ * that opened the dialog is gone and `document.activeElement` is <body> (issue #161).
+ */
+function RememberOpener({ targetRef }: { targetRef: React.RefObject<HTMLElement | null> }) {
+  const [opener] = React.useState(focusReturnTarget);
+  React.useLayoutEffect(() => {
+    targetRef.current = opener;
+  }, [opener, targetRef]);
+  return null;
+}
+
 export function DialogContent({
   title,
   description,
@@ -150,7 +166,8 @@ export function DialogContent({
   onClosed?: () => void;
 }) {
   // Dialogs here open from state (no Radix Trigger), so Radix would leave focus on <body> when they
-  // close. Remember the opener — editor pane, toolbar or header button — and hand focus back to it.
+  // close. Remember the opener — editor pane, toolbar or header button, the ⋮ menu's trigger — and hand
+  // focus back to it (see RememberOpener).
   const returnRef = React.useRef<HTMLElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   return (
@@ -160,7 +177,6 @@ export function DialogContent({
         ref={contentRef}
         className={cn("dialog animate-fade-in", wide && "w-[min(94vw,760px)]", className)}
         onOpenAutoFocus={(e) => {
-          returnRef.current = focusedElement();
           // Radix only gets here when focus is outside the dialog — e.g. the ⋮ menu that opened it gave
           // focus back to its trigger after the input's `autoFocus` had already run (task #474) — and
           // would then focus the first tabbable control, the Close button in the header. Start on the
@@ -178,6 +194,7 @@ export function DialogContent({
           onClosed?.();
         }}
       >
+        <RememberOpener targetRef={returnRef} />
         <div className="mb-4 flex items-start justify-between gap-4" data-focus-skip>
           <div>
             <RadixDialog.Title className="text-lg font-semibold text-ink">{title}</RadixDialog.Title>
