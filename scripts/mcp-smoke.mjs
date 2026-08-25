@@ -84,6 +84,15 @@ check(!read.isError, `markdoc_read_document failed: ${text(read)}`);
 check(text(read).includes("Written through /api/mcp."), `read back: ${text(read)}`);
 console.log(`read ${id}: ${text(read).split("\n")[0]}`);
 
+// A reply to a thread that does not exist must surface as a tool error, not a false "Replied to thread …".
+const ghost = await client.callTool({ name: "markdoc_comment", arguments: { id, action: "reply", threadId: "bogus", body: "ghost reply" } });
+check(ghost.isError === true, `markdoc_comment reply to an unknown thread should be isError, got: ${text(ghost)}`);
+check(text(ghost).includes("404"), `markdoc_comment reply to an unknown thread should report 404: ${text(ghost)}`);
+console.log(`reply to unknown thread → isError (${text(ghost).split("\n")[0]})`);
+const threads = await client.callTool({ name: "markdoc_comments", arguments: { id } });
+check(!threads.isError, `markdoc_comments failed: ${text(threads)}`);
+check(!text(threads).includes("ghost reply"), `phantom reply stored: ${text(threads)}`);
+
 await client.callTool({ name: "markdoc_delete_document", arguments: { id } });
 await client.close();
 console.log(`ALL GOOD — ${tools.length} tools over ${baseUrl}/api/mcp`);
