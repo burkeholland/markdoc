@@ -2,6 +2,7 @@
 import { Dialog, DialogContent, Spinner, GitHubIcon } from "@/components/ui/primitives";
 
 import { memo, useEffect, useMemo, useState } from "react";
+import { signIn } from "next-auth/react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError } from "@/lib/api";
@@ -9,6 +10,46 @@ import { api, ApiError } from "@/lib/api";
 import { cn, relativeTime } from "@/lib/utils";
 
 type Tab = "gist" | "repo";
+
+/** Shown wherever a GitHub entry point is disabled because the server has no GitHub OAuth app (#162). */
+export const GITHUB_NOT_CONFIGURED = "GitHub storage is not set up on this server.";
+
+/**
+ * Empty state of the GitHub picker for an account without a GitHub token (#162): the action the
+ * sentence names, or why there is none. `redirectTo` defaults to the page the user is on.
+ */
+export function GitHubSignInPrompt({ githubConfigured, redirectTo }: { githubConfigured: boolean; redirectTo?: string }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-2 p-6 text-center text-sm text-ink-3" data-testid="github-signin-prompt">
+      <GitHubIcon className="text-ink-4" size={24} />
+      {githubConfigured ? (
+        <>
+          <p>
+            Gists and repositories need a GitHub account. You are signed in without one — sign in with GitHub to use them as storage.
+          </p>
+          <button
+            type="button"
+            className="btn btn-primary gap-2"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void signIn("github", { redirectTo: redirectTo ?? window.location.href }).catch(() => setBusy(false));
+            }}
+            data-testid="github-signin"
+          >
+            {busy ? <Loader2 size={16} className="animate-spin" /> : <GitHubIcon size={16} />} Sign in with GitHub
+          </button>
+        </>
+      ) : (
+        <p data-testid="github-not-configured">
+          {GITHUB_NOT_CONFIGURED} Gists and repositories become available once the administrator sets <code className="font-mono text-xs">AUTH_GITHUB_ID</code> and{" "}
+          <code className="font-mono text-xs">AUTH_GITHUB_SECRET</code>.
+        </p>
+      )}
+    </div>
+  );
+}
 
 interface GistItem {
   id: string;
@@ -36,12 +77,16 @@ export function GitHubPicker({
   onLinked,
   onImported,
   githubAvailable,
+  githubConfigured,
 }: {
   mode: "link" | "import";
   doc?: DocumentDto;
   onLinked?: (doc: DocumentDto) => void;
   onImported?: (docId: string) => void;
+  /** The signed-in account has a GitHub token. */
   githubAvailable: boolean;
+  /** The server has a GitHub OAuth app, so "Sign in with GitHub" can work. */
+  githubConfigured: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("gist");
   const [gists, setGists] = useState<GistItem[] | null>(null);
@@ -146,12 +191,7 @@ export function GitHubPicker({
     });
 
   if (!githubAvailable) {
-    return (
-      <div className="rounded-xl border border-dashed border-line-2 p-6 text-center text-sm text-ink-3">
-        <GitHubIcon className="mx-auto mb-2 text-ink-4" size={24} />
-        Sign in with GitHub to use gists and repositories as storage.
-      </div>
-    );
+    return <GitHubSignInPrompt githubConfigured={githubConfigured} />;
   }
 
   return (
@@ -350,12 +390,14 @@ export const GitHubDialog = memo(function GitHubDialog({
   doc,
   onDocChange,
   githubAvailable,
+  githubConfigured,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   doc: DocumentDto;
   onDocChange: (doc: DocumentDto) => void;
   githubAvailable: boolean;
+  githubConfigured: boolean;
 }) {
   const [unlinking, setUnlinking] = useState(false);
   const linked = doc.storage !== "local";
@@ -405,6 +447,7 @@ export const GitHubDialog = memo(function GitHubDialog({
           mode="link"
           doc={doc}
           githubAvailable={githubAvailable}
+          githubConfigured={githubConfigured}
           onLinked={(d) => {
             onDocChange(d);
             onOpenChange(false);
