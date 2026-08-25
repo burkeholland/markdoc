@@ -503,6 +503,19 @@ body {
 .md-rich:focus {
   outline: none;
 }
+/* Server-rendered stand-in for the rich pane while the live text loads (editor-shell): same box as
+   .md-rich, the reader's rhythm rules (class reader-body), never interactive. */
+.rich-placeholder {
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--color-ink-2);
+  min-height: 100%;
+  padding: 8px 40px 80px 24px;
+  max-width: 820px;
+  word-wrap: break-word;
+  pointer-events: none;
+  user-select: none;
+}
 
 /* ---------- Markdown prose rhythm ----------
    One margin system for every rendered-Markdown surface: the rich editor (.md-rich), the reader
