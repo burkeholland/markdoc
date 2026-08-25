@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName } from "@/server/http";
-import { readLiveText, mutateLiveDoc, cleanTextOf, expectedContentHash, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
+import { readLiveText, mutateLiveDoc, cleanTextOf, readPrecondition, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
 import { addVersion } from "@/server/documents";
 import { diffOps, applyOps } from "@/editor/sync/text-diff";
 import { recordAgentActivity } from "@/server/agents";
@@ -51,7 +51,7 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const { user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => putSchema.parse(d));
-  const expected = expectedContentHash(req, body.ifContentHash);
+  const expected = readPrecondition(req, body);
   let changed = false;
   let chars = 0;
   let at: { from: number; to: number } | undefined;
@@ -87,20 +87,29 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
 const patchSchema = z.object({
   /** Text to append at the end of the document (a blank line is inserted before it when needed). */
   append: z.string().max(500_000),
+  /** `contentHash` from `GET /content`; the append is refused with 409 when the document moved since (also as `If-Match`). */
+  ifContentHash: ifContentHashSchema,
 });
 
-/** Append Markdown to the end of the document. */
+/**
+ * Append Markdown to the end of the document. With `ifContentHash` (or `If-Match`) the append only
+ * lands when the clean text still hashes to that value — the same 409 as `PUT` otherwise.
+ */
 export const PATCH = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const { user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => patchSchema.parse(d));
+  const expected = readPrecondition(req, body);
+  let hashAfter = "";
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
+    assertContentUnchanged(id, doc, expected);
     const ytext = doc.getText(TEXT_KEY);
     const current = ytext.toString();
     const separator = current.length === 0 ? "" : current.endsWith("\n\n") ? "" : current.endsWith("\n") ? "\n" : "\n\n";
     ytext.insert(ytext.length, separator + body.append);
     recordAgentActivity(doc, user!, "edited", { from: ytext.length, to: ytext.length });
+    hashAfter = contentHash(cleanTextOf(doc));
   });
   void recordEdit(id, activityActor(user!), body.append.length).catch((err) => console.error("[activity] edit failed", err));
-  return json({ ok: true });
+  return json({ ok: true, contentHash: hashAfter });
 });

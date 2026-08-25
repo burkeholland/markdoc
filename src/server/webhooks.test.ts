@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { hostname, networkInterfaces } from "node:os";
 import { eq } from "drizzle-orm";
 
 process.env.PGLITE_DATA_DIR = "memory://";
@@ -118,15 +119,49 @@ describe("outbound webhooks", () => {
   });
 
   it("refuses a URL at the server's own origin (Host header or MARKDOC_URL) but allows another localhost port", async () => {
+    // Pinned self: the listening port and one LAN address, so the keys are machine-independent.
+    const self = { port: 3000, addresses: ["192.168.100.71"] };
     // Host header, scheme unknown: both default ports are "own"; an explicit other port is not.
-    expect(ownOriginKeys("localhost:3000")).toEqual(["localhost:3000"]);
-    expect(ownOriginKeys("Docs.Example.com", undefined)).toEqual(["docs.example.com:80", "docs.example.com:443"]);
-    expect(ownOriginKeys("localhost:3000", "https://docs.example.com")).toEqual(["localhost:3000", "docs.example.com:443"]);
-    expect(ownOriginKeys(null, undefined)).toEqual([]);
+    expect(ownOriginKeys("localhost:3000", undefined, self)).toEqual(["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "0.0.0.0:3000", "[::]:3000", "192.168.100.71:3000"]);
+    expect(ownOriginKeys("Docs.Example.com", undefined, self)).toContain("docs.example.com:80");
+    expect(ownOriginKeys("Docs.Example.com", undefined, self)).toContain("docs.example.com:443");
+    expect(ownOriginKeys("localhost:3000", "https://docs.example.com", self)).toContain("docs.example.com:443");
+    expect(ownOriginKeys(null, undefined, self)).toEqual(["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "0.0.0.0:3000", "[::]:3000", "192.168.100.71:3000"]);
+    expect(ownOriginKeys(null, undefined, { port: 0, addresses: [] })).toEqual([]);
+    // Every spelling of the listener (issue #184), on the listening port and the Host header's port; other ports stay free.
+    const keys = ownOriginKeys("localhost:3400", undefined, { port: 3400, addresses: ["192.168.100.71", "fd74:fea9::1252:bd53", "fe80::1%eth0"] });
+    for (const k of ["localhost:3400", "127.0.0.1:3400", "[::1]:3400", "0.0.0.0:3400", "[::]:3400", "192.168.100.71:3400", "[fd74:fea9::1252:bd53]:3400", "[fe80::1]:3400"]) expect(keys).toContain(k);
+    expect(keys.some((k) => !k.endsWith(":3400"))).toBe(false);
+    // Defaults: PORT (3000 when unset), this machine's interfaces and its name.
+    const defaults = ownOriginKeys("localhost:3000");
+    expect(defaults).toContain("127.0.0.1:3000");
+    expect(defaults).toContain("[::1]:3000");
+    expect(defaults).toContain(`${hostname().toLowerCase()}:3000`);
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries ?? []) expect(defaults).toContain(entry.family === "IPv6" ? `[${entry.address.replace(/%.*$/, "")}]:3000` : `${entry.address}:3000`);
+    }
 
-    const own = ownOriginKeys("localhost:3000", "https://docs.example.com");
-    for (const url of ["http://localhost:3000/api/webhooks", "https://docs.example.com/hook", "https://docs.example.com:443/hook", "http://LOCALHOST:3000/"]) {
-      await expect(createWebhook(alice, { url, events: ["mention"] }, own)).rejects.toThrow("A webhook cannot point at Markdoc itself");
+    const own = ownOriginKeys("localhost:3000", "https://docs.example.com", self);
+    for (const url of [
+      "http://localhost:3000/api/webhooks",
+      "https://docs.example.com/hook",
+      "https://docs.example.com:443/hook",
+      "http://LOCALHOST:3000/",
+      "http://127.0.0.1:3000/hook",
+      "http://127.0.0.2:3000/hook",
+      "http://127.1:3000/hook",
+      "http://2130706433:3000/hook",
+      "http://[::1]:3000/hook",
+      "http://[::ffff:127.0.0.1]:3000/hook",
+      "http://0.0.0.0:3000/hook",
+      "http://0:3000/hook",
+      "http://[::]:3000/hook",
+      "http://192.168.100.71:3000/hook",
+      "http://app.localhost:3000/hook",
+      // Loopback on the public origin's port is the proxy in front of Markdoc.
+      "https://127.0.0.1/hook",
+    ]) {
+      await expect(createWebhook(alice, { url, events: ["mention"] }, own), url).rejects.toThrow("A webhook cannot point at Markdoc itself");
     }
     // Same host, different port (a LAN bridge next to the server), the receiver, and http on the public host's other port are fine.
     const port = (receiver.address() as AddressInfo).port;
@@ -134,20 +169,56 @@ describe("outbound webhooks", () => {
     expect(allowed.url).toBe(`http://localhost:${port}/bridge`);
     const other = await createWebhook(alice, { url: "http://docs.example.com/hook", events: ["mention"] }, own);
     expect(other.url).toBe("http://docs.example.com/hook");
+    const lan = await createWebhook(alice, { url: `http://192.168.100.71:${port}/hook`, events: ["mention"] }, own);
+    expect(lan.url).toBe(`http://192.168.100.71:${port}/hook`);
     await deleteWebhook(alice.id, allowed.id);
     await deleteWebhook(alice.id, other.id);
+    await deleteWebhook(alice.id, lan.id);
 
-    // Through the route: the Host header the browser sent is the origin to refuse.
+    // Through the route: the Host header the browser sent is the origin to refuse, under every spelling of this machine.
     actor = alice;
     const make = (url: string) => postWebhook(new Request("http://localhost/api/webhooks", { method: "POST", headers: { "Content-Type": "application/json", Host: `localhost:${port}` }, body: JSON.stringify({ url, events: ["mention"] }) }));
-    const refused = await make(`http://localhost:${port}/hook`);
-    expect(refused.status).toBe(400);
-    expect(await refused.json()).toEqual({ error: "A webhook cannot point at Markdoc itself" });
+    const lanIp = Object.values(networkInterfaces()).flat().find((e) => e?.family === "IPv4" && !e.internal)?.address;
+    for (const url of [`http://localhost:${port}/hook`, `http://127.0.0.1:${port}/x`, `http://[::1]:${port}/x`, `http://0.0.0.0:${port}/x`, `http://${hostname()}:${port}/x`, ...(lanIp ? [`http://${lanIp}:${port}/x`] : [])]) {
+      const refused = await make(url);
+      expect(refused.status, url).toBe(400);
+      expect(await refused.json()).toEqual({ error: "A webhook cannot point at Markdoc itself" });
+    }
     const accepted = await make(`http://localhost:${port + 1}/hook`);
     expect(accepted.status).toBe(201);
     const { webhook } = (await accepted.json()) as { webhook: { id: string; url: string } };
     expect(webhook.url).toBe(`http://localhost:${port + 1}/hook`);
     expect(await deleteWebhook(alice.id, webhook.id)).toBe(true);
+  });
+
+  it("never delivers to a hook that targets this server: it is disabled at once, with a notification", async () => {
+    // The receiver stands in for Markdoc: make its port the listening port, so a hook stored before the check (or under a spelling it missed) now resolves to "self".
+    received.length = 0;
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
+    const db = await getDb();
+    const [hook] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    const payload = { type: "test" as const, documentId: null, documentTitle: null, cursor: null, actor: null, at: new Date().toISOString() };
+    const previousPort = process.env.PORT;
+    process.env.PORT = String((receiver.address() as AddressInfo).port);
+    try {
+      expect(await sendTestWebhook(alice.id, created.id)).toMatchObject({ ok: false, status: 0 });
+      const result = await deliverWebhook(hook, payload);
+      expect(result).toMatchObject({ ok: false, status: 0, attempt: 1 });
+      await settleWebhookDeliveries();
+      await new Promise((r) => setTimeout(r, 100));
+      expect(received).toHaveLength(0);
+      const [listed] = await listWebhooks(alice.id);
+      expect(listed.active).toBe(false);
+      expect(listed.lastDelivery).toMatchObject({ status: 0 });
+      const notes = await db.select().from(schema.notifications).where(eq(schema.notifications.kind, "webhook.disabled"));
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toMatchObject({ userLogin: alice.login, documentId: docId, snippet: receiverUrl });
+    } finally {
+      if (previousPort === undefined) delete process.env.PORT;
+      else process.env.PORT = previousPort;
+    }
+    await db.delete(schema.notifications).where(eq(schema.notifications.kind, "webhook.disabled"));
+    await deleteWebhook(alice.id, created.id);
   });
 
   it("delivers a comment.added event within a second, signed with the secret", async () => {

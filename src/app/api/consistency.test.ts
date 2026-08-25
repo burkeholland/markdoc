@@ -18,7 +18,7 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers(bearer ? { aut
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, deleteDocument, addVersion, listCollaborators } = await import("@/server/documents");
 const { createApiToken } = await import("@/server/tokens");
-const { notify } = await import("@/server/notifications");
+const { notify, NOTIFICATION_KINDS } = await import("@/server/notifications");
 const version = await import("@/app/api/documents/[id]/versions/[vid]/route");
 const restore = await import("@/app/api/documents/[id]/restore/route");
 const collaborators = await import("@/app/api/documents/[id]/collaborators/route");
@@ -183,6 +183,24 @@ describe("limit caps", () => {
     expect(ok.status).toBe(200);
     expect(((await ok.json()) as { items: unknown[] }).items.length).toBeGreaterThan(0);
     expect((await notifications.GET(jsonReq(`/api/notifications`, "GET"))).status).toBe(200);
+  });
+
+  it("GET /api/notifications?kind= outside the documented kinds is 400, every real kind works", async () => {
+    for (const kind of ["bogus", "mentions", "Share", "share,reply"]) {
+      const res = await notifications.GET(jsonReq(`/api/notifications?kind=${kind}`, "GET"));
+      expect(res.status, kind).toBe(400);
+      const body = (await res.json()) as Err;
+      expect(body.error).toBe("Invalid request");
+      expect(body.issues?.[0]?.path).toEqual(["kind"]);
+    }
+    for (const kind of NOTIFICATION_KINDS) {
+      const res = await notifications.GET(jsonReq(`/api/notifications?kind=${kind}`, "GET"));
+      expect(res.status, kind).toBe(200);
+      const { items } = (await res.json()) as { items: { kind: string }[] };
+      for (const n of items) expect(n.kind).toBe(kind);
+    }
+    const mention = (await (await notifications.GET(jsonReq(`/api/notifications?kind=mention`, "GET"))).json()) as { items: unknown[] };
+    expect(mention.items).toEqual([]);
   });
 
   it("GET /api/documents/:id/activity?limit= outside 1–200 is 400, valid values work", async () => {
