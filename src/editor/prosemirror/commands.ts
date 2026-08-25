@@ -40,8 +40,11 @@ export function markAttrs(state: EditorState, type: MarkType): Attrs | null {
 
 export function blockTypeActive(state: EditorState, type: NodeType, attrs?: Attrs): boolean {
   const { $from, to, node } = state.selection as { $from: typeof state.selection.$from; to: number; node?: PMNode };
-  if (node) return node.hasMarkup(type, attrs);
-  return to <= $from.end() && $from.parent.hasMarkup(type, attrs);
+  // Without `attrs` only the type counts: `hasMarkup` would compare against the default attrs, so a
+  // ```js block never read as a code block (toolbar not pressed, toggle-off refused — task #437).
+  const matches = (n: PMNode) => (attrs ? n.hasMarkup(type, attrs) : n.type === type);
+  if (node) return matches(node);
+  return to <= $from.end() && matches($from.parent);
 }
 
 export function currentHeadingLevel(state: EditorState): number {
@@ -138,12 +141,20 @@ export function insertHorizontalRule(): Command {
       const { $to } = state.selection;
       const tr = state.tr;
       const hr = schema.nodes.horizontal_rule.create();
-      // Insert after the current top-level block.
-      const after = $to.after(1);
-      tr.insert(after, hr);
-      // Continue writing in a new paragraph below the rule.
-      tr.insert(after + hr.nodeSize, schema.nodes.paragraph.create());
-      tr.setSelection(TextSelection.create(tr.doc, after + hr.nodeSize + 1));
+      // An empty top-level paragraph (the line `/divider` was typed on) becomes the rule; otherwise
+      // the rule goes after the current top-level block. Either way writing continues in a new
+      // paragraph below it.
+      const atEmptyParagraph = $to.parent.type === schema.nodes.paragraph && $to.parent.content.size === 0 && $to.depth === 1;
+      let pos: number;
+      if (atEmptyParagraph) {
+        pos = $to.before(1);
+        tr.replaceWith(pos, pos + $to.parent.nodeSize, hr);
+      } else {
+        pos = $to.after(1);
+        tr.insert(pos, hr);
+      }
+      tr.insert(pos + hr.nodeSize, schema.nodes.paragraph.create());
+      tr.setSelection(TextSelection.create(tr.doc, pos + hr.nodeSize + 1));
       dispatch(tr.scrollIntoView());
     }
     return true;
@@ -574,6 +585,34 @@ export const exitTableOnArrowDown: Command = (state, dispatch, view) => {
 export function selectAllText(state: EditorState): Transaction {
   return state.tr.setSelection(TextSelection.create(state.doc, 1, state.doc.content.size - 1));
 }
+
+/* ---------- Entering blocks with the keyboard (task #437) ---------- */
+
+/**
+ * Enter on a paragraph that reads ```` ```lang ```` turns it into an empty code block with that
+ * language — the way a Markdown author opens a fence. The input rule handles the same text
+ * followed by a space; Enter is a keypress, which input rules never see.
+ */
+export const codeFenceOnEnter: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  if (!empty || $from.parent.type !== schema.nodes.paragraph || $from.parentOffset !== $from.parent.content.size) return false;
+  const match = /^```([a-zA-Z0-9+#_-]*)$/.exec($from.parent.textContent);
+  if (!match) return false;
+  if (dispatch) {
+    const pos = $from.before();
+    const tr = state.tr.replaceWith(pos, pos + $from.parent.nodeSize, schema.nodes.code_block.create({ language: match[1] || null }));
+    tr.setSelection(TextSelection.create(tr.doc, pos + 1));
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+};
+
+/** Ctrl+Enter with the caret in a task item toggles its checkbox (Notion and Obsidian do the same); the mouse has the checkbox itself. */
+export const toggleTaskAtCaret: Command = (state, dispatch) => {
+  const item = findParentNode(state.selection.$from, (n) => n.type === schema.nodes.list_item);
+  if (!item || item.node.attrs.checked === null) return false;
+  return toggleTaskChecked(item.pos)(state, dispatch);
+};
 
 export { NodeSelection, Fragment };
 

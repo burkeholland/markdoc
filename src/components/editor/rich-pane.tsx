@@ -69,10 +69,15 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     });
     viewRef.current = view;
     onReady(view);
+    if (process.env.NODE_ENV !== "production") {
+      // Like `__markdocSession`: lets e2e tests wait for ProseMirror's own selection, not just the DOM's.
+      (window as unknown as { __markdocRichView?: EditorView }).__markdocRichView = view;
+    }
     return () => {
       onReady(null);
       view.destroy();
       viewRef.current = null;
+      if (process.env.NODE_ENV !== "production") delete (window as unknown as { __markdocRichView?: EditorView }).__markdocRichView;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);

@@ -173,7 +173,16 @@ export const Toolbar = memo(function Toolbar({
               <ChevronDown size={14} className="text-ink-4" />
             </button>
           </MenuTrigger>
-          <MenuContent align="start" className="w-56">
+          <MenuContent
+            align="start"
+            className="w-56"
+            // Radix hands focus back to the trigger when the menu closes; the caret belongs in the editor
+            // the moment a style is picked (task #437: Ctrl+Z and typing went to the toolbar button).
+            onCloseAutoFocus={(e) => {
+              e.preventDefault();
+              actions.focus();
+            }}
+          >
             <MenuRadioGroup value={String(format.heading)} onValueChange={(v) => actions.setHeading(Number(v))}>
               {HEADINGS.map((h) => (
                 <MenuRadioItem key={h.value} value={h.value} className={h.className}>

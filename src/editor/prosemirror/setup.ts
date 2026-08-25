@@ -43,6 +43,8 @@ import {
   exitCodeBlockOnTripleEnter,
   exitTableBelow,
   exitTableOnArrowDown,
+  codeFenceOnEnter,
+  toggleTaskAtCaret,
 } from "./commands";
 
 export interface RichEditorHandlers extends HighlightHandlers {
@@ -148,8 +150,10 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
 
   // Enter leaves every block the same way (task #415): an empty list item / quote paragraph lifts
   // out, a code block exits after two empty trailing lines, the end of a heading gives a paragraph
-  // (splitBlock picks the parent's default block type), otherwise the block splits.
+  // (splitBlock picks the parent's default block type), otherwise the block splits. A paragraph
+  // that reads ```lang opens a code block instead (task #437).
   const enter = chainCommands(
+    codeFenceOnEnter,
     splitListItemUnchecked,
     liftEmptyQuoteParagraph,
     exitCodeBlockOnTripleEnter,
@@ -198,9 +202,11 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     "Mod-Alt-Shift-Backspace": guard(deleteColumn),
     Enter: guard(chainCommands(addRowOnEnterAtEnd, enter)),
     "Shift-Enter": guard(lineBreak),
-    "Mod-Enter": guard(chainCommands(exitCode, exitTableBelow, insertHardBreak())),
+    "Mod-Enter": guard(chainCommands(exitCode, exitTableBelow, toggleTaskAtCaret, insertHardBreak())),
     ArrowDown: guard(exitTableOnArrowDown),
-    Tab: guard(chainCommands(goToNextCell(1), sinkListItem(schema.nodes.list_item))),
+    // Tab in the bottom-right cell adds a row (every table editor does; without it the key fell
+    // through to the browser and moved focus out of the editor — task #437).
+    Tab: guard(chainCommands(goToNextCell(1), addRowOnEnterAtEnd, sinkListItem(schema.nodes.list_item))),
     "Shift-Tab": guard(chainCommands(goToNextCell(-1), liftListItem(schema.nodes.list_item))),
     Backspace: guard(
       chainCommands(

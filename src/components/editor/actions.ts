@@ -107,8 +107,18 @@ export class EditorActions {
 
   private runPm(command: import("prosemirror-state").Command) {
     if (!this.rich) return;
+    this.discrete();
     command(this.rich.state, this.rich.dispatch, this.rich);
     this.rich.focus();
+  }
+
+  /**
+   * A toolbar or menu action is its own undo step. Y.UndoManager merges edits closer than its
+   * 400 ms capture window, so two quick menu clicks — or a click right after typing — would undo
+   * together (the table menu's add row / add column came back as one step, task #437).
+   */
+  private discrete() {
+    this.session.undoManager.stopCapturing();
   }
 
   private guard(): boolean {
@@ -218,6 +228,7 @@ export class EditorActions {
     if (a.kind === "code") return void cm.insertLink(a.view, href, text || undefined);
     const state = a.view.state;
     if (state.selection.empty && text) {
+      this.discrete();
       const tr = state.tr.insertText(text);
       const from = state.selection.from;
       tr.addMark(from, from + text.length, schema.marks.link.create({ href }));

@@ -195,6 +195,17 @@ describe("serializeMarkdown", () => {
     expect(parseMarkdown(out).doc.eq(doc)).toBe(true);
   });
 
+  it("escapes every tilde of a one- or two-tilde run that touches text, since GFM strikes through with either (task #437)", () => {
+    // Typing `~~typed~` in the preview, one key at a time: each intermediate doc must come back as the same plain text.
+    for (const text of ["Target ~", "Target ~~", "Target ~~t", "Target ~~typed~", "~/.bashrc and ~/.zshrc", "about ~5 minutes"]) {
+      const doc = schema.nodes.doc.create(null, [schema.nodes.paragraph.create(null, [schema.text(text)])]);
+      const out = serializeMarkdown(doc);
+      expect(parseMarkdown(out).doc.eq(doc), `${JSON.stringify(text)} -> ${JSON.stringify(out)}`).toBe(true);
+    }
+    const doc = schema.nodes.doc.create(null, [schema.nodes.paragraph.create(null, [schema.text("Target ~~typed~ and ~ alone and ~~~ three")])]);
+    expect(serializeMarkdown(doc)).toBe("Target \\~\\~typed\\~ and ~ alone and ~~~ three");
+  });
+
   it("keeps bullet and delimiter styles", () => {
     expect(roundTrip("* a\n* b")).toBe("* a\n* b");
     expect(roundTrip("1) a\n2) b")).toBe("1) a\n2) b");

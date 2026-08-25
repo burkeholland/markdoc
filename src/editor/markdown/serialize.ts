@@ -38,7 +38,16 @@ class State extends StateCtor {
     str = str.replace(/_/g, (m, i: number, s: string) =>
       i > 0 && i + 1 < s.length && /\w/.test(s[i - 1]) && /\w/.test(s[i + 1]) ? m : "\\" + m,
     );
-    str = str.replace(/~~/g, "\\~~");
+    // GFM strikes through text between one *or two* tildes, so a run of one or two tildes that touches
+    // text on either side may be a delimiter and every tilde in it is escaped. The old `\~~` left the
+    // second tilde live: typing `~~x~` in the preview serialized to `\~~x~`, which parsed back as
+    // `~` + struck "x" and re-serialized to `~~~x~~` (task #437). Three or more never strike through.
+    str = str.replace(/~+/g, (run, i: number, s: string) => {
+      if (run.length > 2) return run;
+      const before = i > 0 ? s[i - 1] : " ";
+      const after = s[i + run.length] ?? " ";
+      return /\S/.test(before) || /\S/.test(after) ? run.replace(/~/g, "\\~") : run;
+    });
     str = str.replace(/\[/g, "\\[");
     if (this.inLink) str = str.replace(/\]/g, "\\]");
     str = str.replace(/<(?=[a-zA-Z/!?])/g, "\\<");
