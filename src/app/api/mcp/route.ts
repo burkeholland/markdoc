@@ -81,9 +81,17 @@ async function serve(req: Request): Promise<Response> {
   }
 }
 
-/** A real MCP GET (SSE stream) goes to the transport; anything else gets a liveness card a curl can read. */
+/**
+ * The transport is stateless (no session ids), so there is no standalone SSE stream to open and no
+ * session to close: the MCP spec wants `405` for GET-as-SSE and DELETE in that case, and clients
+ * probe for it.
+ */
+const methodNotAllowed = (what: string) =>
+  json({ error: "Method Not Allowed", detail: `${what} is not supported: this MCP endpoint is stateless. POST JSON-RPC messages; there is no SSE stream to open and no session to delete.` }, { status: 405, headers: { Allow: "GET, POST" } });
+
+/** A plain GET answers a liveness card a curl can read; an MCP GET (SSE stream) is refused (stateless). */
 export const GET = handler(async (req: Request) => {
-  if (req.headers.get("accept")?.includes("text/event-stream")) return serve(req);
+  if (req.headers.get("accept")?.includes("text/event-stream")) return methodNotAllowed("GET as an SSE stream");
   return json({
     name: SERVER_INFO.name,
     version: SERVER_INFO.version,
@@ -95,4 +103,4 @@ export const GET = handler(async (req: Request) => {
 });
 
 export const POST = handler(serve);
-export const DELETE = handler(serve);
+export const DELETE = handler(async (req: Request) => methodNotAllowed(req.method));

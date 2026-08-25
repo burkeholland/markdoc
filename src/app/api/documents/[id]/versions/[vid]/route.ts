@@ -77,7 +77,11 @@ export const DELETE = handler(async (_req: Request, { params }: Params) => {
   const { id, vid } = await params;
   await requireAccess(id, "edit");
   const db = await getDb();
-  await db.delete(schema.versions).where(and(eq(schema.versions.documentId, id), eq(schema.versions.id, vid)));
+  const deleted = await db
+    .delete(schema.versions)
+    .where(and(eq(schema.versions.documentId, id), eq(schema.versions.id, vid)))
+    .returning();
+  if (deleted.length === 0) throw new HttpError(404, "Version not found");
   return json({ ok: true });
 });
 

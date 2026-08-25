@@ -54,7 +54,7 @@ Markdoc serves the Model Context Protocol itself at `/api/mcp` (Streamable HTTP)
 }
 ```
 
-For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or run `/mcp add` and enter the same URL and header); for VS Code put it in `.vscode/mcp.json` under `servers`; Claude, Cursor and other Streamable HTTP clients use the same shape. Use the URL you open Markdoc with (a LAN address such as `http://192.168.1.20:3000/api/mcp` works too; `MARKDOC_URL` on the server overrides the origin the tools call back to when it sits behind a proxy). A plain `GET /api/mcp` (no token) answers `{ name, version, tools, docs }` so a `curl` shows it is alive; without a token every MCP request is a `401` that says where to create one.
+For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or run `/mcp add` and enter the same URL and header); for VS Code put it in `.vscode/mcp.json` under `servers`; Claude, Cursor and other Streamable HTTP clients use the same shape. Use the URL you open Markdoc with (a LAN address such as `http://192.168.1.20:3000/api/mcp` works too; `MARKDOC_URL` on the server overrides the origin the tools call back to when it sits behind a proxy). A plain `GET /api/mcp` (no token) answers `{ name, version, tools, docs }` so a `curl` shows it is alive; without a token every MCP request is a `401` that says where to create one. The transport is stateless (no session ids): `GET` with `Accept: text/event-stream` and `DELETE` answer `405` as the MCP spec prescribes, which Streamable HTTP clients treat as "no standalone stream / nothing to close". When a tool call fails on validation, the tool error text carries the first problem (`… failed (400): Invalid request — content: Too big: …`) so you can tell why.
 
 **Alternative: stdio from a checkout.** `mcp/server.mjs` exposes the same tools over stdio for clients that cannot speak HTTP:
 
@@ -74,7 +74,7 @@ From a checkout you can also run `npm run mcp` with `MARKDOC_URL` and `MARKDOC_T
 
 ### MCP tools
 
-Twenty-six tools; every `id` is the document id from the URL `/d/<id>`.
+Twenty-seven tools; every `id` is the document id from the URL `/d/<id>`.
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
@@ -223,7 +223,7 @@ The same flow over REST is in [Recipes](#4-recipes).
 
 ## 3. Or call the REST API directly
 
-All routes accept `Authorization: Bearer mdk_…` (the browser session cookie works too). Bodies are JSON unless noted; errors are `{ error }` with a 4xx/5xx status. The examples below assume:
+All routes accept `Authorization: Bearer mdk_…` (the browser session cookie works too). Bodies are JSON unless noted; errors are `{ error, issues? }` with a 4xx/5xx status (`issues` lists the zod problems of an invalid body or query), and a non-2xx status means nothing changed. Every `/api/*` path answers JSON — an unknown path is `404 { error: "Not found" }`, never the HTML page. The examples below assume:
 
 ```bash
 BASE=http://localhost:3000
@@ -245,7 +245,7 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 | `GET /api/documents/:id` | | view | `{ document, role }`: title, storage, link access, timestamps and your role. |
 | `PATCH /api/documents/:id` | `{ title? }`, `{ linkAccess?: private \| view \| comment \| edit }` | edit (`linkAccess`: own) | Rename, or change who a link admits. |
 | `DELETE /api/documents/:id` | `?permanent=1` | own | Move to the **trash**: it vanishes from lists, search and every route (`404`), connected editors are sent back to the dashboard, and it is purged after **30 days**. `permanent=1` deletes immediately (also for documents already in the trash). |
-| `POST /api/documents/:id/restore` | | own | Take the document out of the trash. |
+| `POST /api/documents/:id/restore` | | own | Take the document out of the trash. Not in the trash → `409 { error: "Document is not in the trash" }` (nothing changed). |
 | `POST /api/documents/:id/duplicate` | | view | Make a copy: `201 { id, title }`. The copy is yours, titled *Copy of …*, holds the current clean text with referenced images copied, is stored in Markdoc (no GitHub link), has no collaborators and one version *Copied from …*. |
 | `GET` / `PUT` / `DELETE /api/documents/:id/star` | | view | Read, set or clear your star (`{ starred }`). Stars are per user. |
 
@@ -297,9 +297,9 @@ Agents are published into the document's awareness by the server, so the bot ava
 | `GET /api/documents/:id/versions/:vid` | | view | One version with its full text. |
 | `POST /api/documents/:id/versions/:vid` | `{ action: "restore" }` or `{ action: "rename", title }` | edit | Restore (the pre-restore state is kept as a version) or rename (an `auto` version becomes `named`). |
 | `POST /api/documents/:id/versions/:vid/copy` | | view | Copy that version as a new document you own: `201 { id, title }`, titled *Copy of <title> (v<n>)*, same rules as `/duplicate` (images copied, stored in Markdoc, no collaborators, one version *Copied from v<n>*). Trashed documents and unknown versions are `404`. |
-| `DELETE /api/documents/:id/versions/:vid` | | edit | Delete a version. |
-| `GET /api/documents/:id/activity` | `?before=<iso>&limit=50` | view | Who did what, when: `{ items: [{ id, actorId, actorName, actorKind: "user" \| "agent", action, detail, createdAt }], nextBefore }`, newest first. `action` is one of `edit`, `comment.add`, `comment.resolve`, `suggestion.add`, `suggestion.accept`, `suggestion.reject`, `version.save`, `version.restore`, `publish`, `share.add`, `share.remove`, `asset.upload`, `title.change`, `agent.request` (someone asked an agent), `agent.request.done` (an agent finished one; `detail` has `requestId`, `mode`, `suggestions`, `comments`, `summary`); `detail` holds small facts (`chars`, `count`, `number`, `title`, `login`, `role`, a ≤120-char `quote`), never document text. Pass `nextBefore` as `before` for the next page. Your own API calls appear under the token's name with `actorKind: "agent"`. |
-| `GET /api/documents/:id/export` | `?format=md \| html \| pdf` (default `md`), `?download=1` (attachment; HTML embeds images as `data:` URIs), `?suggestions=1` keeps pending insertions | view | Plain Markdown, a standalone HTML page, or a Letter PDF. PDF returns `503 { error }` if Chromium is unavailable on the server. HTML and PDF answer `422 { error: "Document is not renderable", reason: "brackets" \| "emphasis" \| "timeout" }` for text the renderer refuses (more than 1 000 `]` or 2 000 `*`/`_` in one paragraph, or a render past its time budget); rendering runs on a worker thread, so it never delays other requests. |
+| `DELETE /api/documents/:id/versions/:vid` | | edit | Delete a version. Unknown version → `404`. |
+| `GET /api/documents/:id/activity` | `?before=<iso>&limit=50` (1–200; anything else → `400`) | view | Who did what, when: `{ items: [{ id, actorId, actorName, actorKind: "user" \| "agent", action, detail, createdAt }], nextBefore }`, newest first. `action` is one of `edit`, `comment.add`, `comment.resolve`, `suggestion.add`, `suggestion.accept`, `suggestion.reject`, `version.save`, `version.restore`, `publish`, `share.add`, `share.remove`, `asset.upload`, `title.change`, `agent.request` (someone asked an agent), `agent.request.done` (an agent finished one; `detail` has `requestId`, `mode`, `suggestions`, `comments`, `summary`); `detail` holds small facts (`chars`, `count`, `number`, `title`, `login`, `role`, a ≤120-char `quote`), never document text. Pass `nextBefore` as `before` for the next page. Your own API calls appear under the token's name with `actorKind: "agent"`. |
+| `GET /api/documents/:id/export` | `?format=md \| html \| pdf` (default `md`; any other value → `400 { error: "Unknown format" }`), `?download=1` (attachment; HTML embeds images as `data:` URIs), `?suggestions=1` keeps pending insertions | view | Plain Markdown, a standalone HTML page, or a Letter PDF. PDF returns `503 { error }` if Chromium is unavailable on the server. HTML and PDF answer `422 { error: "Document is not renderable", reason: "brackets" \| "emphasis" \| "timeout" }` for text the renderer refuses (more than 1 000 `]` or 2 000 `*`/`_` in one paragraph, or a render past its time budget); rendering runs on a worker thread, so it never delays other requests. |
 
 ### Images
 
@@ -313,7 +313,7 @@ Agents are published into the document's awareness by the server, so the bot ava
 | Method & path | Body | Access | Purpose |
 | --- | --- | --- | --- |
 | `GET /api/documents/:id/collaborators` | | view | `{ owner, collaborators, linkAccess }`. |
-| `POST /api/documents/:id/collaborators` | `{ login, role: editor \| commenter \| viewer }` | own | Add or change a person by GitHub handle. |
+| `POST /api/documents/:id/collaborators` | `{ login, role: editor \| commenter \| viewer }` | own | Add or change a person by GitHub handle: `{ ok, login, role, pending }`. `200` when that person has signed in to Markdoc before; `202` with `pending: true` when nobody with that handle has (the share applies on their first sign-in — check the spelling). |
 | `DELETE /api/documents/:id/collaborators` | `{ login }` | own | Remove a person. |
 | `POST /api/documents/:id/link` | `{ storage: "local" }`, `{ storage: "gist", gistId?, filename?, isPublic?, description? }` or `{ storage: "repo", owner, repo, branch, path }` | own | Connect the document to a gist or repository file (or back to Markdoc-only storage). |
 | `GET /api/documents/:id/sync` | `?fresh=1` (skip the 30 s cache), `?content=1` (include `remoteContent`) | view | Three-way status against the linked file, like a Git client: `{ status: "in-sync" \| "local-ahead" \| "remote-ahead" \| "diverged", remote: { sha, revision, url, updatedAt }, localChanged, remoteChanged, lines: { local, remote }, pollMs }`. The base is the content of the last publish/pull; `remote.sha` is the file blob sha for repositories and the latest history version for gists. The GitHub read is cached for 30 s per document. |
@@ -330,10 +330,10 @@ Sharing a document with an audience: `/p/:id` is the read-only **reader view** (
 | Method & path | Body / query | Access | Purpose |
 | --- | --- | --- | --- |
 | `GET /api/me` | | signed in | Current user and agent name. |
-| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you), `request.done` (an agent finished a request you made; `actorName` is the agent, `snippet` its summary); `refId` is the thread, reply, suggestion or request id (`<docId>:<login>` for shares). |
+| `GET /api/notifications` | `?unread=1&limit=20&kind=<kind>` (`limit` 1–100; anything else → `400`) | signed in | Your notifications, newest first, with the document title: `{ items: [{ id, kind, documentId, documentTitle, actorLogin, actorName, refId, snippet, createdAt, readAt }], unreadCount }`. `kind` is one of `mention`, `reply` (to a thread you wrote in), `resolve` / `reopen` (of such a thread), `suggestion.accept` / `suggestion.reject` (of your suggestion), `share` (a document shared with you), `request.done` (an agent finished a request you made; `actorName` is the agent, `snippet` its summary); `refId` is the thread, reply, suggestion or request id (`<docId>:<login>` for shares). |
 | `POST /api/notifications/:id/read` / `POST /api/notifications/read-all` / `POST /api/notifications/thread-read` | `{ documentId, refIds }` for thread-read | signed in | Mark one, all, or everything about the given threads/replies read. |
 | `GET /api/mentions` / `POST /api/mentions/:id/read` | | signed in | **Deprecated, removed next release**: alias of `GET /api/notifications?unread=1&kind=mention` (also returns the old `mentions` array) and of `POST /api/notifications/:id/read`. |
-| `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays? }` | session only | List your API tokens; create one (`201`, the secret is returned once). Tokens cannot call these. |
+| `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays? }` | session only | List your API tokens; create one (`201`, the secret is returned once). Tokens cannot call these (`403`), so a leaked token cannot enumerate its siblings. |
 | `DELETE /api/tokens/:id` | | session only | Revoke a token. |
 | `GET /api/health` | | public | `{ ok, version }`. |
 
@@ -347,7 +347,7 @@ Agents can get someone's attention by writing `@login` (their GitHub handle) in 
 
 Comment and reply bodies support inline Markdown: `**bold**`, `*italic*`, `` `code` ``, `[text](https://…)` and bare `http(s)://` URLs (which auto-link). Single newlines are line breaks, blank lines start a new paragraph. Headings, lists, images and HTML are not rendered — they stay literal text — and only `http`, `https` and `mailto` links are clickable. The stored `body` is always the raw text you sent.
 
-Reactions are emoji on a thread or a reply: `POST … { action: "react", threadId, replyId?, emoji: "👍" }` toggles yours (send it again to remove it) and answers `{ ok: true, reacted: true | false }`. Reactions appear live as chips in the comments panel (the editor offers 👍 ❤️ 🎉 👀 😄 🚀, any emoji is accepted) and in `reactions` from `GET /api/documents/:id/comments`. **Reactions never create notifications** — react freely to acknowledge feedback without ringing anyone's bell; reply when you need someone to look.
+Reactions are emoji on a thread or a reply: `POST … { action: "react", threadId, replyId?, emoji: "👍" }` toggles yours (send it again to remove it) and answers `{ ok: true, reacted: true | false }`. Reactions appear live as chips in the comments panel (the editor offers 👍 ❤️ 🎉 👀 😄 🚀; any single emoji is accepted, including skin tones, flags and ZWJ sequences — words like `+1` or `:thumbsup:` are `400` with an `issues` entry on `emoji`) and in `reactions` from `GET /api/documents/:id/comments`. **Reactions never create notifications** — react freely to acknowledge feedback without ringing anyone's bell; reply when you need someone to look.
 
 ### Notifications
 

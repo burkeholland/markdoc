@@ -32,6 +32,13 @@ const card = await (await fetch(`${baseUrl}/api/mcp`)).json();
 check(card.name === "markdoc" && typeof card.tools === "number", `GET /api/mcp card: ${JSON.stringify(card)}`);
 console.log(`GET /api/mcp → ${card.name} ${card.version}, ${card.tools} tools`);
 
+// 1b. Stateless transport: GET-as-SSE and DELETE are 405 per the MCP spec (clients probe for it).
+const sse = await fetch(`${baseUrl}/api/mcp`, { headers: { Accept: "text/event-stream", Authorization: ["Bearer", token].join(" ") } });
+check(sse.status === 405, `GET /api/mcp as SSE should be 405, got ${sse.status}`);
+const del = await fetch(`${baseUrl}/api/mcp`, { method: "DELETE", headers: { Authorization: ["Bearer", token].join(" ") } });
+check(del.status === 405, `DELETE /api/mcp should be 405, got ${del.status}`);
+console.log("GET as SSE / DELETE → 405 (stateless)");
+
 // 2. Without a token the endpoint says where to get one.
 const denied = await fetch(`${baseUrl}/api/mcp`, {
   method: "POST",
@@ -54,7 +61,8 @@ const { tools } = await client.listTools();
 const names = tools.map((t) => t.name).sort();
 const expected = listToolNames().sort();
 check(names.length === expected.length && names.every((n, i) => n === expected[i]), `tool list differs from mcp/tools.mjs:\n  http:  ${names.join(", ")}\n  stdio: ${expected.join(", ")}`);
-console.log(`tools: ${tools.length} (same as stdio) — ${names.join(", ")}`);
+check(card.tools === tools.length, `GET /api/mcp card says ${card.tools} tools, tools/list returned ${tools.length}`);
+console.log(`tools: ${tools.length} (same as stdio and the card) — ${names.join(", ")}`);
 
 // 4. Every tool carries the MCP annotations Copilot CLI reads to decide whether to prompt.
 const defined = new Map(listToolDefinitions().map((t) => [t.name, t.annotations]));
@@ -101,6 +109,18 @@ console.log(`reply to unknown thread → isError (${text(ghost).split("\n")[0]})
 const threads = await client.callTool({ name: "markdoc_comments", arguments: { id } });
 check(!threads.isError, `markdoc_comments failed: ${text(threads)}`);
 check(!text(threads).includes("ghost reply"), `phantom reply stored: ${text(threads)}`);
+
+// Validation errors keep their detail: a 3 MB body names the field and the cap, not just "Invalid request".
+const huge = await client.callTool({ name: "markdoc_create_document", arguments: { content: "x".repeat(3_000_000), title: "too big" } });
+check(huge.isError === true, `3 MB create should be isError, got: ${text(huge).slice(0, 200)}`);
+check(text(huge).includes("(400)") && text(huge).includes("content"), `3 MB create error should carry the zod path "content": ${text(huge)}`);
+console.log(`3 MB create → isError (${text(huge).split("\n")[0].slice(0, 120)})`);
+
+// Restoring a document that is not in the trash is an error, not "Restored".
+const notTrashed = await client.callTool({ name: "markdoc_restore_document", arguments: { id } });
+check(notTrashed.isError === true, `restore of a live document should be isError, got: ${text(notTrashed)}`);
+check(text(notTrashed).includes("409"), `restore of a live document should report 409: ${text(notTrashed)}`);
+console.log(`restore of a live document → isError (${text(notTrashed).split("\n")[0]})`);
 
 await client.callTool({ name: "markdoc_delete_document", arguments: { id } });
 await client.close();

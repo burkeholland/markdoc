@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
-import { CommentsModel, type CommentThread } from "@/editor/collab/comments";
+import { CommentsModel, isEmoji, type CommentThread } from "@/editor/collab/comments";
 import { isSuggestionOutdated, parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
@@ -27,7 +27,12 @@ const schema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("resolve"), threadId: z.string().min(1), resolved: z.boolean() }),
   z.object({ action: z.literal("edit"), threadId: z.string().min(1), replyId: z.string().optional(), body: z.string().trim().min(1).max(5000) }),
   z.object({ action: z.literal("delete"), threadId: z.string().min(1), replyId: z.string().optional() }),
-  z.object({ action: z.literal("react"), threadId: z.string().min(1), replyId: z.string().optional(), emoji: z.string().trim().min(1).max(16) }),
+  z.object({
+    action: z.literal("react"),
+    threadId: z.string().min(1),
+    replyId: z.string().optional(),
+    emoji: z.string().trim().min(1).max(16).refine(isEmoji, "Must be a single emoji (e.g. 👍)"),
+  }),
   /** Decide on the thread's ```suggestion block: accept applies it to the text (editors only), reject records the decision. */
   z.object({ action: z.literal("suggestion"), threadId: z.string().min(1), decision: z.enum(["accept", "reject"]) }),
 ]);
