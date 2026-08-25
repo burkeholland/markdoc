@@ -14,7 +14,9 @@ const createSchema = z.object({
   mode: z.enum(["suggest", "comment", "rewrite"]).default("suggest"),
 });
 
-const STATUSES: AgentRequestStatus[] = ["open", "claimed", "done", "cancelled"];
+const STATUSES = ["open", "claimed", "done", "cancelled"] as const satisfies readonly AgentRequestStatus[];
+
+const querySchema = z.object({ status: z.array(z.enum(STATUSES)).min(1).optional() });
 
 /**
  * Ask an agent: hand a selection plus an instruction to whichever agent picks it up. Commenters
@@ -29,17 +31,12 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   return json({ request }, { status: 201 });
 });
 
-/** Requests on this document, newest first. `?status=open,claimed` filters. */
+/** Requests on this document, newest first. `?status=open,claimed` filters (`open | claimed | done | cancelled`; anything else is a `400`). */
 export const GET = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   await requireAccess(id, "view");
   const raw = new URL(req.url).searchParams.get("status");
-  const status = raw
-    ? raw
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s): s is AgentRequestStatus => (STATUSES as string[]).includes(s))
-    : undefined;
-  const requests = await listRequests(id, { status: status && status.length ? status : undefined });
+  const { status } = querySchema.parse({ status: raw?.split(",").map((s) => s.trim()) });
+  const requests = await listRequests(id, { status });
   return json({ requests });
 });

@@ -129,10 +129,63 @@ function Wait-LiveHealth {
   }
 }
 
-function Get-LiveProcesses {
-  # node.exe processes whose command line mentions the live worktree folder name.
+function Get-LiveStatePath {
+  # <factory root>\markdoc-data\live.json: { root, sha, port, promotedAt } written by promote.ps1 after a handover.
+  param([string]$DataRoot)
+  if (-not $DataRoot) { $DataRoot = Join-Path (Get-FactoryRoot) 'markdoc-data' }
+  return (Join-Path $DataRoot 'live.json')
+}
+
+function Get-LiveRoot {
+  # The worktree the live server runs from. promote.ps1 alternates between two sibling worktrees
+  # (markdoc-live and markdoc-live-b) so the next build can compile beside the running one; live.json
+  # says which is current. Without it (or when its folder is gone) it is ..\markdoc-live as before.
+  param([string]$DataRoot)
+  $default = Join-Path (Get-FactoryRoot) 'markdoc-live'
+  $statePath = Get-LiveStatePath -DataRoot $DataRoot
+  if (Test-Path -LiteralPath $statePath) {
+    try {
+      $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+      if ($state.root -and (Test-Path -LiteralPath (Join-Path $state.root 'package.json'))) { return [string]$state.root }
+    } catch { $null = $_ }
+  }
+  return $default
+}
+
+function Get-LiveTwinRoot {
+  # The other worktree of the pair: <x>-b for <x>, <x> for <x>-b.
   param([string]$Root)
-  $marker = Split-Path -Leaf $Root
+  $parent = Split-Path -Parent $Root
+  $leaf = Split-Path -Leaf $Root
+  if ($leaf -like '*-b') { return (Join-Path $parent $leaf.Substring(0, $leaf.Length - 2)) }
+  return (Join-Path $parent "$leaf-b")
+}
+
+function Write-LiveState {
+  param([string]$Root, [string]$Sha, [int]$Port, [string]$DataRoot)
+  $statePath = Get-LiveStatePath -DataRoot $DataRoot
+  $dir = Split-Path -Parent $statePath
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  $state = [ordered]@{ root = $Root; sha = $Sha; port = $Port; promotedAt = (Get-Date -Format 's') }
+  ($state | ConvertTo-Json) | Set-Content -LiteralPath $statePath -Encoding UTF8
+}
+
+function Get-LiveLogPath {
+  # <DataRoot>\live.log for markdoc-live, <DataRoot>\live-b.log for markdoc-live-b: each worktree's server appends
+  # to its own file, so the standby can start while the old server still holds its log open.
+  param([string]$Root, [string]$DataRoot)
+  if (-not $DataRoot) { $DataRoot = Join-Path (Get-FactoryRoot) 'markdoc-data' }
+  $leaf = Split-Path -Leaf $Root
+  if ($leaf -like '*-b') { return (Join-Path $DataRoot 'live-b.log') }
+  return (Join-Path $DataRoot 'live.log')
+}
+
+function Get-LiveProcesses {
+  # node.exe processes whose command line carries the live worktree path as a folder
+  # ("...\markdoc-live\" — not "...\markdoc-live-b\", the twin, nor a sibling with the same leaf).
+  param([string]$Root)
+  $full = if (Test-Path -LiteralPath $Root) { (Resolve-Path -LiteralPath $Root).Path } else { $Root }
+  $marker = $full.TrimEnd('\') + '\'
   Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
     Where-Object { $_.CommandLine -and $_.CommandLine -like "*$marker*" }
 }

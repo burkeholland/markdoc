@@ -234,8 +234,17 @@ export function validateImportFiles(files: { name: string; size: number }[]): vo
   }
 }
 
-function decode(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+/**
+ * Decode an uploaded file: UTF-16 when it starts with a `FF FE` / `FE FF` byte-order mark (Word's
+ * "Unicode" text export, PowerShell's default redirection), UTF-8 otherwise. `TextDecoder` drops the
+ * BOM itself. The result still containing U+0000 means the bytes were not text (a binary renamed
+ * `.md`, UTF-16 without a BOM): Postgres `text` cannot store it, so it is refused as `415`.
+ */
+export function decodeImportBytes(name: string, bytes: Uint8Array): string {
+  const encoding = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+  const text = new TextDecoder(encoding, { fatal: false }).decode(bytes);
+  if (text.includes("\0")) throw new ImportError(415, `“${name}” is not a text file`);
+  return text;
 }
 
 /**
@@ -283,18 +292,24 @@ async function createImported(ownerId: string, converted: ConvertedImport, image
 export async function importFiles(input: { ownerId: string; files: ImportFileInput[]; images?: ImportImageInput[] }): Promise<ImportedDocument[]> {
   validateImportFiles(input.files.map((f) => ({ name: f.name, size: f.bytes.byteLength })));
   const images = input.images ?? [];
-  const out: ImportedDocument[] = [];
+  // Decode and convert every file before creating any document, so a binary third file does not leave the first two imported.
+  const converted: { converted: ConvertedImport; source: string }[] = [];
   for (const file of input.files) {
     const format = importFormatFor(file.name)!;
-    const converted = await convertImport({ name: file.name, text: decode(file.bytes), format });
-    out.push(await createImported(input.ownerId, converted, images, file.name.split(/[\\/]/).pop() ?? file.name));
+    converted.push({
+      converted: await convertImport({ name: file.name, text: decodeImportBytes(file.name, file.bytes), format }),
+      source: file.name.split(/[\\/]/).pop() ?? file.name,
+    });
   }
+  const out: ImportedDocument[] = [];
+  for (const c of converted) out.push(await createImported(input.ownerId, c.converted, images, c.source));
   return out;
 }
 
 /** Import a string (Markdown, plain text or HTML) as one new document; used by the MCP tool. */
 export async function importText(input: { ownerId: string; content: string; format: ImportFormat; title?: string | null }): Promise<ImportedDocument> {
   if (Buffer.byteLength(input.content, "utf8") > MAX_IMPORT_BYTES) throw new ImportError(413, "Content is larger than 2 MB");
+  if (input.content.includes("\0") || input.title?.includes("\0")) throw new ImportError(400, "Text may not contain NUL characters");
   const fallback = input.format === "html" ? "Imported page" : "Imported text";
   const converted = await convertImport({ name: fallback, text: input.content, format: input.format, title: input.title });
   return createImported(input.ownerId, converted, [], input.format === "html" ? "HTML" : input.format === "text" ? "text" : "Markdown");

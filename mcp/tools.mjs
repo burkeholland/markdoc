@@ -246,7 +246,7 @@ export function registerTools(server, client) {
     {
       title: "Read document",
       description:
-        "Read a document's current Markdown. `clean` excludes text that is still a pending suggestion. The header line carries the document's contentHash: pass it as `ifContentHash` to markdoc_replace_content / markdoc_suggest so your write is refused (instead of silently overwriting) if someone edited the document after you read it.",
+        "Read a document's current Markdown. `clean` excludes text that is still a pending suggestion. The header line carries the document's contentHash: pass it as `ifContentHash` to markdoc_replace_content / markdoc_append / markdoc_suggest so your write is refused (instead of silently overwriting) if someone edited the document after you read it.",
       inputSchema: { id: z.string().describe("Document id (from the URL /d/<id>)"), clean: z.boolean().optional().describe("Return the text without pending suggestions (default false)") },
       annotations: READ_ONLY,
     },
@@ -293,10 +293,20 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_append",
-    { title: "Append", description: "Append Markdown to the end of a document.", inputSchema: { id: z.string(), markdown: z.string() }, annotations: ADDITIVE },
-    async ({ id, markdown }) => {
-      await api("PATCH", `/api/documents/${id}/content`, { append: markdown });
-      return ok(`Appended to ${id}. ${docUrl(id)}`);
+    {
+      title: "Append",
+      description:
+        "Append Markdown to the end of a document. Pass `ifContentHash` from the markdoc_read_document you worked from so the append is refused (instead of landing under text someone moved) if the document changed since you read it.",
+      inputSchema: { id: z.string(), markdown: z.string(), ifContentHash: IF_HASH },
+      annotations: ADDITIVE,
+    },
+    async ({ id, markdown, ifContentHash }) => {
+      try {
+        const res = await api("PATCH", `/api/documents/${id}/content`, { append: markdown, ...(ifContentHash ? { ifContentHash } : {}) });
+        return ok(`Appended to ${id} (hash ${res.contentHash}). ${docUrl(id)}`, { ...res, url: docUrl(id) });
+      } catch (err) {
+        return staleOr(err);
+      }
     },
   );
 
