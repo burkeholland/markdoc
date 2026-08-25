@@ -120,6 +120,50 @@ async function mcpClient(baseURL: string, token: string) {
   return client;
 }
 
+/**
+ * Installed with `addInitScript`: counts frames on the `/collab` WebSocket (not Next's HMR socket)
+ * as `window.__ws`. Sizes are payload bytes (strings count characters).
+ */
+const WS_COUNTER = `(() => {
+  const stats = { sockets: 0, sent: 0, sentBytes: 0, recv: 0, recvBytes: 0, maxRecv: 0 };
+  window.__ws = stats;
+  const size = (d) => (typeof d === "string" ? d.length : d instanceof ArrayBuffer ? d.byteLength : d instanceof Blob ? d.size : (d && d.byteLength) || 0);
+  const Native = window.WebSocket;
+  window.WebSocket = class extends Native {
+    constructor(url, protocols) {
+      super(url, protocols);
+      this.__collab = String(url).includes("/collab");
+      if (!this.__collab) return;
+      stats.sockets++;
+      this.addEventListener("message", (e) => {
+        const n = size(e.data);
+        stats.recv++;
+        stats.recvBytes += n;
+        if (n > stats.maxRecv) stats.maxRecv = n;
+      });
+    }
+    send(data) {
+      if (this.__collab) {
+        stats.sent++;
+        stats.sentBytes += size(data);
+      }
+      return super.send(data);
+    }
+  };
+})();`;
+
+interface WsStats {
+  sockets: number;
+  sent: number;
+  sentBytes: number;
+  recv: number;
+  recvBytes: number;
+  maxRecv: number;
+}
+
+const wsStats = (page: Page) => page.evaluate(() => ({ ...(window as unknown as { __ws: WsStats }).__ws }));
+const wsDiff = (before: WsStats, after: WsStats) => ({ sent: after.sent - before.sent, sentBytes: after.sentBytes - before.sentBytes, recv: after.recv - before.recv, recvBytes: after.recvBytes - before.recvBytes });
+
 test.describe("Burke-scale", () => {
   let owner: User;
   let seed: BurkeScaleSeed;
@@ -264,6 +308,66 @@ test.describe("Burke-scale", () => {
       expect(count(await codeText(bob.page))).toBe(1);
       await expect.poll(async () => (await codeText(a)) === (await codeText(bob.page))).toBe(true);
       // Restore the seeded text through the API (the same path an agent uses) so later tests see the fixture.
+      expect((await a.request.put(`/api/documents/${longDocId}/content`, { data: { content: seed.longDoc.content } })).ok()).toBeTruthy();
+      await expect.poll(() => codeText(a)).toBe(seed.longDoc.content);
+    } finally {
+      await bob.context.close();
+    }
+  });
+
+  test("3b. collab WebSocket: initial sync < 150 KB per browser, typist receives ≤ 1.2 messages per keystroke (task #480)", async ({ browser }) => {
+    // Both contexts count their /collab frames from the next navigation on. The owner's IndexedDB already
+    // mirrors the document (tests 1 and 3), the peer's context is cold: the peer is the full-state case.
+    await owner.context.addInitScript(WS_COUNTER);
+    const bob = await signIn(browser, PEER);
+    await bob.context.addInitScript(WS_COUNTER);
+    const { page: a } = owner;
+    try {
+      await openDocument(a, longDocId);
+      await openDocument(bob.page, longDocId);
+      await expect(a.getByTestId("presence").locator(".avatar")).toHaveCount(2);
+      await expect(bob.page.getByTestId("presence").locator(".avatar")).toHaveCount(2);
+      await a.waitForTimeout(1_000);
+      const aOpen = await wsStats(a);
+      const bOpen = await wsStats(bob.page);
+      const textBytes = seed.longDoc.content.length;
+      console.log(`[ws] initial sync (text ${textBytes} B): A recv ${aOpen.recvBytes} B in ${aOpen.recv} msgs (max ${aOpen.maxRecv} B, ${aOpen.sockets} sockets) · B recv ${bOpen.recvBytes} B in ${bOpen.recv} msgs (max ${bOpen.maxRecv} B, ${bOpen.sockets} sockets)`);
+      // Budget from issue #119: < 150 KB for this document (86 KB of text plus 25 comment threads). Before the
+      // fix every tab ran two connections (StrictMode twin session) and the first one also got the hydration
+      // update: 389 KB for the first browser, 266 KB for the second.
+      expect(aOpen.sockets).toBe(1);
+      expect(bOpen.sockets).toBe(1);
+      expect(aOpen.recvBytes).toBeLessThan(150_000);
+      expect(bOpen.recvBytes).toBeLessThan(150_000);
+      expect(bOpen.recvBytes).toBeGreaterThan(textBytes);
+
+      // A types 200 characters at the end of the document while B watches.
+      await a.locator(".cm-content").click();
+      await a.keyboard.press("Control+End");
+      await a.waitForTimeout(500);
+      const a0 = await wsStats(a);
+      const b0 = await wsStats(bob.page);
+      const typed = `${"lorem ".repeat(33)}lo`;
+      expect(typed).toHaveLength(200);
+      const t0 = Date.now();
+      await a.keyboard.type(typed, { delay: 30 });
+      const typeMs = Date.now() - t0;
+      await expect.poll(() => codeText(bob.page)).toContain(typed);
+      await a.waitForTimeout(1_500);
+      const aTyping = wsDiff(a0, await wsStats(a));
+      const bTyping = wsDiff(b0, await wsStats(bob.page));
+      console.log(`[ws] A typed ${typed.length} chars in ${typeMs} ms · A sent ${aTyping.sent} msgs ${aTyping.sentBytes} B · recv ${aTyping.recv} msgs ${aTyping.recvBytes} B · B recv ${bTyping.recv} msgs ${bTyping.recvBytes} B`);
+      // The typist gets one ack per update it sent (the provider needs it for "saved") and nothing else of its
+      // own: no echo of its update, no echo of its caret, no twin connection. Before the fix: ~3.1 per keystroke.
+      expect(aTyping.recv).toBeLessThanOrEqual(1.2 * typed.length);
+      // The reader gets each update once plus a throttled caret stream (≤ 1.5 per keystroke; was ~2.1).
+      expect(bTyping.recv).toBeLessThanOrEqual(1.5 * typed.length);
+
+      // Integrity: nothing lost or doubled on either side.
+      const count = (s: string) => s.split(typed).length - 1;
+      expect(count(await codeText(a))).toBe(1);
+      expect(count(await codeText(bob.page))).toBe(1);
+      await expect.poll(async () => (await codeText(a)) === (await codeText(bob.page))).toBe(true);
       expect((await a.request.put(`/api/documents/${longDocId}/content`, { data: { content: seed.longDoc.content } })).ok()).toBeTruthy();
       await expect.poll(() => codeText(a)).toBe(seed.longDoc.content);
     } finally {
