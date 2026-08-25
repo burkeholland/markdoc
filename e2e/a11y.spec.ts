@@ -119,6 +119,13 @@ test.describe("axe: pages", () => {
     await setTheme(page, "dark");
     await expect(page.getByTestId("document-card").first()).toBeVisible();
     await scan(page, "dashboard (dark)", { contrast: true });
+
+    // Active no-match search: the ✕ clear button in the field and the empty state's "Clear search" link.
+    await page.getByTestId("search").fill("zzzzqqq");
+    await expect(page.getByTestId("empty-state")).toContainText('No matches for "zzzzqqq"');
+    await expect(page.getByTestId("empty-state-clear-search")).toBeVisible();
+    await expect(page.getByTestId("search-clear")).toBeVisible();
+    await scan(page, "dashboard no-match search (dark)", { contrast: true });
     await context.close();
   });
 

@@ -1,4 +1,5 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { createDocument, selectTextInRich } from "./helpers";
 
 const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\nMore words.\n\n## Third\n\nEnd.\n";
@@ -160,6 +161,49 @@ test.describe("phone", () => {
     await context.close();
   });
 
+  test("header ⋮ menu fits the 844 px screen and scrolls so Move to trash is reachable", async ({ browser }) => {
+    const { context, page } = await signInOn(browser, "phone-menu", { ...phone });
+    const id = await createDocument(page, DOC, "Mobile menu");
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((t) => localStorage.setItem("markdoc:theme", t), theme);
+      await openDoc(page, id);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.getByTestId("more-menu").click();
+      const menu = page.getByRole("menu");
+      await expect(menu).toBeVisible();
+      await settled(menu);
+      // The phone menu folds Share / Publish / Mode in, so it is taller than the screen without a cap.
+      const rows = (await menu.getByRole("menuitem").count()) + (await menu.getByRole("menuitemradio").count());
+      expect(rows).toBeGreaterThanOrEqual(20);
+      const box = (await menu.boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(phone.viewport.height);
+      expect(await menu.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+      const trash = menu.getByRole("menuitem", { name: "Move to trash" });
+      await trash.scrollIntoViewIfNeeded();
+      await expect(trash).toBeInViewport();
+      // Scoped to the menu: the rest of the page is aria-hidden by Radix while a menu is open (the skip link
+      // there is a page-level finding, not this menu's).
+      const results = await new AxeBuilder({ page })
+        .include('[role="menu"]')
+        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+        .disableRules(["color-contrast"])
+        .analyze();
+      expect(results.violations, `${theme} menu: ${JSON.stringify(results.violations.map((v) => v.id))}`).toHaveLength(0);
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
+    }
+    // Tapping the last row actually works: the document lands in the trash.
+    page.on("dialog", (dialog) => void dialog.accept());
+    await page.getByTestId("more-menu").click();
+    const trash = page.getByRole("menuitem", { name: "Move to trash" });
+    await trash.scrollIntoViewIfNeeded();
+    await trash.click();
+    await page.waitForURL((url) => url.pathname === "/");
+    await expect(page.getByTestId("toast")).toContainText("moved to the trash");
+    await context.close();
+  });
+
   test("dashboard at 390 px has no horizontal scroll and the template dialog fits", async ({ browser }) => {
     const { context, page } = await signInOn(browser, "phone-dash", { ...phone });
     await createDocument(page, DOC, "A document with a fairly long title that needs to wrap nicely");
@@ -170,6 +214,17 @@ test.describe("phone", () => {
     expect(await noHorizontalScroll(page)).toBe(true);
     await expect(page.getByTestId("search")).toBeVisible();
     await expect(page.getByTestId("filter-starred")).toBeVisible();
+    // The search ✕ is a finger-sized target on phone, and clears the query.
+    await page.getByTestId("search").fill("zzzzqqq");
+    const clear = page.getByTestId("search-clear");
+    await expect(clear).toBeVisible();
+    const clearBox = (await clear.boundingBox())!;
+    expect(clearBox.width).toBeGreaterThanOrEqual(44);
+    expect(clearBox.height).toBeGreaterThanOrEqual(44);
+    expect(await noHorizontalScroll(page)).toBe(true);
+    await clear.click();
+    await expect(page.getByTestId("search")).toHaveValue("");
+    await expect(page.getByTestId("document-list")).toBeVisible();
     await page.getByTestId("new-from-template").click();
     const dialog = page.getByTestId("template-dialog");
     await expect(dialog).toBeVisible();

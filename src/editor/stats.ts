@@ -47,6 +47,65 @@ export function minutesFor(words: number, wpm: number): number {
 }
 
 /**
+ * Linear replacement for the regex `\[([^\]]*)\]\([^)]*\)` family: at each `open` (`[` or `![`),
+ * the label runs to the first `]`, which must be followed by `destOpen` and a destination that
+ * runs to the first `destClose`. The regex rescans to the next `]` from every `[`, which is
+ * quadratic on text such as 40 000 `[` in a row (#115); here the positions of the next `]` and
+ * the next destination terminator are remembered between candidates.
+ */
+function stripLinkLike(s: string, open: string, destOpen: string, destClose: string, keepLabel: boolean): string {
+  if (!s.includes(open)) return s;
+  let out = "";
+  let i = 0;
+  let nextLabelEnd = -1;
+  let nextDestEnd = -1;
+  while (i < s.length) {
+    if (!s.startsWith(open, i)) {
+      out += s[i++];
+      continue;
+    }
+    const labelFrom = i + open.length;
+    if (nextLabelEnd < labelFrom) nextLabelEnd = s.indexOf("]", labelFrom);
+    if (nextLabelEnd === -1) return out + s.slice(i);
+    const destFrom = nextLabelEnd + 1;
+    if (s[destFrom] !== destOpen) {
+      out += s[i++];
+      continue;
+    }
+    if (nextDestEnd < destFrom + 1) nextDestEnd = s.indexOf(destClose, destFrom + 1);
+    if (nextDestEnd === -1) {
+      // No terminator anywhere ahead: no candidate from here on can match.
+      return out + s.slice(i);
+    }
+    if (keepLabel) out += s.slice(labelFrom, nextLabelEnd);
+    i = nextDestEnd + 1;
+  }
+  return out;
+}
+
+/** Linear `s.replace(/<[^>]+>/g, "")`. */
+function stripAngleTags(s: string): string {
+  if (!s.includes("<")) return s;
+  let out = "";
+  let i = 0;
+  let nextGt = -1;
+  while (i < s.length) {
+    if (s[i] !== "<") {
+      out += s[i++];
+      continue;
+    }
+    if (nextGt < i + 1) nextGt = s.indexOf(">", i + 1);
+    if (nextGt === -1) return out + s.slice(i);
+    if (nextGt === i + 1) {
+      out += s[i++];
+      continue;
+    }
+    i = nextGt + 1;
+  }
+  return out;
+}
+
+/**
  * Turn one Markdown line into prose: drop block markers (heading, list, quote, table pipes),
  * images, link URLs, emphasis and inline code delimiters. Returns the prose text and whether
  * the line was a heading.
@@ -68,12 +127,12 @@ function proseOfLine(line: string): { text: string; heading: boolean } {
   // Table pipes become spaces so cells stay separate words.
   if (s.includes("|")) s = s.replace(/\|/g, " ");
   // Images are dropped entirely; links keep their text; reference definitions vanish.
-  s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
-  s = s.replace(/!\[[^\]]*\]\[[^\]]*\]/g, "");
-  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
-  s = s.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  s = stripLinkLike(s, "![", "(", ")", false);
+  s = stripLinkLike(s, "![", "[", "]", false);
+  s = stripLinkLike(s, "[", "(", ")", true);
+  s = stripLinkLike(s, "[", "[", "]", true);
   if (/^\s{0,3}\[[^\]]+\]:\s*\S+/.test(s)) return { text: "", heading };
-  s = s.replace(/<[^>]+>/g, "");
+  s = stripAngleTags(s);
   s = s.replace(/`+/g, "");
   s = s.replace(/(\*\*|__|~~|\*|_)/g, "");
   s = s.replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1");

@@ -6,6 +6,7 @@ import { readLiveText } from "@/server/livedoc";
 import { contentHash, renderMarkdownBody } from "@/server/export/html";
 import { ReaderPage } from "@/components/reader/reader-page";
 import { computeStats } from "@/editor/stats";
+import { UnrenderableDocumentError, UNRENDERABLE_MESSAGE } from "@/editor/markdown/renderable";
 
 // Always render the latest text: the reader has no live connection, a refresh is the update.
 export const dynamic = "force-dynamic";
@@ -30,7 +31,10 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
   const { doc, role } = access;
   const [live, owner] = await Promise.all([readLiveText(id), getUserById(doc.ownerId)]);
   // Pending suggestions are editor business; the audience reads the clean text.
-  const body = await renderMarkdownBody(live.clean, { assetBaseUrl: "" });
+  const body = await renderMarkdownBody(live.clean, { assetBaseUrl: "" }).catch((err: unknown) => {
+    if (!(err instanceof UnrenderableDocumentError)) throw err;
+    return { html: `<p><em>${UNRENDERABLE_MESSAGE}: it contains more unmatched brackets or emphasis markers than the renderer accepts. Open it in the editor to fix the source.</em></p>`, headings: [] };
+  });
   const title = live.title || doc.title || "Untitled";
 
   return (
