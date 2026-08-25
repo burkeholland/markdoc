@@ -20,6 +20,7 @@ export interface RichPaneProps {
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  onNotice?: (message: string) => void;
   /** A dropped .md/.txt file and the ProseMirror position under the pointer. */
   onMarkdownFileDrop?: (file: File, pos: number) => void;
   /** Slash command menu plumbing (stable object; see SlashMenuController). */
@@ -28,15 +29,15 @@ export interface RichPaneProps {
   hidden?: boolean;
 }
 
-export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop, slashMenu, hidden = false }: RichPaneProps) {
+export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop, slashMenu, hidden = false }: RichPaneProps) {
   // Source offset of the code pane's cursor while the code pane is active (for the focus block).
   const focusSource = useSessionValue(session, (s) => (s.activeSurface === "code" ? s.localCursor.code : null));
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const handlers = useRef({ onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop });
+  const handlers = useRef({ onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
   useEffect(() => {
-    handlers.current = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop };
-  }, [onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onMarkdownFileDrop]);
+    handlers.current = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
+  }, [onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop]);
   const focusRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -49,6 +50,7 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
       onCommentShortcut: () => handlers.current.onCommentShortcut(),
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
       onImageError: (message) => handlers.current.onImageError?.(message),
+      onNotice: (message) => handlers.current.onNotice?.(message),
       onMarkdownFileDrop: (file, pos) => handlers.current.onMarkdownFileDrop?.(file, pos),
       getFocusSource: () => (session.activeSurface === "code" ? focusRef.current : null),
       slashMenu,

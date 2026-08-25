@@ -3,6 +3,7 @@ import type { Slice } from "prosemirror-model";
 import type { EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
 import { schema } from "../markdown/schema";
+import { decideInsert, wrapInCodeFence } from "../markdown/renderable";
 import type { MarkdownBinding } from "../sync/markdown-binding";
 
 /** The parts of a CollabSession the paste handler needs; kept narrow so tests can supply a stub. */
@@ -154,7 +155,7 @@ function pasteMarkdownSource(view: EditorView, session: PasteSession, text: stri
  * - everything else (HTML from web pages and word processors, single lines of text) goes
  *   through ProseMirror's default clipboard parsing.
  */
-export function smartPastePlugin(session: PasteSession): Plugin {
+export function smartPastePlugin(session: PasteSession, options: { onNotice?: (message: string) => void } = {}): Plugin {
   return new Plugin({
     props: {
       handlePaste(view, event, slice) {
@@ -165,6 +166,16 @@ export function smartPastePlugin(session: PasteSession): Plugin {
         if (isUrlText(text) && linkSelection(view, text)) return true;
 
         if (session.mode === "suggesting") return false;
+        // Text micromark would choke on goes in as a fenced code block (which the guard skips),
+        // whatever the clipboard's HTML says; inside a code block it is already safe.
+        if (!view.state.selection.$from.parent.type.spec.code) {
+          const decision = decideInsert(text);
+          if (decision.kind === "code") {
+            if (!pasteMarkdownSource(view, session, wrapInCodeFence(text))) return false;
+            options.onNotice?.(decision.message);
+            return true;
+          }
+        }
         const html = clipboardHtml(event);
         if (html && !isPlainSlice(slice)) return false;
         if (!looksLikeMarkdown(text)) return false;

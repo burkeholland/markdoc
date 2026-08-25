@@ -18,21 +18,22 @@ export interface CodePaneProps {
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  onNotice?: (message: string) => void;
   /** A dropped .md/.txt file and the source offset under the pointer. */
   onMarkdownFileDrop?: (file: File, at: number) => void;
   lineWrapping: boolean;
 }
 
-export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onMarkdownFileDrop, lineWrapping }: CodePaneProps) {
+export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop, lineWrapping }: CodePaneProps) {
   // Source offset of the rich pane's cursor while the rich pane is active (for the focus line).
   const focusSource = useSessionValue(session, (s) => (s.activeSurface === "rich" ? s.localCursor.rich : null));
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const setupRef = useRef<CodeEditorSetup | null>(null);
-  const handlers = useRef({ onSelection, onHighlightClick, uploadImage, onImageError, onMarkdownFileDrop });
+  const handlers = useRef({ onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
   useEffect(() => {
-    handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError, onMarkdownFileDrop };
-  }, [onSelection, onHighlightClick, uploadImage, onImageError, onMarkdownFileDrop]);
+    handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
+  }, [onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop]);
   const focusRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -43,6 +44,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
       onHighlightClick: (kind, id) => handlers.current.onHighlightClick(kind, id),
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
       onImageError: (message) => handlers.current.onImageError?.(message),
+      onNotice: (message) => handlers.current.onNotice?.(message),
       onMarkdownFileDrop: (file, at) => handlers.current.onMarkdownFileDrop?.(file, at),
     });
     const view = new EditorView({

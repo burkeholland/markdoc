@@ -161,6 +161,18 @@ const nodes: Record<string, NodeSpec> = {
     toDOM: () => ["pre", { class: "md-frontmatter" }, ["code", 0]],
   },
 
+  /**
+   * A block the parser refused to render (see `renderable.ts`): its Markdown source is kept
+   * verbatim in `src` so it round-trips, and the rich pane shows a placeholder.
+   */
+  unrenderable: {
+    attrs: { src: {} },
+    group: "block",
+    atom: true,
+    selectable: true,
+    toDOM: () => ["div", { class: "md-unrenderable", contenteditable: "false", "data-testid": "unrenderable-block" }, "This section cannot be rendered"],
+  },
+
   /** `[label]: url "title"` reference definition. */
   link_definition: {
     attrs: { label: {}, url: {}, title: { default: null } },
