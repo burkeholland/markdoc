@@ -232,3 +232,59 @@ describe("agent request routes", () => {
     expect(activity.items.some((i) => i.action === "agent.request.done" && i.detail.requestId === request.id)).toBe(true);
   });
 });
+
+describe("query validation (#186)", () => {
+  type Err = { error: string; issues?: { path: (string | number)[]; message: string }[] };
+  const inbox = (qs: string) => as(null, () => GET_AGENT_REQUESTS(jsonReq(`/api/agent/requests${qs}`, undefined, "GET")), ownerToken);
+  const onDoc = (qs: string) => as(owner, () => GET_REQUESTS(jsonReq(`/api/documents/${docId}/requests${qs}`, undefined, "GET"), params(docId)));
+  const expectInvalid = async (res: Response, path: string) => {
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Err;
+    expect(body.error).toBe("Invalid request");
+    expect(body.issues?.[0]?.path[0]).toBe(path);
+  };
+
+  it("GET /api/agent/requests rejects unknown or empty status members and a limit outside 1–200", async () => {
+    for (const status of ["bogus", "claimd", "open,,claimed", "open,bogus", "", "OPEN"]) await expectInvalid(await inbox(`?status=${status}`), "status");
+    for (const limit of ["0", "abc", "-5", "100000", "201", "1.5"]) await expectInvalid(await inbox(`?limit=${limit}`), "limit");
+    // Both wrong: the first issue names the first bad field, as for the other routes.
+    await expectInvalid(await inbox("?status=bogus&limit=abc"), "status");
+  });
+
+  it("GET /api/agent/requests still honours a valid status list and limit", async () => {
+    for (let i = 0; i < 3; i++) await createRequest(docId, ownerActor(), "owner", { instruction: `Filler ${i}`, mode: "comment" });
+    const claimed = await createRequest(docId, ownerActor(), "owner", { instruction: "Claim me", mode: "comment" });
+    await claimRequest(docId, claimed.id, agentActor());
+
+    const res = await inbox("?status=open,claimed&limit=2");
+    expect(res.status).toBe(200);
+    const { requests } = (await res.json()) as { requests: { status: string }[] };
+    expect(requests.length).toBeLessThanOrEqual(2);
+    expect(requests.length).toBeGreaterThan(0);
+    for (const r of requests) expect(["open", "claimed"]).toContain(r.status);
+
+    const done = (await (await inbox("?status=done")).json()) as { requests: { status: string }[] };
+    for (const r of done.requests) expect(r.status).toBe("done");
+    expect(done.requests.length).toBeGreaterThan(0);
+
+    const only = (await (await inbox("?status=claimed&limit=200")).json()) as { requests: { id: string; status: string }[] };
+    expect(only.requests.map((r) => r.id)).toContain(claimed.id);
+    for (const r of only.requests) expect(r.status).toBe("claimed");
+
+    const dflt = (await (await inbox("")).json()) as { requests: { status: string }[] };
+    for (const r of dflt.requests) expect(r.status).toBe("open");
+  });
+
+  it("GET /api/documents/:id/requests rejects an unknown status and filters a valid one", async () => {
+    for (const status of ["bogus", "open,,claimed", "done,nope", ""]) await expectInvalid(await onDoc(`?status=${status}`), "status");
+
+    const all = (await (await onDoc("")).json()) as { requests: { status: string }[] };
+    const statuses = new Set(all.requests.map((r) => r.status));
+    expect(statuses.size).toBeGreaterThan(1);
+
+    const some = (await (await onDoc("?status=open,claimed")).json()) as { requests: { status: string }[] };
+    expect(some.requests.length).toBeGreaterThan(0);
+    expect(some.requests.length).toBeLessThan(all.requests.length);
+    for (const r of some.requests) expect(["open", "claimed"]).toContain(r.status);
+  });
+});
