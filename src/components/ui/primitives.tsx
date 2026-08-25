@@ -136,11 +136,11 @@ export const DialogPrimitiveContent = RadixDialog.Content;
  * inside the content (Image, Link, Name this version, Ask an agent), and by the time any effect runs a menu
  * that opened the dialog is gone and `document.activeElement` is <body> (issue #161).
  */
-function RememberOpener({ target }: { target: React.RefObject<HTMLElement | null> }) {
+function RememberOpener({ targetRef }: { targetRef: React.RefObject<HTMLElement | null> }) {
   const [opener] = React.useState(focusReturnTarget);
   React.useLayoutEffect(() => {
-    target.current = opener;
-  }, [opener, target]);
+    targetRef.current = opener;
+  }, [opener, targetRef]);
   return null;
 }
 
@@ -194,7 +194,7 @@ export function DialogContent({
           onClosed?.();
         }}
       >
-        <RememberOpener target={returnRef} />
+        <RememberOpener targetRef={returnRef} />
         <div className="mb-4 flex items-start justify-between gap-4" data-focus-skip>
           <div>
             <RadixDialog.Title className="text-lg font-semibold text-ink">{title}</RadixDialog.Title>

@@ -779,3 +779,100 @@ test.describe("keyboard-only walkthrough", () => {
     await context.close();
   });
 });
+
+test.describe("dialog focus return (#161)", () => {
+  test("Image, Link, Shortcuts, GitHub, Name version and Ask an agent hand focus back to their opener, never <body>", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-return");
+    const id = await createDocument(page, "# Return\n\nAlpha bravo charlie.\n", "Return fixture");
+    await openDocument(page, id);
+
+    // tag/testid of document.activeElement, the way the issue's evidence table reads.
+    const active = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "body";
+        return el.getAttribute("data-testid") ?? (el.closest(".md-rich") ? "rich" : el.closest(".cm-content") ? "code" : el.tagName.toLowerCase());
+      });
+    const closedWith = async (name: RegExp | string, key: "Escape" | "Cancel") => {
+      const dialog = page.getByRole("dialog", { name });
+      await expect(dialog).toBeVisible();
+      if (key === "Escape") await page.keyboard.press("Escape");
+      else await dialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toHaveCount(0);
+    };
+
+    // 1. Insert image from the toolbar with the mouse: the button does not take focus (it keeps the caret
+    //    in the editor), so the editor is the opener and gets focus — and its selection — back.
+    await focusRichEnd(page);
+    await page.keyboard.press("Shift+Control+ArrowLeft");
+    await expect.poll(() => page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie.");
+    await page.getByTestId("tb-image").click();
+    await expect(page.getByTestId("image-url")).toBeFocused();
+    await closedWith("Insert image", "Escape");
+    await expect.poll(active).toBe("rich");
+    expect(await page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie.");
+
+    // 2. Insert link with Ctrl+K on a selection (a shortcut): back to the rich pane, selection intact.
+    await selectTextInRich(page, "bravo");
+    await page.keyboard.press("Control+k");
+    await expect(page.getByTestId("link-url")).toBeFocused();
+    await closedWith(/link/i, "Escape");
+    await expect.poll(active).toBe("rich");
+    expect(await page.evaluate(() => String(window.getSelection()).trim())).toBe("bravo");
+    // The Cancel button behaves like Esc.
+    await page.keyboard.press("Control+k");
+    await expect(page.getByTestId("link-url")).toBeFocused();
+    await closedWith(/link/i, "Cancel");
+    await expect.poll(active).toBe("rich");
+
+    // 3–5. Dialogs opened from the ⋮ menu with the keyboard: the menu item is unmounted by the time the
+    //      dialog closes, so focus goes to the menu's trigger.
+    const fromMenu = async (item: string) => {
+      await page.getByTestId("more-menu").focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: item }).focus();
+      await page.keyboard.press("Enter");
+    };
+    await fromMenu("Keyboard shortcuts");
+    await closedWith("Keyboard shortcuts", "Escape");
+    await expect.poll(active).toBe("more-menu");
+
+    await fromMenu("Connect to GitHub…");
+    await closedWith("Connect to GitHub", "Escape");
+    await expect.poll(active).toBe("more-menu");
+
+    await fromMenu("Name current version");
+    await expect(page.getByTestId("version-name")).toBeFocused();
+    await closedWith("Name this version", "Escape");
+    await expect.poll(active).toBe("more-menu");
+    // The shortcut form of the same dialog (Ctrl+/) from the editor returns to the editor.
+    await focusRichEnd(page);
+    await page.keyboard.press("Control+/");
+    await closedWith("Keyboard shortcuts", "Escape");
+    await expect.poll(active).toBe("rich");
+
+    // 6. Ask an agent from its toolbar button with Enter: the button is the opener.
+    await page.getByTestId("ask-agent-button").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("ask-agent-instruction")).toBeFocused();
+    await closedWith("Ask an agent", "Escape");
+    await expect.poll(active).toBe("ask-agent-button");
+
+    // Toolbar button activated with Enter: the dialog takes focus (it did not, #161) and Esc returns to the button.
+    await page.getByTestId("tb-image").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("image-url")).toBeFocused();
+    await closedWith("Insert image", "Escape");
+    await expect.poll(active).toBe("tb-image");
+
+    // Submitting still lands in the editor (task #437): Apply on the link dialog puts the caret after the link.
+    await selectTextInRich(page, "Alpha");
+    await page.keyboard.press("Control+k");
+    await page.getByTestId("link-url").fill("https://example.com");
+    await page.getByTestId("link-submit").click();
+    await expect(page.getByRole("dialog", { name: /link/i })).toHaveCount(0);
+    await expect.poll(active).toBe("rich");
+    await expect.poll(() => codeText(page)).toContain("[Alpha](https://example.com)");
+    await context.close();
+  });
+});
