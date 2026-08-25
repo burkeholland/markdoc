@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell } from "./helpers";
+import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -871,6 +871,154 @@ test.describe("dialog focus return (#161)", () => {
     await expect(page.getByRole("dialog", { name: /link/i })).toHaveCount(0);
     await expect.poll(active).toBe("rich");
     await expect.poll(() => codeText(page)).toContain("[Alpha](https://example.com)");
+    await context.close();
+  });
+});
+
+test.describe("insert-table grid keyboard (#160)", () => {
+  test("one Tab stop, arrows move focus and the label, Enter inserts, Tab leaves for Close, axe clean", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-table-grid");
+    const id = await createDocument(page, "# Grid\n\nIntro paragraph.\n", "Grid fixture");
+    await openDocument(page, id);
+    await page.locator(".md-rich p").last().click();
+    await page.keyboard.press("End");
+    await page.getByTestId("tb-table").click();
+
+    const dialog = page.getByRole("dialog", { name: "Insert table" });
+    await expect(dialog).toBeVisible();
+    const grid = page.getByTestId("table-grid");
+    const activeLabel = () => page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? null);
+
+    // WAI-ARIA grid: one roving tab stop, focus starts on the first cell and the label follows it.
+    await expect(grid).toHaveAttribute("role", "grid");
+    await expect(grid.getByRole("row")).toHaveCount(6);
+    await expect(grid.getByRole("gridcell")).toHaveCount(48);
+    await expect(grid.locator('[tabindex="0"]')).toHaveCount(1);
+    await expect(grid.locator('button[tabindex="-1"]')).toHaveCount(47);
+    await expect.poll(activeLabel).toBe("1 by 1");
+    await expect(page.getByTestId("table-grid-label")).toHaveText("1 rows × 1 columns");
+
+    // ArrowRight ×2, ArrowDown ×2 → 3 by 3; the label reads the same; still exactly one tab stop.
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect.poll(activeLabel).toBe("3 by 3");
+    await expect(page.getByTestId("table-grid-label")).toHaveText("3 rows × 3 columns");
+    await expect(grid.locator('[tabindex="0"]')).toHaveCount(1);
+    await expect(grid.locator('[tabindex="0"]')).toHaveAttribute("aria-label", "3 by 3");
+    await scan(page, "editor + insert table dialog (grid focus on 3 by 3)");
+
+    // Edges clamp; Home/End stay in the row; Ctrl+Home returns to the first cell.
+    await page.keyboard.press("End");
+    await expect.poll(activeLabel).toBe("3 by 8");
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(activeLabel).toBe("3 by 8");
+    await page.keyboard.press("Home");
+    await expect.poll(activeLabel).toBe("3 by 1");
+    await page.keyboard.press("ArrowLeft");
+    await expect.poll(activeLabel).toBe("3 by 1");
+    await page.keyboard.press("Control+End");
+    await expect.poll(activeLabel).toBe("6 by 8");
+    await page.keyboard.press("Control+Home");
+    await expect.poll(activeLabel).toBe("1 by 1");
+
+    // Exactly one Tab from a grid cell reaches the dialog's Close button (was 48, #160); Shift+Tab comes back.
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(activeLabel).toBe("1 by 1");
+
+    // Back to 3 by 3 with the keyboard and Enter inserts a 3×3 table; the caret lands in it.
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect.poll(activeLabel).toBe("3 by 3");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expectTableShape(page, 3, 3);
+    await expect(page.locator(".md-rich")).toBeFocused();
+
+    // Reopening starts over at 1 by 1 (not where the last pick left focus).
+    await page.getByTestId("tb-table").click();
+    await expect(dialog).toBeVisible();
+    await expect.poll(activeLabel).toBe("1 by 1");
+    await expect(page.getByTestId("table-grid-label")).toHaveText("1 rows × 1 columns");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await context.close();
+  });
+});
+
+test.describe("Esc dismisses the floating menus (#163)", () => {
+  test("selection bubble: Esc collapses the selection; table menu: Esc hides it, typing stays in the cell; find bar still closes", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-escape");
+    const id = await createDocument(page, "# Esc\n\nSelect these words for the bubble test please.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nLast paragraph.\n", "Esc fixture");
+    await openDocument(page, id);
+    await expect(page.locator(".md-rich table")).toBeVisible();
+    const collapsed = () => page.evaluate(() => window.getSelection()?.isCollapsed ?? null);
+
+    // Selection bubble.
+    await selectTextInRich(page, "these words");
+    await expect(page.getByTestId("selection-bubble")).toBeVisible();
+    expect(await collapsed()).toBe(false);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+    await expect.poll(collapsed).toBe(true);
+    // Focus stays in the editor and the caret sits at the selection's head, so typing continues there.
+    await expect(page.locator(".md-rich")).toBeFocused();
+    await page.keyboard.type("X");
+    await expect(page.locator(".md-rich p").nth(0)).toHaveText("Select these wordsX for the bubble test please.");
+    await page.keyboard.press("Backspace");
+
+    // Table menu: Esc hides it, the caret stays in the cell, a typed character lands there.
+    await clickCell(page, 1, 0);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("table-menu")).toHaveCount(0);
+    await expect(page.locator(".md-rich")).toBeFocused();
+    await page.keyboard.type("z");
+    await expect(tableCell(page, 1, 0)).toHaveText("1z");
+    // Typing moved the selection, so the menu is back; a caret move also brings it back after another Esc.
+    await expect(page.getByTestId("table-menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("table-menu")).toHaveCount(0);
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("table-menu")).toBeVisible();
+
+    // Esc with a selection inside the cell collapses first (bubble), the second Esc hides the menu.
+    await page.keyboard.press("Shift+ArrowRight");
+    await expect(page.getByTestId("selection-bubble")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+    await expect(page.getByTestId("table-menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("table-menu")).toHaveCount(0);
+
+    // Regression guard: Esc in the find bar still closes it, with the rich pane's Esc binding in place.
+    await page.locator(".md-rich p").last().click();
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("find-input")).toBeFocused();
+    await page.keyboard.type("Last");
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 1");
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("find-bar")).toHaveCount(0);
+    await expect(page.locator(".md-rich")).toBeFocused();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Last");
+    // …and the selection the find bar handed back collapses with one more Esc, bubble gone.
+    await expect(page.getByTestId("selection-bubble")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+    await expect.poll(collapsed).toBe(true);
+
+    // The Shortcuts dialog documents the decision: docked panels close from their header, not Esc.
+    await page.keyboard.press("Control+/");
+    const shortcuts = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    await expect(shortcuts).toBeVisible();
+    await expect(shortcuts.getByText("Clear the selection / hide the table menu")).toBeVisible();
+    await expect(page.getByTestId("shortcuts-panels-note")).toContainText("close from the × in their header");
+    await page.keyboard.press("Escape");
+    await expect(shortcuts).toHaveCount(0);
     await context.close();
   });
 });

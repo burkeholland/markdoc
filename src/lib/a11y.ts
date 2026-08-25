@@ -28,6 +28,39 @@ export function rovingIndex(key: string, current: number, count: number, { orien
   }
 }
 
+export interface GridCell {
+  row: number;
+  col: number;
+}
+
+/**
+ * Cell the arrow/Home/End keys should focus next in a `rows × cols` roving-tabindex grid (the insert-table
+ * size picker), or null if `key` is not a navigation key. Arrows clamp at the edges; Home/End go to the
+ * first/last cell of the current row and, with `ctrl`, to the first/last cell of the grid (the WAI-ARIA
+ * grid pattern). An off-grid `current` is clamped before moving.
+ */
+export function gridCell(key: string, current: GridCell, rows: number, cols: number, { ctrl = false }: { ctrl?: boolean } = {}): GridCell | null {
+  if (rows <= 0 || cols <= 0) return null;
+  const row = Math.max(0, Math.min(rows - 1, current.row));
+  const col = Math.max(0, Math.min(cols - 1, current.col));
+  switch (key) {
+    case "ArrowRight":
+      return { row, col: Math.min(cols - 1, col + 1) };
+    case "ArrowLeft":
+      return { row, col: Math.max(0, col - 1) };
+    case "ArrowDown":
+      return { row: Math.min(rows - 1, row + 1), col };
+    case "ArrowUp":
+      return { row: Math.max(0, row - 1), col };
+    case "Home":
+      return { row: ctrl ? 0 : row, col: 0 };
+    case "End":
+      return { row: ctrl ? rows - 1 : row, col: cols - 1 };
+    default:
+      return null;
+  }
+}
+
 /**
  * Move focus back to `el` (captured before a dialog or palette took focus) unless something else already
  * has it. Radix's modal content returns focus to its Trigger on close; dialogs opened from state have
