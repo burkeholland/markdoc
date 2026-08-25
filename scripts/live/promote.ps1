@@ -19,7 +19,7 @@ param(
   [int]$Port = 3000,
   # Loopback port the standby compiles on; never reached by anything but this script.
   [int]$StandbyPort = 3001,
-  # Defaults to <DataRoot>\live.log.
+  # Old server's log; defaults to <DataRoot>\live.log (live-b.log for the -b twin, see Get-LiveLogPath).
   [string]$LogPath,
   [int]$TimeoutSec = 180,
   # Never give up on a still-starting standby before it had this many seconds to come up.
@@ -31,7 +31,9 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 if (-not $DataRoot) { $DataRoot = Join-Path (Get-FactoryRoot) 'markdoc-data' }
 if (-not $Root) { $Root = Get-LiveRoot -DataRoot $DataRoot }
-if (-not $LogPath) { $LogPath = Join-Path $DataRoot 'live.log' }
+$Twin = Get-LiveTwinRoot -Root $Root
+if (-not $LogPath) { $LogPath = Get-LiveLogPath -Root $Root -DataRoot $DataRoot }
+$TwinLogPath = Get-LiveLogPath -Root $Twin -DataRoot $DataRoot
 $Twin = Get-LiveTwinRoot -Root $Root
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
 $standbyBase = "http://127.0.0.1:$StandbyPort"
@@ -76,14 +78,14 @@ function Invoke-Warm {
 
 function Start-Standby {
   # Launches `npm run dev` in the twin in standby mode; returns the launcher process.
-  $logDir = Split-Path -Parent $LogPath
+  $logDir = Split-Path -Parent $TwinLogPath
   if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-  Add-Content -LiteralPath $LogPath -Value ("==== start-live {0} root={1} port={2} standby={3} ====" -f (Get-Date -Format 's'), $Twin, $Port, $StandbyPort)
+  Add-Content -LiteralPath $TwinLogPath -Value ("==== start-live {0} root={1} port={2} standby={3} ====" -f (Get-Date -Format 's'), $Twin, $Port, $StandbyPort)
   $env:PORT = "$Port"
   $env:STANDBY_PORT = "$StandbyPort"
   try {
-    $cmdLine = '/d /c "npm run dev >> "' + $LogPath + '" 2>&1"'
-    Write-Step "starting standby 'npm run dev' in $Twin on 127.0.0.1:$StandbyPort (log: $LogPath)"
+    $cmdLine = '/d /c "npm run dev >> "' + $TwinLogPath + '" 2>&1"'
+    Write-Step "starting standby 'npm run dev' in $Twin on 127.0.0.1:$StandbyPort (log: $TwinLogPath)"
     return (Start-Process -FilePath "$env:ComSpec" -ArgumentList $cmdLine -WorkingDirectory $Twin -WindowStyle Hidden -PassThru)
   } finally {
     Remove-Item Env:STANDBY_PORT -ErrorAction SilentlyContinue
@@ -186,7 +188,7 @@ else { Write-Step "no .env.local in $Root; the standby starts with the environme
 # 2. standby up and warm while the old server keeps serving.
 $proc = Start-Standby
 Write-Step "standby launcher PID $($proc.Id)"
-$result = Wait-LiveStartup -Port $StandbyPort -TimeoutSec $TimeoutSec -MinWaitSec $MinWaitSec -Process $proc -LogPath $LogPath
+$result = Wait-LiveStartup -Port $StandbyPort -TimeoutSec $TimeoutSec -MinWaitSec $MinWaitSec -Process $proc -LogPath $TwinLogPath
 $reason = ''
 if (-not $result.Healthy) { $reason = "standby never healthy: $($result.Reason)" }
 else {
@@ -196,7 +198,7 @@ else {
 if ($reason) {
   Write-Step "promotion of $target FAILED before the handover; the live server on :$Port was never stopped"
   Write-Step "ROLLBACK REASON: $reason"
-  Show-LogTail -LogPath $LogPath -Lines 30
+  Show-LogTail -LogPath $TwinLogPath -Lines 30
   Stop-LiveProcesses -Root $Twin
   exit 1
 }
@@ -205,7 +207,7 @@ if ($reason) {
 $swapStarted = Get-Date
 $healthy = $false
 if (Invoke-Takeover) {
-  $up = Wait-LiveStartup -Port $Port -TimeoutSec 30 -MinWaitSec 0 -Process $proc -LogPath $LogPath -PollSec 1
+  $up = Wait-LiveStartup -Port $Port -TimeoutSec 30 -MinWaitSec 0 -Process $proc -LogPath $TwinLogPath -PollSec 1
   $healthy = $up.Healthy
   if (-not $healthy) { $reason = "after takeover: $($up.Reason)" }
 } else { $reason = 'standby did not take over the port' }
@@ -218,7 +220,7 @@ if ($healthy) {
 
 Write-Step "promotion of $target FAILED during the handover; restarting $previous in $Root"
 Write-Step "ROLLBACK REASON: $reason"
-Show-LogTail -LogPath $LogPath -Lines 30
+Show-LogTail -LogPath $TwinLogPath -Lines 30
 if (Restore-OldServer) {
   Write-Step "ROLLED BACK: live server on :$Port runs $previous again from $Root"
 } else {

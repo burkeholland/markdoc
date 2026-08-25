@@ -170,6 +170,16 @@ function Write-LiveState {
   ($state | ConvertTo-Json) | Set-Content -LiteralPath $statePath -Encoding UTF8
 }
 
+function Get-LiveLogPath {
+  # <DataRoot>\live.log for markdoc-live, <DataRoot>\live-b.log for markdoc-live-b: each worktree's server appends
+  # to its own file, so the standby can start while the old server still holds its log open.
+  param([string]$Root, [string]$DataRoot)
+  if (-not $DataRoot) { $DataRoot = Join-Path (Get-FactoryRoot) 'markdoc-data' }
+  $leaf = Split-Path -Leaf $Root
+  if ($leaf -like '*-b') { return (Join-Path $DataRoot 'live-b.log') }
+  return (Join-Path $DataRoot 'live.log')
+}
+
 function Get-LiveProcesses {
   # node.exe processes whose command line carries the live worktree folder as a path segment
   # ("\markdoc-live\" — not "\markdoc-live-b\", the twin).

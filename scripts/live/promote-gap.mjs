@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Measures the downtime a promote causes: polls GET /api/health on a port every 250 ms and, at the end,
 // prints the longest run of non-200 answers (the "gap") plus every gap over 1 s with its start time.
-// Runs until stdin closes, a SIGINT/SIGTERM arrives, or --seconds elapse.
+// Runs until a SIGINT/SIGTERM arrives or --seconds elapse.
 //   node scripts/live/promote-gap.mjs --port 3991 [--interval 250] [--seconds 600] [--json <file>]
 // Exit 0 always (it is a meter, not a gate); promote.test reads --json.
 import { writeFileSync } from "node:fs";
@@ -71,9 +71,6 @@ function report() {
 
 process.on("SIGINT", () => { stopping = true; });
 process.on("SIGTERM", () => { stopping = true; });
-process.stdin.on("end", () => { stopping = true; });
-process.stdin.on("close", () => { stopping = true; });
-process.stdin.resume();
 
 (async () => {
   const deadline = seconds > 0 ? startedAt + seconds * 1000 : Infinity;
