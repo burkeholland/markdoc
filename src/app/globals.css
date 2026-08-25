@@ -868,6 +868,16 @@ body {
   font-family: var(--font-mono);
   font-size: 0.85em;
 }
+/* Block the parser refused to render (pathological Markdown); the code pane still has the text. */
+.md-rich .md-unrenderable {
+  color: var(--color-ink-3);
+  border: 1px dashed var(--color-line);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9em;
+  font-style: italic;
+  user-select: none;
+}
 .md-rich .md-html-inline {
   color: var(--color-ink-4);
   font-family: var(--font-mono);

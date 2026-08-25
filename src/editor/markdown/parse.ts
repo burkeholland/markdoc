@@ -7,6 +7,7 @@ import { frontmatterFromMarkdown } from "mdast-util-frontmatter";
 import type * as Md from "mdast";
 import { schema } from "./schema";
 import { buildSourceMap, type BlockRange, type Segment, type SourceMap } from "./sourcemap";
+import { findUnrenderableRanges, type UnrenderableRange } from "./renderable";
 
 export interface HeadingInfo {
   level: number;
@@ -169,7 +170,17 @@ class Converter {
   private lineStarts: number[] | null = null;
   private inTableCell = false;
 
-  constructor(private src: string) {}
+  constructor(
+    private src: string,
+    /** Paragraphs the guard refused (see `renderable.ts`); blocks overlapping them become placeholders. */
+    private unrenderable: readonly UnrenderableRange[] = [],
+  ) {}
+
+  private isUnrenderable(node: Md.RootContent): boolean {
+    if (this.unrenderable.length === 0) return false;
+    const { from, to } = offsets(node);
+    return this.unrenderable.some((r) => r.from < to && from < r.to);
+  }
 
   lineAt(offset: number): number {
     if (!this.lineStarts) {
@@ -200,7 +211,19 @@ class Converter {
     this.collectDefinitions(root);
     const children: PMNode[] = [];
     const blocks: BlockRange[] = [];
-    for (const child of root.children) {
+    for (let i = 0; i < root.children.length; i++) {
+      const child = root.children[i];
+      if (this.isUnrenderable(child)) {
+        // The parser saw neutralized text here (see parseMarkdown); the placeholder carries the
+        // real source so it serializes back unchanged, and the tree keeps it as raw html so the
+        // linter does not read the neutralized paragraph.
+        const { from, to } = offsets(child);
+        const raw = this.src.slice(from, to);
+        children.push(schema.nodes.unrenderable.create({ src: raw }));
+        blocks.push({ from, to });
+        root.children[i] = { type: "html", value: raw, position: child.position };
+        continue;
+      }
       const node = this.block(child, true);
       if (!node) continue;
       children.push(node);
@@ -543,12 +566,31 @@ export function parseMdast(src: string): Md.Root {
 }
 
 /**
+ * Copy of `src` with every unrenderable paragraph replaced by a same-length run of a harmless
+ * letter (line breaks kept), so micromark parses a plain paragraph in linear time and every
+ * offset in the result still points into the real text.
+ */
+function neutralize(src: string, ranges: readonly UnrenderableRange[]): string {
+  let out = "";
+  let pos = 0;
+  for (const r of ranges) {
+    out += src.slice(pos, r.from) + src.slice(r.from, r.to).replace(/[^\n\r]/g, "x");
+    pos = r.to;
+  }
+  return out + src.slice(pos);
+}
+
+/**
  * Parse Markdown into a ProseMirror document plus a source map that relates
  * document positions to character offsets in the Markdown text.
+ *
+ * Paragraphs that micromark would parse in quadratic time (see `renderable.ts`) are never
+ * handed to it: they come back as `unrenderable` placeholder blocks holding their source.
  */
 export function parseMarkdown(src: string): ParseResult {
-  const tree = parseMdast(src);
-  const converter = new Converter(src);
+  const unrenderable = findUnrenderableRanges(src);
+  const tree = parseMdast(unrenderable.length > 0 ? neutralize(src, unrenderable) : src);
+  const converter = new Converter(src, unrenderable);
   const { doc, blocks } = converter.root(tree);
   const segments: Segment[] = [];
   doc.descendants((node, pos) => {

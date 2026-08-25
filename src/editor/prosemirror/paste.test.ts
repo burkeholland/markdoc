@@ -240,6 +240,26 @@ describe("smartPastePlugin", () => {
     expect(ytext.toString()).toBe("Hello worldone\n\ntwo");
   });
 
+  it("bracket soup that micromark cannot parse in time goes in as a fenced code block with a notice (#115)", () => {
+    view.destroy();
+    binding.destroy();
+    const notices: string[] = [];
+    const session = setup("Hello world");
+    view.destroy();
+    view = new EditorView(document.createElement("div"), {
+      state: EditorState.create({ doc: binding.initialDoc(), plugins: [markdownBindingPlugin(binding), smartPastePlugin(session, { onNotice: (m) => notices.push(m) })] }),
+    });
+    const soup = "[".repeat(40_000) + "a" + "]".repeat(40_000);
+    select(12);
+    const started = performance.now();
+    view.pasteText(soup, clipboard(soup, "<p>" + soup + "</p>"));
+    expect(performance.now() - started).toBeLessThan(3_000);
+    expect(ytext.toString()).toBe("Hello world\n\n```\n" + soup + "\n```");
+    expect(view.state.doc.childCount).toBe(2);
+    expect(view.state.doc.child(1).type.name).toBe("code_block");
+    expect(notices).toEqual(["Pasted text contains 40,000 unbalanced brackets in one paragraph and cannot be rendered — inserted as a code block"]);
+  });
+
   it("pastes literally inside a code block", () => {
     view.destroy();
     binding.destroy();

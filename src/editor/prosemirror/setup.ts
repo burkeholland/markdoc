@@ -55,6 +55,8 @@ export interface RichEditorHandlers extends HighlightHandlers {
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** Non-blocking notice for the user (a toast), e.g. when pasted text had to be inserted as code. */
+  onNotice?: (message: string) => void;
   /** A dropped .md/.txt file with the position under the pointer; when absent the browser handles the drop. */
   onMarkdownFileDrop?: MarkdownFileDropHandler;
   /** Slash command menu (`/`) state and navigation; when absent the menu is disabled. */
@@ -233,7 +235,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
       markdownInputRules(),
       ...(handlers.uploadImage ? [imageUploadPlugin(session, handlers.uploadImage, { onError: handlers.onImageError })] : []),
       ...(handlers.onMarkdownFileDrop ? [markdownFileDropPlugin(handlers.onMarkdownFileDrop)] : []),
-      smartPastePlugin(session),
+      smartPastePlugin(session, { onNotice: handlers.onNotice }),
       shortcuts,
       keymap(guardedBase),
       dropCursor({ color: "#2563eb", width: 2 }),
