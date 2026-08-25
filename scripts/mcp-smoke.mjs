@@ -122,6 +122,25 @@ check(notTrashed.isError === true, `restore of a live document should be isError
 check(text(notTrashed).includes("409"), `restore of a live document should report 409: ${text(notTrashed)}`);
 console.log(`restore of a live document → isError (${text(notTrashed).split("\n")[0]})`);
 
+// A watch does not wake on the token's own writes: after our own append, polling from the cursor taken
+// before it sleeps out the wait and reports nothing; includeSelf shows the same change marked "(you)".
+const w0 = await client.callTool({ name: "markdoc_watch", arguments: { id } });
+check(!w0.isError && typeof w0.structuredContent?.cursor === "string", `markdoc_watch first call: ${text(w0)}`);
+const appended = await client.callTool({ name: "markdoc_append", arguments: { id, markdown: "\nself append\n" } });
+check(!appended.isError, `markdoc_append failed: ${text(appended)}`);
+const t0 = Date.now();
+const quiet = await client.callTool({ name: "markdoc_watch", arguments: { id, since: w0.structuredContent.cursor, wait: 2 } });
+const quietMs = Date.now() - t0;
+check(!quiet.isError, `markdoc_watch after own append failed: ${text(quiet)}`);
+check(text(quiet).startsWith("Nothing happened"), `watch after own append should say Nothing happened, got: ${text(quiet)}`);
+check(quietMs >= 1800, `watch after own append returned after ${quietMs} ms; it should have waited the full 2 s`);
+const mine = await client.callTool({ name: "markdoc_watch", arguments: { id, since: w0.structuredContent.cursor, wait: 0, includeSelf: true } });
+check(!mine.isError, `markdoc_watch includeSelf failed: ${text(mine)}`);
+check(text(mine).includes("content.changed") && text(mine).includes("(you)") && text(mine).includes("+self append"), `includeSelf should list the own append as (you): ${text(mine)}`);
+const selfEvent = mine.structuredContent?.events?.find((e) => e.type === "content.changed");
+check(selfEvent?.actor?.self === true && selfEvent.actor.kind === "agent", `own content.changed should carry actor.self: ${JSON.stringify(selfEvent?.actor)}`);
+console.log(`watch after own append → "${text(quiet).split("\n")[0].slice(0, 40)}…" after ${quietMs} ms; includeSelf → ${text(mine).split("\n")[0]}`);
+
 await client.callTool({ name: "markdoc_delete_document", arguments: { id } });
 await client.close();
 console.log(`ALL GOOD — ${tools.length} tools over ${baseUrl}/api/mcp`);

@@ -6,7 +6,7 @@ import type { Actor } from "@/server/http";
 import { newId } from "@/editor/collab/shared";
 import { META_KEY, TEXT_KEY } from "@/server/collab/hocuspocus";
 import type { CollabClaims } from "@/server/collab/token";
-import { wakeDocument } from "@/server/agent-events";
+import { noteTypist, wakeDocument } from "@/server/agent-events";
 
 /** Edits by the same actor within this window are merged into one activity row. */
 export const EDIT_COALESCE_WINDOW_MS = Number(process.env.ACTIVITY_EDIT_WINDOW_MS ?? 10 * 60 * 1000);
@@ -193,6 +193,7 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
     wakeDocument(docId);
     const actor = actorFromOrigin(txn.origin);
     if (!actor) return;
+    noteTypist(docId, actor);
     let chars = 0;
     for (const d of event.delta) {
       if (typeof d.insert === "string") chars += d.insert.length;
