@@ -99,7 +99,7 @@ With `AUTH_DEV_LOGIN=1` (the default in `.env.example`) the login page offers a 
 
 The server listens on all interfaces (`HOST` overrides), so the same process also works from a phone or another machine on the LAN at `http://<your-ip>:3000` or `http://<machine-name>:3000` — the start-up log lists the addresses. Sign-in redirects and the collaboration socket follow whatever host the browser used, and in development Next's cross-origin guard for `/_next/*` is pre-filled with this machine's LAN addresses and name (`scripts/lib/dev-origins.mjs`; add others with `ALLOWED_DEV_ORIGINS=a,b`; restart after a DHCP change). `e2e/lan.spec.ts` covers it.
 
-To sign in with GitHub for real, create an OAuth App (Settings → Developer settings → OAuth Apps) with callback URL `http://localhost:3000/api/auth/callback/github` and set `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET`. Markdoc requests the `read:user user:email gist repo` scopes so it can publish on your behalf.
+To sign in with GitHub for real, create an OAuth App (Settings → Developer settings → OAuth Apps) with callback URL `http://localhost:3000/api/auth/callback/github` and set `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET`. Markdoc requests the `read:user user:email gist repo` scopes so it can publish on your behalf. With the OAuth app set, an account that has no GitHub token (the development login) gets a **Sign in with GitHub** button in the GitHub dialogs; without it, *Open from GitHub* and the *Connect to GitHub…* / *Gist or repository…* entries are disabled and say that GitHub storage is not set up on this server.
 
 ### Environment variables
 

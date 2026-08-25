@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { EditorShell } from "@/components/editor/editor-shell";
 import { currentUser } from "@/server/http";
+import { githubConfigured } from "@/auth";
 import { getDocumentAccess, getGitHubToken } from "@/server/documents";
 import { publicDocument } from "@/server/dto";
 import { readLiveText } from "@/server/livedoc";
@@ -38,6 +39,7 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
         image: user?.image ?? null,
       }}
       githubAvailable={githubAvailable}
+      githubConfigured={githubConfigured}
       initialHtml={initialHtml}
     />
   );

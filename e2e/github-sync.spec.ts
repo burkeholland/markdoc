@@ -159,3 +159,58 @@ test.describe("GitHub sync", () => {
     await expect(status(page)).toHaveAttribute("data-status", "in-sync", { timeout: 15_000 });
   });
 });
+
+// The e2e server has a (fake) GitHub OAuth app configured (playwright.config.ts) but dev-login users
+// hold no GitHub token, so every GitHub dialog opens on its empty state. That state must carry the
+// action it names instead of dead-ending on Close (#162).
+test.describe("GitHub dialogs without a GitHub account (#162)", () => {
+  const signInButton = (page: Page) => page.getByRole("dialog").getByRole("button", { name: /Sign in with GitHub/ });
+
+  test("dashboard card, ⋮ → Connect to GitHub… and Publish ▾ → Gist or repository… all offer Sign in with GitHub", async ({ browser }) => {
+    const { page } = await signIn(browser, "nogithub");
+
+    const card = page.getByTestId("open-github");
+    await expect(card).toBeEnabled();
+    await expect(card).toContainText("Edit a Markdown file from a gist or repository.");
+    await card.click();
+    const dashboardDialog = page.getByRole("dialog", { name: "Open from GitHub" });
+    await expect(dashboardDialog).toBeVisible();
+    await expect(signInButton(page)).toBeVisible();
+    await expect(dashboardDialog.getByTestId("github-not-configured")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dashboardDialog).toHaveCount(0);
+
+    const docId = await createDocument(page, BASE);
+    await openDocument(page, docId);
+
+    await page.getByTestId("more-menu").click();
+    const connect = page.getByRole("menuitem", { name: "Connect to GitHub…" });
+    await expect(connect).toBeVisible();
+    await expect(connect).not.toHaveAttribute("data-disabled");
+    await connect.click();
+    const editorDialog = page.getByRole("dialog", { name: "Connect to GitHub" });
+    await expect(editorDialog).toBeVisible();
+    await expect(signInButton(page)).toBeVisible();
+    // Keyboard: Tab reaches the sign-in button, not only Close.
+    await signInButton(page).focus();
+    await expect(signInButton(page)).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(editorDialog).toHaveCount(0);
+
+    await page.getByTestId("publish-menu").click();
+    const gistOrRepo = page.getByRole("menuitem", { name: "Gist or repository…" });
+    await expect(gistOrRepo).not.toHaveAttribute("data-disabled");
+    await gistOrRepo.click();
+    await expect(editorDialog).toBeVisible();
+    await expect(signInButton(page)).toBeVisible();
+
+    // The button really starts the GitHub sign-in: the server answers with the GitHub authorize URL,
+    // which carries the e2e client id and a callback to this server. github.com itself is never reached.
+    await page.route("https://github.com/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>github stub</title>" }));
+    const authorize = page.waitForRequest((req) => req.url().startsWith("https://github.com/login/oauth/authorize"));
+    await signInButton(page).click();
+    const url = new URL((await authorize).url());
+    expect(url.searchParams.get("client_id")).toBe("e2e-github-oauth-app");
+    expect(url.searchParams.get("redirect_uri")).toMatch(/\/api\/auth\/callback\/github$/);
+  });
+});

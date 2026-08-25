@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, MessageSquare, Sparkles, Users, GitBranch, History, Columns2 } from "lucide-react";
 import { cookies } from "next/headers";
-import { auth } from "@/auth";
+import { auth, githubConfigured } from "@/auth";
 import { Wordmark } from "@/components/editor/header";
 import { GitHubIcon } from "@/components/ui/primitives";
 import { Dashboard } from "@/components/dashboard/dashboard";
@@ -22,6 +22,7 @@ export default async function HomePage() {
         user={{ id: user.id, name: user.name ?? user.login ?? "You", login: user.login, image: user.image }}
         documents={docs.map((d) => ({ ...d, updatedAt: d.updatedAt.toISOString(), createdAt: d.createdAt.toISOString(), lastOpenedAt: d.lastOpenedAt?.toISOString() ?? null, deletedAt: null }))}
         githubAvailable={!!token}
+        githubConfigured={githubConfigured}
         initialSort={isDashboardSort(savedSort) ? savedSort : DEFAULT_DASHBOARD_SORT}
       />
     );
