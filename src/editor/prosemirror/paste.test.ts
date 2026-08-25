@@ -306,4 +306,90 @@ describe("smartPastePlugin", () => {
     view.pasteText("https://example.com", clipboard("https://example.com"));
     expect(ytext.toString()).not.toContain("[world]");
   });
+
+  describe("tab-separated text (#166)", () => {
+    const TSV = "Name\tQty\tPrice\nApple\t3\t1.20\nPear\t5\t0.80\n";
+    const TABLE = "| Name  | Qty | Price |\n| ----- | --- | ----- |\n| Apple | 3   | 1.20  |\n| Pear  | 5   | 0.80  |";
+
+    it("3×3 TSV becomes a table with a header row and two body rows", () => {
+      select(12);
+      view.pasteText(TSV, clipboard(TSV));
+      expect(ytext.toString()).toBe("Hello world\n\n" + TABLE);
+      const doc = view.state.doc;
+      expect(doc.childCount).toBe(2);
+      const table = doc.child(1);
+      expect(table.type.name).toBe("table");
+      expect(table.childCount).toBe(3);
+      expect(table.child(0).child(0).type.name).toBe("table_header");
+      expect(table.child(0).childCount).toBe(3);
+      expect(table.child(1).child(0).type.name).toBe("table_cell");
+      expect(table.child(1).child(0).textContent).toBe("Apple");
+      expect(table.child(2).child(2).textContent).toBe("0.80");
+      expect(doc.textContent).not.toContain("\t");
+    });
+
+    it("a single line with tabs stays plain text", () => {
+      select(12);
+      view.pasteText(" a\tb\tc", clipboard(" a\tb\tc"));
+      expect(view.state.doc.childCount).toBe(1);
+      expect(ytext.toString()).not.toContain("|");
+      expect(view.state.doc.textContent).toBe("Hello world a\tb\tc");
+    });
+
+    it("ragged rows (different tab counts) keep the default behaviour", () => {
+      select(12);
+      const ragged = "a\tb\nc\td\te";
+      view.pasteText(ragged, clipboard(ragged));
+      expect(ytext.toString()).not.toContain("|");
+      expect(view.state.doc.childCount).toBe(2);
+    });
+
+    it("a real HTML table on the clipboard goes through the HTML path, not the TSV one", () => {
+      select(12);
+      const html = "<table><tr><th>Name</th><th>Qty</th></tr><tr><td>Apple</td><td>3</td></tr></table>";
+      view.pasteHTML(html, clipboard("Name\tQty\nApple\t3", html));
+      expect(view.state.doc.child(1).type.name).toBe("table");
+      expect(ytext.toString()).toContain("| Name  | Qty |");
+    });
+
+    it("HTML without structure (a terminal's coloured spans) still yields a table", () => {
+      select(12);
+      const html = '<div><span style="color:#ccc">Name\tQty</span></div><div><span>Apple\t3</span></div>';
+      view.pasteHTML(html, clipboard("Name\tQty\nApple\t3", html));
+      expect(view.state.doc.child(1).type.name).toBe("table");
+    });
+
+    it("is one undo step and offers Undo in the notice", () => {
+      view.destroy();
+      binding.destroy();
+      const notices: [string, { label: string; onClick: () => void } | undefined][] = [];
+      const session = setup("Hello world");
+      view.destroy();
+      view = new EditorView(document.createElement("div"), {
+        state: EditorState.create({
+          doc: binding.initialDoc(),
+          plugins: [markdownBindingPlugin(binding), smartPastePlugin(session, { onNotice: (m, a) => notices.push([m, a]) })],
+        }),
+      });
+      select(12);
+      view.pasteText(TSV, clipboard(TSV));
+      expect(ytext.toString()).toBe("Hello world\n\n" + TABLE);
+      expect(notices).toHaveLength(1);
+      expect(notices[0][0]).toBe("Pasted tab-separated text as a table");
+      expect(notices[0][1]?.label).toBe("Undo");
+      notices[0][1]!.onClick();
+      expect(ytext.toString()).toBe("Hello world");
+      expect(view.state.doc.childCount).toBe(1);
+    });
+
+    it("pastes literally inside a code block", () => {
+      view.destroy();
+      binding.destroy();
+      setup("```\nx\n```");
+      select(2);
+      view.pasteText("a\tb\nc\td", clipboard("a\tb\nc\td"));
+      expect(ytext.toString()).toBe("```\nxa\tb\nc\td\n```");
+      expect(view.state.doc.childCount).toBe(1);
+    });
+  });
 });

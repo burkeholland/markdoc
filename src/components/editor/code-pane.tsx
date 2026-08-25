@@ -8,6 +8,7 @@ import { createCodeEditorSetup, type CodeEditorSetup } from "@/editor/codemirror
 import type { ImageUploader } from "@/editor/prosemirror/images";
 import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlights";
 import { collectHighlights } from "@/editor/prosemirror/highlights";
+import type { NoticeAction } from "@/editor/markdown/tsv";
 import { useSessionValue } from "./use-session";
 
 function sameHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
@@ -28,7 +29,7 @@ export interface CodePaneProps {
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
-  onNotice?: (message: string) => void;
+  onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file and the source offset under the pointer. */
   onMarkdownFileDrop?: (file: File, at: number) => void;
   lineWrapping: boolean;
@@ -55,7 +56,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
       onHighlightClick: (kind, id) => handlers.current.onHighlightClick(kind, id),
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
       onImageError: (message) => handlers.current.onImageError?.(message),
-      onNotice: (message) => handlers.current.onNotice?.(message),
+      onNotice: (message, action) => handlers.current.onNotice?.(message, action),
       onMarkdownFileDrop: (file, at) => handlers.current.onMarkdownFileDrop?.(file, at),
     });
     const view = new EditorView({

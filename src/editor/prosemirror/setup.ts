@@ -16,6 +16,7 @@ import { smartPastePlugin } from "./paste";
 import { imageUploadPlugin, type ImageUploader } from "./images";
 import { markdownFileDropPlugin, type MarkdownFileDropHandler } from "./file-drop";
 import { slashMenuPlugin, type SlashMenuHandlers } from "./slash-menu";
+import type { NoticeAction } from "../markdown/tsv";
 import {
   toggleMark,
   setHeadingLevel,
@@ -57,7 +58,7 @@ export interface RichEditorHandlers extends HighlightHandlers {
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
   /** Non-blocking notice for the user (a toast), e.g. when pasted text had to be inserted as code. */
-  onNotice?: (message: string) => void;
+  onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file with the position under the pointer; when absent the browser handles the drop. */
   onMarkdownFileDrop?: MarkdownFileDropHandler;
   /** Slash command menu (`/`) state and navigation; when absent the menu is disabled. */

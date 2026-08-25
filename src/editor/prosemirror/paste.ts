@@ -4,6 +4,7 @@ import type { EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
 import { schema } from "../markdown/schema";
 import { decideInsert, wrapInCodeFence } from "../markdown/renderable";
+import { tsvToMarkdownTable, TSV_TABLE_NOTICE, type NoticeAction } from "../markdown/tsv";
 import type { MarkdownBinding } from "../sync/markdown-binding";
 
 /** The parts of a CollabSession the paste handler needs; kept narrow so tests can supply a stub. */
@@ -13,6 +14,12 @@ export interface PasteSession {
   binding: MarkdownBinding;
   undoManager?: Y.UndoManager;
   mode?: string;
+  /** Undo the last step (the toast's Undo action); falls back to the undo manager. */
+  undo?: () => void;
+}
+
+export interface SmartPasteOptions {
+  onNotice?: (message: string, action?: NoticeAction) => void;
 }
 
 const URL_RE = /^(?:https?:\/\/|mailto:|www\.)[^\s<>"']+$/i;
@@ -152,10 +159,14 @@ function pasteMarkdownSource(view: EditorView, session: PasteSession, text: stri
  *   without a selection it is inserted as text and autolinked by the Markdown;
  * - multi-line plain text that looks like Markdown is inserted as Markdown source so it
  *   renders as real structure instead of escaped literal text;
+ * - tab-separated plain text (a spreadsheet range, `psql` or `jq -r @tsv` output) with the
+ *   same number of tabs on every line becomes a GFM table, first row as header, unless the
+ *   clipboard's HTML already carries structure (a real `<table>` goes through the HTML path);
  * - everything else (HTML from web pages and word processors, single lines of text) goes
  *   through ProseMirror's default clipboard parsing.
  */
-export function smartPastePlugin(session: PasteSession, options: { onNotice?: (message: string) => void } = {}): Plugin {
+export function smartPastePlugin(session: PasteSession, options: SmartPasteOptions = {}): Plugin {
+  const undo = () => (session.undo ? session.undo() : session.undoManager?.undo());
   return new Plugin({
     props: {
       handlePaste(view, event, slice) {
@@ -178,6 +189,12 @@ export function smartPastePlugin(session: PasteSession, options: { onNotice?: (m
         }
         const html = clipboardHtml(event);
         if (html && !isPlainSlice(slice)) return false;
+        const table = tsvToMarkdownTable(text);
+        if (table !== null) {
+          if (!pasteMarkdownSource(view, session, table)) return false;
+          options.onNotice?.(TSV_TABLE_NOTICE, { label: "Undo", onClick: undo });
+          return true;
+        }
         if (!looksLikeMarkdown(text)) return false;
         return pasteMarkdownSource(view, session, text);
       },
