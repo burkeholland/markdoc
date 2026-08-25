@@ -2,6 +2,12 @@
 
 Newest first. Each entry is one merged feature or fix on `main`; test-only and work-in-progress commits are folded into the feature they belong to. Short hashes point at the merge or squash commit.
 
+## 2026-08-25
+
+### Organising
+
+- Dashboard cards carry a storage chip only when the document is linked to GitHub — it reads **GitHub** with the repo path or gist in its tooltip — so plain documents no longer all say "Markdoc" in the grid, the list or the Trash (#114); on phone, *Show all starred* has a 44 px tap target (24 px on desktop) and the phone dashboard axe scan now enforces WCAG 2.2 `target-size` (#116).
+
 ## 2026-08-24
 
 Everything that landed on `main` after midnight, 24 August: the new look, typing speed in long documents and the long-document accessibility fixes.
