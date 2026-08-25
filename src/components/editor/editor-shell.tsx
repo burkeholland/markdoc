@@ -28,7 +28,7 @@ import { CodePane } from "./code-pane";
 import { RichPane } from "./rich-pane";
 import { StatusBar, type Layout } from "./status-bar";
 import { CommentsPanel } from "./comments-panel";
-import { VersionsPanel, VersionDiffView, type VersionPreview } from "./versions-panel";
+import { VersionsPanel, VersionDiffView, prefetchVersions, type VersionPreview } from "./versions-panel";
 import { ActivityPanel } from "./activity-panel";
 import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
@@ -587,6 +587,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
     return () => clearTimeout(timer);
   }, [threadParamReady, activateRef]);
   const toggleHistory = useCallback(() => setSidePanel((p) => (p === "versions" ? null : "versions")), []);
+  const onMoreMenuOpen = useCallback(() => prefetchVersions(doc.id), [doc.id]);
   const toggleActivity = useCallback(() => setSidePanel((p) => (p === "activity" ? null : "activity")), []);
   const openShare = useCallback(() => setDialog("share"), []);
   const openPublish = useCallback(() => setDialog("publish"), []);
@@ -843,6 +844,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable }: Ed
           onSync={openSync}
           sync={sync}
           onHistory={toggleHistory}
+          onMoreMenuOpen={onMoreMenuOpen}
           onActivity={toggleActivity}
           onShortcuts={openShortcuts}
           onCommandPalette={openPalette}
