@@ -10,6 +10,7 @@ import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
+import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -421,14 +422,26 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
   // Pasted, dropped and dialog-chosen images all go through the document's asset store.
   const uploadImage = useCallback((file: File) => uploadAsset(doc.id, file), [doc.id]);
   const onImageError = useCallback((message: string) => toast(`Image upload failed: ${message}`, "error"), [toast]);
+  const onNotice = useCallback((message: string) => toast(message, "info"), [toast]);
 
   // A .md/.txt file dropped on either pane: ask whether to replace, insert at the drop point or open as a new document.
   const [fileDrop, setFileDrop] = useState<PendingFileDrop | null>(null);
   const onCodeFileDrop = useCallback((file: File, at: number) => setFileDrop({ file, at }), []);
   const onRichFileDrop = useCallback((file: File, pos: number) => setFileDrop({ file, at: session.binding.getSourceMap().pmToSrc(pos) }), [session]);
-  const replaceAll = useCallback((text: string) => session.replaceSource([{ from: 0, to: session.ytext.length, text }]), [session]);
+  // Imported text micromark cannot parse in linear time goes in as a fenced code block (see renderable.ts).
+  const guardImport = useCallback(
+    (text: string) => {
+      const decision = decideInsert(text, "Imported file");
+      if (decision.kind === "markdown") return text;
+      toast(decision.message, "info");
+      return wrapInCodeFence(text) + "\n";
+    },
+    [toast],
+  );
+  const replaceAll = useCallback((text: string) => session.replaceSource([{ from: 0, to: session.ytext.length, text: guardImport(text) }]), [session, guardImport]);
   const insertAt = useCallback(
     (text: string, at: number) => {
+      text = guardImport(text);
       const len = session.ytext.length;
       const pos = Math.min(Math.max(at, 0), len);
       const src = session.ytext.toString();
@@ -950,6 +963,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
                       onHighlightClick={onHighlightClick}
                       uploadImage={uploadImage}
                       onImageError={onImageError}
+                      onNotice={onNotice}
                       onMarkdownFileDrop={onCodeFileDrop}
                       lineWrapping={lineWrapping}
                     />
@@ -989,6 +1003,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
                       onCommentShortcut={startComment}
                       uploadImage={uploadImage}
                       onImageError={onImageError}
+                      onNotice={onNotice}
                       onMarkdownFileDrop={onRichFileDrop}
                       slashMenu={slashMenu.handlers}
                     />
