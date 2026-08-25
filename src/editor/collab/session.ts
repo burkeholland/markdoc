@@ -36,6 +36,32 @@ export type SaveState = ConnectionPhase;
 /** How long the "All changes saved" highlight stays after a reconnect. */
 export const RECOVERED_FLASH_MS = 2000;
 
+/**
+ * How long one connection attempt may sit in "connecting" before it is abandoned and a fresh one
+ * started. Across a server restart the browser's socket can hang in CONNECTING with no error or
+ * close event at all (#190: the pill said "Reconnecting…" for minutes after the server was back);
+ * the provider has no handshake timeout of its own, so without this the retry loop stops for good.
+ */
+export const CONNECT_ATTEMPT_TIMEOUT_MS = 5_000;
+
+/** Longest pause between reconnect attempts (the provider's default backs off to 30 s). */
+export const RECONNECT_MAX_DELAY_MS = 3_000;
+
+/** Shortest pause between reconnect attempts; also the provider's delay before the first retry. */
+export const RECONNECT_MIN_DELAY_MS = 1_000;
+
+/** Pause before retrying after the collaboration token could not be fetched (server restarting). */
+export const TOKEN_RETRY_DELAY_MS = 2_000;
+
+/** Cut off for this long with unsaved edits: the pill says the edits are kept on this device. */
+export const OFFLINE_PROLONGED_MS = 30_000;
+
+/** Whether a failed collaboration-token fetch was a refusal (no access) rather than a server that did not answer. */
+export function isAccessRefusal(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  return status === 401 || status === 403 || status === 404;
+}
+
 export interface FindState {
   query: string;
   options: FindOptions;
@@ -126,9 +152,16 @@ export class CollabSession {
   private resolveLocalLoaded!: () => void;
   /** True for a moment after a reconnect finished syncing, so the UI can flash a confirmation. */
   recovered = false;
+  /** True once the connection has been down for {@link OFFLINE_PROLONGED_MS}; the pill then says edits are kept locally. */
+  prolongedOffline = false;
   private everConnected = false;
   private wasOffline = false;
   private recoveredTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectingTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private prolongedTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Why the last collaboration-token fetch failed, read by `onAuthenticationFailed`. */
+  private tokenFailure: unknown = null;
   private local: LocalPersistence | null = null;
   private localStarted = false;
   mode: EditMode;
@@ -177,9 +210,17 @@ export class CollabSession {
     if (!options.deferLocal) this.startLocalPersistence();
 
     const url = options.wsUrl ?? defaultWsUrl();
-    // The websocket provider reads `autoConnect` from the same configuration object at runtime; the
-    // public provider type only names `url`, so the socket options come in from a socket-typed fragment.
-    const socketOptions: Partial<CompleteHocuspocusProviderWebsocketConfiguration> = options.autoConnect === false ? { autoConnect: false } : {};
+    // The websocket provider reads `autoConnect` and the retry settings from the same configuration
+    // object at runtime; the public provider type only names `url`, so the socket options come in from
+    // a socket-typed fragment. The retry backoff is capped so a server that comes back after a restart
+    // is found within seconds, not after the default 30 s pause.
+    const socketOptions: Partial<CompleteHocuspocusProviderWebsocketConfiguration> = {
+      ...(options.autoConnect === false ? { autoConnect: false } : {}),
+      delay: RECONNECT_MIN_DELAY_MS,
+      minDelay: RECONNECT_MIN_DELAY_MS,
+      maxDelay: RECONNECT_MAX_DELAY_MS,
+      factor: 2,
+    };
     this.provider = new HocuspocusProvider({
       url,
       ...socketOptions,
@@ -190,20 +231,34 @@ export class CollabSession {
         // The provider asks for the token only once the socket is open; `connect()` fetched it meanwhile.
         const prefetched = this.tokenPrefetch;
         this.tokenPrefetch = null;
-        const token = prefetched ? await prefetched : await options.getToken();
-        perfMark("markdoc:token");
-        return token;
+        try {
+          const token = prefetched ? await prefetched : await options.getToken();
+          perfMark("markdoc:token");
+          this.tokenFailure = null;
+          return token;
+        } catch (err) {
+          // The provider reports a failed fetch as an authentication failure; remember why so
+          // `onAuthenticationFailed` can tell a refusal from a server that is not answering yet.
+          this.tokenFailure = err;
+          throw err;
+        }
       },
       onStatus: ({ status }) => {
         this.status = status;
         if (status === "connected") {
           perfMark("markdoc:ws-connected");
           this.everConnected = true;
+          this.clearProlongedOffline();
         } else {
           // The provider resets its own synced flag on close without emitting; mirror it.
           this.synced = false;
-          if (this.everConnected) this.wasOffline = true;
+          if (this.everConnected) {
+            this.wasOffline = true;
+            this.armProlongedOffline();
+          }
         }
+        if (status === "connecting") this.armConnectWatchdog();
+        else this.disarmConnectWatchdog();
         this.updateRecovery();
         this.notify();
       },
@@ -219,6 +274,17 @@ export class CollabSession {
         this.notify();
       },
       onAuthenticationFailed: ({ reason }) => {
+        const failure = this.tokenFailure;
+        this.tokenFailure = null;
+        if (failure !== null && !isAccessRefusal(failure)) {
+          // The token could not be fetched (server restarting, network blip): nobody refused access, so
+          // the local copy stays and the connection is retried shortly. Wiping here lost every offline
+          // edit on the first reload after a restart (#190).
+          console.warn("[markdoc] collaboration token fetch failed; retrying", failure);
+          this.scheduleReconnect(TOKEN_RETRY_DELAY_MS);
+          this.notify();
+          return;
+        }
         this.authError = reason;
         // Access was refused: do not keep a copy of the document on this device.
         void this.clearLocal();
@@ -289,9 +355,88 @@ export class CollabSession {
     this.undoManager.addTrackedOrigin(LOCAL_EDIT_ORIGIN);
     if (options.autoConnect === false) this.scheduleDestroy(ORPHAN_GRACE_MS);
     else this.connectRequested = true;
+    this.registerWindowListeners();
   }
 
   private connectRequested = false;
+
+  private static readonly WAKE_EVENTS = ["online", "focus", "visibilitychange", "pageshow"] as const;
+
+  /** Coming back online, to the tab or from sleep: retry at once instead of waiting out the backoff. */
+  private onWindowWake = () => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (this.status === "connected" || !this.connectRequested) return;
+    this.restartConnection("window event");
+  };
+
+  private registerWindowListeners() {
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+    for (const event of CollabSession.WAKE_EVENTS) window.addEventListener(event, this.onWindowWake);
+  }
+
+  private unregisterWindowListeners() {
+    if (typeof window === "undefined" || typeof window.removeEventListener !== "function") return;
+    for (const event of CollabSession.WAKE_EVENTS) window.removeEventListener(event, this.onWindowWake);
+  }
+
+  /** Abandon a connection attempt that is still "connecting" after {@link CONNECT_ATTEMPT_TIMEOUT_MS}. */
+  private armConnectWatchdog() {
+    this.disarmConnectWatchdog();
+    this.connectingTimer = setTimeout(() => {
+      this.connectingTimer = null;
+      if (this.status !== "connecting") return;
+      this.restartConnection("attempt stalled");
+    }, CONNECT_ATTEMPT_TIMEOUT_MS);
+  }
+
+  private disarmConnectWatchdog() {
+    if (this.connectingTimer) clearTimeout(this.connectingTimer);
+    this.connectingTimer = null;
+  }
+
+  /** Retry the connection after `delayMs` unless it is up and authenticated by then. */
+  private scheduleReconnect(delayMs: number) {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.status === "connected" && this.provider.isAuthenticated) return;
+      this.restartConnection("token retry");
+    }, delayMs);
+  }
+
+  /**
+   * Drop whatever socket the provider holds (open, pending or none) and start a fresh connection
+   * attempt. A socket stuck in CONNECTING is closed so the provider's retry moves on; `connect()`
+   * restarts its backoff from the shortest delay.
+   */
+  private restartConnection(why: string) {
+    if (this.destroyed || this.trashed || this.authError || !this.connectRequested) return;
+    const socket = this.provider.configuration?.websocketProvider;
+    if (!socket || typeof socket.connect !== "function") return;
+    if (process.env.NODE_ENV !== "production") console.info(`[markdoc] reconnecting collaboration socket (${why})`);
+    this.restarts++;
+    socket.disconnect();
+    void socket.connect();
+  }
+
+  /** How many times a stalled or failed attempt was replaced by a fresh one (diagnostics). */
+  restarts = 0;
+
+  private armProlongedOffline() {
+    if (this.prolongedTimer || this.prolongedOffline) return;
+    this.prolongedTimer = setTimeout(() => {
+      this.prolongedTimer = null;
+      if (this.status === "connected") return;
+      this.prolongedOffline = true;
+      this.notify();
+    }, OFFLINE_PROLONGED_MS);
+  }
+
+  private clearProlongedOffline() {
+    if (this.prolongedTimer) clearTimeout(this.prolongedTimer);
+    this.prolongedTimer = null;
+    this.prolongedOffline = false;
+  }
 
   /** Open the connection of a session created with `autoConnect: false` (once) and keep the session alive. */
   connect() {
@@ -742,6 +887,10 @@ export class CollabSession {
     this.destroyed = true;
     if (this.recoveredTimer) clearTimeout(this.recoveredTimer);
     if (this.flashTimer) clearTimeout(this.flashTimer);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.disarmConnectWatchdog();
+    this.clearProlongedOffline();
+    this.unregisterWindowListeners();
     this.listeners.clear();
     this.binding.destroy();
     this.comments.destroy();
