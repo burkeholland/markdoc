@@ -394,35 +394,15 @@ test.describe("preview controls: inline marks and links", () => {
 
 test.describe("preview controls: tables and lists", () => {
   /**
-   * Ctrl+Z until the table has `rows` × `cols`, expected in ONE press. Found, not fixed (task #437):
-   * with each menu action now its own undo step, undoing "add column" still took a second Ctrl+Z once
-   * (run 4: 4×3 stayed 4×3 after one press, then 4×2) — an extra stack item lands between two menu
-   * edits, most likely a second ytext write after the first (column re-alignment?). Not isolated in
-   * time; a second press is tolerated and recorded so the lead can file it with this evidence.
+   * One Ctrl+Z, then the table must read `rows` × `cols` in both panes. Task #437 tolerated a second
+   * press here ("undoing add column took a second Ctrl+Z: 4×3 stayed 4×3"); that was the rich pane
+   * not reproducing the undone text (task #459, minimalReplaceTransaction), not an extra undo step,
+   * so one press is now asserted strictly.
    */
   async function undoUntilShape(page: Page, rows: number, cols: number) {
-    const shape = async () => {
-      const trs = page.locator(".md-rich table tr");
-      const cells = await trs.evaluateAll((els) => els.map((tr) => tr.querySelectorAll("td,th").length));
-      return `${cells.length}x${cells.every((c) => c === cols) ? cols : cells.join("/")}`;
-    };
     await page.keyboard.press(`${mod}+z`);
-    // The full expect timeout: under load the undo can take seconds to reach both panes, and a
-    // second press sent too early would undo one step too many (run 5: 4×3 → 3×2 instead of 4×2).
-    const oneStep = await expect.poll(shape, { timeout: 15_000 }).toBe(`${rows}x${cols}`).then(() => true, () => false);
-    if (!oneStep) {
-      test.info().annotations.push({ type: "fixme", description: `undo to ${rows}x${cols} needed a second Ctrl+Z (table was ${await shape()} after one)` });
-      await page.keyboard.press(`${mod}+z`);
-    }
     await expectTableShape(page, rows, cols);
   }
-  /**
-   * fixme(#437): add-row via the table menu then the row count — the row reads 3 not 4 under the undo
-   * walk (lead's run on an idle box: `.md-rich table tr` expected 4, received 3, 33 polls). The menu
-   * add/remove walk and its undo steps below are skipped while this is true and recorded as a fixme
-   * annotation; the rest of the table test runs. Flip to `false` to restore the assertions verbatim.
-   */
-  const TABLE_MENU_UNDO_FIXME: boolean = true;
   test("table: toolbar grid and /table insert it, Tab walks the cells, the menu adds and removes rows and columns, undo is one step each", async ({ browser }) => {
     const { page, context } = await setup(browser, "ctl-table");
     for (const via of ["toolbar", "/table"] as const) {
@@ -459,30 +439,28 @@ test.describe("preview controls: tables and lists", () => {
       await page.keyboard.press("Tab");
       await expectTableShape(page, rows + 1, cols);
 
-      // Table menu: add a row / column, then delete them; each is one undo step.
-      if (TABLE_MENU_UNDO_FIXME) {
-        test.info().annotations.push({ type: "fixme", description: `#437: add-row via table menu then row count (via ${via}) — row appears 3 not 4 under the undo walk; isolate in a follow-up` });
-      } else {
-        await test.step("table menu: add and remove a row and a column, undo is one step each", async () => {
-          await clickCell(page, 1, 0);
-          await page.getByTestId("table-row-after").click();
-          await expectTableShape(page, rows + 2, cols);
-          await clickCell(page, 1, 0);
-          await page.getByTestId("table-col-after").click();
-          await expectTableShape(page, rows + 2, cols + 1);
-          await clickCell(page, 2, 0);
-          await page.getByTestId("table-delete-row").click();
-          await expectTableShape(page, rows + 1, cols + 1);
-          await clickCell(page, 1, 1);
-          await page.getByTestId("table-delete-col").click();
-          await expectTableShape(page, rows + 1, cols);
-          // Undo walks back through the structural edits one at a time.
-          await undoUntilShape(page, rows + 1, cols + 1);
-          await undoUntilShape(page, rows + 2, cols + 1);
-          await undoUntilShape(page, rows + 2, cols);
-          await undoUntilShape(page, rows + 1, cols);
-        });
-      }
+      // Table menu: add a row / column, then delete them; each is one undo step. Until task #459 the
+      // undo of "add column" left the rich pane at 4×3 while the text said 4×2: the binding's fitted
+      // replace did not reproduce the parsed table (see minimalReplaceTransaction).
+      await test.step("table menu: add and remove a row and a column, undo is one step each", async () => {
+        await clickCell(page, 1, 0);
+        await page.getByTestId("table-row-after").click();
+        await expectTableShape(page, rows + 2, cols);
+        await clickCell(page, 1, 0);
+        await page.getByTestId("table-col-after").click();
+        await expectTableShape(page, rows + 2, cols + 1);
+        await clickCell(page, 2, 0);
+        await page.getByTestId("table-delete-row").click();
+        await expectTableShape(page, rows + 1, cols + 1);
+        await clickCell(page, 1, 1);
+        await page.getByTestId("table-delete-col").click();
+        await expectTableShape(page, rows + 1, cols);
+        // Undo walks back through the structural edits one at a time.
+        await undoUntilShape(page, rows + 1, cols + 1);
+        await undoUntilShape(page, rows + 2, cols + 1);
+        await undoUntilShape(page, rows + 2, cols);
+        await undoUntilShape(page, rows + 1, cols);
+      });
       // The header row cannot be deleted on its own (GFM tables always have one).
       await clickCell(page, 0, 0);
       await page.getByTestId("table-delete-row").click();
