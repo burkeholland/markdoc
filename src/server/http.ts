@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { getDocumentAccess, type AccessOptions, type DocumentAccess, type SessionUser } from "@/server/documents";
 import { resolveApiToken, looksLikeApiToken } from "@/server/tokens";
 import type { Role } from "@/server/db/schema";
+import { UnrenderableDocumentError } from "@/editor/markdown/renderable";
 
 export class HttpError extends Error {
   constructor(
@@ -90,6 +91,7 @@ export function handler<T extends unknown[]>(fn: (...args: T) => Promise<Respons
       return await fn(...args);
     } catch (err) {
       if (err instanceof HttpError) return json({ error: err.message, ...(err.details ?? {}) }, { status: err.status });
+      if (err instanceof UnrenderableDocumentError) return json({ error: err.message, reason: err.reason }, { status: 422 });
       if (err && typeof err === "object" && "issues" in err) {
         return json({ error: "Invalid request", issues: (err as { issues: unknown }).issues }, { status: 400 });
       }

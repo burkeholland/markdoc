@@ -6,6 +6,7 @@ delete process.env.DATABASE_URL;
 const { getDb, schema } = await import("../db");
 const { putAsset } = await import("../assets");
 const { renderDocumentHtml } = await import("./html");
+const { UnrenderableDocumentError } = await import("@/editor/markdown/renderable");
 
 // Smallest valid PNG (1x1 transparent pixel).
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -110,6 +111,47 @@ describe("renderDocumentHtml", () => {
       const html = await render(`![dot](/api/assets/${assetId})\n\n![missing](/api/assets/nope)`, { inlineAssets: true });
       expect(html).toContain(`<img src="data:image/png;base64,${PNG_B64}" alt="dot">`);
       expect(html).toContain(`<img src="${BASE}/api/assets/nope" alt="missing">`);
+    });
+  });
+
+  describe("pathological input (#115)", () => {
+    const BRACKETS = "[".repeat(40_000) + "a" + "]".repeat(40_000);
+
+    it("refuses 40k unbalanced brackets in well under 2 s instead of parsing them for ~40 s", async () => {
+      const started = performance.now();
+      await expect(render(BRACKETS)).rejects.toBeInstanceOf(UnrenderableDocumentError);
+      expect(performance.now() - started).toBeLessThan(2_000);
+    });
+
+    it("refuses 40k alternating emphasis markers", async () => {
+      await expect(render("*a".repeat(40_000))).rejects.toMatchObject({ reason: "emphasis" });
+    });
+
+    it("keeps the event loop free while a document renders", async () => {
+      // A big but legal document: many paragraphs, each under the guard's limits.
+      const md = Array.from({ length: 200 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ".repeat(60)}\n`).join("\n");
+      let worstGap = 0;
+      let last = performance.now();
+      const ticker = setInterval(() => {
+        const now = performance.now();
+        worstGap = Math.max(worstGap, now - last);
+        last = now;
+      }, 5);
+      try {
+        const html = await render(md);
+        expect(html).toContain('<h2 id="section-199">Section 199</h2>');
+      } finally {
+        clearInterval(ticker);
+      }
+      expect(worstGap).toBeLessThan(100);
+    });
+
+    it("gives up on a render that exceeds its time budget", async () => {
+      // Bypass the guard: split the brackets over paragraphs so no single one exceeds the limit, but
+      // ask for an impossible budget. The worker is terminated and a fresh one serves the next render.
+      const md = Array.from({ length: 50 }, () => "[".repeat(900) + "a" + "]".repeat(900)).join("\n\n");
+      await expect(render(md, { timeoutMs: 1 })).rejects.toMatchObject({ reason: "timeout" });
+      expect(await render("# After")).toContain('<h1 id="after">After</h1>');
     });
   });
 });
