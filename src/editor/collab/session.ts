@@ -15,7 +15,7 @@ import {
   type ConnectionPhase,
   type LocalPersistence,
 } from "./offline";
-import type { CollabUser } from "./shared";
+import { perfMark, type CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
   carryActiveIndex,
@@ -185,10 +185,19 @@ export class CollabSession {
       ...socketOptions,
       name: options.docId,
       document: this.ydoc,
-      token: () => options.getToken(),
+      token: async () => {
+        perfMark("markdoc:token-start");
+        // The provider asks for the token only once the socket is open; `connect()` fetched it meanwhile.
+        const prefetched = this.tokenPrefetch;
+        this.tokenPrefetch = null;
+        const token = prefetched ? await prefetched : await options.getToken();
+        perfMark("markdoc:token");
+        return token;
+      },
       onStatus: ({ status }) => {
         this.status = status;
         if (status === "connected") {
+          perfMark("markdoc:ws-connected");
           this.everConnected = true;
         } else {
           // The provider resets its own synced flag on close without emitting; mirror it.
@@ -200,6 +209,12 @@ export class CollabSession {
       },
       onSynced: ({ state }) => {
         this.synced = state;
+        if (state) {
+          perfMark("markdoc:synced");
+          // The first sync ends the coalesced initial load: one rebuild of the rich pane, before
+          // the UI learns it is synced (so the stand-in is never swapped for an empty editor).
+          this.binding.releaseRemoteSync();
+        }
         this.updateRecovery();
         this.notify();
       },
@@ -259,6 +274,8 @@ export class CollabSession {
     this.comments = new CommentsModel(this.ydoc, this.ytext);
     this.suggestions = new SuggestionsModel(this.ydoc, this.ytext);
     this.binding = new MarkdownBinding(this.ytext, { onSync: () => this.notify() });
+    // Coalesce the text the local copy and the server deliver into one rich-pane rebuild (released on the first sync).
+    this.binding.holdRemoteSync();
     this.undoManager.addTrackedOrigin(this.binding);
     this.undoManager.on("stack-item-added", this.notify);
     this.undoManager.on("stack-item-popped", this.notify);
@@ -280,8 +297,17 @@ export class CollabSession {
     this.keepAlive();
     if (this.connectRequested || this.destroyed || this.trashed) return;
     this.connectRequested = true;
+    perfMark("markdoc:connect");
+    // Fetch the collaboration token while the socket opens instead of after: the REST round trip
+    // used to sit between the socket opening and the first sync on every open (#118).
+    const prefetch = this.options.getToken();
+    prefetch.catch(() => undefined);
+    this.tokenPrefetch = prefetch;
     void this.provider.connect();
   }
+
+  /** Token fetched by {@link connect}, consumed by the provider on the first socket open. */
+  private tokenPrefetch: Promise<string> | null = null;
 
   get canEdit(): boolean {
     return (this.role === "owner" || this.role === "editor") && this.mode !== "viewing";
@@ -337,6 +363,7 @@ export class CollabSession {
     const markLoaded = () => {
       if (this.localLoaded) return;
       this.localLoaded = true;
+      perfMark("markdoc:local-loaded");
       this.resolveLocalLoaded();
       this.notify();
     };

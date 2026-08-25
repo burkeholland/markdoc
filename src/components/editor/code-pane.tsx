@@ -6,9 +6,19 @@ import { EditorView } from "@codemirror/view";
 import type { CollabSession } from "@/editor/collab/session";
 import { createCodeEditorSetup, type CodeEditorSetup } from "@/editor/codemirror/setup";
 import type { ImageUploader } from "@/editor/prosemirror/images";
-import { setHighlights } from "@/editor/codemirror/highlights";
+import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlights";
 import { collectHighlights } from "@/editor/prosemirror/highlights";
 import { useSessionValue } from "./use-session";
+
+function sameHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.from !== y.from || x.to !== y.to || x.kind !== y.kind || x.id !== y.id || x.active !== y.active || x.color !== y.color) return false;
+  }
+  return true;
+}
 
 export interface CodePaneProps {
   session: CollabSession;
@@ -35,6 +45,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
     handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
   }, [onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop]);
   const focusRef = useRef<number | null>(null);
+  const lastHighlights = useRef<SourceHighlight[] | null>(null);
 
   useEffect(() => {
     if (!host.current) return;
@@ -53,6 +64,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
     });
     viewRef.current = view;
     setupRef.current = setup;
+    lastHighlights.current = null;
     onReady(view);
     return () => {
       onReady(null);
@@ -74,6 +86,10 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
   }, [lineWrapping]);
 
   // Comment / suggestion / focus highlights follow the session directly (no React render per keystroke).
+  // The session notifies on every change while a document opens (status, awareness, each comment thread,
+  // the text itself); only an actual change in the highlight list is dispatched. A CodeMirror dispatch
+  // reads the DOM selection, which forces a layout of whatever the rich pane and React left dirty — on
+  // the 12k-word document those no-op dispatches added up to ~200 ms of forced layout per open (#118).
   const applyHighlights = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -82,6 +98,8 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
     const highlights = collectHighlights(session, focus).map((h) =>
       h.kind === "focus" ? { ...h, from: view.state.doc.lineAt(Math.min(h.from, view.state.doc.length)).from, to: view.state.doc.lineAt(Math.min(h.from, view.state.doc.length)).from } : h,
     );
+    if (lastHighlights.current && sameHighlights(lastHighlights.current, highlights)) return;
+    lastHighlights.current = highlights;
     view.dispatch({ effects: setHighlights.of(highlights) });
   }, [session]);
   useEffect(() => {

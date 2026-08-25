@@ -205,12 +205,13 @@ test.describe("Burke-scale", () => {
     const { page } = owner;
     const open = await timeOpen(page, longDocId);
     // Issue #118: the server-rendered stand-in makes the document readable as soon as the page loads; before it
-    // the rich pane painted its first heading at 2.3–4.6 s (warm). `saved` still waits for hydration, the Yjs
-    // sync and the full ProseMirror render (warm median 3.0 s on this box) — the 6 s ceiling is not a target.
+    // the rich pane painted its first heading at 2.3–4.6 s (warm). `saved` waits for hydration, the WebSocket
+    // open + sync and one coalesced ProseMirror rebuild (task #510: warm median 2.6 s on this box, 2.8 s on main
+    // in the same interleaved run; the 3.3 s budget is that median + 25 %, not a target).
     const paintMs = record("long doc: navigation → first rich paint", open.richPaintMs, budgetMs(1_500));
     expect(paintMs).toBeLessThan(budgetMs(1_500));
-    const openMs = record("long doc: navigation → saved", open.savedMs, budgetMs(6_000));
-    expect(openMs).toBeLessThan(budgetMs(6_000));
+    const openMs = record("long doc: navigation → saved", open.savedMs, budgetMs(3_300));
+    expect(openMs).toBeLessThan(budgetMs(3_300));
     expect((await codeText(page)).length).toBe(seed.longDoc.content.length);
 
     if ((await page.getByTestId("outline").count()) === 0) await page.getByTestId("outline-button").click();
