@@ -18,7 +18,8 @@ const { createCollabServer, shutdownCollab } = await import("@/server/collab/hoc
 const { registerCollab } = await import("@/server/collab/registry");
 const { POST: postComment } = await import("@/app/api/documents/[id]/comments/route");
 const webhooks = await import("@/server/webhooks");
-const { createWebhook, listWebhooks, deleteWebhook, sendTestWebhook, deliverWebhook, sweepWebhooks, verifyWebhookSignature, signWebhookBody, setWebhookRetryDelays, settleWebhookDeliveries, stopWebhookDispatcher, startWebhookDispatcher, activeWebhooksFor, pruneDeliveries } = webhooks;
+const { createWebhook, listWebhooks, deleteWebhook, sendTestWebhook, deliverWebhook, sweepWebhooks, verifyWebhookSignature, signWebhookBody, setWebhookRetryDelays, settleWebhookDeliveries, stopWebhookDispatcher, startWebhookDispatcher, activeWebhooksFor, pruneDeliveries, ownOriginKeys } = webhooks;
+const { POST: postWebhook } = await import("@/app/api/webhooks/route");
 
 interface Received {
   headers: IncomingMessage["headers"];
@@ -114,6 +115,39 @@ describe("outbound webhooks", () => {
     expect(await deleteWebhook(bob.id, created.id)).toBe(false);
     expect(await deleteWebhook(alice.id, created.id)).toBe(true);
     expect(await listWebhooks(alice.id)).toEqual([]);
+  });
+
+  it("refuses a URL at the server's own origin (Host header or MARKDOC_URL) but allows another localhost port", async () => {
+    // Host header, scheme unknown: both default ports are "own"; an explicit other port is not.
+    expect(ownOriginKeys("localhost:3000")).toEqual(["localhost:3000"]);
+    expect(ownOriginKeys("Docs.Example.com", undefined)).toEqual(["docs.example.com:80", "docs.example.com:443"]);
+    expect(ownOriginKeys("localhost:3000", "https://docs.example.com")).toEqual(["localhost:3000", "docs.example.com:443"]);
+    expect(ownOriginKeys(null, undefined)).toEqual([]);
+
+    const own = ownOriginKeys("localhost:3000", "https://docs.example.com");
+    for (const url of ["http://localhost:3000/api/webhooks", "https://docs.example.com/hook", "https://docs.example.com:443/hook", "http://LOCALHOST:3000/"]) {
+      await expect(createWebhook(alice.id, { url, events: ["mention"] }, own)).rejects.toThrow("A webhook cannot point at Markdoc itself");
+    }
+    // Same host, different port (a LAN bridge next to the server), the receiver, and http on the public host's other port are fine.
+    const port = (receiver.address() as AddressInfo).port;
+    const allowed = await createWebhook(alice.id, { url: `http://localhost:${port}/bridge`, events: ["mention"] }, own);
+    expect(allowed.url).toBe(`http://localhost:${port}/bridge`);
+    const other = await createWebhook(alice.id, { url: "http://docs.example.com/hook", events: ["mention"] }, own);
+    expect(other.url).toBe("http://docs.example.com/hook");
+    await deleteWebhook(alice.id, allowed.id);
+    await deleteWebhook(alice.id, other.id);
+
+    // Through the route: the Host header the browser sent is the origin to refuse.
+    actor = alice;
+    const make = (url: string) => postWebhook(new Request("http://localhost/api/webhooks", { method: "POST", headers: { "Content-Type": "application/json", Host: `localhost:${port}` }, body: JSON.stringify({ url, events: ["mention"] }) }));
+    const refused = await make(`http://localhost:${port}/hook`);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "A webhook cannot point at Markdoc itself" });
+    const accepted = await make(`http://localhost:${port + 1}/hook`);
+    expect(accepted.status).toBe(201);
+    const { webhook } = (await accepted.json()) as { webhook: { id: string; url: string } };
+    expect(webhook.url).toBe(`http://localhost:${port + 1}/hook`);
+    expect(await deleteWebhook(alice.id, webhook.id)).toBe(true);
   });
 
   it("delivers a comment.added event within a second, signed with the secret", async () => {

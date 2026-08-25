@@ -307,7 +307,7 @@ Each delivery is `POST <url>` with the same JSON event `GET /api/agent/documents
 
 | Method & path | Body / query | Access | Purpose |
 | --- | --- | --- | --- |
-| `GET /api/webhooks`, `POST /api/webhooks` | `{ url, events: [...], documentIds?: [...] \| null }` | session only | List your webhooks with `active`, `failures` and `lastDelivery { status, at, attempt, event }`; add one (`201`, `secret` returned once). Tokens get `403`, like `/api/tokens`. |
+| `GET /api/webhooks`, `POST /api/webhooks` | `{ url, events: [...], documentIds?: [...] \| null }` | session only | List your webhooks with `active`, `failures` and `lastDelivery { status, at, attempt, event }`; add one (`201`, `secret` returned once). The URL must be http(s) and may not be Markdoc's own origin (`400 A webhook cannot point at Markdoc itself`); other hosts and ports, localhost included, are fine. Tokens get `403`, like `/api/tokens`. |
 | `DELETE /api/webhooks/:id` | | session only | Remove a webhook. |
 | `POST /api/webhooks/:id/test` | | session only | Send a `test` event once (no retries) and return `{ delivery: { status, ok, durationMs } }`. |
 
