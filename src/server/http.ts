@@ -5,6 +5,7 @@ import { getDocumentAccess, type AccessOptions, type DocumentAccess, type Sessio
 import { resolveApiToken, looksLikeApiToken, scopeSatisfies } from "@/server/tokens";
 import type { Role, TokenScope } from "@/server/db/schema";
 import { UnrenderableDocumentError } from "@/editor/markdown/renderable";
+import { failedAuthAllowed, rateLimitingEnabled, recordFailedAuth, takeApiRequest, withRateLimitHeaders, type TakeResult } from "@/server/rate-limit";
 
 export class HttpError extends Error {
   constructor(
@@ -12,9 +13,36 @@ export class HttpError extends Error {
     message: string,
     /** Extra JSON fields merged into the error body (e.g. sync `status`, `remoteContent`). */
     public details?: Record<string, unknown>,
+    /** Extra response headers (e.g. `Retry-After`). */
+    public headers?: Record<string, string>,
   ) {
     super(message);
   }
+}
+
+/** `429 { error, retryAfter }` with `Retry-After`; thrown by the limiter in `handler()` and by failed-token lockout. */
+export class RateLimitError extends HttpError {
+  constructor(what: string, result: TakeResult) {
+    super(429, `${what} Retry in ${result.retryAfter} s.`, { retryAfter: result.retryAfter }, {
+      "Retry-After": String(result.retryAfter),
+      "X-RateLimit-Limit": String(result.limit),
+      "X-RateLimit-Remaining": "0",
+    });
+  }
+}
+
+/**
+ * Resolve a bearer token, counting misses per IP: after too many wrong tokens from one address the
+ * lookup is refused with `429` before touching the database.
+ */
+export async function resolveBearer(token: string, h: Headers) {
+  if (rateLimitingEnabled()) {
+    const budget = failedAuthAllowed(h);
+    if (!budget.ok) throw new RateLimitError("Too many failed authentication attempts.", budget);
+  }
+  const actor = await resolveApiToken(token);
+  if (!actor && rateLimitingEnabled()) recordFailedAuth(h);
+  return actor;
 }
 
 /** The caller: a signed-in user, or a user acting through an API token (then `agent` is set). */
@@ -38,7 +66,7 @@ export async function currentUser(): Promise<Actor | null> {
   if (authorization?.toLowerCase().startsWith("bearer ")) {
     const token = authorization.slice(7).trim();
     if (looksLikeApiToken(token)) {
-      const actor = await resolveApiToken(token);
+      const actor = await resolveBearer(token, h);
       if (!actor) throw new HttpError(401, "Invalid or revoked API token");
       return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds };
     }
@@ -143,22 +171,34 @@ export function json(data: unknown, init?: ResponseInit) {
   return NextResponse.json(data, init);
 }
 
-/** Wrap a route handler: maps HttpError/zod errors to JSON responses. */
+/**
+ * Wrap a route handler: maps HttpError/zod errors to JSON responses, and spends one request from
+ * the caller's rate-limit bucket first (`429 { error, retryAfter }` when it is empty; every response
+ * carries `X-RateLimit-Limit` / `X-RateLimit-Remaining`).
+ */
 export function handler<T extends unknown[]>(fn: (...args: T) => Promise<Response>) {
   return async (...args: T): Promise<Response> => {
-    try {
-      return await fn(...args);
-    } catch (err) {
-      if (err instanceof HttpError) return json({ error: err.message, ...(err.details ?? {}) }, { status: err.status });
-      if (err instanceof UnrenderableDocumentError) return json({ error: err.message, reason: err.reason }, { status: 422 });
-      if (err && typeof err === "object" && "issues" in err) {
-        return json({ error: "Invalid request", issues: (err as { issues: unknown }).issues }, { status: 400 });
-      }
-      console.error(err);
-      const message = err instanceof Error ? err.message : "Unexpected error";
-      return json({ error: message }, { status: 500 });
-    }
+    const req = args[0] instanceof Request ? args[0] : null;
+    const budget = req && rateLimitingEnabled() ? takeApiRequest(req) : null;
+    const res = await run(fn, args, budget);
+    return budget ? withRateLimitHeaders(res, budget) : res;
   };
+}
+
+async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, args: T, budget: TakeResult | null): Promise<Response> {
+  try {
+    if (budget && !budget.ok) throw new RateLimitError("Rate limit exceeded.", budget);
+    return await fn(...args);
+  } catch (err) {
+    if (err instanceof HttpError) return json({ error: err.message, ...(err.details ?? {}) }, { status: err.status, headers: err.headers });
+    if (err instanceof UnrenderableDocumentError) return json({ error: err.message, reason: err.reason }, { status: 422 });
+    if (err && typeof err === "object" && "issues" in err) {
+      return json({ error: "Invalid request", issues: (err as { issues: unknown }).issues }, { status: 400 });
+    }
+    console.error(err);
+    const message = err instanceof Error ? err.message : "Unexpected error";
+    return json({ error: message }, { status: 500 });
+  }
 }
 
 export async function readJson<T>(req: Request, parse: (data: unknown) => T): Promise<T> {

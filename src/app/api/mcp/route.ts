@@ -1,6 +1,6 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { handler, json, HttpError } from "@/server/http";
-import { recordMcpActivity, resolveApiToken, type McpActivity } from "@/server/tokens";
+import { handler, json, HttpError, resolveBearer } from "@/server/http";
+import { recordMcpActivity, type McpActivity } from "@/server/tokens";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "../../../../mcp/tools.mjs";
 
@@ -63,7 +63,7 @@ export async function mcpActivityIn(req: Request): Promise<McpActivity[]> {
 async function serve(req: Request): Promise<Response> {
   const token = bearerToken(req);
   if (!token) throw unauthorized("Authorization: Bearer <token> is required.");
-  const actor = await resolveApiToken(token);
+  const actor = await resolveBearer(token, req.headers);
   if (!actor) throw unauthorized("This endpoint is for API tokens (agents).");
   // The Settings checklist reads these: connected (tools/list) and working (tools/call). Off the hot path.
   for (const kind of await mcpActivityIn(req)) void recordMcpActivity(actor.tokenId, kind).catch(() => {});

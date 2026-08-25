@@ -15,7 +15,7 @@ export const INSTRUCTIONS = [
   "Use markdoc_create_document to start a document people can open in their browser and edit with you in real time;",
   "always give the user the returned URL.",
   "markdoc_suggest is the preferred way to change text: suggestions show up as tracked changes the humans review and accept or reject in the app.",
-  "Use markdoc_replace_content only when the user explicitly asks you to rewrite the document in place.",
+  "Use markdoc_replace_content only when the user explicitly asks you to rewrite the document in place, and always pass the hash from markdoc_read_document as ifContentHash so you never overwrite what a person typed while you worked.",
   "Use markdoc_comments to read feedback left for you and markdoc_comment to reply.",
   "When asked to review a document, call markdoc_review: a summary, a verdict and one comment per finding, each quoting the exact text and proposing a rewrite in a ```suggestion block the humans accept with one click.",
   "When the user asks you to check Markdoc for requests (or says an agent was asked for something in a document), call markdoc_list_requests,",
@@ -241,29 +241,49 @@ export function registerTools(server, client) {
     "markdoc_read_document",
     {
       title: "Read document",
-      description: "Read a document's current Markdown. `clean` excludes text that is still a pending suggestion.",
+      description:
+        "Read a document's current Markdown. `clean` excludes text that is still a pending suggestion. The header line carries the document's contentHash: pass it as `ifContentHash` to markdoc_replace_content / markdoc_suggest so your write is refused (instead of silently overwriting) if someone edited the document after you read it.",
       inputSchema: { id: z.string().describe("Document id (from the URL /d/<id>)"), clean: z.boolean().optional().describe("Return the text without pending suggestions (default false)") },
       annotations: READ_ONLY,
     },
     async ({ id, clean }) => {
       const data = await api("GET", `/api/documents/${id}/content`);
       const text = clean ? data.clean : data.content;
-      const header = `# ${data.title || "Untitled"} (id ${id}) — ${data.pendingSuggestions} pending suggestion(s), ${data.openComments} open comment(s)\n\n`;
-      return ok(header + text, { id, title: data.title, content: text, pendingSuggestions: data.pendingSuggestions, openComments: data.openComments, url: docUrl(id) });
+      const header = `# ${data.title || "Untitled"} (id ${id}, hash ${data.contentHash}) — ${data.pendingSuggestions} pending suggestion(s), ${data.openComments} open comment(s)\n\n`;
+      return ok(header + text, { id, title: data.title, content: text, contentHash: data.contentHash, pendingSuggestions: data.pendingSuggestions, openComments: data.openComments, url: docUrl(id) });
     },
   );
+
+  const IF_HASH = z.string().optional().describe("The contentHash from markdoc_read_document (header line `hash …`). When the document changed since, the call fails with what changed instead of writing; re-read and retry.");
+
+  /**
+   * A conditional write refused because the document moved: tell the model to re-read and retry and
+   * show it the diff (409 bodies carry `contentHash` and `diff`). Anything else rethrows.
+   * @param {unknown} err
+   */
+  const staleOr = (err) => {
+    const data = err?.status === 409 && err?.data && typeof err.data.contentHash === "string" ? err.data : null;
+    if (!data) throw err;
+    const what = data.diff ? `here is what changed:\n${data.diff}${data.truncated ? "\n… (diff truncated)" : ""}` : "what changed is not available, so re-read the document.";
+    return { isError: true, content: [{ type: "text", text: `Document changed since you read it — nothing was written; re-read and retry (markdoc_read_document, then pass its hash; the current one is ${data.contentHash}); ${what}` }], structuredContent: data };
+  };
 
   tool(
     "markdoc_replace_content",
     {
       title: "Replace content",
-      description: "Replace the whole document with new Markdown. Applied live as a minimal edit (collaborators keep their cursors). Use for your own drafts, or when the user explicitly asks for an in-place rewrite; use markdoc_suggest for other people's text.",
-      inputSchema: { id: z.string(), content: z.string().describe("The complete new Markdown"), message: z.string().optional().describe("Short description saved in version history") },
+      description:
+        "Replace the whole document with new Markdown. Applied live as a minimal edit (collaborators keep their cursors). Use for your own drafts, or when the user explicitly asks for an in-place rewrite; use markdoc_suggest for other people's text. Always pass `ifContentHash` from the markdoc_read_document you worked from: a person may be typing in the same document, and without it their words are silently overwritten.",
+      inputSchema: { id: z.string(), content: z.string().describe("The complete new Markdown"), message: z.string().optional().describe("Short description saved in version history"), ifContentHash: IF_HASH },
       annotations: DESTRUCTIVE,
     },
-    async ({ id, content, message }) => {
-      const res = await api("PUT", `/api/documents/${id}/content`, { content, message });
-      return ok(res.changed ? `Document ${id} updated. ${docUrl(id)}` : `Document ${id} already had that content.`, { ...res, url: docUrl(id) });
+    async ({ id, content, message, ifContentHash }) => {
+      try {
+        const res = await api("PUT", `/api/documents/${id}/content`, { content, message, ...(ifContentHash ? { ifContentHash } : {}) });
+        return ok(res.changed ? `Document ${id} updated (hash ${res.contentHash}). ${docUrl(id)}` : `Document ${id} already had that content (hash ${res.contentHash}).`, { ...res, url: docUrl(id) });
+      } catch (err) {
+        return staleOr(err);
+      }
     },
   );
 
@@ -287,13 +307,18 @@ export function registerTools(server, client) {
         content: z.string().optional().describe("Full revised Markdown"),
         edits: z.array(z.object({ find: z.string(), replace: z.string(), all: z.boolean().optional() })).optional(),
         requestId: z.string().optional().describe("Link to an \"Ask an agent\" request you are working on (from markdoc_list_requests)"),
+        ifContentHash: IF_HASH,
       },
       annotations: ADDITIVE,
     },
-    async ({ id, content, edits, requestId }) => {
+    async ({ id, content, edits, requestId, ifContentHash }) => {
       if (!content && !edits?.length) throw new Error("Provide `content` or `edits`.");
-      const res = await api("POST", `/api/documents/${id}/suggest`, { ...(content !== undefined ? { content } : { edits }), ...(requestId ? { requestId } : {}) });
-      return ok(`Proposed ${res.suggestions} change(s) on ${id}. Reviewers can accept or reject them at ${docUrl(id)}`, { ...res, url: docUrl(id) });
+      try {
+        const res = await api("POST", `/api/documents/${id}/suggest`, { ...(content !== undefined ? { content } : { edits }), ...(requestId ? { requestId } : {}), ...(ifContentHash ? { ifContentHash } : {}) });
+        return ok(`Proposed ${res.suggestions} change(s) on ${id}. Reviewers can accept or reject them at ${docUrl(id)}`, { ...res, url: docUrl(id) });
+      } catch (err) {
+        return staleOr(err);
+      }
     },
   );
 

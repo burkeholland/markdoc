@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName, HttpError } from "@/server/http";
-import { mutateLiveDoc } from "@/server/livedoc";
+import { mutateLiveDoc, cleanTextOf, expectedContentHash, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
 import { diffOpsWords } from "@/editor/sync/text-diff";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { activityActor, recordActivity } from "@/server/activity";
 import { attachWork } from "@/server/agent-requests";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
+import { contentHash } from "@/server/export/html";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -24,7 +25,11 @@ const targeted = z.object({
     .max(200),
 });
 /** Link the suggestions to an "Ask an agent" request so its pill shows progress. */
-const linked = z.object({ requestId: z.string().min(1).optional() });
+const linked = z.object({
+  requestId: z.string().min(1).optional(),
+  /** `contentHash` from `GET /content`; refused with 409 when the document moved since (also as `If-Match`). */
+  ifContentHash: ifContentHashSchema,
+});
 
 const schema = z.union([
   z
@@ -46,11 +51,14 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // A comment-scoped token may propose suggestions (humans accept them); the user still needs edit access.
   const { user } = await requireAccess(id, "edit", { tokenScope: "comment" });
   const body = await readJson(req, (d) => schema.parse(d));
+  const expected = expectedContentHash(req, body.ifContentHash);
   const author = collabIdentity(user!);
   let count = 0;
   const created: string[] = [];
+  let hashAfter = "";
 
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
+    hashAfter = assertContentUnchanged(id, doc, expected);
     const ytext = doc.getText(TEXT_KEY);
     const current = ytext.toString();
     let proposed: string;
@@ -95,10 +103,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       model.destroy();
     }
     recordAgentActivity(doc, user!, "suggested", firstEnd === null ? undefined : { from: firstEnd, to: firstEnd });
+    hashAfter = contentHash(cleanTextOf(doc));
   });
 
   if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(body.requestId ? { requestId: body.requestId } : {}) });
   if (body.requestId) await attachWork(id, body.requestId, user!, { suggestions: count, suggestionIds: created });
-  return json({ ok: true, suggestions: count, suggestionIds: created });
+  return json({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter });
 });
 

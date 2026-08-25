@@ -208,6 +208,10 @@ const nodes: Record<string, NodeSerializer> = {
     state.text(node.textContent, false);
     state.closeBlock(node);
   },
+  unrenderable(state, node) {
+    state.text(node.attrs.src, false);
+    state.closeBlock(node);
+  },
   html_inline(state, node) {
     state.write(node.attrs.html);
   },
