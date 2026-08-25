@@ -1,7 +1,7 @@
 "use client";
 
 import * as Y from "yjs";
-import { HocuspocusProvider, type WebSocketStatus } from "@hocuspocus/provider";
+import { HocuspocusProvider, type CompleteHocuspocusProviderWebsocketConfiguration, type WebSocketStatus } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
 import { CommentsModel, COMMENTS_ORIGIN } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
@@ -79,7 +79,18 @@ export interface CollabSessionOptions {
    * locally stored content cannot make the client's first render differ from the server's.
    */
   deferLocal?: boolean;
+  /**
+   * Do not open the WebSocket in the constructor; the owner calls {@link CollabSession.connect} once it
+   * is sure this instance is the one it keeps. React StrictMode (development) invokes state initializers
+   * twice, and a session that connected on construction made every tab run two connections — the full
+   * state arrived twice on open and every update twice afterwards. A session created this way destroys
+   * itself after {@link ORPHAN_GRACE_MS} unless {@link CollabSession.keepAlive} (or `connect`) is called.
+   */
+  autoConnect?: boolean;
 }
+
+/** How long a deferred-connect session waits to be adopted before it frees its Y.Doc and provider. */
+export const ORPHAN_GRACE_MS = 10_000;
 
 type Listener = () => void;
 
@@ -166,8 +177,12 @@ export class CollabSession {
     if (!options.deferLocal) this.startLocalPersistence();
 
     const url = options.wsUrl ?? defaultWsUrl();
+    // The websocket provider reads `autoConnect` from the same configuration object at runtime; the
+    // public provider type only names `url`, so the socket options come in from a socket-typed fragment.
+    const socketOptions: Partial<CompleteHocuspocusProviderWebsocketConfiguration> = options.autoConnect === false ? { autoConnect: false } : {};
     this.provider = new HocuspocusProvider({
       url,
+      ...socketOptions,
       name: options.docId,
       document: this.ydoc,
       token: () => options.getToken(),
@@ -254,6 +269,18 @@ export class CollabSession {
     this.ytext.observe(this.notify);
     this.ytext.observe(this.refreshFind);
     this.undoManager.addTrackedOrigin(LOCAL_EDIT_ORIGIN);
+    if (options.autoConnect === false) this.scheduleDestroy(ORPHAN_GRACE_MS);
+    else this.connectRequested = true;
+  }
+
+  private connectRequested = false;
+
+  /** Open the connection of a session created with `autoConnect: false` (once) and keep the session alive. */
+  connect() {
+    this.keepAlive();
+    if (this.connectRequested || this.destroyed || this.trashed) return;
+    this.connectRequested = true;
+    void this.provider.connect();
   }
 
   get canEdit(): boolean {
