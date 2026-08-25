@@ -13,12 +13,12 @@ vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) })
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const { getDb, schema } = await import("@/server/db");
-const { createDocument, upsertCollaborator } = await import("@/server/documents");
+const { createDocument, upsertCollaborator, removeCollaborator } = await import("@/server/documents");
 const { createCollabServer, shutdownCollab } = await import("@/server/collab/hocuspocus");
 const { registerCollab } = await import("@/server/collab/registry");
 const { POST: postComment } = await import("@/app/api/documents/[id]/comments/route");
 const webhooks = await import("@/server/webhooks");
-const { createWebhook, listWebhooks, deleteWebhook, sendTestWebhook, deliverWebhook, sweepWebhooks, verifyWebhookSignature, signWebhookBody, setWebhookRetryDelays, settleWebhookDeliveries, stopWebhookDispatcher, startWebhookDispatcher, activeWebhooksFor, pruneDeliveries, ownOriginKeys } = webhooks;
+const { createWebhook, listWebhooks, deleteWebhook, sendTestWebhook, deliverWebhook, sweepWebhooks, verifyWebhookSignature, signWebhookBody, setWebhookRetryDelays, settleWebhookDeliveries, stopWebhookDispatcher, startWebhookDispatcher, activeWebhooksFor, pruneDeliveries, ownOriginKeys, WebhookDocumentNotFoundError } = webhooks;
 const { POST: postWebhook } = await import("@/app/api/webhooks/route");
 
 interface Received {
@@ -99,10 +99,10 @@ describe("outbound webhooks", () => {
   });
 
   it("validates input and returns the secret once", async () => {
-    await expect(createWebhook(alice.id, { url: "not a url", events: ["mention"] })).rejects.toThrow(/valid URL/);
-    await expect(createWebhook(alice.id, { url: "ftp://x/y", events: ["mention"] })).rejects.toThrow(/http/);
-    await expect(createWebhook(alice.id, { url: receiverUrl, events: ["nope"] })).rejects.toThrow(/at least one event/);
-    const created = await createWebhook(alice.id, { url: receiverUrl, events: ["mention", "mention", "bogus"], documentIds: [] });
+    await expect(createWebhook(alice, { url: "not a url", events: ["mention"] })).rejects.toThrow(/valid URL/);
+    await expect(createWebhook(alice, { url: "ftp://x/y", events: ["mention"] })).rejects.toThrow(/http/);
+    await expect(createWebhook(alice, { url: receiverUrl, events: ["nope"] })).rejects.toThrow(/at least one event/);
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["mention", "mention", "bogus"], documentIds: [] });
     expect(created.secret.startsWith("whsec_")).toBe(true);
     expect(created.events).toEqual(["mention"]);
     expect(created.documentIds).toBeNull();
@@ -126,13 +126,13 @@ describe("outbound webhooks", () => {
 
     const own = ownOriginKeys("localhost:3000", "https://docs.example.com");
     for (const url of ["http://localhost:3000/api/webhooks", "https://docs.example.com/hook", "https://docs.example.com:443/hook", "http://LOCALHOST:3000/"]) {
-      await expect(createWebhook(alice.id, { url, events: ["mention"] }, own)).rejects.toThrow("A webhook cannot point at Markdoc itself");
+      await expect(createWebhook(alice, { url, events: ["mention"] }, own)).rejects.toThrow("A webhook cannot point at Markdoc itself");
     }
     // Same host, different port (a LAN bridge next to the server), the receiver, and http on the public host's other port are fine.
     const port = (receiver.address() as AddressInfo).port;
-    const allowed = await createWebhook(alice.id, { url: `http://localhost:${port}/bridge`, events: ["mention"] }, own);
+    const allowed = await createWebhook(alice, { url: `http://localhost:${port}/bridge`, events: ["mention"] }, own);
     expect(allowed.url).toBe(`http://localhost:${port}/bridge`);
-    const other = await createWebhook(alice.id, { url: "http://docs.example.com/hook", events: ["mention"] }, own);
+    const other = await createWebhook(alice, { url: "http://docs.example.com/hook", events: ["mention"] }, own);
     expect(other.url).toBe("http://docs.example.com/hook");
     await deleteWebhook(alice.id, allowed.id);
     await deleteWebhook(alice.id, other.id);
@@ -152,7 +152,7 @@ describe("outbound webhooks", () => {
 
   it("delivers a comment.added event within a second, signed with the secret", async () => {
     received.length = 0;
-    const hook = await createWebhook(alice.id, { url: receiverUrl, events: ["comment.added", "mention"], documentIds: [docId] });
+    const hook = await createWebhook(alice, { url: receiverUrl, events: ["comment.added", "mention"], documentIds: [docId] });
     // The dispatcher was idle since before the hook existed; give it one sweep so its baseline predates the comment.
     await sweepWebhooks();
     actor = bob;
@@ -184,7 +184,7 @@ describe("outbound webhooks", () => {
   it("does not deliver events the hook did not subscribe to or on other documents", async () => {
     received.length = 0;
     const other = await createDocument({ ownerId: bob.id, content: "# Bob's\n\nPrivate.\n" });
-    const hook = await createWebhook(alice.id, { url: receiverUrl, events: ["comment.replied"] });
+    const hook = await createWebhook(alice, { url: receiverUrl, events: ["comment.replied"] });
     await sweepWebhooks();
     actor = bob;
     await postComment(new Request(`http://localhost/api/documents/${other.id}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "Mine." }) }), { params: Promise.resolve({ id: other.id }) });
@@ -196,10 +196,76 @@ describe("outbound webhooks", () => {
     await deleteWebhook(alice.id, hook.id);
   });
 
+  it("refuses documentIds the user cannot see with 404, like POST /api/tokens, and stores nothing", async () => {
+    const bobsPrivate = await createDocument({ ownerId: bob.id, content: "# Other private\n\nSecret line one.\n" });
+    const foreign = createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [bobsPrivate.id] });
+    await expect(foreign).rejects.toBeInstanceOf(WebhookDocumentNotFoundError);
+    await expect(foreign).rejects.toMatchObject({ status: 404, message: `Document not found: ${bobsPrivate.id}`, documentId: bobsPrivate.id });
+    await expect(createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: ["nope12345678"] })).rejects.toMatchObject({ status: 404, message: "Document not found: nope12345678" });
+    // One bad id among good ones refuses the whole hook: nothing is stored.
+    await expect(createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [docId, bobsPrivate.id] })).rejects.toMatchObject({ status: 404 });
+    expect(await listWebhooks(alice.id)).toEqual([]);
+    // The owner, and a collaborator, may name it.
+    const own = await createWebhook(bob, { url: receiverUrl, events: ["comment.added"], documentIds: [bobsPrivate.id] });
+    expect(own.documentIds).toEqual([bobsPrivate.id]);
+    await deleteWebhook(bob.id, own.id);
+    const shared = await createWebhook(bob, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
+    expect(shared.documentIds).toEqual([docId]);
+    await deleteWebhook(bob.id, shared.id);
+
+    // Through the route: `404 { error: "Document not found: <id>" }`, and a visible id is still 201.
+    actor = alice;
+    const post = (documentIds: string[]) => postWebhook(new Request("http://localhost/api/webhooks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: receiverUrl, events: ["comment.added", "content.changed"], documentIds }) }));
+    const refused = await post([bobsPrivate.id]);
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toEqual({ error: `Document not found: ${bobsPrivate.id}` });
+    const bogus = await post(["nope12345678"]);
+    expect(bogus.status).toBe(404);
+    expect(await bogus.json()).toEqual({ error: "Document not found: nope12345678" });
+    expect(await listWebhooks(alice.id)).toEqual([]);
+    const accepted = await post([docId]);
+    expect(accepted.status).toBe(201);
+    const { webhook } = (await accepted.json()) as { webhook: { id: string; documentIds: string[] } };
+    expect(webhook.documentIds).toEqual([docId]);
+    expect(await deleteWebhook(alice.id, webhook.id)).toBe(true);
+  });
+
+  it("stops delivering a document's events once the share is revoked, even when the hook names that document", async () => {
+    received.length = 0;
+    const shared = await createDocument({ ownerId: bob.id, content: "# Shared for a while\n\nSecret line one.\n" });
+    await upsertCollaborator(shared.id, alice.login, "commenter", bob.id);
+    const hook = await createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [shared.id] });
+    await sweepWebhooks();
+    actor = bob;
+    const comment = (body: string) => postComment(new Request(`http://localhost/api/documents/${shared.id}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", quote: "Secret line one", body }) }), { params: Promise.resolve({ id: shared.id }) });
+    expect((await comment("While shared.")).status).toBe(200);
+    await waitFor(() => received.some((r) => r.headers["x-markdoc-event"] === "comment.added"), 1000);
+    expect(received.map((r) => r.json.body)).toEqual(["While shared."]);
+
+    // Bob revokes Alice's access: the hook still lists the document, but nothing more reaches it.
+    await removeCollaborator(shared.id, alice.login);
+    received.length = 0;
+    expect((await comment("After revoke: private remark.")).status).toBe(200);
+    await sweepWebhooks();
+    await settleWebhookDeliveries();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(received).toHaveLength(0);
+
+    // Shared again: deliveries resume from now; the comment made while revoked is not back-filled.
+    await upsertCollaborator(shared.id, alice.login, "commenter", bob.id);
+    await sweepWebhooks();
+    expect((await comment("Shared again.")).status).toBe(200);
+    await waitFor(() => received.some((r) => r.headers["x-markdoc-event"] === "comment.added"), 1000);
+    await settleWebhookDeliveries();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(received.map((r) => r.json.body)).toEqual(["Shared again."]);
+    await deleteWebhook(alice.id, hook.id);
+  });
+
   it("records a retry when the receiver fails, and disables the hook after 20 consecutive failures with a notification", async () => {
     received.length = 0;
     respondWith = 500;
-    const created = await createWebhook(alice.id, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
     const db = await getDb();
     const [hook] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
     const payload = { type: "test" as const, documentId: null, documentTitle: null, cursor: null, actor: null, at: new Date().toISOString() };
@@ -250,7 +316,7 @@ describe("outbound webhooks", () => {
   it("sends a test event once, without retries, and resets the failure count on success", async () => {
     received.length = 0;
     respondWith = 200;
-    const created = await createWebhook(alice.id, { url: receiverUrl, events: ["mention"] });
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["mention"] });
     const db = await getDb();
     await db.update(schema.webhooks).set({ failures: 3 }).where(eq(schema.webhooks.id, created.id));
     expect(await sendTestWebhook(bob.id, created.id)).toBeNull();
