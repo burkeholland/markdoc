@@ -45,6 +45,7 @@ import {
   exitTableOnArrowDown,
   codeFenceOnEnter,
   toggleTaskAtCaret,
+  tableAt,
 } from "./commands";
 
 export interface RichEditorHandlers extends HighlightHandlers {
@@ -89,6 +90,62 @@ export function setEditable(view: import("prosemirror-view").EditorView, canEdit
 export function isEditable(state: EditorState): boolean {
   return editableKey.getState(state)?.canEdit ?? true;
 }
+
+const tableMenuKey = new PluginKey<{ hidden: boolean }>("tableMenu");
+
+/** Fired on the editor's DOM element when Esc hides the floating table menu or a selection change shows it again. */
+export const TABLE_MENU_EVENT = "markdoc:table-menu";
+
+/**
+ * Whether Esc hid the floating table menu (issue #163). The menu is a React component that keys off the
+ * selection, so the hidden flag lives in plugin state: a meta transaction sets it, any explicit selection
+ * change (caret moves, typing, leaving the table) clears it, and the view announces each flip on
+ * `view.dom` so the component can re-read the state.
+ */
+export function tableMenuPlugin(): Plugin<{ hidden: boolean }> {
+  return new Plugin<{ hidden: boolean }>({
+    key: tableMenuKey,
+    state: {
+      init: () => ({ hidden: false }),
+      apply: (tr, value) => {
+        if (tr.getMeta(tableMenuKey) === "hide") return { hidden: true };
+        return value.hidden && tr.selectionSet ? { hidden: false } : value;
+      },
+    },
+    view() {
+      return {
+        update(view, prevState) {
+          if (isTableMenuHidden(view.state) !== isTableMenuHidden(prevState)) view.dom.dispatchEvent(new CustomEvent(TABLE_MENU_EVENT));
+        },
+      };
+    },
+  });
+}
+
+export function isTableMenuHidden(state: EditorState): boolean {
+  return tableMenuKey.getState(state)?.hidden ?? false;
+}
+
+/**
+ * Esc in the rich pane (issue #163), in this order: a non-empty selection collapses to its head (the
+ * selection bubble keys off the selection, so it goes away); otherwise, with the caret in a table whose
+ * floating menu is showing, the menu hides until the selection moves; otherwise the key is not handled,
+ * so nothing else changes. The slash menu's own Esc runs before this (its plugin precedes the keymap),
+ * following a collaborator stops on a window-level capture listener, and the find bar's Esc is handled
+ * inside the bar, so none of those are affected.
+ */
+export const escapeFloatingUi: Command = (state, dispatch) => {
+  const { selection } = state;
+  if (!selection.empty) {
+    dispatch?.(state.tr.setSelection(TextSelection.near(selection.$head)));
+    return true;
+  }
+  if (isEditable(state) && tableAt(state) && !isTableMenuHidden(state)) {
+    dispatch?.(state.tr.setMeta(tableMenuKey, "hide").setMeta("addToHistory", false));
+    return true;
+  }
+  return false;
+};
 
 /** Restores the rich editor's selection after undo/redo driven by the shared Y.UndoManager. */
 function undoSelectionPlugin(session: CollabSession): Plugin {
@@ -205,6 +262,8 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     Enter: guard(chainCommands(addRowOnEnterAtEnd, enter)),
     "Shift-Enter": guard(lineBreak),
     "Mod-Enter": guard(chainCommands(exitCode, exitTableBelow, toggleTaskAtCaret, insertHardBreak())),
+    // Not guarded: commenters get the selection bubble too, so Esc must collapse their selection as well.
+    Escape: escapeFloatingUi,
     ArrowDown: guard(exitTableOnArrowDown),
     // Tab in the bottom-right cell adds a row (every table editor does; without it the key fell
     // through to the browser and moved focus out of the editor — task #437).
@@ -229,6 +288,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     doc: session.binding.initialDoc(),
     plugins: [
       editablePlugin(session.canEdit),
+      tableMenuPlugin(),
       ...(handlers.slashMenu ? [slashMenuPlugin(handlers.slashMenu)] : []),
       markdownBindingPlugin(session.binding),
       richSuggestingPlugin(session),
