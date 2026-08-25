@@ -2,8 +2,22 @@ import { createServer } from "node:http";
 import nextEnv from "@next/env";
 import next from "next";
 
+const dev = process.env.NODE_ENV !== "production";
+
+// `next dev` (cli/next-dev) puts __NEXT_DEV_SERVER=1 in its child's environment before anything
+// else runs; a custom server only gets it set inside app.prepare(). @next/env snapshots process.env
+// on its first loadEnvConfig() call and, on every forced reload (any .env* change event, including
+// the watcher's first aggregation on a cold start), deletes every variable that was not in that
+// snapshot. Without this line the snapshot below predates prepare(), the reload wipes
+// __NEXT_DEV_SERVER, and every route module built afterwards believes it is a production build:
+// it then tries to read <distDir>/required-server-files.json (which `next dev` never writes) and
+// answers 500 "ENOENT … required-server-files.json" for every request until the process restarts.
+if (dev) process.env.__NEXT_DEV_SERVER = "1";
+
 // Load .env files the same way Next.js does, so the collaboration server sees them too.
-nextEnv.loadEnvConfig(process.cwd(), process.env.NODE_ENV !== "production");
+nextEnv.loadEnvConfig(process.cwd(), dev);
+// scripts/dev-port.mts loads the env (and takes the snapshot) before importing this file.
+if (dev) nextEnv.updateInitialEnv({ __NEXT_DEV_SERVER: "1" });
 import { createCollabServer, shutdownCollab } from "@/server/collab/hocuspocus";
 import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
@@ -15,7 +29,6 @@ import { lanAddresses } from "../scripts/lib/dev-origins.mjs";
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-const dev = process.env.NODE_ENV !== "production";
 // Bind address. Only a concrete HOST is handed to Next as its hostname: for the default 0.0.0.0
 // Next would stamp "http://0.0.0.0:<port>" into every absolute URL it builds (Auth.js redirects
 // included), which no browser can follow. Without it Next falls back to localhost for its own

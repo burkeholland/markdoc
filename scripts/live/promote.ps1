@@ -2,7 +2,9 @@
 #   .\promote.ps1 -Sha <sha>
 # Steps: fetch, verify sha is on origin/main, stop live, checkout --detach,
 # npm ci (only if package.json / package-lock.json changed), delete .next,
-# start-live. If health never returns 200, roll back to the previous sha.
+# start-live. Rolls back to the previous sha only when the server process exited or
+# /api/health has not answered ok:true,db:true for at least -MinWaitSec (5xx while the
+# cold server compiles counts as "still starting"); the reason is printed as ROLLBACK REASON.
 param(
   [Parameter(Mandatory = $true)][string]$Sha,
   # Live worktree; defaults to the sibling ../markdoc-live (see Get-FactoryRoot in common.ps1).
@@ -10,13 +12,16 @@ param(
   [int]$Port = 3000,
   # Defaults to ../markdoc-data/live.log next to the repo.
   [string]$LogPath,
-  [int]$TimeoutSec = 180
+  [int]$TimeoutSec = 180,
+  # Never roll back a still-running server before it had this many seconds to come up.
+  [int]$MinWaitSec = 90
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 if (-not $Root) { $Root = Join-Path (Get-FactoryRoot) 'markdoc-live' }
 if (-not $LogPath) { $LogPath = Join-Path (Get-FactoryRoot) 'markdoc-data\live.log' }
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
+$script:lastFailure = ''
 
 function Invoke-Git {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GitArgs)
@@ -44,15 +49,21 @@ function Invoke-NpmCi {
 }
 
 function Switch-LiveTo {
-  # Stop, checkout, install deps if needed, clear .next, start. Returns $true on healthy.
+  # Stop, checkout, install deps if needed, clear .next, start. Returns $true on healthy; on failure
+  # $script:lastFailure holds start-live's "NOT HEALTHY: <reason>" line.
   param([string]$From, [string]$To)
   Stop-LiveProcesses -Root $Root
   Write-Step "git checkout --detach $To"
   Invoke-Git checkout --detach $To | Out-Null
   if (Test-DepsChanged -From $From -To $To) { Invoke-NpmCi } else { Write-Step 'dependencies unchanged; skipping npm ci' }
   Remove-NextCache -Root $Root
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startLive -Root $Root -Port $Port -LogPath $LogPath -TimeoutSec $TimeoutSec -Restart | Out-Host
-  return ($LASTEXITCODE -eq 0)
+  $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startLive -Root $Root -Port $Port -LogPath $LogPath `
+    -TimeoutSec $TimeoutSec -MinWaitSec $MinWaitSec -Restart 2>&1 | ForEach-Object { "$_" }
+  $code = $LASTEXITCODE
+  $out | Out-Host
+  $reasonLine = @($out | Where-Object { $_ -match 'NOT HEALTHY: (.*)$' } | Select-Object -Last 1)
+  $script:lastFailure = if ($reasonLine.Count -gt 0) { ($reasonLine[0] -replace '^.*NOT HEALTHY: ', '') } else { "start-live.ps1 exited with code $code" }
+  return ($code -eq 0)
 }
 
 Write-Step "fetching origin in $Root"
@@ -81,10 +92,11 @@ if (Switch-LiveTo -From $previous -To $target) {
 }
 
 Write-Step "promotion of $target FAILED; rolling back to $previous"
+Write-Step "ROLLBACK REASON: $script:lastFailure"
 Show-LogTail -LogPath $LogPath -Lines 30
 if (Switch-LiveTo -From $target -To $previous) {
   Write-Step "ROLLED BACK: live server on :$Port runs $previous again"
 } else {
-  Write-Step "ROLLBACK FAILED: live server is down; inspect $LogPath"
+  Write-Step "ROLLBACK FAILED: live server is down ($script:lastFailure); inspect $LogPath"
 }
 exit 1
