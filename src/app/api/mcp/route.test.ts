@@ -8,12 +8,13 @@ delete process.env.MARKDOC_URL;
 // Same stand-ins as the other API route tests: the caller is resolved through next-auth and
 // `next/headers`. Here the token travels in `requestHeaders` so the real resolver sees it.
 let requestHeaders = new Headers();
-vi.mock("@/auth", () => ({ auth: async () => null }));
+let sessionUser: { id: string; login: string; name: string; image: null } | null = null;
+vi.mock("@/auth", () => ({ auth: async () => (sessionUser ? { user: sessionUser } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 
 const { getDb, schema } = await import("@/server/db");
 const { createApiToken, listApiTokens } = await import("@/server/tokens");
-const { GET, POST, mcpActivityIn } = await import("./route");
+const { GET, POST, DELETE, mcpActivityIn } = await import("./route");
 const { listToolNames } = await import("../../../../mcp/tools.mjs");
 
 const URL_ = "http://192.168.0.10:3700/api/mcp";
@@ -21,11 +22,11 @@ const MCP_ACCEPT = "application/json, text/event-stream";
 let token: string;
 let userId: string;
 
-const call = (method: "GET" | "POST", init: { headers?: Record<string, string>; body?: unknown } = {}) => {
+const call = (method: "GET" | "POST" | "DELETE", init: { headers?: Record<string, string>; body?: unknown } = {}) => {
   const headers = new Headers({ host: "192.168.0.10:3700", ...(init.headers ?? {}) });
   requestHeaders = headers;
   const req = new Request(URL_, { method, headers, body: init.body === undefined ? undefined : JSON.stringify(init.body) });
-  return method === "GET" ? GET(req) : POST(req);
+  return method === "GET" ? GET(req) : method === "DELETE" ? DELETE(req) : POST(req);
 };
 const rpc = (method: string, params: unknown = {}, id: number | null = 1) => ({ jsonrpc: "2.0", id, method, params });
 const bearer = (t: string) => ({ Authorization: ["Bearer", t].join(" ") });
@@ -76,13 +77,20 @@ describe("/api/mcp records MCP activity on the token (Settings checklist)", () =
       row = (await listApiTokens(userId)).find((t) => t.id === fresh.id)!;
     }
     expect(row.lastMcpCallAt).toBeInstanceOf(Date);
-    // GET /api/tokens exposes both as ISO strings for the checklist.
+    // GET /api/tokens exposes both as ISO strings for the checklist (session only: tokens get 403).
     const { GET: tokensGet } = await import("../tokens/route");
     requestHeaders = new Headers(bearer(fresh.token));
-    const list = (await (await (tokensGet as () => Promise<Response>)()).json()) as { tokens: { id: string; lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
-    const dto = list.tokens.find((t) => t.id === fresh.id)!;
-    expect(dto.lastMcpSeenAt).toMatch(/^\d{4}-/);
-    expect(dto.lastMcpCallAt).toMatch(/^\d{4}-/);
+    expect((await (tokensGet as () => Promise<Response>)()).status).toBe(403);
+    requestHeaders = new Headers();
+    sessionUser = { id: userId, login: "mia", name: "Mia", image: null };
+    try {
+      const list = (await (await (tokensGet as () => Promise<Response>)()).json()) as { tokens: { id: string; lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
+      const dto = list.tokens.find((t) => t.id === fresh.id)!;
+      expect(dto.lastMcpSeenAt).toMatch(/^\d{4}-/);
+      expect(dto.lastMcpCallAt).toMatch(/^\d{4}-/);
+    } finally {
+      sessionUser = null;
+    }
   });
 });
 
@@ -95,6 +103,21 @@ describe("/api/mcp", () => {
     expect(body.tools).toBe(listToolNames().length);
     expect(body.tools).toBe(27);
     expect(body.docs).toContain("docs/agents");
+  });
+
+  it("GET as an SSE stream and DELETE are 405 (stateless transport), with or without a token", async () => {
+    for (const headers of [{ Accept: "text/event-stream" }, { Accept: "text/event-stream", ...bearer(token) }]) {
+      const res = await call("GET", { headers });
+      expect(res.status).toBe(405);
+      expect(res.headers.get("allow")).toBe("GET, POST");
+      expect(((await res.json()) as { error: string }).error).toBe("Method Not Allowed");
+    }
+    for (const headers of [{}, bearer(token)]) {
+      const res = await call("DELETE", { headers });
+      expect(res.status).toBe(405);
+      expect(res.headers.get("allow")).toBe("GET, POST");
+      expect(((await res.json()) as { error: string }).error).toBe("Method Not Allowed");
+    }
   });
 
   it("POST without a token is 401 and says where to create one", async () => {
