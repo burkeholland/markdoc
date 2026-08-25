@@ -149,7 +149,11 @@ export function registerTools(server, client) {
       const scope = me.scope ?? "full";
       const restriction = me.documentIds?.length ? ` Restricted to ${me.documentIds.length} document(s): ${me.documentIds.join(", ")}.` : "";
       const limits = scope === "full" ? "" : scope === "comment" ? " It can read, comment, suggest and review but not rewrite, publish or delete (ask for a full-access token at /settings for that)." : " It can only read; comments and edits need a comment or full-access token from /settings.";
-      return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}" with ${scope} scope.${limits}${restriction} Server: ${baseUrl}`, me);
+      const hooks = Array.isArray(me.webhooks) ? me.webhooks : [];
+      const pushes = hooks.length
+        ? `\nEvents are also pushed to ${hooks.length} webhook${hooks.length === 1 ? "" : "s"}: ${hooks.map((h) => `${h.url} (${h.events.join(", ")}${h.documentIds ? `; ${h.documentIds.length} document${h.documentIds.length === 1 ? "" : "s"}` : ""})`).join("; ")}.`
+        : "";
+      return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}" with ${scope} scope.${limits}${restriction} Server: ${baseUrl}${pushes}`, me);
     },
   );
 

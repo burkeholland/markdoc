@@ -138,6 +138,15 @@ export function wakeSeq(docId: string | null): number {
   return seqs.get(docId ?? GLOBAL) ?? 0;
 }
 
+/** Documents whose wake sequence differs from `known` (or all woken documents when `known` is empty), with the current seqs. */
+export function wokenDocuments(known: ReadonlyMap<string, number>): { changed: string[]; seqs: Map<string, number> } {
+  const snapshot = new Map(seqs);
+  snapshot.delete(GLOBAL);
+  const changed: string[] = [];
+  for (const [docId, seq] of snapshot) if (known.get(docId) !== seq) changed.push(docId);
+  return { changed, seqs: snapshot };
+}
+
 /** Resolves when the document (or any document) is woken after `seq`, or after `timeoutMs`. Never rejects. */
 export function waitForWake(docId: string | null, seq: number, timeoutMs: number): Promise<void> {
   const key = docId ?? GLOBAL;

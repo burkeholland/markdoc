@@ -235,7 +235,7 @@ export const assets = pgTable(
 export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
-export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "suggestion.accepted" | "review" | "share" | "request.done";
+export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "suggestion.accepted" | "review" | "share" | "request.done" | "webhook.disabled";
 
 /**
  * Per-user notifications: @mentions, replies to and resolutions of threads they took part in,
@@ -383,6 +383,54 @@ export const reviews = pgTable(
 );
 
 export type Review = typeof reviews.$inferSelect;
+
+/**
+ * Outbound webhooks: a user's HTTP endpoints that receive the same events `markdoc_watch` returns, pushed
+ * instead of long-polled. `secret` is the HMAC key for `X-Markdoc-Signature`; it is shown once at creation
+ * and never returned by the API again (it must be stored raw: a hash cannot sign).
+ */
+export const webhooks = pgTable(
+  "webhook",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secret: text("secret").notNull(),
+    /** Event types to deliver (see WEBHOOK_EVENTS in webhooks.ts). */
+    events: jsonb("events").$type<string[]>().notNull().default([]),
+    /** Only these documents, or null for every document the user can see. */
+    documentIds: jsonb("document_ids").$type<string[] | null>(),
+    active: boolean("active").notNull().default(true),
+    /** Consecutive failed deliveries; reset on success, the hook is disabled at 20. */
+    failures: integer("failures").notNull().default(0),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("webhook_user_idx").on(t.userId)],
+);
+
+export type Webhook = typeof webhooks.$inferSelect;
+
+/** One delivery attempt of one event to one webhook; rows are kept for 7 days. */
+export const webhookDeliveries = pgTable(
+  "webhook_delivery",
+  {
+    id: text("id").primaryKey(),
+    webhookId: text("webhook_id")
+      .notNull()
+      .references(() => webhooks.id, { onDelete: "cascade" }),
+    event: text("event").notNull(),
+    /** HTTP status of the response, or 0 when the request failed (timeout, refused). */
+    status: integer("status").notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    attempt: integer("attempt").notNull().default(1),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("webhook_delivery_hook_created_idx").on(t.webhookId, t.createdAt.desc())],
+);
+
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;

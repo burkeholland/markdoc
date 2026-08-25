@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AtSign, Bell, Bot, CheckCheck, CircleCheck, ClipboardCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus } from "lucide-react";
+import { AtSign, Bell, Bot, CheckCheck, CircleCheck, ClipboardCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus, WebhookOff } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { RelativeTime } from "@/components/ui/relative-time";
 import type { NotificationDto } from "@/lib/api";
@@ -20,6 +20,7 @@ const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; class
   review: ClipboardCheck,
   share: UserPlus,
   "request.done": Bot,
+  "webhook.disabled": WebhookOff,
 };
 
 export function KindIcon({ kind, size = 14, className }: { kind: NotificationKind; size?: number; className?: string }) {
