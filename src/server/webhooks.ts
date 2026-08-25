@@ -104,6 +104,7 @@ export async function createWebhook(userId: string, input: WebhookInput): Promis
   const secret = "whsec_" + randomBytes(24).toString("base64url");
   const [row] = await db.insert(schema.webhooks).values({ id: newId(), userId, url, secret, events, documentIds }).returning();
   state.cursors.delete(row.id);
+  state.hooksCache = null;
   return { ...toDto(row, null), secret };
 }
 
@@ -132,6 +133,7 @@ export async function deleteWebhook(userId: string, id: string): Promise<boolean
   const db = await getDb();
   const deleted = await db.delete(schema.webhooks).where(and(eq(schema.webhooks.id, id), eq(schema.webhooks.userId, userId))).returning();
   state.cursors.delete(id);
+  state.hooksCache = null;
   return deleted.length > 0;
 }
 
@@ -167,11 +169,22 @@ interface DispatcherState {
   retryDelays: readonly number[];
   seqs: Map<string, number>;
   sweeping: Promise<number> | null;
+  /** Active hooks as of `at`; refreshed every few seconds and dropped on any change, so a wake per keystroke does not mean a query per keystroke. */
+  hooksCache: { at: number; rows: schema.Webhook[] } | null;
 }
 
 // One dispatcher per process even when the module is re-evaluated (dev HMR).
 const g = globalThis as typeof globalThis & { __markdocWebhooks?: DispatcherState };
-const state: DispatcherState = (g.__markdocWebhooks ??= { loop: null, stopped: false, cursors: new Map(), lastSweep: Date.now(), lastPrune: 0, retryTimers: new Set(), inflight: new Set(), retryDelays: RETRY_DELAYS_MS, seqs: new Map(), sweeping: null });
+const state: DispatcherState = (g.__markdocWebhooks ??= { loop: null, stopped: false, cursors: new Map(), lastSweep: Date.now(), lastPrune: 0, retryTimers: new Set(), inflight: new Set(), retryDelays: RETRY_DELAYS_MS, seqs: new Map(), sweeping: null, hooksCache: null });
+const HOOKS_CACHE_MS = 5_000;
+
+async function activeHooks(now: number): Promise<schema.Webhook[]> {
+  if (state.hooksCache && now - state.hooksCache.at < HOOKS_CACHE_MS) return state.hooksCache.rows;
+  const db = await getDb();
+  const rows = await db.select().from(schema.webhooks).where(eq(schema.webhooks.active, true));
+  state.hooksCache = { at: now, rows };
+  return rows;
+}
 
 async function recordDelivery(webhookId: string, event: string, status: number, durationMs: number, attempt: number): Promise<string> {
   const db = await getDb();
@@ -198,6 +211,7 @@ async function disableWebhook(hook: schema.Webhook, documentId: string | null) {
   const db = await getDb();
   await db.update(schema.webhooks).set({ active: false }).where(eq(schema.webhooks.id, hook.id));
   state.cursors.delete(hook.id);
+  state.hooksCache = null;
   const [owner] = await db.select({ login: schema.users.login }).from(schema.users).where(eq(schema.users.id, hook.userId)).limit(1);
   if (!owner?.login) return;
   let docId = documentId ?? hook.documentIds?.[0] ?? null;
@@ -231,7 +245,7 @@ export async function deliverWebhook(hook: schema.Webhook, payload: WebhookPaylo
   const db = await getDb();
   const rowId = await recordDelivery(hook.id, payload.type, status, durationMs, attempt);
   if (ok) {
-    if (hook.failures > 0) await db.update(schema.webhooks).set({ failures: 0 }).where(eq(schema.webhooks.id, hook.id));
+    await db.update(schema.webhooks).set({ failures: 0 }).where(and(eq(schema.webhooks.id, hook.id), sql`${schema.webhooks.failures} > 0`));
     return { deliveryId: rowId, status, ok, durationMs, attempt };
   }
   const [updated] = await db
@@ -315,7 +329,7 @@ async function sweepOnce(now: number): Promise<number> {
   state.lastSweep = now;
   if (changed.length === 0) return 0;
   const db = await getDb();
-  const hooks = await db.select().from(schema.webhooks).where(eq(schema.webhooks.active, true));
+  const hooks = await activeHooks(now);
   if (hooks.length === 0) return 0;
   const users = new Map((await db.select().from(schema.users).where(inArray(schema.users.id, [...new Set(hooks.map((h) => h.userId))]))).map((u) => [u.id, u]));
   const docs = new Map((await db.select({ id: schema.documents.id, title: schema.documents.title, deletedAt: schema.documents.deletedAt }).from(schema.documents).where(inArray(schema.documents.id, changed))).map((d) => [d.id, d]));
