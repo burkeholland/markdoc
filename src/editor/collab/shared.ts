@@ -72,3 +72,12 @@ export function newId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
+
+/**
+ * User Timing mark for the open-document timeline (`performance.getEntriesByType("mark")`), so the
+ * stages of a warm open (connect, local copy applied, synced, rich rebuild) can be read off a trace
+ * or a Playwright run without instrumenting the page. A no-op outside the browser.
+ */
+export function perfMark(name: string) {
+  if (typeof performance !== "undefined" && typeof performance.mark === "function") performance.mark(name);
+}
