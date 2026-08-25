@@ -59,6 +59,8 @@ export interface EditorShellProps {
   role: Role;
   user: EditorUser;
   githubAvailable: boolean;
+  /** The server has a GitHub OAuth app; without it the GitHub entry points are disabled (#162). */
+  githubConfigured: boolean;
   /**
    * Server-rendered HTML of the document, shown in the rich column until the editor holds the
    * live text, so a long document is readable as soon as the page loads (issue #118). Null when
@@ -78,7 +80,7 @@ type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
 
-export function EditorShell({ doc: initialDoc, role, user, githubAvailable, initialHtml = null }: EditorShellProps) {
+export function EditorShell({ doc: initialDoc, role, user, githubAvailable, githubConfigured, initialHtml = null }: EditorShellProps) {
   const router = useRouter();
   const session = useCollabSession(initialDoc.id, user, role);
   const [doc, setDoc] = useState(initialDoc);
@@ -887,6 +889,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
           onNameVersion={openVersionName}
           publishing={publishing}
           isOwner={isOwner}
+          githubConfigured={githubConfigured}
           onHome={goHome}
           layout={shownLayout}
           onLayout={setLayout}
@@ -1050,7 +1053,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, init
         />
 
         <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
-        <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} />
+        <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} />
         <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
         <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />
         <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />

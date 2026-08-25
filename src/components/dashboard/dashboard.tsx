@@ -15,7 +15,7 @@ import { PICKER_TEMPLATES, TEMPLATES, WELCOME_TEMPLATE_ID, getTemplate, type Tem
 import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, SORT_COOKIE_MAX_AGE, SORT_OPTIONS, SORT_STORAGE_KEY, isDashboardSort, type DashboardSort } from "@/lib/dashboard-sort";
 
 import { Logo } from "@/components/editor/header";
-import { GitHubPicker } from "@/components/editor/github-dialog";
+import { GITHUB_NOT_CONFIGURED, GitHubPicker } from "@/components/editor/github-dialog";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
@@ -138,6 +138,8 @@ export interface DashboardProps {
   user: { id: string; name: string; login: string | null; image: string | null };
   documents: Doc[];
   githubAvailable: boolean;
+  /** The server has a GitHub OAuth app; without it the "Open from GitHub" card is disabled and says why (#162). */
+  githubConfigured: boolean;
   /** Sort read from the `markdoc.dashboardSort` cookie by the server, so the first paint is already in the saved order (#165). */
   initialSort?: DashboardSort;
 }
@@ -198,7 +200,7 @@ function StorageBadge({ doc }: { doc: Doc }) {
   );
 }
 
-export function Dashboard({ user, documents: initialDocuments, githubAvailable, initialSort = DEFAULT_DASHBOARD_SORT }: DashboardProps) {
+export function Dashboard({ user, documents: initialDocuments, githubAvailable, githubConfigured, initialSort = DEFAULT_DASHBOARD_SORT }: DashboardProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -537,7 +539,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             <button
               type="button"
               onClick={() => setOpenPicker(true)}
-              className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md"
+              disabled={!githubConfigured}
+              title={githubConfigured ? undefined : GITHUB_NOT_CONFIGURED}
+              className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md disabled:cursor-default disabled:opacity-60 disabled:hover:border-line disabled:hover:shadow-sm"
               data-testid="open-github"
             >
               <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-inverse text-white">
@@ -545,7 +549,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               </span>
               <span>
                 <span className="block text-[15px] font-semibold text-ink">Open from GitHub</span>
-                <span className="block text-sm text-ink-3">Edit a Markdown file from a gist or repository.</span>
+                <span className="block text-sm text-ink-3">{githubConfigured ? "Edit a Markdown file from a gist or repository." : GITHUB_NOT_CONFIGURED}</span>
               </span>
             </button>
           </div>
@@ -699,7 +703,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
         <Dialog open={openPicker} onOpenChange={setOpenPicker}>
           <DialogContent title="Open from GitHub" description="Pick a Markdown file. Markdoc keeps a live copy and publishes back when you ask it to." wide>
-            <GitHubPicker mode="import" githubAvailable={githubAvailable} onImported={(id) => router.push(`/d/${id}`)} />
+            <GitHubPicker mode="import" githubAvailable={githubAvailable} githubConfigured={githubConfigured} onImported={(id) => router.push(`/d/${id}`)} />
           </DialogContent>
         </Dialog>
 

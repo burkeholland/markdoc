@@ -44,6 +44,7 @@ import {
 import type { CollabSession, EditMode, PresenceUser, SaveState } from "@/editor/collab/session";
 import type { SyncStatusDto } from "@/lib/api";
 import { SYNC_LABELS } from "./sync-dialog";
+import { GITHUB_NOT_CONFIGURED } from "./github-dialog";
 import { isIdle } from "@/editor/collab/follow";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
@@ -434,6 +435,8 @@ export interface HeaderProps {
   onNameVersion: () => void;
   publishing: boolean;
   isOwner: boolean;
+  /** The server has a GitHub OAuth app; without it the GitHub entries are disabled and say why (#162). */
+  githubConfigured: boolean;
   onHome: () => void;
   /** Pane layout shown by the segmented control on phones. */
   layout: Layout;
@@ -478,8 +481,19 @@ function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: (l: Lay
   );
 }
 
+/** Menu entry text for a GitHub action; says why it is disabled when the server has no GitHub OAuth app (#162). */
+function GitHubEntryLabel({ configured, children }: { configured: boolean; children: React.ReactNode }) {
+  if (configured) return <>{children}</>;
+  return (
+    <span className="flex flex-col">
+      <span>{children}</span>
+      <span className="text-xs text-ink-3">{GITHUB_NOT_CONFIGURED}</span>
+    </span>
+  );
+}
+
 export const Header = memo(function Header(props: HeaderProps) {
-  const { session, doc, compact } = props;
+  const { session, doc, compact, githubConfigured } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
@@ -543,10 +557,11 @@ export const Header = memo(function Header(props: HeaderProps) {
                 <MenuItem
                   icon={linked ? <UploadCloud size={15} /> : <GitHubIcon size={15} />}
                   onSelect={linked ? props.onPublishNow : props.onPublish}
-                  disabled={props.publishing || (linked ? !canEdit : !props.isOwner)}
+                  disabled={props.publishing || (linked ? !canEdit : !props.isOwner || !githubConfigured)}
+                  title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                   data-testid="menu-publish"
                 >
-                  {linked ? (doc.storage === "gist" ? "Update gist" : "Commit to GitHub…") : "Publish to GitHub…"}
+                  {linked ? (doc.storage === "gist" ? "Update gist" : "Commit to GitHub…") : <GitHubEntryLabel configured={githubConfigured}>Publish to GitHub…</GitHubEntryLabel>}
                 </MenuItem>
                 <MenuSeparator />
                 <ModeItems session={session} />
@@ -590,8 +605,14 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             {props.isOwner && (
-              <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish}>
-                {linked ? "GitHub connection…" : "Connect to GitHub…"}
+              <MenuItem
+                icon={<GitHubIcon size={15} />}
+                onSelect={props.onPublish}
+                disabled={!linked && !githubConfigured}
+                title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
+                data-testid="menu-github"
+              >
+                {linked ? "GitHub connection…" : <GitHubEntryLabel configured={githubConfigured}>Connect to GitHub…</GitHubEntryLabel>}
               </MenuItem>
             )}
             {props.onCommandPalette && (
@@ -694,8 +715,14 @@ export const Header = memo(function Header(props: HeaderProps) {
               ) : (
                 <>
                   <MenuLabel>Publish to GitHub</MenuLabel>
-                  <MenuItem icon={<GitHubIcon size={15} />} onSelect={props.onPublish} disabled={!props.isOwner}>
-                    Gist or repository…
+                  <MenuItem
+                    icon={<GitHubIcon size={15} />}
+                    onSelect={props.onPublish}
+                    disabled={!props.isOwner || !githubConfigured}
+                    title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
+                    data-testid="menu-publish-github"
+                  >
+                    <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
                   </MenuItem>
                   <MenuSeparator />
                   <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>

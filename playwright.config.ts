@@ -83,6 +83,11 @@ export default defineConfig({
           READER_POLL_MS: "2000",
           // GitHub is an in-memory fake for the suite (e2e/github-sync.spec.ts); the header polls fast.
           GITHUB_MOCK: "1",
+          // A (never used) GitHub OAuth app so the server counts as "GitHub configured": dev-login
+          // users then see the "Sign in with GitHub" button in the GitHub dialogs (#162) and the
+          // ⋮ → Connect to GitHub… entry is enabled. No test clicks through to github.com.
+          AUTH_GITHUB_ID: "e2e-github-oauth-app",
+          AUTH_GITHUB_SECRET: "e2e-github-oauth-app-secret",
           SYNC_POLL_MS: "2000",
           SYNC_CACHE_MS: "500",
           // The Burke-scale fixture seeds 60 documents and hundreds of writes through the API from one
