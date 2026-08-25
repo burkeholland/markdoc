@@ -117,7 +117,7 @@ function limitForKey(key: string): Limit {
 
 export const apiLimiter = new RateLimiter();
 
-/** `RATE_LIMIT=off` switches the limiter off (the e2e dev server seeds dozens of documents through the API). */
+/** `RATE_LIMIT=off` switches the limiter off (the e2e dev server and `scripts/dev-port.mts` default to it: the Burke-scale fixture seeds dozens of documents through the API). */
 export function rateLimitingEnabled(): boolean {
   return process.env.RATE_LIMIT !== "off";
 }
