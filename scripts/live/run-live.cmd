@@ -5,4 +5,4 @@ rem line in live.log (the watchdog and a human reading the log can tell "stopped
 rem   run-live.cmd <log path>
 rem `call` is required: a .cmd invoked from a batch file without it never returns here.
 call npm run dev >> "%~1" 2>&1
-echo ==== exit code %ERRORLEVEL% %DATE% %TIME% ==== >> "%~1"
+echo ==== exit code %ERRORLEVEL% %DATE% %TIME% ====>> "%~1"
