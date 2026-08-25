@@ -548,7 +548,7 @@ export const Header = memo(function Header(props: HeaderProps) {
                 <MenuSeparator />
               </>
             )}
-            <MenuItem icon={<History size={15} />} onSelect={props.onHistory}>
+            <MenuItem icon={<History size={15} />} onSelect={props.onHistory} data-testid="menu-history">
               Version history
             </MenuItem>
             <MenuItem icon={<Activity size={15} />} onSelect={props.onActivity} data-testid="menu-activity">
