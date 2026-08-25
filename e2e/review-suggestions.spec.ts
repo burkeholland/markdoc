@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, type User } from "./helpers";
 
 const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
 
@@ -233,5 +233,96 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     } finally {
       await carol.context.close();
     }
+  });
+});
+
+test.describe("suggesting mode: one typed word is one suggestion, even with an unpadded table in the document (task #475)", () => {
+  const TABLE_DOC = "# Scout doc\n\nFirst paragraph with some words to select here.\n\n- item one\n- item two\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nLast paragraph.\n";
+  const TABLE_LINES = ["| a | b |", "| --- | --- |", "| 1 | 2 |"];
+  let alice: User;
+
+  test.beforeAll(async ({ browser }) => {
+    alice = await signIn(browser, "alice");
+  });
+  test.afterAll(async () => {
+    await alice.context.close();
+  });
+
+  const tableLinesOf = (text: string) => text.split("\n").slice(7, 10);
+  /** Line numbers (1-based) of the code pane that carry an insertion mark. */
+  const markedCodeLines = (page: Page) =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll(".cm-content .md-suggest-insert")).map((el) => {
+        const line = el.closest(".cm-line")!;
+        return Array.from(line.parentElement!.children).indexOf(line) + 1;
+      }),
+    );
+
+  async function openTableDoc() {
+    const docId = await createDocument(alice.page, TABLE_DOC, "Scout doc");
+    await openDocument(alice.page, docId);
+    await ensureCommentsOpen(alice.page);
+    expect(tableLinesOf(await codeText(alice.page))).toEqual(TABLE_LINES);
+  }
+
+  async function switchToSuggesting() {
+    await alice.page.getByTestId("mode-switcher").click();
+    await alice.page.getByRole("menuitemradio", { name: /Suggesting/ }).click();
+    await expect(alice.page.getByTestId("mode-switcher")).toContainText("Suggesting");
+  }
+
+  test("typing into the trailing paragraph the rich pane created: Suggestions 1, table lines untouched, one mark on the last line", async () => {
+    await openTableDoc();
+    const page = alice.page;
+    // Still in Editing mode: Enter at the end, open and dismiss the slash menu, Backspace. The document text
+    // is unchanged; the rich pane keeps a trailing empty paragraph.
+    await focusRichEnd(page);
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Backspace");
+    await expect.poll(() => codeText(page)).toBe(TABLE_DOC);
+
+    await switchToSuggesting();
+    await focusRichEnd(page);
+    await page.keyboard.type(" suggested-words");
+    await expect.poll(() => codeText(page)).toContain("suggested-words");
+
+    const text = await codeText(page);
+    expect(text).toBe(TABLE_DOC.trimEnd() + "\n\n suggested-words\n");
+    expect(tableLinesOf(text)).toEqual(TABLE_LINES);
+    await page.getByTestId("comments-tab-suggestions").click();
+    await expect(page.getByTestId("comments-tab-suggestions")).toHaveText(/Suggestions\s*1$/);
+    await expect(page.getByTestId("suggestion-card")).toHaveCount(1);
+    // The only insertion mark in the code pane is on the typed line (line 14; the table is lines 8–10).
+    await expect(page.locator(".cm-content .md-suggest-insert")).toHaveCount(1);
+    expect(await markedCodeLines(page)).toEqual([14]);
+    await expect(page.locator(".md-rich .md-suggest-insert")).toHaveCount(1);
+    await expect(page.locator(".md-rich .md-suggest-insert")).toHaveText("suggested-words");
+    // No blank paragraph slipped in between "Last paragraph." and the suggestion: three paragraphs, six blocks.
+    await expect(page.locator(".md-rich > p")).toHaveCount(3);
+    await expect(page.locator(".md-rich > p").last()).toHaveText(/^\s?suggested-words$/);
+
+    // Accept all: only the typed word lands.
+    await page.getByTestId("review-accept-all").click();
+    await expect(page.getByTestId("suggestion-card")).toHaveCount(0);
+    const accepted = await codeText(page);
+    expect(accepted).toBe(TABLE_DOC.trimEnd() + "\n\n suggested-words\n");
+    expect(tableLinesOf(accepted)).toEqual(TABLE_LINES);
+  });
+
+  test("control: typing at the end of the last paragraph is still exactly one suggestion", async () => {
+    await openTableDoc();
+    const page = alice.page;
+    await switchToSuggesting();
+    await focusRichEnd(page);
+    await page.keyboard.type(" suggested-words");
+    await expect.poll(() => codeText(page)).toContain("Last paragraph. suggested-words");
+    expect(tableLinesOf(await codeText(page))).toEqual(TABLE_LINES);
+    await page.getByTestId("comments-tab-suggestions").click();
+    await expect(page.getByTestId("comments-tab-suggestions")).toHaveText(/Suggestions\s*1$/);
+    await expect(page.locator(".cm-content .md-suggest-insert")).toHaveCount(1);
+    expect(await markedCodeLines(page)).toEqual([12]);
   });
 });
