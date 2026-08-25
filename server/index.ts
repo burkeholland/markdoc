@@ -9,6 +9,7 @@ import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
 import { getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
+import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { lanAddresses } from "../scripts/lib/dev-origins.mjs";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
@@ -43,6 +44,10 @@ async function main() {
   setInterval(purgeTrash, TRASH_PURGE_INTERVAL_MS).unref();
 
   const server = createServer((req, res) => {
+    // The address the socket saw, for the per-IP rate limiter: always overwritten so a client cannot forge it.
+    const remote = req.socket.remoteAddress;
+    if (remote) req.headers[REMOTE_ADDR_HEADER] = remote;
+    else delete req.headers[REMOTE_ADDR_HEADER];
     handle(req, res).catch((err: unknown) => {
       console.error("[http] request failed", err);
       if (!res.headersSent) res.statusCode = 500;

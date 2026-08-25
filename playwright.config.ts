@@ -85,6 +85,9 @@ export default defineConfig({
           GITHUB_MOCK: "1",
           SYNC_POLL_MS: "2000",
           SYNC_CACHE_MS: "500",
+          // The Burke-scale fixture seeds 60 documents and hundreds of writes through the API from one
+          // session; the limiter would refuse them. Production keeps it on (e2e/prod-smoke.spec.ts checks).
+          RATE_LIMIT: "off",
           NODE_ENV: "development",
         },
       },
