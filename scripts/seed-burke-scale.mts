@@ -13,6 +13,11 @@
 //   --yes          required to seed anything on port 3000 (Burke's live server)
 //
 // Needs AUTH_DEV_LOGIN on the target (dev:port sets it). Exits non-zero on the first failed call.
+//
+// Rate limiting: the fixture issues ~100 document/asset creates and ~150 other writes in a few seconds,
+// far past the API's default budgets (src/server/rate-limit.ts: create 20/min, write 120/min). dev:port
+// starts with RATE_LIMIT=off so the seed finishes in ~15 s; against any other server every 429 is
+// retried after its Retry-After (≈4 min in total), and the failure line names the switch.
 
 import { seedBurkeScale, type SeedRequest, type SeedRequestOptions, type SeedResponse } from "../e2e/fixtures/burke-scale";
 
@@ -57,6 +62,7 @@ function wrap(res: Response): SeedResponse {
     status: () => res.status,
     text: body,
     json: async () => JSON.parse(await body()) as unknown,
+    headers: () => Object.fromEntries(res.headers),
   };
 }
 

@@ -464,6 +464,8 @@ export interface SeedResponse {
   status(): number;
   json(): Promise<unknown>;
   text(): Promise<string>;
+  /** Response headers, lower-cased names (Playwright's `APIResponse.headers()` shape). Optional: only `retry-after` is read. */
+  headers?(): Record<string, string>;
 }
 
 export interface SeedRequestOptions {
@@ -493,6 +495,8 @@ export interface SeedOptions {
   /** Parallel document creations and comment threads in flight (default 8). */
   concurrency?: number;
   log?: (line: string) => void;
+  /** Total seconds one request may spend waiting on `429`s before it is reported as failed (default 120). */
+  maxRateLimitWaitSeconds?: number;
 }
 
 export interface SeededDoc {
@@ -519,9 +523,72 @@ export interface BurkeScaleSeed {
 /** 1×1 transparent PNG. */
 export const PNG_1X1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 
+/** Appended to a `429` failure so nobody has to find the switch in src/server/rate-limit.ts. */
+export const RATE_LIMIT_HINT = "the server is rate limiting the API; start it with RATE_LIMIT=off (dev:port does by default) or let the seed pace itself";
+
 async function expectOk(res: SeedResponse, what: string): Promise<unknown> {
-  if (!res.ok()) throw new Error(`${what} -> ${res.status()} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok()) {
+    const body = (await res.text()).slice(0, 300);
+    throw new Error(`${what} -> ${res.status()} ${body}${res.status() === 429 ? ` (${RATE_LIMIT_HINT})` : ""}`);
+  }
   return res.json();
+}
+
+/** Seconds the server asked us to wait: `retryAfter` in the JSON body (what `/api/*` answers), else the `Retry-After` header, else 1. */
+export async function retryAfterSeconds(res: SeedResponse): Promise<number> {
+  const whole = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.ceil(v) : null);
+  try {
+    const body = (await res.json()) as { retryAfter?: unknown } | null;
+    const fromBody = whole(body?.retryAfter);
+    if (fromBody !== null) return fromBody;
+  } catch {
+    // not JSON
+  }
+  const header = res.headers?.()["retry-after"];
+  return (header !== undefined ? whole(Number(header)) : null) ?? 1;
+}
+
+export interface RateLimitRetryOptions {
+  /** Total seconds one request may spend waiting before the `429` is returned to the caller (default 120). */
+  maxWaitSeconds?: number;
+  /** Called once, on the first `429` seen. */
+  onFirst?: (retryAfter: number) => void;
+  /** Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Wrap a `SeedRequest` so every call that answers `429` sleeps for the server's `retryAfter` and is sent
+ * again, until it succeeds or the request has waited `maxWaitSeconds` in total. The API's limiter is a
+ * token bucket that tells the caller exactly when the next token exists, so honouring it lets the seed
+ * finish on a server with the limiter on (≈4 min with the default `create` budget of 20/min, against
+ * ~15 s with `RATE_LIMIT=off`). Anything other than `429` is returned untouched.
+ */
+export function withRateLimitRetry(request: SeedRequest, options: RateLimitRetryOptions = {}): SeedRequest {
+  const maxWaitMs = (options.maxWaitSeconds ?? 120) * 1000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let first = true;
+  const retrying = (send: (url: string, o?: SeedRequestOptions) => Promise<SeedResponse>) => async (url: string, o?: SeedRequestOptions): Promise<SeedResponse> => {
+    let waitedMs = 0;
+    for (;;) {
+      const res = await send(url, o);
+      if (res.status() !== 429) return res;
+      const seconds = await retryAfterSeconds(res);
+      if (first) {
+        first = false;
+        options.onFirst?.(seconds);
+      }
+      if (waitedMs + seconds * 1000 > maxWaitMs) return res;
+      await sleep(seconds * 1000);
+      waitedMs += seconds * 1000;
+    }
+  };
+  return {
+    get: retrying((u, o) => request.get(u, o)),
+    post: retrying((u, o) => request.post(u, o)),
+    put: retrying((u, o) => request.put(u, o)),
+    delete: retrying((u, o) => request.delete(u, o)),
+  };
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -556,12 +623,16 @@ async function rewriteImages(request: SeedRequest, docId: string, content: strin
  * Seed the whole fixture for `users.owner` (the signed-in user behind `request`). Idempotence is not
  * attempted: every call creates a fresh set of 60 documents, so use a dedicated login per run.
  */
-export async function seedBurkeScale(request: SeedRequest, users: SeedUsers, options: SeedOptions = {}): Promise<BurkeScaleSeed> {
+export async function seedBurkeScale(rawRequest: SeedRequest, users: SeedUsers, options: SeedOptions = {}): Promise<BurkeScaleSeed> {
   const started = Date.now();
   const log = options.log ?? (() => undefined);
   const concurrency = options.concurrency ?? 8;
   const commentLoad = generateCommentLoad(users.peer);
   const t = () => `${String(Date.now() - started).padStart(6)} ms`;
+  const request = withRateLimitRetry(rawRequest, {
+    maxWaitSeconds: options.maxRateLimitWaitSeconds,
+    onFirst: (retryAfter) => log(`[burke-scale] ${t()}  429 from the server (Retry-After ${retryAfter} s): pacing requests by Retry-After from here on — ${RATE_LIMIT_HINT}`),
+  });
 
   // 1. Sixty documents (POST), each followed by its own star / share / trash so the whole phase runs at
   //    `concurrency` with no barrier in between. Long ones get their images uploaded and the content

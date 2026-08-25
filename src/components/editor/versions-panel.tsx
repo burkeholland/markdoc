@@ -308,13 +308,15 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
                               />
                             ) : (
                               <div className="flex items-center gap-1.5">
-                                <span className="truncate text-[13px] font-medium text-ink">{v.title ?? `${KIND_LABEL[v.kind]} · v${v.number}`}</span>
-                                <span
-                                  className="shrink-0 rounded border border-line px-1 text-[10px] font-medium uppercase tracking-wide text-ink-3"
-                                  data-testid="version-kind"
-                                >
-                                  {KIND_TAG[v.kind]}
-                                </span>
+                                <span className="truncate text-[13px] font-medium text-ink">{v.title ?? KIND_LABEL[v.kind]}</span>
+                                {v.title && (
+                                  <span
+                                    className="shrink-0 rounded border border-line px-1 text-[10px] font-medium uppercase tracking-wide text-ink-3"
+                                    data-testid="version-kind"
+                                  >
+                                    {KIND_TAG[v.kind]}
+                                  </span>
+                                )}
                               </div>
                             )}
                             <div className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-3">
