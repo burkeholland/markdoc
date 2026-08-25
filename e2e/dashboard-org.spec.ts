@@ -126,7 +126,7 @@ test.describe("dashboard organisation", () => {
 
     // Trash: a local document carries no chip there either.
     expect((await page.request.delete(`/api/documents/${idA}`)).ok()).toBeTruthy();
-    await page.reload();
+    await goHome(page);
     await page.getByTestId("filter-trash").click();
     await expect(page.getByTestId("trash-card")).toHaveCount(1);
     await expect(page.getByTestId("trash-card")).toContainText("Mike");

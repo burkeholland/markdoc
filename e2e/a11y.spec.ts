@@ -774,7 +774,8 @@ test.describe("keyboard-only walkthrough", () => {
     await page.keyboard.type("Keyboard named");
     await page.keyboard.press("Enter");
     await expect(nameDialog).toHaveCount(0);
-    await expect(page.getByTestId("toast")).toContainText("Saved version “Keyboard named”");
+    // The "Theme:" toast from above may still be showing (4.5 s), so pick the version toast by text.
+    await expect(page.getByTestId("toast").filter({ hasText: "Saved version" })).toContainText("Saved version “Keyboard named”");
     await context.close();
   });
 });
