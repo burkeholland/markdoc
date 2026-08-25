@@ -118,4 +118,27 @@ export function useDebouncedSessionValue<T>(
   return value;
 }
 
+/** Longest the shell waits for the first sync before firing the deferred calls anyway (offline, auth refused, slow socket). */
+export const OPEN_SETTLED_FALLBACK_MS = 2_500;
 
+/**
+ * True once the document is synced with the server (or {@link OPEN_SETTLED_FALLBACK_MS} has passed).
+ * REST calls the editor does not need to become editable — star state, the notifications poll, the
+ * share hint's collaborator and token lists — wait on this so they do not compete with the
+ * collab-token call and the socket handshake for the server's single thread on open (#118).
+ */
+export function useOpenSettled(session: CollabSession): boolean {
+  const synced = useSessionValue(session, (s) => s.synced || s.authError !== null || s.trashed);
+  const [settled, setSettled] = useState(synced);
+  useEffect(() => {
+    if (settled) return;
+    if (synced) {
+      setSettled(true);
+      return;
+    }
+    const t = setTimeout(() => setSettled(true), OPEN_SETTLED_FALLBACK_MS);
+    return () => clearTimeout(t);
+  }, [synced, settled]);
+  // Latched: a later reconnect must not re-hide what has already loaded.
+  return settled || synced;
+}
