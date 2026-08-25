@@ -28,6 +28,21 @@ const fakeFetch: typeof fetch = async (input, init) => {
   }
   if (method === "POST" && url.pathname === "/api/documents/live-1/restore") return reply(409, { error: "Document is not in the trash" });
   if (method === "POST" && url.pathname === "/api/documents/trashed-1/restore") return reply(200, { ok: true, document: { id: "trashed-1", title: "Back" } });
+  if (url.pathname === "/api/documents/doc-1/content" && method === "GET") {
+    return reply(200, { content: "# Plan\n\nFirst.\n", clean: "# Plan\n\nFirst.\n", title: "Plan", contentHash: "a".repeat(64), pendingSuggestions: 0, openComments: 0 });
+  }
+  if (url.pathname === "/api/documents/doc-1/content" && method === "PUT") {
+    const body = JSON.parse(String(init?.body)) as { ifContentHash?: string };
+    if (body.ifContentHash && body.ifContentHash !== "b".repeat(64)) {
+      return reply(409, { error: "Document changed since you read it", contentHash: "b".repeat(64), diff: "@@ -1,3 +1,5 @@\n # Plan\n \n First.\n+\n+The human's new sentence.", truncated: false });
+    }
+    return reply(200, { ok: true, changed: true, contentHash: "c".repeat(64) });
+  }
+  if (url.pathname === "/api/documents/doc-1/suggest" && method === "POST") {
+    const body = JSON.parse(String(init?.body)) as { ifContentHash?: string };
+    if (body.ifContentHash && body.ifContentHash !== "b".repeat(64)) return reply(409, { error: "Document changed since you read it", contentHash: "b".repeat(64), diff: null, truncated: false });
+    return reply(200, { ok: true, suggestions: 2, suggestionIds: ["s1", "s2"], contentHash: "b".repeat(64) });
+  }
   if (url.pathname === "/api/nope") return reply(404, "<!DOCTYPE html><html>not json</html>", "text/html");
   return reply(404, { error: "Not found" });
 };
@@ -90,5 +105,40 @@ describe("tools over a real MCP client", () => {
     const trashed = (await mcp.callTool({ name: "markdoc_restore_document", arguments: { id: "trashed-1" } })) as { isError?: boolean; content: { type: string; text?: string }[] };
     expect(trashed.isError).toBeFalsy();
     expect(text(trashed)).toContain('Restored "Back"');
+  });
+
+  type Result = { isError?: boolean; content: { type: string; text?: string }[]; structuredContent?: Record<string, unknown> };
+
+  it("markdoc_read_document puts the contentHash in the header line and structured content", async () => {
+    const res = (await mcp.callTool({ name: "markdoc_read_document", arguments: { id: "doc-1" } })) as Result;
+    expect(res.isError).toBeFalsy();
+    expect(text(res).split("\n")[0]).toBe(`# Plan (id doc-1, hash ${"a".repeat(64)}) — 0 pending suggestion(s), 0 open comment(s)`);
+    expect(res.structuredContent?.contentHash).toBe("a".repeat(64));
+  });
+
+  it("markdoc_replace_content with a stale ifContentHash is an error that says what changed; a current one succeeds", async () => {
+    const stale = (await mcp.callTool({ name: "markdoc_replace_content", arguments: { id: "doc-1", content: "# Plan\n\nRewritten.\n", ifContentHash: "a".repeat(64) } })) as Result;
+    expect(stale.isError).toBe(true);
+    expect(text(stale)).toContain("changed since you read it");
+    expect(text(stale)).toContain("re-read and retry");
+    expect(text(stale)).toContain("+The human's new sentence.");
+    expect(text(stale)).toContain("b".repeat(64));
+    expect(stale.structuredContent?.contentHash).toBe("b".repeat(64));
+
+    const fresh = (await mcp.callTool({ name: "markdoc_replace_content", arguments: { id: "doc-1", content: "# Plan\n\nRewritten.\n", ifContentHash: "b".repeat(64) } })) as Result;
+    expect(fresh.isError).toBeFalsy();
+    expect(text(fresh)).toContain(`updated (hash ${"c".repeat(64)})`);
+    expect(fresh.structuredContent?.contentHash).toBe("c".repeat(64));
+  });
+
+  it("markdoc_suggest with a stale ifContentHash is an error even without a diff; a current one succeeds", async () => {
+    const stale = (await mcp.callTool({ name: "markdoc_suggest", arguments: { id: "doc-1", edits: [{ find: "First", replace: "1st" }], ifContentHash: "a".repeat(64) } })) as Result;
+    expect(stale.isError).toBe(true);
+    expect(text(stale)).toContain("changed since you read it");
+    expect(text(stale)).toContain("re-read the document");
+
+    const fresh = (await mcp.callTool({ name: "markdoc_suggest", arguments: { id: "doc-1", edits: [{ find: "First", replace: "1st" }], ifContentHash: "b".repeat(64) } })) as Result;
+    expect(fresh.isError).toBeFalsy();
+    expect(text(fresh)).toContain("Proposed 2 change(s)");
   });
 });

@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { getCollab } from "@/server/collab/registry";
@@ -7,7 +8,8 @@ import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { CommentsModel } from "@/editor/collab/comments";
 import { diffOps, applyOps } from "@/editor/sync/text-diff";
 import { HttpError } from "@/server/http";
-import { noteContentWrite, type WriterRef } from "@/server/agent-events";
+import { noteContentWrite, rememberCleanText, cachedCleanText, unifiedDiff, type WriterRef } from "@/server/agent-events";
+import { contentHash } from "@/server/export/html";
 import type { AgentActivity } from "@/server/agents";
 
 export interface LiveText {
@@ -77,6 +79,52 @@ export function cleanTextOf(doc: Y.Doc): string {
   } finally {
     model.destroy();
   }
+}
+
+// --- Optimistic concurrency -----------------------------------------------------
+
+/** Body field shared by the conditional write routes: the `contentHash` from `GET /content` (64 hex chars). */
+export const ifContentHashSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-f]{64}$/i, "Expected the 64-character contentHash from GET /content")
+  .optional();
+
+/**
+ * The clean-text hash a write is conditional on: the body's `ifContentHash`, else the `If-Match`
+ * header (`"<hash>"`, quotes and a weak `W/` prefix tolerated); null when the caller sent neither.
+ */
+export function expectedContentHash(req: Request, bodyHash?: string | null): string | null {
+  if (bodyHash) return bodyHash.trim().toLowerCase();
+  const header = req.headers.get("if-match");
+  if (!header) return null;
+  const raw = header
+    .trim()
+    .replace(/^W\//i, "")
+    .replace(/^"(.*)"$/, "$1")
+    .trim();
+  return raw && raw !== "*" ? raw.toLowerCase() : null;
+}
+
+/**
+ * Refuse a write when the document's clean text no longer hashes to what the caller read. Call it
+ * inside the `mutateLiveDoc` callback (so the check and the write see the same state) before touching
+ * the text. The 409 body carries the current hash and, when the text at `expected` is still cached
+ * (`GET /content`, the events route and every API write remember it), a unified diff of what moved.
+ * Returns the current hash.
+ */
+export function assertContentUnchanged(docId: string, doc: Y.Doc, expected: string | null): string {
+  const clean = cleanTextOf(doc);
+  const current = contentHash(clean);
+  if (expected === null || expected === current) return current;
+  const known = cachedCleanText(docId, expected);
+  const change = known === null ? null : unifiedDiff(known, clean);
+  rememberCleanText(docId, clean);
+  throw new HttpError(409, "Document changed since you read it", {
+    contentHash: current,
+    diff: change?.diff ?? null,
+    truncated: change?.truncated ?? false,
+  });
 }
 
 /**

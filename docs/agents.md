@@ -87,10 +87,10 @@ Twenty-seven tools; every `id` is the document id from the URL `/d/<id>`.
 | `markdoc_duplicate_document` | `id` | "Make a copy": a new document you own, titled *Copy of …*, with the current clean text and images. Always a Markdoc document, even when the source lives on GitHub. |
 | `markdoc_delete_document` | `id`, `permanent?` | Move a document you own to the trash (restorable for 30 days). `permanent: true` deletes it for good. |
 | `markdoc_restore_document` | `id` | Take a document out of the trash. |
-| `markdoc_read_document` | `id`, `clean?` | Current Markdown (`clean: true` excludes pending suggestions). |
-| `markdoc_replace_content` | `id`, `content`, `message?` | Replace the whole text, applied live as a minimal diff (collaborators keep their cursors); `message` names a version. |
+| `markdoc_read_document` | `id`, `clean?` | Current Markdown (`clean: true` excludes pending suggestions). The header line carries the document's `contentHash` (`# Title (id …, hash …)`) to pass back as `ifContentHash`. |
+| `markdoc_replace_content` | `id`, `content`, `message?`, `ifContentHash?` | Replace the whole text, applied live as a minimal diff (collaborators keep their cursors); `message` names a version. With `ifContentHash` (the hash you read) the write is refused — *"Document changed since you read it … re-read and retry"*, with a diff of what moved — when anyone edited the document in between, so a person typing alongside you never loses their words. Always pass it. |
 | `markdoc_append` | `id`, `markdown` | Append Markdown to the end. |
-| `markdoc_suggest` | `id`, `content` or `edits: [{ find, replace, all? }]` | Propose changes as tracked suggestions, from a full revised text or find → replace edits. |
+| `markdoc_suggest` | `id`, `content` or `edits: [{ find, replace, all? }]`, `ifContentHash?` | Propose changes as tracked suggestions, from a full revised text or find → replace edits. `ifContentHash` works as for `markdoc_replace_content`. |
 | `markdoc_suggestions` | `id` | List pending suggestions with author and surrounding context. |
 | `markdoc_review_suggestions` | `id`, `action: accept \| reject \| acceptAll \| rejectAll`, `suggestionId` (required for accept/reject) | Accept or reject (only when asked to). Errors instead of "done" when the id is missing or unknown; `acceptAll` / `rejectAll` with nothing pending is a plain success — *Nothing to decide on … (0 pending)*, `decided: 0` — since the document is already in the asked-for state. |
 | `markdoc_comments` | `id` | Read threads, open and resolved, with the text they anchor to. |
@@ -206,7 +206,7 @@ Quote the selection exactly as the request gives it: `markdoc_suggest` `edits[].
   "summary": "Left one comment: the preference claim needs a source or softer wording." } }
 ```
 
-**Rewrite directly (`mode: "rewrite"`)** — *"Turn into a checklist"* with no selection (whole document). The change lands in place for everyone, so only do this when the mode says so; `message` names the version it creates:
+**Rewrite directly (`mode: "rewrite"`)** — *"Turn into a checklist"* with no selection (whole document). The change lands in place for everyone, so only do this when the mode says so; `message` names the version it creates, and `ifContentHash` (the `hash` from the read) makes sure nothing a person typed while you worked is overwritten — on a conflict the tool errors with the diff; re-read and retry:
 
 ```json
 { "tool": "markdoc_list_requests", "arguments": {} }
@@ -214,7 +214,8 @@ Quote the selection exactly as the request gives it: `markdoc_suggest` `edits[].
 { "tool": "markdoc_read_document", "arguments": { "id": "DOC", "clean": true } }
 { "tool": "markdoc_replace_content", "arguments": { "id": "DOC",
   "content": "# Launch checklist\n\n- [ ] Cut the release branch\n- [ ] Run the e2e suite\n- [ ] Publish the changelog\n",
-  "message": "Rewritten as a checklist (Ask an agent)" } }
+  "message": "Rewritten as a checklist (Ask an agent)",
+  "ifContentHash": "<hash from the read_document header>" } }
 { "tool": "markdoc_complete_request", "arguments": { "documentId": "DOC", "requestId": "REQ",
   "summary": "Rewrote the document as a three-item checklist; see version history to compare." } }
 ```
@@ -253,10 +254,10 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 
 | Method & path | Body | Access | Purpose |
 | --- | --- | --- | --- |
-| `GET /api/documents/:id/content` | | view | `{ content, clean, title, contentHash, pendingSuggestions, openComments, stats }`. `contentHash` is the SHA-256 of `clean`; `stats` are prose statistics of `clean`: `{ words, characters, charactersNoSpaces, sentences, paragraphs, headings, readingMinutes (200 wpm), speakingMinutes (130 wpm) }` (fenced code and front matter excluded). |
-| `PUT /api/documents/:id/content` | `{ content, message? }` | edit | Replace the whole text (minimal live diff; `message` names a version). |
+| `GET /api/documents/:id/content` | | view | `{ content, clean, title, contentHash, pendingSuggestions, openComments, stats }`. `contentHash` is the SHA-256 of `clean` — send it back with your write as `ifContentHash` (below); `stats` are prose statistics of `clean`: `{ words, characters, charactersNoSpaces, sentences, paragraphs, headings, readingMinutes (200 wpm), speakingMinutes (130 wpm) }` (fenced code and front matter excluded). |
+| `PUT /api/documents/:id/content` | `{ content, message?, ifContentHash? }` or header `If-Match: "<contentHash>"` | edit | Replace the whole text (minimal live diff; `message` names a version). With `ifContentHash` / `If-Match`, the write only lands when the clean text still hashes to that value; otherwise **`409 { error: "Document changed since you read it", contentHash, diff, truncated }`** — `contentHash` is the current one, `diff` a unified diff of the clean text since the hash you sent (≤ 200 lines; `null` when that state is no longer cached) — and nothing is applied. Returns `{ ok, changed, contentHash }` with the new hash. |
 | `PATCH /api/documents/:id/content` | `{ append }` | edit | Append Markdown. |
-| `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }`, plus `requestId?` | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`. Returns `{ suggestions, suggestionIds }`; with `requestId` the suggestions count against that request. |
+| `POST /api/documents/:id/suggest` | `{ content }` or `{ edits: [{ find, replace, all? }] }`, plus `requestId?`, `ifContentHash?` (or `If-Match`) | edit | Propose word-level tracked changes. `400` when a `find` string is missing from the text or occurs more than once without `all: true`; `409` as for `PUT /content` when `ifContentHash` no longer matches. Returns `{ suggestions, suggestionIds, contentHash }`; with `requestId` the suggestions count against that request. |
 | `GET /api/documents/:id/suggestions` | | view | Pending suggestions with ranges and context. |
 | `POST /api/documents/:id/suggestions` | `{ action: accept \| reject, id }` or `{ action: acceptAll \| rejectAll }` | edit | Review suggestions. `accept` / `reject` decide one suggestion: `400` without `id`, `404` when no pending suggestion has that `id`. Returns `{ ok, decided }` (the number decided; plus `id` for a single decision). |
 | `GET /api/documents/:id/comments` | | view | `{ comments: [thread] }`: threads with the text they anchor to, a `mentions` array, `reactions` (`{ "👍": [userId, …] }`) and `editedAt` per thread and reply. |
