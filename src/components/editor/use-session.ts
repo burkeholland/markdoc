@@ -29,9 +29,10 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role): C
       }),
   );
   useEffect(() => {
-    session.connect();
-    // Only after hydration: locally stored content must not change the first client render.
+    // Only after hydration: locally stored content must not change the first client render. The
+    // mirror goes first so the socket (opened by `connect` once the mirror is in) syncs the difference.
     session.startLocalPersistence();
+    session.connect();
     if (process.env.NODE_ENV !== "production") {
       (window as unknown as { __markdocSession?: CollabSession }).__markdocSession = session;
     }

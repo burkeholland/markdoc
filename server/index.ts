@@ -37,6 +37,25 @@ const bindHost = process.env.HOST ?? "0.0.0.0";
 const hostname = bindHost === "0.0.0.0" || bindHost === "::" ? undefined : bindHost;
 const port = Number(process.env.PORT ?? 3000);
 
+// Exit trace (task #614): the live server once died with nothing in live.log. Whatever ends this process
+// leaves one line here, with the uptime, so a silent death can be told apart from a kill or a crash.
+const startedAt = Date.now();
+const uptime = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+const describe = (err: unknown) => (err instanceof Error ? (err.stack ?? err.message) : String(err));
+process.on("exit", (code) => {
+  console.log(`> [exit] process exiting with code ${code} after ${uptime()}`);
+});
+// Without these listeners Node prints the error and exits 1 (the rejection is raised as an uncaught
+// exception since v15); keep that outcome, just with the uptime on the line.
+process.on("uncaughtException", (err, origin) => {
+  console.error(`> [exit] ${origin} after ${uptime()}:`, describe(err));
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error(`> [exit] unhandledRejection after ${uptime()}:`, describe(reason));
+  process.exit(1);
+});
+
 // Standby mode (scripts/live/promote.ps1): with STANDBY_PORT set, the server comes up on
 // 127.0.0.1:<STANDBY_PORT> against a throwaway in-memory database so the ops script can compile every
 // route while the previous build keeps serving :PORT. `POST /_standby/takeover` on the standby port
@@ -156,8 +175,8 @@ async function main() {
     });
   }
 
-  const shutdown = async () => {
-    console.log("> Shutting down, flushing documents...");
+  const shutdown = async (signal: NodeJS.Signals) => {
+    console.log(`> [exit] ${signal} after ${uptime()}; shutting down, flushing documents...`);
     server.close();
     standby?.close();
     try {
@@ -171,7 +190,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(`> [exit] startup failed after ${uptime()}:`, describe(err));
   process.exit(1);
 });
 

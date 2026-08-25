@@ -6,8 +6,11 @@ import { IndexeddbPersistence, clearDocument } from "y-indexeddb";
  * IndexedDB database named `markdoc:<docId>`, so edits made while offline
  * survive a refresh or a closed tab and are sent to the server on reconnect.
  *
- * The mirror is applied before the socket opens (offline-first) and merged with
- * whatever the server sends. That merge is only safe because the server's state
+ * The mirror is applied before the socket opens (offline-first; `CollabSession.connect` waits
+ * for it, bounded by {@link LOCAL_LOAD_TIMEOUT_MS}) and merged with whatever the server sends.
+ * Because the provider then knows this document's state vector before sync step 1, only the
+ * difference travels in either direction (see collab/provider.ts). That merge is only safe
+ * because the server's state
  * for a document is stable across loads: the Yjs seed of a document is minted
  * exactly once (at creation, or on the first load of a legacy row) and stored as
  * `ystate` (see src/server/collab/seed.ts). Before that was the case, an opened but
@@ -210,6 +213,11 @@ export function ensureLocalEpoch(): Promise<boolean> {
 }
 
 export interface LocalPersistence {
+  /**
+   * Transaction origin of the updates this mirror applies to the document (the y-indexeddb
+   * instance), so the provider can tell a restore of the stored copy from an edit.
+   */
+  readonly origin: unknown;
   /** Resolves once the stored state has been applied to the document (or load gave up). */
   readonly whenLoaded: Promise<void>;
   /** Whether {@link whenLoaded} has settled. */
@@ -259,6 +267,7 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
     }
   };
   return {
+    origin: persistence,
     whenLoaded,
     get loaded() {
       return loaded;
