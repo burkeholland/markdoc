@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { firstTabbable, rovingIndex } from "./a11y";
+import { firstTabbable, focusReturnTarget, restoreFocus, rovingIndex } from "./a11y";
 
 describe("rovingIndex", () => {
   it("ignores non-navigation keys and empty lists", () => {
@@ -84,5 +84,75 @@ describe("firstTabbable", () => {
     const root = mount(`<div><div data-focus-skip><button>Close</button></div><ul><li>Ctrl+B</li></ul></div>`);
     expect(firstTabbable(root)).toBeNull();
     expect(firstTabbable(null)).toBeNull();
+  });
+});
+
+describe("focusReturnTarget", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  const mount = (html: string) => {
+    document.body.innerHTML = html;
+  };
+
+  it("is the focused element itself for a toolbar button or an editor pane", () => {
+    mount(`<div role="toolbar"><button id="image">Image</button></div><div id="rich" contenteditable="true" tabindex="0"></div>`);
+    document.getElementById("image")!.focus();
+    expect(focusReturnTarget()?.id).toBe("image");
+    document.getElementById("rich")!.focus();
+    expect(focusReturnTarget()?.id).toBe("rich");
+  });
+
+  it("resolves a menu item to the trigger that controls the menu (Radix: aria-controls while open)", () => {
+    mount(`<button id="trigger" aria-controls="menu-1" aria-expanded="true" data-testid="more-menu">⋮</button>
+      <div role="menu" id="menu-1" aria-labelledby="trigger"><div role="menuitem" tabindex="-1" id="item">Keyboard shortcuts</div></div>`);
+    document.getElementById("item")!.focus();
+    expect(document.activeElement?.id).toBe("item");
+    expect(focusReturnTarget()?.id).toBe("trigger");
+  });
+
+  it("falls back to the menu's aria-labelledby when aria-controls is already gone", () => {
+    mount(`<button id="trigger">⋮</button>
+      <div role="menu" id="menu-1" aria-labelledby="trigger"><div role="menuitemradio" tabindex="-1" id="item">Heading 1</div></div>`);
+    document.getElementById("item")!.focus();
+    expect(focusReturnTarget()?.id).toBe("trigger");
+  });
+
+  it("keeps the menu item when no trigger can be found, and is null for <body>", () => {
+    mount(`<div role="menu"><div role="menuitem" tabindex="-1" id="item">Orphan</div></div>`);
+    document.getElementById("item")!.focus();
+    expect(focusReturnTarget()?.id).toBe("item");
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    expect(focusReturnTarget()).toBeNull();
+  });
+});
+
+describe("restoreFocus", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("focuses the remembered element once the closed dialog has let go of focus", () => {
+    document.body.innerHTML = `<button id="trigger">⋮</button>`;
+    const trigger = document.getElementById("trigger")!;
+    expect(document.activeElement).toBe(document.body);
+    expect(restoreFocus(trigger)).toBe(true);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("leaves focus alone when a closing handler already placed it, and does nothing for a detached or missing element", () => {
+    document.body.innerHTML = `<button id="trigger">⋮</button><div id="rich" tabindex="0"></div>`;
+    const trigger = document.getElementById("trigger")!;
+    const rich = document.getElementById("rich")!;
+    rich.focus();
+    expect(restoreFocus(trigger)).toBe(false);
+    expect(document.activeElement).toBe(rich);
+    rich.blur();
+    const detached = document.createElement("button");
+    expect(restoreFocus(detached)).toBe(false);
+    expect(restoreFocus(null)).toBe(false);
+    expect(document.activeElement).toBe(document.body);
   });
 });
