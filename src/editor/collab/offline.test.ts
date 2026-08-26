@@ -488,6 +488,31 @@ describe("with IndexedDB (fake-indexeddb)", () => {
       expect(localStorage.getItem(IDB_REGISTRY_KEY)).toBeNull();
     });
 
+    it("sign-out cleanup restores an active mirror after its deletion is blocked", async () => {
+      const docId = `signout-active-blocked-${Date.now()}`;
+      const doc = new Y.Doc();
+      const persistence = openLocalPersistence(docId, doc)!;
+      await persistence.whenLoaded;
+      doc.getText("content").insert(0, "before failed sign-out");
+      await tick();
+      const holder = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(localDbName(docId));
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      holder.onversionchange = null;
+
+      await expect(clearAllLocalDocuments()).rejects.toThrow("blocked by another open connection");
+      doc.getText("content").insert(doc.getText("content").length, " and after");
+      holder.close();
+      await tick(100);
+
+      expect(await readMirror(docId)).toBe("before failed sign-out and after");
+      await persistence.destroy();
+      doc.destroy();
+      await clearLocalDocument(docId);
+    });
+
     it("sign-out cleanup times out a stalled database listing and retains the registry", async () => {
       const docId = `signout-timeout-${Date.now()}`;
       localStorage.setItem(IDB_REGISTRY_KEY, JSON.stringify([docId]));

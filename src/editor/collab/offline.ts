@@ -153,7 +153,9 @@ function deleteDatabase(name: string): Promise<void> {
 
 interface ActivePersistence {
   readonly name: string;
-  destroy(): Promise<void>;
+  suspend(): Promise<void>;
+  resume(): void;
+  discard(): void;
 }
 
 const activePersistences = new Set<ActivePersistence>();
@@ -179,28 +181,49 @@ export async function clearAllLocalDocuments(): Promise<number> {
   }
 
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  let suspended: ActivePersistence[] = [];
   const cleanup = (async () => {
     const active = [...activePersistences];
     const activeNames = new Set(active.map(({ name }) => name));
     const names = [...new Set([...(await listLocalDbNames()), ...activeNames])];
     const batches = [names.filter((name) => !activeNames.has(name)), names.filter((name) => activeNames.has(name))];
-    for (const [index, batch] of batches.entries()) {
-      if (index === 1) await Promise.all(active.map((persistence) => persistence.destroy()));
-      const results = await Promise.allSettled(batch.map(deleteDatabase));
-      const failed = results
-        .map((result, resultIndex) => ({ result, name: batch[resultIndex] }))
-        .filter((item): item is { result: PromiseRejectedResult; name: string } => item.result.status === "rejected");
-      if (failed.length > 0) {
-        const reasons = failed.map(({ name, result }) => `${name}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`).join("; ");
-        throw new Error(`Could not remove ${failed.length} of ${names.length} local document database${names.length === 1 ? "" : "s"} (${reasons})`);
+    try {
+      for (const [index, batch] of batches.entries()) {
+        if (timedOut) throw new Error(`Local document cleanup did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms`);
+        if (index === 1) {
+          suspended = active;
+          await Promise.all(active.map((persistence) => persistence.suspend()));
+          if (timedOut) throw new Error(`Local document cleanup did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms`);
+        }
+        const results = await Promise.allSettled(batch.map(deleteDatabase));
+        const failed = results
+          .map((result, resultIndex) => ({ result, name: batch[resultIndex] }))
+          .filter((item): item is { result: PromiseRejectedResult; name: string } => item.result.status === "rejected");
+        if (failed.length > 0) {
+          const reasons = failed.map(({ name, result }) => `${name}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`).join("; ");
+          throw new Error(`Could not remove ${failed.length} of ${names.length} local document database${names.length === 1 ? "" : "s"} (${reasons})`);
+        }
       }
-    }
 
-    removeRegistry();
-    return names.length;
+      if (timedOut) throw new Error(`Local document cleanup did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms`);
+      active.forEach((persistence) => persistence.discard());
+      suspended = [];
+      removeRegistry();
+      return names.length;
+    } catch (error) {
+      suspended.forEach((persistence) => persistence.resume());
+      suspended = [];
+      throw error;
+    }
   })();
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Local document cleanup did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms`)), LOCAL_WIPE_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      timedOut = true;
+      suspended.forEach((persistence) => persistence.resume());
+      suspended = [];
+      reject(new Error(`Local document cleanup did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms`));
+    }, LOCAL_WIPE_TIMEOUT_MS);
   });
   try {
     return await Promise.race([cleanup, timeout]);
@@ -311,6 +334,8 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
   rememberLocalDoc(docId);
   let loaded = false;
   let destroyed = false;
+  let suspended = false;
+  let suspension: Promise<void> | null = null;
   const whenLoaded = new Promise<void>((resolve) => {
     const done = () => {
       if (loaded) return;
@@ -325,25 +350,58 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
   });
   const active: ActivePersistence = {
     name: localDbName(docId),
-    destroy: async () => {
-      if (destroyed) return;
+    suspend: () => {
+      if (destroyed || suspended) return suspension ?? Promise.resolve();
+      suspended = true;
+      suspension = persistence.destroy().catch(() => {
+        // The database may already have failed or closed; reopening below is still safe.
+      });
+      return suspension;
+    },
+    resume: () => {
+      if (destroyed || !suspended) return;
+      const reopen = () => {
+        if (destroyed || !suspended) return;
+        try {
+          persistence = new IndexeddbPersistence(localDbName(docId), ydoc);
+          suspended = false;
+          suspension = null;
+        } catch {
+          // Keep the registry entry so a reload can retry if this runtime cannot reopen IndexedDB.
+        }
+      };
+      if (suspension) void suspension.then(reopen);
+      else reopen();
+    },
+    discard: () => {
       destroyed = true;
-      try {
-        await persistence.destroy();
-      } catch {
-        // Closing an already-failed database is not an error worth surfacing.
-      } finally {
-        activePersistences.delete(active);
-      }
+      suspended = false;
+      suspension = null;
+      activePersistences.delete(active);
     },
   };
   const local: LocalPersistence = {
-    origin: persistence,
+    get origin() {
+      return persistence;
+    },
     whenLoaded,
     get loaded() {
       return loaded;
     },
-    destroy: active.destroy,
+    destroy: async () => {
+      if (destroyed) return;
+      destroyed = true;
+      activePersistences.delete(active);
+      if (suspended) {
+        await suspension;
+        return;
+      }
+      try {
+        await persistence.destroy();
+      } catch {
+        // Closing an already-failed database is not an error worth surfacing.
+      }
+    },
     clear: async () => {
       if (destroyed) {
         await clearLocalDocument(docId);
@@ -351,6 +409,11 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
       }
       destroyed = true;
       activePersistences.delete(active);
+      if (suspended) {
+        await suspension;
+        await clearLocalDocument(docId);
+        return;
+      }
       try {
         await persistence.clearData();
       } catch {

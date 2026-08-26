@@ -5,7 +5,7 @@ export const SIGN_OUT_WARNING =
   "Sign out and remove offline document copies from this device?\n\nAny changes that have not finished syncing will be permanently lost. Select Cancel to stay signed in.";
 
 export const SIGN_OUT_CLEANUP_ERROR =
-  "Could not sign out because offline document copies could not be removed. You are still signed in. Close other Markdoc tabs, reload this page to restore offline storage, and try again.";
+  "Could not sign out because offline document copies could not be removed. You are still signed in, and this tab will keep storing your edits offline. Close other Markdoc tabs and try again.";
 
 let inFlight: Promise<boolean> | null = null;
 

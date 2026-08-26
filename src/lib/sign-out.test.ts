@@ -44,6 +44,17 @@ describe("signOutSafely", () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
+  it("shares confirmation, cleanup, and navigation across concurrent calls", async () => {
+    const first = signOutSafely();
+    const second = signOutSafely();
+
+    expect(second).toBe(first);
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(offline.clearAllLocalDocuments).toHaveBeenCalledOnce();
+    expect(navigateTo).toHaveBeenCalledOnce();
+  });
+
   it("surfaces cleanup failure and stays signed in", async () => {
     const error = new Error("blocked by another open connection");
     offline.clearAllLocalDocuments.mockRejectedValue(error);
