@@ -24,9 +24,14 @@ function withHost(baseURL: string, host: string): string {
 }
 
 interface SocketRecord {
+  url: string;
   path: string;
   frames: number;
   closed: boolean;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
 /** Sign in through the dev form on `base` and return the page plus the URL it landed on. */
@@ -39,7 +44,7 @@ async function signInAt(browser: Browser, base: string, login: string): Promise<
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   page.on("response", (r) => r.status() >= 400 && errors.push(`${r.status()} ${r.request().method()} ${r.url()}`));
   page.on("websocket", (ws) => {
-    const record = { path: new URL(ws.url()).pathname, frames: 0, closed: false };
+    const record = { url: ws.url(), path: new URL(ws.url()).pathname, frames: 0, closed: false };
     sockets.push(record);
     ws.on("framereceived", () => record.frames++);
     ws.on("close", () => (record.closed = true));
@@ -91,10 +96,11 @@ const sessionState = (page: Page) =>
 
 test.describe("LAN access", () => {
   test("signs in, edits and reads through the machine's LAN address", async ({ browser, baseURL }) => {
-    const lan = lanAddress();
+    test.skip(!baseURL, "no baseURL");
+    const configured = new URL(baseURL!);
+    const lan = isLoopbackHost(configured.hostname) ? lanAddress() : configured.hostname;
     test.skip(!lan, "no non-loopback IPv4 address on this machine");
-    test.skip(!baseURL || new URL(baseURL).hostname !== "localhost", "the suite is not driving its own server");
-    const base = withHost(baseURL!, lan!);
+    const base = isLoopbackHost(configured.hostname) ? withHost(baseURL!, lan!) : baseURL!.replace(/\/$/, "");
 
     const { page, errors, sockets } = await signInAt(browser, base, "lan-phone");
     // Auth.js redirected to the host the client used, not the server's bind address.
@@ -116,11 +122,23 @@ test.describe("LAN access", () => {
     const connectedMs = Date.now() - openedAt;
     expect(connectedMs, "LAN editor reaches saved within 10 seconds").toBeLessThanOrEqual(10_000);
 
-    await expect.poll(() => sockets.some((socket) => socket.path === "/_next/hmr" && socket.frames > 0 && !socket.closed)).toBe(true);
-    await expect.poll(() => sockets.some((socket) => socket.path === "/collab" && socket.frames > 0 && !socket.closed)).toBe(true);
+    await expect.poll(() => sockets.filter((socket) => socket.path === "/_next/hmr" && socket.frames > 0 && !socket.closed).length).toBe(1);
+    await expect.poll(() => sockets.filter((socket) => socket.path === "/collab" && socket.frames > 0 && !socket.closed).length).toBe(1);
+    await page.waitForTimeout(1_500);
+    const editorSockets = sockets.filter((socket) => !socket.closed && (socket.path === "/_next/hmr" || socket.path === "/collab"));
+    const socketStates = editorSockets.map((socket) => ({ host: new URL(socket.url).hostname, path: socket.path, closed: socket.closed }));
+    expect(socketStates).toHaveLength(2);
+    expect(socketStates).toEqual(
+      expect.arrayContaining([
+        { host: lan, path: "/collab", closed: false },
+        { host: lan, path: "/_next/hmr", closed: false },
+      ]),
+    );
     expect(await sessionState(page)).toMatchObject({ status: "connected", synced: true, authError: null });
 
     const tokens = Array.from({ length: 20 }, (_, index) => `LAN${String(index).padStart(2, "0")}`);
+    const warmContent = await page.request.get(`/api/documents/${documentId}/content`);
+    expect(warmContent.ok()).toBeTruthy();
     await page.goto(`/d/${documentId}`);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 10_000 });
     await page.locator(".md-rich").click();
@@ -159,7 +177,7 @@ test.describe("LAN access", () => {
   });
 
   test("localhost still signs in and saves", async ({ browser, baseURL }) => {
-    test.skip(!baseURL, "no baseURL");
+    test.skip(!baseURL || !isLoopbackHost(new URL(baseURL).hostname), "no localhost server");
     const { page, errors } = await signInAt(browser, baseURL!, "lan-local");
     expect(new URL(page.url()).hostname).toBe(new URL(baseURL!).hostname);
     await editAndRead(page, baseURL!, "Localhost doc");
