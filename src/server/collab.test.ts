@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
@@ -142,6 +142,94 @@ describe("collaboration server", () => {
     await waitFor(() => failed2);
     mismatch.provider.destroy();
     mismatch.socket.destroy();
+  });
+
+  it("leaves non-collaboration upgrades for another WebSocket listener", async () => {
+    const nextServer = new WebSocketServer({ noServer: true });
+    const routed = createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end();
+    });
+    attachCollab(routed, hocuspocus, { path: "/collab" });
+    routed.on("upgrade", (req, socket, head) => {
+      if (req.url === "/_next/hmr") nextServer.handleUpgrade(req, socket, head, (ws) => nextServer.emit("connection", ws, req));
+    });
+    await new Promise<void>((resolve) => routed.listen(0, "127.0.0.1", resolve));
+    const { port } = routed.address() as AddressInfo;
+    const client = new WebSocket(`ws://127.0.0.1:${port}/_next/hmr`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("HMR upgrade timed out")), 2_000);
+        client.once("open", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        client.once("error", (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+      });
+    } finally {
+      client.close();
+      nextServer.close();
+      await new Promise<void>((resolve) => routed.close(() => resolve()));
+    }
+  });
+
+  it("bootstraps a non-collaboration upgrade before another listener is attached", async () => {
+    const nextServer = new WebSocketServer({ noServer: true });
+    const routed = createServer();
+    attachCollab(routed, hocuspocus, {
+      path: "/collab",
+      fallback: (req, socket, head) => nextServer.handleUpgrade(req, socket, head, (ws) => nextServer.emit("connection", ws, req)),
+    });
+    await new Promise<void>((resolve) => routed.listen(0, "127.0.0.1", resolve));
+    const { port } = routed.address() as AddressInfo;
+    const client = new WebSocket(`ws://127.0.0.1:${port}/_next/hmr`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("bootstrap HMR upgrade timed out")), 2_000);
+        client.once("open", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        client.once("error", (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+      });
+    } finally {
+      client.close();
+      nextServer.close();
+      await new Promise<void>((resolve) => routed.close(() => resolve()));
+    }
+  });
+
+  it("closes an unhandled upgrade when no fallback or other listener exists", async () => {
+    const routed = createServer();
+    attachCollab(routed, hocuspocus, { path: "/collab" });
+    await new Promise<void>((resolve) => routed.listen(0, "127.0.0.1", resolve));
+    const { port } = routed.address() as AddressInfo;
+    const client = new WebSocket(`ws://127.0.0.1:${port}/other`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("unhandled upgrade was not closed")), 2_000);
+        client.once("error", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        client.once("open", () => {
+          clearTimeout(timeout);
+          reject(new Error("unhandled upgrade unexpectedly opened"));
+        });
+      });
+    } finally {
+      client.close();
+      await new Promise<void>((resolve) => routed.close(() => resolve()));
+    }
   });
 
   it("makes viewers read-only", async () => {
@@ -327,4 +415,3 @@ describe("collaboration server", () => {
     }
   });
 });
-

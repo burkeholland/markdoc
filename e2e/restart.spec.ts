@@ -210,10 +210,8 @@ test.describe("server restart while typing", () => {
   });
 
   test("edits typed across a restart reach the server and survive a reload", async ({ browser }) => {
-    // Under the dev server, Next's HMR socket (/_next/hmr) reopened during the outage stays CONNECTING for good and
-    // Chromium's one-pending-handshake-per-endpoint rule then blocks every later /collab socket (see the task report).
-    // Production has no HMR socket; run with RESTART_SPEC=1 against a build without it.
-    test.skip(!process.env.RESTART_SPEC, "dev-only HMR socket blocks the reconnect; set RESTART_SPEC=1");
+    // Keep the two-cold-start scenario opt-in for the regular suite; targeted restart verification enables it.
+    test.skip(!process.env.RESTART_SPEC, "set RESTART_SPEC=1 to run the slow restart scenario");
     const { context, page } = await signInAt(browser, server.baseURL, "restart-typist");
     try {
       const created = await page.request.post("/api/documents", {
