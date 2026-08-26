@@ -1,6 +1,7 @@
 import type { Browser } from "playwright-core";
 
 const IDLE_CLOSE_MS = 60_000;
+const CONTENT_LOAD_TIMEOUT_MS = 10_000;
 
 let browserPromise: Promise<Browser> | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
@@ -48,15 +49,21 @@ function scheduleIdleClose() {
   idleTimer.unref?.();
 }
 
-/** Render a standalone HTML string to a Letter-size PDF with one shared Chromium instance. */
+/**
+ * Render a standalone HTML string to a Letter-size PDF with one shared Chromium instance.
+ * Each render uses an isolated offline context and rejects every routed request: PDF input is
+ * document-controlled, so all required assets must already be embedded as data URIs.
+ */
 export async function renderPdf(html: string): Promise<Uint8Array> {
   inFlight++;
   if (idleTimer) clearTimeout(idleTimer);
   try {
     const browser = await getBrowser();
-    const page = await browser.newPage();
+    const context = await browser.newContext({ offline: true, serviceWorkers: "block" });
     try {
-      await page.setContent(html, { waitUntil: "load" });
+      await context.route("**/*", (route) => route.abort("blockedbyclient"));
+      const page = await context.newPage();
+      await page.setContent(html, { waitUntil: "load", timeout: CONTENT_LOAD_TIMEOUT_MS });
       await page.emulateMedia({ media: "print" });
       return await page.pdf({
         format: "Letter",
@@ -64,7 +71,7 @@ export async function renderPdf(html: string): Promise<Uint8Array> {
         margin: { top: "0.75in", right: "0.75in", bottom: "0.75in", left: "0.75in" },
       });
     } finally {
-      await page.close().catch(() => {});
+      await context.close().catch(() => {});
     }
   } finally {
     inFlight--;
