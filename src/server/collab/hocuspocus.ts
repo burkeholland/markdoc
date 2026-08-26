@@ -1,4 +1,11 @@
-import { Hocuspocus, type onAuthenticatePayload, type onChangePayload, type onLoadDocumentPayload, type onStoreDocumentPayload } from "@hocuspocus/server";
+import {
+  Hocuspocus,
+  type connectedPayload,
+  type onAuthenticatePayload,
+  type onChangePayload,
+  type onLoadDocumentPayload,
+  type onStoreDocumentPayload,
+} from "@hocuspocus/server";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
@@ -10,6 +17,11 @@ import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 import { publishAgentPresence } from "@/server/agent-presence";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
+import {
+  collabAccessChangeBlocks,
+  resolveStableCollabAccess,
+  unauthorizedCollabError,
+} from "./authorization";
 
 export { hydrateDoc, META_KEY, TEXT_KEY };
 
@@ -42,8 +54,27 @@ export function createCollabServer() {
         throw new Error("Invalid token");
       }
       if (claims.docId !== documentName) throw new Error("Token does not match document");
-      if (!canEdit(claims.role)) connectionConfig.readOnly = true;
-      return claims;
+      const current = await resolveStableCollabAccess(claims);
+      if (!current) throw unauthorizedCollabError();
+      connectionConfig.readOnly = !canEdit(current.role);
+      return current;
+    },
+
+    async connected({ connection, context }: connectedPayload<CollabContext>) {
+      // Seal the small race between authentication and adding the connection to the live document:
+      // a concurrent share change either sees this connection or this hook waits for that change.
+      const current = await resolveStableCollabAccess(context);
+      if (!current) {
+        connection.readOnly = true;
+        connection.close({ code: 4401, reason: "Unauthorized" });
+        return;
+      }
+      connection.context = current;
+      connection.readOnly = !canEdit(current.role);
+    },
+
+    async beforeHandleMessage({ connection }) {
+      if (collabAccessChangeBlocks(connection)) connection.readOnly = true;
     },
 
     async onLoadDocument({ document, documentName }: onLoadDocumentPayload<CollabContext>) {
@@ -151,5 +182,3 @@ export async function withDocument<T>(
     await connection.disconnect();
   }
 }
-
-
