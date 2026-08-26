@@ -177,14 +177,35 @@ describe("GET /api/me", () => {
 });
 
 describe("POST /api/tokens", () => {
-  it("stores scope and documentIds, defaults to full, lists them back, and refuses documents the user cannot see", async () => {
+  it.each([
+    ["omitted", { name: "Plain omitted" }],
+    ["null", { name: "Plain null", documentIds: null }],
+  ])("treats %s documentIds as unrestricted", async (_case, requestBody) => {
+    const response = await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", requestBody)));
+    expect(response.status).toBe(201);
+    expect((await response.json()) as { token: { scope: string; documentIds: null } }).toMatchObject({
+      token: { scope: "full", documentIds: null },
+    });
+  });
+
+  it("rejects explicitly empty documentIds with a clear 400", async () => {
+    const response = await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Empty restriction", documentIds: [] })));
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; issues: { path: (string | number)[]; message: string }[] };
+    expect(body.error).toBe("Invalid request");
+    expect(body.issues).toContainEqual(
+      expect.objectContaining({
+        path: ["documentIds"],
+        message: "Select at least one document when restricting a token",
+      }),
+    );
+  });
+
+  it("stores non-empty documentIds exactly, lists them back, and refuses documents the user cannot see", async () => {
     const created = await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Scoped", scope: "comment", documentIds: [d1, d1] })));
     expect(created.status).toBe(201);
     const body = (await created.json()) as { token: { id: string; scope: string; documentIds: string[] } };
     expect(body.token).toMatchObject({ scope: "comment", documentIds: [d1] });
-
-    const plain = (await (await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Plain" })))).json()) as { token: { scope: string; documentIds: null } };
-    expect(plain.token).toMatchObject({ scope: "full", documentIds: null });
 
     const bad = await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Bad", scope: "admin" })));
     expect(bad.status).toBe(400);
