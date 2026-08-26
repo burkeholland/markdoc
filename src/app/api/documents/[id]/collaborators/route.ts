@@ -4,6 +4,7 @@ import { listCollaborators, removeCollaborator, upsertCollaborator, getUserById,
 import { activityActor, recordActivity } from "@/server/activity";
 import { notifyShare } from "@/server/notifications";
 import { listMentionableAgents } from "@/server/agents";
+import { changeCollaboratorAccess } from "@/server/collab/authorization";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -43,7 +44,9 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const login = body.login.replace(/^@/, "").toLowerCase();
   if (owner?.login?.toLowerCase() === login) throw new HttpError(400, "That is the owner");
   const known = await getUserByLogin(login);
-  await upsertCollaborator(id, login, body.role, user!.id);
+  await changeCollaboratorAccess(id, login, body.role, async () => {
+    await upsertCollaborator(id, login, body.role, user!.id);
+  });
   await recordActivity(id, activityActor(user!), "share.add", { login, role: body.role });
   await notifyShare(id, login, body.role, { login: user!.login ?? null, name: user!.name ?? user!.login ?? null });
   return json({ ok: true, login, role: body.role, pending: !known }, { status: known ? 200 : 202 });
@@ -56,7 +59,7 @@ export const DELETE = handler(async (req: Request, { params }: Params) => {
   const { user } = await requireAccess(id, "own");
   const body = await readJson(req, (d) => removeSchema.parse(d));
   const login = body.login.replace(/^@/, "");
-  await removeCollaborator(id, login);
+  await changeCollaboratorAccess(id, login, null, () => removeCollaborator(id, login));
   await recordActivity(id, activityActor(user!), "share.remove", { login: login.toLowerCase() });
   return json({ ok: true });
 });
