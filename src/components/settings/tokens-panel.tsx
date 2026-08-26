@@ -74,6 +74,7 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ token: string; name: string; scope: TokenScopeName; documentIds: string[] | null } | null>(null);
+  const restrictionError = restrict && documentIds.length === 0 ? "Select at least one document when restricting a token." : null;
   // The browser's origin wins (LAN access, tunnels): the config must point where the user actually is.
   const liveOrigin = useOrigin(origin);
   const base = liveOrigin || origin;
@@ -101,12 +102,16 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
   const toggleDocument = (id: string) => setDocumentIds((ids) => (ids.includes(id) ? ids.filter((d) => d !== id) : [...ids, id]));
 
   const create = async () => {
+    if (restrictionError) {
+      setError(restrictionError);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const res = await request<{ token: { token: string; name: string; scope: TokenScopeName; documentIds: string[] | null } }>("/api/tokens", {
         method: "POST",
-        body: JSON.stringify({ name, expiresInDays: expires === "never" ? null : Number(expires), scope, documentIds: restrict ? documentIds : [] }),
+        body: JSON.stringify({ name, expiresInDays: expires === "never" ? null : Number(expires), scope, documentIds: restrict ? documentIds : null }),
       });
       setCreated({ token: res.token.token, name: res.token.name, scope: res.token.scope, documentIds: res.token.documentIds });
       await load();
@@ -169,7 +174,7 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
               <option value="never">Never</option>
             </select>
           </label>
-          <button type="submit" className="btn btn-primary gap-2" disabled={busy || !name.trim()} data-testid="token-create">
+          <button type="submit" className="btn btn-primary gap-2" disabled={busy || !name.trim() || Boolean(restrictionError)} data-testid="token-create">
             {busy ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />} Create token
           </button>
           <fieldset className="flex w-full flex-col gap-1.5" data-testid="token-scope">
@@ -186,25 +191,41 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
           </fieldset>
           <div className="flex w-full flex-col gap-1.5">
             <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-2">
-              <input type="checkbox" checked={restrict} onChange={(e) => setRestrict(e.target.checked)} data-testid="token-restrict" />
+              <input
+                type="checkbox"
+                checked={restrict}
+                onChange={(e) => setRestrict(e.target.checked)}
+                aria-invalid={restrictionError ? true : undefined}
+                aria-describedby={`token-document-access${restrictionError ? " token-document-selection-error" : ""}`}
+                data-testid="token-restrict"
+              />
               <span className="font-medium text-ink">Only these documents</span>
-              <span className="text-ink-3">— every other document answers 404 to this token; leave off for all</span>
             </label>
+            <p id="token-document-access" className="text-xs text-ink-3" data-testid="token-document-access">
+              {restrict ? "Every other document answers 404 to this token." : "This token will access all documents."}
+            </p>
             {restrict && (
-              <div className="max-h-48 overflow-y-auto rounded-lg border border-line bg-surface-2 p-2" data-testid="token-documents">
-                {documents === null ? (
-                  <div className="px-1 py-1 text-xs text-ink-3">Loading your documents…</div>
-                ) : documents.length === 0 ? (
-                  <div className="px-1 py-1 text-xs text-ink-3">No documents yet.</div>
-                ) : (
-                  documents.map((d) => (
-                    <label key={d.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm text-ink-2 hover:bg-surface">
-                      <input type="checkbox" checked={documentIds.includes(d.id)} onChange={() => toggleDocument(d.id)} data-testid={`token-document-${d.id}`} />
-                      <span className="truncate">{d.title}</span>
-                    </label>
-                  ))
+              <>
+                <div className="max-h-48 overflow-y-auto rounded-lg border border-line bg-surface-2 p-2" data-testid="token-documents">
+                  {documents === null ? (
+                    <div className="px-1 py-1 text-xs text-ink-3">Loading your documents…</div>
+                  ) : documents.length === 0 ? (
+                    <div className="px-1 py-1 text-xs text-ink-3">No documents yet.</div>
+                  ) : (
+                    documents.map((d) => (
+                      <label key={d.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm text-ink-2 hover:bg-surface">
+                        <input type="checkbox" checked={documentIds.includes(d.id)} onChange={() => toggleDocument(d.id)} data-testid={`token-document-${d.id}`} />
+                        <span className="truncate">{d.title}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+                {restrictionError && (
+                  <p id="token-document-selection-error" className="text-xs font-medium text-danger" role="alert" data-testid="token-document-error">
+                    {restrictionError}
+                  </p>
                 )}
-              </div>
+              </>
             )}
           </div>
         </form>

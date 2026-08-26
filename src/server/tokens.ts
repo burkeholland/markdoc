@@ -48,18 +48,21 @@ export interface CreateTokenOptions {
   expiresInDays?: number | null;
   /** Defaults to `full` so existing callers (and scripts) keep today's behaviour. */
   scope?: TokenScope;
-  /** Restrict the token to these documents; empty or omitted = all of the user's documents. */
+  /** Restrict the token to these documents; null or omitted = all of the user's documents. */
   documentIds?: string[] | null;
 }
 
 export async function createApiToken(userId: string, name: string, options: number | null | CreateTokenOptions = {}): Promise<CreatedToken> {
   const opts: CreateTokenOptions = typeof options === "number" || options === null ? { expiresInDays: options } : options;
+  if (Array.isArray(opts.documentIds) && opts.documentIds.length === 0) {
+    throw new RangeError("documentIds must contain at least one document when provided");
+  }
   const db = await getDb();
   const token = TOKEN_PREFIX + randomSecret();
   const prefix = token.slice(0, TOKEN_PREFIX.length + 6);
   const expiresAt = opts.expiresInDays ? new Date(Date.now() + opts.expiresInDays * 86_400_000) : null;
   const scope = opts.scope ?? "full";
-  const documentIds = opts.documentIds?.length ? Array.from(new Set(opts.documentIds)) : null;
+  const documentIds = opts.documentIds ? Array.from(new Set(opts.documentIds)) : null;
   const [row] = await db
     .insert(schema.apiTokens)
     .values({ id: newId(), userId, name: name.trim().slice(0, 80) || "Token", prefix, tokenHash: hashToken(token), expiresAt, scope, documentIds })
@@ -152,4 +155,3 @@ export async function resolveApiToken(token: string): Promise<TokenActor | null>
     documentIds: row.token.documentIds?.length ? row.token.documentIds : null,
   };
 }
-

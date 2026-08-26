@@ -4,6 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test, expect, type Browser, type Page } from "@playwright/test";
+import WebSocket from "ws";
 import { e2eDistDir, removeDistDir } from "./dist-dir";
 
 /**
@@ -102,6 +103,40 @@ async function waitForHealth(baseURL: string, timeoutMs: number): Promise<number
   throw new Error(`GET ${baseURL}/api/health did not return 200 within ${timeoutMs} ms (last: ${last})`);
 }
 
+async function waitForReadyLog(server: OwnServer, from: number, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (server.log.slice(from).some((line) => line.includes("> Markdoc ready on "))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`server did not report readiness within ${timeoutMs} ms\n--- server log ---\n${server.log.slice(from).join("\n")}`);
+}
+
+async function expectWebSocketOnlyReady(baseURL: string) {
+  const url = `${baseURL.replace(/^http/, "ws")}/collab`;
+  await new Promise<void>((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`${url} did not open without an HTTP warm-up`));
+    }, 5_000);
+    socket.once("open", () => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve();
+    });
+    socket.once("unexpected-response", (_req, response) => {
+      clearTimeout(timeout);
+      socket.terminate();
+      reject(new Error(`${url} returned HTTP ${response.statusCode} without an HTTP warm-up`));
+    });
+    socket.once("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
 async function waitForExit(child: ChildProcess, timeoutMs: number) {
   if (child.exitCode !== null) return;
   await new Promise<void>((resolve) => {
@@ -195,7 +230,10 @@ test.describe("server restart while typing", () => {
     server.baseURL = `http://127.0.0.1:${server.port}`;
     server.dataDir = mkdtempSync(path.join(os.tmpdir(), "markdoc-restart-"));
     server.distDir = `${e2eDistDir()}-restart-${server.port}`;
+    const logStart = server.log.length;
     startServer(server);
+    await waitForReadyLog(server, logStart, 240_000);
+    await expectWebSocketOnlyReady(server.baseURL);
     await waitForHealth(server.baseURL, 240_000).catch((err) => {
       throw new Error(`${err instanceof Error ? err.message : String(err)}\n--- server log ---\n${server.log.join("\n")}`);
     });
@@ -256,16 +294,29 @@ test.describe("server restart while typing", () => {
       // no editor exists are not a product bug, so every token waits for the pane (production never reloads).
       const reloads: number[] = [];
       page.on("load", () => reloads.push(at()));
-      const typeToken = async (token: string) => {
-        if (reloads.length > 0) {
-          await page.locator(".cm-content").waitFor({ timeout: 60_000 });
-          await page.waitForFunction(() => Boolean((window as unknown as { __markdocSession?: unknown }).__markdocSession), undefined, { timeout: 60_000 });
-          if (!(await page.locator(".cm-content").evaluate((el) => el.contains(document.activeElement)))) {
-            await page.locator(".cm-content").click();
-            await page.keyboard.press("Control+End");
-          }
+      const waitForToken = async (token: string, timeoutMs: number) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (await paneText(page).then((text) => text.includes(token), () => false)) return true;
+          await page.waitForTimeout(100);
         }
-        await page.keyboard.type(`${token} `, { delay: 15 });
+        return false;
+      };
+      const typeToken = async (token: string) => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (reloads.length > 0) {
+            await page.locator(".cm-content").waitFor({ timeout: 60_000 });
+            await page.waitForFunction(() => Boolean((window as unknown as { __markdocSession?: unknown }).__markdocSession), undefined, { timeout: 60_000 });
+            if (!(await page.locator(".cm-content").evaluate((el) => el.contains(document.activeElement)))) {
+              await page.locator(".cm-content").click();
+              await page.keyboard.press("Control+End");
+            }
+          }
+          if (await waitForToken(token, 100)) return;
+          await page.keyboard.type(`${token} `, { delay: 15 });
+          if (await waitForToken(token, 1_500)) return;
+        }
+        throw new Error(`${token} was not inserted while the editor reloaded`);
       };
       for (let i = 0; i < TOKENS_TOTAL; i++) {
         await typeToken(ALL_TOKENS[i]);

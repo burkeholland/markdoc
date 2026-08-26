@@ -66,6 +66,14 @@ export default async function globalSetup(config: FullConfig) {
   const browser = await chromium.launch();
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
+  const sockets: { path: string; frames: number; closed: boolean; error: string | null }[] = [];
+  page.on("websocket", (ws) => {
+    const socket: (typeof sockets)[number] = { path: new URL(ws.url()).pathname, frames: 0, closed: false, error: null };
+    sockets.push(socket);
+    ws.on("framereceived", () => socket.frames++);
+    ws.on("close", () => (socket.closed = true));
+    ws.on("socketerror", (error) => (socket.error = error));
+  });
   const login = `warmup-${Date.now().toString(36)}`;
   let docId: string | undefined;
 
@@ -100,7 +108,9 @@ export default async function globalSetup(config: FullConfig) {
       } catch (err) {
         const state = await saveState.getAttribute("data-state").catch(() => null);
         const text = await saveState.innerText().catch(() => "");
-        throw new Error(`[e2e warm-up] editor never reached saved (state=${state ?? "missing"}, header="${text}"): ${String(err)}`);
+        throw new Error(
+          `[e2e warm-up] editor never reached saved (state=${state ?? "missing"}, header="${text}", sockets=${JSON.stringify(sockets)}): ${String(err)}`,
+        );
       }
       await page.locator(".cm-content").waitFor({ timeout: 30_000 });
       await page.locator(".md-rich").waitFor({ timeout: 30_000 });

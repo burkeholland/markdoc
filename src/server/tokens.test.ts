@@ -38,8 +38,7 @@ describe("api tokens", () => {
     expect(scoped).toMatchObject({ scope: "comment", documentIds: ["d1", "d2"] });
     expect(scoped.expiresAt).not.toBeNull();
     expect(await resolveApiToken(scoped.token)).toMatchObject({ scope: "comment", documentIds: ["d1", "d2"], agent: "reviewer" });
-    const empty = await createApiToken(userId, "empty", { scope: "read", documentIds: [] });
-    expect(empty.documentIds).toBeNull();
+    await expect(createApiToken(userId, "empty", { scope: "read", documentIds: [] })).rejects.toThrow("documentIds must contain at least one document");
     const list = await listApiTokens(userId);
     expect(list.find((t) => t.id === scoped.id)).toMatchObject({ scope: "comment", documentIds: ["d1", "d2"] });
     expect(scopeSatisfies("comment", "read")).toBe(true);

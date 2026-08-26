@@ -1,5 +1,4 @@
 "use client";
-import { navigateTo } from "@/lib/nav";
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
 import { memo, useEffect, useRef, useState } from "react";
@@ -58,6 +57,7 @@ import { NotificationsBell } from "@/components/notifications/notifications-bell
 import type { NotificationDto } from "@/lib/api";
 import { AgentActivityChip } from "./agent-activity";
 import { AgentRequestsPill } from "./agent-requests-pill";
+import { signOutSafely } from "@/lib/sign-out";
 
 /** The Markdoc mark (public/brand/mark.svg): a document with a folded corner and the `#` heading glyph. Follows the accent token. */
 export function Logo({ className }: { className?: string }) {
@@ -631,7 +631,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem icon={<ArrowLeft size={15} />} onSelect={props.onHome}>
               All documents
             </MenuItem>
-            <MenuItem icon={<LogOut size={15} />} onSelect={() => navigateTo("/api/auth/signout")}>
+            <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
               Sign out
             </MenuItem>
             {props.isOwner && (
@@ -744,6 +744,5 @@ export const Header = memo(function Header(props: HeaderProps) {
     </header>
   );
 });
-
 
 
