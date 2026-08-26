@@ -2,6 +2,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { handler, json, HttpError, resolveBearer } from "@/server/http";
 import { recordMcpActivity, type McpActivity } from "@/server/tokens";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
+import { mcpPublicOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "../../../../mcp/tools.mjs";
 
 /**
@@ -12,25 +13,15 @@ import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from ".
  *   { "mcpServers": { "markdoc": { "type": "http", "url": "<origin>/api/mcp",
  *                                  "headers": { "Authorization": "Bearer mdk_…" } } } }
  *
- * Auth is the same token resolver as every `/api/*` route. The tools call the REST API back over
- * HTTP at this server's own origin (`MARKDOC_URL` when set — needed behind a proxy the server cannot
- * reach itself), forwarding the caller's token, so access and attribution are exactly the REST ones.
+ * Auth is the same token resolver as every `/api/*` route. The tools call the REST API back at the
+ * server-controlled `MARKDOC_INTERNAL_URL`, `MARKDOC_URL`, or loopback `PORT`, forwarding the
+ * caller's token, so access and attribution are exactly the REST ones.
  */
 export const dynamic = "force-dynamic";
 
 const TOOL_NAMES = listToolNames();
 const TOKEN_HINT = "Create a token at /settings (Agents & API access → Create a token) and send it as Authorization: Bearer <token>.";
 const unauthorized = (why: string) => new HttpError(401, `${why} ${TOKEN_HINT}`, { docs: AGENT_DOCS_URL, settings: "/settings#tokens" });
-
-function publicOrigin(req: Request): string {
-  const configured = process.env.MARKDOC_URL?.replace(/\/$/, "");
-  if (configured) return configured;
-  const url = new URL(req.url);
-  // Trust the Host header (LAN IPs, tunnels): `req.url` can carry the bind address instead of what the client used.
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(/:$/, "");
-  return host ? `${proto}://${host}` : url.origin;
-}
 
 function bearerToken(req: Request): string | null {
   const authorization = req.headers.get("authorization");
@@ -68,7 +59,11 @@ async function serve(req: Request): Promise<Response> {
   // The Settings checklist reads these: connected (tools/list) and working (tools/call). Off the hot path.
   for (const kind of await mcpActivityIn(req)) void recordMcpActivity(actor.tokenId, kind).catch(() => {});
 
-  const client = createClient({ baseUrl: publicOrigin(req), token });
+  const client = createClient({
+    baseUrl: mcpRestOrigin(),
+    publicUrl: mcpPublicOrigin(req),
+    token,
+  });
   const server = createMarkdocServer(client);
   // MCP clients are not browsers: no Origin header, any Host (LAN IP, tunnel) — so no DNS-rebinding checks.
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, enableDnsRebindingProtection: false });

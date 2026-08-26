@@ -23,6 +23,7 @@ import { registerCollab } from "@/server/collab/registry";
 import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
 import { closeDb, getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
+import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { lanAddresses } from "../scripts/lib/dev-origins.mjs";
 
@@ -64,6 +65,24 @@ process.on("unhandledRejection", (reason) => {
 const standbyPort = Number(process.env.STANDBY_PORT ?? 0);
 const STANDBY_TAKEOVER_PATH = "/_standby/takeover";
 const realDataDir = process.env.PGLITE_DATA_DIR;
+const configuredMcpInternalOrigin = Boolean(process.env.MARKDOC_INTERNAL_URL?.trim());
+
+function callbackHost(host: string): string {
+  if (host === "0.0.0.0") return "127.0.0.1";
+  if (host === "::") return "[::1]";
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function configureMcpInternalOrigin(onPort: number, host: string) {
+  if (!configuredMcpInternalOrigin) {
+    process.env.MARKDOC_INTERNAL_URL = `http://${callbackHost(host)}:${onPort}`;
+    nextEnv.updateInitialEnv({ MARKDOC_INTERNAL_URL: process.env.MARKDOC_INTERNAL_URL });
+  }
+  mcpRestOrigin();
+  if (process.env.MARKDOC_URL?.trim()) httpOrigin(process.env.MARKDOC_URL, "MARKDOC_URL");
+}
+
+configureMcpInternalOrigin(standbyPort > 0 ? standbyPort : port, standbyPort > 0 ? "127.0.0.1" : bindHost);
 if (standbyPort > 0) {
   process.env.PGLITE_DATA_DIR = "memory://";
   nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: "memory://" });
@@ -124,6 +143,7 @@ async function main() {
     else process.env.PGLITE_DATA_DIR = realDataDir;
     nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: realDataDir ?? "" });
     await getDb();
+    configureMcpInternalOrigin(port, bindHost);
     const dbMs = Date.now() - t0;
     await listenWithRetry(server, port, bindHost, Date.now() + 15_000);
     console.log(`> Standby took over :${port} (database open ${dbMs} ms, listen ${Date.now() - t0 - dbMs} ms)`);
@@ -193,7 +213,6 @@ main().catch((err) => {
   console.error(`> [exit] startup failed after ${uptime()}:`, describe(err));
   process.exit(1);
 });
-
 
 
 
