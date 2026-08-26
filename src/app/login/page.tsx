@@ -2,13 +2,14 @@ import { redirect } from "next/navigation";
 import { GitHubIcon } from "@/components/ui/primitives";
 import { signIn, auth, devLoginEnabled, githubConfigured } from "@/auth";
 import { Logo } from "@/components/editor/header";
+import { loginReturnPath } from "./return-path";
 
 export const metadata = { title: "Sign in" };
 
 export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const session = await auth();
   const params = await searchParams;
-  const next = typeof params.next === "string" && params.next.startsWith("/") ? params.next : "/";
+  const next = loginReturnPath(params.next);
   if (session?.user) redirect(next);
   const error = typeof params.error === "string" ? params.error : null;
 
@@ -63,5 +64,4 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
     </main>
   );
 }
-
 
