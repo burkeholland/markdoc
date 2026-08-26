@@ -103,10 +103,16 @@ test.describe("share dialog · collaborate with an agent", () => {
     await expect(row.getByTestId("token-documents-count")).toHaveText("all documents");
     // The create form: scope radio (default Comment & suggest) and a document picker; a Read token for this document only.
     await expect(page.getByTestId("token-scope-comment")).toBeChecked();
+    await expect(page.getByTestId("token-document-access")).toHaveText("This token will access all documents.");
     await page.getByTestId("token-name").fill("Read bot");
     await page.getByTestId("token-scope-read").check();
     await page.getByTestId("token-restrict").check();
+    await expect(page.getByTestId("token-create")).toBeDisabled();
+    await expect(page.getByTestId("token-document-error")).toHaveText("Select at least one document when restricting a token.");
+    await expect(page.getByTestId("token-document-error")).toHaveAttribute("role", "alert");
+    await expect(page.getByTestId("token-restrict")).toHaveAttribute("aria-invalid", "true");
     await page.getByTestId(`token-document-${id}`).check();
+    await expect(page.getByTestId("token-create")).toBeEnabled();
     await page.getByTestId("token-create").click();
     const createdBox = page.getByTestId("token-created");
     await expect(createdBox).toContainText("Read bot");
