@@ -1,4 +1,5 @@
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import nextEnv from "@next/env";
 import next from "next";
 
@@ -20,7 +21,7 @@ nextEnv.loadEnvConfig(process.cwd(), dev);
 if (dev) nextEnv.updateInitialEnv({ __NEXT_DEV_SERVER: "1" });
 import { createCollabServer, shutdownCollab } from "@/server/collab/hocuspocus";
 import { registerCollab } from "@/server/collab/registry";
-import { attachCollab, COLLAB_PATH } from "@/server/collab/ws";
+import { attachCollab, COLLAB_PATH, protectUpgradePath } from "@/server/collab/ws";
 import { closeDb, getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
@@ -90,17 +91,47 @@ function listenWithRetry(server: ReturnType<typeof createServer>, onPort: number
   });
 }
 
-async function main() {
-  // Fail fast on database problems before accepting traffic.
-  await getDb();
+function setupNextWebSocketHandler(app: object, server: Server) {
+  // Next 16's custom-server wrapper exposes this at runtime but omits it from its public interface.
+  // Installing it now keeps WebSocket-only clients from depending on a later HTTP request after restart.
+  const setup = Reflect.get(app, "setupWebSocketHandler");
+  if (typeof setup !== "function") throw new Error("Next custom server does not expose setupWebSocketHandler");
+  Reflect.apply(setup, app, [server]);
+}
 
-  const app = next({ dev, hostname, port, turbopack: dev });
+async function main() {
+  let requestHandler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
+  const server = createServer((req, res) => {
+    if (requestHandler) return requestHandler(req, res);
+    res.statusCode = 503;
+    res.end("starting");
+  });
+  // Start accepting TCP connections before Next prepares. Reject upgrades promptly while starting:
+  // a pending HMR handshake makes Chromium queue every later /collab socket behind it.
+  const rejectStartupUpgrade = (_req: IncomingMessage, socket: Duplex) => {
+    socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+  };
+  server.on("upgrade", rejectStartupUpgrade);
+  const initialListen =
+    standbyPort > 0 ? null : listenWithRetry(server, port, bindHost, Date.now() + 15_000);
+  void initialListen?.catch(() => {});
+
+  // Initialize the database before serving application traffic. The early listener only returns 503
+  // until this and Next preparation have both completed.
+  await getDb();
+  const app = next({ dev, hostname, port, turbopack: dev, httpServer: server });
   await app.prepare();
   const handle = app.getRequestHandler();
-  const upgrade = app.getUpgradeHandler();
 
   const hocuspocus = createCollabServer();
   registerCollab(hocuspocus);
+  // Install Next's HMR listener before reporting readiness. Next otherwise waits for the first HTTP
+  // request, leaving a browser that survived a restart unable to reconnect through WebSockets alone.
+  const protectCollabUpgrade = protectUpgradePath(server, COLLAB_PATH);
+  setupNextWebSocketHandler(app, server);
+  protectCollabUpgrade();
+  server.off("upgrade", rejectStartupUpgrade);
+  attachCollab(server, hocuspocus, { path: COLLAB_PATH });
 
   const purgeTrash = () =>
     purgeTrashOlderThan(TRASH_RETENTION_DAYS)
@@ -130,7 +161,7 @@ async function main() {
     standby?.close();
   };
 
-  const server = createServer((req, res) => {
+  requestHandler = (req, res) => {
     if (standbyPort > 0 && req.url === STANDBY_TAKEOVER_PATH && req.socket.localPort === standbyPort) {
       if (req.method !== "POST") { res.statusCode = 405; res.end("POST"); return; }
       takeover ??= runTakeover();
@@ -153,10 +184,7 @@ async function main() {
       if (!res.headersSent) res.statusCode = 500;
       res.end("internal server error");
     });
-  });
-
-  attachCollab(server, hocuspocus, { path: COLLAB_PATH, fallback: upgrade });
-
+  };
   // In standby the same request handler also answers on the loopback side port; closing it after the
   // takeover leaves only :PORT.
   const standby = standbyPort > 0 ? createServer((req, res) => server.emit("request", req, res)) : null;
@@ -165,14 +193,13 @@ async function main() {
       console.log(`> Markdoc STANDBY on http://127.0.0.1:${standbyPort} (throwaway database; POST ${STANDBY_TAKEOVER_PATH} to take :${port})`);
     });
   } else {
-    server.listen(port, bindHost, () => {
-      const shownHost = hostname ?? "localhost";
-      console.log(`> Markdoc ready on http://${shownHost}:${port} (${dev ? "development" : "production"})`);
-      console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);
-      if (!hostname) {
-        for (const ip of lanAddresses()) console.log(`> Also reachable on the LAN at http://${ip}:${port}`);
-      }
-    });
+    await initialListen;
+    const shownHost = hostname ?? "localhost";
+    console.log(`> Markdoc ready on http://${shownHost}:${port} (${dev ? "development" : "production"})`);
+    console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);
+    if (!hostname) {
+      for (const ip of lanAddresses()) console.log(`> Also reachable on the LAN at http://${ip}:${port}`);
+    }
   }
 
   const shutdown = async (signal: NodeJS.Signals) => {
@@ -193,7 +220,3 @@ main().catch((err) => {
   console.error(`> [exit] startup failed after ${uptime()}:`, describe(err));
   process.exit(1);
 });
-
-
-
-

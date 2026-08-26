@@ -13,7 +13,7 @@ delete process.env.DATABASE_URL;
 
 const { getDb, schema } = await import("./db");
 const { createCollabServer, hydrateDoc, shutdownCollab } = await import("./collab/hocuspocus");
-const { attachCollab } = await import("./collab/ws");
+const { attachCollab, protectUpgradePath } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
 const { createDocument } = await import("./documents");
 
@@ -144,34 +144,50 @@ describe("collaboration server", () => {
     mismatch.socket.destroy();
   });
 
-  it("leaves non-collaboration upgrades for another WebSocket listener", async () => {
+  it("owns upgrade routing so collaboration is handled once and HMR reaches Next", async () => {
     const nextServer = new WebSocketServer({ noServer: true });
     const routed = createServer((_req, res) => {
       res.statusCode = 404;
       res.end();
     });
-    attachCollab(routed, hocuspocus, { path: "/collab" });
+    let collabConnections = 0;
+    const protectCollab = protectUpgradePath(routed, "/collab");
+    let nextUpgrades = 0;
     routed.on("upgrade", (req, socket, head) => {
-      if (req.url === "/_next/hmr") nextServer.handleUpgrade(req, socket, head, (ws) => nextServer.emit("connection", ws, req));
+      nextUpgrades++;
+      nextServer.handleUpgrade(req, socket, head, (ws) => nextServer.emit("connection", ws, req));
     });
+    protectCollab();
+    const collabServer = attachCollab(routed, hocuspocus, { path: "/collab" });
+    collabServer.on("connection", () => collabConnections++);
     await new Promise<void>((resolve) => routed.listen(0, "127.0.0.1", resolve));
     const { port } = routed.address() as AddressInfo;
-    const client = new WebSocket(`ws://127.0.0.1:${port}/_next/hmr`);
+    const collabClient = new WebSocket(`ws://127.0.0.1:${port}/collab`);
+    const hmrClient = new WebSocket(`ws://127.0.0.1:${port}/_next/hmr`);
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("HMR upgrade timed out")), 2_000);
-        client.once("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        client.once("error", (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-      });
+      await Promise.all(
+        [collabClient, hmrClient].map(
+          (client) =>
+            new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => reject(new Error("WebSocket upgrade timed out")), 2_000);
+              client.once("open", () => {
+                clearTimeout(timeout);
+                resolve();
+              });
+              client.once("error", (err) => {
+                clearTimeout(timeout);
+                reject(err);
+              });
+            }),
+        ),
+      );
+      expect(routed.listenerCount("upgrade")).toBe(2);
+      expect(collabConnections).toBe(1);
+      expect(nextUpgrades).toBe(1);
     } finally {
-      client.close();
+      collabClient.close();
+      hmrClient.close();
       nextServer.close();
       await new Promise<void>((resolve) => routed.close(() => resolve()));
     }
