@@ -35,9 +35,11 @@ import { HocuspocusProvider } from "@hocuspocus/provider";
 import { CollabSession, RECOVERED_FLASH_MS } from "./session";
 import { makeCollabUser } from "./shared";
 import {
+  clearAllLocalDocuments,
   clearLocalDocument,
   ensureLocalEpoch,
   hasIndexedDB,
+  hasLocalDocuments,
   IDB_EPOCH,
   IDB_EPOCH_KEY,
   IDB_REGISTRY_KEY,
@@ -127,6 +129,13 @@ describe("without IndexedDB", () => {
     await expect(session.clearLocal()).resolves.toBeUndefined();
     await expect(clearLocalDocument("no-idb")).resolves.toBeUndefined();
     session.destroy();
+  });
+
+  it("removes the fallback registry even when IndexedDB is unavailable", async () => {
+    vi.stubGlobal("localStorage", memoryStorage({ [IDB_REGISTRY_KEY]: JSON.stringify(["private-doc"]) }));
+    await expect(hasLocalDocuments()).resolves.toBe(true);
+    await expect(clearAllLocalDocuments()).resolves.toBe(0);
+    expect(localStorage.getItem(IDB_REGISTRY_KEY)).toBeNull();
   });
 });
 
@@ -377,6 +386,119 @@ describe("with IndexedDB (fake-indexeddb)", () => {
       expect(storedIdbEpoch()).toBe(IDB_EPOCH);
       await expect(ensureLocalEpoch()).resolves.toBe(true);
       expect(await readMirror(docId)).toBe("keep me");
+    });
+
+    it("sign-out cleanup closes active persistence and removes multiple mirrors plus the registry", async () => {
+      const activeId = `signout-active-${Date.now()}`;
+      const closedId = `signout-closed-${Date.now()}`;
+      const activeDoc = new Y.Doc();
+      const active = openLocalPersistence(activeId, activeDoc)!;
+      await active.whenLoaded;
+      activeDoc.getText("content").insert(0, "active private marker");
+      await writeMirror(closedId, "closed private marker");
+      await tick();
+
+      expect(await hasLocalDocuments()).toBe(true);
+      expect(JSON.parse(localStorage.getItem(IDB_REGISTRY_KEY)!)).toContain(activeId);
+      await expect(clearAllLocalDocuments()).resolves.toBe(2);
+
+      expect((await indexedDB.databases()).map((database) => database.name).filter((name) => name?.startsWith("markdoc:"))).toEqual([]);
+      expect(localStorage.getItem(IDB_REGISTRY_KEY)).toBeNull();
+      expect(await readMirror(activeId)).toBe("");
+      expect(await readMirror(closedId)).toBe("");
+      activeDoc.destroy();
+    });
+
+    it("sign-out cleanup uses the registry when indexedDB.databases() is unavailable", async () => {
+      const a = `signout-fallback-a-${Date.now()}`;
+      const b = `signout-fallback-b-${Date.now()}`;
+      for (const id of [a, b]) {
+        const doc = new Y.Doc();
+        const persistence = openLocalPersistence(id, doc)!;
+        await persistence.whenLoaded;
+        doc.getText("content").insert(0, id);
+        await tick();
+        await persistence.destroy();
+        doc.destroy();
+      }
+
+      const real = indexedDB;
+      const withoutList = Object.create(real) as IDBFactory & { databases?: unknown };
+      Object.defineProperty(withoutList, "databases", { value: undefined });
+      for (const method of ["open", "deleteDatabase", "cmp"] as const) {
+        (withoutList as unknown as Record<string, unknown>)[method] = (real[method] as (...args: unknown[]) => unknown).bind(real);
+      }
+      vi.stubGlobal("indexedDB", withoutList);
+      await expect(clearAllLocalDocuments()).resolves.toBe(2);
+      expect(localStorage.getItem(IDB_REGISTRY_KEY)).toBeNull();
+      vi.stubGlobal("indexedDB", real);
+
+      expect(await readMirror(a)).toBe("");
+      expect(await readMirror(b)).toBe("");
+    });
+
+    it("sign-out cleanup tracks active mirrors when enumeration and the registry are unavailable", async () => {
+      const docId = `signout-active-fallback-${Date.now()}`;
+      const doc = new Y.Doc();
+      const persistence = openLocalPersistence(docId, doc)!;
+      await persistence.whenLoaded;
+      doc.getText("content").insert(0, "active private marker");
+      await tick();
+      localStorage.removeItem(IDB_REGISTRY_KEY);
+
+      const real = indexedDB;
+      const withoutList = Object.create(real) as IDBFactory & { databases?: unknown };
+      Object.defineProperty(withoutList, "databases", { value: undefined });
+      for (const method of ["open", "deleteDatabase", "cmp"] as const) {
+        (withoutList as unknown as Record<string, unknown>)[method] = (real[method] as (...args: unknown[]) => unknown).bind(real);
+      }
+      vi.stubGlobal("indexedDB", withoutList);
+
+      expect(await hasLocalDocuments()).toBe(true);
+      await expect(clearAllLocalDocuments()).resolves.toBe(1);
+      vi.stubGlobal("indexedDB", real);
+      expect(await readMirror(docId)).toBe("");
+      doc.destroy();
+    });
+
+    it("sign-out cleanup rejects a blocked database and retains the registry for retry", async () => {
+      const docId = `signout-blocked-${Date.now()}`;
+      const doc = new Y.Doc();
+      const persistence = openLocalPersistence(docId, doc)!;
+      await persistence.whenLoaded;
+      doc.getText("content").insert(0, "must not be reported as removed");
+      await tick();
+      await persistence.destroy();
+      const holder = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(localDbName(docId));
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      holder.onversionchange = null;
+
+      try {
+        await expect(clearAllLocalDocuments()).rejects.toThrow("blocked by another open connection");
+        expect(JSON.parse(localStorage.getItem(IDB_REGISTRY_KEY)!)).toContain(docId);
+      } finally {
+        holder.close();
+        doc.destroy();
+      }
+      await tick();
+      await expect(clearAllLocalDocuments()).resolves.toBeGreaterThanOrEqual(1);
+      expect(localStorage.getItem(IDB_REGISTRY_KEY)).toBeNull();
+    });
+
+    it("sign-out cleanup times out a stalled database listing and retains the registry", async () => {
+      const docId = `signout-timeout-${Date.now()}`;
+      localStorage.setItem(IDB_REGISTRY_KEY, JSON.stringify([docId]));
+      vi.stubGlobal("indexedDB", withDatabases(() => new Promise(() => {})));
+      vi.useFakeTimers();
+
+      const cleanup = expect(clearAllLocalDocuments()).rejects.toThrow(`${LOCAL_WIPE_TIMEOUT_MS}ms`);
+      await vi.advanceTimersByTimeAsync(LOCAL_WIPE_TIMEOUT_MS);
+      await cleanup;
+      expect(JSON.parse(localStorage.getItem(IDB_REGISTRY_KEY)!)).toContain(docId);
+      vi.useRealTimers();
     });
 
     it("falls back to the localStorage registry when indexedDB.databases() is missing", async () => {

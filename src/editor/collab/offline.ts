@@ -102,6 +102,11 @@ function writeRegistry(ids: string[]) {
   }
 }
 
+function removeRegistry() {
+  const s = storage();
+  if (s) s.removeItem(IDB_REGISTRY_KEY);
+}
+
 function rememberLocalDoc(docId: string) {
   const ids = readRegistry();
   if (ids.includes(docId)) return;
@@ -117,16 +122,19 @@ function forgetLocalDoc(docId: string) {
 
 /** Names of every `markdoc:*` IndexedDB database this browser holds. */
 async function listLocalDbNames(): Promise<string[]> {
+  const names = new Set(readRegistry().map(localDbName));
   const idb = indexedDB as IDBFactory & { databases?: () => Promise<{ name?: string }[]> };
   if (typeof idb.databases === "function") {
     try {
       const all = await idb.databases();
-      return all.map((d) => d.name ?? "").filter((n) => n.startsWith(LOCAL_DB_PREFIX));
+      for (const { name = "" } of all) {
+        if (name.startsWith(LOCAL_DB_PREFIX)) names.add(name);
+      }
     } catch {
-      // Fall through to the registry.
+      // The registry remains the fallback.
     }
   }
-  return readRegistry().map(localDbName);
+  return [...names];
 }
 
 /**
@@ -141,6 +149,64 @@ function deleteDatabase(name: string): Promise<void> {
     req.onerror = () => reject(req.error ?? new Error(`deleteDatabase(${name}) failed`));
     req.onblocked = () => reject(new Error(`deleteDatabase(${name}) blocked by another open connection`));
   });
+}
+
+interface ActivePersistence {
+  readonly name: string;
+  destroy(): Promise<void>;
+}
+
+const activePersistences = new Set<ActivePersistence>();
+
+/** Whether this browser currently has any discoverable or registered document mirrors. */
+export async function hasLocalDocuments(): Promise<boolean> {
+  if (activePersistences.size > 0) return true;
+  if (!hasIndexedDB()) return readRegistry().length > 0;
+  return (await listLocalDbNames()).length > 0;
+}
+
+/**
+ * Remove every local document mirror before an explicit account boundary.
+ *
+ * Same-page y-indexeddb connections are closed first. A connection in another tab can still
+ * block deletion; that is an error so callers never report a privacy-safe sign-out while a
+ * recoverable mirror remains.
+ */
+export async function clearAllLocalDocuments(): Promise<number> {
+  if (!hasIndexedDB()) {
+    removeRegistry();
+    return 0;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const cleanup = (async () => {
+    const active = [...activePersistences];
+    const activeNames = new Set(active.map(({ name }) => name));
+    const names = [...new Set([...(await listLocalDbNames()), ...activeNames])];
+    const batches = [names.filter((name) => !activeNames.has(name)), names.filter((name) => activeNames.has(name))];
+    for (const [index, batch] of batches.entries()) {
+      if (index === 1) await Promise.all(active.map((persistence) => persistence.destroy()));
+      const results = await Promise.allSettled(batch.map(deleteDatabase));
+      const failed = results
+        .map((result, resultIndex) => ({ result, name: batch[resultIndex] }))
+        .filter((item): item is { result: PromiseRejectedResult; name: string } => item.result.status === "rejected");
+      if (failed.length > 0) {
+        const reasons = failed.map(({ name, result }) => `${name}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`).join("; ");
+        throw new Error(`Could not remove ${failed.length} of ${names.length} local document database${names.length === 1 ? "" : "s"} (${reasons})`);
+      }
+    }
+
+    removeRegistry();
+    return names.length;
+  })();
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Local document cleanup did not finish in ${LOCAL_WIPE_TIMEOUT_MS}ms`)), LOCAL_WIPE_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([cleanup, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** The epoch the stored mirrors belong to, or null when nothing was ever recorded. */
@@ -257,28 +323,34 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
     // `_db` is the open request; a rejection here means persistence is unavailable.
     (persistence as unknown as { _db: Promise<unknown> })._db.catch(done);
   });
-  const destroy = async () => {
-    if (destroyed) return;
-    destroyed = true;
-    try {
-      await persistence.destroy();
-    } catch {
-      // Closing an already-failed database is not an error worth surfacing.
-    }
+  const active: ActivePersistence = {
+    name: localDbName(docId),
+    destroy: async () => {
+      if (destroyed) return;
+      destroyed = true;
+      try {
+        await persistence.destroy();
+      } catch {
+        // Closing an already-failed database is not an error worth surfacing.
+      } finally {
+        activePersistences.delete(active);
+      }
+    },
   };
-  return {
+  const local: LocalPersistence = {
     origin: persistence,
     whenLoaded,
     get loaded() {
       return loaded;
     },
-    destroy,
+    destroy: active.destroy,
     clear: async () => {
       if (destroyed) {
         await clearLocalDocument(docId);
         return;
       }
       destroyed = true;
+      activePersistences.delete(active);
       try {
         await persistence.clearData();
       } catch {
@@ -287,6 +359,8 @@ export function openLocalPersistence(docId: string, ydoc: Y.Doc): LocalPersisten
       forgetLocalDoc(docId);
     },
   };
+  activePersistences.add(active);
+  return local;
 }
 
 /** Delete the local copy of a document without needing a live persistence instance. */
