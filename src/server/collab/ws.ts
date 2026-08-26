@@ -20,7 +20,31 @@ export function toWebRequest(req: IncomingMessage, fallbackHost = "localhost"): 
 export interface AttachOptions {
   path?: string;
   /** Bootstrap handler for other upgrades until their own listener has been attached. */
-  fallback?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+  fallback?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;
+}
+
+type UpgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
+/**
+ * Wrap upgrade listeners added after this call so they never receive `path`.
+ * Next installs its HMR listener lazily on the first HTTP request; without this filter EventEmitter
+ * also invokes it for the /collab socket that the existing router has already upgraded.
+ */
+export function protectUpgradePath(server: HttpServer, path = COLLAB_PATH): () => void {
+  const known = new Set(server.listeners("upgrade"));
+  return () => {
+    for (const candidate of server.listeners("upgrade")) {
+      if (known.has(candidate)) continue;
+      const listener = candidate as UpgradeListener;
+      server.off("upgrade", listener);
+      const filtered: UpgradeListener = (req, socket, head) => {
+        const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+        if (pathname !== path) listener.call(server, req, socket, head);
+      };
+      known.add(filtered);
+      server.on("upgrade", filtered);
+    }
+  };
 }
 
 /** Route WebSocket upgrades on `path` to the Hocuspocus instance. */
@@ -49,12 +73,22 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
       return;
     }
-    // Next installs its HMR listener lazily on the first HTTP request. Bootstrap an earlier HMR
-    // upgrade through its handler, but stop forwarding once another listener exists or EventEmitter
-    // would invoke Next twice for every later socket.
+    // Next's HMR listener is lazy. Use its handler before it exists, then leave non-collab upgrades
+    // to that listener after it has been attached; forwarding as well would handle every HMR socket twice.
     if (server.listenerCount("upgrade") !== 1) return;
-    if (options.fallback) options.fallback(req, socket, head);
-    else socket.destroy();
+    if (!options.fallback) return socket.destroy();
+    try {
+      const pending = options.fallback(req, socket, head);
+      if (pending) {
+        void pending.catch((err: unknown) => {
+          console.error("[websocket] fallback upgrade failed", err);
+          socket.destroy();
+        });
+      }
+    } catch (err) {
+      console.error("[websocket] fallback upgrade failed", err);
+      socket.destroy();
+    }
   });
 
   return wss;

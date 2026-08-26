@@ -12,10 +12,12 @@ process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
 
 const { getDb, schema } = await import("./db");
-const { createCollabServer, hydrateDoc, shutdownCollab } = await import("./collab/hocuspocus");
-const { attachCollab } = await import("./collab/ws");
+const { createCollabServer, hydrateDoc, shutdownCollab, TEXT_KEY } = await import("./collab/hocuspocus");
+const { attachCollab, protectUpgradePath } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
-const { createDocument } = await import("./documents");
+const { registerCollab } = await import("./collab/registry");
+const { createDocument, removeCollaborator, upsertCollaborator } = await import("./documents");
+const { changeCollaboratorAccess } = await import("./collab/authorization");
 
 function waitFor(check: () => boolean, timeout = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -66,6 +68,7 @@ describe("collaboration server", () => {
     docId = doc.id;
 
     hocuspocus = createCollabServer();
+    registerCollab(hocuspocus);
     hocuspocus.configuration.debounce = 50;
     hocuspocus.configuration.maxDebounce = 100;
     server = createServer((_req, res) => {
@@ -144,34 +147,50 @@ describe("collaboration server", () => {
     mismatch.socket.destroy();
   });
 
-  it("leaves non-collaboration upgrades for another WebSocket listener", async () => {
+  it("owns upgrade routing so collaboration is handled once and HMR reaches Next", async () => {
     const nextServer = new WebSocketServer({ noServer: true });
     const routed = createServer((_req, res) => {
       res.statusCode = 404;
       res.end();
     });
-    attachCollab(routed, hocuspocus, { path: "/collab" });
+    let collabConnections = 0;
+    const protectCollab = protectUpgradePath(routed, "/collab");
+    let nextUpgrades = 0;
     routed.on("upgrade", (req, socket, head) => {
-      if (req.url === "/_next/hmr") nextServer.handleUpgrade(req, socket, head, (ws) => nextServer.emit("connection", ws, req));
+      nextUpgrades++;
+      nextServer.handleUpgrade(req, socket, head, (ws) => nextServer.emit("connection", ws, req));
     });
+    protectCollab();
+    const collabServer = attachCollab(routed, hocuspocus, { path: "/collab" });
+    collabServer.on("connection", () => collabConnections++);
     await new Promise<void>((resolve) => routed.listen(0, "127.0.0.1", resolve));
     const { port } = routed.address() as AddressInfo;
-    const client = new WebSocket(`ws://127.0.0.1:${port}/_next/hmr`);
+    const collabClient = new WebSocket(`ws://127.0.0.1:${port}/collab`);
+    const hmrClient = new WebSocket(`ws://127.0.0.1:${port}/_next/hmr`);
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("HMR upgrade timed out")), 2_000);
-        client.once("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-        client.once("error", (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-      });
+      await Promise.all(
+        [collabClient, hmrClient].map(
+          (client) =>
+            new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => reject(new Error("WebSocket upgrade timed out")), 2_000);
+              client.once("open", () => {
+                clearTimeout(timeout);
+                resolve();
+              });
+              client.once("error", (err) => {
+                clearTimeout(timeout);
+                reject(err);
+              });
+            }),
+        ),
+      );
+      expect(routed.listenerCount("upgrade")).toBe(2);
+      expect(collabConnections).toBe(1);
+      expect(nextUpgrades).toBe(1);
     } finally {
-      client.close();
+      collabClient.close();
+      hmrClient.close();
       nextServer.close();
       await new Promise<void>((resolve) => routed.close(() => resolve()));
     }
@@ -233,13 +252,144 @@ describe("collaboration server", () => {
   });
 
   it("makes viewers read-only", async () => {
-    const token = await signCollabToken({ userId, docId, role: "viewer", name: "V", login: null, avatar: null });
+    const db = await getDb();
+    const [viewer] = await db.insert(schema.users).values({ name: "Viewer", login: "viewer", email: "viewer@example.com" }).returning();
+    await upsertCollaborator(docId, viewer.login!, "viewer", userId);
+    const token = await signCollabToken({ userId: viewer.id, docId, role: "viewer", name: viewer.name!, login: viewer.login, avatar: null });
     const v = connect(token);
     await waitFor(() => v.provider.isSynced);
     expect(v.provider.isAuthenticated).toBe(true);
     expect(v.provider.authorizedScope).toBe("readonly");
     v.provider.destroy();
     v.socket.destroy();
+  });
+
+  it("revokes stale editor sockets and tokens, then permits a newly shared editor", async () => {
+    const db = await getDb();
+    const [owner] = await db.insert(schema.users).values({ name: "Revocation owner", login: "revoke-owner", email: "revoke-owner@example.com" }).returning();
+    const [editor] = await db.insert(schema.users).values({ name: "Revoked editor", login: "revoked-editor", email: "revoked-editor@example.com" }).returning();
+    const doc = await createDocument({ ownerId: owner.id, content: "Start" });
+    await upsertCollaborator(doc.id, editor.login!, "editor", owner.id);
+
+    const ownerToken = await signCollabToken({ userId: owner.id, docId: doc.id, role: "owner", name: owner.name!, login: owner.login, avatar: null });
+    const staleEditorToken = await signCollabToken({
+      userId: editor.id,
+      docId: doc.id,
+      role: "editor",
+      name: editor.name!,
+      login: editor.login,
+      avatar: null,
+    });
+    const ownerClient = connect(ownerToken, doc.id);
+    const editorClient = connect(staleEditorToken, doc.id);
+    await waitFor(() => ownerClient.provider.isSynced && editorClient.provider.isSynced);
+
+    editorClient.ydoc.getText(TEXT_KEY).insert(5, " before");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Start before");
+    await changeCollaboratorAccess(doc.id, editor.login!, null, () => removeCollaborator(doc.id, editor.login!));
+
+    const [afterRemoval] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterRemoval.content).toBe("Start before");
+    await waitFor(() => !hocuspocus.documents.get(doc.id)?.getConnections().some((connection) => connection.context.userId === editor.id));
+
+    editorClient.ydoc.getText(TEXT_KEY).insert(editorClient.ydoc.getText(TEXT_KEY).length, " rejected");
+    await sleep(150);
+    expect(ownerClient.ydoc.getText(TEXT_KEY).toString()).toBe("Start before");
+    const [afterRejectedEdit] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterRejectedEdit.content).toBe("Start before");
+
+    const replay = connect(staleEditorToken, doc.id);
+    let replayRejected = false;
+    replay.provider.on("authenticationFailed", () => (replayRejected = true));
+    await waitFor(() => replayRejected);
+
+    await changeCollaboratorAccess(doc.id, editor.login!, "editor", async () => {
+      await upsertCollaborator(doc.id, editor.login!, "editor", owner.id);
+    });
+    const freshEditorToken = await signCollabToken({
+      userId: editor.id,
+      docId: doc.id,
+      role: "editor",
+      name: editor.name!,
+      login: editor.login,
+      avatar: null,
+    });
+    const reshared = connect(freshEditorToken, doc.id);
+    await waitFor(() => reshared.provider.isSynced);
+    reshared.ydoc.getText(TEXT_KEY).insert(reshared.ydoc.getText(TEXT_KEY).length, " restored");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Start before restored");
+
+    for (const client of [ownerClient, editorClient, replay, reshared]) {
+      client.provider.destroy();
+      client.socket.destroy();
+    }
+  });
+
+  it("downgrades only the affected editor after flushing their accepted update", async () => {
+    const db = await getDb();
+    const [owner] = await db.insert(schema.users).values({ name: "Downgrade owner", login: "downgrade-owner", email: "downgrade-owner@example.com" }).returning();
+    const [editor] = await db.insert(schema.users).values({ name: "Downgraded editor", login: "downgraded-editor", email: "downgraded-editor@example.com" }).returning();
+    const doc = await createDocument({ ownerId: owner.id, content: "Base" });
+    await upsertCollaborator(doc.id, editor.login!, "editor", owner.id);
+
+    const ownerClient = connect(
+      await signCollabToken({ userId: owner.id, docId: doc.id, role: "owner", name: owner.name!, login: owner.login, avatar: null }),
+      doc.id,
+    );
+    const staleEditorToken = await signCollabToken({
+      userId: editor.id,
+      docId: doc.id,
+      role: "editor",
+      name: editor.name!,
+      login: editor.login,
+      avatar: null,
+    });
+    const editorClient = connect(staleEditorToken, doc.id);
+    await waitFor(() => ownerClient.provider.isSynced && editorClient.provider.isSynced);
+
+    editorClient.ydoc.getText(TEXT_KEY).insert(4, " accepted");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Base accepted");
+    await changeCollaboratorAccess(doc.id, editor.login!, "viewer", async () => {
+      await upsertCollaborator(doc.id, editor.login!, "viewer", owner.id);
+    });
+
+    const editorConnection = hocuspocus.documents.get(doc.id)?.getConnections().find((connection) => connection.context.userId === editor.id);
+    expect(editorConnection?.readOnly).toBe(true);
+    const [afterDowngrade] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterDowngrade.content).toBe("Base accepted");
+
+    editorClient.ydoc.getText(TEXT_KEY).insert(editorClient.ydoc.getText(TEXT_KEY).length, " rejected");
+    await sleep(150);
+    expect(ownerClient.ydoc.getText(TEXT_KEY).toString()).toBe("Base accepted");
+    const [afterRejectedEdit] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterRejectedEdit.content).toBe("Base accepted");
+
+    const replay = connect(staleEditorToken, doc.id);
+    await waitFor(() => replay.provider.isSynced);
+    expect(replay.provider.authorizedScope).toBe("readonly");
+    replay.ydoc.getText(TEXT_KEY).insert(replay.ydoc.getText(TEXT_KEY).length, " replayed");
+    await sleep(150);
+    expect(ownerClient.ydoc.getText(TEXT_KEY).toString()).toBe("Base accepted");
+
+    ownerClient.ydoc.getText(TEXT_KEY).insert(ownerClient.ydoc.getText(TEXT_KEY).length, " owner");
+    await waitFor(() => editorClient.ydoc.getText(TEXT_KEY).toString().includes(" owner"));
+    expect(ownerClient.ydoc.getText(TEXT_KEY).toString()).toBe("Base accepted owner");
+
+    await changeCollaboratorAccess(doc.id, editor.login!, "editor", async () => {
+      await upsertCollaborator(doc.id, editor.login!, "editor", owner.id);
+    });
+    const upgraded = connect(
+      await signCollabToken({ userId: editor.id, docId: doc.id, role: "editor", name: editor.name!, login: editor.login, avatar: null }),
+      doc.id,
+    );
+    await waitFor(() => upgraded.provider.isSynced);
+    upgraded.ydoc.getText(TEXT_KEY).insert(upgraded.ydoc.getText(TEXT_KEY).length, " upgraded");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString().endsWith(" upgraded"));
+
+    for (const client of [ownerClient, editorClient, replay, upgraded]) {
+      client.provider.destroy();
+      client.socket.destroy();
+    }
   });
 
   it("sends the initial state once and never echoes a client's own updates or awareness (task #480)", async () => {
