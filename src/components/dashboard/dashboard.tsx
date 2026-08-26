@@ -1,5 +1,4 @@
 "use client";
-import { navigateTo } from "@/lib/nav";
 import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider, GitHubIcon } from "@/components/ui/primitives";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
@@ -20,6 +19,7 @@ import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
 import { buildDashboardCommands } from "@/components/editor/commands";
+import { signOutSafely } from "@/lib/sign-out";
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
@@ -416,7 +416,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         showTrash: () => setFilter("trash"),
         openFile: pickFile,
         navigate: (href) => router.push(href),
-        signOut: () => navigateTo("/api/auth/signout"),
+        signOut: () => void signOutSafely(),
       }),
     [create, listDocs, router, pickFile],
   );
@@ -479,7 +479,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 <MenuItem icon={<Bot size={15} />} onSelect={() => router.push("/settings")}>
                   Agents &amp; API tokens
                 </MenuItem>
-                <MenuItem icon={<LogOut size={15} />} onSelect={() => navigateTo("/api/auth/signout")}>
+                <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
                   Sign out
                 </MenuItem>
               </MenuContent>
@@ -777,6 +777,5 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
     </div>
   );
 }
-
 
 
