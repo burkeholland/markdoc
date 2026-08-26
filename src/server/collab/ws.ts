@@ -19,7 +19,7 @@ export function toWebRequest(req: IncomingMessage, fallbackHost = "localhost"): 
 
 export interface AttachOptions {
   path?: string;
-  /** Upgrade handler for every other path (for example Next.js HMR). */
+  /** Bootstrap handler for other upgrades until their own listener has been attached. */
   fallback?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 }
 
@@ -49,6 +49,10 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
       return;
     }
+    // Next installs its HMR listener lazily on the first HTTP request. Bootstrap an earlier HMR
+    // upgrade through its handler, but stop forwarding once another listener exists or EventEmitter
+    // would invoke Next twice for every later socket.
+    if (server.listenerCount("upgrade") !== 1) return;
     if (options.fallback) options.fallback(req, socket, head);
     else socket.destroy();
   });
