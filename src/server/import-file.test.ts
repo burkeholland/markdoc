@@ -30,6 +30,8 @@ const {
   MAX_IMPORT_BYTES,
 } = await import("@/server/import-file");
 const { POST } = await import("@/app/api/import/file/route");
+const { GET: listDocuments } = await import("@/app/api/documents/route");
+const { DOCUMENT_TITLE_MAX } = await import("@/server/document-title");
 
 // 1x1 transparent PNG.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -77,6 +79,48 @@ describe("titles", () => {
     expect(importFormatFor("a.htm")).toBe("html");
     expect(importFormatFor("a.docx")).toBeNull();
     expect(importFormatFor("noext")).toBeNull();
+  });
+
+  describe("oversized titles are clipped to the document-title maximum", () => {
+    const long = "A".repeat(10_000);
+    const clipped = "A".repeat(DOCUMENT_TITLE_MAX);
+
+    it("from a Markdown H1, keeping the full heading in the content", async () => {
+      const text = `# ${long}\n\nbody\n`;
+      expect(titleForImport(text, "notes.md")).toBe(clipped);
+      const out = await convertImport({ name: "notes.md", text, format: "markdown" });
+      expect(out.title).toBe(clipped);
+      expect(out.content).toBe(text);
+    });
+
+    it("from YAML front matter", async () => {
+      const text = `---\ntitle: ${long}\n---\n\n# Heading\n`;
+      expect(titleForImport(text, "notes.md")).toBe(clipped);
+      expect((await convertImport({ name: "notes.md", text, format: "markdown" })).title).toBe(clipped);
+    });
+
+    it("from an HTML <h1> and from <title>", async () => {
+      const h1 = await convertImport({ name: "page.html", text: `<html><head><title>Short</title></head><body><h1>${long}</h1><p>x</p></body></html>`, format: "html" });
+      expect(h1.title).toBe(clipped);
+      expect(h1.content).toContain(`# ${long}`);
+      const title = await convertImport({ name: "page.html", text: `<html><head><title>${long}</title></head><body><p>x</p></body></html>`, format: "html" });
+      expect(title.title).toBe(clipped);
+    });
+
+    it("from the file name and from an explicit title", async () => {
+      expect(titleForImport("just text\n", `${long}.md`)).toBe(clipped);
+      expect((await convertImport({ name: `${long}.txt`, text: "x\n", format: "text" })).title).toBe(clipped);
+      expect((await convertImport({ name: "x.md", text: "# H\n", format: "markdown", title: long })).title).toBe(clipped);
+    });
+
+    it("trims whitespace left at the cut, deterministically", async () => {
+      const words = "word ".repeat(60); // the 200th character is a space
+      const out = await convertImport({ name: "x.md", text: `# ${words}\n`, format: "markdown" });
+      expect(out.title.length).toBeLessThanOrEqual(DOCUMENT_TITLE_MAX);
+      expect(out.title).toBe(out.title.trimEnd());
+      expect(out.title.endsWith("word")).toBe(true);
+      expect((await convertImport({ name: "x.md", text: `# ${words}\n`, format: "markdown" })).title).toBe(out.title);
+    });
   });
 });
 
@@ -258,6 +302,50 @@ describe("POST /api/import/file", () => {
       expect(res.status).toBe(201);
       const body = (await res.json()) as { documents: { id: string; title: string }[] };
       expect(body.documents[0].title).toBe("Agent Page");
+    } finally {
+      actor = null;
+    }
+  });
+
+  it("stores a bounded title for a huge H1 and never lists it unbounded", async () => {
+    actor = owner;
+    try {
+      const long = "A".repeat(10_000);
+      const content = `# ${long}\n\nbody\n`;
+      const res = await POST(
+        new Request("http://localhost:3700/api/import/file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ format: "markdown", content }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { documents: { id: string; title: string }[] };
+      const [imported] = body.documents;
+      expect(imported.title).toBe("A".repeat(DOCUMENT_TITLE_MAX));
+
+      // The body keeps the full heading; only the metadata is clipped.
+      const db = await getDb();
+      const [row] = await db.select().from(schema.documents).where(eq(schema.documents.id, imported.id));
+      expect(row.title).toHaveLength(DOCUMENT_TITLE_MAX);
+      expect(row.content).toBe(content);
+
+      // The multipart path goes through the same rule.
+      const form = new FormData();
+      form.append("files", new File([bytes(content)], `${long}.md`, { type: "text/markdown" }));
+      const upload = await post(form);
+      expect(upload.status).toBe(201);
+      const uploaded = (await upload.json()) as { documents: { id: string; title: string }[] };
+      expect(uploaded.documents[0].title).toHaveLength(DOCUMENT_TITLE_MAX);
+
+      for (const url of ["http://localhost:3700/api/documents", "http://localhost:3700/api/documents?q=AAAA"]) {
+        const list = await listDocuments(new Request(url));
+        expect(list.status).toBe(200);
+        const listed = (await list.json()) as { documents: { id: string; title: string }[] };
+        const mine = listed.documents.filter((d) => d.id === imported.id || d.id === uploaded.documents[0].id);
+        expect(mine).toHaveLength(2);
+        for (const d of listed.documents) expect(d.title.length).toBeLessThanOrEqual(DOCUMENT_TITLE_MAX);
+      }
     } finally {
       actor = null;
     }

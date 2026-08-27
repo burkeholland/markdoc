@@ -4,7 +4,8 @@ import { normalizeMime } from "@/server/assets";
 import { ImportError, importFiles, importText, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, type ImportFileInput, type ImportImageInput } from "@/server/import-file";
 
 const textSchema = z.object({
-  title: z.string().trim().max(300).optional(),
+  /** Clipped to the document-title maximum like every other import title (see `convertImport`). */
+  title: z.string().trim().optional(),
   content: z.string(),
   format: z.enum(["markdown", "text", "html"]).default("markdown"),
 });

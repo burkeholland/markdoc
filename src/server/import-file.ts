@@ -5,6 +5,7 @@ import rehypeRemark from "rehype-remark";
 import remarkGfm from "remark-gfm";
 import remarkStringify from "remark-stringify";
 import { addVersion, createDocument, setDocumentText } from "@/server/documents";
+import { boundTitle } from "@/server/document-title";
 import { AssetError, normalizeMime, putAsset } from "@/server/assets";
 
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
@@ -90,9 +91,9 @@ export function firstHeading(content: string): string | null {
   return null;
 }
 
-/** Front matter `title`, else the first H1, else the file name without its extension. */
+/** Front matter `title`, else the first H1, else the file name without its extension; clipped to the document-title maximum. */
 export function titleForImport(content: string, fileName: string): string {
-  return frontMatterTitle(content) ?? firstHeading(content) ?? fileStem(fileName);
+  return boundTitle(frontMatterTitle(content) ?? firstHeading(content) ?? fileStem(fileName));
 }
 
 // GitHub-style sanitising plus `input` checkboxes so task lists survive the round trip.
@@ -133,7 +134,11 @@ export interface ConvertedImport {
   warnings: string[];
 }
 
-/** Turn the raw text of one file into Markdown plus a title. Pure; no database access. */
+/**
+ * Turn the raw text of one file into Markdown plus a title. Pure; no database access.
+ * The title (explicit, front matter, first H1, `<title>` or file name — in that order) is clipped to
+ * the document-title maximum; the content is kept whole, including the full heading.
+ */
 export async function convertImport(input: { name: string; text: string; format: ImportFormat; title?: string | null }): Promise<ConvertedImport> {
   const warnings: string[] = [];
   const text = normalizeLineEndings(input.text);
@@ -146,7 +151,7 @@ export async function convertImport(input: { name: string; text: string; format:
   } else {
     content = text.endsWith("\n") ? text : text + "\n";
   }
-  const title = input.title?.trim() || frontMatterTitle(content) || firstHeading(content) || fallback || fileStem(input.name);
+  const title = boundTitle(input.title?.trim() || frontMatterTitle(content) || firstHeading(content) || fallback || fileStem(input.name));
   return { title, content, warnings };
 }
 

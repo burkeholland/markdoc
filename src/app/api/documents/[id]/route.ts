@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
-import { deleteDocument, purgeDocument, updateDocument } from "@/server/documents";
+import { deleteDocument, DOCUMENT_TITLE_MAX, purgeDocument, updateDocument } from "@/server/documents";
 import { publicDocument } from "@/server/dto";
 
 type Params = { params: Promise<{ id: string }> };
@@ -12,7 +12,7 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
 });
 
 const patchSchema = z.object({
-  title: z.string().trim().min(1).max(200).optional(),
+  title: z.string().trim().min(1).max(DOCUMENT_TITLE_MAX).optional(),
   linkAccess: z.enum(["private", "view", "comment", "edit"]).optional(),
 });
 

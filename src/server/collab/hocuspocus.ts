@@ -12,6 +12,7 @@ import { getDb, schema } from "@/server/db";
 import { verifyCollabToken, type CollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
+import { boundTitle } from "@/server/document-title";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 import { publishAgentPresence } from "@/server/agent-presence";
@@ -129,7 +130,7 @@ export function createCollabServer() {
         updatedAt: new Date(),
         lastEditedBy: lastContext?.userId ?? null,
       };
-      if (typeof metaTitle === "string" && metaTitle.trim()) patch.title = metaTitle.trim().slice(0, 200);
+      if (typeof metaTitle === "string" && metaTitle.trim()) patch.title = boundTitle(metaTitle);
       await db.update(schema.documents).set(patch).where(eq(schema.documents.id, documentName));
       await maybeAutoVersion(documentName, content, lastContext ?? null);
     },

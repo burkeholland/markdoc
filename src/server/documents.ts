@@ -3,7 +3,10 @@ import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
 import { encodeSeedState } from "@/server/collab/seed";
+import { boundTitle } from "@/server/document-title";
 import { excerptOf } from "@/editor/stats";
+
+export { DOCUMENT_TITLE_MAX, boundTitle } from "@/server/document-title";
 
 const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
 
@@ -281,16 +284,18 @@ export const DEFAULT_CONTENT = `# Untitled
 Start writing. Use the toolbar, Markdown shortcuts, or edit the source on the left.
 `;
 
+/** First `# ` heading with inline markup stripped, else `fallback`; clipped to {@link DOCUMENT_TITLE_MAX}. */
 export function titleFromContent(content: string, fallback = "Untitled"): string {
   const m = /^#\s+(.+)$/m.exec(content);
-  return m ? m[1].trim().replace(/[*_`]/g, "") : fallback;
+  return boundTitle(m ? m[1].trim().replace(/[*_`]/g, "") : fallback);
 }
 
 export async function createDocument(input: CreateDocumentInput): Promise<Document> {
   const db = await getDb();
   const content = input.content ?? DEFAULT_CONTENT;
   const id = nanoid();
-  const title = input.title ?? titleFromContent(content);
+  // Every path that mints a title (API, file/text/HTML import, GitHub import) ends here, so the bound is enforced once.
+  const title = boundTitle(input.title ?? titleFromContent(content));
   const [doc] = await db
     .insert(schema.documents)
     .values({
@@ -329,6 +334,7 @@ export async function updateDocument(docId: string, patch: Partial<Document>): P
     throw new Error("updateDocument: `content` must be written together with `ystate` — use setDocumentText or replaceLiveText");
   }
   const db = await getDb();
+  if (typeof patch.title === "string") patch = { ...patch, title: boundTitle(patch.title) };
   const [doc] = await db
     .update(schema.documents)
     .set({ ...patch, updatedAt: new Date() })
@@ -419,7 +425,7 @@ export async function duplicateDocument(docId: string, userId: string, options: 
   const { readLiveText } = await import("@/server/livedoc");
   const live = await readLiveText(docId);
   const sourceTitle = live.title || source.title;
-  const title = `Copy of ${sourceTitle}${options.titleSuffix ?? ""}`;
+  const title = boundTitle(`Copy of ${sourceTitle}${options.titleSuffix ?? ""}`);
   const newId = nanoid();
   const text = options.content ?? live.clean;
 
