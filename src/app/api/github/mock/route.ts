@@ -3,7 +3,16 @@ import { handler, json, readJson, requireUser, HttpError } from "@/server/http";
 import { isGitHubMock, mockGetGist, mockGetRepoFile, mockReset, mockSetGistFile, mockSetRepoFile } from "@/server/github/mock";
 
 const schema = z.union([
-  z.object({ kind: z.literal("repo"), owner: z.string(), repo: z.string(), branch: z.string().default("main"), path: z.string(), content: z.string() }),
+  z.object({
+    kind: z.literal("repo"),
+    owner: z.string(),
+    repo: z.string(),
+    branch: z.string().default("main"),
+    path: z.string(),
+    content: z.string(),
+    /** Bytes the fake GitHub reports for the file; over 2 MB it behaves like a 1–100 MB file (sha known, text unreadable). */
+    size: z.number().int().nonnegative().optional(),
+  }),
   z.object({ kind: z.literal("gist"), gistId: z.string(), filename: z.string(), content: z.string() }),
   z.object({ kind: z.literal("reset") }),
 ]);
@@ -22,7 +31,7 @@ export const POST = handler(async (req: Request) => {
     return json({ ok: true });
   }
   if (body.kind === "repo") {
-    const file = mockSetRepoFile(body.owner, body.repo, body.branch, body.path, body.content);
+    const file = mockSetRepoFile(body.owner, body.repo, body.branch, body.path, body.content, body.size);
     return json({ sha: file.sha });
   }
   const gist = mockSetGistFile(body.gistId, body.filename, body.content);

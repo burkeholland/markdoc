@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { HttpError } from "@/server/http";
+import { GITHUB_FILE_MAX_BYTES, GitHubFileTooLargeError } from "./limits";
 
 /**
  * In-memory stand-in for GitHub, enabled with `GITHUB_MOCK=1` (dev/e2e only). The same function
@@ -12,6 +13,8 @@ interface FakeFile {
   content: string;
   sha: string;
   updatedAt: string;
+  /** Bytes GitHub would report; defaults to the content's length. A fixture over the bound stands in for a 1–100 MB file. */
+  size: number;
 }
 
 const repos = new Map<string, FakeFile>(); // key: owner/repo@branch:path
@@ -28,8 +31,8 @@ export function mockReset() {
   counter = 0;
 }
 
-export function mockSetRepoFile(owner: string, repo: string, branch: string, path: string, content: string) {
-  const file: FakeFile = { content, sha: blobSha(content), updatedAt: new Date().toISOString() };
+export function mockSetRepoFile(owner: string, repo: string, branch: string, path: string, content: string, size?: number) {
+  const file: FakeFile = { content, sha: blobSha(content), updatedAt: new Date().toISOString(), size: size ?? Buffer.byteLength(content, "utf8") };
   repos.set(repoKey(owner, repo, branch, path), file);
   return file;
 }
@@ -55,6 +58,8 @@ export const mockGithub = {
   async readRepoFile(owner: string, repo: string, path: string, ref: string) {
     const file = repos.get(repoKey(owner, repo, ref, path));
     if (!file) throw new HttpError(404, "Not Found");
+    // Like GitHub past 1 MB: the sha is known, the text is not readable into a document.
+    if (file.size > GITHUB_FILE_MAX_BYTES) throw new GitHubFileTooLargeError(file.size, file.sha);
     return { content: file.content, sha: file.sha, htmlUrl: `https://github.com/${owner}/${repo}/blob/${ref}/${path}`, updatedAt: file.updatedAt };
   },
   async commitRepoFile(input: { owner: string; repo: string; path: string; branch: string; content: string; message: string; sha?: string | null }) {
@@ -127,6 +132,6 @@ export const mockGithub = {
     const prefix = `${owner}/${repo}@${ref}:`;
     return [...repos.entries()]
       .filter(([key]) => key.startsWith(prefix))
-      .map(([key, file]) => ({ path: key.slice(prefix.length), type: "file" as const, size: file.content.length, sha: file.sha }));
+      .map(([key, file]) => ({ path: key.slice(prefix.length), type: "file" as const, size: file.size, sha: file.sha }));
   },
 };

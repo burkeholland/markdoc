@@ -9,6 +9,7 @@ import {
   readGistFile,
   readRepoFile,
   isGitHubMock,
+  GitHubFileTooLargeError,
 } from "@/server/github";
 import { readLiveText, replaceLiveText } from "@/server/livedoc";
 import type { CollabContext } from "@/server/collab/hocuspocus";
@@ -58,6 +59,12 @@ export interface RemoteFile {
   revision: string | null;
   url: string | null;
   updatedAt: string | null;
+  /**
+   * Set when the file exists but Markdoc could not read its text (larger than the 2 MB bound);
+   * `content` is null then. Status, pull and a plain publish refuse with `413`; only a force-publish
+   * may overwrite it.
+   */
+  unreadable?: { message: string; size: number | null; limit: number };
 }
 
 export interface SyncStatus {
@@ -92,10 +99,27 @@ async function fetchRemote(doc: LinkedDocument, user: SessionUser): Promise<Remo
     const file = await readRepoFile(octokit, doc.repoOwner, doc.repoName, doc.repoPath, doc.repoBranch ?? "main");
     return { content: file.content, revision: file.sha, url: file.htmlUrl, updatedAt: file.updatedAt ?? null };
   } catch (err) {
+    if (err instanceof GitHubFileTooLargeError) {
+      return { content: null, revision: err.revision, url: githubUrlFor(doc), updatedAt: null, unreadable: { message: err.message, size: err.size, limit: err.limit } };
+    }
     const status = (err as { status?: number }).status;
     if (status === 404) return { content: null, revision: null, url: githubUrlFor(doc), updatedAt: null };
     throw err;
   }
+}
+
+/**
+ * `413 { error, status: "remote-unreadable", size, limit, remote }`: the GitHub file is there but over
+ * the document bound, so there is no remote text to compare with or pull.
+ */
+function unreadableRemote(remote: RemoteFile): HttpError {
+  const u = remote.unreadable!;
+  return new HttpError(413, u.message, {
+    status: "remote-unreadable",
+    size: u.size,
+    limit: u.limit,
+    remote: { sha: remote.revision, revision: remote.revision, url: remote.url, updatedAt: remote.updatedAt },
+  });
 }
 
 /** Read the linked file, reusing a read made in the last 30 s unless `fresh`. */
@@ -140,10 +164,12 @@ function toStatus(base: string | null, local: string, remote: RemoteFile): SyncS
 /**
  * Where the document stands against its GitHub file: in-sync, local-ahead, remote-ahead or diverged.
  * The merge base (`publishedContent`) is read here, not carried on `doc`: access checks leave it out.
+ * A remote Markdoc cannot read (over the 2 MB bound) is a `413`, never an empty "remote-ahead".
  */
 export async function syncStatus(doc: LinkedDocument, user: SessionUser, options: { fresh?: boolean; content?: boolean } = {}): Promise<SyncStatus> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const [remote, live, base] = await Promise.all([readRemote(doc, user, options.fresh), readLiveText(doc.id), getPublishedContent(doc.id)]);
+  if (remote.unreadable) throw unreadableRemote(remote);
   const status = toStatus(base, live.clean, remote);
   return options.content ? { ...status, remoteContent: remote.content ?? "" } : status;
 }
@@ -190,19 +216,24 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
   const [live, base] = await Promise.all([readLiveText(doc.id), getPublishedContent(doc.id)]);
   const content = live.clean;
   const remote = await readRemote(doc, user, true);
-  const status = toStatus(base, content, remote);
-  if (!options.force && (status.status === "remote-ahead" || status.status === "diverged")) {
-    throw syncConflict("The file changed on GitHub since it was last synced. Pull or merge first, or force-publish to overwrite.", {
-      status: status.status,
-      remote: status.remote,
-      localChanged: status.localChanged,
-      remoteChanged: status.remoteChanged,
-      lines: status.lines,
-    });
-  }
-  if (status.status === "in-sync" && remote.content === content) {
-    if (doc.githubSha !== remote.revision) await updateDocument(doc.id, { githubSha: remote.revision });
-    return { url: githubUrlFor(doc), commitSha: null, publishedAt: (doc.publishedAt ?? new Date()).toISOString(), skipped: true, status: "in-sync" };
+  if (remote.unreadable) {
+    // No remote text to compare with: overwriting an unreadable file is an explicit choice.
+    if (!options.force) throw unreadableRemote(remote);
+  } else {
+    const status = toStatus(base, content, remote);
+    if (!options.force && (status.status === "remote-ahead" || status.status === "diverged")) {
+      throw syncConflict("The file changed on GitHub since it was last synced. Pull or merge first, or force-publish to overwrite.", {
+        status: status.status,
+        remote: status.remote,
+        localChanged: status.localChanged,
+        remoteChanged: status.remoteChanged,
+        lines: status.lines,
+      });
+    }
+    if (status.status === "in-sync" && remote.content === content) {
+      if (doc.githubSha !== remote.revision) await updateDocument(doc.id, { githubSha: remote.revision });
+      return { url: githubUrlFor(doc), commitSha: null, publishedAt: (doc.publishedAt ?? new Date()).toISOString(), skipped: true, status: "in-sync" };
+    }
   }
 
   let url: string | null = null;
@@ -267,6 +298,8 @@ export interface PullResult {
 export async function pullDocument(doc: LinkedDocument, user: SessionUser, options: PullOptions = {}): Promise<PullResult> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const remote = await readRemote(doc, user, true);
+  // Nothing readable to pull — with or without `force` the live text stays as it is.
+  if (remote.unreadable) throw unreadableRemote(remote);
   const [live, base] = await Promise.all([readLiveText(doc.id), getPublishedContent(doc.id)]);
   const status = toStatus(base, live.clean, remote);
   const remoteText = remote.content ?? "";
@@ -340,6 +373,12 @@ export interface LinkRepoInput {
 
 export type LinkInput = LinkGistInput | LinkRepoInput | { storage: "local" };
 
+/** `null` for a file that is not there (or unreadable for any reason but its size); an oversized file is a `413` the caller must see. */
+const missingUnlessTooLarge = (err: unknown) => {
+  if (err instanceof GitHubFileTooLargeError) throw err;
+  return null;
+};
+
 /** Link a document to a gist (existing or new) or a repository file, then publish. */
 export async function linkDocument(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<Document> {
   if (input.storage === "local") {
@@ -361,7 +400,7 @@ export async function linkDocument(doc: LinkedDocument, user: SessionUser, input
   if (input.storage === "gist") {
     const filename = (input.filename?.trim() || `${slugFile(doc.title)}.md`).replace(/[\\/]/g, "-");
     if (input.gistId) {
-      const file = await readGistFile(octokit, input.gistId, input.filename).catch(() => null);
+      const file = await readGistFile(octokit, input.gistId, input.filename).catch(missingUnlessTooLarge);
       return (await updateDocument(doc.id, {
         storage: "gist",
         gistId: input.gistId,
@@ -397,7 +436,7 @@ export async function linkDocument(doc: LinkedDocument, user: SessionUser, input
   }
   const path = input.path.replace(/^\/+/, "");
   if (!path) throw new HttpError(400, "A file path is required");
-  const existing = await readRepoFile(octokit, input.owner, input.repo, path, input.branch).catch(() => null);
+  const existing = await readRepoFile(octokit, input.owner, input.repo, path, input.branch).catch(missingUnlessTooLarge);
   return (await updateDocument(doc.id, {
     storage: "repo",
     repoOwner: input.owner,
