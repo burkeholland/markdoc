@@ -108,4 +108,79 @@ describe("CommentsModel suggestions", () => {
     expect(model.acceptSuggestion(id, "", bob)).toBe(true);
     expect(ytext.toString()).toBe("Keep this. Keep that.");
   });
+
+  it("accepts a reply suggestion in one undo step without deciding another reply or resolving the thread", () => {
+    const { ytext, model } = setup("The quick brown fox jumps.");
+    const id = model.add({ from: 4, to: 15, body: "Could this be clearer?", author: alice });
+    const acceptedId = model.reply(id, "Yes.\n\n```suggestion\nslow red\n```", alice)!;
+    const pendingId = model.reply(id, "Another option.\n\n```suggestion\nswift auburn\n```", alice)!;
+    const origin = { name: "comments" };
+    const undo = new Y.UndoManager(ytext, { trackedOrigins: new Set([origin]) });
+
+    expect(model.acceptReplySuggestion(id, acceptedId, bob, origin)).toBe(true);
+    expect(ytext.toString()).toBe("The slow red fox jumps.");
+    const thread = model.get(id)!;
+    expect(thread.replies.find((reply) => reply.id === acceptedId)).toMatchObject({
+      suggestionState: "accepted",
+      suggestionBy: "bob",
+    });
+    expect(thread.replies.find((reply) => reply.id === pendingId)?.suggestionState).toBeUndefined();
+    expect(thread.suggestionState).toBeNull();
+    expect(thread.resolved).toBe(false);
+    expect(undo.undoStack).toHaveLength(1);
+    undo.undo();
+    expect(ytext.toString()).toBe("The quick brown fox jumps.");
+  });
+
+  it("rejects an outdated reply suggestion independently and refuses unknown, non-suggestion, or decided replies", () => {
+    const { ytext, model } = setup("The quick brown fox jumps.");
+    const id = model.add({ from: 4, to: 15, body: "Could this be clearer?", author: alice });
+    const rejectedId = model.reply(id, "```suggestion\nslow red\n```", alice)!;
+    const plainId = model.reply(id, "No rewrite here.", alice)!;
+    ytext.insert(10, "BIG ");
+
+    expect(model.acceptReplySuggestion(id, rejectedId, bob)).toBe(false);
+    expect(model.rejectReplySuggestion(id, rejectedId, bob)).toBe(true);
+    expect(model.get(id)!.replies.find((reply) => reply.id === rejectedId)).toMatchObject({
+      suggestionState: "rejected",
+      suggestionBy: "bob",
+    });
+    expect(model.rejectReplySuggestion(id, rejectedId, bob)).toBe(false);
+    expect(model.acceptReplySuggestion(id, rejectedId, bob)).toBe(false);
+    expect(model.rejectReplySuggestion(id, plainId, bob)).toBe(false);
+    expect(model.rejectReplySuggestion(id, "missing", bob)).toBe(false);
+    expect(ytext.toString()).toBe("The quick BIG brown fox jumps.");
+  });
+
+  it("re-anchors after each accepted reply so sibling reply suggestions stay pending and Accept all can decide each once", () => {
+    const { ytext, model } = setup("The quick brown fox jumps.");
+    const id = model.add({ from: 4, to: 15, body: "Could this be clearer?", author: alice });
+    const firstId = model.reply(id, "```suggestion\nslow red\n```", alice)!;
+    const secondId = model.reply(id, "```suggestion\nswift auburn\n```", alice)!;
+
+    expect(model.acceptReplySuggestion(id, firstId, bob)).toBe(true);
+    let thread = model.get(id)!;
+    expect(thread.quote).toBe("slow red");
+    expect(thread.range && ytext.toString().slice(thread.range.from, thread.range.to)).toBe("slow red");
+    expect(thread.replies.find((reply) => reply.id === secondId)?.suggestionState).toBeUndefined();
+    expect(isSuggestionOutdated(thread, ytext.toString())).toBe(false);
+
+    expect(model.acceptReplySuggestion(id, secondId, bob)).toBe(true);
+    expect(model.acceptReplySuggestion(id, secondId, bob)).toBe(false);
+    thread = model.get(id)!;
+    expect(ytext.toString()).toBe("The swift auburn fox jumps.");
+    expect(thread.replies.map((reply) => reply.suggestionState)).toEqual(["accepted", "accepted"]);
+  });
+
+  it("keeps a reply suggestion applicable when the root suggestion is accepted first", () => {
+    const { ytext, model } = setup("The quick brown fox jumps.");
+    const id = model.add({ from: 4, to: 15, body: "```suggestion\nslow red\n```", author: alice });
+    const replyId = model.reply(id, "Another option.\n\n```suggestion\nswift auburn\n```", alice)!;
+
+    expect(model.acceptSuggestion(id, "slow red", bob)).toBe(true);
+    expect(model.get(id)).toMatchObject({ quote: "slow red", suggestionState: "accepted" });
+    expect(model.acceptReplySuggestion(id, replyId, bob)).toBe(true);
+    expect(ytext.toString()).toBe("The swift auburn fox jumps.");
+    expect(model.get(id)!.replies[0].suggestionState).toBe("accepted");
+  });
 });

@@ -39,7 +39,7 @@ export interface EventActor {
 export type AgentEvent =
   | { type: "content.changed"; documentId: string; contentHash: string; previousHash: string | null; diff: string | null; truncated: boolean; actor: EventActor; at: string }
   | { type: "comment.added" | "comment.replied" | "comment.resolved"; documentId: string; threadId: string | null; author: string; authorKind: string; body: string; quote: string | null; actor: EventActor; at: string }
-  | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
+  | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; replyId?: string; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
   | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; actor: EventActor; at: string }
   | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; actor: EventActor; at: string }
   | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; actor: EventActor; at: string }
@@ -323,6 +323,7 @@ function activityToEvent(row: typeof schema.activity.$inferSelect, selfId: strin
         type: row.action === "comment.suggestion.accepted" ? "suggestion.accepted" : "suggestion.rejected",
         ...base,
         threadId: typeof d.threadId === "string" ? d.threadId : null,
+        ...(typeof d.replyId === "string" ? { replyId: d.replyId } : {}),
         by: row.actorName,
         byKind: row.actorKind,
         author: typeof d.author === "string" ? d.author : null,
