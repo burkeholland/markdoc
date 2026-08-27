@@ -60,6 +60,8 @@ export interface EditorCommandContext {
   startComment: () => void;
   /** Opens the "Ask an agent" dialog for the current selection (or the whole document). */
   askAgent?: () => void;
+  /** Opens "Keep an agent here": the sentence that puts an agent into this document's watch loop. */
+  keepAgent?: () => void;
   toggleComments: () => void;
   toggleHistory: () => void;
   toggleActivity: () => void;
@@ -254,6 +256,15 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       icon: "Bot",
       when: () => ctx.session.canComment && !!ctx.askAgent,
       run: () => ctx.askAgent?.(),
+    },
+    {
+      id: "doc:keep-agent",
+      title: "Keep an agent here",
+      keywords: ["agent", "ai", "copilot", "watch", "presence", "sit", "loop", "mcp", "here"],
+      group: "Document",
+      icon: "Radio",
+      when: () => !!ctx.keepAgent,
+      run: () => ctx.keepAgent?.(),
     },
     { id: "doc:find", title: "Find", keywords: ["search", "locate"], group: "Document", icon: "Search", shortcut: "Mod-F", run: () => ctx.openFind(false) },
     { id: "doc:find-replace", title: "Find and replace", keywords: ["search", "substitute", "rename"], group: "Document", icon: "Replace", shortcut: "Mod-H", when: canEdit, run: () => ctx.openFind(true) },

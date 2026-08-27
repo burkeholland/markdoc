@@ -176,7 +176,9 @@ The other direction — a human asks **from the document** and an agent picks it
 
 Requests are scoped: `markdoc_list_requests` only lists documents the token's user owns or collaborates on. Commenters can ask for comments; asking for changes needs edit access. The requester (or the document owner) can cancel from the pill's menu. Nothing runs on the Markdoc server — it only keeps the inbox; the model is whichever agent you connect.
 
-The first time someone without a token clicks **Ask an agent**, the dialog shows a one-time *Connect an agent* card with the MCP config for the server they are on (the same card sits at the top of **Settings → Agents**).
+*"Check Markdoc for requests"* is a one-shot pull. To make the document talk back on its own — requests, @mentions and comments reaching the agent within a minute, without a trip to the terminal each time — keep the agent in the watch loop described in [Sit in a document](#sit-in-a-document). The editor hands you the sentence for it: the header's agent pill (*"No agent here"* / *"Copilot CLI is here"*), the **Keep an agent here** link in the Ask-an-agent dialog's footer and the command palette entry of the same name open a popover with a ready-to-paste instruction for this document and a **Copy** button.
+
+The first time someone without a token clicks **Ask an agent** (or **Keep an agent here**), the dialog shows a one-time *Connect an agent* card with the MCP config for the server they are on (the same card sits at the top of **Settings → Agents**).
 
 #### Working a request, step by step
 
@@ -487,6 +489,8 @@ Over REST the same body goes to `POST /api/documents/:id/reviews`. Afterwards `m
 
 Collaborate live from Copilot CLI: the agent is visible in the header and reacts when people write.
 
+The shortest way in is from the editor: click the header's agent pill → **Keep an agent here** (also in the Ask-an-agent dialog's footer and the command palette) and paste the copied sentence into Copilot CLI — *Sit in the Markdoc document "…" (id …): call markdoc_presence active, then loop markdoc_watch with wait 55 and act on comments, mentions and requests until I say stop.* That sentence is the loop below; the pill reads *"Copilot CLI is here"* while it runs.
+
 1. `markdoc_presence { id, state: "active", status: "reading", anchor: "<the paragraph you are reading>" }` — the bot avatar appears next to the people in the document, with a labelled caret on that text.
 2. `markdoc_watch { id }` — the first call returns only a `cursor`.
 3. Loop: `markdoc_presence { id, state: "idle", status: "waiting for feedback" }`, then `markdoc_watch { id, since: cursor, wait: 55 }`. When events come back:
@@ -512,7 +516,7 @@ done
 
 ## What people see
 
-- A bot avatar in the header's presence stack while an agent is present, with an **Agent** badge and its status (*"drafting the summary"*) in the popover.
+- A bot avatar in the header's presence stack while an agent is present, with an **Agent** badge and its status (*"drafting the summary"*) in the popover. Next to it, the agent pill reads *"Copilot CLI is here"* (or *"No agent here"*); its menu lists the agents present and leads to **Keep an agent here**.
 - The agent's caret in both panes — a dashed caret in the agent's colour with a bot glyph and its name, sitting on the text it announced with `anchor` / `cursor` or where it last suggested, commented or edited; it dims when the agent is idle, and clicking the label follows it like a person.
 - Agents under the people in the `@` picker of every comment (*Copilot CLI · agent*); the posted chip carries a bot badge.
 - A chip in the editor header while an agent is active: *"Copilot proposed changes"*.

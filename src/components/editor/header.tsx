@@ -57,6 +57,7 @@ import { NotificationsBell } from "@/components/notifications/notifications-bell
 import type { NotificationDto } from "@/lib/api";
 import { AgentActivityChip } from "./agent-activity";
 import { AgentRequestsPill } from "./agent-requests-pill";
+import { AgentPill } from "./keep-agent-here";
 import { signOutSafely } from "@/lib/sign-out";
 
 /** The Markdoc mark (public/brand/mark.svg): a document with a folded corner and the `#` heading glyph. Follows the accent token. */
@@ -453,6 +454,10 @@ export interface HeaderProps {
   onJumpToUser?: (user: PresenceUser) => void;
   /** Cancel an "Ask an agent" request from the header pill; the pill is hidden when omitted. */
   onCancelRequest?: (requestId: string) => void;
+  /** Where "Keep an agent here" sends people without a token (defaults to /settings#tokens). */
+  onCreateToken?: () => void;
+  /** Bumped by the command palette's "Keep an agent here": opens the agent pill on that view. */
+  keepAgentNonce?: number;
 }
 
 /** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
@@ -526,6 +531,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         <div className="hidden items-center gap-3 md:flex">
           {props.onCancelRequest && <AgentRequestsPill session={session} onCancel={props.onCancelRequest} />}
           <AgentActivityChip session={session} />
+          <AgentPill session={session} doc={doc} onCreateToken={props.onCreateToken} keepAgentNonce={props.keepAgentNonce} />
           <ModeSwitcher session={session} />
           <PresenceStack session={session} onJump={props.onJumpToUser} />
         </div>

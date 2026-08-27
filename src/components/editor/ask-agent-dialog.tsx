@@ -1,11 +1,12 @@
 "use client";
 
 import { memo, useEffect, useState } from "react";
-import { Bot, Loader2 } from "lucide-react";
+import { Bot, Loader2, Radio } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AgentConnectCard, AGENT_CONNECT_DISMISSED_KEY, useOrigin } from "@/components/settings/agent-connect-card";
+import { KeepAgentHerePopover } from "./keep-agent-here";
 
 export type AskAgentMode = "suggest" | "comment" | "rewrite";
 
@@ -41,10 +42,12 @@ export interface AskAgentDialogProps {
   onSend: (input: { instruction: string; mode: AskAgentMode; selection: AskAgentSelection | null }) => Promise<void>;
   /** Where to go to create a token; defaults to /settings#tokens and back. */
   onCreateToken?: () => void;
+  /** The document, for the "Keep an agent here" sentence in the footer; the link is hidden when omitted. */
+  doc?: { id: string; title: string };
 }
 
 /** "Ask an agent": hand the selection (or the document) plus an instruction to whichever agent picks it up. */
-export const AskAgentDialog = memo(function AskAgentDialog({ open, onOpenChange, selection, canEdit, canComment, onSend, onCreateToken }: AskAgentDialogProps) {
+export const AskAgentDialog = memo(function AskAgentDialog({ open, onOpenChange, selection, canEdit, canComment, onSend, onCreateToken, doc }: AskAgentDialogProps) {
   const [instruction, setInstruction] = useState("");
   const [mode, setMode] = useState<AskAgentMode>("suggest");
   const [busy, setBusy] = useState(false);
@@ -168,7 +171,19 @@ export const AskAgentDialog = memo(function AskAgentDialog({ open, onOpenChange,
             </fieldset>
             {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
             <div className="flex items-center justify-between gap-3 pt-1">
-              <span className="text-xs text-ink-4">{instruction.length > 1800 ? `${2000 - instruction.length} characters left` : ""}</span>
+              <span className="min-w-0 text-xs text-ink-4">
+                {instruction.length > 1800 ? (
+                  `${2000 - instruction.length} characters left`
+                ) : doc ? (
+                  <KeepAgentHerePopover doc={doc} onCreateToken={onCreateToken}>
+                    <button type="button" className="inline-flex items-center gap-1.5 text-ink-3 underline-offset-2 hover:text-ink hover:underline" data-testid="ask-agent-keep">
+                      <Radio size={13} /> Keep an agent here
+                    </button>
+                  </KeepAgentHerePopover>
+                ) : (
+                  ""
+                )}
+              </span>
               <div className="flex gap-2">
                 <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
                   Cancel
