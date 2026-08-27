@@ -544,11 +544,15 @@ export async function upsertCollaborator(docId: string, login: string, role: Exc
   return normalized;
 }
 
-export async function removeCollaborator(docId: string, login: string) {
+/** Remove a collaborator (login normalized like `upsertCollaborator`). Returns whether a row was actually removed. */
+export async function removeCollaborator(docId: string, login: string): Promise<boolean> {
   const db = await getDb();
-  await db
+  const normalized = login.trim().toLowerCase().replace(/^@/, "");
+  const removed = await db
     .delete(schema.collaborators)
-    .where(and(eq(schema.collaborators.documentId, docId), eq(schema.collaborators.login, login.toLowerCase())));
+    .where(and(eq(schema.collaborators.documentId, docId), eq(schema.collaborators.login, normalized)))
+    .returning();
+  return removed.length > 0;
 }
 
 export async function getUserById(id: string) {
