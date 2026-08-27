@@ -4,6 +4,7 @@ import { getDb, schema } from "@/server/db";
 import type { Activity, ActivityAction, ActorKind } from "@/server/db/schema";
 import type { Actor } from "@/server/http";
 import { newId } from "@/editor/collab/shared";
+import { readReplySuggestionDecision } from "@/editor/collab/comments";
 import { META_KEY, TEXT_KEY } from "@/server/collab/hocuspocus";
 import type { CollabClaims } from "@/server/collab/token";
 import { noteTypist, wakeDocument } from "@/server/agent-events";
@@ -229,6 +230,22 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
           const author = activityActorFromCollab(map.get("authorId") as string | undefined, map.get("authorName") as string | undefined);
           void recordActivity(docId, author.id ? author : byOrigin, "comment.add", { threadId: key, quote: clip(typeof body === "string" ? body : "") }).catch(log("comment"));
         });
+      } else if (event.target instanceof Y.Map && event.target.parent instanceof Y.Map && event.target.parent.parent === comments && event.target.parent.get("replySuggestions") === event.target) {
+        const decisions = event.target as Y.Map<unknown>;
+        const thread = decisions.parent as Y.Map<unknown>;
+        const replies = thread.get("replies");
+        event.changes.keys.forEach((_change, replyId) => {
+          const decision = readReplySuggestionDecision(replyId, decisions.get(replyId));
+          if (!decision) return;
+          const reply = replies instanceof Y.Array ? replies.toArray().find((item) => item && typeof item === "object" && "id" in item && item.id === replyId) : null;
+          const author = reply && typeof reply === "object" && "authorName" in reply ? reply.authorName : null;
+          void recordActivity(docId, byOrigin, decision.suggestionState === "accepted" ? "comment.suggestion.accepted" : "comment.suggestion.rejected", {
+            threadId: thread.get("id"),
+            replyId,
+            author: typeof author === "string" ? author : null,
+            quote: clip(decision.quote),
+          }).catch(log("reply suggestion"));
+        });
       } else if (event.target instanceof Y.Map && event.target.parent === comments && event.changes.keys.has("suggestionState")) {
         const map = event.target as Y.Map<unknown>;
         const state = map.get("suggestionState");
@@ -250,6 +267,7 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
           for (const item of d.insert) {
             const reply = item as Y.Map<unknown> | Record<string, unknown>;
             const get = (k: string) => (reply instanceof Y.Map ? reply.get(k) : reply[k]);
+            if (get("suggestionState") === "accepted" || get("suggestionState") === "rejected") continue;
             // Edited replies are re-inserted with the same id and an `editedAt`; only fresh replies count.
             if (get("editedAt")) continue;
             const body = get("body");

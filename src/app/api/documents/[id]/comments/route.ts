@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
-import { CommentsModel, isEmoji, type CommentThread } from "@/editor/collab/comments";
+import { CommentsModel, isEmoji, type CommentReply, type CommentThread } from "@/editor/collab/comments";
 import { isSuggestionOutdated, parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
@@ -33,8 +33,8 @@ const schema = z.discriminatedUnion("action", [
     replyId: z.string().optional(),
     emoji: z.string().trim().min(1).max(16).refine(isEmoji, "Must be a single emoji (e.g. 👍)"),
   }),
-  /** Decide on the thread's ```suggestion block: accept applies it to the text (editors only), reject records the decision. */
-  z.object({ action: z.literal("suggestion"), threadId: z.string().min(1), decision: z.enum(["accept", "reject"]) }),
+  /** Decide on a root or reply ```suggestion block: accept applies it to the text (editors only), reject records the decision. */
+  z.object({ action: z.literal("suggestion"), threadId: z.string().min(1), replyId: z.string().min(1).optional(), decision: z.enum(["accept", "reject"]) }),
 ]);
 
 /**
@@ -55,7 +55,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const after: (() => Promise<unknown>)[] = [];
   // The text the action concerns (new comment's quote, replied thread's range): an agent's caret moves there.
   let at: { from: number; to: number } | undefined;
-  let decided: { thread: CommentThread; accepted: boolean } | null = null;
+  let decided: { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null = null;
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
     const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
@@ -125,19 +125,24 @@ export const POST = handler(async (req: Request, { params }: Params) => {
         case "suggestion": {
           const thread = model.get(body.threadId);
           if (!thread) throw new HttpError(404, "Comment not found");
-          const block = parseSuggestionBlock(thread.body);
-          if (!block) throw new HttpError(400, "This comment has no suggestion block");
-          if (thread.suggestionState) throw new HttpError(409, `Suggestion already ${thread.suggestionState}`);
+          const reply = body.replyId ? (thread.replies.find((item) => item.id === body.replyId) ?? null) : null;
+          if (body.replyId && !reply) throw new HttpError(404, "Reply not found");
+          const block = parseSuggestionBlock(reply?.body ?? thread.body);
+          if (!block) throw new HttpError(400, `This ${reply ? "reply" : "comment"} has no suggestion block`);
+          const state = reply ? reply.suggestionState : thread.suggestionState;
+          if (state) throw new HttpError(409, `Suggestion already ${state}`);
           if (body.decision === "accept") {
             if (role !== "owner" && role !== "editor") throw new HttpError(403, "Only editors can accept suggestions");
             if (isSuggestionOutdated(thread, doc.getText(TEXT_KEY).toString())) throw new HttpError(409, "Suggestion is outdated: the quoted text changed");
-            if (!model.acceptSuggestion(body.threadId, block.text, author)) throw new HttpError(409, "Could not apply the suggestion");
+            const accepted = reply ? model.acceptReplySuggestion(body.threadId, reply.id, author) : model.acceptSuggestion(body.threadId, block.text, author);
+            if (!accepted) throw new HttpError(409, "Could not apply the suggestion");
           } else {
-            model.rejectSuggestion(body.threadId, author);
+            const rejected = reply ? model.rejectReplySuggestion(body.threadId, reply.id, author) : model.rejectSuggestion(body.threadId, author);
+            if (!rejected) throw new HttpError(409, "Could not reject the suggestion");
           }
-          decided = { thread, accepted: body.decision === "accept" };
+          decided = { thread, reply, accepted: body.decision === "accept" };
           at = thread.range ?? undefined;
-          result = { ok: true, state: body.decision === "accept" ? "accepted" : "rejected" };
+          result = { ok: true, state: body.decision === "accept" ? "accepted" : "rejected", ...(reply ? { replyId: reply.id } : {}) };
           break;
         }
       }
@@ -175,8 +180,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     } else if (body.action === "resolve" && body.resolved) {
       await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
     } else if (body.action === "suggestion") {
-      const d = decided as { thread: CommentThread; accepted: boolean } | null;
-      if (d) await recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null });
+      const d = decided as { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null;
+      if (d) await recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null }, d.reply);
     }
   }
 
@@ -230,6 +235,11 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
           authorId: r.authorId,
           createdAt: new Date(r.createdAt).toISOString(),
           editedAt: r.editedAt ? new Date(r.editedAt).toISOString() : null,
+          suggestion: (() => {
+            const block = parseSuggestionBlock(r.body);
+            if (!block) return null;
+            return { text: block.text, state: r.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"), by: r.suggestionBy ?? null, at: r.suggestionAt ? new Date(r.suggestionAt).toISOString() : null };
+          })(),
           reactions: r.reactions,
         })),
       }));
@@ -239,4 +249,3 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
   });
   return json({ comments: threads });
 });
-

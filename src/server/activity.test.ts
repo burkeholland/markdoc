@@ -17,6 +17,8 @@ const { recordActivity, recordEdit, listActivity, countActivity, activityActor, 
 const { TEXT_KEY, META_KEY, hydrateDoc, createCollabServer, shutdownCollab } = await import("./collab/hocuspocus");
 const { attachCollab } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
+const { CommentsModel } = await import("@/editor/collab/comments");
+const { makeCollabUser } = await import("@/editor/collab/shared");
 
 const alice = { id: "", name: "Alice", kind: "user" as const };
 const bob = { id: "", name: "Bob", kind: "user" as const };
@@ -209,6 +211,31 @@ describe("activity feed", () => {
 
     const resolve = items.find((i) => i.action === "comment.resolve");
     expect(resolve?.actorName).toBe("Bob");
+    doc.destroy();
+  });
+
+  it("records a reply suggestion decision once with the exact reply target", async () => {
+    const docId = await newDoc(ownerId);
+    const doc = new Y.Doc();
+    hydrateDoc(doc, null, "Hello brave world.", "Feed");
+    const stop = watchDocumentActivity(doc, docId);
+    const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
+    const aliceUser = makeCollabUser(alice.id, "Alice", null, "alice");
+    const bobUser = makeCollabUser(bob.id, "Bob", null, "bob");
+    const threadId = model.add({ from: 6, to: 11, body: "Could this be clearer?", author: aliceUser });
+    const replyId = model.reply(threadId, "Yes.\n\n```suggestion\nbold\n```", aliceUser)!;
+
+    expect(model.acceptReplySuggestion(threadId, replyId, bobUser, { source: "connection", connection: { context: { userId: bob.id, docId, role: "editor", name: "Bob", login: "bob", avatar: null } } })).toBe(true);
+    await sleep(150);
+    await stop();
+
+    const { items } = await listActivity(docId, { limit: 100 });
+    const decisions = items.filter((item) => item.action === "comment.suggestion.accepted" && item.detail.replyId === replyId);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ actorName: "Bob", detail: { threadId, replyId, author: "Alice", quote: "brave" } });
+    expect(items.filter((item) => item.action === "comment.reply" && item.detail.replyId === replyId)).toHaveLength(0);
+
+    model.destroy();
     doc.destroy();
   });
 
