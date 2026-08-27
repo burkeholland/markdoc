@@ -33,6 +33,7 @@ import { markdownTyping } from "./markdown-typing";
 import { remoteCaretInteractions } from "./remote-cursors";
 import type { ImageUploader } from "../prosemirror/images";
 import type { NoticeAction } from "../markdown/tsv";
+import { preserveInactiveUndoScroll } from "./undo-scroll";
 
 export interface CodeEditorHandlers {
   onFocus?: () => void;
@@ -99,6 +100,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     createMarkdownEditingKeymap(() => session.undoManager.stopCapturing()),
     codeEditorTheme,
     wrapping.of(EditorView.lineWrapping),
+    preserveInactiveUndoScroll(() => session.activeSurface === "code"),
     yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
     remoteCaretInteractions(session),
     sourceHighlights(),
