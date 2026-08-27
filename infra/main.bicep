@@ -73,6 +73,7 @@ var postgresAdminLogin = 'markdoc'
 var postgresDatabaseName = 'markdoc'
 var postgresPasswordSecretName = 'postgres-admin-password'
 var vnetName = '${name}-vnet'
+var environmentName = '${name}-prod-env'
 var appSubnetName = 'container-apps'
 var appSubnetPrefix = '10.42.0.0/23'
 var postgresSubnetName = 'postgres'
@@ -444,7 +445,7 @@ resource postgresBackup 'Microsoft.RecoveryServices/vaults/backupFabrics/protect
 }
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${name}-env'
+  name: environmentName
   location: location
   properties: {
     appLogsConfiguration: {
