@@ -19,7 +19,7 @@ folder of this checkout; `Get-FactoryRoot` in `scripts/live/common.ps1`).
 | Live env | `<live worktree>/.env.local` (copied into the twin on every promote) — `AUTH_SECRET`, `AUTH_DEV_LOGIN=1`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` | Yes, `resume-check.ps1` writes it; `AUTH_SECRET` comes back from the snapshot's sealed copy when there is one (see Secrets below) |
 | **Data** | `markdoc-data/pglite/` — the embedded PGlite database (~39 MB, ~1050 files): documents, versions, assets, comments, notifications, users, API tokens | **Only from the snapshot** |
 | Snapshot | `markdoc-data/snapshots/latest/` — current hot backup (`markdoc-pglite.tar.gz` + `manifest.json`), rewritten every 15 min; `markdoc-data/snapshots/<yyyyMMdd-HHmmss>/` — the last 3 copies | Recreated by the "Markdoc snapshot" task while the server runs |
-| Log | `markdoc-data/live.log` for `markdoc-live`, `markdoc-data/live-b.log` for `markdoc-live-b` (+ `.1` rotation) — `==== start-live <ts>` on every start, `==== exit code N <ts>` when the server process ends, `> [exit] …` lines from the server itself (signal, crash, uptime); `markdoc-data/watchdog.log` — one line per watchdog restart; `markdoc-data/watchdog.state`, `markdoc-data/promote.lock` — transient | Disposable |
+| Log | `markdoc-data/live.log` for `markdoc-live`, `markdoc-data/live-b.log` for `markdoc-live-b` (+ `.1` rotation) — `==== start-live <ts>` on every start, `==== exit code N <ts>` when the server process ends, `> [exit] …` lines from the server itself (signal, crash, uptime); `markdoc-data/watchdog.log` — one line per watchdog restart and per stale-snapshot episode; `markdoc-data/snapshot.log` — one line per snapshot run (`ok …` / `FAILED <step>: <reason>`); `markdoc-data/watchdog.state`, `markdoc-data/promote.lock` — transient | Disposable |
 | Scheduled tasks | "Markdoc live server" (per user, at logon) → `markdoc-live\scripts\live\start-live.ps1`; "Markdoc snapshot" (per user, every 15 min) → `snapshot-data.ps1 -Latest`; "Markdoc watchdog" (per user, every 1 min) → `watchdog.ps1` (see below) | `scripts/live/install-autostart.ps1` registers all three (`-Only watchdog` for one), `-Uninstall` removes all three |
 | Ports | 3000 live; 3001 loopback standby during a promote; 3100/31xx Playwright; 32xx–39xx dev servers (`npm run dev:port`) | — |
 
@@ -57,6 +57,47 @@ is polled once a second for up to 60 s (`-HealthTimeoutSec`) until it answers `d
 Next.js server compiles the route on the first hit and used to fail a single short probe. Token
 resolution: `-Token`, else `$env:BACKUP_TOKEN`, else `BACKUP_TOKEN=` in `markdoc-live\.env.local`.
 
+### `snapshot.log`: one line per run
+
+The task runs hidden and Task Scheduler history is off, so `markdoc-data\snapshot.log` is the only
+trace a run leaves (task #701, after a 21:10 run exited 1 with an empty `latest.tmp` and no way to
+tell why). Every run appends exactly one line:
+
+```
+2026-08-27T12:00:03 ok 41234567 bytes 123 documents 2345 ms
+2026-08-27T12:15:02 FAILED download: backup request failed: HTTP 401 Unauthorized
+2026-08-27T12:30:02 FAILED health: server on :3000 is not healthy after 60s (db=); nothing snapshotted
+```
+
+Steps, in order: `args`, `prepare`, `token`, `health`, `download`, `verify` (size + gzip magic),
+`manifest`, `seal`, `swap`, `copy` (timestamped copy + prune). The whole run is one `try`: an
+explicit check and an unhandled exception (`Get-Item`, `Move-Item`, a read-only folder) land in the
+same `catch`, which removes `latest.tmp` and the `.part` download (retrying, and naming what it could
+not remove in the log line) and exits 1. Once `latest.tmp` has become `latest` nothing is deleted: a
+failure in `copy` is logged but the snapshot stays. `-DataRoot <dir>` moves `snapshots\` and the
+log for a rehearsal (`-Out <tmp> -DataRoot <tmp>`) so the live log stays clean.
+
+### Stale snapshot: the watchdog raises it
+
+A *persistent* failure (rotated `BACKUP_TOKEN` after a promote, `/api/admin/backup` 401/500, full
+disk) would otherwise freeze the backup at its last good copy until a restore is attempted. On every
+tick `watchdog.ps1` compares `snapshots\latest\manifest.json` `takenAt` with now; past
+`-SnapshotStaleMinutes` (45 = three missed runs) it, **once per episode**:
+
+- appends `<ts> snapshot STALE <age> (takenAt …, threshold 45 min)` to `watchdog.log` and
+  `<ts> STALE <age> …; watchdog alerting` to `snapshot.log`;
+- files one Board **need** for the owner (title `Markdoc backup is stale: snapshots\latest is N min old`,
+  body with the last `snapshot.log` lines and what to check). `BOARD_URL`/`BOARD_TOKEN` come from the
+  environment or from `%LOCALAPPDATA%\agent-tools\board.env`, the file the "Agent tools savings" tasks
+  already post with (`tools\scripts\register-savings.ps1` writes it from an agent's shell; without it, or with the
+  board down, the log says `alert FAILED: …` once and the alert is retried quietly every tick until it gets out);
+- remembers `snapshotStaleSince` / `snapshotStaleAlert` in `watchdog.state`, so later ticks stay silent.
+
+The next fresh snapshot appends `snapshot fresh again …` and clears the episode. A missing manifest
+(fresh box) is not an episode — `resume-check.ps1` reports that. `-NoAlert` logs without filing;
+`-SnapshotStaleMinutes 0` disables the check. Rehearse with a backdated manifest under a scratch
+`-DataRoot`, and point `BOARD_URL` at a fake board to see the POST without bothering anyone.
+
 ### Every 15 minutes, and where it lands in factory-state
 
 The per-user scheduled task **"Markdoc snapshot"** (`install-autostart.ps1`; trigger: once, repeating
@@ -81,6 +122,8 @@ ignored) runs `scripts\live\watchdog.ps1`, which does one `GET /api/health` on :
 - It never acts while `markdoc-data\promote.lock` exists and is younger than 10 min — `promote.ps1` holds
   that file for its whole run (a stale one from a crashed promote is ignored) — nor while the newest
   `==== start-live` marker in the live worktree's log (`live.log` / `live-b.log`) is younger than 180 s (a cold start answers nothing for ~90 s).
+- Before any of that, every tick checks the backup's age (see *Stale snapshot* above); that check runs even
+  while a promote lock skips the health part.
 
 Rehearse against a copy, never the real server: `.\watchdog.ps1 -Root <copy worktree> -Port 3993 -DataRoot <tmp>`
 (state, log and lock all live under `-DataRoot`). `Get-Content ..\markdoc-data\watchdog.log` shows every
@@ -175,11 +218,11 @@ it safely can unless `-DryRun`:
 2. `node`, `npm`, `git` on PATH
 3. `../markdoc-live` exists and is detached (created with `git worktree add --detach` if missing; `npm ci --ignore-scripts` if `node_modules` is missing); warns when it is behind `main` (that is `promote.ps1`'s job)
 4. `.env.local` has `AUTH_SECRET`, `AUTH_DEV_LOGIN`, `PGLITE_DATA_DIR`, `BACKUP_TOKEN` — missing keys are written (file created or lines appended, existing values untouched) and their names printed; `AUTH_SECRET` is taken from the snapshot's `auth-secret.enc.json` when `FACTORY_STATE_KEY` can open it (`[ok] AUTH_SECRET - reused …`), else regenerated with a `[warn] … users will be signed out once`; a server that was already running is restarted so it reads them
-5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` or, when that is unset, `../markdoc-data/snapshots/latest` (folder with the tarball + manifest); without a tarball in either it warns and the server starts with an empty database (PGlite creates the folder) — not a failure
+5. `../markdoc-data/pglite` present, else restored from `$env:FACTORY_SNAPSHOT` or, when that is unset, `../markdoc-data/snapshots/latest` (folder with the tarball + manifest); the snapshot's age (`manifest.json` `takenAt`) is printed first — `[ok] snapshot age`, or `[warn]` past 45 min: the backup had stopped landing before the wipe, newer changes are lost; without a tarball in either it warns and the server starts with an empty database (PGlite creates the folder) — not a failure
 6. scheduled tasks "Markdoc live server", "Markdoc snapshot" and "Markdoc watchdog" registered (runs `install-autostart.ps1` if any is missing)
 7. `/api/health` 200 with `db:true` within 180 s (`start-live.ps1` if not)
 8. `GET /api/admin/backup?meta=1` with the token; `GET /api/documents` with the dev login (handle `resume-check`, `-CheckLogin` to change) answers 200
-9. `../markdoc-data/snapshots/latest/manifest.json` exists and is < 30 min old — a **warning** only, since right after a restore the first run of the snapshot task may be up to 15 min away (`Start-ScheduledTask 'Markdoc snapshot'` forces one)
+9. `../markdoc-data/snapshots/latest/manifest.json` exists and its `takenAt` is < 45 min old (the watchdog's STALE threshold) — a **warning** only, since right after a restore the first run of the snapshot task may be up to 15 min away (`Start-ScheduledTask 'Markdoc snapshot'` forces one); `snapshot.log` says why runs fail
 
 Manual order after a wipe, if not using bootstrap.ps1 (one run, unattended):
 

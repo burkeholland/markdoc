@@ -16,6 +16,84 @@ function Write-Step {
   Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message)
 }
 
+function Write-OpsLog {
+  # One "<ts> <message>" line appended to an ops log (markdoc-data\watchdog.log, markdoc-data\snapshot.log) and
+  # echoed to the console. The scheduled tasks run hidden, so the file is the only trace a run leaves; a log that
+  # cannot be written (full disk, locked file) is reported on the console and never fails the caller.
+  param([string]$Path, [string]$Message)
+  $line = "{0} {1}" -f (Get-Date -Format 's'), $Message
+  try {
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    Add-Content -LiteralPath $Path -Value $line -ErrorAction Stop
+  } catch {
+    Write-Step "(could not append to $Path : $($_.Exception.Message))"
+  }
+  Write-Step $line
+}
+
+function Get-SnapshotAge {
+  # Age of the snapshot in <Dir> from its manifest.json `takenAt` (UTC ISO). Returns
+  # @{ TakenAt = <local datetime>; TakenAtText = <the ISO string>; AgeMinutes = <double> } or $null when there is
+  # no readable manifest. The threshold callers compare against is 45 min = three missed 15-minute runs.
+  param([string]$Dir)
+  $manifestPath = Join-Path $Dir 'manifest.json'
+  if (-not (Test-Path -LiteralPath $manifestPath)) { return $null }
+  try {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if (-not $manifest.takenAt) { return $null }
+    $taken = [datetime]::Parse("$($manifest.takenAt)", [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+    return @{ TakenAt = $taken; TakenAtText = "$($manifest.takenAt)"; AgeMinutes = ((Get-Date) - $taken).TotalMinutes }
+  } catch {
+    return $null
+  }
+}
+
+function Get-BoardEnv {
+  # BOARD_URL / BOARD_TOKEN for a scheduled task: the environment when set, else %LOCALAPPDATA%\agent-tools\board.env,
+  # the file the "Agent tools savings" tasks already post with (tools\scripts\register-savings.ps1 writes it from an
+  # agent's shell). Returns @{ Url; Token; Source } with Token = '' when neither has one. The token is never printed.
+  $url = $env:BOARD_URL
+  $token = $env:BOARD_TOKEN
+  $source = 'environment'
+  if (-not $token) {
+    $envFile = Join-Path $env:LOCALAPPDATA 'agent-tools\board.env'
+    $vars = Read-EnvFile -Path $envFile
+    if ($vars.ContainsKey('BOARD_TOKEN')) { $token = $vars['BOARD_TOKEN']; $source = $envFile }
+    if (-not $url -and $vars.ContainsKey('BOARD_URL')) { $url = $vars['BOARD_URL'] }
+  }
+  if (-not $url) { $url = 'http://localhost:4747' }
+  return @{ Url = $url.TrimEnd('/'); Token = "$token"; Source = $source }
+}
+
+function Send-BoardNeed {
+  # Files a need on the Agent Board for the owner (the human; GET /api says who) - the route a hidden scheduled
+  # task has for reaching a person. Returns @{ Ok = $true; Id = <need id>; Url } or @{ Ok = $false; Reason }.
+  # Never throws and never prints the token.
+  param([string]$Title, [string]$Body = '')
+  $board = Get-BoardEnv
+  if (-not $board.Token) {
+    return @{ Ok = $false; Reason = "no BOARD_TOKEN in the environment or in $(Join-Path $env:LOCALAPPDATA 'agent-tools\board.env')" }
+  }
+  $headers = @{ Authorization = "Bearer $($board.Token)" }
+  $to = $null
+  try {
+    $info = Invoke-RestMethod -UseBasicParsing -Uri "$($board.Url)/api" -TimeoutSec 10
+    if ($info.owner) { $to = "$($info.owner)" }
+  } catch { $null = $_ }
+  $payload = @{ title = $Title; body = $Body }
+  if ($to) { $payload.to = $to }
+  try {
+    $need = Invoke-RestMethod -UseBasicParsing -Uri "$($board.Url)/api/needs" -Method Post -Headers $headers `
+      -ContentType 'application/json' -Body ($payload | ConvertTo-Json -Compress) -TimeoutSec 15
+    return @{ Ok = $true; Id = [int]$need.id; To = $to; Url = "$($board.Url)/#/needs/$($need.id)" }
+  } catch {
+    $response = $_.Exception.Response
+    $status = if ($response -and $response.StatusCode) { " (HTTP $([int]$response.StatusCode))" } else { '' }
+    return @{ Ok = $false; Reason = "POST $($board.Url)/api/needs failed$status : $($_.Exception.Message)" }
+  }
+}
+
 function Get-LiveHealth {
   # Returns the parsed /api/health body on HTTP 200, otherwise $null.
   param([int]$Port)
