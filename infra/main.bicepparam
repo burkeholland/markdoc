@@ -12,6 +12,7 @@ param githubClientId = readEnvironmentVariable('MARKDOC_GITHUB_CLIENT_ID', '')
 param githubClientSecret = readEnvironmentVariable('MARKDOC_GITHUB_CLIENT_SECRET', '')
 param vmAdminSshPublicKey = readEnvironmentVariable('MARKDOC_VM_SSH_PUBLIC_KEY', '')
 param image = readEnvironmentVariable('MARKDOC_IMAGE', '')
+param appVersion = readEnvironmentVariable('APP_VERSION', '')
 param publicUrl = readEnvironmentVariable('MARKDOC_PUBLIC_URL', '')
 param bootstrapPublicIp = false
 param enableVmBackup = false

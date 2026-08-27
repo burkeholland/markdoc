@@ -16,8 +16,11 @@ param name string = 'markdoc'
 @description('Azure region for all resources.')
 param location string = resourceGroup().location
 
-@description('Container image to run, e.g. markdocacr.azurecr.io/markdoc:<git-sha>. Leave empty on the first deployment to create the infrastructure with a placeholder image.')
+@description('Container image to run, preferably an immutable markdocacr.azurecr.io/markdoc@sha256:<digest> reference. Leave empty on the first deployment to create infrastructure without the app.')
 param image string = ''
+
+@description('Immutable application source version reported by /api/health.')
+param appVersion string = ''
 
 @description('Minimum replicas. 1 keeps the collaboration server warm; 0 scales to zero when nobody is connected.')
 @allowed([0, 1])
@@ -78,8 +81,6 @@ var appSubnetName = 'container-apps'
 var appSubnetPrefix = '10.42.0.0/23'
 var postgresSubnetName = 'postgres'
 var postgresSubnetPrefix = '10.42.2.0/24'
-var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
-var appImage = empty(image) ? placeholderImage : image
 var backupVaultName = '${name}-backup'
 var backupPolicyName = 'daily-7-days'
 var backupFabric = 'Azure'
@@ -470,7 +471,7 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-resource app 'Microsoft.App/containerApps@2024-03-01' = {
+resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
   name: name
   location: location
   identity: {
@@ -489,14 +490,12 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         allowInsecure: false
         stickySessions: { affinity: 'sticky' }
       }
-      registries: empty(image)
-        ? []
-        : [
-            {
-              server: registry.properties.loginServer
-              identity: identity.id
-            }
-          ]
+      registries: [
+        {
+          server: registry.properties.loginServer
+          identity: identity.id
+        }
+      ]
       secrets: [
         { name: 'auth-secret', value: authSecret }
         { name: 'github-client-secret', value: githubClientSecret }
@@ -508,7 +507,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'markdoc'
-          image: appImage
+          image: image
           resources: {
             cpu: json(cpu)
             memory: memory
@@ -524,25 +523,23 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AUTH_URL', value: empty(publicUrl) ? 'https://${name}.${environment.properties.defaultDomain}' : publicUrl }
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'DATABASE_SSL', value: '1' }
-            { name: 'APP_VERSION', value: empty(image) ? 'placeholder' : last(split(image, ':')) }
+            { name: 'APP_VERSION', value: empty(appVersion) ? last(split(image, ':')) : appVersion }
           ]
-          probes: empty(image)
-            ? []
-            : [
-                {
-                  type: 'Startup'
-                  httpGet: { path: '/api/health', port: 3000 }
-                  initialDelaySeconds: 5
-                  periodSeconds: 5
-                  failureThreshold: 12
-                }
-                {
-                  type: 'Liveness'
-                  httpGet: { path: '/api/health', port: 3000 }
-                  periodSeconds: 30
-                  failureThreshold: 3
-                }
-              ]
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: { path: '/api/health', port: 3000 }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              failureThreshold: 12
+            }
+            {
+              type: 'Liveness'
+              httpGet: { path: '/api/health', port: 3000 }
+              periodSeconds: 30
+              failureThreshold: 3
+            }
+          ]
         }
       ]
       scale: {
@@ -557,7 +554,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
   ]
 }
 
-output appUrl string = 'https://${app.properties.configuration.ingress.fqdn}'
+output appUrl string = 'https://${name}.${environment.properties.defaultDomain}'
 output registryLoginServer string = registry.properties.loginServer
 output registryName string = registry.name
 output postgresHost string = postgresPrivateIp

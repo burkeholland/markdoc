@@ -117,7 +117,7 @@ $sourceSha = (git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -or $sourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the current Git commit.' }
 $shortTag = $sourceSha.Substring(0, 12)
 
-function Deploy-Infra([string]$Image, [bool]$BootstrapPublicIp, [bool]$EnableVmBackup) {
+function Deploy-Infra([string]$Image, [string]$AppVersion, [bool]$BootstrapPublicIp, [bool]$EnableVmBackup) {
   $tempParameters = Join-Path ([IO.Path]::GetTempPath()) "markdoc-azure-$([guid]::NewGuid().ToString('N')).parameters.json"
   $plainValues = @{}
   $json = $null
@@ -140,6 +140,7 @@ function Deploy-Infra([string]$Image, [bool]$BootstrapPublicIp, [bool]$EnableVmB
         githubClientSecret = @{ value = $plainValues.GitHubClientSecret }
         vmAdminSshPublicKey = @{ value = $plainValues.VmAdminSshPublicKey }
         image = @{ value = $Image }
+        appVersion = @{ value = $AppVersion }
         publicUrl = @{ value = if ($env:MARKDOC_PUBLIC_URL) { $env:MARKDOC_PUBLIC_URL } else { '' } }
         bootstrapPublicIp = @{ value = $BootstrapPublicIp }
         enableVmBackup = @{ value = $EnableVmBackup }
@@ -189,10 +190,11 @@ function Remove-BootstrapPublicIp([string]$PublicIpName) {
 }
 
 Step 'Deploying private infrastructure. Initial PostgreSQL setup can take several minutes.'
-$outputs = Deploy-Infra '' $true $false
+$outputs = Deploy-Infra '' '' $true $false
 $registry = $outputs.registryName.value
 $appUrl = $outputs.appUrl.value
 $image = ''
+$appVersion = ''
 
 az backup vault backup-properties set `
   --resource-group $ResourceGroup `
@@ -212,9 +214,8 @@ if (-not $InfraOnly) {
       --output tsv `
       --only-show-errors
     if ($LASTEXITCODE -or $available -ne $ImageTag) { throw "Image tag $ImageTag does not exist in registry $registry." }
-    $image = "$($outputs.registryLoginServer.value)/markdoc:$ImageTag"
+    $appVersion = $ImageTag
   } else {
-    $image = "$($outputs.registryLoginServer.value)/markdoc:$sourceSha"
     Step "Building immutable image for source $sourceSha in Azure Container Registry"
     az acr build `
       --registry $registry `
@@ -225,11 +226,21 @@ if (-not $InfraOnly) {
       . `
       --only-show-errors
     if ($LASTEXITCODE) { throw 'Azure Container Registry build failed.' }
+    $appVersion = $sourceSha
   }
+
+  $digest = az acr manifest list-metadata `
+    --registry $registry `
+    --name markdoc `
+    --query "[?contains(tags, '$appVersion')] | [0].digest" `
+    --output tsv `
+    --only-show-errors
+  if ($LASTEXITCODE -or $digest -notmatch '^sha256:[0-9a-f]{64}$') { throw "Could not resolve the immutable image digest for $appVersion." }
+  $image = "$($outputs.registryLoginServer.value)/markdoc@$digest"
 }
 
 Step 'Finalizing the private VM network and rolling the Container App'
-$outputs = Deploy-Infra $image $false $true
+$outputs = Deploy-Infra $image $appVersion $false $true
 Remove-BootstrapPublicIp $outputs.bootstrapPublicIpName.value
 
 Write-Host "App URL: $appUrl" -ForegroundColor Green
