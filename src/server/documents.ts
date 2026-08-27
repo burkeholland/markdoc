@@ -25,7 +25,13 @@ export interface SessionUser {
 export type DocumentMeta = Omit<Document, "ystate" | "content" | "publishedContent">;
 
 /** Columns of {@link DocumentMeta}: every `document` column except the three large text/bytea ones. */
-const { ystate: _ystate, content: _content, publishedContent: _publishedContent, ...documentMetaColumns } = getTableColumns(schema.documents);
+const documentMetaColumns = (() => {
+  const columns: Partial<typeof schema.documents._.columns> = { ...getTableColumns(schema.documents) };
+  delete columns.ystate;
+  delete columns.content;
+  delete columns.publishedContent;
+  return columns as Omit<typeof schema.documents._.columns, "ystate" | "content" | "publishedContent">;
+})();
 
 /** The document as an access check sees it. */
 export interface AccessDocument extends DocumentMeta {
@@ -182,7 +188,7 @@ interface VisibleRow {
  * full `content`: the dashboard and `GET /api/documents` only show metadata and a short excerpt.
  * `extra` adds `document` columns to `doc` for the one caller that needs more (search).
  */
-function visibleDocuments<E extends Partial<typeof schema.documents._.columns> = {}>(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser, extra?: E) {
+function visibleDocuments<E extends Partial<typeof schema.documents._.columns> = Record<never, never>>(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser, extra?: E) {
   const login = user.login?.toLowerCase() ?? "";
   const query = db
     .select({
