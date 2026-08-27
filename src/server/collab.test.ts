@@ -286,7 +286,9 @@ describe("collaboration server", () => {
 
     editorClient.ydoc.getText(TEXT_KEY).insert(5, " before");
     await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Start before");
-    await changeCollaboratorAccess(doc.id, editor.login!, null, () => removeCollaborator(doc.id, editor.login!));
+    await changeCollaboratorAccess(doc.id, editor.login!, null, async () => {
+      await removeCollaborator(doc.id, editor.login!);
+    });
 
     const [afterRemoval] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
     expect(afterRemoval.content).toBe("Start before");

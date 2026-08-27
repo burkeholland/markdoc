@@ -54,12 +54,21 @@ export const POST = handler(async (req: Request, { params }: Params) => {
 
 const removeSchema = z.object({ login: z.string().trim().min(1) });
 
+/**
+ * Remove a person. Not idempotent on purpose: a login that is not currently a collaborator is
+ * `404 { error: "Collaborator not found" }` and records nothing, so a removal that "succeeded"
+ * always means a share actually ended.
+ */
 export const DELETE = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const { user } = await requireAccess(id, "own");
   const body = await readJson(req, (d) => removeSchema.parse(d));
-  const login = body.login.replace(/^@/, "");
-  await changeCollaboratorAccess(id, login, null, () => removeCollaborator(id, login));
-  await recordActivity(id, activityActor(user!), "share.remove", { login: login.toLowerCase() });
+  const login = body.login.replace(/^@/, "").toLowerCase();
+  let removed = false;
+  await changeCollaboratorAccess(id, login, null, async () => {
+    removed = await removeCollaborator(id, login);
+  });
+  if (!removed) throw new HttpError(404, "Collaborator not found");
+  await recordActivity(id, activityActor(user!), "share.remove", { login });
   return json({ ok: true });
 });
