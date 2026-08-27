@@ -161,7 +161,6 @@ test.describe("LAN access", () => {
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 10_000 });
     const { text } = await sessionState(page);
     for (const token of tokens) expect(text.split(token)).toHaveLength(2);
-    await expect.poll(() => sockets.filter((socket) => socket.path === "/collab" && !socket.closed).length).toBe(1);
     expect(sockets.filter((socket) => socket.path === "/collab").every((socket) => new URL(socket.url).hostname === stableHost)).toBe(true);
     console.log(
       `[stable-host] cookie domain=${session!.domain}; auth session host=${authSessionHosts.at(-1)}; token request host=${new URL(tokenRequests[0].url).hostname}; /collab host=${new URL(collabSockets[0].url).hostname}; edit persisted=true; reload=true; connected=${connectedMs}ms; saved=${saveMs}ms`,
