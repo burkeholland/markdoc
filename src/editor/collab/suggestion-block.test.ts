@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { CommentsModel } from "./comments";
+import { CommentsModel, DecidedSuggestionEditError } from "./comments";
 import { hasSuggestionBlock, isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor } from "./suggestion-block";
 
 const alice = { id: "alice", name: "Alice", color: "#000", colorLight: "#fff", login: "alice" };
@@ -190,5 +190,26 @@ describe("CommentsModel suggestions", () => {
     expect(ytext.toString()).toBe("The swift auburn fox jumps.");
     expect(model.get(id)!.replies[0]).toMatchObject({ suggestionState: "accepted", suggestionQuote: "slow red" });
     expect(model.get(id)!.suggestionQuote).toBe("quick brown");
+  });
+
+  it.each(["accepted", "rejected"] as const)("keeps %s root and reply suggestion bodies immutable", (state) => {
+    const root = setup("Alpha text.");
+    const rootBody = "Root proposal.\n\n```suggestion\nOmega text.\n```";
+    const rootId = root.model.add({ from: 0, to: 10, body: rootBody, author: alice });
+    if (state === "accepted") expect(root.model.acceptSuggestion(rootId, "Omega text.", bob)).toBe(true);
+    else expect(root.model.rejectSuggestion(rootId, bob)).toBe(true);
+
+    expect(() => root.model.editBody(rootId, "Changed after the decision.")).toThrow(new DecidedSuggestionEditError(state));
+    expect(root.model.get(rootId)?.body).toBe(rootBody);
+
+    const reply = setup("Beta text.");
+    const threadId = reply.model.add({ from: 0, to: 9, body: "What do you think?", author: alice });
+    const replyBody = "Reply proposal.\n\n```suggestion\nGamma text.\n```";
+    const replyId = reply.model.reply(threadId, replyBody, alice)!;
+    if (state === "accepted") expect(reply.model.acceptReplySuggestion(threadId, replyId, bob)).toBe(true);
+    else expect(reply.model.rejectReplySuggestion(threadId, replyId, bob)).toBe(true);
+
+    expect(() => reply.model.editBody(threadId, "Changed after the decision.", replyId)).toThrow(new DecidedSuggestionEditError(state));
+    expect(reply.model.get(threadId)?.replies[0].body).toBe(replyBody);
   });
 });

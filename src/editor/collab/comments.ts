@@ -100,6 +100,13 @@ export interface CommentThread {
   suggestionQuote?: string | null;
 }
 
+export class DecidedSuggestionEditError extends Error {
+  constructor(public readonly state: "accepted" | "rejected") {
+    super(`Cannot edit a suggestion that was already ${state}`);
+    this.name = "DecidedSuggestionEditError";
+  }
+}
+
 export const COMMENTS_ORIGIN = { name: "comments" };
 
 type ThreadMap = Y.Map<unknown>;
@@ -304,6 +311,8 @@ export class CommentsModel {
   editBody(id: string, body: string, replyId?: string) {
     const map = this.ymap.get(id);
     if (!map) return;
+    const suggestionState = replyId ? this.read(map).replies.find((reply) => reply.id === replyId)?.suggestionState : map.get("suggestionState");
+    if (suggestionState === "accepted" || suggestionState === "rejected") throw new DecidedSuggestionEditError(suggestionState);
     this.ydoc.transact(() => {
       if (!replyId) {
         if (map.get("body") !== body) map.set("editedAt", Date.now());

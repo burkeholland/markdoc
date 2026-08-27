@@ -756,7 +756,7 @@ const ThreadCard = memo(function ThreadCard({
             <span className="shrink-0 text-xs text-ink-4">{relativeTime(thread.createdAt)}</span>
             <EditedMarker at={thread.editedAt} />
           </div>
-          {editing === "root" ? (
+          {editing === "root" && !thread.suggestionState ? (
             <div className="mt-1">
               <Composer
                 placeholder="Edit comment"
@@ -824,7 +824,7 @@ const ThreadCard = memo(function ThreadCard({
                 </button>
               }
             >
-              {thread.authorId === me && (
+              {thread.authorId === me && !thread.suggestionState && (
                 <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
                   Edit
                 </MenuItem>
@@ -851,7 +851,7 @@ const ThreadCard = memo(function ThreadCard({
                     <span className="shrink-0 text-xs text-ink-4">{relativeTime(r.createdAt)}</span>
                     <EditedMarker at={r.editedAt} />
                   </div>
-                  {editing === r.id ? (
+                  {editing === r.id && !r.suggestionState ? (
                     <div className="mt-1">
                       <Composer
                         placeholder="Edit reply"
@@ -907,7 +907,7 @@ const ThreadCard = memo(function ThreadCard({
                         </button>
                       }
                     >
-                      {r.authorId === me && (
+                      {r.authorId === me && !r.suggestionState && (
                         <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
                           Edit
                         </MenuItem>

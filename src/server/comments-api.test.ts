@@ -281,6 +281,61 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     expect(thread.replies[0].suggestion).toMatchObject({ state: "accepted", source: "Lead paragraph." });
   });
 
+  it("returns 409 when accepted or rejected root and reply suggestion bodies are edited", async () => {
+    const immutableDoc = await createDocument({ ownerId: alice.id, content: "Alpha beta gamma delta." });
+    await upsertCollaborator(immutableDoc.id, carol.login, "commenter", alice.id);
+
+    actor = alice;
+    const acceptedRoot = (await (
+      await post(immutableDoc.id, { action: "add", quote: "Alpha", body: "First draft.\n\n```suggestion\nALPHA\n```" })
+    ).json()) as { id: string };
+    const acceptedRootBody = "Updated draft.\n\n```suggestion\nALPHA\n```";
+    expect((await post(immutableDoc.id, { action: "edit", threadId: acceptedRoot.id, body: acceptedRootBody })).status).toBe(200);
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: acceptedRoot.id, decision: "accept" })).status).toBe(200);
+
+    const rejectedRootBody = "Leave beta alone.\n\n```suggestion\nBETA\n```";
+    const rejectedRoot = (await (await post(immutableDoc.id, { action: "add", quote: "beta", body: rejectedRootBody })).json()) as { id: string };
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: rejectedRoot.id, decision: "reject" })).status).toBe(200);
+
+    const acceptedParent = (await (await post(immutableDoc.id, { action: "add", quote: "gamma", body: "A reply can revise this." })).json()) as { id: string };
+    actor = carol;
+    const acceptedReplyBody = "Try this.\n\n```suggestion\nGAMMA\n```";
+    const acceptedReply = (await (
+      await post(immutableDoc.id, { action: "reply", threadId: acceptedParent.id, body: acceptedReplyBody })
+    ).json()) as { id: string };
+    actor = alice;
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: acceptedParent.id, replyId: acceptedReply.id, decision: "accept" })).status).toBe(200);
+
+    const rejectedParent = (await (await post(immutableDoc.id, { action: "add", quote: "delta", body: "Another reply can revise this." })).json()) as { id: string };
+    actor = carol;
+    const rejectedReplyBody = "Or this.\n\n```suggestion\nDELTA\n```";
+    const rejectedReply = (await (
+      await post(immutableDoc.id, { action: "reply", threadId: rejectedParent.id, body: rejectedReplyBody })
+    ).json()) as { id: string };
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: rejectedParent.id, replyId: rejectedReply.id, decision: "reject" })).status).toBe(200);
+
+    const targets: { threadId: string; replyId?: string; state: "accepted" | "rejected"; editor: TestActor }[] = [
+      { threadId: acceptedRoot.id, state: "accepted", editor: alice },
+      { threadId: rejectedRoot.id, state: "rejected", editor: alice },
+      { threadId: acceptedParent.id, replyId: acceptedReply.id, state: "accepted", editor: carol },
+      { threadId: rejectedParent.id, replyId: rejectedReply.id, state: "rejected", editor: carol },
+    ];
+    for (const target of targets) {
+      actor = target.editor;
+      const response = await post(immutableDoc.id, { action: "edit", threadId: target.threadId, replyId: target.replyId, body: "Changed after the decision." });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: `Cannot edit a suggestion that was already ${target.state}` });
+    }
+
+    actor = alice;
+    expect((await post(immutableDoc.id, { action: "edit", threadId: acceptedParent.id, replyId: acceptedReply.id, body: "Owner bypass." })).status).toBe(409);
+    const comments = ((await (await get(immutableDoc.id)).json()) as { comments: ThreadJson[] }).comments;
+    expect(comments.find((thread) => thread.id === acceptedRoot.id)?.body).toBe(acceptedRootBody);
+    expect(comments.find((thread) => thread.id === rejectedRoot.id)?.body).toBe(rejectedRootBody);
+    expect(comments.find((thread) => thread.id === acceptedParent.id)?.replies[0].body).toBe(acceptedReplyBody);
+    expect(comments.find((thread) => thread.id === rejectedParent.id)?.replies[0].body).toBe(rejectedReplyBody);
+  });
+
   it("answers 404 for a reply to an unknown thread and records nothing", async () => {
     actor = carol;
     const { comments: commentsBefore } = (await (await get(docId)).json()) as { comments: ThreadJson[] };

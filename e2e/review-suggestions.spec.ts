@@ -206,6 +206,12 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     });
     const page = alice.page;
     const reply = () => page.locator(`[data-testid="comment-reply"][data-reply-id="${replyId}"]`);
+    const expectReplyEditHidden = async () => {
+      await reply().getByRole("button", { name: "Reply actions" }).click();
+      await expect(page.getByRole("menuitem", { name: "Delete", exact: true })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Edit", exact: true })).toHaveCount(0);
+      await page.keyboard.press("Escape");
+    };
     await expect(reply()).toHaveAttribute("data-state", "pending");
 
     for (const [width, height] of [
@@ -248,6 +254,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
     await expect(page.getByTestId("toast")).toContainText("Accepted suggestion from Copilot");
     await expect(page.getByTestId("toast-action")).toHaveText("Undo");
+    await expectReplyEditHidden();
 
     const comments = (await (await page.request.get(`/api/documents/${docId}/comments`)).json()) as {
       comments: { id: string; replies: { id: string; suggestion: { state: string; source: string; at: string | null } | null }[] }[];
@@ -278,6 +285,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await ensureCommentsOpen(page);
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
+    await expectReplyEditHidden();
   });
 
   test("reply suggestions stay independent in bulk review; outdated replies can be rejected once", async () => {
