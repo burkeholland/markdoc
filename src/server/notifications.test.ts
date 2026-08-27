@@ -193,6 +193,31 @@ describe("notifications", () => {
     model.destroy();
   });
 
+  it("notifies the exact reply author when their suggestion is accepted", async () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, "Some text to improve");
+    const stop = watchDocumentNotifications(doc, "n-doc1");
+    const model = new CommentsModel(doc, ytext);
+    const alice = makeCollabUser(aliceId, "Alice", null, "alice");
+    const bob = makeCollabUser(bobId, "Bob", null, "bob");
+    const threadId = model.add({ from: 0, to: 4, body: "Could this be clearer?", author: alice });
+    const acceptedId = model.reply(threadId, "```suggestion\nThat\n```", alice)!;
+    const rejectedId = model.reply(threadId, "```suggestion\nThis\n```", alice)!;
+
+    expect(model.acceptReplySuggestion(threadId, acceptedId, bob, origin(bobId, "Bob"))).toBe(true);
+    expect(model.rejectReplySuggestion(threadId, rejectedId, bob, origin(bobId, "Bob"))).toBe(true);
+    await until(async () => (await unread("alice")).some((item) => item.kind === "suggestion.accepted" && item.refId === acceptedId));
+    await settle();
+
+    const replyDecisions = (await unread("alice")).filter((item) => item.refId === acceptedId || item.refId === rejectedId);
+    expect(replyDecisions.map((item) => [item.kind, item.refId, item.actorLogin])).toEqual([["suggestion.accepted", acceptedId, "bob"]]);
+
+    stop();
+    model.destroy();
+    doc.destroy();
+  });
+
   it("watches a live document: suggestions accepted or rejected notify their author", async () => {
     const doc = new Y.Doc();
     const ytext = doc.getText("content");
@@ -217,8 +242,9 @@ describe("notifications", () => {
     model.reject(del.id, origin(bobId, "Bob"));
     model.reject(bang.id, origin(bobId, "Bob"));
     model.accept(agentDel.id, origin(bobId, "Bob"));
-    await until(async () => (await unread("alice")).filter((n) => n.kind.startsWith("suggestion.")).length === 3);
-    const items = (await unread("alice")).filter((n) => n.kind.startsWith("suggestion."));
+    const isTrackedSuggestionDecision = (kind: string) => kind === "suggestion.accept" || kind === "suggestion.reject";
+    await until(async () => (await unread("alice")).filter((n) => isTrackedSuggestionDecision(n.kind)).length === 3);
+    const items = (await unread("alice")).filter((n) => isTrackedSuggestionDecision(n.kind));
     expect(items.map((n) => [n.kind, n.refId, n.actorLogin]).sort()).toEqual(
       [
         ["suggestion.accept", ins.id, "bob"],
@@ -237,7 +263,7 @@ describe("notifications", () => {
     const local = model.list().find((s) => s.text === "Ah ")!;
     model.accept(local.id);
     await settle();
-    expect((await unread("alice")).filter((n) => n.kind.startsWith("suggestion."))).toHaveLength(3);
+    expect((await unread("alice")).filter((n) => isTrackedSuggestionDecision(n.kind))).toHaveLength(3);
     stop();
     model.destroy();
   });
