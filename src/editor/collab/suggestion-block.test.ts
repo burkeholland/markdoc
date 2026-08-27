@@ -81,6 +81,7 @@ describe("CommentsModel suggestions", () => {
     const t = model.get(id)!;
     expect(t.suggestionState).toBe("accepted");
     expect(t.suggestionBy).toBe("bob");
+    expect(t.suggestionQuote).toBe("quick brown");
     expect(t.resolved).toBe(true);
     expect(t.resolvedBy).toBe("bob");
     expect(undo.undoStack).toHaveLength(1);
@@ -123,6 +124,7 @@ describe("CommentsModel suggestions", () => {
     expect(thread.replies.find((reply) => reply.id === acceptedId)).toMatchObject({
       suggestionState: "accepted",
       suggestionBy: "bob",
+      suggestionQuote: "quick brown",
     });
     expect(thread.replies.find((reply) => reply.id === pendingId)?.suggestionState).toBeUndefined();
     expect(thread.suggestionState).toBeNull();
@@ -153,7 +155,7 @@ describe("CommentsModel suggestions", () => {
   });
 
   it("re-anchors after each accepted reply so sibling reply suggestions stay pending and Accept all can decide each once", () => {
-    const { ytext, model } = setup("The quick brown fox jumps.");
+    const { ydoc, ytext, model } = setup("The quick brown fox jumps.");
     const id = model.add({ from: 4, to: 15, body: "Could this be clearer?", author: alice });
     const firstId = model.reply(id, "```suggestion\nslow red\n```", alice)!;
     const secondId = model.reply(id, "```suggestion\nswift auburn\n```", alice)!;
@@ -170,6 +172,11 @@ describe("CommentsModel suggestions", () => {
     thread = model.get(id)!;
     expect(ytext.toString()).toBe("The swift auburn fox jumps.");
     expect(thread.replies.map((reply) => reply.suggestionState)).toEqual(["accepted", "accepted"]);
+    expect(thread.replies.map((reply) => reply.suggestionQuote)).toEqual(["quick brown", "slow red"]);
+
+    const reloaded = new CommentsModel(ydoc, ytext);
+    expect(reloaded.get(id)!.replies.map((reply) => reply.suggestionQuote)).toEqual(["quick brown", "slow red"]);
+    reloaded.destroy();
   });
 
   it("keeps a reply suggestion applicable when the root suggestion is accepted first", () => {
@@ -178,9 +185,10 @@ describe("CommentsModel suggestions", () => {
     const replyId = model.reply(id, "Another option.\n\n```suggestion\nswift auburn\n```", alice)!;
 
     expect(model.acceptSuggestion(id, "slow red", bob)).toBe(true);
-    expect(model.get(id)).toMatchObject({ quote: "slow red", suggestionState: "accepted" });
+    expect(model.get(id)).toMatchObject({ quote: "slow red", suggestionState: "accepted", suggestionQuote: "quick brown" });
     expect(model.acceptReplySuggestion(id, replyId, bob)).toBe(true);
     expect(ytext.toString()).toBe("The swift auburn fox jumps.");
-    expect(model.get(id)!.replies[0].suggestionState).toBe("accepted");
+    expect(model.get(id)!.replies[0]).toMatchObject({ suggestionState: "accepted", suggestionQuote: "slow red" });
+    expect(model.get(id)!.suggestionQuote).toBe("quick brown");
   });
 });

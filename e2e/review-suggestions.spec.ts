@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, type User } from "./helpers";
 
 const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
@@ -50,6 +50,23 @@ async function addComment(page: Page, quote: string, body: string): Promise<stri
   const thread = page.getByTestId("comment-thread").filter({ hasText: body }).first();
   await expect(thread).toBeVisible();
   return (await thread.getAttribute("data-thread-id"))!;
+}
+
+async function expectSuggestionTransition(diff: Locator, from: string, to: string) {
+  await expect
+    .poll(() =>
+      diff.evaluate((element) => {
+        let renderedFrom = "";
+        let renderedTo = "";
+        for (const child of element.children) {
+          const value = child.textContent ?? "";
+          if (child.tagName !== "INS") renderedFrom += value;
+          if (child.tagName !== "DEL") renderedTo += value;
+        }
+        return { from: renderedFrom, to: renderedTo };
+      }),
+    )
+    .toEqual({ from, to });
 }
 
 test.describe("review suggestions: ```suggestion blocks in comments, Accept / Reject, agent reviews", () => {
@@ -228,13 +245,18 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect.poll(() => codeText(page), { timeout: 1_000 }).toContain("sales are strong");
     expect(Date.now() - started).toBeLessThan(1_000);
     await expect(reply()).toHaveAttribute("data-state", "accepted");
+    await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
     await expect(page.getByTestId("toast")).toContainText("Accepted suggestion from Copilot");
     await expect(page.getByTestId("toast-action")).toHaveText("Undo");
 
     const comments = (await (await page.request.get(`/api/documents/${docId}/comments`)).json()) as {
-      comments: { id: string; replies: { id: string; suggestion: { state: string; at: string | null } | null }[] }[];
+      comments: { id: string; replies: { id: string; suggestion: { state: string; source: string; at: string | null } | null }[] }[];
     };
-    expect(comments.comments.find((thread) => thread.id === threadId)?.replies.find((item) => item.id === replyId)?.suggestion).toMatchObject({ state: "accepted", at: expect.any(String) });
+    expect(comments.comments.find((thread) => thread.id === threadId)?.replies.find((item) => item.id === replyId)?.suggestion).toMatchObject({
+      state: "accepted",
+      source: "sales are good",
+      at: expect.any(String),
+    });
     const activity = (await (await page.request.get(`/api/documents/${docId}/activity?limit=200`)).json()) as {
       items: { action: string; detail: { replyId?: string; threadId?: string } }[];
     };
@@ -255,6 +277,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await page.reload();
     await ensureCommentsOpen(page);
     await expect(reply()).toHaveAttribute("data-state", "accepted");
+    await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
   });
 
   test("reply suggestions stay independent in bulk review; outdated replies can be rejected once", async () => {
@@ -280,8 +303,18 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect.poll(() => codeText(page)).toContain("Our product is distinctive.");
     await page.getByTestId("comments-tab-open").click();
     const bulkThread = page.locator(`[data-testid="comment-thread"][data-thread-id="${bulkThreadId}"]`);
-    await expect(bulkThread.locator(`[data-reply-id="${first.id}"]`)).toHaveAttribute("data-state", "accepted");
-    await expect(bulkThread.locator(`[data-reply-id="${second.id}"]`)).toHaveAttribute("data-state", "accepted");
+    const firstReply = bulkThread.locator(`[data-reply-id="${first.id}"]`);
+    const secondReply = bulkThread.locator(`[data-reply-id="${second.id}"]`);
+    await expect(firstReply).toHaveAttribute("data-state", "accepted");
+    await expect(secondReply).toHaveAttribute("data-state", "accepted");
+    await expectSuggestionTransition(firstReply.getByTestId("suggestion-diff"), "very unique", "unique");
+    await expectSuggestionTransition(secondReply.getByTestId("suggestion-diff"), "unique", "distinctive");
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await page.getByTestId("comments-tab-open").click();
+    const reloadedBulkThread = page.locator(`[data-testid="comment-thread"][data-thread-id="${bulkThreadId}"]`);
+    await expectSuggestionTransition(reloadedBulkThread.locator(`[data-reply-id="${first.id}"]`).getByTestId("suggestion-diff"), "very unique", "unique");
+    await expectSuggestionTransition(reloadedBulkThread.locator(`[data-reply-id="${second.id}"]`).getByTestId("suggestion-diff"), "unique", "distinctive");
 
     const staleThreadId = await addComment(bob.page, "sales are good", "Can this be stronger?");
     const stale = await mcp<{ id: string }>(page, token, "markdoc_comment", {
@@ -313,6 +346,40 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await page.reload();
     await ensureCommentsOpen(page);
     await expect(page.locator(`[data-testid="comment-reply"][data-reply-id="${stale.id}"]`)).toHaveAttribute("data-state", "rejected");
+  });
+
+  test("an accepted root keeps its original diff while a pending reply follows the advanced anchor", async () => {
+    const docId = await freshDocument();
+    const page = bob.page;
+    await selectTextInRich(page, "sales are good");
+    await page.getByTestId("tb-comment").click();
+    await page.getByTestId("comment-composer").fill("Root option.\n\n```suggestion\nsales are strong\n```");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    const authoredThread = page.getByTestId("comment-thread").filter({ hasText: "Root option." }).first();
+    await expect(authoredThread).toBeVisible();
+    const threadId = (await authoredThread.getAttribute("data-thread-id"))!;
+    const reply = await mcp<{ id: string }>(alice.page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId,
+      body: "Another option.\n\n```suggestion\nsales are excellent\n```",
+    });
+
+    const thread = alice.page.locator(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`);
+    await thread.getByTestId("suggestion-box").first().getByTestId("suggestion-accept-comment").click();
+    await expect.poll(() => codeText(alice.page)).toContain("sales are strong");
+    await alice.page.getByTestId("comments-tab-resolved").click();
+    await expect(thread).toHaveAttribute("data-suggestion", "accepted");
+    const replyCard = thread.locator(`[data-reply-id="${reply.id}"]`);
+    await expect(replyCard).toHaveAttribute("data-state", "pending");
+    await expectSuggestionTransition(thread.getByTestId("suggestion-diff").first(), "sales are good", "sales are strong");
+    await expectSuggestionTransition(replyCard.getByTestId("suggestion-diff"), "sales are strong", "sales are excellent");
+
+    await alice.page.reload();
+    await ensureCommentsOpen(alice.page);
+    const reloaded = alice.page.locator(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`);
+    await expectSuggestionTransition(reloaded.getByTestId("suggestion-diff").first(), "sales are good", "sales are strong");
+    await expectSuggestionTransition(reloaded.locator(`[data-reply-id="${reply.id}"]`).getByTestId("suggestion-diff"), "sales are strong", "sales are excellent");
   });
 
   test("Reject keeps the text; editing the quoted text first marks the suggestion Outdated and disables Accept", async () => {

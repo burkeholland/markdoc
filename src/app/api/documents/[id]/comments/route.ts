@@ -224,7 +224,13 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
         suggestion: (() => {
           const block = parseSuggestionBlock(t.body);
           if (!block) return null;
-          return { text: block.text, state: t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"), by: t.suggestionBy ?? null, at: t.suggestionAt ? new Date(t.suggestionAt).toISOString() : null };
+          return {
+            text: block.text,
+            source: t.suggestionState ? (t.suggestionQuote ?? t.quote) : t.quote,
+            state: t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"),
+            by: t.suggestionBy ?? null,
+            at: t.suggestionAt ? new Date(t.suggestionAt).toISOString() : null,
+          };
         })(),
         reactions: t.reactions,
         replies: t.replies.map((r) => ({
@@ -238,7 +244,13 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
           suggestion: (() => {
             const block = parseSuggestionBlock(r.body);
             if (!block) return null;
-            return { text: block.text, state: r.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"), by: r.suggestionBy ?? null, at: r.suggestionAt ? new Date(r.suggestionAt).toISOString() : null };
+            return {
+              text: block.text,
+              source: r.suggestionState ? (r.suggestionQuote ?? t.quote) : t.quote,
+              state: r.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"),
+              by: r.suggestionBy ?? null,
+              at: r.suggestionAt ? new Date(r.suggestionAt).toISOString() : null,
+            };
           })(),
           reactions: r.reactions,
         })),

@@ -23,6 +23,8 @@ export interface CommentReply {
   suggestionState?: "accepted" | "rejected" | null;
   suggestionBy?: string | null;
   suggestionAt?: number | null;
+  /** Anchored text at decision time, so decided diffs remain stable after the thread advances. */
+  suggestionQuote?: string | null;
 }
 
 /** Durable per-reply decision. The containing Y.Map key is the reply id. */
@@ -94,6 +96,8 @@ export interface CommentThread {
   suggestionState?: "accepted" | "rejected" | null;
   suggestionBy?: string | null;
   suggestionAt?: number | null;
+  /** Anchored text at decision time, so decided diffs remain stable after the thread advances. */
+  suggestionQuote?: string | null;
 }
 
 export const COMMENTS_ORIGIN = { name: "comments" };
@@ -213,13 +217,22 @@ export class CommentsModel {
         ? replies.toArray().map((r) => {
             const reply = readReply(r, byTarget.get(r.id) ?? {});
             const decision = readReplySuggestionDecision(reply.id, replySuggestions?.get(reply.id));
-            return decision ? { ...reply, suggestionState: decision.suggestionState, suggestionBy: decision.suggestionBy, suggestionAt: decision.suggestionAt } : reply;
+            return decision
+              ? {
+                  ...reply,
+                  suggestionState: decision.suggestionState,
+                  suggestionBy: decision.suggestionBy,
+                  suggestionAt: decision.suggestionAt,
+                  suggestionQuote: decision.quote,
+                }
+              : reply;
           })
         : [],
       range: anchor ? resolveAnchor(this.ytext, anchor) : null,
       suggestionState: (map.get("suggestionState") as "accepted" | "rejected" | null) ?? null,
       suggestionBy: (map.get("suggestionBy") as string | null) ?? null,
       suggestionAt: (map.get("suggestionAt") as number | null) ?? null,
+      suggestionQuote: (map.get("suggestionQuote") as string | null) ?? null,
     };
   }
 
@@ -398,6 +411,7 @@ export class CommentsModel {
       map.set("suggestionState", "accepted");
       map.set("suggestionBy", by.id);
       map.set("suggestionAt", Date.now());
+      map.set("suggestionQuote", thread.quote);
       map.set("resolved", true);
       map.set("resolvedBy", by.id);
       map.set("resolvedAt", Date.now());
@@ -417,6 +431,7 @@ export class CommentsModel {
       map.set("suggestionState", "rejected");
       map.set("suggestionBy", by.id);
       map.set("suggestionAt", Date.now());
+      map.set("suggestionQuote", (map.get("quote") as string) ?? "");
     }, origin);
     return true;
   }
