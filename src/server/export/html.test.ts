@@ -1,16 +1,20 @@
 import { describe, expect, it, beforeAll } from "vitest";
+import { eq } from "drizzle-orm";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
 
 const { getDb, schema } = await import("../db");
 const { putAsset } = await import("../assets");
-const { renderDocumentHtml } = await import("./html");
+const { renderDocumentHtml, MAX_INLINE_ASSET_BYTES } = await import("./html");
 const { UnrenderableDocumentError } = await import("@/editor/markdown/renderable");
 
 // Smallest valid PNG (1x1 transparent pixel).
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const PNG = Uint8Array.from(Buffer.from(PNG_B64, "base64"));
+// Distinct bytes standing in for another user's private image.
+const SECRET_PNG_B64 = Buffer.from("PNG-secret-bytes-that-must-not-leak").toString("base64");
+const SECRET_PNG = Uint8Array.from(Buffer.from(SECRET_PNG_B64, "base64"));
 
 const BASE = "https://docs.example.com";
 
@@ -98,6 +102,7 @@ describe("renderDocumentHtml", () => {
 
   describe("inline assets", () => {
     let assetId: string;
+    let foreignAssetId: string;
 
     beforeAll(async () => {
       const db = await getDb();
@@ -105,12 +110,45 @@ describe("renderDocumentHtml", () => {
       await db.insert(schema.documents).values({ id: "export-doc", title: "Export", ownerId: user.id, content: "" });
       const stored = await putAsset({ documentId: "export-doc", userId: user.id, name: "dot.png", mime: "image/png", bytes: PNG });
       assetId = stored.id;
+
+      // Another user's private document with its own image: referencing its id must not leak the bytes.
+      const [other] = await db.insert(schema.users).values({ name: "Other", login: "other", email: "other@example.com" }).returning();
+      await db.insert(schema.documents).values({ id: "secret-doc", title: "Secret", ownerId: other.id, content: "" });
+      const secret = await putAsset({ documentId: "secret-doc", userId: other.id, name: "secret.png", mime: "image/png", bytes: SECRET_PNG });
+      foreignAssetId = secret.id;
     });
 
     it("embeds stored images as data: URIs when inlineAssets is set", async () => {
-      const html = await render(`![dot](/api/assets/${assetId})\n\n![missing](/api/assets/nope)`, { inlineAssets: true });
+      const html = await render(`![dot](/api/assets/${assetId})\n\n![missing](/api/assets/nope)`, { inlineAssets: { documentId: "export-doc" } });
       expect(html).toContain(`<img src="data:image/png;base64,${PNG_B64}" alt="dot">`);
       expect(html).toContain(`<img src="${BASE}/api/assets/nope" alt="missing">`);
+    });
+
+    it("leaves another document's asset as a URL instead of inlining bytes the exporter may not view", async () => {
+      const html = await render(`![mine](/api/assets/${assetId})\n\n![theirs](/api/assets/${foreignAssetId})`, { inlineAssets: { documentId: "export-doc" } });
+      expect(html).toContain(`<img src="data:image/png;base64,${PNG_B64}" alt="mine">`);
+      expect(html).toContain(`<img src="${BASE}/api/assets/${foreignAssetId}" alt="theirs">`);
+      expect(html).not.toContain(SECRET_PNG_B64);
+      // The same id *is* inlined when the owning document exports.
+      const own = await render(`![theirs](/api/assets/${foreignAssetId})`, { inlineAssets: { documentId: "secret-doc" } });
+      expect(own).toContain(`<img src="data:image/png;base64,${SECRET_PNG_B64}" alt="theirs">`);
+    });
+
+    it("stops embedding at the byte budget and keeps the remaining images as URLs", async () => {
+      const db = await getDb();
+      const [user] = await db.select().from(schema.users).where(eq(schema.users.login, "exp"));
+      await db.insert(schema.documents).values({ id: "budget-doc", title: "Budget", ownerId: user.id, content: "" });
+      const blobs = ["a", "b", "c"].map((c) => Uint8Array.from(Buffer.from(c.repeat(100))));
+      const ids: string[] = [];
+      for (const [i, bytes] of blobs.entries()) {
+        ids.push((await putAsset({ documentId: "budget-doc", userId: user.id, name: `${i}.png`, mime: "image/png", bytes })).id);
+      }
+      const markdown = ids.map((id, i) => `![img${i}](/api/assets/${id})`).join("\n\n");
+      const html = await render(markdown, { inlineAssets: { documentId: "budget-doc", maxBytes: 250 } });
+      expect(html).toContain(`<img src="data:image/png;base64,${Buffer.from(blobs[0]).toString("base64")}" alt="img0">`);
+      expect(html).toContain(`<img src="data:image/png;base64,${Buffer.from(blobs[1]).toString("base64")}" alt="img1">`);
+      expect(html).toContain(`<img src="${BASE}/api/assets/${ids[2]}" alt="img2">`);
+      expect(MAX_INLINE_ASSET_BYTES).toBe(64 * 1024 * 1024);
     });
   });
 

@@ -42,7 +42,9 @@ export const GET = handler(async (req: Request, { params }: Params) => {
     body = markdown;
   } else {
     // PDF rendering happens in a headless browser with no session, so its images must be inlined.
-    const html = await renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: download || format === "pdf" });
+    // Inlining is scoped to this document's own assets: the access check above covers the document, not every id its Markdown names.
+    const inlineAssets = download || format === "pdf" ? { documentId: id } : false;
+    const html = await renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets });
     if (format === "html") {
       body = html;
     } else {

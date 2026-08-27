@@ -11,9 +11,12 @@ vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) })
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const { getDb, schema } = await import("@/server/db");
-const { createDocument } = await import("@/server/documents");
+const { createDocument, setDocumentText } = await import("@/server/documents");
+const { putAsset } = await import("@/server/assets");
 const { closePdfBrowser } = await import("@/server/export/pdf");
+const { renderDocumentHtml } = await import("@/server/export/html");
 const { GET } = await import("./[id]/export/route");
+const { GET: assetGET } = await import("../assets/[id]/route");
 const { GET: healthGET } = await import("../health/route");
 
 const MARKDOWN = "# Export Me\n\nA paragraph with **bold**.\n\n- [ ] task\n";
@@ -111,6 +114,70 @@ describe("GET /api/documents/[id]/export", () => {
     } finally {
       actor = saved;
     }
+  });
+
+  describe("asset inlining respects the asset's own document (security)", () => {
+    // Alice owns a private document with an image; Mallory, who cannot see it, names the asset id in her own document.
+    let mallory: { id: string; login: string; name: string; image: null };
+    let malloryDocId: string;
+    let secretDocId: string;
+    let secretAssetId: string;
+    const SECRET_B64 = Buffer.from("alice-secret-png-bytes").toString("base64");
+
+    beforeAll(async () => {
+      const db = await getDb();
+      const alice = actor!;
+      secretDocId = (await createDocument({ ownerId: alice.id, title: "Secret", content: "# Secret\n" })).id;
+      const stored = await putAsset({ documentId: secretDocId, userId: alice.id, name: "secret.png", mime: "image/png", bytes: Uint8Array.from(Buffer.from(SECRET_B64, "base64")) });
+      secretAssetId = stored.id;
+
+      const [user] = await db.insert(schema.users).values({ name: "Mallory", login: "mallory", email: "mallory@example.com" }).returning();
+      mallory = { id: user.id, login: "mallory", name: "Mallory", image: null };
+      malloryDocId = (await createDocument({ ownerId: mallory.id, title: "Mine", content: `![x](/api/assets/${secretAssetId})\n` })).id;
+    });
+
+    const asMallory = async <T>(fn: () => Promise<T>) => {
+      const saved = actor;
+      actor = mallory;
+      try {
+        return await fn();
+      } finally {
+        actor = saved;
+      }
+    };
+
+    it("still refuses the asset itself to someone without access to its document", async () => {
+      const res = await asMallory(() => assetGET(new Request(`http://localhost:3700/api/assets/${secretAssetId}`), { params: Promise.resolve({ id: secretAssetId }) }));
+      expect(res.status).toBe(404);
+    });
+
+    it("does not inline another document's asset into an HTML download; the URL is kept for the reader's own access check", async () => {
+      const res = await asMallory(() => GET(new Request(`http://localhost:3700/api/documents/${malloryDocId}/export?format=html&download=1`), { params: Promise.resolve({ id: malloryDocId }) }));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).not.toContain("data:image");
+      expect(html).not.toContain(SECRET_B64);
+      expect(html).toContain(`<img src="http://localhost:3700/api/assets/${secretAssetId}" alt="x">`);
+    });
+
+    it("takes the same path for PDF (asserted on the intermediate HTML)", async () => {
+      const html = await renderDocumentHtml({ title: "Mine", markdown: `![x](/api/assets/${secretAssetId})\n`, assetBaseUrl: "http://localhost:3700", inlineAssets: { documentId: malloryDocId } });
+      expect(html).not.toContain("data:image");
+      expect(html).toContain(`<img src="http://localhost:3700/api/assets/${secretAssetId}" alt="x">`);
+    });
+
+    it("still inlines the owner's own asset in the owner's export", async () => {
+      // Same owner, but a different document: ownership is per document, not per user.
+      const aliceOtherDocId = (await createDocument({ ownerId: actor!.id, title: "Own", content: `![s](/api/assets/${secretAssetId})\n` })).id;
+      const other = await GET(new Request(`http://localhost:3700/api/documents/${aliceOtherDocId}/export?format=html&download=1`), { params: Promise.resolve({ id: aliceOtherDocId }) });
+      expect(other.status).toBe(200);
+      expect(await other.text()).not.toContain("data:image");
+
+      await setDocumentText(secretDocId, `![s](/api/assets/${secretAssetId})\n`);
+      const own = await GET(new Request(`http://localhost:3700/api/documents/${secretDocId}/export?format=html&download=1`), { params: Promise.resolve({ id: secretDocId }) });
+      expect(own.status).toBe(200);
+      expect(await own.text()).toContain(`<img src="data:image/png;base64,${SECRET_B64}" alt="s">`);
+    });
   });
 
   it("returns a PDF for format=pdf", async () => {
