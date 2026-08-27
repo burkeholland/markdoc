@@ -455,13 +455,46 @@ export function insertHardBreak(): Command {
   };
 }
 
-/** Backspace at the start of a list item lifts it out of the list. */
-export const liftEmptyListItemOnBackspace: Command = (state, dispatch) => {
+/** Backspace at the start of the first list item lifts it out of the list. */
+export const liftFirstListItemOnBackspace: Command = (state, dispatch) => {
   const { $from, empty } = state.selection;
   if (!empty || $from.parentOffset !== 0) return false;
   const item = findParentNode($from, (n) => n.type === schema.nodes.list_item);
-  if (!item || $from.depth !== item.depth + 1 || $from.index(item.depth) !== 0) return false;
+  if (
+    !item ||
+    $from.depth !== item.depth + 1 ||
+    $from.index(item.depth) !== 0 ||
+    $from.index(item.depth - 1) !== 0
+  ) {
+    return false;
+  }
   return liftListItem(schema.nodes.list_item)(state, dispatch);
+};
+
+/**
+ * Backspace in an empty later item removes it and leaves the caret at the end of the previous item.
+ * Lifting would create an empty top-level paragraph that Markdown cannot represent; a subsequent
+ * binding round trip can then join the following paragraph back into the list.
+ */
+export const deleteEmptyLaterListItemOnBackspace: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  if (!empty || $from.parentOffset !== 0 || $from.parent.content.size !== 0) return false;
+  const item = findParentNode($from, (n) => n.type === schema.nodes.list_item);
+  if (
+    !item ||
+    item.node.childCount !== 1 ||
+    $from.depth !== item.depth + 1 ||
+    $from.index(item.depth) !== 0 ||
+    $from.index(item.depth - 1) === 0
+  ) {
+    return false;
+  }
+  if (dispatch) {
+    const tr = state.tr.delete(item.pos, item.pos + item.node.nodeSize);
+    tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(item.pos, tr.doc.content.size)), -1));
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
 };
 
 /* ---------- Leaving blocks with the keyboard (task #415) ---------- */
@@ -615,4 +648,3 @@ export const toggleTaskAtCaret: Command = (state, dispatch) => {
 };
 
 export { NodeSelection, Fragment };
-

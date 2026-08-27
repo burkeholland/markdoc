@@ -28,7 +28,7 @@ import { codePasteGuard } from "./paste-guard";
 import { pathologicalParagraphs } from "./pathological";
 import { codeMarkdownFileDrop } from "./file-drop";
 import type { MarkdownFileDropHandler } from "../prosemirror/file-drop";
-import { markdownEditingKeymap } from "./continue-markup";
+import { createMarkdownEditingKeymap } from "./continue-markup";
 import { markdownTyping } from "./markdown-typing";
 import { remoteCaretInteractions } from "./remote-cursors";
 import type { ImageUploader } from "../prosemirror/images";
@@ -96,7 +96,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     // Enter/Backspace come from markdownEditingKeymap (Enter on an empty `> ` or `- ` line exits the block).
     // pathologicalParagraphs keeps the #115 bracket soup out of the inline parser (seconds per keystroke otherwise).
     markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false, extensions: [pathologicalParagraphs] }),
-    markdownEditingKeymap,
+    createMarkdownEditingKeymap(() => session.undoManager.stopCapturing()),
     codeEditorTheme,
     wrapping.of(EditorView.lineWrapping),
     yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
