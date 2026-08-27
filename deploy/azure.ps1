@@ -232,7 +232,7 @@ if (-not $InfraOnly) {
   $digest = az acr manifest list-metadata `
     --registry $registry `
     --name markdoc `
-    --query "[?contains(tags, '$appVersion')] | [0].digest" `
+    --query "[?tags != null && contains(tags, '$appVersion')] | [0].digest" `
     --output tsv `
     --only-show-errors
   if ($LASTEXITCODE -or $digest -notmatch '^sha256:[0-9a-f]{64}$') { throw "Could not resolve the immutable image digest for $appVersion." }
