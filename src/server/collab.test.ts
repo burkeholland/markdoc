@@ -16,8 +16,8 @@ const { createCollabServer, hydrateDoc, shutdownCollab, TEXT_KEY } = await impor
 const { attachCollab, protectUpgradePath } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
 const { registerCollab } = await import("./collab/registry");
-const { createDocument, removeCollaborator, upsertCollaborator } = await import("./documents");
-const { changeCollaboratorAccess } = await import("./collab/authorization");
+const { createDocument, removeCollaborator, updateDocument, upsertCollaborator } = await import("./documents");
+const { changeCollaboratorAccess, changeLinkAccess } = await import("./collab/authorization");
 
 function waitFor(check: () => boolean, timeout = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -389,6 +389,154 @@ describe("collaboration server", () => {
     await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString().endsWith(" upgraded"));
 
     for (const client of [ownerClient, editorClient, replay, upgraded]) {
+      client.provider.destroy();
+      client.socket.destroy();
+    }
+  });
+
+  it("closes link editors and anonymous viewers when the owner restricts the link; owner and collaborators keep editing", async () => {
+    const db = await getDb();
+    const [owner] = await db.insert(schema.users).values({ name: "Link owner", login: "link-owner", email: "link-owner@example.com" }).returning();
+    const [guest] = await db.insert(schema.users).values({ name: "Link guest", login: "link-guest", email: "link-guest@example.com" }).returning();
+    const [collab] = await db.insert(schema.users).values({ name: "Link collab", login: "link-collab", email: "link-collab@example.com" }).returning();
+    const doc = await createDocument({ ownerId: owner.id, content: "Start" });
+    await updateDocument(doc.id, { linkAccess: "edit" });
+    await upsertCollaborator(doc.id, collab.login!, "editor", owner.id);
+
+    const ownerClient = connect(
+      await signCollabToken({ userId: owner.id, docId: doc.id, role: "owner", name: owner.name!, login: owner.login, avatar: null }),
+      doc.id,
+    );
+    const collabClient = connect(
+      await signCollabToken({ userId: collab.id, docId: doc.id, role: "editor", name: collab.name!, login: collab.login, avatar: null }),
+      doc.id,
+    );
+    // What POST /collab-token mints for a signed-in non-collaborator on an edit link, and for an anonymous visitor.
+    const guestToken = await signCollabToken({ userId: guest.id, docId: doc.id, role: "editor", name: guest.name!, login: guest.login, avatar: null });
+    const guestClient = connect(guestToken, doc.id);
+    const anonId = "anon-link-test";
+    const anonClient = connect(await signCollabToken({ userId: anonId, docId: doc.id, role: "viewer", name: "Anonymous", login: null, avatar: null }), doc.id);
+    await waitFor(() => [ownerClient, collabClient, guestClient, anonClient].every((c) => c.provider.isSynced));
+    expect(guestClient.provider.authorizedScope).toBe("read-write");
+    expect(anonClient.provider.authorizedScope).toBe("readonly");
+
+    guestClient.ydoc.getText(TEXT_KEY).insert(5, " guest");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Start guest" && anonClient.ydoc.getText(TEXT_KEY).toString() === "Start guest");
+
+    const changedAt = Date.now();
+    await changeLinkAccess(doc.id, "private", async () => {
+      await updateDocument(doc.id, { linkAccess: "private" });
+    });
+
+    // The edit accepted before the change is stored; both link visitors are gone within a second.
+    const [afterClose] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterClose.content).toBe("Start guest");
+    expect(afterClose.linkAccess).toBe("private");
+    const linkVisitor = (connection: { context: { userId: string } }) => connection.context.userId === guest.id || connection.context.userId === anonId;
+    await waitFor(() => !hocuspocus.documents.get(doc.id)?.getConnections().some(linkVisitor), 1000);
+    expect(Date.now() - changedAt).toBeLessThan(1000);
+    const remaining = hocuspocus.documents.get(doc.id)!.getConnections();
+    expect(remaining.map((c) => c.context.userId).sort()).toEqual([owner.id, collab.id].sort());
+    expect(remaining.every((c) => !c.readOnly)).toBe(true);
+
+    guestClient.ydoc.getText(TEXT_KEY).insert(guestClient.ydoc.getText(TEXT_KEY).length, " AFTER-REVOKE");
+    await sleep(150);
+    expect(ownerClient.ydoc.getText(TEXT_KEY).toString()).toBe("Start guest");
+    expect(anonClient.ydoc.getText(TEXT_KEY).toString()).toBe("Start guest");
+    const [afterRejectedEdit] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterRejectedEdit.content).toBe("Start guest");
+
+    // A replayed pre-change token is refused too.
+    const replay = connect(guestToken, doc.id);
+    let replayRejected = false;
+    replay.provider.on("authenticationFailed", () => (replayRejected = true));
+    await waitFor(() => replayRejected);
+
+    // Owner and the explicit collaborator were never affected.
+    ownerClient.ydoc.getText(TEXT_KEY).insert(ownerClient.ydoc.getText(TEXT_KEY).length, " owner");
+    await waitFor(() => collabClient.ydoc.getText(TEXT_KEY).toString() === "Start guest owner");
+    collabClient.ydoc.getText(TEXT_KEY).insert(collabClient.ydoc.getText(TEXT_KEY).length, " collab");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Start guest owner collab");
+    expect(anonClient.ydoc.getText(TEXT_KEY).toString()).toBe("Start guest");
+
+    for (const client of [ownerClient, collabClient, guestClient, anonClient, replay]) {
+      client.provider.destroy();
+      client.socket.destroy();
+    }
+  });
+
+  it("downgrades link editors to read-only on edit → view / comment and keeps a collaborator who also used the link", async () => {
+    const db = await getDb();
+    const [owner] = await db.insert(schema.users).values({ name: "Link downgrade owner", login: "link-dg-owner", email: "link-dg-owner@example.com" }).returning();
+    const [guest] = await db.insert(schema.users).values({ name: "Link downgrade guest", login: "link-dg-guest", email: "link-dg-guest@example.com" }).returning();
+    const [collab] = await db.insert(schema.users).values({ name: "Link downgrade collab", login: "link-dg-collab", email: "link-dg-collab@example.com" }).returning();
+    const doc = await createDocument({ ownerId: owner.id, content: "Base" });
+    await updateDocument(doc.id, { linkAccess: "edit" });
+    await upsertCollaborator(doc.id, collab.login!, "editor", owner.id);
+
+    const ownerClient = connect(
+      await signCollabToken({ userId: owner.id, docId: doc.id, role: "owner", name: owner.name!, login: owner.login, avatar: null }),
+      doc.id,
+    );
+    const guestToken = await signCollabToken({ userId: guest.id, docId: doc.id, role: "editor", name: guest.name!, login: guest.login, avatar: null });
+    const guestClient = connect(guestToken, doc.id);
+    // A collaborator who opened the document through the same edit link: access derives from the share, not the link.
+    const collabClient = connect(
+      await signCollabToken({ userId: collab.id, docId: doc.id, role: "editor", name: collab.name!, login: collab.login, avatar: null }),
+      doc.id,
+    );
+    await waitFor(() => [ownerClient, guestClient, collabClient].every((c) => c.provider.isSynced));
+
+    guestClient.ydoc.getText(TEXT_KEY).insert(4, " accepted");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Base accepted");
+    await changeLinkAccess(doc.id, "view", async () => {
+      await updateDocument(doc.id, { linkAccess: "view" });
+    });
+
+    const connectionOf = (id: string) => hocuspocus.documents.get(doc.id)?.getConnections().find((connection) => connection.context.userId === id);
+    expect(connectionOf(guest.id)?.readOnly).toBe(true);
+    expect(connectionOf(guest.id)?.context.role).toBe("viewer");
+    expect(connectionOf(collab.id)?.readOnly).toBe(false);
+    const [afterDowngrade] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterDowngrade.content).toBe("Base accepted");
+
+    guestClient.ydoc.getText(TEXT_KEY).insert(guestClient.ydoc.getText(TEXT_KEY).length, " rejected");
+    await sleep(150);
+    expect(ownerClient.ydoc.getText(TEXT_KEY).toString()).toBe("Base accepted");
+    const [afterRejectedEdit] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    expect(afterRejectedEdit.content).toBe("Base accepted");
+
+    // A replayed pre-change token connects read-only now.
+    const replay = connect(guestToken, doc.id);
+    await waitFor(() => replay.provider.isSynced);
+    expect(replay.provider.authorizedScope).toBe("readonly");
+
+    // Signed-in link visitors stay connected as commenters on a comment link.
+    await changeLinkAccess(doc.id, "comment", async () => {
+      await updateDocument(doc.id, { linkAccess: "comment" });
+    });
+    expect(connectionOf(guest.id)?.readOnly).toBe(true);
+    expect(connectionOf(guest.id)?.context.role).toBe("commenter");
+    const guestConnections = hocuspocus.documents.get(doc.id)!.getConnections().filter((connection) => connection.context.userId === guest.id);
+    expect(guestConnections).toHaveLength(2);
+    expect(guestConnections.every((connection) => connection.readOnly && connection.context.role === "commenter")).toBe(true);
+
+    // They still follow the document live, and the collaborator keeps editing.
+    collabClient.ydoc.getText(TEXT_KEY).insert(collabClient.ydoc.getText(TEXT_KEY).length, " collab");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString() === "Base accepted collab");
+    await waitFor(() => replay.ydoc.getText(TEXT_KEY).toString() === "Base accepted collab");
+
+    // Re-opening the link restores editing for a fresh link session.
+    await changeLinkAccess(doc.id, "edit", async () => {
+      await updateDocument(doc.id, { linkAccess: "edit" });
+    });
+    expect(connectionOf(guest.id)?.readOnly).toBe(false);
+    const reopened = connect(guestToken, doc.id);
+    await waitFor(() => reopened.provider.isSynced);
+    reopened.ydoc.getText(TEXT_KEY).insert(reopened.ydoc.getText(TEXT_KEY).length, " reopened");
+    await waitFor(() => ownerClient.ydoc.getText(TEXT_KEY).toString().endsWith(" reopened"));
+
+    for (const client of [ownerClient, guestClient, collabClient, replay, reopened]) {
       client.provider.destroy();
       client.socket.destroy();
     }

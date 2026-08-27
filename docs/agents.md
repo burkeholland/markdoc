@@ -254,7 +254,7 @@ The *Access* column is the minimum role on the document: **view** (owner, any co
 | `POST /api/documents` | `{ title?, content?, template? }` | signed in | Create (`201`). `title` is at most **200 characters** (the limit for every document title; longer → `400`). `template` is an id from `GET /api/templates`; it fills `title` and `content` when they are omitted (`{{date}}` → today, `{{user}}` → your login). Unknown id → `400`. |
 | `GET /api/templates` | | signed in | `{ templates: [{ id, name, description }] }`: `blank`, `meeting-notes`, `project-readme`, `design-doc`, `weekly-status`, `blog-post`, `decision-record`, `checklist`. |
 | `GET /api/documents/:id` | | view | `{ document, role }`: title, storage, link access, timestamps and your role. |
-| `PATCH /api/documents/:id` | `{ title? }`, `{ linkAccess?: private \| view \| comment \| edit }` | edit (`linkAccess`: own) | Rename, or change who a link admits. |
+| `PATCH /api/documents/:id` | `{ title? }`, `{ linkAccess?: private \| view \| comment \| edit }` | edit (`linkAccess`: own) | Rename, or change who a link admits. A `linkAccess` change also reaches everyone who is in the document *because of the link* right now (see [Sharing and GitHub](#sharing-and-github)). |
 | `DELETE /api/documents/:id` | `?permanent=1` | own | Move to the **trash**: it vanishes from lists, search and every route (`404`), connected editors are sent back to the dashboard, and it is purged after **30 days**. `permanent=1` deletes immediately (also for documents already in the trash). |
 | `POST /api/documents/:id/restore` | | own | Take the document out of the trash. Not in the trash → `409 { error: "Document is not in the trash" }` (nothing changed). |
 | `POST /api/documents/:id/duplicate` | | view | Make a copy: `201 { id, title }`. The copy is yours, titled *Copy of …*, holds the current clean text with referenced images copied, is stored in Markdoc (no GitHub link), has no collaborators and one version *Copied from …*. |
@@ -353,6 +353,8 @@ const ok = expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(
 | `GET /api/github/gists`, `GET /api/github/repos`, `GET /api/github/repos/:owner/:repo/branches`, `GET /api/github/repos/:owner/:repo/files?ref=<branch>` | | signed in | Browse what the signed-in GitHub account can import from. |
 
 Sharing a document with an audience: `/p/:id` is the read-only **reader view** (clean text, table of contents, reading time, download menu, no editor chrome); it opens for anyone when link access is not *Restricted*, while `/d/:id` is the editor.
+
+Access changes are authoritative for live sessions, not just for the next open. Removing or downgrading a collaborator, and changing link access (`PATCH /api/documents/:id { linkAccess }`), re-resolves every affected connection within about a second: edits they sent before the change are stored, later ones are dropped. Closing a link (*Restricted*) disconnects everyone who was in the document through the link — signed-in non-collaborators and anonymous readers alike — with the editor's "access changed" state; downgrading it (*edit* → *view* / *comment*) leaves them connected read-only. The owner and explicit collaborators are never affected by a link change.
 
 ### Account and notifications
 
