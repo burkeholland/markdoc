@@ -439,7 +439,7 @@ function Composer({
     }
   };
   return (
-    <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
+    <div className="@container flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
       <Popover open={open} onOpenChange={(o) => !o && setTrigger(null)}>
         <PopoverAnchor asChild>
           <textarea
@@ -565,26 +565,28 @@ function Composer({
         </span>
         <span>@mention · Enter sends · Shift+Enter newline</span>
       </div>
-      <div className="flex items-center justify-end gap-2">
+      {/* One row, single-line labels: below ~21rem of composer width (the 340 px panel) "Suggest a change"
+          is icon-only — the tooltip and aria-label carry the name — so the three buttons never wrap. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         {quote !== undefined && (
           <button
             type="button"
-            className="btn btn-ghost btn-sm mr-auto gap-1.5"
+            className="btn btn-ghost btn-sm mr-auto min-w-8 gap-1.5 whitespace-nowrap px-2 @min-[21rem]:px-3"
             onClick={insertSuggestion}
             disabled={parseSuggestionBlock(value) !== null}
             title="Suggest a change (Ctrl+Shift+S)"
             aria-label="Suggest a change"
             data-testid="comment-suggest-change"
           >
-            <Wand2 size={13} /> Suggest a change
+            <Wand2 size={13} /> <span className="hidden @min-[21rem]:inline">Suggest a change</span>
           </button>
         )}
         {onCancel && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
+          <button type="button" className="btn btn-ghost btn-sm whitespace-nowrap" onClick={onCancel}>
             Cancel
           </button>
         )}
-        <button type="button" className="btn btn-primary btn-sm" disabled={!value.trim() || busy} onClick={() => void submit()} data-testid="comment-submit">
+        <button type="button" className="btn btn-primary btn-sm whitespace-nowrap" disabled={!value.trim() || busy} onClick={() => void submit()} data-testid="comment-submit">
           {submitLabel}
         </button>
       </div>

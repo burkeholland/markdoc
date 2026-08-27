@@ -117,6 +117,55 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(alice.page.getByTestId("comments-tab-resolved")).toContainText("1");
   });
 
+  test("the composer's Suggest a change / Cancel / Comment sit on one row with single-line labels at every panel width", async () => {
+    await freshDocument();
+    const page = bob.page;
+    const original = page.viewportSize()!;
+    try {
+      // 1280 and 1024 show the 340 px side panel; 800 is the tablet overlay (360 px). The label is icon-only in
+      // all three (the container query shows it again from 21rem of composer width, e.g. the phone sheet).
+      for (const [width, height] of [
+        [1280, 800],
+        [1024, 768],
+        [800, 600],
+      ] as const) {
+        await page.setViewportSize({ width, height });
+        await ensureCommentsOpen(page);
+        await selectTextInRich(page, "very unique");
+        await page.getByTestId("tb-comment").click();
+        const composer = page.getByTestId("comment-composer");
+        await expect(composer).toBeFocused();
+        const suggest = page.getByTestId("comment-suggest-change");
+        await expect(suggest).toBeVisible();
+        const row = suggest.locator("xpath=..");
+        const buttons = row.locator("button");
+        await expect(buttons).toHaveCount(3);
+        const boxes = [];
+        for (const b of await buttons.all()) {
+          const box = (await b.boundingBox())!;
+          const { scrollHeight, clientHeight, label } = await b.evaluate((el) => ({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, label: el.textContent?.trim() }));
+          boxes.push({ ...box, scrollHeight, clientHeight, label });
+        }
+        for (const box of boxes) {
+          // One line of btn-sm: 32 px, and nothing wrapped inside it.
+          expect(box.height, `${width}px: ${box.label} height`).toBeLessThanOrEqual(32);
+          expect(box.scrollHeight, `${width}px: ${box.label} overflows`).toBeLessThanOrEqual(box.clientHeight);
+          expect(Math.abs(box.y - boxes[0].y), `${width}px: ${box.label} on the same row`).toBeLessThanOrEqual(2);
+        }
+        // Still the real button: the tooltip and name carry the label when the row is too narrow for the text.
+        await expect(suggest).toHaveAttribute("aria-label", "Suggest a change");
+        await expect(suggest).toHaveAttribute("title", "Suggest a change (Ctrl+Shift+S)");
+        await suggest.click();
+        await expect(composer).toHaveValue("```suggestion\nvery unique\n```");
+        await expect(suggest).toBeDisabled();
+        await page.keyboard.press("Escape");
+        await expect(composer).toHaveCount(0);
+      }
+    } finally {
+      await page.setViewportSize(original);
+    }
+  });
+
   test("Reject keeps the text; editing the quoted text first marks the suggestion Outdated and disables Accept", async () => {
     await freshDocument();
     const page = alice.page;
