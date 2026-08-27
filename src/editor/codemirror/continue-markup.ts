@@ -38,10 +38,22 @@ export const exitOrContinueMarkup: StateCommand = (target) => {
   return continueMarkup(target);
 };
 
+/** Starts a new undo step before Markdown-specific or fallback Backspace handling. */
+export function isolatedMarkdownBackspace(beforeBackspace: () => void = () => {}): StateCommand {
+  return (target) => {
+    beforeBackspace();
+    return deleteMarkupBackward(target);
+  };
+}
+
 /** Replaces lang-markdown's built-in keymap (`addKeymap: false`) with the same precedence. */
-export const markdownEditingKeymap = Prec.high(
-  keymap.of([
-    { key: "Enter", run: exitOrContinueMarkup },
-    { key: "Backspace", run: deleteMarkupBackward },
-  ]),
-);
+export function createMarkdownEditingKeymap(beforeBackspace: () => void = () => {}) {
+  return Prec.high(
+    keymap.of([
+      { key: "Enter", run: exitOrContinueMarkup },
+      { key: "Backspace", run: isolatedMarkdownBackspace(beforeBackspace) },
+    ]),
+  );
+}
+
+export const markdownEditingKeymap = createMarkdownEditingKeymap();

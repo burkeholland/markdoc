@@ -26,7 +26,8 @@ import {
   sinkListItem,
   liftListItem,
   insertHardBreak,
-  liftEmptyListItemOnBackspace,
+  liftFirstListItemOnBackspace,
+  deleteEmptyLaterListItemOnBackspace,
   goToNextCell,
   addRowBefore,
   addRowAfter,
@@ -225,6 +226,19 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
   // Shift+Enter: a hard break where Markdown has one (paragraphs, list items, quotes, cells);
   // headings cannot hold a line break, so there it acts like Enter.
   const lineBreak = chainCommands(exitCode, insertHardBreak(), enter);
+  const backspace = chainCommands(
+    deleteEmptyTableOnBackspace,
+    liftFirstListItemOnBackspace,
+    deleteEmptyLaterListItemOnBackspace,
+    liftFirstQuoteParagraphOnBackspace,
+    codeBlockToParagraphOnBackspace,
+    headingToParagraphOnBackspace,
+    baseKeymap.Backspace,
+  );
+  const isolatedBackspace: Command = (state, dispatch, view) => {
+    session.undoManager.stopCapturing();
+    return backspace(state, dispatch, view);
+  };
 
   const shortcuts = keymap({
     "Mod-z": undo,
@@ -270,16 +284,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     // through to the browser and moved focus out of the editor — task #437).
     Tab: guard(chainCommands(goToNextCell(1), addRowOnEnterAtEnd, sinkListItem(schema.nodes.list_item))),
     "Shift-Tab": guard(chainCommands(goToNextCell(-1), liftListItem(schema.nodes.list_item))),
-    Backspace: guard(
-      chainCommands(
-        deleteEmptyTableOnBackspace,
-        liftEmptyListItemOnBackspace,
-        liftFirstQuoteParagraphOnBackspace,
-        codeBlockToParagraphOnBackspace,
-        headingToParagraphOnBackspace,
-        baseKeymap.Backspace,
-      ),
-    ),
+    Backspace: guard(isolatedBackspace),
   });
 
   const guardedBase: Record<string, Command> = {};
