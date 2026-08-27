@@ -57,6 +57,7 @@ COPY --from=build /app/public ./public
 # Drizzle migrations run on startup from ./drizzle (DRIZZLE_MIGRATIONS_DIR overrides).
 COPY --from=build /app/drizzle ./drizzle
 COPY --from=build /app/next.config.ts ./next.config.ts
+COPY --from=build /app/scripts/lib/dev-origins.mjs ./scripts/lib/dev-origins.mjs
 # Run as the unprivileged user that ships with the image; .data is where PGlite writes when no
 # DATABASE_URL is given (mount a volume there to keep it).
 RUN mkdir -p /app/.data && chown -R node:node /app
