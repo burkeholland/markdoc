@@ -171,7 +171,31 @@ function closesFence(line: string, fence: string): boolean {
  * to its heading text. Linear in the input and stops once `max` characters are collected.
  */
 export function excerptOf(markdown: string, max = 160): string {
-  if (!markdown) return "";
+  return collectExcerpt(markdown, max).text;
+}
+
+/**
+ * {@link excerptOf} computed from only the first characters of a document, as read with a bounded
+ * `left(content, n)` instead of the whole column. `truncated` says whether `prefix` is cut short.
+ * Returns null when the prefix is not enough to know the excerpt for certain: the partial last line
+ * is dropped, and the result is trusted only if the excerpt filled up before running out of lines
+ * (the full function would have stopped at the same point). Otherwise the caller must read the
+ * whole text. A prefix that is not truncated is the whole document and is always conclusive.
+ */
+export function excerptOfPrefix(prefix: string, truncated: boolean, max = 160): string | null {
+  if (!truncated) return excerptOf(prefix, max);
+  const complete = prefix.slice(0, prefix.lastIndexOf("\n") + 1);
+  const lines = complete.split("\n");
+  let first = 0;
+  while (first < lines.length && lines[first].trim() === "") first++;
+  // Front matter that closes beyond the prefix would be read as prose here and skipped by the full text.
+  if (lines[first]?.trim() === "---" && afterFrontMatter(lines) === 0) return null;
+  const { text, saturated } = collectExcerpt(complete, max);
+  return saturated ? text : null;
+}
+
+function collectExcerpt(markdown: string, max: number): { text: string; saturated: boolean } {
+  if (!markdown) return { text: "", saturated: false };
   const lines = markdown.split("\n");
   let out = "";
   let headingsOnly = "";
@@ -197,7 +221,8 @@ export function excerptOf(markdown: string, max = 160): string {
     }
     out += (out ? " " : "") + t;
   }
-  return (out || headingsOnly).slice(0, max).trim();
+  // Once `out` holds `max` characters the remaining lines cannot change the result.
+  return { text: (out || headingsOnly).slice(0, max).trim(), saturated: out.length >= max };
 }
 
 function countSentences(text: string): number {

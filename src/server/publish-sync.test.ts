@@ -43,7 +43,7 @@ vi.mock("@/server/documents", async (importOriginal) => {
 });
 
 const { getDb, schema } = await import("@/server/db");
-const { createDocument, updateDocument, getDocumentAccess, listVersions } = await import("@/server/documents");
+const { createDocument, updateDocument, getDocumentAccess, getPublishedContent, listVersions } = await import("@/server/documents");
 const getDocument = async (id: string) => (await getDocumentAccess(id, user))?.doc ?? null;
 const { readLiveText, replaceLiveText } = await import("@/server/livedoc");
 const { syncStatus, pullDocument, publishDocument, mergeTexts, clearSyncCache } = await import("@/server/publish");
@@ -162,7 +162,7 @@ describe("pullDocument", () => {
     expect(r.status).toBe("in-sync");
     expect((await readLiveText(doc.id)).text).toBe(REMOTE);
     const after = (await getDocument(doc.id))!;
-    expect(after.publishedContent).toBe(REMOTE);
+    expect(await getPublishedContent(doc.id)).toBe(REMOTE);
     expect(after.githubSha).toBe("sha-5");
     expect((await listVersions(doc.id))[0].title).toBe("Pulled from GitHub");
   });
@@ -184,7 +184,7 @@ describe("pullDocument", () => {
     expect(text).not.toContain("<<<<<<<");
     expect((await listVersions(doc.id))[0].title).toBe("Merged from GitHub");
     const after = (await getDocument(doc.id))!;
-    expect(after.publishedContent).toBe(REMOTE);
+    expect(await getPublishedContent(doc.id)).toBe(REMOTE);
     expect((await syncStatus(after, user, { fresh: true })).status).toBe("local-ahead");
   });
   it("reports conflicts with markers when the same line changed", async () => {
