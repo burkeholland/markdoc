@@ -1,0 +1,1 @@
+CREATE INDEX "collaborator_login_idx" ON "collaborator" USING btree ("login");

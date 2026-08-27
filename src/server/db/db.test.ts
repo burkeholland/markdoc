@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
@@ -29,5 +29,14 @@ describe("database", () => {
   it("returns the same instance for repeated calls", async () => {
     const mod = await import("./index");
     expect(await mod.getDb()).toBe(db);
+  });
+
+  it("indexes collaborator by login for login-first lookups", async () => {
+    const rows = await db.execute<{ indexdef: string }>(
+      sql`select indexdef from pg_indexes where tablename = 'collaborator' and indexname = 'collaborator_login_idx'`,
+    );
+    const list = Array.isArray(rows) ? rows : rows.rows;
+    expect(list).toHaveLength(1);
+    expect(list[0].indexdef).toMatch(/\("login"\)|\(login\)/);
   });
 });
