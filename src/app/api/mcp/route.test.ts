@@ -1,9 +1,12 @@
+import { createServer, type Server } from "node:http";
 import { describe, expect, it, beforeAll, vi } from "vitest";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
 delete process.env.MARKDOC_URL;
+delete process.env.MARKDOC_INTERNAL_URL;
+process.env.PORT = "3700";
 
 // Same stand-ins as the other API route tests: the caller is resolved through next-auth and
 // `next/headers`. Here the token travels in `requestHeaders` so the real resolver sees it.
@@ -16,6 +19,7 @@ const { getDb, schema } = await import("@/server/db");
 const { createApiToken, listApiTokens } = await import("@/server/tokens");
 const { GET, POST, DELETE, mcpActivityIn } = await import("./route");
 const { listToolNames } = await import("../../../../mcp/tools.mjs");
+const { mcpRestOrigin } = await import("@/server/mcp-origin");
 
 const URL_ = "http://192.168.0.10:3700/api/mcp";
 const MCP_ACCEPT = "application/json, text/event-stream";
@@ -30,6 +34,17 @@ const call = (method: "GET" | "POST" | "DELETE", init: { headers?: Record<string
 };
 const rpc = (method: string, params: unknown = {}, id: number | null = 1) => ({ jsonrpc: "2.0", id, method, params });
 const bearer = (t: string) => ({ Authorization: ["Bearer", t].join(" ") });
+const listen = (server: Server) =>
+  new Promise<number>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      if (!address || typeof address === "string") reject(new Error("Expected an IP listener"));
+      else resolve(address.port);
+    });
+  });
+const close = (server: Server) => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 
 beforeAll(async () => {
   const db = await getDb();
@@ -95,6 +110,43 @@ describe("/api/mcp records MCP activity on the token (Settings checklist)", () =
 });
 
 describe("/api/mcp", () => {
+  it.each(["development", "production"] as const)("uses a loopback callback when canonical origins are absent in %s", (nodeEnv) => {
+    expect(mcpRestOrigin({ NODE_ENV: nodeEnv, PORT: "3812" })).toBe("http://127.0.0.1:3812");
+  });
+
+  it("accepts configured http(s) origins and gives the internal origin precedence", () => {
+    expect(mcpRestOrigin({ MARKDOC_URL: "https://public.example" })).toBe("https://public.example");
+    expect(mcpRestOrigin({ MARKDOC_INTERNAL_URL: "http://markdoc.internal:8080", MARKDOC_URL: "https://public.example" })).toBe("http://markdoc.internal:8080");
+  });
+
+  it.each([
+    ["MARKDOC_INTERNAL_URL", "file:///tmp/markdoc"],
+    ["MARKDOC_INTERNAL_URL", "http://markdoc.internal/base"],
+    ["MARKDOC_URL", "https://user@public.example"],
+    ["MARKDOC_URL", "https://public.example?proxy=1"],
+    ["MARKDOC_URL", "https://public.example#proxy"],
+  ] as const)("rejects unsafe %s value %s", (variable, value) => {
+    expect(() => mcpRestOrigin({ [variable]: value })).toThrow(new RegExp(`${variable} must be an http\\(s\\) origin`));
+  });
+
+  it("fails closed before fetch when a configured callback origin is invalid", async () => {
+    process.env.MARKDOC_INTERNAL_URL = "http://trusted.example/not-an-origin";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await call("POST", {
+        headers: { "Content-Type": "application/json", Accept: MCP_ACCEPT, ...bearer(token) },
+        body: rpc("tools/call", { name: "markdoc_whoami", arguments: {} }),
+      });
+      expect(res.status).toBe(500);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+      fetchSpy.mockRestore();
+      delete process.env.MARKDOC_INTERNAL_URL;
+    }
+  });
+
   it("GET without MCP headers answers a small JSON card (no auth needed)", async () => {
     const res = await call("GET");
     expect(res.status).toBe(200);
@@ -165,7 +217,7 @@ describe("/api/mcp", () => {
     expect(body.result.capabilities.tools).toBeDefined();
   });
 
-  it("tool calls go back to this server's own origin with the caller's token", async () => {
+  it("tool calls without canonical configuration use the loopback PORT with the caller's token", async () => {
     const seen: { url: string; auth: string | null }[] = [];
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       seen.push({ url: String(input), auth: new Headers(init?.headers).get("authorization") });
@@ -180,9 +232,89 @@ describe("/api/mcp", () => {
       const body = (await res.json()) as { result: { content: { type: string; text: string }[]; isError?: boolean } };
       expect(body.result.isError).toBeFalsy();
       expect(body.result.content[0].text).toContain('via agent "Copilot CLI"');
-      expect(seen).toEqual([{ url: "http://192.168.0.10:3700/api/me", auth: ["Bearer", token].join(" ") }]);
+      expect(seen).toEqual([{ url: "http://127.0.0.1:3700/api/me", auth: ["Bearer", token].join(" ") }]);
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  it("host and forwarding headers cannot redirect read or write tools from the configured origin", async () => {
+    process.env.MARKDOC_INTERNAL_URL = "https://markdoc.internal:8443";
+    const seen: { url: string; method: string; auth: string | null }[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      seen.push({ url, method: init?.method ?? "GET", auth: new Headers(init?.headers).get("authorization") });
+      const data = url.endsWith("/api/me")
+        ? { user: { id: "u1", login: "mia", name: "Mia" }, agent: "Copilot CLI" }
+        : { document: { id: "d1", title: "Trusted" } };
+      return new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
+    });
+    const hostile = {
+      Host: "ignored-host.invalid:9999",
+      "X-Forwarded-Host": "public.example:9443",
+      "X-Forwarded-Proto": "https",
+      Forwarded: 'for=192.0.2.1;host="forwarded.invalid:8888";proto=http',
+      "Content-Type": "application/json",
+      Accept: MCP_ACCEPT,
+      ...bearer(token),
+    };
+    try {
+      const read = await call("POST", { headers: hostile, body: rpc("tools/call", { name: "markdoc_whoami", arguments: {} }) });
+      const write = await call("POST", {
+        headers: hostile,
+        body: rpc("tools/call", { name: "markdoc_create_document", arguments: { title: "Trusted", content: "# Trusted" } }),
+      });
+      expect(read.status).toBe(200);
+      expect(write.status).toBe(200);
+      const readBody = (await read.json()) as { result: { content: { text: string }[] } };
+      const writeBody = (await write.json()) as { result: { content: { text: string }[]; structuredContent: { url: string } } };
+      expect(readBody.result.content[0].text).toContain("Server: https://public.example:9443");
+      expect(writeBody.result.content[0].text).toContain("https://public.example:9443/d/d1");
+      expect(writeBody.result.structuredContent.url).toBe("https://public.example:9443/d/d1");
+      expect(seen).toEqual([
+        { url: "https://markdoc.internal:8443/api/me", method: "GET", auth: ["Bearer", token].join(" ") },
+        { url: "https://markdoc.internal:8443/api/documents", method: "POST", auth: ["Bearer", token].join(" ") },
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+      delete process.env.MARKDOC_INTERNAL_URL;
+    }
+  });
+
+  it("sends no request to a hostile forwarded host through the real network stack", async () => {
+    let captureRequests = 0;
+    let trustedRequests = 0;
+    const capture = createServer((_req, res) => {
+      captureRequests++;
+      res.writeHead(500).end();
+    });
+    const trusted = createServer((req, res) => {
+      trustedRequests++;
+      expect(req.url).toBe("/api/me");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ user: { id: "u1", login: "mia", name: "Mia" }, agent: "Copilot CLI" }));
+    });
+    const [capturePort, trustedPort] = await Promise.all([listen(capture), listen(trusted)]);
+    process.env.MARKDOC_INTERNAL_URL = `http://127.0.0.1:${trustedPort}`;
+    try {
+      const res = await call("POST", {
+        headers: {
+          Host: `127.0.0.1:${capturePort}`,
+          "X-Forwarded-Host": `127.0.0.1:${capturePort}`,
+          "X-Forwarded-Proto": "http",
+          Forwarded: `for=192.0.2.1;host="127.0.0.1:${capturePort}";proto=http`,
+          "Content-Type": "application/json",
+          Accept: MCP_ACCEPT,
+          ...bearer(token),
+        },
+        body: rpc("tools/call", { name: "markdoc_whoami", arguments: {} }),
+      });
+      expect(res.status).toBe(200);
+      expect(trustedRequests).toBe(1);
+      expect(captureRequests).toBe(0);
+    } finally {
+      delete process.env.MARKDOC_INTERNAL_URL;
+      await Promise.all([close(capture), close(trusted)]);
     }
   });
 });

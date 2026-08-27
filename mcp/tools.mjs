@@ -36,12 +36,13 @@ export const ADDITIVE = Object.freeze({ readOnlyHint: false, destructiveHint: fa
 export const DESTRUCTIVE = Object.freeze({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
 
 /**
- * A small REST client: `{ baseUrl, request, get, post, put, patch, delete }` over fetch with the
- * base URL and the bearer token. `fetch` lets the HTTP route (or a test) substitute the implementation.
- * @param {{ baseUrl: string, token: string, fetch?: typeof globalThis.fetch }} options
+ * A small REST client over fetch with a private callback base, a public link base, and the bearer
+ * token. `fetch` lets the HTTP route (or a test) substitute the implementation.
+ * @param {{ baseUrl: string, publicUrl?: string, token: string, fetch?: typeof globalThis.fetch }} options
  */
-export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fetch }) {
+export function createClient({ baseUrl, publicUrl = baseUrl, token, fetch: fetchImpl = globalThis.fetch }) {
   const base = baseUrl.replace(/\/$/, "");
+  const publicBase = publicUrl.replace(/\/$/, "");
   const authorization = ["Bearer", token].join(" ");
   async function request(method, path, body) {
     const res = await fetchImpl(base + path, {
@@ -68,6 +69,7 @@ export function createClient({ baseUrl, token, fetch: fetchImpl = globalThis.fet
   }
   return {
     baseUrl: base,
+    publicUrl: publicBase,
     request,
     get: (path) => request("GET", path),
     post: (path, body) => request("POST", path, body),
@@ -137,7 +139,7 @@ export function registerTools(server, client) {
     server.registerTool(name, config, handler);
     names.push(name);
   };
-  const baseUrl = client?.baseUrl ?? "";
+  const baseUrl = client?.publicUrl ?? client?.baseUrl ?? "";
   const api = (method, path, body) => client.request(method, path, body);
   const docUrl = (id) => `${baseUrl}/d/${id}`;
 
