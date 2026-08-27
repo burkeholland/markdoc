@@ -391,7 +391,7 @@ resource postgresSetup 'Microsoft.Compute/virtualMachines/extensions@2024-03-01'
     typeHandlerVersion: '2.1'
     autoUpgradeMinorVersion: true
     protectedSettings: {
-      commandToExecute: 'bash -c "echo ${base64(postgresSetupScript)} | base64 -d | bash"'
+      commandToExecute: 'bash -c "echo ${base64(postgresSetupScript)} | base64 -d | tr -d \'\\r\' | bash"'
     }
   }
   dependsOn: [
