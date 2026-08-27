@@ -1,4 +1,4 @@
-# Idempotent start of Burke's live test server (http://localhost:3000).
+# Idempotent start of Burke's live test server (stable hostname; http://SURF:3000 on this machine).
 # - If /api/health already answers 200: exit 0, touch nothing.
 # - Otherwise: kill stale node processes from the live worktree, delete .next,
 #   start `npm run dev` hidden (via run-live.cmd) with output appended to the log, wait for ok:true,db:true.
@@ -24,11 +24,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 if (-not $Root) { $Root = Get-LiveRoot }
 if (-not $LogPath) { $LogPath = Get-LiveLogPath -Root $Root }
+$liveUrl = Get-LiveAccessUrl -Port $Port
 
 if (-not $Restart) {
   $health = Get-LiveHealth -Port $Port
   if ($health) {
-    Write-Step "already healthy on :$Port (db=$($health.db) collab=$($health.collab)); nothing to do"
+    Write-Step "already healthy at $liveUrl (db=$($health.db) collab=$($health.collab)); nothing to do"
     exit 0
   }
 }
@@ -63,7 +64,7 @@ $result = Wait-LiveStartup -Port $Port -TimeoutSec $TimeoutSec -MinWaitSec $MinW
 if ($result.Healthy) {
   $health = $result.Health
   $pids = @(Get-LiveProcesses -Root $Root | ForEach-Object { $_.ProcessId }) -join ','
-  Write-Step "healthy on :$Port after $($result.Elapsed)s (db=$($health.db) collab=$($health.collab)) node PIDs: $pids"
+  Write-Step "healthy at $liveUrl after $($result.Elapsed)s (db=$($health.db) collab=$($health.collab)) node PIDs: $pids"
   exit 0
 }
 
