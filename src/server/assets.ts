@@ -58,6 +58,8 @@ export interface AssetContent {
 export interface AssetStore {
   put(input: PutAssetInput): Promise<StoredAsset>;
   get(id: string): Promise<AssetContent | null>;
+  /** The asset only if it belongs to `documentId`; an id owned by another document is `null`, as if missing. */
+  getForDocument(documentId: string, id: string): Promise<AssetContent | null>;
 }
 
 export function assetUrl(id: string): string {
@@ -129,6 +131,16 @@ const dbStore: AssetStore = {
     if (!row) return null;
     return { mime: row.mime, bytes: row.data, size: row.size, documentId: row.documentId, name: row.name };
   },
+
+  async getForDocument(documentId, id) {
+    const db = await getDb();
+    const [row] = await db
+      .select()
+      .from(schema.assets)
+      .where(and(eq(schema.assets.id, id), eq(schema.assets.documentId, documentId)));
+    if (!row) return null;
+    return { mime: row.mime, bytes: row.data, size: row.size, documentId: row.documentId, name: row.name };
+  },
 };
 
 let store: AssetStore = dbStore;
@@ -145,4 +157,13 @@ export function putAsset(input: PutAssetInput): Promise<StoredAsset> {
 
 export function getAsset(id: string): Promise<AssetContent | null> {
   return store.get(id);
+}
+
+/**
+ * Read an asset only if `documentId` owns it. Use this wherever access has been checked on the
+ * document rather than on the asset (export inlining), so a Markdown body that names another
+ * document's `/api/assets/<id>` cannot pull in bytes its author may not view.
+ */
+export function getDocumentAsset(documentId: string, id: string): Promise<AssetContent | null> {
+  return store.getForDocument(documentId, id);
 }

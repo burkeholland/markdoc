@@ -1,18 +1,28 @@
 import { createHash } from "node:crypto";
-import { getAsset } from "@/server/assets";
+import { getDocumentAsset } from "@/server/assets";
 import { findUnrenderable, UnrenderableDocumentError } from "@/editor/markdown/renderable";
 import { type RenderedHeading } from "./render-markdown";
 import { renderOffThread, RenderTimeoutError, RENDER_TIMEOUT_MS } from "./render-pool";
 
 export type { RenderedHeading };
 
+/** Total asset bytes one render may embed as `data:` URIs; images past the budget keep their URL. */
+export const MAX_INLINE_ASSET_BYTES = 64 * 1024 * 1024;
+
+export interface InlineAssetsOptions {
+  /** Only assets this document owns are embedded; another document's ids stay absolute URLs (its own access check governs them). */
+  documentId: string;
+  /** Byte budget for embedded assets; defaults to MAX_INLINE_ASSET_BYTES. */
+  maxBytes?: number;
+}
+
 export interface RenderDocumentHtmlOptions {
   title: string;
   markdown: string;
   /** Origin (and optional base path) that relative `/api/assets/<id>` URLs are resolved against. */
   assetBaseUrl: string;
-  /** Embed images stored as document assets as `data:` URIs so the file works offline. */
-  inlineAssets?: boolean;
+  /** Embed images stored as the document's own assets as `data:` URIs so the file works offline. */
+  inlineAssets?: InlineAssetsOptions | false;
   /** Parse budget; the render is abandoned (worker terminated) and `UnrenderableDocumentError` thrown past it. */
   timeoutMs?: number;
 }
@@ -107,7 +117,8 @@ del { color: #57534e; }
 export interface RenderMarkdownBodyOptions {
   /** Origin (and optional base path) that relative `/api/assets/<id>` URLs are resolved against; "" keeps them relative. */
   assetBaseUrl: string;
-  inlineAssets?: boolean;
+  /** Embed the document's own assets as `data:` URIs; see InlineAssetsOptions. */
+  inlineAssets?: InlineAssetsOptions | false;
   /** Parse budget; defaults to RENDER_TIMEOUT_MS. */
   timeoutMs?: number;
 }
@@ -125,19 +136,33 @@ function escapeRegExp(text: string): string {
 /**
  * Replace the absolute asset URLs the worker produced with `data:` URIs. The fragment came out of
  * rehype-stringify, so `src` values are double-quoted and the ids are `[0-9a-z]+`: a plain string
- * replacement on the attribute is exact. Assets that no longer exist keep their URL, as before.
+ * replacement on the attribute is exact.
+ *
+ * Only assets owned by `documentId` are read: the caller checked access on the document, not on
+ * each asset, so a foreign id in the Markdown keeps its URL (and `GET /api/assets/:id` decides for
+ * the reader). Assets are loaded one at a time, in document order, and embedding stops at the byte
+ * budget, so one export can never hold more than the budget plus a single asset in memory. Assets
+ * that no longer exist keep their URL, as before.
  */
-async function inlineAssetUrls(html: string, base: string, assetIds: string[]): Promise<string> {
+async function inlineAssetUrls(html: string, base: string, assetIds: string[], { documentId, maxBytes = MAX_INLINE_ASSET_BYTES }: InlineAssetsOptions): Promise<string> {
   if (assetIds.length === 0) return html;
   const prefix = base.replace(/\/+$/, "");
-  const assets = await Promise.all(assetIds.map((id) => getAsset(id)));
-  let out = html;
-  assets.forEach((asset, i) => {
-    if (!asset) return;
-    const uri = `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`;
-    out = out.replace(new RegExp(`src="${escapeRegExp(`${prefix}/api/assets/${assetIds[i]}`)}"`, "g"), () => `src="${uri}"`);
+  const uris = new Map<string, string>();
+  let used = 0;
+  for (const id of assetIds) {
+    if (used >= maxBytes) break;
+    const asset = await getDocumentAsset(documentId, id);
+    if (!asset) continue;
+    if (used + asset.bytes.byteLength > maxBytes) break;
+    used += asset.bytes.byteLength;
+    uris.set(id, `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`);
+  }
+  if (uris.size === 0) return html;
+  const pattern = new RegExp(`src="${escapeRegExp(`${prefix}/api/assets/`)}([0-9a-zA-Z]+)"`, "g");
+  return html.replace(pattern, (match, id: string) => {
+    const uri = uris.get(id);
+    return uri ? `src="${uri}"` : match;
   });
-  return out;
 }
 
 /**
@@ -158,7 +183,7 @@ export async function renderMarkdownBody(markdown: string, { assetBaseUrl, inlin
     if (err instanceof RenderTimeoutError) throw new UnrenderableDocumentError("timeout");
     throw err;
   }
-  const html = inlineAssets ? await inlineAssetUrls(fragment.html, assetBaseUrl, fragment.assetIds) : fragment.html;
+  const html = inlineAssets ? await inlineAssetUrls(fragment.html, assetBaseUrl, fragment.assetIds, inlineAssets) : fragment.html;
   return { html, headings: fragment.headings };
 }
 
