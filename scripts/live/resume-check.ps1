@@ -184,12 +184,22 @@ if ($missing.Count -gt 0) {
 }
 $token = $envVars['BACKUP_TOKEN']
 
-# 5. data dir (restore from the snapshot if missing: $env:FACTORY_SNAPSHOT, else ../markdoc-data/snapshots/latest)
+# 5. data dir (restore from the snapshot if missing: $env:FACTORY_SNAPSHOT, else ../markdoc-data/snapshots/latest).
+# The snapshot's age (manifest takenAt) is printed whenever a tarball is there: past $snapshotStaleMinutes the backup
+# task had stopped landing before the wipe (see snapshot.log / watchdog.log), and a restore brings back data that old.
+$snapshotStaleMinutes = 45
+$snapshotAge = Get-SnapshotAge -Dir $snapshotDir
+$snapshotAgeText = if ($snapshotAge) { "taken $($snapshotAge.TakenAtText), {0:n0} min old" -f $snapshotAge.AgeMinutes } else { 'manifest.json missing or without takenAt - age unknown' }
+$snapshotIsStale = (-not $snapshotAge) -or ($snapshotAge.AgeMinutes -gt $snapshotStaleMinutes)
+if (Test-Path (Join-Path $snapshotDir 'markdoc-pglite.tar.gz')) {
+  if ($snapshotIsStale) { Write-Check 'warn' 'snapshot age' "$snapshotDir - $snapshotAgeText; OLDER than $snapshotStaleMinutes min: the backup was not landing before the wipe, newer changes are lost" }
+  else { Write-Check 'ok' 'snapshot age' "$snapshotDir - $snapshotAgeText" }
+}
 if (-not (Test-Path (Join-Path $pgliteDir 'PG_VERSION'))) {
   if (Test-Path (Join-Path $snapshotDir 'markdoc-pglite.tar.gz')) {
-    if ($DryRun) { Write-Check 'fix' 'data dir' "$pgliteDir missing; would run restore-data.ps1 -From $snapshotDir -SkipServer" }
+    if ($DryRun) { Write-Check 'fix' 'data dir' "$pgliteDir missing; would run restore-data.ps1 -From $snapshotDir -SkipServer (snapshot $snapshotAgeText)" }
     else {
-      Write-Check 'fix' 'data dir' "restoring $pgliteDir from $snapshotDir"
+      Write-Check 'fix' 'data dir' "restoring $pgliteDir from $snapshotDir ($snapshotAgeText)"
       & (Join-Path $PSScriptRoot 'restore-data.ps1') -From $snapshotDir -DataDir $pgliteDir -SkipServer
       if ($LASTEXITCODE -ne 0) { Fail 'data dir' 'restore-data.ps1 failed' }
     }
@@ -250,15 +260,18 @@ if ($health) {
   if ($null -eq $docs) { Fail 'documents' "GET /api/documents with the dev login '$CheckLogin' failed (is AUTH_DEV_LOGIN=1?)" }
   Write-Check 'ok' 'documents' "GET /api/documents as @$CheckLogin -> $(@($docs.documents).Count) documents"
 
-  # 9. the 15-min snapshot is landing: ../markdoc-data/snapshots/latest/manifest.json < 30 min old. A warning,
-  # not a failure: right after a restore the first run of the task may still be up to 15 min away.
-  $latestManifest = Join-Path $dataRoot 'snapshots\latest\manifest.json'
+  # 9. the 15-min snapshot is landing: ../markdoc-data/snapshots/latest/manifest.json takenAt < $snapshotStaleMinutes
+  # old (the watchdog's STALE threshold). A warning, not a failure: right after a restore the first run of the task
+  # may still be up to 15 min away.
+  $latestDir = Join-Path $dataRoot 'snapshots\latest'
+  $latestManifest = Join-Path $latestDir 'manifest.json'
   if (-not (Test-Path -LiteralPath $latestManifest)) {
     Write-Check 'warn' 'snapshot' "$latestManifest missing - the 'Markdoc snapshot' task has not run yet (Start-ScheduledTask 'Markdoc snapshot' to force one)"
   } else {
-    $ageMin = [math]::Round(((Get-Date) - (Get-Item -LiteralPath $latestManifest).LastWriteTime).TotalMinutes, 1)
-    $takenAt = try { (Get-Content -LiteralPath $latestManifest -Raw | ConvertFrom-Json).takenAt } catch { '?' }
-    if ($ageMin -gt 30) { Write-Check 'warn' 'snapshot' "$latestManifest is $ageMin min old (takenAt $takenAt); the 'Markdoc snapshot' task should refresh it every 15 min" }
+    $latestAge = Get-SnapshotAge -Dir $latestDir
+    $ageMin = if ($latestAge) { [math]::Round($latestAge.AgeMinutes, 1) } else { [math]::Round(((Get-Date) - (Get-Item -LiteralPath $latestManifest).LastWriteTime).TotalMinutes, 1) }
+    $takenAt = if ($latestAge) { $latestAge.TakenAtText } else { '?' }
+    if ($ageMin -gt $snapshotStaleMinutes) { Write-Check 'warn' 'snapshot' "$latestManifest is $ageMin min old (takenAt $takenAt); the 'Markdoc snapshot' task should refresh it every 15 min - see $(Join-Path $dataRoot 'snapshot.log')" }
     else { Write-Check 'ok' 'snapshot' "snapshots\latest\manifest.json is $ageMin min old (takenAt $takenAt)" }
   }
 } elseif ($DryRun) {
