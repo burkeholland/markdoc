@@ -158,6 +158,51 @@ test.describe("GitHub sync", () => {
     expect(await codeText(page)).not.toContain("Local only.");
     await expect(status(page)).toHaveAttribute("data-status", "in-sync", { timeout: 15_000 });
   });
+
+  // GitHub's Contents API answers `content: "", encoding: "none"` for a 1–100 MB file; the fake
+  // reports a file as that size with `size`. Such a file must never be read as empty (task #699).
+  // (Import needs a GitHub token, which dev-login users have not — github-oversized.test.ts covers it.)
+  test("a GitHub file over the 2 MB bound is a 413 for link, sync, pull and a plain publish; the editor keeps its text", async ({ browser }) => {
+    const { page } = await signIn(browser, "syncer5");
+    const bigPath = `docs/big-${Date.now()}.md`;
+    const oversized = { kind: "repo", ...REPO, path: bigPath, content: "", size: 3_801_362 };
+    expect((await page.request.post("/api/github/mock", { data: oversized })).ok()).toBeTruthy();
+
+    // Link: 413 naming the size and the limit, the document stays Markdoc-only.
+    const docId = await createDocument(page, BASE);
+    const linked = await page.request.post(`/api/documents/${docId}/link`, { data: { storage: "repo", ...REPO, path: bigPath } });
+    expect(linked.status()).toBe(413);
+    expect(((await linked.json()) as { error: string }).error).toBe("The file on GitHub is 3.63 MB; Markdoc documents are limited to 2 MB");
+    expect(((await (await page.request.get(`/api/documents/${docId}`)).json()) as { document: { storage: string } }).document.storage).toBe("local");
+
+    // A document linked while the file was small, whose file then grows past the bound.
+    const path = await linkToFakeRepo(page, docId);
+    await openDocument(page, docId);
+    await expect(status(page)).toHaveAttribute("data-status", "in-sync", { timeout: 15_000 });
+    expect((await page.request.post("/api/github/mock", { data: { ...oversized, path } })).ok()).toBeTruthy();
+
+    const sync = await page.request.get(`/api/documents/${docId}/sync?fresh=1`);
+    expect(sync.status()).toBe(413);
+    expect(((await sync.json()) as { status: string }).status).toBe("remote-unreadable");
+    for (const q of ["", "?force=1"]) {
+      const pulled = await page.request.post(`/api/documents/${docId}/pull${q}`);
+      expect(pulled.status(), `pull${q}`).toBe(413);
+    }
+    const publish = await page.request.post(`/api/documents/${docId}/publish`, { data: {} });
+    expect(publish.status()).toBe(413);
+
+    // Two polls later the header has not turned into "Pull" and the text is still there.
+    await page.waitForTimeout(5_000);
+    await expect(status(page)).not.toHaveAttribute("data-status", "remote-ahead");
+    expect(await codeText(page)).toContain("Third paragraph.");
+    expect(((await (await page.request.get(`/api/documents/${docId}/content`)).json()) as { content: string }).content).toContain("Third paragraph.");
+
+    // Force-publish is the one explicit way out: the local text replaces the oversized file.
+    const forced = await page.request.post(`/api/documents/${docId}/publish?force=1`, { data: { message: "take mine" } });
+    expect(forced.ok()).toBeTruthy();
+    expect(await remote(page, path)).toBe(BASE);
+    await expect(status(page)).toHaveAttribute("data-status", "in-sync", { timeout: 15_000 });
+  });
 });
 
 // The e2e server has a (fake) GitHub OAuth app configured (playwright.config.ts) but dev-login users

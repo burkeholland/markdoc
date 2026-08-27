@@ -31,6 +31,8 @@ describe.skipIf(!token)("GitHub sync against the scratch repository", () => {
   let user: { id: string; login: string; name: string; image: null };
   let octokit: import("@octokit/rest").Octokit;
   let fileSha: string | null = null;
+  /** Extra files committed by a test, deleted at the end. */
+  const extra: { path: string; sha: string }[] = [];
 
   beforeAll(async () => {
     const { getDb, schema } = await import("@/server/db");
@@ -44,6 +46,9 @@ describe.skipIf(!token)("GitHub sync against the scratch repository", () => {
   }, 60_000);
 
   afterAll(async () => {
+    for (const f of extra) {
+      await octokit.repos.deleteFile({ owner, repo, path: f.path, branch: "main", sha: f.sha, message: "markdoc sync test: clean up" }).catch(() => undefined);
+    }
     if (!fileSha) return;
     const { data } = await octokit.repos.getContent({ owner, repo, path, ref: "main" }).catch(() => ({ data: null }));
     const sha = data && !Array.isArray(data) && data.type === "file" ? data.sha : fileSha;
@@ -93,4 +98,43 @@ describe.skipIf(!token)("GitHub sync against the scratch repository", () => {
     expect(onGitHub.content).toBe(text);
     expect(onGitHub.sha).toBe(fileSha);
   }, 120_000);
+
+  // The Contents API inlines base64 only up to 1 MB; past that it answers `content: "", encoding: "none"`.
+  it("reads a 1–2 MB file whole through the raw blob and refuses one over 2 MB with a 413", async () => {
+    const { commitRepoFile, readRepoFile, GITHUB_FILE_MAX_BYTES } = await import("@/server/github");
+    const { createDocument, getDocumentAccess } = await import("@/server/documents");
+    const { linkDocument, syncStatus, pullDocument } = await import("@/server/publish");
+    const { readLiveText } = await import("@/server/livedoc");
+    const stamp = `${Date.now()}-${process.pid}`;
+
+    const midPath = `markdoc-sync-test/${stamp}-mid.md`;
+    const mid = `# Mid\n\n${"The quick brown fox jumps over the lazy dog. ".repeat(26_000)}\nEND\n`; // ~1.2 MB
+    expect(Buffer.byteLength(mid)).toBeGreaterThan(1024 * 1024);
+    const midCommit = await commitRepoFile(octokit, { owner, repo, path: midPath, branch: "main", content: mid, message: "markdoc sync test: 1.2 MB file" });
+    extra.push({ path: midPath, sha: midCommit.sha! });
+    const { data: meta } = await octokit.repos.getContent({ owner, repo, path: midPath, ref: "main" });
+    expect(!Array.isArray(meta) && meta.type === "file" && meta.encoding).toBe("none");
+    const read = await readRepoFile(octokit, owner, repo, midPath, "main");
+    expect(read.content).toBe(mid);
+    expect(read.sha).toBe(midCommit.sha);
+
+    const bigPath = `markdoc-sync-test/${stamp}-big.md`;
+    const big = `# Big\n\n${"Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(40_000)}\n`; // ~2.3 MB
+    expect(Buffer.byteLength(big)).toBeGreaterThan(GITHUB_FILE_MAX_BYTES);
+    const bigCommit = await commitRepoFile(octokit, { owner, repo, path: bigPath, branch: "main", content: big, message: "markdoc sync test: 2.3 MB file" });
+    extra.push({ path: bigPath, sha: bigCommit.sha! });
+    const err = await readRepoFile(octokit, owner, repo, bigPath, "main").catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 413, revision: bigCommit.sha });
+    expect((err as Error).message).toMatch(/^The file on GitHub is 2\.\d+ MB; Markdoc documents are limited to 2 MB$/);
+
+    // A document already linked to the oversized file: status is a 413, pull leaves the text alone.
+    const doc = await createDocument({ ownerId: user.id, content: BASE });
+    await expect(linkDocument(doc, user, { storage: "repo", owner, repo, branch: "main", path: bigPath })).rejects.toMatchObject({ status: 413 });
+    const { updateDocument } = await import("@/server/documents");
+    await updateDocument(doc.id, { storage: "repo", repoOwner: owner, repoName: repo, repoBranch: "main", repoPath: bigPath, githubSha: "stale", publishedContent: BASE, publishedAt: new Date() });
+    const linked = (await getDocumentAccess(doc.id, user))!.doc;
+    await expect(syncStatus(linked, user, { fresh: true })).rejects.toMatchObject({ status: 413, details: { status: "remote-unreadable" } });
+    await expect(pullDocument(linked, user, { force: true })).rejects.toMatchObject({ status: 413 });
+    expect((await readLiveText(doc.id)).text).toBe(BASE);
+  }, 180_000);
 });
