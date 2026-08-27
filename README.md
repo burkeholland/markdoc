@@ -92,14 +92,16 @@ Requirements: Node.js 22+ and npm. No database or Docker needed: an embedded Pos
 ```bash
 npm install
 cp .env.example .env.local   # then edit: set AUTH_SECRET (any long random string)
-npm run dev                  # http://localhost:3000
+npm run dev                  # http://<machine-name>:3000 (stable LAN URL)
 ```
 
 With `AUTH_DEV_LOGIN=1` (the default in `.env.example`) the login page offers a **development login** that accepts any handle, so you can open two browsers as two users without a GitHub OAuth app. Set `GITHUB_TOKEN` (for example from `gh auth token`) to use gists and repositories with the development login.
 
-The server listens on all interfaces (`HOST` overrides), so the same process also works from a phone or another machine on the LAN at `http://<your-ip>:3000` or `http://<machine-name>:3000` — the start-up log lists the addresses. Sign-in redirects and the collaboration socket follow whatever host the browser used, and in development Next's cross-origin guard for `/_next/*` is pre-filled with this machine's LAN addresses and name (`scripts/lib/dev-origins.mjs`; add others with `ALLOWED_DEV_ORIGINS=a,b`; restart after a DHCP change). `e2e/lan.spec.ts` covers it.
+The server listens on all interfaces (`HOST` overrides). Use `http://<machine-name>:3000` as the canonical local URL from this computer, a phone, or another LAN client; it survives DHCP address changes. The start-up log prints that stable name first, then its `<machine-name>.local` alias, loopback, and deterministically ordered numeric interface addresses as secondary diagnostics (virtual/WSL adapters are labelled and never select the canonical URL). Sign-in, the collaboration-token request, and the one active `/collab` socket follow the browser's origin. In development, Next's cross-origin guard for `/_next/*` includes both stable names and current numeric diagnostics (`scripts/lib/dev-origins.mjs`; `ALLOWED_DEV_ORIGINS=a,b` adds others). A DHCP change needs no restart for hostname access; restart only if you are deliberately troubleshooting through the new numeric IP. `e2e/lan.spec.ts` covers the stable-hostname path.
 
-To sign in with GitHub for real, create an OAuth App (Settings → Developer settings → OAuth Apps) with callback URL `http://localhost:3000/api/auth/callback/github` and set `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET`. Markdoc requests the `read:user user:email gist repo` scopes so it can publish on your behalf. With the OAuth app set, an account that has no GitHub token (the development login) gets a **Sign in with GitHub** button in the GitHub dialogs; without it, *Open from GitHub* and the *Connect to GitHub…* / *Gist or repository…* entries are disabled and say that GitHub storage is not set up on this server.
+Changing from a numeric URL (for example `http://192.168.1.20:3000`) to the hostname is a one-time origin transition. Cookies, `localStorage`, and IndexedDB are scoped to the exact origin, so sign in once at the hostname. Markdoc cannot invisibly move an unsynced IndexedDB edit from the old numeric origin: reconnect and save it at the old URL before switching, or copy the text manually if that address is no longer reachable.
+
+To sign in with GitHub for real, create an OAuth App (Settings → Developer settings → OAuth Apps) with the callback URL on the same stable origin, for example `http://<machine-name>:3000/api/auth/callback/github`, and set `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET`. Markdoc requests the `read:user user:email gist repo` scopes so it can publish on your behalf. With the OAuth app set, an account that has no GitHub token (the development login) gets a **Sign in with GitHub** button in the GitHub dialogs; without it, *Open from GitHub* and the *Connect to GitHub…* / *Gist or repository…* entries are disabled and say that GitHub storage is not set up on this server.
 
 ### Environment variables
 

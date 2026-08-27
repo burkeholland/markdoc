@@ -2,6 +2,12 @@
 
 Newest first. Each entry is one merged feature or fix on `main`; test-only and work-in-progress commits are folded into the feature they belong to. Short hashes point at the merge or squash commit.
 
+## 2026-08-27
+
+### Reliability
+
+- Local and LAN access now advertises the stable machine hostname as the canonical origin instead of leading with a DHCP-issued address. Startup and live-status output use the hostname, list the `.local` alias, and retain physical-before-virtual numeric addresses as labelled diagnostics; WSL adapter ordering cannot change the canonical choice. The LAN Playwright regression opens the real machine hostname and records the session cookie domain, browser auth-session and collaboration-token hosts, exactly one active `/collab` socket, persistence, and reload. Local setup docs describe the one-time sign-in when changing origins and explicitly warn that origin-scoped unsynced IndexedDB data cannot be invisibly migrated.
+
 ## 2026-08-25
 
 ### Organising

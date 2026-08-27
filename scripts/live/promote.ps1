@@ -38,6 +38,7 @@ if (-not $LogPath) { $LogPath = Get-LiveLogPath -Root $Root -DataRoot $DataRoot 
 $TwinLogPath = Get-LiveLogPath -Root $Twin -DataRoot $DataRoot
 $Twin = Get-LiveTwinRoot -Root $Root
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
+$liveUrl = Get-LiveAccessUrl -Port $Port
 $standbyBase = "http://127.0.0.1:$StandbyPort"
 # The watchdog ignores a lock older than 10 min, so a crashed promote cannot block it for good.
 $lockPath = Join-Path $DataRoot 'promote.lock'
@@ -223,7 +224,7 @@ try {
 
   if ($healthy) {
     Write-LiveState -Root $Twin -Sha $target -Port $Port -DataRoot $DataRoot
-    Write-Step ("PROMOTED: live server on :{0} now runs {1} from {2} (was {3} in {4}); handover {5:n1}s" -f $Port, $target, $Twin, $previous, $Root, ((Get-Date) - $swapStarted).TotalSeconds)
+    Write-Step ("PROMOTED: {0} now runs {1} from {2} (was {3} in {4}); handover {5:n1}s" -f $liveUrl, $target, $Twin, $previous, $Root, ((Get-Date) - $swapStarted).TotalSeconds)
     exit 0
   }
 
