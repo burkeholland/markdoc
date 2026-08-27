@@ -101,6 +101,11 @@ const SYNC_HINT = {
   "local-ahead": "The document has unpublished changes; pulling would discard them. Call markdoc_publish first (or pull with force: true).",
 };
 
+/** `413 { status: "remote-unreadable" }`: the GitHub file is over Markdoc's 2 MB document bound, so there is no remote text to compare with or pull. */
+const UNREADABLE_HINT = "Markdoc cannot read the GitHub file, so it cannot be compared or pulled; markdoc_publish with force: true overwrites it with the document — only when the user asks.";
+const isUnreadableRemote = (err) => err?.status === 413 && err?.data?.status === "remote-unreadable";
+const withUnreadableHint = (err) => Object.assign(new Error(`${err.message} ${UNREADABLE_HINT}`), { status: err.status, data: err.data });
+
 /** A new McpServer with the Markdoc instructions and every tool registered against `client`. */
 export function createMarkdocServer(client) {
   const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
@@ -470,7 +475,7 @@ export function registerTools(server, client) {
     {
       title: "Publish to GitHub",
       description:
-        "Publish the document to its linked gist or repository file (creates a commit). The document must already be connected to GitHub in the app. Refuses (status remote-ahead / diverged) when GitHub moved since the last sync; force: true overwrites GitHub's version — only when the user asks.",
+        "Publish the document to its linked gist or repository file (creates a commit). The document must already be connected to GitHub in the app. Refuses (status remote-ahead / diverged) when GitHub moved since the last sync, and with a 413 when the GitHub file is over Markdoc's 2 MB bound (remote-unreadable); force: true overwrites GitHub's version — only when the user asks.",
       inputSchema: { id: z.string(), message: z.string().optional(), force: z.boolean().optional() },
       annotations: ADDITIVE,
     },
@@ -479,6 +484,7 @@ export function registerTools(server, client) {
         const res = await api("POST", `/api/documents/${id}/publish${force ? "?force=1" : ""}`, { message });
         return ok(res.result.skipped ? "Already up to date on GitHub." : `Published. ${res.result.url ?? ""}`, res);
       } catch (err) {
+        if (isUnreadableRemote(err)) throw withUnreadableHint(err);
         if (!err.sync) throw err;
         return ok(`Not published: ${err.sync.status}. ${SYNC_HINT[err.sync.status] ?? err.message}`, err.sync);
       }
@@ -490,7 +496,7 @@ export function registerTools(server, client) {
     {
       title: "Pull from GitHub",
       description:
-        "Bring the linked GitHub file into the document. Refuses (status local-ahead / diverged) when unpublished edits would be lost; merge: true three-way merges a diverged document (conflicts come back as status \"conflict\" with the marked text), force: true replaces the text regardless — only when the user asks.",
+        "Bring the linked GitHub file into the document. Refuses (status local-ahead / diverged) when unpublished edits would be lost; merge: true three-way merges a diverged document (conflicts come back as status \"conflict\" with the marked text), force: true replaces the text regardless — only when the user asks. A GitHub file over Markdoc's 2 MB bound cannot be pulled at all (413, remote-unreadable).",
       inputSchema: { id: z.string(), merge: z.boolean().optional(), force: z.boolean().optional() },
       annotations: ADDITIVE,
     },
@@ -501,6 +507,7 @@ export function registerTools(server, client) {
         const r = res.result;
         return ok(r.merged ? "Merged GitHub\u2019s changes into the document; publish to finish." : r.changed ? "Pulled the latest version from GitHub." : "Already up to date.", res);
       } catch (err) {
+        if (isUnreadableRemote(err)) throw withUnreadableHint(err);
         if (!err.sync) throw err;
         if (err.sync.status === "conflict") return ok(`Merge has ${err.sync.conflicts} conflict(s); the marked text is in \`merged\`.`, err.sync);
         return ok(`Not pulled: ${err.sync.status}. ${SYNC_HINT[err.sync.status] ?? err.message}`, err.sync);
@@ -510,10 +517,21 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_sync_status",
-    { title: "GitHub sync status", description: "Where a GitHub-linked document stands: in-sync, local-ahead (publish is safe), remote-ahead (pull is safe) or diverged (merge or force one side).", inputSchema: { id: z.string() }, annotations: READ_ONLY },
+    {
+      title: "GitHub sync status",
+      description:
+        "Where a GitHub-linked document stands: in-sync, local-ahead (publish is safe), remote-ahead (pull is safe), diverged (merge or force one side) or remote-unreadable (the GitHub file is over Markdoc's 2 MB bound: nothing can be pulled, only a force-publish can overwrite it).",
+      inputSchema: { id: z.string() },
+      annotations: READ_ONLY,
+    },
     async ({ id }) => {
-      const s = await api("GET", `/api/documents/${id}/sync?fresh=1`);
-      return ok(`${s.status} (local ${s.lines.local} line(s) changed, GitHub ${s.lines.remote}).`, s);
+      try {
+        const s = await api("GET", `/api/documents/${id}/sync?fresh=1`);
+        return ok(`${s.status} (local ${s.lines.local} line(s) changed, GitHub ${s.lines.remote}).`, s);
+      } catch (err) {
+        if (isUnreadableRemote(err)) return ok(`remote-unreadable: ${err.data.error}. ${UNREADABLE_HINT}`, err.data);
+        throw err;
+      }
     },
   );
 

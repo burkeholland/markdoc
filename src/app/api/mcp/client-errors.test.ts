@@ -49,6 +49,20 @@ const fakeFetch: typeof fetch = async (input, init) => {
     return reply(200, { ok: true, suggestions: 2, suggestionIds: ["s1", "s2"], contentHash: "b".repeat(64) });
   }
   if (url.pathname === "/api/nope") return reply(404, "<!DOCTYPE html><html>not json</html>", "text/html");
+  // A linked document whose GitHub file is over the 2 MB bound: sync, pull and a plain publish are 413s.
+  if (url.pathname.startsWith("/api/documents/big-1/")) {
+    const unreadable = {
+      error: "The file on GitHub is 3.63 MB; Markdoc documents are limited to 2 MB",
+      status: "remote-unreadable",
+      size: 3_801_362,
+      limit: 2_097_152,
+      remote: { sha: "4ce1359b", revision: "4ce1359b", url: "https://github.com/o/r/blob/main/big.md", updatedAt: null },
+    };
+    if (url.pathname.endsWith("/publish") && url.searchParams.get("force") === "1") {
+      return reply(200, { result: { url: "https://github.com/o/r/blob/main/big.md", commitSha: "c1", publishedAt: "2026-08-27T00:00:00.000Z", status: "in-sync" }, document: null });
+    }
+    return reply(413, unreadable);
+  }
   return reply(404, { error: "Not found" });
 };
 
@@ -163,5 +177,29 @@ describe("tools over a real MCP client", () => {
     const fresh = (await mcp.callTool({ name: "markdoc_suggest", arguments: { id: "doc-1", edits: [{ find: "First", replace: "1st" }], ifContentHash: "b".repeat(64) } })) as Result;
     expect(fresh.isError).toBeFalsy();
     expect(text(fresh)).toContain("Proposed 2 change(s)");
+  });
+
+  it("a GitHub file over the 2 MB bound is remote-unreadable: status answers, pull and plain publish are errors, force-publish goes through", async () => {
+    const status = (await mcp.callTool({ name: "markdoc_sync_status", arguments: { id: "big-1" } })) as Result;
+    expect(status.isError).toBeFalsy();
+    expect(text(status)).toContain("remote-unreadable: The file on GitHub is 3.63 MB; Markdoc documents are limited to 2 MB");
+    expect(text(status)).toContain("force: true");
+    expect(status.structuredContent?.status).toBe("remote-unreadable");
+    expect(status.structuredContent?.size).toBe(3_801_362);
+
+    const pull = (await mcp.callTool({ name: "markdoc_pull", arguments: { id: "big-1", force: true } })) as Result;
+    expect(pull.isError).toBe(true);
+    expect(text(pull)).toContain("failed (413): The file on GitHub is 3.63 MB");
+    expect(text(pull)).toContain("cannot be compared or pulled");
+    expect(text(pull)).not.toContain("Pulled");
+
+    const publish = (await mcp.callTool({ name: "markdoc_publish", arguments: { id: "big-1" } })) as Result;
+    expect(publish.isError).toBe(true);
+    expect(text(publish)).toContain("failed (413): The file on GitHub is 3.63 MB");
+    expect(text(publish)).toContain("force: true");
+
+    const forced = (await mcp.callTool({ name: "markdoc_publish", arguments: { id: "big-1", force: true } })) as Result;
+    expect(forced.isError).toBeFalsy();
+    expect(text(forced)).toContain("Published.");
   });
 });
