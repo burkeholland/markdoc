@@ -77,7 +77,7 @@ describe("renderPdf", () => {
         title: "Network policy",
         markdown,
         assetBaseUrl: origin,
-        inlineAssets: true,
+        inlineAssets: { documentId: "pdf-export-doc" },
       });
 
       expect(html).toContain(`src="data:image/png;base64,${PNG_B64}"`);
