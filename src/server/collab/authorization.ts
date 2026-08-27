@@ -1,6 +1,8 @@
 import type { Connection } from "@hocuspocus/server";
+import { eq } from "drizzle-orm";
+import { getDb, schema } from "@/server/db";
 import { canEdit, getDocumentAccess, getUserById } from "@/server/documents";
-import type { Role } from "@/server/db/schema";
+import type { LinkAccess, Role } from "@/server/db/schema";
 import { getCollab } from "./registry";
 import type { CollabClaims } from "./token";
 
@@ -31,14 +33,21 @@ function accessKey(docId: string, login: string): string {
   return `${docId}\0${login.trim().replace(/^@/, "").toLowerCase()}`;
 }
 
+/** Transition key for a document-wide link-access change; `\0\0` cannot occur in a login. */
+function linkKey(docId: string): string {
+  return `${docId}\0\0link`;
+}
+
 function loginOf(context: CollabContext): string | null {
   return context.login?.trim().toLowerCase() ?? null;
 }
 
-/** Wait until an owner-initiated access change for this collaborator has committed. */
+/**
+ * Wait until an owner-initiated access change that could affect this identity has committed: a
+ * change to this collaborator, or a link-access change on the document (which reaches everyone).
+ */
 export async function waitForCollabAccessChange(docId: string, login: string | null): Promise<void> {
-  if (!login) return;
-  await state.transitions.get(accessKey(docId, login));
+  await Promise.all([state.transitions.get(linkKey(docId)), login ? state.transitions.get(accessKey(docId, login)) : undefined]);
 }
 
 /** Resolve token identity and role from current database state instead of trusting the role claim. */
@@ -92,34 +101,38 @@ function applyCurrentAccess(connection: Connection<CollabContext>, current: Coll
   connection.readOnly = !canEdit(current.role);
 }
 
+interface AccessTransition {
+  docId: string;
+  /** Serialises changes that affect the same identities; also what `waitForCollabAccessChange` awaits. */
+  key: string;
+  /** Pick the live connections whose access the mutation may take away. */
+  select: (connections: Connection<CollabContext>[]) => Promise<Connection<CollabContext>[]> | Connection<CollabContext>[];
+  /** Whether edit rights may be lost: new messages from the selected connections are gated while prior ones drain. */
+  gate: boolean;
+  mutation: () => Promise<void>;
+  what: string;
+}
+
 /**
- * Apply a collaborator database mutation without losing edits already accepted by the live
- * document. New messages from that collaborator are gated while prior messages and stores drain.
+ * Apply an access database mutation without losing edits already accepted by the live document:
+ * gate, flush pending messages and stores, mutate, then re-resolve each affected connection.
  */
-export async function changeCollaboratorAccess(
-  docId: string,
-  login: string,
-  newRole: Exclude<Role, "owner"> | null,
-  mutation: () => Promise<void>,
-): Promise<void> {
-  const key = accessKey(docId, login);
+async function transitionAccess({ docId, key, select, gate, mutation, what }: AccessTransition): Promise<void> {
   const previous = state.transitions.get(key) ?? Promise.resolve();
   let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
+  const settled = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const queued = previous.catch(() => undefined).then(() => gate);
+  const queued = previous.catch(() => undefined).then(() => settled);
   state.transitions.set(key, queued);
   state.revision++;
 
   await previous.catch(() => undefined);
   const collab = getCollab();
   const document = collab?.documents.get(docId);
-  const normalizedLogin = login.trim().replace(/^@/, "").toLowerCase();
-  const connections =
-    document?.getConnections().filter((connection) => loginOf(connection.context as CollabContext) === normalizedLogin) ?? [];
+  const connections = await select(document?.getConnections() ?? []);
 
-  if (!newRole || !canEdit(newRole)) {
+  if (gate) {
     for (const connection of connections) {
       state.blockedConnections.add(connection);
       connection.readOnly = true;
@@ -152,7 +165,7 @@ export async function changeCollaboratorAccess(
         } catch (recoveryError) {
           connection.readOnly = true;
           connection.close(UNAUTHORIZED);
-          console.error("[collab] failed to restore access after collaborator mutation failed", recoveryError);
+          console.error(`[collab] failed to restore access after ${what} mutation failed`, recoveryError);
         }
       }),
     );
@@ -162,6 +175,60 @@ export async function changeCollaboratorAccess(
     release();
     if (state.transitions.get(key) === queued) state.transitions.delete(key);
   }
+}
+
+/**
+ * Apply a collaborator database mutation without losing edits already accepted by the live
+ * document. New messages from that collaborator are gated while prior messages and stores drain.
+ */
+export async function changeCollaboratorAccess(
+  docId: string,
+  login: string,
+  newRole: Exclude<Role, "owner"> | null,
+  mutation: () => Promise<void>,
+): Promise<void> {
+  const normalizedLogin = login.trim().replace(/^@/, "").toLowerCase();
+  await transitionAccess({
+    docId,
+    key: accessKey(docId, login),
+    select: (connections) => connections.filter((connection) => loginOf(connection.context as CollabContext) === normalizedLogin),
+    gate: !newRole || !canEdit(newRole),
+    mutation,
+    what: "collaborator",
+  });
+}
+
+/**
+ * Apply a link-access database mutation to a document. Every live connection whose access derives
+ * from the link — neither the owner nor an explicit collaborator, anonymous visitors included — is
+ * gated, flushed and re-resolved: a closed link disconnects them (4401), a downgraded link makes
+ * them read-only, and edits accepted before the change are kept. Owner and collaborators are untouched.
+ */
+export async function changeLinkAccess(docId: string, newLinkAccess: LinkAccess, mutation: () => Promise<void>): Promise<void> {
+  await transitionAccess({
+    docId,
+    key: linkKey(docId),
+    select: async (connections) => {
+      if (connections.length === 0) return [];
+      const db = await getDb();
+      const [doc] = await db.select({ ownerId: schema.documents.ownerId }).from(schema.documents).where(eq(schema.documents.id, docId));
+      const collaborators = await db
+        .select({ login: schema.collaborators.login })
+        .from(schema.collaborators)
+        .where(eq(schema.collaborators.documentId, docId));
+      const explicit = new Set(collaborators.map((row) => row.login.toLowerCase()));
+      return connections.filter((connection) => {
+        const context = connection.context as CollabContext;
+        if (doc && context.userId === doc.ownerId) return false;
+        const login = loginOf(context);
+        return !(login && explicit.has(login));
+      });
+    },
+    // Only "edit" admits link visitors as editors; every other value can take editing away.
+    gate: newLinkAccess !== "edit",
+    mutation,
+    what: "link access",
+  });
 }
 
 export const unauthorizedCollabError = () => Object.assign(new Error(UNAUTHORIZED.reason), UNAUTHORIZED);

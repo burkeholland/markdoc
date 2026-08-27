@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { deleteDocument, DOCUMENT_TITLE_MAX, purgeDocument, updateDocument } from "@/server/documents";
+import { changeLinkAccess } from "@/server/collab/authorization";
+import type { Document } from "@/server/db/schema";
 import { publicDocument } from "@/server/dto";
 
 type Params = { params: Promise<{ id: string }> };
@@ -20,7 +22,16 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const body = await readJson(req, (d) => patchSchema.parse(d));
   await requireAccess(id, body.linkAccess !== undefined ? "own" : "edit");
-  const doc = await updateDocument(id, body);
+  let doc: Document | null = null;
+  if (body.linkAccess !== undefined) {
+    // Authoritative for live sockets: visitors admitted by the link are re-resolved (read-only or
+    // disconnected) once the change commits, like a collaborator change.
+    await changeLinkAccess(id, body.linkAccess, async () => {
+      doc = await updateDocument(id, body);
+    });
+  } else {
+    doc = await updateDocument(id, body);
+  }
   if (!doc) throw new HttpError(404, "Document not found");
   return json({ document: publicDocument(doc) });
 });
