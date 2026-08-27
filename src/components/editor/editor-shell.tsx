@@ -537,6 +537,11 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
   const goCreateToken = useCallback(() => {
     navigateTo(`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`);
   }, [doc.id]);
+  // "Keep an agent here" from the command palette: the header's agent pill opens on that view.
+  const [keepAgentNonce, setKeepAgentNonce] = useState(0);
+  const openKeepAgent = useCallback(() => setKeepAgentNonce((n) => n + 1), []);
+  const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
+  const askAgentDoc = useMemo(() => ({ id: doc.id, title: liveTitle }), [doc.id, liveTitle]);
   // Hint (c): open Comments on the open threads and put the caret in a composer — the reply box of the
   // first thread (it autofocuses once opened) or any composer already showing.
   const focusCommentComposer = useCallback(() => {
@@ -707,6 +712,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
     openImage,
     startComment,
     askAgent: openAskAgent,
+    keepAgent: openKeepAgent,
     toggleComments,
     toggleHistory,
     toggleActivity,
@@ -898,6 +904,8 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
           compact={isPhone}
           onJumpToUser={jumpToUser}
           onCancelRequest={cancelAgentRequest}
+          onCreateToken={goCreateToken}
+          keepAgentNonce={keepAgentNonce}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onAskAgent={openAskAgent} onImage={openImage} onTable={openTable} />
         {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onAskAgent={openAskAgent} onComment={focusCommentComposer} />}
@@ -1071,6 +1079,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
           canComment={canComment}
           onSend={sendAskAgent}
           onCreateToken={goCreateToken}
+          doc={askAgentDoc}
         />
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
 

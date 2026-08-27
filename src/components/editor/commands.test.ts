@@ -144,6 +144,17 @@ describe("buildCommands", () => {
     byId.get("help:shortcuts")!.run();
     expect((ctx as unknown as { calls: string[] }).calls).toEqual(["reader", "find:true", "sync:false", "layout:code", "dialog:shortcuts"]);
   });
+
+  it("offers 'Keep an agent here' for 'agent' only when the shell wires it", () => {
+    const without = buildCommands(stubCtx());
+    expect(ids(visible(without))).not.toContain("doc:keep-agent");
+    const calls: string[] = [];
+    const cmds = buildCommands(stubCtx({ keepAgent: () => calls.push("keep-agent") }));
+    const hits = ids(filterCommands("agent", cmds));
+    expect(hits).toContain("doc:keep-agent");
+    cmds.find((c) => c.id === "doc:keep-agent")!.run();
+    expect(calls).toEqual(["keep-agent"]);
+  });
 });
 
 describe("filterCommands", () => {
