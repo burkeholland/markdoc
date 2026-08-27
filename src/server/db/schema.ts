@@ -131,7 +131,12 @@ export const collaborators = pgTable(
     addedBy: text("added_by"),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.documentId, t.login] })],
+  (t) => [
+    primaryKey({ columns: [t.documentId, t.login] }),
+    // Login-first lookups ("every document shared with me") in visibleDocuments() and
+    // collectUserEvents() cannot use the (document_id, login) primary key.
+    index("collaborator_login_idx").on(t.login),
+  ],
 );
 
 export type VersionKind = "auto" | "named" | "publish" | "restore" | "import";

@@ -99,6 +99,13 @@
       "when": 1787671462547,
       "tag": "0013_webhooks",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787795284192,
+      "tag": "0014_collaborator_login_idx",
+      "breakpoints": true
     }
   ]
 }
