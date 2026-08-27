@@ -86,6 +86,7 @@ var backupFabric = 'Azure'
 var backupProtectionContainer = 'iaasvmcontainer;iaasvmcontainerv2;${resourceGroup().name};${postgresVmName}'
 var backupProtectedItem = 'vm;iaasvmcontainerv2;${resourceGroup().name};${postgresVmName}'
 var backupTime = '2026-01-01T02:00:00Z'
+#disable-next-line BCP329
 var keyVaultDnsHost = substring(az.environment().suffixes.keyvaultDns, 1, length(az.environment().suffixes.keyvaultDns) - 1)
 var keyVaultAudience = uriComponent('https://${keyVaultDnsHost}')
 var keyVaultSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresPasswordSecretName}?api-version=7.4'
@@ -500,7 +501,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'auth-secret', value: authSecret }
         { name: 'github-client-secret', value: githubClientSecret }
         #disable-next-line use-secure-value-for-secure-inputs
-        { name: 'database-url', value: 'postgres://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgresPrivateIp}:5432/${postgresDatabaseName}?sslmode=require' }
+        { name: 'database-url', value: 'postgres://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgresPrivateIp}:5432/${postgresDatabaseName}?uselibpqcompat=true&sslmode=require' }
       ]
     }
     template: {
