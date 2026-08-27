@@ -1,4 +1,4 @@
-import { getGitHubToken, updateDocument, addVersion, type SessionUser } from "@/server/documents";
+import { getGitHubToken, getPublishedContent, updateDocument, addVersion, type DocumentMeta, type SessionUser } from "@/server/documents";
 import type { Document } from "@/server/db/schema";
 import { HttpError, actorName } from "@/server/http";
 import {
@@ -22,7 +22,10 @@ export interface PublishResult {
   status: SyncState;
 }
 
-export function githubUrlFor(doc: Document): string | null {
+/** Where the document lives on GitHub; the metadata an access check returns is enough. */
+export type LinkedDocument = Pick<DocumentMeta, "id" | "title" | "storage" | "gistId" | "gistFile" | "repoOwner" | "repoName" | "repoBranch" | "repoPath" | "githubSha" | "publishedAt">;
+
+export function githubUrlFor(doc: Pick<LinkedDocument, "storage" | "gistId" | "repoOwner" | "repoName" | "repoBranch" | "repoPath">): string | null {
   if (doc.storage === "gist" && doc.gistId) return `https://gist.github.com/${doc.gistId}`;
   if (doc.storage === "repo" && doc.repoOwner && doc.repoName && doc.repoPath) {
     return `https://github.com/${doc.repoOwner}/${doc.repoName}/blob/${doc.repoBranch ?? "main"}/${doc.repoPath}`;
@@ -77,7 +80,7 @@ export function clearSyncCache(docId?: string) {
   else remoteCache.clear();
 }
 
-async function fetchRemote(doc: Document, user: SessionUser): Promise<RemoteFile> {
+async function fetchRemote(doc: LinkedDocument, user: SessionUser): Promise<RemoteFile> {
   const octokit = await octokitFor(user);
   try {
     if (doc.storage === "gist") {
@@ -96,7 +99,7 @@ async function fetchRemote(doc: Document, user: SessionUser): Promise<RemoteFile
 }
 
 /** Read the linked file, reusing a read made in the last 30 s unless `fresh`. */
-async function readRemote(doc: Document, user: SessionUser, fresh = false): Promise<RemoteFile> {
+async function readRemote(doc: LinkedDocument, user: SessionUser, fresh = false): Promise<RemoteFile> {
   const hit = remoteCache.get(doc.id);
   if (!fresh && hit && Date.now() - hit.at < SYNC_CACHE_MS) return hit.remote;
   const remote = await fetchRemote(doc, user);
@@ -134,11 +137,14 @@ function toStatus(base: string | null, local: string, remote: RemoteFile): SyncS
   return { ...classify(base, local, remote), remote: { sha: remote.revision, revision: remote.revision, url: remote.url, updatedAt: remote.updatedAt } };
 }
 
-/** Where the document stands against its GitHub file: in-sync, local-ahead, remote-ahead or diverged. */
-export async function syncStatus(doc: Document, user: SessionUser, options: { fresh?: boolean; content?: boolean } = {}): Promise<SyncStatus> {
+/**
+ * Where the document stands against its GitHub file: in-sync, local-ahead, remote-ahead or diverged.
+ * The merge base (`publishedContent`) is read here, not carried on `doc`: access checks leave it out.
+ */
+export async function syncStatus(doc: LinkedDocument, user: SessionUser, options: { fresh?: boolean; content?: boolean } = {}): Promise<SyncStatus> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
-  const [remote, live] = await Promise.all([readRemote(doc, user, options.fresh), readLiveText(doc.id)]);
-  const status = toStatus(doc.publishedContent, live.clean, remote);
+  const [remote, live, base] = await Promise.all([readRemote(doc, user, options.fresh), readLiveText(doc.id), getPublishedContent(doc.id)]);
+  const status = toStatus(base, live.clean, remote);
   return options.content ? { ...status, remoteContent: remote.content ?? "" } : status;
 }
 
@@ -176,15 +182,15 @@ export interface PublishOptions {
 }
 
 /** Commit the document's current clean text to its linked gist or repository file. */
-export async function publishDocument(doc: Document, user: SessionUser, messageOrOptions?: string | PublishOptions): Promise<PublishResult> {
+export async function publishDocument(doc: LinkedDocument, user: SessionUser, messageOrOptions?: string | PublishOptions): Promise<PublishResult> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const options: PublishOptions = typeof messageOrOptions === "string" ? { message: messageOrOptions } : (messageOrOptions ?? {});
   const message = options.message;
   const octokit = await octokitFor(user);
-  const live = await readLiveText(doc.id);
+  const [live, base] = await Promise.all([readLiveText(doc.id), getPublishedContent(doc.id)]);
   const content = live.clean;
   const remote = await readRemote(doc, user, true);
-  const status = toStatus(doc.publishedContent, content, remote);
+  const status = toStatus(base, content, remote);
   if (!options.force && (status.status === "remote-ahead" || status.status === "diverged")) {
     throw syncConflict("The file changed on GitHub since it was last synced. Pull or merge first, or force-publish to overwrite.", {
       status: status.status,
@@ -258,11 +264,11 @@ export interface PullResult {
  * `force`; with `merge` a diverged document is three-way merged, and conflicts come back as a 409
  * with the marked text so the UI can hand them to the user.
  */
-export async function pullDocument(doc: Document, user: SessionUser, options: PullOptions = {}): Promise<PullResult> {
+export async function pullDocument(doc: LinkedDocument, user: SessionUser, options: PullOptions = {}): Promise<PullResult> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const remote = await readRemote(doc, user, true);
-  const live = await readLiveText(doc.id);
-  const status = toStatus(doc.publishedContent, live.clean, remote);
+  const [live, base] = await Promise.all([readLiveText(doc.id), getPublishedContent(doc.id)]);
+  const status = toStatus(base, live.clean, remote);
   const remoteText = remote.content ?? "";
   const url = remote.url ?? githubUrlFor(doc);
   const recordBase = () => updateDocument(doc.id, { publishedContent: remoteText, publishedAt: new Date(), githubSha: remote.revision });
@@ -273,7 +279,7 @@ export async function pullDocument(doc: Document, user: SessionUser, options: Pu
   }
 
   if (status.status === "diverged" && options.merge && !options.force) {
-    const merged = mergeTexts(doc.publishedContent ?? "", live.clean, remoteText);
+    const merged = mergeTexts(base ?? "", live.clean, remoteText);
     if (merged.conflicts > 0) {
       throw syncConflict(`Merge has ${merged.conflicts} conflict${merged.conflicts === 1 ? "" : "s"}.`, {
         status: "conflict",
@@ -335,7 +341,7 @@ export interface LinkRepoInput {
 export type LinkInput = LinkGistInput | LinkRepoInput | { storage: "local" };
 
 /** Link a document to a gist (existing or new) or a repository file, then publish. */
-export async function linkDocument(doc: Document, user: SessionUser, input: LinkInput): Promise<Document> {
+export async function linkDocument(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<Document> {
   if (input.storage === "local") {
     return (await updateDocument(doc.id, {
       storage: "local",

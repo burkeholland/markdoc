@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import { execSync } from "node:child_process";
+import type { DocumentMeta } from "@/server/documents";
 
 // Real GitHub against the scratch repository (burkeholland/markdoc-scratch). Runs only when a token
 // is available (GITHUB_TOKEN or `gh auth token`); the file it creates is deleted at the end.
@@ -57,8 +58,9 @@ describe.skipIf(!token)("GitHub sync against the scratch repository", () => {
     const fresh = async (id: string) => (await getDocumentAccess(id, user))!.doc;
 
     const doc = await createDocument({ ownerId: user.id, content: BASE });
-    let linked = await linkDocument(doc, user, { storage: "repo", owner, repo, branch: "main", path });
-    expect(linked.publishedContent).toBe(BASE);
+    const linkedRow = await linkDocument(doc, user, { storage: "repo", owner, repo, branch: "main", path });
+    expect(linkedRow.publishedContent).toBe(BASE);
+    let linked: DocumentMeta = linkedRow;
     expect(linked.githubSha).toBe(fileSha);
     expect((await syncStatus(linked, user, { fresh: true })).status).toBe("in-sync");
 

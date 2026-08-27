@@ -1,10 +1,10 @@
-import { and, desc, eq, ilike, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, ilike, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
 import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
-import { excerptOf } from "@/editor/stats";
+import { excerptOf, excerptOfPrefix } from "@/editor/stats";
 
 export { DOCUMENT_TITLE_MAX, boundTitle } from "@/server/document-title";
 
@@ -17,8 +17,28 @@ export interface SessionUser {
   image?: string | null;
 }
 
+/**
+ * A `document` row without its bulky columns: no `ystate` (the Yjs state, read only by
+ * livedoc.ts / collab/hocuspocus.ts), no `content` and no `publishedContent`. Everything that
+ * authorizes, lists or describes a document works from this shape.
+ */
+export type DocumentMeta = Omit<Document, "ystate" | "content" | "publishedContent">;
+
+/** Columns of {@link DocumentMeta}: every `document` column except the three large text/bytea ones. */
+const { ystate: _ystate, content: _content, publishedContent: _publishedContent, ...documentMetaColumns } = getTableColumns(schema.documents);
+
+/** The document as an access check sees it. */
+export interface AccessDocument extends DocumentMeta {
+  /**
+   * For a document linked to GitHub, whether the stored text differs from what was last published
+   * or pulled (`published_content is distinct from content`, compared in SQL so neither column has
+   * to leave the database). Always false for a local document.
+   */
+  hasUnpublishedChanges: boolean;
+}
+
 export interface DocumentAccess {
-  doc: Document;
+  doc: AccessDocument;
   role: Role;
 }
 
@@ -55,10 +75,19 @@ export interface AccessOptions {
 /**
  * Resolve the document and the caller's role, or null if the caller has no access.
  * Documents in the trash resolve as "not found" unless `allowDeleted` is set.
+ *
+ * This runs for every `/api/documents/:id/*` request and every collaboration socket, so it reads
+ * metadata only: no `ystate`, `content` or `publishedContent` (see {@link AccessDocument}).
  */
 export async function getDocumentAccess(docId: string, user: SessionUser | null, { allowDeleted = false }: AccessOptions = {}): Promise<DocumentAccess | null> {
   const db = await getDb();
-  const [doc] = await db.select().from(schema.documents).where(eq(schema.documents.id, docId));
+  const [doc] = await db
+    .select({
+      ...documentMetaColumns,
+      hasUnpublishedChanges: sql<boolean>`(${schema.documents.storage} <> 'local' and ${schema.documents.publishedContent} is distinct from ${schema.documents.content})`,
+    })
+    .from(schema.documents)
+    .where(eq(schema.documents.id, docId));
   if (!doc) return null;
   if (doc.deletedAt && !allowDeleted) return null;
   if (user && doc.ownerId === user.id) return { doc, role: "owner" };
@@ -71,6 +100,16 @@ export async function getDocumentAccess(docId: string, user: SessionUser | null,
   }
   const linkRole = roleFromLink(doc.linkAccess, !!user);
   return linkRole ? { doc, role: linkRole } : null;
+}
+
+/**
+ * The text last published to or pulled from GitHub (the three-way merge base), or null for a
+ * document that was never synced. Read on its own because access rows leave the column out.
+ */
+export async function getPublishedContent(docId: string): Promise<string | null> {
+  const db = await getDb();
+  const [row] = await db.select({ publishedContent: schema.documents.publishedContent }).from(schema.documents).where(eq(schema.documents.id, docId));
+  return row?.publishedContent ?? null;
 }
 
 export interface DocumentSummary {
@@ -98,11 +137,39 @@ export interface DocumentSummary {
 
 /** The card excerpt: the document's first prose, Markdown removed (see `excerptOf`). */
 export function excerpt(content: string): string {
-  return excerptOf(content, 160);
+  return excerptOf(content, EXCERPT_LENGTH);
 }
 
+const EXCERPT_LENGTH = 160;
+
+/**
+ * How much of `content` a listing reads to build the excerpt: enough for a title, front matter
+ * and a first paragraph many times over. The rare document whose first prose starts later than
+ * this (a long code block or front matter up front) is re-read in full, see {@link excerptsFor}.
+ */
+export const EXCERPT_PREFIX_CHARS = 1000;
+
+/** Columns a {@link DocumentSummary} is built from: metadata plus a bounded prefix of the text. */
+const summaryColumns = {
+  id: schema.documents.id,
+  title: schema.documents.title,
+  storage: schema.documents.storage,
+  updatedAt: schema.documents.updatedAt,
+  createdAt: schema.documents.createdAt,
+  ownerId: schema.documents.ownerId,
+  repoOwner: schema.documents.repoOwner,
+  repoName: schema.documents.repoName,
+  repoPath: schema.documents.repoPath,
+  gistId: schema.documents.gistId,
+  deletedAt: schema.documents.deletedAt,
+  // One character more than the bound, so a prefix longer than the bound is known to be cut short.
+  contentHead: sql<string>`left(${schema.documents.content}, ${EXCERPT_PREFIX_CHARS + 1})`,
+};
+
+type SummaryDoc = { [K in keyof typeof summaryColumns]: K extends keyof Document ? Document[K] : string };
+
 interface VisibleRow {
-  doc: Document;
+  doc: SummaryDoc;
   owner: { name: string | null; login: string | null } | null;
   collabRole: Role | null;
   starred: boolean | null;
@@ -111,13 +178,15 @@ interface VisibleRow {
 
 /**
  * Documents the user owns or is listed as a collaborator on, with the owner, the user's collaborator
- * role, their star and their last-opened time joined in.
+ * role, their star and their last-opened time joined in. Reads no `ystate`, `publishedContent` or
+ * full `content`: the dashboard and `GET /api/documents` only show metadata and a short excerpt.
+ * `extra` adds `document` columns to `doc` for the one caller that needs more (search).
  */
-function visibleDocuments(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser) {
+function visibleDocuments<E extends Partial<typeof schema.documents._.columns> = {}>(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser, extra?: E) {
   const login = user.login?.toLowerCase() ?? "";
   const query = db
     .select({
-      doc: schema.documents,
+      doc: { ...summaryColumns, ...(extra ?? ({} as E)) },
       owner: { name: schema.users.name, login: schema.users.login },
       collabRole: schema.collaborators.role,
       starred: schema.stars.starred,
@@ -136,7 +205,33 @@ function visibleDocuments(db: Awaited<ReturnType<typeof getDb>>, user: SessionUs
   return { query, visible, starredOnly };
 }
 
-function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow, user: SessionUser): DocumentSummary {
+/**
+ * Excerpts for the rows, by document id. Each is computed from the row's content prefix when that
+ * is conclusive (see `excerptOfPrefix`); the documents where it is not are read in full in one
+ * extra query, so the result is exactly `excerpt(content)` for every document. A row that already
+ * carries the full `content` (search) uses it directly.
+ */
+async function excerptsFor(db: Awaited<ReturnType<typeof getDb>>, rows: VisibleRow[]): Promise<Map<string, string>> {
+  const excerpts = new Map<string, string>();
+  const needFull: string[] = [];
+  for (const { doc } of rows) {
+    if ("content" in doc && typeof doc.content === "string") {
+      excerpts.set(doc.id, excerpt(doc.content));
+      continue;
+    }
+    const truncated = doc.contentHead.length > EXCERPT_PREFIX_CHARS;
+    const fromPrefix = excerptOfPrefix(doc.contentHead, truncated, EXCERPT_LENGTH);
+    if (fromPrefix === null) needFull.push(doc.id);
+    else excerpts.set(doc.id, fromPrefix);
+  }
+  if (needFull.length > 0) {
+    const full = await db.select({ id: schema.documents.id, content: schema.documents.content }).from(schema.documents).where(inArray(schema.documents.id, needFull));
+    for (const { id, content } of full) excerpts.set(id, excerpt(content));
+  }
+  return excerpts;
+}
+
+function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow, user: SessionUser, excerpt: string): DocumentSummary {
   return {
     id: doc.id,
     title: doc.title,
@@ -147,7 +242,7 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     ownerName: owner?.name ?? null,
     ownerLogin: owner?.login ?? null,
     role: doc.ownerId === user.id ? "owner" : (collabRole ?? "viewer"),
-    excerpt: excerpt(doc.content),
+    excerpt,
     repoOwner: doc.repoOwner,
     repoName: doc.repoName,
     repoPath: doc.repoPath,
@@ -156,6 +251,11 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     lastOpenedAt: lastOpenedAt ?? null,
     deletedAt: doc.deletedAt ?? null,
   };
+}
+
+async function toSummaries(db: Awaited<ReturnType<typeof getDb>>, rows: VisibleRow[], user: SessionUser): Promise<DocumentSummary[]> {
+  const excerpts = await excerptsFor(db, rows);
+  return rows.map((row) => toSummary(row, user, excerpts.get(row.doc.id) ?? ""));
 }
 
 export interface ListDocumentsOptions {
@@ -170,7 +270,7 @@ export async function listDocumentsForUser(user: SessionUser, { starred }: ListD
   const rows = await query
     .where(starred ? and(visible, starredOnly) : visible)
     .orderBy(sql`${schema.recents.openedAt} desc nulls last`, desc(schema.documents.updatedAt));
-  return rows.map((row) => toSummary(row, user));
+  return toSummaries(db, rows, user);
 }
 
 /** The caller's own documents that are in the trash, most recently trashed first. */
@@ -180,7 +280,7 @@ export async function listTrashForUser(user: SessionUser): Promise<DocumentSumma
   const rows = await query
     .where(and(eq(schema.documents.ownerId, user.id), isNotNull(schema.documents.deletedAt)))
     .orderBy(desc(schema.documents.deletedAt));
-  return rows.map((row) => toSummary(row, user));
+  return toSummaries(db, rows, user);
 }
 
 export async function starDocument(userId: string, docId: string): Promise<void> {
@@ -250,6 +350,11 @@ function escapeLike(s: string): string {
 /**
  * Case-insensitive substring search over title and content of the documents the user can see.
  * Title matches rank first, then content matches, each by most recently updated.
+ *
+ * This is the one listing that still reads the full `content` column (for at most `limit` rows):
+ * the snippet is cut from the whitespace-collapsed text around the first match, and a bounded
+ * window could not reproduce it exactly (a run of whitespace collapses to one space, and the
+ * ellipses depend on knowing where the text ends). `ystate` and `publishedContent` are not read.
  */
 export async function searchDocumentsForUser(user: SessionUser, q: string, { limit = 20 }: { limit?: number } = {}): Promise<SearchResult[]> {
   const needle = q.trim();
@@ -257,12 +362,13 @@ export async function searchDocumentsForUser(user: SessionUser, q: string, { lim
   const db = await getDb();
   const pattern = `%${escapeLike(needle)}%`;
   const titleMatch = ilike(schema.documents.title, pattern);
-  const { query, visible } = visibleDocuments(db, user);
+  const { query, visible } = visibleDocuments(db, user, { content: schema.documents.content });
   const rows = await query
     .where(and(visible, or(titleMatch, ilike(schema.documents.content, pattern))))
     .orderBy(sql`case when ${titleMatch} then 0 else 1 end`, desc(schema.documents.updatedAt))
     .limit(limit);
-  return rows.map((row) => ({ ...toSummary(row, user), snippet: contentSnippet(row.doc.content, needle) }));
+  const summaries = await toSummaries(db, rows, user);
+  return summaries.map((summary, i) => ({ ...summary, snippet: contentSnippet(rows[i].doc.content, needle) }));
 }
 
 export interface CreateDocumentInput {
