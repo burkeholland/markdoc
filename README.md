@@ -234,15 +234,18 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 ## Deploy to Azure
 
-The target is **Azure Container Apps** with **Azure Database for PostgreSQL Flexible Server**. Infrastructure is in `infra/main.bicep`; `deploy/azure.ps1` provisions everything and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
+The target is **Azure Container Apps** with a private PostgreSQL VM. The VM has no public IP after bootstrap, accepts TLS database connections only from the Container Apps subnet, and is protected by an encrypted daily VM backup retained for seven days. Infrastructure is in `infra/main.bicep`; `deploy/azure.ps1` provisions everything and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
 
 ```powershell
 $env:MARKDOC_PG_PASSWORD = '<strong password>'
 $env:MARKDOC_AUTH_SECRET = '<openssl rand -base64 32>'
 $env:MARKDOC_GITHUB_CLIENT_ID = '<oauth app id>'
 $env:MARKDOC_GITHUB_CLIENT_SECRET = '<oauth app secret>'
+$env:MARKDOC_VM_SSH_PUBLIC_KEY = Get-Content "$HOME\.ssh\id_ed25519.pub" -Raw
 .\deploy\azure.ps1             # first run prints the app URL; add it as the OAuth callback, then rerun
 ```
+
+For unattended production deployment, pass `-SecretsPath <file>` instead. The CLIXML file must contain `PostgresAdminPassword`, `AuthSecret`, `GitHubClientId`, `GitHubClientSecret`, and `VmAdminSshPublicKey` as DPAPI-encrypted `SecureString` properties. Secure Bicep values are written to a randomly named parameter file only for the duration of each Azure CLI call and removed in `finally`; they are never command-line arguments.
 
 Approximate monthly cost (East US 2, pay-as-you-go list prices):
 
@@ -251,11 +254,12 @@ Approximate monthly cost (East US 2, pay-as-you-go list prices):
 | Container App | 0.5 vCPU / 1 GiB, one always-on replica | 34 |
 | Container App (`-Small`) | 0.25 vCPU / 0.5 GiB | 14 |
 | Container App (`-ScaleToZero`) | sleeps when nobody is connected | ~0 idle |
-| PostgreSQL Flexible Server | Burstable B1ms, 32 GiB | 16 |
+| PostgreSQL VM | Standard B1ms, 32 GiB Standard SSD | varies |
+| Recovery Services backup | daily, seven-day LRS retention | varies |
 | Container Registry | Basic | 5 |
 | Log Analytics | first 5 GiB free, 1 GiB/day cap | ~0 |
 
-Expect **$40–55/month** for a small team, about **$25** with the small app size. The collaboration server keeps open documents in memory, so the app runs as a single replica; scaling out would need Hocuspocus's Redis extension.
+The collaboration server keeps open documents in memory, so the app runs as a single replica; scaling out would need Hocuspocus's Redis extension.
 
 ## Project layout
 
