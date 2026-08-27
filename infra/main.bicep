@@ -86,8 +86,9 @@ var backupFabric = 'Azure'
 var backupProtectionContainer = 'iaasvmcontainer;iaasvmcontainerv2;${resourceGroup().name};${postgresVmName}'
 var backupProtectedItem = 'vm;iaasvmcontainerv2;${resourceGroup().name};${postgresVmName}'
 var backupTime = '2026-01-01T02:00:00Z'
-var keyVaultAudience = uriComponent('https://${az.environment().suffixes.keyvaultDns}')
-var keyVaultSecretUrl = 'https://${keyVaultName}.${az.environment().suffixes.keyvaultDns}/secrets/${postgresPasswordSecretName}?api-version=7.4'
+var keyVaultDnsHost = substring(az.environment().suffixes.keyvaultDns, 1, length(az.environment().suffixes.keyvaultDns) - 1)
+var keyVaultAudience = uriComponent('https://${keyVaultDnsHost}')
+var keyVaultSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresPasswordSecretName}?api-version=7.4'
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${name}-logs'
