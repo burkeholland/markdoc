@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { handler, HttpError, json, NUL_MESSAGE, nulFree, readJson, requireCanCreateDocuments, requireUser, tokenAllowsDocument } from "@/server/http";
-import { createDocument, listDocumentsForUser, listTrashForUser, searchDocumentsForUser } from "@/server/documents";
+import { createDocument, DOCUMENT_TITLE_MAX, listDocumentsForUser, listTrashForUser, searchDocumentsForUser } from "@/server/documents";
 import { applyTemplate, getTemplate } from "@/lib/templates";
 
 const flag = z
@@ -41,7 +41,7 @@ export const GET = handler(async (req: Request) => {
 });
 
 const createSchema = z.object({
-  title: z.string().trim().min(1).max(200).optional(),
+  title: z.string().trim().min(1).max(DOCUMENT_TITLE_MAX).optional(),
   content: z.string().max(2_000_000).optional(),
   /** Template id (see GET /api/templates). Fills title/content unless `content` is given. */
   template: z.string().trim().min(1).max(64).optional(),
