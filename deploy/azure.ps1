@@ -431,17 +431,32 @@ if ($VerifyRecovery -or $ConfigureRecovery) {
     Step 'Running the newly configured automated scratch restore verification.'
   }
   $restoreResult = ''
-  for ($attempt = 1; $attempt -le 5; $attempt++) {
-    $restoreResult = az vm run-command invoke `
+  if ($ConfigureRecovery) {
+    $recoveryExecutionJson = az vm run-command show `
       --resource-group $ResourceGroup `
-      --name "$Name-pg" `
-      --command-id RunShellScript `
-      --scripts '/usr/local/sbin/markdoc-restore-check && sudo -u postgres /usr/local/sbin/markdoc-backup-monitor && echo recovery-verification=ok' `
-      --query 'value[0].message' `
-      --output tsv `
+      --vm-name "$Name-pg" `
+      --run-command-name 'configure-postgresql-recovery' `
+      --instance-view `
+      --query '{exitCode:instanceView.exitCode,output:instanceView.output}' `
+      --output json `
       --only-show-errors
-    if ($LASTEXITCODE -eq 0 -and $restoreResult -match 'recovery-verification=ok') { break }
-    if ($attempt -lt 5) { Start-Sleep -Seconds 30 }
+    if ($LASTEXITCODE) { throw 'Could not read the PostgreSQL recovery configuration result.' }
+    $recoveryExecution = $recoveryExecutionJson | ConvertFrom-Json
+    if ($recoveryExecution.exitCode -ne 0) { throw 'The PostgreSQL recovery configuration failed on the VM.' }
+    $restoreResult = $recoveryExecution.output
+  } else {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+      $restoreResult = az vm run-command invoke `
+        --resource-group $ResourceGroup `
+        --name "$Name-pg" `
+        --command-id RunShellScript `
+        --scripts '/usr/local/sbin/markdoc-restore-check && sudo -u postgres /usr/local/sbin/markdoc-backup-monitor && echo recovery-verification=ok' `
+        --query 'value[0].message' `
+        --output tsv `
+        --only-show-errors
+      if ($LASTEXITCODE -eq 0 -and $restoreResult -match 'recovery-verification=ok') { break }
+      if ($attempt -lt 5) { Start-Sleep -Seconds 30 }
+    }
   }
   if ($restoreResult -notmatch 'recovery-verification=ok') {
     throw 'The PostgreSQL scratch restore verification failed.'

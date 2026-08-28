@@ -456,6 +456,8 @@ systemctl restart postgresql
 sudo -u postgres pgbackrest --stanza="$STANZA" check
 sudo -u postgres pgbackrest --stanza="$STANZA" --type=full backup
 sudo -u postgres /usr/local/sbin/markdoc-logical-backup
+/usr/local/sbin/markdoc-restore-check
+sudo -u postgres /usr/local/sbin/markdoc-backup-monitor
 
 systemctl daemon-reload
 systemctl enable --now \
@@ -463,3 +465,4 @@ systemctl enable --now \
   markdoc-logical-backup.timer \
   markdoc-backup-monitor.timer \
   markdoc-restore-check.timer
+echo 'recovery-verification=ok'
