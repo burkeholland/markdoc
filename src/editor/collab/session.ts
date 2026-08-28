@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import type { CompleteHocuspocusProviderWebsocketConfiguration, WebSocketStatus } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
 import { MarkdocProvider } from "./provider";
-import { CommentsModel, COMMENTS_ORIGIN } from "./comments";
+import { CommentsModel, COMMENTS_ORIGIN, type CommentSuggestionSnapshot, type CommentSuggestionTarget } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
 import {
@@ -16,7 +16,7 @@ import {
   type ConnectionPhase,
   type LocalPersistence,
 } from "./offline";
-import { perfMark, type CollabUser, type TextAnchor } from "./shared";
+import { perfMark, type CollabUser } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
   carryActiveIndex,
@@ -34,12 +34,12 @@ export type EditMode = "editing" | "suggesting" | "viewing";
 export type Surface = "code" | "rich";
 export type SaveState = ConnectionPhase;
 
-const COMMENT_SUGGESTION_ANCHOR_META = Symbol("commentSuggestionAnchor");
+const COMMENT_SUGGESTION_META = Symbol("commentSuggestion");
 
-interface CommentSuggestionAnchorMeta {
+interface CommentSuggestionMeta {
   threadId: string;
-  before: { anchor: TextAnchor; quote: string };
-  after: { anchor: TextAnchor; quote: string };
+  before: CommentSuggestionSnapshot;
+  after: CommentSuggestionSnapshot;
 }
 
 /** How long the "All changes saved" highlight stays after a reconnect. */
@@ -876,14 +876,45 @@ export class CollabSession {
     this.notify();
   }
 
+  /** Accept a root or reply suggestion as one text-and-comment undo step. */
+  acceptCommentSuggestion(threadId: string, proposed: string, replyId?: string): boolean {
+    const target: CommentSuggestionTarget = replyId ? { kind: "reply", replyId } : { kind: "root" };
+    const before = this.comments.snapshotSuggestion(threadId, target);
+    if (!before) return false;
+
+    this.undoManager.stopCapturing();
+    const previousUndoStackLength = this.undoManager.undoStack.length;
+    const previousUndoStackItem = this.undoManager.undoStack.at(-1);
+    try {
+      const accepted = replyId
+        ? this.comments.acceptReplySuggestion(threadId, replyId, this.user)
+        : this.comments.acceptSuggestion(threadId, proposed, this.user);
+      if (!accepted) return false;
+
+      const after = this.comments.snapshotSuggestion(threadId, target);
+      if (!after) throw new Error("Accepted comment suggestion target disappeared");
+      const undoStackItem = this.undoManager.undoStack.at(-1);
+      if (
+        !undoStackItem ||
+        undoStackItem === previousUndoStackItem ||
+        this.undoManager.undoStack.length !== previousUndoStackLength + 1
+      ) {
+        if (!this.comments.restoreSuggestion(threadId, before)) {
+          throw new Error("Could not restore comment suggestion after undo capture failed");
+        }
+        return false;
+      }
+      undoStackItem.meta.set(COMMENT_SUGGESTION_META, { threadId, before, after } satisfies CommentSuggestionMeta);
+      return true;
+    } finally {
+      this.undoManager.stopCapturing();
+    }
+  }
+
   // Y.UndoManager keeps merging edits into the newest stack item for `captureTimeout` after the
   // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
-  rememberCommentSuggestionUndo(meta: CommentSuggestionAnchorMeta) {
-    this.undoManager.undoStack.at(-1)?.meta.set(COMMENT_SUGGESTION_ANCHOR_META, meta);
-  }
-
   undo() {
     this.undoManager.undo();
     this.undoManager.stopCapturing();
@@ -920,10 +951,12 @@ export class CollabSession {
   };
 
   private onUndoStackItemPopped = (event: { stackItem: { meta: Map<unknown, unknown> }; type: "undo" | "redo" }) => {
-    const meta = event.stackItem.meta.get(COMMENT_SUGGESTION_ANCHOR_META) as CommentSuggestionAnchorMeta | undefined;
+    const meta = event.stackItem.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined;
     if (meta) {
+      const destination = event.type === "undo" ? this.undoManager.redoStack : this.undoManager.undoStack;
+      destination.at(-1)?.meta.set(COMMENT_SUGGESTION_META, meta);
       const snapshot = event.type === "undo" ? meta.before : meta.after;
-      this.comments.setAnchor(meta.threadId, snapshot.anchor, snapshot.quote);
+      this.comments.restoreSuggestion(meta.threadId, snapshot);
     }
     this.notify();
   };

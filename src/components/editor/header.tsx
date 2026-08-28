@@ -503,6 +503,52 @@ function GitHubEntryLabel({ configured, children }: { configured: boolean; child
   );
 }
 
+export function PublishStatusButton({
+  sync,
+  publishing,
+  onPublishNow,
+  onPull,
+  onSync,
+}: Pick<HeaderProps, "sync" | "publishing" | "onPublishNow" | "onPull" | "onSync"> & { sync: SyncStatusDto }) {
+  const opensSyncDialog = sync.status === "diverged" || sync.status === "remote-unreadable";
+  const label =
+    sync.status === "remote-ahead"
+      ? "Pull"
+      : sync.status === "diverged"
+        ? "Both changed"
+        : sync.status === "remote-unreadable"
+          ? SYNC_LABELS[sync.status]
+          : sync.status === "in-sync"
+            ? "Up to date"
+            : "Publish";
+
+  return (
+    <button
+      type="button"
+      className="btn btn-primary gap-1.5 rounded-r-none pl-3 pr-3"
+      disabled={publishing}
+      data-testid="publish-button"
+      onClick={sync.status === "remote-ahead" ? onPull : opensSyncDialog ? onSync : onPublishNow}
+      title={SYNC_LABELS[sync.status]}
+    >
+      {publishing ? (
+        <Loader2 size={16} className="animate-spin" />
+      ) : sync.status === "remote-ahead" ? (
+        <RefreshCw size={15} />
+      ) : sync.status === "diverged" ? (
+        <GitMerge size={15} />
+      ) : sync.status === "remote-unreadable" ? (
+        <AlertTriangle size={15} className="text-amber-200" />
+      ) : (
+        <span aria-hidden className={cn("inline-block h-2 w-2 rounded-full", sync.status === "in-sync" ? "bg-emerald-300" : "bg-amber-300")} />
+      )}
+      <span data-testid="publish-status" data-status={sync.status}>
+        {label}
+      </span>
+    </button>
+  );
+}
+
 export const Header = memo(function Header(props: HeaderProps) {
   const { session, doc, compact, githubConfigured, embed = false } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
@@ -660,30 +706,7 @@ export const Header = memo(function Header(props: HeaderProps) {
           <Menu>
             <div className="flex items-stretch" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
               {linked && canEdit && props.sync ? (
-                <button
-                  type="button"
-                  className="btn btn-primary gap-1.5 rounded-r-none pl-3 pr-3"
-                  disabled={props.publishing}
-                  data-testid="publish-button"
-                  onClick={props.sync.status === "remote-ahead" ? props.onPull : props.sync.status === "diverged" ? props.onSync : props.onPublishNow}
-                  title={SYNC_LABELS[props.sync.status]}
-                >
-                  {props.publishing ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : props.sync.status === "remote-ahead" ? (
-                    <RefreshCw size={15} />
-                  ) : props.sync.status === "diverged" ? (
-                    <GitMerge size={15} />
-                  ) : (
-                    <span
-                      aria-hidden
-                      className={cn("inline-block h-2 w-2 rounded-full", props.sync.status === "in-sync" ? "bg-emerald-300" : "bg-amber-300")}
-                    />
-                  )}
-                  <span data-testid="publish-status" data-status={props.sync.status}>
-                    {props.sync.status === "remote-ahead" ? "Pull" : props.sync.status === "diverged" ? "Both changed" : props.sync.status === "in-sync" ? "Up to date" : "Publish"}
-                  </span>
-                </button>
+                <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
               ) : (
                 <MenuTrigger asChild>
                   <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
@@ -708,7 +731,7 @@ export const Header = memo(function Header(props: HeaderProps) {
                   <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
                     {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
                   </MenuItem>
-                  <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit}>
+                  <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
                     Pull latest from GitHub
                   </MenuItem>
                   <MenuItem icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">

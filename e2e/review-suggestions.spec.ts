@@ -138,12 +138,14 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(alice.page.getByTestId("comment-thread").first()).toHaveAttribute("data-suggestion", "accepted");
     await alice.page.getByTestId("comments-tab-open").click();
 
-    // One undo step in the editor restores the text. The undo manager's scope is the text (as for
-    // accepted tracked changes), so the thread keeps its decision record and stays resolved.
+    // One undo step restores both the text and the root decision.
     await alice.page.locator(".md-rich").click();
     await alice.page.keyboard.press("ControlOrMeta+z");
     await expect.poll(() => codeText(alice.page)).toContain("Our product is very unique.");
-    await expect(alice.page.getByTestId("comments-tab-resolved")).toContainText("1");
+    await expect(alice.page.getByTestId("comments-tab-resolved")).not.toContainText("1");
+    await expect(aliceThread).toHaveAttribute("data-suggestion", "pending");
+    await expect(aliceThread.getByTestId("suggestion-accept-comment")).toBeVisible();
+    await expect(aliceThread.getByTestId("suggestion-reject-comment")).toBeVisible();
   });
 
   test("the composer's Suggest a change / Cancel / Comment sit on one row with single-line labels at every panel width", async () => {
@@ -273,6 +275,9 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
 
     await page.getByTestId("toast-action").click();
     await expect.poll(() => codeText(page)).toContain("sales are good");
+    await expect(reply()).toHaveAttribute("data-state", "pending");
+    await expect(reply().getByTestId("suggestion-accept-comment")).toBeVisible();
+    await expect(reply().getByTestId("suggestion-reject-comment")).toBeVisible();
     await expect
       .poll(async () => {
         const undone = (await (await page.request.get(`/api/documents/${docId}/comments`)).json()) as {
@@ -281,11 +286,21 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
         return undone.comments.find((thread) => thread.id === threadId);
       })
       .toMatchObject({ quote: "sales are good", currentText: "sales are good" });
-    await page.reload();
-    await ensureCommentsOpen(page);
+
+    await page.getByTestId("tb-redo").click();
+    await expect.poll(() => codeText(page)).toContain("sales are strong");
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
-    await expectReplyEditHidden();
+
+    await page.getByTestId("tb-undo").click();
+    await expect.poll(() => codeText(page)).toContain("sales are good");
+    await expect(reply()).toHaveAttribute("data-state", "pending");
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await expect(reply()).toHaveAttribute("data-state", "pending");
+    await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
+    await expect(reply().getByTestId("suggestion-accept-comment")).toBeVisible();
+    await expect(reply().getByTestId("suggestion-reject-comment")).toBeVisible();
   });
 
   test("reply suggestions stay independent in bulk review; outdated replies can be rejected once", async () => {
@@ -463,7 +478,12 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect
       .poll(
         async () => {
-          const w = await mcp<{ cursor: string; events: { type: string; threadId?: string | null }[] }>(page, token, "markdoc_watch", { id: docId, since: watch0.cursor, wait: 1 });
+          const w = await mcp<{ cursor: string; events: { type: string; threadId?: string | null }[] }>(page, token, "markdoc_watch", {
+            id: docId,
+            since: watch0.cursor,
+            wait: 1,
+            includeSelf: true,
+          });
           return w.events.map((e) => e.type);
         },
         { timeout: 10_000 },
