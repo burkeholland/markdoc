@@ -211,7 +211,8 @@ flock -n 9 || {
 
 restore_dir="\$(mktemp -d /var/lib/postgresql/markdoc-restore-check.XXXXXX)"
 result_file="\$(mktemp /var/lib/postgresql/markdoc-restore-result.XXXXXX.json)"
-pg_bin="/usr/lib/postgresql/\$(pg_config --version | awk '{print \$2}' | cut -d. -f1)/bin"
+pg_major="\$(sudo -u postgres psql -Atc "select current_setting('server_version_num')::int / 10000")"
+pg_bin="/usr/lib/postgresql/\${pg_major}/bin"
 started_epoch="\$(date +%s)"
 started_at="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 started_cluster=0
