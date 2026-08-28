@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { NotificationKind } from "@/server/db/schema";
 import { parseAgentMentions, parseMentions } from "@/editor/collab/mentions";
@@ -97,27 +97,50 @@ export async function notifyMany(logins: Iterable<string | null | undefined>, in
   return n;
 }
 
+async function mentionRecipientsWithAccess(docId: string, logins: string[]): Promise<string[]> {
+  if (logins.length === 0) return [];
+  const db = await getDb();
+  const [document] = await db
+    .select({ linkAccess: schema.documents.linkAccess, ownerLogin: schema.users.login })
+    .from(schema.documents)
+    .leftJoin(schema.users, eq(schema.users.id, schema.documents.ownerId))
+    .where(and(eq(schema.documents.id, docId), isNull(schema.documents.deletedAt)))
+    .limit(1);
+  if (!document) return [];
+  if (document.linkAccess !== "private") return logins;
+
+  const collaborators = await db
+    .select({ login: schema.collaborators.login })
+    .from(schema.collaborators)
+    .where(and(eq(schema.collaborators.documentId, docId), inArray(schema.collaborators.login, logins)));
+  const allowed = new Set(collaborators.map(({ login }) => login.toLowerCase()));
+  if (document.ownerLogin) allowed.add(document.ownerLogin.toLowerCase());
+  return logins.filter((login) => allowed.has(login));
+}
+
 /**
  * Record every `@login` in `body` as a mention notification about `commentId`.
- * Idempotent per (comment, mentioned login); mentioning yourself is ignored — except
+ * Only recipients who can open the document are notified. Idempotent per (comment,
+ * mentioned login); mentioning yourself is ignored — except
  * `@you/Your-Agent`, which is stored already read so your agent's watch still gets it
  * (notifications are keyed on the token's user) without badging you.
  * Returns the number of new rows.
  */
 export async function recordMentions(docId: string, commentId: string, byLogin: string | null, body: string, byName?: string | null): Promise<number> {
-  const logins = parseMentions(body);
+  const logins = [...new Set(parseMentions(body).map((login) => login.toLowerCase()))];
   const db = await getDb();
   const existing = await db
     .select({ id: schema.notifications.id, userLogin: schema.notifications.userLogin })
     .from(schema.notifications)
     .where(and(eq(schema.notifications.documentId, docId), eq(schema.notifications.kind, "mention"), eq(schema.notifications.refId, commentId)));
-  const current = new Set(logins);
+  const recipients = await mentionRecipientsWithAccess(docId, logins);
+  const current = new Set(recipients);
   const removed = existing.filter((notification) => !current.has(notification.userLogin));
   if (removed.length > 0) {
     await db.delete(schema.notifications).where(inArray(schema.notifications.id, removed.map((notification) => notification.id)));
     wakeDocument(docId);
   }
-  if (logins.length === 0) return 0;
+  if (recipients.length === 0) return 0;
   const agentTargets = new Map<string, string[]>();
   for (const mention of parseAgentMentions(body)) {
     const targets = agentTargets.get(mention.login) ?? [];
@@ -125,7 +148,7 @@ export async function recordMentions(docId: string, commentId: string, byLogin: 
     agentTargets.set(mention.login, targets);
   }
   let n = 0;
-  for (const login of logins) {
+  for (const login of recipients) {
     const targets = agentTargets.get(login) ?? [];
     const ok = await notify({ userLogin: login, documentId: docId, kind: "mention", actorLogin: byLogin, actorName: byName ?? byLogin, refId: commentId, snippet: body, agentTargets: targets, selfAsRead: targets.length > 0 });
     if (ok) n++;
@@ -161,11 +184,25 @@ export interface NotificationPage {
 
 const userWhere = (login: string) => eq(schema.notifications.userLogin, login.toLowerCase());
 
+const mentionDocumentAccessWhere = (login: string) => {
+  const normalized = login.toLowerCase();
+  return and(
+    isNull(schema.documents.deletedAt),
+    or(
+      ne(schema.documents.linkAccess, "private"),
+      sql`exists (select 1 from ${schema.users} where ${schema.users.id} = ${schema.documents.ownerId} and lower(${schema.users.login}) = ${normalized})`,
+      sql`exists (select 1 from ${schema.collaborators} where ${schema.collaborators.documentId} = ${schema.documents.id} and lower(${schema.collaborators.login}) = ${normalized})`,
+    ),
+  );
+};
+
+const visibleNotificationWhere = (login: string) => or(ne(schema.notifications.kind, "mention"), mentionDocumentAccessWhere(login));
+
 /** The user's notifications, newest first, plus their total unread count. */
 export async function listNotifications(login: string, opts: { unread?: boolean; limit?: number; kind?: NotificationKind } = {}): Promise<NotificationPage> {
   const db = await getDb();
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
-  const conds = [userWhere(login)];
+  const conds = [userWhere(login), visibleNotificationWhere(login)];
   if (opts.unread) conds.push(isNull(schema.notifications.readAt));
   if (opts.kind) conds.push(eq(schema.notifications.kind, opts.kind));
   const items = await db
@@ -192,11 +229,12 @@ export async function listNotifications(login: string, opts: { unread?: boolean;
 
 export async function unreadCount(login: string, kind?: NotificationKind): Promise<number> {
   const db = await getDb();
-  const conds = [userWhere(login), isNull(schema.notifications.readAt)];
+  const conds = [userWhere(login), isNull(schema.notifications.readAt), visibleNotificationWhere(login)];
   if (kind) conds.push(eq(schema.notifications.kind, kind));
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(schema.notifications)
+    .innerJoin(schema.documents, eq(schema.documents.id, schema.notifications.documentId))
     .where(and(...conds));
   return row?.n ?? 0;
 }
