@@ -136,10 +136,17 @@ $storedRotationRecoveryPropertyCount = @(
     $store -and $store.PSObject.Properties[$_]
   }
 ).Count
-$hasRetainedRotationCandidate = (
+$hasCompleteRotationRecoveryMetadata = (
   $hasStoredRotationCandidate -and
   $storedRotationRecoveryPropertyCount -eq $rotationRecoveryProperties.Count
 )
+if ($hasStoredRotationCandidate) {
+  $storedCandidate = $store.PSObject.Properties['PostgresCandidatePassword']
+  if ($storedCandidate.Value -isnot [Security.SecureString]) {
+    throw 'Secrets file property PostgresCandidatePassword must be a SecureString.'
+  }
+  $secureValues.PostgresCandidatePassword = $storedCandidate.Value
+}
 
 function Assert-ProductionSecretStoreAcl {
   if (-not $resolvedSecretsPath -or -not $store) {
@@ -150,12 +157,7 @@ function Assert-ProductionSecretStoreAcl {
 
 function Save-ProductionSecretStore {
   Assert-ProductionSecretStoreAcl
-  $store | Export-Clixml -LiteralPath $resolvedSecretsPath -Force
-  $saved = Import-Clixml -LiteralPath $resolvedSecretsPath
-  $invalidProperties = @($saved.PSObject.Properties | Where-Object { $_.Value -isnot [Security.SecureString] })
-  if ($invalidProperties.Count -gt 0) {
-    throw 'The production secrets store contains a property that is not a DPAPI-encrypted SecureString.'
-  }
+  Save-ProtectedSecureStringStore -Path $resolvedSecretsPath -Store $store
   Assert-ProductionSecretStoreAcl
 }
 
@@ -199,6 +201,7 @@ function Get-RotationRecoveryState {
 
   $secureValues.PostgresCandidatePassword = $candidate.Value
   return [pscustomobject]@{
+    RecoveryKind = 'Complete'
     PreviousImage = $values.PostgresRotationPreviousImage
     PreviousAppVersion = $values.PostgresRotationPreviousAppVersion
     PreviousRevision = $values.PostgresRotationPreviousRevision
@@ -220,6 +223,9 @@ function Initialize-RotationCandidate(
   if ($candidate -and $recoveryPropertyCount -eq $rotationRecoveryProperties.Count) {
     return Get-RotationRecoveryState
   }
+  if ($candidate) {
+    throw 'A candidate-only password rotation must be reconciled before a fresh candidate can be initialized.'
+  }
   if ($recoveryPropertyCount -ne 0) {
     throw 'The DPAPI-encrypted password rotation recovery metadata is incomplete.'
   }
@@ -238,11 +244,7 @@ function Initialize-RotationCandidate(
   ) {
     throw 'Password rotation recovery metadata is invalid.'
   }
-  if (-not $candidate) {
-    $store | Add-Member -NotePropertyName PostgresCandidatePassword -NotePropertyValue (New-RotationCandidatePassword)
-  } elseif ($candidate.Value -isnot [Security.SecureString]) {
-    throw 'Secrets file property PostgresCandidatePassword must be a SecureString.'
-  }
+  $store | Add-Member -NotePropertyName PostgresCandidatePassword -NotePropertyValue (New-RotationCandidatePassword)
   foreach ($entry in $recoveryValues.GetEnumerator()) {
     $store | Add-Member -NotePropertyName $entry.Key -NotePropertyValue (ConvertFrom-PlainText $entry.Value)
   }
@@ -626,40 +628,7 @@ $postgresVmId = az vm show `
   --output tsv `
   --only-show-errors 2>$null
 $postgresVmExists = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($postgresVmId)
-$databaseSetupState = ''
-if ($postgresVmExists) {
-  $databaseSetupState = az vm extension show `
-    --resource-group $ResourceGroup `
-    --vm-name "$Name-pg" `
-    --name 'install-postgresql' `
-    --query provisioningState `
-    --output tsv `
-    --only-show-errors 2>$null
-}
-$databaseInitialized = $databaseSetupState -eq 'Succeeded'
-if ($postgresVmExists -and -not $databaseInitialized) {
-  $existingFqdn = az containerapp show `
-    --resource-group $ResourceGroup `
-    --name $Name `
-    --query 'properties.configuration.ingress.fqdn' `
-    --output tsv `
-    --only-show-errors 2>$null
-  if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingFqdn)) {
-    try {
-      $existingHealth = Invoke-RestMethod "https://$existingFqdn/api/health" -TimeoutSec 10
-      $databaseInitialized = $existingHealth.ok -eq $true -and $existingHealth.db -eq $true
-    } catch {
-      $databaseInitialized = $false
-    }
-  }
-}
 
-if ($RotateDatabasePassword -and -not $postgresVmExists) {
-  throw 'The PostgreSQL VM does not exist; use -InitializeDatabase for first provision.'
-}
-if ($InitializeDatabase -and $RotateDatabasePassword) {
-  throw '-InitializeDatabase and -RotateDatabasePassword are mutually exclusive.'
-}
 if ($SimulateDatabaseRotationFailure -and -not $RotateDatabasePassword) {
   throw '-SimulateDatabaseRotationFailure requires -RotateDatabasePassword.'
 }
@@ -668,6 +637,14 @@ if ($SimulatePostChangeDatabaseRotationFailure -and -not $RotateDatabasePassword
 }
 if ($SimulateDatabaseRotationFailure -and $SimulatePostChangeDatabaseRotationFailure) {
   throw 'Pre-change and post-change database rotation failure simulations are mutually exclusive.'
+}
+if (
+  $hasStoredRotationCandidate -and (
+    $SimulateDatabaseRotationFailure -or
+    $SimulatePostChangeDatabaseRotationFailure
+  )
+) {
+  throw 'Database rotation failure simulations cannot run while retained recovery state is present.'
 }
 if ($SimulateRecoveryConfigurationFailure -and -not $ConfigureRecovery) {
   throw '-SimulateRecoveryConfigurationFailure requires -ConfigureRecovery.'
@@ -678,13 +655,44 @@ if ($RotateDatabasePassword -and $InfraOnly) {
 if ($RotateDatabasePassword -and -not $SecretsPath) {
   throw 'Password rotation requires -SecretsPath so current and candidate credentials remain DPAPI-encrypted and recoverable.'
 }
-if (-not $postgresVmExists -and -not $InitializeDatabase) {
-  throw 'The PostgreSQL VM does not exist. First provision requires the explicit -InitializeDatabase flag.'
-}
-if ($postgresVmExists -and -not $databaseInitialized -and -not $InitializeDatabase) {
-  throw 'PostgreSQL initialization is incomplete. Resume it with the explicit -InitializeDatabase flag.'
-}
-if ($InitializeDatabase -and $databaseInitialized) {
+
+$databaseReadiness = Resolve-DatabaseDeploymentReadiness `
+  -PostgresVmExists $postgresVmExists `
+  -InitializeDatabase ([bool]$InitializeDatabase) `
+  -RotateDatabasePassword ([bool]$RotateDatabasePassword) `
+  -HasRetainedCandidate $hasStoredRotationCandidate `
+  -GetExtensionState {
+    $state = az vm extension list `
+      --resource-group $ResourceGroup `
+      --vm-name "$Name-pg" `
+      --query "[?name=='install-postgresql'] | [0].provisioningState" `
+      --output tsv `
+      --only-show-errors 2>$null
+    return [pscustomobject]@{
+      ExitCode = $LASTEXITCODE
+      State = [string]$state
+    }
+  } `
+  -GetExistingAppHealth {
+    $existingFqdn = az containerapp list `
+      --resource-group $ResourceGroup `
+      --query "[?name=='$Name'] | [0].properties.configuration.ingress.fqdn" `
+      --output tsv `
+      --only-show-errors 2>$null
+    if ($LASTEXITCODE) {
+      throw 'Could not inspect the existing Container App during PostgreSQL initialization discovery.'
+    }
+    if ([string]::IsNullOrWhiteSpace($existingFqdn)) {
+      return $false
+    }
+    try {
+      $existingHealth = Invoke-RestMethod "https://$existingFqdn/api/health" -TimeoutSec 10
+      return $existingHealth.ok -eq $true -and $existingHealth.db -eq $true
+    } catch {
+      return $false
+    }
+  }
+if ($databaseReadiness.Mode -eq 'AlreadyInitialized') {
   Invoke-AlreadyInitializedDatabaseRefusal `
     -CleanupTemporaryEgress { Restore-PostgresSteadyStateEgress } `
     -RemoveBootstrapPublicIp { Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip" }
@@ -697,7 +705,7 @@ $rotationAppVersion = ''
 $rotationRevision = ''
 $rotationAppUrl = ''
 
-function Get-CurrentRotationContext {
+function Get-CurrentApplicationContext {
   $previousImage = az containerapp show `
     --resource-group $ResourceGroup `
     --name $Name `
@@ -722,28 +730,40 @@ function Get-CurrentRotationContext {
     --only-show-errors
   if ($LASTEXITCODE) { throw 'Could not inspect the existing Container App FQDN before password rotation.' }
 
-  $previousActiveRevisions = @(Get-ActiveContainerAppRevisions)
   if (
     $previousImage -notmatch '@sha256:[0-9a-f]{64}$' -or
     $previousAppVersion -notmatch '^[0-9a-f]{40}$' -or
-    [string]::IsNullOrWhiteSpace($previousFqdn) -or
-    $previousActiveRevisions.Count -ne 1
+    [string]::IsNullOrWhiteSpace($previousFqdn)
   ) {
-    throw 'Password rotation requires one existing Container App revision, immutable image, and APP_VERSION.'
+    throw 'Password recovery requires an existing Container App with an immutable image, APP_VERSION, and FQDN.'
   }
 
   return [pscustomobject]@{
     PreviousImage = $previousImage
     PreviousAppVersion = $previousAppVersion
-    PreviousRevision = $previousActiveRevisions[0]
     AppUrl = "https://$previousFqdn"
   }
 }
 
+function Get-CurrentRotationContext {
+  $context = Get-CurrentApplicationContext
+  $previousActiveRevisions = @(Get-ActiveContainerAppRevisions)
+  if ($previousActiveRevisions.Count -ne 1) {
+    throw 'Fresh password rotation requires exactly one existing active Container App revision.'
+  }
+  $context | Add-Member -NotePropertyName PreviousRevision -NotePropertyValue $previousActiveRevisions[0]
+  return $context
+}
+
+$candidateOnlyRotationRecovery = $false
 if ($RotateDatabasePassword) {
   $rotationPreparation = Resolve-RotationPreparation `
-    -HasRetainedCandidate $hasRetainedRotationCandidate `
+    -HasRetainedCandidate $hasStoredRotationCandidate `
+    -HasCompleteRecoveryMetadata $hasCompleteRotationRecoveryMetadata `
     -LoadRetainedCandidate { Get-RotationRecoveryState } `
+    -LoadCandidateOnlyRecovery {
+      [pscustomobject]@{ RecoveryKind = 'CandidateOnly' }
+    } `
     -GetFreshContext { Get-CurrentRotationContext } `
     -AssertFreshRevisionHealthy {
       param($context)
@@ -757,10 +777,14 @@ if ($RotateDatabasePassword) {
         -PreviousRevision $context.PreviousRevision `
         -AppUrl $context.AppUrl
     }
-  $rotationImage = $rotationPreparation.PreviousImage
-  $rotationAppVersion = $rotationPreparation.PreviousAppVersion
-  $rotationRevision = $rotationPreparation.PreviousRevision
-  $rotationAppUrl = $rotationPreparation.AppUrl
+  if ($rotationPreparation.RecoveryKind -eq 'CandidateOnly') {
+    $candidateOnlyRotationRecovery = $true
+  } else {
+    $rotationImage = $rotationPreparation.PreviousImage
+    $rotationAppVersion = $rotationPreparation.PreviousAppVersion
+    $rotationRevision = $rotationPreparation.PreviousRevision
+    $rotationAppUrl = $rotationPreparation.AppUrl
+  }
 }
 
 function Clear-RotationCandidateInfrastructure([bool]$EnableVmBackup) {
@@ -800,6 +824,7 @@ function Restore-PreviousDatabaseCredential {
     -SimulatePostgresRecoveryFailure $false `
     -DatabaseConfigurationToken $databaseConfigurationToken `
     -RecoveryConfigurationVersion 'unchanged'
+
   $reconciliation = Get-ManagedRunCommandResult 'reconcile-postgresql-password'
   $reconciliationResult = [string]$reconciliation.output
   if (
@@ -828,6 +853,54 @@ function Clear-UnchangedRotationCandidate {
   Clear-RotationCandidateInfrastructure $true
   Complete-RotationSecretStore $false
   Write-Host 'database-password-rotation=unchanged candidate=cleared'
+}
+
+function Restore-CandidateOnlyDatabaseCredential($CurrentApplication) {
+  $reconciliationOutputs = Deploy-Infra `
+    -Image $CurrentApplication.PreviousImage `
+    -AppVersion $CurrentApplication.PreviousAppVersion `
+    -BootstrapPublicIp $false `
+    -EnableVmBackup $true `
+    -InitializePostgres $false `
+    -RotatePostgresPassword $false `
+    -CommitPostgresPassword $false `
+    -RestorePostgresPassword $true `
+    -ClearPendingPostgresPassword $false `
+    -ReconcilePostgresPassword $true `
+    -SimulatePostgresRotationFailure $false `
+    -ConfigurePostgresRecovery ([bool]$ConfigureRecovery) `
+    -SimulatePostgresRecoveryFailure ([bool]$SimulateRecoveryConfigurationFailure) `
+    -DatabaseConfigurationToken $databaseConfigurationToken `
+    -RecoveryConfigurationVersion $recoveryConfigurationVersion
+
+  if ($ConfigureRecovery) {
+    $recoveryExecution = Get-ManagedRunCommandResult 'configure-postgresql-recovery'
+    if ($recoveryExecution.executionState -ne 'Succeeded' -or $recoveryExecution.exitCode -ne 0) {
+      throw 'The PostgreSQL recovery configuration failed during candidate-only credential recovery.'
+    }
+  }
+
+  $reconciliation = Get-ManagedRunCommandResult 'reconcile-postgresql-password'
+  $reconciliationResult = [string]$reconciliation.output
+  if (
+    $reconciliation.executionState -ne 'Succeeded' -or
+    $reconciliation.exitCode -ne 0 -or
+    $reconciliationResult -notmatch 'database-password-reconciliation=(rolled-back|already-active)'
+  ) {
+    $state = if ($reconciliationResult -match 'database-password-reconciliation=[a-z-]+(?: stage=[a-z-]+)?') {
+      $Matches[0]
+    } else {
+      'database-password-reconciliation=unknown'
+    }
+    throw "Candidate-only PostgreSQL recovery did not restore the retained current credential ($state)."
+  }
+
+  [void](Wait-AppHealth $CurrentApplication.AppUrl $CurrentApplication.PreviousAppVersion)
+  Assert-ContainerAppDatabaseSecretReference
+  Clear-RotationCandidateInfrastructure $true
+  Complete-RotationSecretStore $false
+  Write-Host 'database-password-reconciliation=verified candidate-only-state=cleared'
+  return $reconciliationOutputs
 }
 
 function Resolve-ApplicationArtifact($StageOutputs) {
@@ -914,7 +987,20 @@ function Resolve-ApplicationArtifact($StageOutputs) {
 $outputs = $null
 $image = ''
 $appVersion = ''
-if ($RotateDatabasePassword) {
+if ($candidateOnlyRotationRecovery) {
+  Step 'Recovering an interrupted legacy password rotation to the retained current credential.'
+  $currentApplication = Get-CurrentApplicationContext
+  $image = $currentApplication.PreviousImage
+  $appVersion = $currentApplication.PreviousAppVersion
+  $candidateOnlyCleanup = @()
+  if ($ConfigureRecovery) {
+    $candidateOnlyCleanup += @{ Action = { Restore-PostgresSteadyStateEgress } }
+  }
+  $outputs = Invoke-OperationWithGuaranteedCleanup `
+    -Context 'Candidate-only PostgreSQL recovery' `
+    -Operation { Restore-CandidateOnlyDatabaseCredential $currentApplication } `
+    -CleanupActions $candidateOnlyCleanup
+} elseif ($RotateDatabasePassword) {
   Step 'Explicit password rotation: staging a candidate secret and using the rollback-capable private run command.'
   if ($ConfigureRecovery) {
     Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'

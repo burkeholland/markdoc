@@ -107,13 +107,244 @@ function Assert-ProtectedCurrentUserFileAcl {
   }
 }
 
+function Set-ProtectedCurrentUserFileAcl {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $protectedAcl = [Security.AccessControl.FileSecurity]::new()
+  $protectedAcl.SetAccessRuleProtection($true, $false)
+  $currentUserRule = [Security.AccessControl.FileSystemAccessRule]::new(
+    $currentSid,
+    [Security.AccessControl.FileSystemRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow
+  )
+  [void]$protectedAcl.AddAccessRule($currentUserRule)
+  [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path), $protectedAcl)
+  Assert-ProtectedCurrentUserFileAcl $Path
+}
+
+function Assert-SecureStringStore {
+  param(
+    [Parameter(Mandatory)]
+    [object]$Store,
+
+    [Parameter(Mandatory)]
+    [string[]]$ExpectedProperties
+  )
+
+  foreach ($propertyName in $ExpectedProperties) {
+    $property = $Store.PSObject.Properties[$propertyName]
+    if (-not $property -or $property.Value -isnot [Security.SecureString]) {
+      throw "The production secrets store property $propertyName must be a DPAPI-encrypted SecureString."
+    }
+  }
+}
+
+function Save-ProtectedSecureStringStore {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path,
+
+    [Parameter(Mandatory)]
+    [object]$Store,
+
+    [scriptblock]$ExportStore = {
+      param($InputObject, [string]$OutputPath)
+      $InputObject | Export-Clixml -LiteralPath $OutputPath -Force
+    },
+
+    [scriptblock]$ImportStore = {
+      param([string]$InputPath)
+      Import-Clixml -LiteralPath $InputPath
+    },
+
+    [scriptblock]$ReplaceFile = {
+      param([string]$SourcePath, [string]$DestinationPath, [string]$BackupPath)
+      [IO.File]::Replace($SourcePath, $DestinationPath, $BackupPath, $true)
+    }
+  )
+
+  $resolvedPath = [IO.Path]::GetFullPath($Path)
+  if (-not [IO.File]::Exists($resolvedPath)) {
+    throw "Production secrets store not found: $resolvedPath"
+  }
+
+  Assert-ProtectedCurrentUserFileAcl $resolvedPath
+  $expectedProperties = @($Store.PSObject.Properties.Name)
+  Assert-SecureStringStore -Store $Store -ExpectedProperties $expectedProperties
+
+  $directory = [IO.Path]::GetDirectoryName($resolvedPath)
+  $fileName = [IO.Path]::GetFileName($resolvedPath)
+  $nonce = [guid]::NewGuid().ToString('N')
+  $temporaryPath = [IO.Path]::Combine($directory, ".$fileName.$nonce.tmp")
+  $backupPath = [IO.Path]::Combine($directory, ".$fileName.$nonce.bak")
+  $replacementAttempted = $false
+  $finalValidated = $false
+  $primaryError = $null
+  $restorationError = $null
+
+  try {
+    $temporaryFile = [IO.File]::Open(
+      $temporaryPath,
+      [IO.FileMode]::CreateNew,
+      [IO.FileAccess]::Write,
+      [IO.FileShare]::None
+    )
+    $temporaryFile.Dispose()
+    Set-ProtectedCurrentUserFileAcl $temporaryPath
+
+    [void](& $ExportStore $Store $temporaryPath)
+    Assert-ProtectedCurrentUserFileAcl $temporaryPath
+    $saved = & $ImportStore $temporaryPath
+    Assert-SecureStringStore -Store $saved -ExpectedProperties $expectedProperties
+
+    $replacementAttempted = $true
+    [void](& $ReplaceFile $temporaryPath $resolvedPath $backupPath)
+
+    Assert-ProtectedCurrentUserFileAcl $resolvedPath
+    $saved = & $ImportStore $resolvedPath
+    Assert-SecureStringStore -Store $saved -ExpectedProperties $expectedProperties
+    $finalValidated = $true
+  } catch {
+    $primaryError = $_
+  } finally {
+    if ($replacementAttempted -and -not $finalValidated -and [IO.File]::Exists($backupPath)) {
+      try {
+        if ([IO.File]::Exists($resolvedPath)) {
+          $failedReplacementPath = "$temporaryPath.failed"
+          [IO.File]::Replace($backupPath, $resolvedPath, $failedReplacementPath, $true)
+          if ([IO.File]::Exists($failedReplacementPath)) {
+            [IO.File]::Delete($failedReplacementPath)
+          }
+        } else {
+          [IO.File]::Move($backupPath, $resolvedPath)
+        }
+        Assert-ProtectedCurrentUserFileAcl $resolvedPath
+      } catch {
+        $restorationError = $_
+      }
+    }
+
+    if ($finalValidated -and [IO.File]::Exists($backupPath)) {
+      [IO.File]::Delete($backupPath)
+    }
+    if ([IO.File]::Exists($temporaryPath) -and [IO.File]::Exists($resolvedPath)) {
+      [IO.File]::Delete($temporaryPath)
+    }
+  }
+
+  if ($primaryError) {
+    if ($restorationError) {
+      throw (New-CombinedOperationException `
+        -Message "Production secrets store replacement failed: $($primaryError.Exception.Message) Predecessor restoration also failed: $($restorationError.Exception.Message)" `
+        -PrimaryError $primaryError `
+        -SecondaryErrors @($restorationError))
+    }
+    throw $primaryError
+  }
+  if ($restorationError) {
+    throw $restorationError
+  }
+}
+
+function Resolve-DatabaseDeploymentReadiness {
+  param(
+    [Parameter(Mandatory)]
+    [bool]$PostgresVmExists,
+
+    [Parameter(Mandatory)]
+    [bool]$InitializeDatabase,
+
+    [Parameter(Mandatory)]
+    [bool]$RotateDatabasePassword,
+
+    [Parameter(Mandatory)]
+    [bool]$HasRetainedCandidate,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$GetExtensionState,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$GetExistingAppHealth
+  )
+
+  if ($InitializeDatabase -and $RotateDatabasePassword) {
+    throw '-InitializeDatabase and -RotateDatabasePassword are mutually exclusive.'
+  }
+  if ($RotateDatabasePassword -and -not $PostgresVmExists) {
+    throw 'The PostgreSQL VM does not exist; use -InitializeDatabase for first provision.'
+  }
+  if ($HasRetainedCandidate) {
+    if (-not $RotateDatabasePassword) {
+      throw 'Retained password rotation state requires -RotateDatabasePassword to recover.'
+    }
+    return [pscustomobject]@{
+      Mode = 'Recovery'
+      DatabaseInitialized = $false
+    }
+  }
+  if (-not $PostgresVmExists) {
+    if (-not $InitializeDatabase) {
+      throw 'The PostgreSQL VM does not exist. First provision requires the explicit -InitializeDatabase flag.'
+    }
+    return [pscustomobject]@{
+      Mode = 'Initialize'
+      DatabaseInitialized = $false
+    }
+  }
+
+  $extension = & $GetExtensionState
+  if (
+    -not $extension -or
+    -not $extension.PSObject.Properties['ExitCode'] -or
+    -not $extension.PSObject.Properties['State']
+  ) {
+    throw 'PostgreSQL initialization discovery did not return an explicit extension query result.'
+  }
+  if ($extension.ExitCode -ne 0) {
+    throw 'Could not inspect the PostgreSQL initialization extension.'
+  }
+
+  $databaseInitialized = $extension.State -eq 'Succeeded'
+  if (-not $databaseInitialized) {
+    $healthResult = @(& $GetExistingAppHealth)
+    if ($healthResult.Count -ne 1 -or $healthResult[0] -isnot [bool]) {
+      throw 'PostgreSQL initialization health discovery did not return one explicit boolean result.'
+    }
+    $databaseInitialized = $healthResult[0]
+  }
+  if ($InitializeDatabase -and $databaseInitialized) {
+    return [pscustomobject]@{
+      Mode = 'AlreadyInitialized'
+      DatabaseInitialized = $true
+    }
+  }
+  if (-not $databaseInitialized -and -not $InitializeDatabase) {
+    throw 'PostgreSQL initialization is incomplete. Resume it with the explicit -InitializeDatabase flag.'
+  }
+
+  return [pscustomobject]@{
+    Mode = if ($InitializeDatabase) { 'Initialize' } elseif ($RotateDatabasePassword) { 'FreshRotation' } else { 'Deploy' }
+    DatabaseInitialized = $databaseInitialized
+  }
+}
+
 function Resolve-RotationPreparation {
   param(
     [Parameter(Mandatory)]
     [bool]$HasRetainedCandidate,
 
     [Parameter(Mandatory)]
+    [bool]$HasCompleteRecoveryMetadata,
+
+    [Parameter(Mandatory)]
     [scriptblock]$LoadRetainedCandidate,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$LoadCandidateOnlyRecovery,
 
     [Parameter(Mandatory)]
     [scriptblock]$GetFreshContext,
@@ -126,7 +357,10 @@ function Resolve-RotationPreparation {
   )
 
   if ($HasRetainedCandidate) {
-    return & $LoadRetainedCandidate
+    if ($HasCompleteRecoveryMetadata) {
+      return & $LoadRetainedCandidate
+    }
+    return & $LoadCandidateOnlyRecovery
   }
 
   $freshContext = & $GetFreshContext

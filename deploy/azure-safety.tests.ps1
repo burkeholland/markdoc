@@ -21,6 +21,29 @@ Assert-True ($deploymentSource -match 'PostgresRotationPreviousRevision') 'Rotat
 Assert-True ($deploymentSource -match 'Resolve-RotationPreparation') 'Rotation must distinguish retained recovery state from a fresh candidate.'
 Assert-True ($deploymentSource -match 'Invoke-AlreadyInitializedDatabaseRefusal') 'Already-initialized retries must run targeted cleanup before refusing.'
 Assert-True ($deploymentSource -match 'Assert-ProtectedCurrentUserFileAcl') 'The production secret store must use the executable ACL helper.'
+Assert-True ($deploymentSource -match 'Save-ProtectedSecureStringStore') 'The production secret store must use atomic protected replacement.'
+Assert-True ($deploymentSource -match 'Restore-CandidateOnlyDatabaseCredential') 'Legacy candidate-only state must use explicit credential reconciliation.'
+Assert-True ($deploymentSource -match 'Resolve-DatabaseDeploymentReadiness') 'Rotation recovery must be selected before initialization health discovery.'
+$candidateOnlyRecovery = [regex]::Match(
+  $deploymentSource,
+  '(?m)function Restore-CandidateOnlyDatabaseCredential\(\$CurrentApplication\) \{(?<body>[\s\S]+?)^}'
+)
+Assert-True $candidateOnlyRecovery.Success 'The candidate-only reconciliation function must remain structurally identifiable.'
+$candidateOnlyBody = $candidateOnlyRecovery.Groups['body'].Value
+Assert-True ($candidateOnlyBody -match '-RestorePostgresPassword \$true') 'Candidate-only recovery must restore the retained current credential to Key Vault.'
+Assert-True ($candidateOnlyBody -match '-ReconcilePostgresPassword \$true') 'Candidate-only recovery must reconcile PostgreSQL to the retained current credential.'
+Assert-True ($candidateOnlyBody -match '-CommitPostgresPassword \$false') 'Candidate-only recovery must not promote the candidate credential.'
+Assert-True ($candidateOnlyBody -match '-ConfigurePostgresRecovery \(\[bool\]\$ConfigureRecovery\)') 'Candidate-only recovery must not drop a requested recovery configuration update.'
+Assert-True ($candidateOnlyBody -notmatch 'Restore-ContainerAppRevision') 'Candidate-only recovery must not guess or restore a prior revision.'
+$candidateOnlyHealth = $candidateOnlyBody.IndexOf('Wait-AppHealth')
+$candidateOnlyClearInfra = $candidateOnlyBody.IndexOf('Clear-RotationCandidateInfrastructure')
+$candidateOnlyClearStore = $candidateOnlyBody.IndexOf('Complete-RotationSecretStore')
+Assert-True (
+  $candidateOnlyHealth -ge 0 -and
+  $candidateOnlyClearInfra -gt $candidateOnlyHealth -and
+  $candidateOnlyClearStore -gt $candidateOnlyClearInfra
+) 'Candidate-only recovery must verify public database health before clearing infrastructure or local recovery state.'
+Assert-True ($deploymentSource -match '\$candidateOnlyCleanup \+= @\{ Action = \{ Restore-PostgresSteadyStateEgress \} \}') 'Candidate-only recovery configuration must retain guaranteed temporary-egress cleanup.'
 $rotationCommit = [regex]::Match(
   $deploymentSource,
   'Invoke-RotationFinalization\s+`\s+-Commit \{(?<body>[\s\S]+?)\}\s+`\s+-Verify'
@@ -62,10 +85,135 @@ try {
   Remove-Item -LiteralPath $aclPath -Force
 }
 
+function New-TestSecureString([int]$Length) {
+  $value = New-Object Security.SecureString
+  foreach ($index in 1..$Length) {
+    $value.AppendChar([char](64 + (($index % 26) + 1)))
+  }
+  $value.MakeReadOnly()
+  return $value
+}
+
+function New-TestSecretStore([int]$Offset) {
+  return [pscustomobject]@{
+    PostgresAdminPassword = New-TestSecureString (20 + $Offset)
+    AuthSecret = New-TestSecureString (21 + $Offset)
+    GitHubClientId = New-TestSecureString (22 + $Offset)
+    GitHubClientSecret = New-TestSecureString (23 + $Offset)
+    AlertEmailAddress = New-TestSecureString (24 + $Offset)
+    VmAdminSshPublicKey = New-TestSecureString (25 + $Offset)
+    PostgresCandidatePassword = New-TestSecureString (26 + $Offset)
+    PostgresRotationPreviousImage = New-TestSecureString (27 + $Offset)
+    PostgresRotationPreviousAppVersion = New-TestSecureString (28 + $Offset)
+    PostgresRotationPreviousRevision = New-TestSecureString (29 + $Offset)
+    PostgresRotationAppUrl = New-TestSecureString (30 + $Offset)
+  }
+}
+
+function New-ProtectedTestStore([string]$Path, [object]$TestStore) {
+  $file = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $file.Dispose()
+  Set-ProtectedCurrentUserFileAcl $Path
+  $TestStore | Export-Clixml -LiteralPath $Path -Force
+  Assert-ProtectedCurrentUserFileAcl $Path
+}
+
+function Assert-OriginalTestStore([string]$Path) {
+  Assert-ProtectedCurrentUserFileAcl $Path
+  $original = Import-Clixml -LiteralPath $Path
+  Assert-SecureStringStore -Store $original -ExpectedProperties @(
+    'PostgresAdminPassword',
+    'PostgresCandidatePassword',
+    'PostgresRotationPreviousImage',
+    'PostgresRotationPreviousAppVersion',
+    'PostgresRotationPreviousRevision',
+    'PostgresRotationAppUrl'
+  )
+  Assert-Equal 20 $original.PostgresAdminPassword.Length 'A failed replacement must retain the original active credential.'
+  Assert-Equal 26 $original.PostgresCandidatePassword.Length 'A failed replacement must retain the original candidate.'
+}
+
+function Assert-NoSecretStoreArtifacts([string]$Directory, [string]$StoreName) {
+  $artifacts = @(
+    Get-ChildItem -LiteralPath $Directory -Force |
+      Where-Object { $_.Name -ne $StoreName }
+  )
+  Assert-Equal 0 $artifacts.Count 'Atomic store replacement must remove generated sibling artifacts.'
+}
+
+$storeTestRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-secret-store-tests-$([guid]::NewGuid().ToString('N'))"
+[void](New-Item -ItemType Directory -Path $storeTestRoot)
+try {
+  foreach ($case in @(
+    'success',
+    'export-failure',
+    'validation-failure',
+    'post-replacement-validation-failure',
+    'replacement-failure',
+    'replacement-post-swap-failure'
+  )) {
+    $caseDirectory = Join-Path $storeTestRoot $case
+    [void](New-Item -ItemType Directory -Path $caseDirectory)
+    $casePath = Join-Path $caseDirectory 'production.clixml'
+    New-ProtectedTestStore -Path $casePath -TestStore (New-TestSecretStore 0)
+    $replacement = New-TestSecretStore 10
+
+    if ($case -eq 'success') {
+      Save-ProtectedSecureStringStore -Path $casePath -Store $replacement
+      Assert-ProtectedCurrentUserFileAcl $casePath
+      $saved = Import-Clixml -LiteralPath $casePath
+      Assert-Equal 30 $saved.PostgresAdminPassword.Length 'Successful replacement must persist the complete new store.'
+      Assert-Equal 36 $saved.PostgresCandidatePassword.Length 'Successful replacement must persist new recovery state.'
+    } else {
+      try {
+        if ($case -eq 'export-failure') {
+          Save-ProtectedSecureStringStore -Path $casePath -Store $replacement -ExportStore {
+            throw 'simulated export failure'
+          }
+        } elseif ($case -eq 'validation-failure') {
+          Save-ProtectedSecureStringStore -Path $casePath -Store $replacement -ImportStore {
+            [pscustomobject]@{ PostgresAdminPassword = 'not-secure' }
+          }
+        } elseif ($case -eq 'post-replacement-validation-failure') {
+          $importCalls = [Collections.Generic.List[int]]::new()
+          Save-ProtectedSecureStringStore -Path $casePath -Store $replacement -ImportStore {
+            param([string]$InputPath)
+            [void]$importCalls.Add(1)
+            if ($importCalls.Count -eq 1) {
+              return Import-Clixml -LiteralPath $InputPath
+            }
+            return [pscustomobject]@{ PostgresAdminPassword = 'not-secure' }
+          }
+        } elseif ($case -eq 'replacement-failure') {
+          Save-ProtectedSecureStringStore -Path $casePath -Store $replacement -ReplaceFile {
+            throw 'simulated replacement failure'
+          }
+        } else {
+          Save-ProtectedSecureStringStore -Path $casePath -Store $replacement -ReplaceFile {
+            param([string]$SourcePath, [string]$DestinationPath, [string]$BackupPath)
+            [IO.File]::Replace($SourcePath, $DestinationPath, $BackupPath, $true)
+            throw 'simulated failure after replacement'
+          }
+        }
+        throw "MISSING-REFUSAL:$case"
+      } catch {
+        Assert-True ($_.Exception.Message -notmatch 'MISSING-REFUSAL') "$case must not succeed."
+        Assert-True ($_.Exception.Message -match 'failure|SecureString') "$case must surface an explicit failure."
+      }
+      Assert-OriginalTestStore $casePath
+    }
+    Assert-NoSecretStoreArtifacts -Directory $caseDirectory -StoreName 'production.clixml'
+  }
+} finally {
+  Remove-Item -LiteralPath $storeTestRoot -Recurse -Force
+}
+
 $events = [Collections.Generic.List[string]]::new()
 $retained = Resolve-RotationPreparation `
   -HasRetainedCandidate $true `
+  -HasCompleteRecoveryMetadata $true `
   -LoadRetainedCandidate { $events.Add('load-retained'); 'retained-state' } `
+  -LoadCandidateOnlyRecovery { $events.Add('load-candidate-only'); throw 'Complete state must not use legacy reconciliation.' } `
   -GetFreshContext { $events.Add('get-fresh'); throw 'Fresh context must not be read.' } `
   -AssertFreshRevisionHealthy { $events.Add('health'); throw 'Old app health must not gate retained state.' } `
   -CreateFreshCandidate { $events.Add('create'); throw 'A retained candidate must not be replaced.' }
@@ -73,10 +221,24 @@ Assert-Equal 'retained-state' $retained 'A retained candidate must be returned f
 Assert-Equal 'load-retained' ($events -join ',') 'Retained candidate recovery must run before app health.'
 
 $events.Clear()
+$legacy = Resolve-RotationPreparation `
+  -HasRetainedCandidate $true `
+  -HasCompleteRecoveryMetadata $false `
+  -LoadRetainedCandidate { $events.Add('load-retained'); throw 'Candidate-only state has no exact prior revision.' } `
+  -LoadCandidateOnlyRecovery { $events.Add('reconcile-candidate-only'); 'candidate-only-state' } `
+  -GetFreshContext { $events.Add('get-fresh'); throw 'Fresh context must not be read.' } `
+  -AssertFreshRevisionHealthy { $events.Add('health'); throw 'Old app health must not gate candidate-only recovery.' } `
+  -CreateFreshCandidate { $events.Add('create'); throw 'A legacy candidate must never be overwritten.' }
+Assert-Equal 'candidate-only-state' $legacy 'Legacy current-plus-candidate state must select reconciliation.'
+Assert-Equal 'reconcile-candidate-only' ($events -join ',') 'Legacy state must bypass fresh creation and old-app health.'
+
+$events.Clear()
 try {
   Resolve-RotationPreparation `
     -HasRetainedCandidate $false `
+    -HasCompleteRecoveryMetadata $false `
     -LoadRetainedCandidate { $events.Add('load-retained') } `
+    -LoadCandidateOnlyRecovery { $events.Add('load-candidate-only') } `
     -GetFreshContext { $events.Add('get-fresh'); 'fresh-context' } `
     -AssertFreshRevisionHealthy { param($context) $events.Add("health-$context"); throw 'old app unhealthy' } `
     -CreateFreshCandidate { $events.Add('create') }
@@ -85,6 +247,106 @@ try {
   Assert-Equal 'old app unhealthy' $_.Exception.Message 'Fresh rotation must preserve the health preflight failure.'
 }
 Assert-Equal 'get-fresh,health-fresh-context' ($events -join ',') 'Fresh unhealthy preflight must refuse before candidate creation.'
+
+$events.Clear()
+foreach ($retainedCase in @('missing-extension', 'updating-extension', 'extension-query-failure', 'unhealthy-old-app')) {
+  $events.Clear()
+  $readiness = Resolve-DatabaseDeploymentReadiness `
+    -PostgresVmExists $true `
+    -InitializeDatabase $false `
+    -RotateDatabasePassword $true `
+    -HasRetainedCandidate $true `
+    -GetExtensionState {
+      $events.Add("extension-$retainedCase")
+      throw 'Retained recovery must not query initialization state.'
+    } `
+    -GetExistingAppHealth {
+      $events.Add("health-$retainedCase")
+      throw 'Retained recovery must not query old-app health.'
+    }
+  Assert-Equal 'Recovery' $readiness.Mode "$retainedCase retained state must enter recovery."
+  Assert-Equal '' ($events -join ',') "$retainedCase retained state must bypass initialization and health gates."
+}
+
+foreach ($freshCase in @(
+  @{ Name = 'missing-extension'; ExitCode = 0; State = '' },
+  @{ Name = 'updating-extension'; ExitCode = 0; State = 'Updating' },
+  @{ Name = 'extension-query-failure'; ExitCode = 1; State = '' },
+  @{ Name = 'unhealthy-old-app'; ExitCode = 0; State = 'Failed' }
+)) {
+  $events.Clear()
+  try {
+    Resolve-DatabaseDeploymentReadiness `
+      -PostgresVmExists $true `
+      -InitializeDatabase $false `
+      -RotateDatabasePassword $true `
+      -HasRetainedCandidate $false `
+      -GetExtensionState {
+        $events.Add("extension-$($freshCase.Name)")
+        [pscustomobject]@{
+          ExitCode = $freshCase.ExitCode
+          State = $freshCase.State
+        }
+      } `
+      -GetExistingAppHealth {
+        $events.Add("health-$($freshCase.Name)")
+        return $false
+      }
+    $events.Add('create-candidate')
+    throw "Expected $($freshCase.Name) refusal."
+  } catch {
+    Assert-True ($_.Exception.Message -match 'initialization|extension') "$($freshCase.Name) must fail closed."
+  }
+  Assert-True (-not $events.Contains('create-candidate')) "$($freshCase.Name) must refuse before creating rotation state."
+  if ($freshCase.ExitCode -ne 0) {
+    Assert-True (-not $events.Contains("health-$($freshCase.Name)")) 'An extension query error must not be converted into a health inference.'
+  }
+}
+
+$events.Clear()
+try {
+  Resolve-DatabaseDeploymentReadiness `
+    -PostgresVmExists $true `
+    -InitializeDatabase $false `
+    -RotateDatabasePassword $true `
+    -HasRetainedCandidate $false `
+    -GetExtensionState {
+      [pscustomobject]@{ ExitCode = 0; State = 'Updating' }
+    } `
+    -GetExistingAppHealth {
+      $false
+      $true
+    }
+  throw 'MISSING-REFUSAL:ambiguous-health'
+} catch {
+  Assert-True ($_.Exception.Message -match 'one explicit boolean') 'Initialization health inference must fail closed on ambiguous output.'
+}
+
+$readiness = Resolve-DatabaseDeploymentReadiness `
+  -PostgresVmExists $true `
+  -InitializeDatabase $true `
+  -RotateDatabasePassword $false `
+  -HasRetainedCandidate $false `
+  -GetExtensionState {
+    [pscustomobject]@{ ExitCode = 0; State = '' }
+  } `
+  -GetExistingAppHealth { return $false }
+Assert-Equal 'Initialize' $readiness.Mode 'An interrupted first provision with no extension or app must remain resumable explicitly.'
+
+$events.Clear()
+try {
+  Resolve-DatabaseDeploymentReadiness `
+    -PostgresVmExists $true `
+    -InitializeDatabase $false `
+    -RotateDatabasePassword $false `
+    -HasRetainedCandidate $true `
+    -GetExtensionState { $events.Add('extension') } `
+    -GetExistingAppHealth { $events.Add('health') }
+  throw 'MISSING-REFUSAL:retained-without-rotation'
+} catch {
+  Assert-True ($_.Exception.Message -match 'requires -RotateDatabasePassword') 'Retained recovery state must refuse an ordinary deployment.'
+}
+Assert-Equal '' ($events -join ',') 'Retained state must refuse an ordinary deployment before initialization discovery.'
 
 $events.Clear()
 $networkRules = [Collections.Generic.List[string]]::new()
