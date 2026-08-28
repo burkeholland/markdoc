@@ -50,6 +50,10 @@ param githubClientId string
 param githubClientSecret string
 
 @secure()
+@description('Email receiver for production database recovery alerts.')
+param alertEmailAddress string
+
+@secure()
 @description('An SSH public key whose private key is not retained. Azure Run Command remains available for maintenance.')
 param vmAdminSshPublicKey string
 
@@ -68,11 +72,23 @@ param enableVmBackup bool = false
 @description('Create or rotate the PostgreSQL login. Ordinary application redeployments must leave this false.')
 param configureDatabase bool = false
 
+@description('Rotate the PostgreSQL login with the rollback-capable managed run command. Ordinary application redeployments must leave this false.')
+param rotateDatabasePassword bool = false
+
+@description('Promote a successfully rotated PostgreSQL password to the active Key Vault secret.')
+param commitDatabasePassword bool = false
+
+@description('Exercise the pre-change password rotation failure path without modifying PostgreSQL.')
+param simulateDatabaseRotationFailure bool = false
+
 @description('Install or update PostgreSQL recovery services. Ordinary application redeployments must leave this false.')
 param configureRecovery bool = false
 
 @description('Explicit token that makes the database bootstrap extension rerun during an approved password rotation.')
 param databaseConfigurationToken string = 'initial'
+
+@description('Changes the Container App revision for every explicit deployment, including secret-only OAuth updates.')
+param deploymentConfigurationToken string = 'manual'
 
 @description('Explicit version for an approved recovery configuration update.')
 param recoveryConfigurationVersion string = 'v1'
@@ -85,10 +101,14 @@ var postgresVmName = '${name}-pg'
 var postgresNicName = '${postgresVmName}-nic'
 var postgresNsgName = '${postgresVmName}-nsg'
 var postgresBootstrapIpName = '${postgresVmName}-bootstrap-ip'
+var postgresNatIpName = '${postgresVmName}-egress-ip'
+var postgresNatGatewayName = '${postgresVmName}-egress'
 var postgresPrivateIp = '10.42.2.4'
 var postgresAdminLogin = 'markdoc'
 var postgresDatabaseName = 'markdoc'
 var postgresPasswordSecretName = 'postgres-admin-password'
+var postgresPendingPasswordSecretName = 'postgres-admin-password-pending'
+var databaseUrlSecretName = 'database-url'
 var vnetName = '${name}-vnet'
 var environmentName = '${name}-prod-env'
 var appSubnetName = 'container-apps'
@@ -105,6 +125,134 @@ var backupTime = '2026-01-01T02:00:00Z'
 var keyVaultDnsHost = substring(az.environment().suffixes.keyvaultDns, 1, length(az.environment().suffixes.keyvaultDns) - 1)
 var keyVaultAudience = uriComponent('https://${keyVaultDnsHost}')
 var keyVaultSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresPasswordSecretName}?api-version=7.4'
+var keyVaultPendingSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresPendingPasswordSecretName}?api-version=7.4'
+var databaseUrlSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${databaseUrlSecretName}'
+var postgresBaseSecurityRules = [
+  {
+    name: 'AllowPostgresFromContainerApps'
+    properties: {
+      priority: 100
+      access: 'Allow'
+      direction: 'Inbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: appSubnetPrefix
+      sourcePortRange: '*'
+      destinationAddressPrefix: postgresPrivateIp
+      destinationPortRange: '5432'
+    }
+  }
+  {
+    name: 'DenyAllInbound'
+    properties: {
+      priority: 110
+      access: 'Deny'
+      direction: 'Inbound'
+      protocol: '*'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: '*'
+      destinationPortRange: '*'
+    }
+  }
+  {
+    name: 'AllowStorageEgress'
+    properties: {
+      priority: 200
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'Storage'
+      destinationPortRange: '443'
+    }
+  }
+  {
+    name: 'AllowAzureMonitorEgress'
+    properties: {
+      priority: 210
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'AzureMonitor'
+      destinationPortRange: '443'
+    }
+  }
+  {
+    name: 'AllowAzureResourceManagerEgress'
+    properties: {
+      priority: 220
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'AzureResourceManager'
+      destinationPortRange: '443'
+    }
+  }
+  {
+    name: 'AllowEntraEgress'
+    properties: {
+      priority: 230
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'AzureActiveDirectory'
+      destinationPortRange: '443'
+    }
+  }
+  {
+    name: 'AllowKeyVaultEgress'
+    properties: {
+      priority: 240
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'AzureKeyVault'
+      destinationPortRange: '443'
+    }
+  }
+]
+var postgresPackageSetupRules = (configureDatabase || configureRecovery) ? [
+  {
+    name: 'AllowApprovedPackageSetup'
+    properties: {
+      priority: 250
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'Internet'
+      destinationPortRanges: [
+        '80'
+        '443'
+      ]
+    }
+  }
+] : []
+var postgresDenyOutboundRules = [
+  {
+    name: 'DenyOtherInternetEgress'
+    properties: {
+      priority: 260
+      access: 'Deny'
+      direction: 'Outbound'
+      protocol: '*'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'Internet'
+      destinationPortRange: '*'
+    }
+  }
+]
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${name}-logs'
@@ -145,32 +293,33 @@ resource postgresNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: postgresNsgName
   location: location
   properties: {
-    securityRules: [
+    securityRules: concat(postgresBaseSecurityRules, postgresPackageSetupRules, postgresDenyOutboundRules)
+  }
+}
+
+resource postgresNatIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
+  name: postgresNatIpName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    publicIPAddressVersion: 'IPv4'
+  }
+}
+
+resource postgresNatGateway 'Microsoft.Network/natGateways@2024-05-01' = {
+  name: postgresNatGatewayName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    idleTimeoutInMinutes: 4
+    publicIpAddresses: [
       {
-        name: 'AllowPostgresFromContainerApps'
-        properties: {
-          priority: 100
-          access: 'Allow'
-          direction: 'Inbound'
-          protocol: 'Tcp'
-          sourceAddressPrefix: appSubnetPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: postgresPrivateIp
-          destinationPortRange: '5432'
-        }
-      }
-      {
-        name: 'DenyAllInbound'
-        properties: {
-          priority: 110
-          access: 'Deny'
-          direction: 'Inbound'
-          protocol: '*'
-          sourceAddressPrefix: '*'
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '*'
-        }
+        id: postgresNatIp.id
       }
     ]
   }
@@ -217,6 +366,9 @@ resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' =
     ]
     networkSecurityGroup: {
       id: postgresNsg.id
+    }
+    natGateway: {
+      id: postgresNatGateway.id
     }
   }
 }
@@ -333,9 +485,25 @@ resource secretsVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase) {
+resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase || commitDatabasePassword) {
   parent: secretsVault
   name: postgresPasswordSecretName
+  properties: {
+    value: postgresAdminPassword
+  }
+}
+
+resource appDatabaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase || commitDatabasePassword) {
+  parent: secretsVault
+  name: databaseUrlSecretName
+  properties: {
+    value: 'postgres://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgresPrivateIp}:5432/${postgresDatabaseName}?uselibpqcompat=true&sslmode=require'
+  }
+}
+
+resource postgresPendingPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword) {
+  parent: secretsVault
+  name: postgresPendingPasswordSecretName
   properties: {
     value: postgresAdminPassword
   }
@@ -346,6 +514,16 @@ resource postgresSecretReader 'Microsoft.Authorization/roleAssignments@2022-04-0
   scope: secretsVault
   properties: {
     principalId: postgresVm.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+  }
+}
+
+resource appSecretReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(secretsVault.id, identity.id, 'key-vault-secrets-user')
+  scope: secretsVault
+  properties: {
+    principalId: identity.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
   }
@@ -430,6 +608,100 @@ resource postgresSetup 'Microsoft.Compute/virtualMachines/extensions@2024-03-01'
   }
   dependsOn: [
     postgresPasswordSecret
+    postgresSecretReader
+  ]
+}
+
+var postgresRotationScript = replace(format('''
+#!/usr/bin/env bash
+set -u -o pipefail
+# Rotation configuration token: {0}
+
+if ! TOKEN="$(curl -fsS -H Metadata:true 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={1}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"; then
+  echo 'database-password-rotation=failed stage=managed-identity'
+  exit 0
+fi
+if ! ACTIVE_PASSWORD="$(curl -fsS -H "Authorization: ******" '{2}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
+  echo 'database-password-rotation=failed stage=active-secret'
+  exit 0
+fi
+if ! CANDIDATE_PASSWORD="$(curl -fsS -H "Authorization: ******" '{3}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
+  echo 'database-password-rotation=failed stage=candidate-secret'
+  exit 0
+fi
+
+PG_HBA="$(sudo -u postgres psql -Atc 'show hba_file')"
+if ! grep -q 'markdoc-password-rotation' "$PG_HBA"; then
+  sed -i '1ilocal all {4} scram-sha-256 # markdoc-password-rotation' "$PG_HBA"
+  sudo -u postgres psql -Atc 'select pg_reload_conf()' >/dev/null
+fi
+
+if [ '{6}' = 'true' ]; then
+  unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-rotation=failed stage=preflight-simulation'
+  exit 0
+fi
+
+if PGPASSWORD="$CANDIDATE_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+  unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-rotation=already-committed'
+  exit 0
+fi
+
+if ! PGPASSWORD="$ACTIVE_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+  unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-rotation=reconciliation-required stage=preflight'
+  exit 0
+fi
+
+if ! sudo -u postgres psql \
+  -v ON_ERROR_STOP=1 \
+  --set=admin_password="$CANDIDATE_PASSWORD" <<'SQL'
+select format('alter role %I with login password %L', '{4}', :'admin_password') \gexec
+SQL
+then
+  unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-rotation=failed stage=alter'
+  exit 0
+fi
+
+if PGPASSWORD="$CANDIDATE_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+  unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-rotation=committed'
+  exit 0
+fi
+
+if sudo -u postgres psql \
+  -v ON_ERROR_STOP=1 \
+  --set=admin_password="$ACTIVE_PASSWORD" <<'SQL'
+select format('alter role %I with login password %L', '{4}', :'admin_password') \gexec
+SQL
+then
+  if PGPASSWORD="$ACTIVE_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+    unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+    echo 'database-password-rotation=rolled-back stage=candidate-verification'
+    exit 0
+  fi
+fi
+
+unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
+echo 'database-password-rotation=reconciliation-required stage=rollback'
+exit 0
+''', databaseConfigurationToken, keyVaultAudience, keyVaultSecretUrl, keyVaultPendingSecretUrl, postgresAdminLogin, postgresDatabaseName, string(simulateDatabaseRotationFailure)), '\r', '')
+
+resource postgresRotation 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = if (rotateDatabasePassword) {
+  parent: postgresVm
+  name: 'rotate-postgresql-password'
+  location: location
+  properties: {
+    asyncExecution: false
+    timeoutInSeconds: 600
+    source: {
+      script: postgresRotationScript
+    }
+  }
+  dependsOn: [
+    postgresPendingPasswordSecret
     postgresSecretReader
   ]
 }
@@ -629,6 +901,22 @@ resource postgresMonitorAgent 'Microsoft.Compute/virtualMachines/extensions@2024
   ]
 }
 
+resource postgresAlertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: '${name}-postgres-alerts'
+  location: 'Global'
+  properties: {
+    groupShortName: 'mdpgalerts'
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'production-owner'
+        emailAddress: alertEmailAddress
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
 resource backupFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
   name: '${name}-postgres-backup-failure'
   location: location
@@ -661,7 +949,9 @@ resource backupFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' 
     }
     autoMitigate: true
     actions: {
-      actionGroups: []
+      actionGroups: [
+        postgresAlertActionGroup.id
+      ]
     }
   }
 }
@@ -675,7 +965,7 @@ resource backupHeartbeatAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01
     enabled: true
     severity: 1
     evaluationFrequency: 'PT5M'
-    windowSize: 'PT30M'
+    windowSize: 'PT15M'
     scopes: [
       logs.id
     ]
@@ -698,7 +988,9 @@ resource backupHeartbeatAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01
     }
     autoMitigate: true
     actions: {
-      actionGroups: []
+      actionGroups: [
+        postgresAlertActionGroup.id
+      ]
     }
   }
 }
@@ -799,8 +1091,11 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
       secrets: [
         { name: 'auth-secret', value: authSecret }
         { name: 'github-client-secret', value: githubClientSecret }
-        #disable-next-line use-secure-value-for-secure-inputs
-        { name: 'database-url', value: 'postgres://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgresPrivateIp}:5432/${postgresDatabaseName}?uselibpqcompat=true&sslmode=require' }
+        {
+          name: 'database-url'
+          keyVaultUrl: databaseUrlSecretUrl
+          identity: identity.id
+        }
       ]
     }
     template: {
@@ -824,6 +1119,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'DATABASE_SSL', value: '1' }
             { name: 'APP_VERSION', value: empty(appVersion) ? last(split(image, ':')) : appVersion }
+            { name: 'DEPLOYMENT_CONFIGURATION_VERSION', value: deploymentConfigurationToken }
           ]
           probes: [
             {
@@ -850,6 +1146,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
   }
   dependsOn: [
     acrPull
+    appSecretReader
+    appDatabaseUrlSecret
     postgresSetup
   ]
 }
@@ -863,4 +1161,6 @@ output backupVaultName string = backupVault.name
 output recoveryStorageName string = recoveryStorage.name
 output recoveryContainerName string = recoveryContainer.name
 output bootstrapPublicIpName string = postgresBootstrapIpName
+output postgresNatGatewayName string = postgresNatGateway.name
+output postgresAlertActionGroupName string = postgresAlertActionGroup.name
 output identityId string = identity.id

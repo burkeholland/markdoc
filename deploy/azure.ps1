@@ -10,6 +10,7 @@
   $env:MARKDOC_AUTH_SECRET = (openssl rand -base64 32)
   $env:MARKDOC_GITHUB_CLIENT_ID = '<oauth app id>'
   $env:MARKDOC_GITHUB_CLIENT_SECRET = '<oauth app secret>'
+  $env:MARKDOC_ALERT_EMAIL = '<production alert receiver>'
   $env:MARKDOC_VM_SSH_PUBLIC_KEY = Get-Content "$HOME\.ssh\id_ed25519.pub" -Raw
   .\deploy\azure.ps1
 
@@ -22,6 +23,7 @@
   .\deploy\azure.ps1 -ImageTag 0123456789abcdef0123456789abcdef01234567
   .\deploy\azure.ps1 -InfraOnly
   .\deploy\azure.ps1 -RotateDatabasePassword
+  .\deploy\azure.ps1 -RotateDatabasePassword -SimulateDatabaseRotationFailure
   .\deploy\azure.ps1 -ConfigureRecovery -VerifyRecovery
   .\deploy\azure.ps1 -Small
   .\deploy\azure.ps1 -ScaleToZero
@@ -41,6 +43,7 @@ param(
   [switch]$InfraOnly,
   [switch]$InitializeDatabase,
   [switch]$RotateDatabasePassword,
+  [switch]$SimulateDatabaseRotationFailure,
   [switch]$ConfigureRecovery,
   [switch]$VerifyRecovery,
   [switch]$Small,
@@ -76,6 +79,7 @@ $secretDefinitions = @(
   @{ Property = 'AuthSecret'; Environment = 'MARKDOC_AUTH_SECRET' },
   @{ Property = 'GitHubClientId'; Environment = 'MARKDOC_GITHUB_CLIENT_ID' },
   @{ Property = 'GitHubClientSecret'; Environment = 'MARKDOC_GITHUB_CLIENT_SECRET' },
+  @{ Property = 'AlertEmailAddress'; Environment = 'MARKDOC_ALERT_EMAIL' },
   @{ Property = 'VmAdminSshPublicKey'; Environment = 'MARKDOC_VM_SSH_PUBLIC_KEY' }
 )
 
@@ -151,13 +155,17 @@ if ($SourceCommit -and $sourceSha -ne $deploymentSha) {
   }
 }
 $shortTag = $sourceSha.Substring(0, 12)
+$deploymentConfigurationToken = [guid]::NewGuid().ToString('N')
 
 function Deploy-Infra(
   [string]$Image,
   [string]$AppVersion,
   [bool]$BootstrapPublicIp,
   [bool]$EnableVmBackup,
-  [bool]$ConfigureDatabase,
+  [bool]$InitializePostgres,
+  [bool]$RotatePostgresPassword,
+  [bool]$CommitPostgresPassword,
+  [bool]$SimulatePostgresRotationFailure,
   [bool]$ConfigurePostgresRecovery,
   [string]$DatabaseConfigurationToken,
   [string]$RecoveryConfigurationVersion
@@ -182,15 +190,20 @@ function Deploy-Infra(
         authSecret = @{ value = $plainValues.AuthSecret }
         githubClientId = @{ value = $plainValues.GitHubClientId }
         githubClientSecret = @{ value = $plainValues.GitHubClientSecret }
+        alertEmailAddress = @{ value = $plainValues.AlertEmailAddress }
         vmAdminSshPublicKey = @{ value = $plainValues.VmAdminSshPublicKey }
         image = @{ value = $Image }
         appVersion = @{ value = $AppVersion }
         publicUrl = @{ value = if ($env:MARKDOC_PUBLIC_URL) { $env:MARKDOC_PUBLIC_URL } else { '' } }
         bootstrapPublicIp = @{ value = $BootstrapPublicIp }
         enableVmBackup = @{ value = $EnableVmBackup }
-        configureDatabase = @{ value = $ConfigureDatabase }
+        configureDatabase = @{ value = $InitializePostgres }
+        rotateDatabasePassword = @{ value = $RotatePostgresPassword }
+        commitDatabasePassword = @{ value = $CommitPostgresPassword }
+        simulateDatabaseRotationFailure = @{ value = $SimulatePostgresRotationFailure }
         configureRecovery = @{ value = $ConfigurePostgresRecovery }
         databaseConfigurationToken = @{ value = $DatabaseConfigurationToken }
+        deploymentConfigurationToken = @{ value = $deploymentConfigurationToken }
         recoveryConfigurationVersion = @{ value = $RecoveryConfigurationVersion }
       }
     }
@@ -291,6 +304,12 @@ if ($RotateDatabasePassword -and -not $postgresVmExists) {
 if ($InitializeDatabase -and $RotateDatabasePassword) {
   throw '-InitializeDatabase and -RotateDatabasePassword are mutually exclusive.'
 }
+if ($SimulateDatabaseRotationFailure -and -not $RotateDatabasePassword) {
+  throw '-SimulateDatabaseRotationFailure requires -RotateDatabasePassword.'
+}
+if ($RotateDatabasePassword -and $InfraOnly) {
+  throw 'Password rotation must roll and verify the Container App; do not combine -RotateDatabasePassword with -InfraOnly.'
+}
 if (-not $postgresVmExists -and -not $InitializeDatabase) {
   throw 'The PostgreSQL VM does not exist. First provision requires the explicit -InitializeDatabase flag.'
 }
@@ -298,26 +317,29 @@ if ($postgresVmExists -and -not $databaseInitialized -and -not $InitializeDataba
   throw 'PostgreSQL initialization is incomplete. Resume it with the explicit -InitializeDatabase flag.'
 }
 
-$configureDatabase = [bool]($InitializeDatabase -or $RotateDatabasePassword)
-$databaseConfigurationToken = if ($configureDatabase) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
+$databaseConfigurationToken = if ($InitializeDatabase -or $RotateDatabasePassword) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
 $recoveryConfigurationVersion = if ($ConfigureRecovery) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
-$preDeployImage = ''
-$preDeployAppVersion = ''
+$rotationImage = ''
+$rotationAppVersion = ''
 
 if ($RotateDatabasePassword) {
-  $preDeployImage = az containerapp show `
+  $rotationImage = az containerapp show `
     --resource-group $ResourceGroup `
     --name $Name `
     --query 'properties.template.containers[0].image' `
     --output tsv `
     --only-show-errors
-  $preDeployAppVersion = az containerapp show `
+  $rotationAppVersion = az containerapp show `
     --resource-group $ResourceGroup `
     --name $Name `
     --query "properties.template.containers[0].env[?name=='APP_VERSION'] | [0].value" `
     --output tsv `
     --only-show-errors
-  if ($LASTEXITCODE -or [string]::IsNullOrWhiteSpace($preDeployImage) -or [string]::IsNullOrWhiteSpace($preDeployAppVersion)) {
+  if (
+    $LASTEXITCODE -or
+    $rotationImage -notmatch '@sha256:[0-9a-f]{64}$' -or
+    $rotationAppVersion -notmatch '^[0-9a-f]{40}$'
+  ) {
     throw 'Password rotation requires a healthy existing Container App image and APP_VERSION.'
   }
 }
@@ -326,19 +348,22 @@ Step 'Deploying private infrastructure without changing the existing PostgreSQL 
 if ($InitializeDatabase) {
   Step 'Explicit first provision: temporarily enabling bootstrap networking and creating the database login.'
 } elseif ($RotateDatabasePassword) {
-  Step 'Explicit password rotation: updating the PostgreSQL login without enabling public networking.'
+  Step 'Explicit password rotation: staging a candidate secret and using the rollback-capable private run command.'
 }
 if ($ConfigureRecovery) {
   Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
 }
-$temporaryPublicIp = [bool]($InitializeDatabase -or $ConfigureRecovery)
+$temporaryPublicIp = [bool]$InitializeDatabase
 try {
   $outputs = Deploy-Infra `
-    $preDeployImage `
-    $preDeployAppVersion `
+    '' `
+    '' `
     $temporaryPublicIp `
     $false `
-    $configureDatabase `
+    ([bool]$InitializeDatabase) `
+    ([bool]$RotateDatabasePassword) `
+    $false `
+    ([bool]$SimulateDatabaseRotationFailure) `
     ([bool]$ConfigureRecovery) `
     $databaseConfigurationToken `
     $recoveryConfigurationVersion
@@ -346,6 +371,33 @@ try {
   if ($temporaryPublicIp) {
     Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip"
   }
+}
+
+if ($RotateDatabasePassword) {
+  $rotationExecutionJson = az vm run-command show `
+    --resource-group $ResourceGroup `
+    --vm-name "$Name-pg" `
+    --run-command-name 'rotate-postgresql-password' `
+    --instance-view `
+    --query '{executionState:instanceView.executionState,exitCode:instanceView.exitCode,output:instanceView.output}' `
+    --output json `
+    --only-show-errors
+  if ($LASTEXITCODE) { throw 'Could not read the PostgreSQL password rotation result.' }
+  $rotationExecution = $rotationExecutionJson | ConvertFrom-Json
+  $rotationResult = [string]$rotationExecution.output
+  if (
+    $rotationExecution.executionState -ne 'Succeeded' -or
+    $rotationExecution.exitCode -ne 0 -or
+    $rotationResult -notmatch 'database-password-rotation=(committed|already-committed)'
+  ) {
+    $rotationState = if ($rotationResult -match 'database-password-rotation=[a-z-]+(?: stage=[a-z-]+)?') {
+      $Matches[0]
+    } else {
+      'database-password-rotation=unknown'
+    }
+    throw "PostgreSQL password rotation did not commit ($rotationState). The active Key Vault secret and Container App were not changed."
+  }
+  Write-Host ($rotationResult | Select-String -Pattern 'database-password-rotation=(committed|already-committed)' | Select-Object -First 1)
 }
 
 $registry = $outputs.registryName.value
@@ -364,7 +416,10 @@ if ($InitializeDatabase) {
 }
 
 if (-not $InfraOnly) {
-  if ($ImageTag) {
+  if ($RotateDatabasePassword) {
+    $image = $rotationImage
+    $appVersion = $rotationAppVersion
+  } elseif ($ImageTag) {
     if ($ImageTag -notmatch '^[0-9a-f]{40}$') { throw '-ImageTag must be a full 40-character Git commit SHA.' }
     $available = az acr repository show-tags `
       --name $registry `
@@ -435,7 +490,18 @@ if (-not $InfraOnly) {
 }
 
 Step 'Finalizing the private VM network and rolling the Container App'
-$outputs = Deploy-Infra $image $appVersion $false $true $false $false 'unchanged' 'unchanged'
+$outputs = Deploy-Infra `
+  $image `
+  $appVersion `
+  $false `
+  $true `
+  $false `
+  $false `
+  ([bool]$RotateDatabasePassword) `
+  $false `
+  $false `
+  $databaseConfigurationToken `
+  'unchanged'
 Remove-BootstrapPublicIp $outputs.bootstrapPublicIpName.value
 
 if ($VerifyRecovery -or $ConfigureRecovery) {

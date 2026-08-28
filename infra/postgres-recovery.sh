@@ -125,76 +125,195 @@ trap 'rm -f "$health_file"' EXIT
 trap 'logger -p local0.err -t markdoc-backup-monitor "backup-health=failed"' ERR
 
 info="$(pgbackrest --stanza=markdoc --output=json info)"
-archive_failed="$(
-  psql -Atc "
-    select case
-      when last_failed_time is null then 0
-      when last_archived_time is null or last_failed_time > last_archived_time then 1
-      else 0
-    end
+archive_stats="$(
+  psql -AtF '|' -c "
+    select
+      coalesce(extract(epoch from last_archived_time)::bigint, 0),
+      coalesce(extract(epoch from last_failed_time)::bigint, 0),
+      failed_count
     from pg_stat_archiver
   "
 )"
+IFS='|' read -r last_archived_epoch last_failed_epoch archive_failed_count <<<"$archive_stats"
 
-python3 - "$health_file" "$info" "$archive_failed" <<'PY'
+pg_data="$(psql -Atc 'show data_directory')"
+archive_status_dir="${MARKDOC_ARCHIVE_STATUS_DIR:-${pg_data}/pg_wal/archive_status}"
+archive_pending_count=0
+archive_pending_bytes=0
+archive_pending_oldest_epoch=0
+while IFS= read -r status_file; do
+  if ! status_epoch="$(stat -c %Y "$status_file" 2>/dev/null)"; then
+    continue
+  fi
+  archive_pending_count="$((archive_pending_count + 1))"
+  if [ "$archive_pending_oldest_epoch" -eq 0 ] || [ "$status_epoch" -lt "$archive_pending_oldest_epoch" ]; then
+    archive_pending_oldest_epoch="$status_epoch"
+  fi
+  wal_file="${pg_data}/pg_wal/$(basename "$status_file" .ready)"
+  if [ -f "$wal_file" ]; then
+    if wal_bytes="$(stat -c %s "$wal_file" 2>/dev/null)"; then
+      archive_pending_bytes="$((archive_pending_bytes + wal_bytes))"
+    fi
+  fi
+done < <(find "$archive_status_dir" -maxdepth 1 -type f -name '*.ready' -print)
+
+spool_dir='/var/spool/pgbackrest/archive/markdoc/out'
+archive_spool_file_count=0
+archive_spool_bytes=0
+if [ -d "$spool_dir" ]; then
+  archive_spool_file_count="$(find "$spool_dir" -maxdepth 1 -type f | wc -l)"
+  archive_spool_bytes="$(find "$spool_dir" -maxdepth 1 -type f -printf '%s\n' | awk '{ total += $1 } END { print total + 0 }')"
+fi
+
+archive_max_age_seconds="${MARKDOC_ARCHIVE_MAX_AGE_SECONDS:-300}"
+test_stale="${MARKDOC_MONITOR_TEST_STALE:-0}"
+health_ok="$(
+python3 - \
+  "$health_file" \
+  "$info" \
+  "$last_archived_epoch" \
+  "$last_failed_epoch" \
+  "$archive_failed_count" \
+  "$archive_pending_count" \
+  "$archive_pending_bytes" \
+  "$archive_pending_oldest_epoch" \
+  "$archive_spool_file_count" \
+  "$archive_spool_bytes" \
+  "$archive_max_age_seconds" \
+  "$test_stale" <<'PY'
 import datetime
 import json
+import os
 import sys
 
-path, raw_info, archive_failed = sys.argv[1:]
+(
+    path,
+    raw_info,
+    last_archived_epoch,
+    last_failed_epoch,
+    archive_failed_count,
+    archive_pending_count,
+    archive_pending_bytes,
+    archive_pending_oldest_epoch,
+    archive_spool_file_count,
+    archive_spool_bytes,
+    archive_max_age_seconds,
+    test_stale,
+) = sys.argv[1:]
+now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+last_archived_epoch = int(last_archived_epoch)
+last_failed_epoch = int(last_failed_epoch)
+archive_failed_count = int(archive_failed_count)
+archive_pending_count = int(archive_pending_count)
+archive_pending_bytes = int(archive_pending_bytes)
+archive_pending_oldest_epoch = int(archive_pending_oldest_epoch)
+archive_spool_file_count = int(archive_spool_file_count)
+archive_spool_bytes = int(archive_spool_bytes)
+archive_max_age_seconds = int(archive_max_age_seconds)
+test_stale = test_stale == "1"
+
 info = json.loads(raw_info)
+errors = []
 if not info or info[0].get("status", {}).get("code") != 0:
-    raise SystemExit("pgBackRest repository is not healthy")
+    errors.append("pgBackRest repository is not healthy")
 
-backups = info[0].get("backup", [])
+backups = info[0].get("backup", []) if info else []
 if not backups:
-    raise SystemExit("pgBackRest has no recoverable backup")
+    errors.append("pgBackRest has no recoverable backup")
+    latest_backup = 0
+    age_seconds = None
+else:
+    latest_backup = max(item["timestamp"]["stop"] for item in backups)
+    age_seconds = now - latest_backup
+    if age_seconds > 26 * 60 * 60:
+        errors.append("latest pgBackRest backup is stale")
 
-latest_backup = max(item["timestamp"]["stop"] for item in backups)
-age_seconds = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) - latest_backup
-if age_seconds > 26 * 60 * 60:
-    raise SystemExit("latest pgBackRest backup is stale")
-if archive_failed != "0":
-    raise SystemExit("PostgreSQL WAL archiving has an unresolved failure")
+archive_age_seconds = now - last_archived_epoch if last_archived_epoch else None
+if test_stale:
+    archive_age_seconds = archive_max_age_seconds + 1
+if archive_age_seconds is None:
+    errors.append("PostgreSQL has no successful WAL archive")
+elif archive_pending_count and archive_age_seconds > archive_max_age_seconds:
+    errors.append("latest PostgreSQL WAL archive is stale")
+if last_failed_epoch and (
+    not last_archived_epoch or last_failed_epoch > last_archived_epoch
+):
+    errors.append("PostgreSQL WAL archiving has an unresolved failure")
+
+archive_pending_oldest_age_seconds = (
+    now - archive_pending_oldest_epoch if archive_pending_oldest_epoch else None
+)
+if test_stale:
+    archive_pending_count = max(archive_pending_count, 1)
+    archive_pending_oldest_age_seconds = archive_max_age_seconds + 1
+if (
+    archive_pending_oldest_age_seconds is not None
+    and archive_pending_oldest_age_seconds > archive_max_age_seconds
+):
+    errors.append("PostgreSQL WAL archive backlog is stale")
 
 logical_marker = "/var/lib/pgbackrest/logical-last-success"
 try:
-    logical_age_seconds = int(
-        datetime.datetime.now(datetime.timezone.utc).timestamp()
-        - __import__("os").stat(logical_marker).st_mtime
-    )
+    logical_age_seconds = int(now - os.stat(logical_marker).st_mtime)
 except FileNotFoundError:
-    raise SystemExit("no successful logical backup has been recorded")
-if logical_age_seconds > 26 * 60 * 60:
-    raise SystemExit("latest logical backup is stale")
+    errors.append("no successful logical backup has been recorded")
+    logical_age_seconds = None
+if logical_age_seconds is not None and logical_age_seconds > 26 * 60 * 60:
+    errors.append("latest logical backup is stale")
 
 restore_marker = "/var/lib/pgbackrest/restore-last-success"
 try:
-    restore_age_seconds = int(
-        datetime.datetime.now(datetime.timezone.utc).timestamp()
-        - __import__("os").stat(restore_marker).st_mtime
-    )
+    restore_age_seconds = int(now - os.stat(restore_marker).st_mtime)
 except FileNotFoundError:
-    raise SystemExit("no successful scratch restore has been recorded")
-if restore_age_seconds > 8 * 24 * 60 * 60:
-    raise SystemExit("latest scratch restore verification is stale")
+    errors.append("no successful scratch restore has been recorded")
+    restore_age_seconds = None
+if restore_age_seconds is not None and restore_age_seconds > 8 * 24 * 60 * 60:
+    errors.append("latest scratch restore verification is stale")
 
 payload = {
-    "ok": True,
+    "ok": not errors,
     "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "latest_backup_epoch": latest_backup,
     "latest_backup_age_seconds": age_seconds,
     "latest_logical_backup_age_seconds": logical_age_seconds,
     "latest_restore_age_seconds": restore_age_seconds,
+    "archive_last_success_epoch": last_archived_epoch or None,
+    "archive_age_seconds": archive_age_seconds,
+    "archive_max_age_seconds": archive_max_age_seconds,
+    "archive_failed_count": archive_failed_count,
+    "archive_has_unresolved_failure": bool(
+        last_failed_epoch
+        and (not last_archived_epoch or last_failed_epoch > last_archived_epoch)
+    ),
+    "archive_pending_count": archive_pending_count,
+    "archive_pending_bytes": archive_pending_bytes,
+    "archive_pending_oldest_age_seconds": archive_pending_oldest_age_seconds,
+    "archive_spool_status_file_count": archive_spool_file_count,
+    "archive_spool_status_bytes": archive_spool_bytes,
+    "test_mode": test_stale,
 }
+if errors:
+    payload["errors"] = errors
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(payload, stream, separators=(",", ":"))
+print("true" if not errors else "false")
 PY
+)"
 
+health_blob='health/backup-latest.json'
+if [ "$test_stale" = '1' ]; then
+  health_blob='health/backup-test-latest.json'
+fi
 /usr/local/lib/markdoc-storage-upload \
   "$health_file" \
-  'health/backup-latest.json' \
+  "$health_blob" \
   'application/json'
+
+if [ "$health_ok" != 'true' ]; then
+  trap - ERR
+  logger -p local0.err -t markdoc-backup-monitor 'backup-health=failed'
+  exit 1
+fi
 logger -p local0.info -t markdoc-backup-monitor 'backup-health=ok'
 MONITOR
 chmod 0755 /usr/local/sbin/markdoc-backup-monitor
@@ -399,11 +518,11 @@ EOF
 
 cat >/etc/systemd/system/markdoc-backup-monitor.timer <<'EOF'
 [Unit]
-Description=Monitor Markdoc PostgreSQL recovery health every five minutes
+Description=Monitor Markdoc PostgreSQL recovery health every two minutes
 
 [Timer]
-OnBootSec=5m
-OnUnitActiveSec=5m
+OnBootSec=2m
+OnUnitActiveSec=2m
 AccuracySec=30s
 Persistent=true
 

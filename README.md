@@ -241,21 +241,22 @@ $env:MARKDOC_PG_PASSWORD = '<strong password>'
 $env:MARKDOC_AUTH_SECRET = '<openssl rand -base64 32>'
 $env:MARKDOC_GITHUB_CLIENT_ID = '<oauth app id>'
 $env:MARKDOC_GITHUB_CLIENT_SECRET = '<oauth app secret>'
+$env:MARKDOC_ALERT_EMAIL = '<production alert receiver>'
 $env:MARKDOC_VM_SSH_PUBLIC_KEY = Get-Content "$HOME\.ssh\id_ed25519.pub" -Raw
 .\deploy\azure.ps1 -InitializeDatabase -ConfigureRecovery
 # The first run prints the app URL; add it as the OAuth callback, then rerun normally.
 ```
 
-For unattended production deployment, pass `-SecretsPath <file>` instead. The CLIXML file must contain `PostgresAdminPassword`, `AuthSecret`, `GitHubClientId`, `GitHubClientSecret`, and `VmAdminSshPublicKey` as DPAPI-encrypted `SecureString` properties. Secure Bicep values are written to a randomly named parameter file only for the duration of each Azure CLI call and removed in `finally`; they are never command-line arguments.
+For unattended production deployment, pass `-SecretsPath <file>` instead. The CLIXML file must contain `PostgresAdminPassword`, `AuthSecret`, `GitHubClientId`, `GitHubClientSecret`, `AlertEmailAddress`, and `VmAdminSshPublicKey` as DPAPI-encrypted `SecureString` properties. Secure Bicep values are written to a randomly named parameter file only for the duration of each Azure CLI call and removed in `finally`; they are never command-line arguments.
 
-Ordinary reruns deliberately do not attach a VM public IP, write the PostgreSQL password to Key Vault, rerun database bootstrap, restart PostgreSQL, or change database ownership. A new environment requires the explicit `-InitializeDatabase` flag. Password rotation requires `-RotateDatabasePassword`; recovery configuration changes require `-ConfigureRecovery`. `-SourceCommit <full-sha>` labels the image with an accepted application commit only when every application file in the clean deployment checkout matches that commit. `-ImageTag <full-sha>` reuses an existing ACR image. Run `-VerifyRecovery` to restore the latest physical backup into an isolated scratch cluster without stopping or modifying production.
+Ordinary reruns deliberately do not attach a VM public IP, write the PostgreSQL password to Key Vault, rerun database bootstrap, restart PostgreSQL, or change database ownership. A new environment requires the explicit `-InitializeDatabase` flag. Password rotation requires `-RotateDatabasePassword`; it stages the candidate separately, verifies the current credential, applies and verifies the candidate, and restores the active credential if candidate verification fails before the app or active Key Vault secret changes. `-SimulateDatabaseRotationFailure` proves that pre-change failure path without modifying PostgreSQL. Recovery configuration changes require `-ConfigureRecovery`. `-SourceCommit <full-sha>` labels the image with an accepted application commit only when every application file in the clean deployment checkout matches that commit. `-ImageTag <full-sha>` reuses an existing ACR image. Run `-VerifyRecovery` to restore the latest physical backup into an isolated scratch cluster without stopping or modifying production.
 
 The PostgreSQL recovery layers are:
 
 - pgBackRest continuously archives WAL to a private Azure Blob container using the VM's managed identity. `archive_timeout=240s` bounds the recovery point to five minutes after a write, including quiet periods.
 - A full physical pgBackRest backup and a separate `pg_dump` logical backup run daily. pgBackRest retains seven full backups; logical dumps expire after 30 days.
 - Azure Recovery Services also keeps seven daily encrypted VM recovery points. This is an additional disaster-recovery layer, not the point-in-time database backup.
-- A five-minute systemd check validates repository access, physical-backup freshness, and unresolved archive failures. Its heartbeat and failures flow through Azure Monitor Agent to Log Analytics; Azure Monitor alert rules detect a failure or a missing heartbeat.
+- A two-minute systemd check validates repository access, physical-backup freshness, the age of any pending WAL archive backlog, pgBackRest spool status, and unresolved archive failures. The five-minute backlog-age bound is tied to `archive_timeout=240s`; an idle database with no unarchived WAL does not false-alert. Its secret-free health object includes archive age and backlog measurements. Its heartbeat and failures flow through a restricted NAT egress path to Log Analytics, and both Azure Monitor rules notify the production action group.
 - A weekly job restores the latest physical backup to an isolated local socket and temporary data directory, starts it on port 55432, verifies the `markdoc` database after recovery, records the duration off-VM, then removes the scratch cluster. Run `-VerifyRecovery` after recovery changes and confirm it finishes within the two-hour RTO.
 
 Approximate monthly cost shape (East US 2, pay-as-you-go; storage, backup, and logs vary with database size and traffic, so verify current prices in the Azure Pricing Calculator):
@@ -266,6 +267,7 @@ Approximate monthly cost shape (East US 2, pay-as-you-go; storage, backup, and l
 | Container App (`-Small`) | 0.25 vCPU / 0.5 GiB | 14 |
 | Container App (`-ScaleToZero`) | sleeps when nobody is connected | ~0 idle |
 | PostgreSQL VM + OS disk | Standard B1ms, 32 GiB Standard SSD LRS | usage-priced |
+| PostgreSQL controlled egress | Standard NAT Gateway + one Standard public IP; no public IP on the VM | usage/data-priced |
 | PostgreSQL recovery storage | Standard StorageV2 LRS, hot tier; WAL + 7 physical + 30 logical daily backups | capacity/operations |
 | Recovery Services backup | Standard vault, daily VM recovery point, seven-day LRS retention | protected-instance/storage |
 | Container Registry | Basic | 5 |
