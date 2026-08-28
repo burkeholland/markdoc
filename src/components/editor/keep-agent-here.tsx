@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bot, Check, Copy, Radio } from "lucide-react";
+import { ArrowLeft, Bot, Check, Copy, ExternalLink, Radio } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
+import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
 import { AgentConnectCard, AGENT_CONNECT_DISMISSED_KEY, useOrigin } from "@/components/settings/agent-connect-card";
 import { jsonEqual, useSessionValue } from "./use-session";
@@ -107,6 +108,18 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true }
       <p className="text-xs leading-5 text-ink-3" data-testid="keep-agent-hint">
         {KEEP_AGENT_HINT}
       </p>
+      <p className="text-xs leading-5 text-ink-3" data-testid="keep-agent-clients">
+        Works with any MCP client: Copilot CLI, VS Code, Claude, Cursor.
+      </p>
+      <a
+        className="inline-flex w-fit items-center gap-1 text-xs font-medium text-accent underline-offset-2 hover:underline"
+        href={`${AGENT_DOCS_URL}#sit-in-a-document`}
+        target="_blank"
+        rel="noreferrer"
+        data-testid="keep-agent-docs-link"
+      >
+        Agent docs <span aria-hidden="true">·</span> Sit in a document <ExternalLink size={13} aria-hidden="true" />
+      </a>
     </div>
   );
 }

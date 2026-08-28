@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import { Check, Copy, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
+import { Check, Copy, ExternalLink, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
-import { MCP_PATH, type TokenScopeName } from "@/lib/mcp";
+import { AGENT_DOCS_URL, MCP_PATH, type TokenScopeName } from "@/lib/mcp";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
 export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
@@ -135,9 +135,14 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
           <X size={14} />
         </button>
       )}
-      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
-        <Plug size={16} className="text-violet-600" /> Connect an agent
-      </h3>
+      <div className={cn("flex items-center justify-between gap-3", onDismiss && "pr-7")}>
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <Plug size={16} className="text-violet-600" /> Connect an agent
+        </h3>
+        <a className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-accent hover:underline" href={AGENT_DOCS_URL} target="_blank" rel="noreferrer" data-testid="agent-docs-link">
+          Agent docs <ExternalLink size={13} aria-hidden="true" />
+        </a>
+      </div>
       <p className="mt-1 text-xs leading-5 text-ink-3">
         Requests you send from the editor are picked up by your own agent — GitHub Copilot CLI by default — through the Markdoc MCP server. Nothing runs on
         the Markdoc side; your agent does the work and proposes it back as suggestions.
