@@ -270,9 +270,20 @@ $postgresVmId = az vm show `
   --output tsv `
   --only-show-errors 2>$null
 $postgresVmExists = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($postgresVmId)
+$databaseSetupState = ''
+if ($postgresVmExists) {
+  $databaseSetupState = az vm extension show `
+    --resource-group $ResourceGroup `
+    --vm-name "$Name-pg" `
+    --name 'install-postgresql' `
+    --query provisioningState `
+    --output tsv `
+    --only-show-errors 2>$null
+}
+$databaseInitialized = $databaseSetupState -eq 'Succeeded'
 
-if ($InitializeDatabase -and $postgresVmExists) {
-  throw 'The PostgreSQL VM already exists; -InitializeDatabase is only valid for first provision.'
+if ($InitializeDatabase -and $databaseInitialized) {
+  throw 'PostgreSQL initialization already succeeded; use ordinary deployment or explicit password rotation.'
 }
 if ($RotateDatabasePassword -and -not $postgresVmExists) {
   throw 'The PostgreSQL VM does not exist; use -InitializeDatabase for first provision.'
@@ -282,6 +293,9 @@ if ($InitializeDatabase -and $RotateDatabasePassword) {
 }
 if (-not $postgresVmExists -and -not $InitializeDatabase) {
   throw 'The PostgreSQL VM does not exist. First provision requires the explicit -InitializeDatabase flag.'
+}
+if ($postgresVmExists -and -not $databaseInitialized -and -not $InitializeDatabase) {
+  throw 'PostgreSQL initialization is incomplete. Resume it with the explicit -InitializeDatabase flag.'
 }
 
 $configureDatabase = [bool]($InitializeDatabase -or $RotateDatabasePassword)
@@ -468,12 +482,21 @@ Write-Host "App URL: $appUrl" -ForegroundColor Green
 Write-Host "Registry: $($outputs.registryLoginServer.value)"
 if (-not $InfraOnly) {
   Step "Markdoc staged at $appUrl"
-  try {
-    $health = Invoke-RestMethod "$appUrl/api/health" -TimeoutSec 60
-    Write-Host "health: ok=$($health.ok) db=$($health.db) version=$($health.version)" -ForegroundColor Green
-  } catch {
-    Write-Host "health check not answering yet ($($_.Exception.Message)); give it a minute." -ForegroundColor Yellow
+  $health = $null
+  for ($attempt = 1; $attempt -le 24; $attempt++) {
+    try {
+      $candidate = Invoke-RestMethod "$appUrl/api/health" -TimeoutSec 10
+      if ($candidate.ok -eq $true -and $candidate.db -eq $true -and $candidate.version -eq $appVersion) {
+        $health = $candidate
+        break
+      }
+    } catch {
+      # A new Container App revision can refuse traffic briefly while its startup probe runs.
+    }
+    Start-Sleep -Seconds 5
   }
+  if (-not $health) { throw "The deployed revision did not become healthy on application version $appVersion." }
+  Write-Host "health: ok=$($health.ok) db=$($health.db) version=$($health.version)" -ForegroundColor Green
   Write-Host "GitHub OAuth callback: $appUrl/api/auth/callback/github"
   Write-Host "Recovery storage: $($outputs.recoveryStorageName.value)/$($outputs.recoveryContainerName.value)"
   Write-Host "Logs: az containerapp logs show -n $Name -g $ResourceGroup --follow"

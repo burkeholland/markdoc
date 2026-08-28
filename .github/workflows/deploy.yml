@@ -20,6 +20,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: markdoc-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     if: inputs.confirm == 'deploy'
