@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
   CommitOutcomeUnknownError,
   createPostgresDestination,
+  type MigrationManifest,
   MigrationCommittedManifestError,
   migratePgliteSnapshot,
   type TransactionalConnection,
@@ -18,7 +19,36 @@ interface MigrationArguments {
   verifyOnly: boolean;
 }
 
-const usage = `usage:
+interface CliOutput {
+  log(message: string): void;
+  error(message: string): void;
+}
+
+type ConnectDestination = (url: string) => Promise<TransactionalConnection>;
+type MigrateSnapshot = typeof migratePgliteSnapshot;
+
+export class MigrationCommittedCloseError extends Error {
+  readonly committed = true;
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("Destination migration committed and verified, but the connection did not close cleanly");
+    this.name = "MigrationCommittedCloseError";
+    this.cause = cause;
+  }
+}
+
+export class DestinationVerificationCloseError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("Destination verification completed, but the connection did not close cleanly");
+    this.name = "DestinationVerificationCloseError";
+    this.cause = cause;
+  }
+}
+
+export const usage = `usage:
   npx tsx scripts/migrate-pglite-to-postgres.mts \\
     --source-snapshot <markdoc-pglite.tar.gz> \\
     --source-data-dir <new-private-temporary-directory> \\
@@ -26,6 +56,7 @@ const usage = `usage:
     --manifest <output.json> [--replace | --verify-only]
 
 The destination URL is read from the named environment variable so credentials never enter shell history.
+It must include sslmode=require. This encrypts private-IP traffic without validating the server certificate identity.
 The temporary source directory must not already exist; it is created privately and removed after every run.`;
 
 export function parseMigrationArguments(argv: string[]): MigrationArguments {
@@ -36,10 +67,12 @@ export function parseMigrationArguments(argv: string[]): MigrationArguments {
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
     if (argument === "--replace") {
+      if (replace) throw new Error("Duplicate argument: --replace");
       replace = true;
       continue;
     }
     if (argument === "--verify-only") {
+      if (verifyOnly) throw new Error("Duplicate argument: --verify-only");
       verifyOnly = true;
       continue;
     }
@@ -48,6 +81,7 @@ export function parseMigrationArguments(argv: string[]): MigrationArguments {
     }
     const value = argv[++index];
     if (!value || value.startsWith("--")) throw new Error(`Missing value for ${argument}`);
+    if (values.has(argument)) throw new Error(`Duplicate argument: ${argument}`);
     values.set(argument, value);
   }
 
@@ -69,7 +103,9 @@ export function parseMigrationArguments(argv: string[]): MigrationArguments {
 export async function runCli(
   argv: string[],
   environment: NodeJS.ProcessEnv = process.env,
-  connect: (url: string) => Promise<TransactionalConnection> = createPostgresDestination,
+  connect: ConnectDestination = createPostgresDestination,
+  migrate: MigrateSnapshot = migratePgliteSnapshot,
+  output: CliOutput = console,
 ): Promise<void> {
   const argumentsValue = parseMigrationArguments(argv);
   const destinationUrl = environment[argumentsValue.destinationUrlEnv];
@@ -93,8 +129,9 @@ export async function runCli(
 
   const destination = await connect(destinationUrl);
   let operationError: unknown;
+  let manifest: MigrationManifest | undefined;
   try {
-    const manifest = await migratePgliteSnapshot({
+    manifest = await migrate({
       sourceSnapshot,
       sourceDataDir,
       destination,
@@ -102,15 +139,16 @@ export async function runCli(
       replace: argumentsValue.replace,
       verifyOnly: argumentsValue.verifyOnly,
     });
-    const action = argumentsValue.verifyOnly ? "verified" : "migrated and verified";
-    console.log(`${action}: ${manifest.totals.rows} rows across ${manifest.totals.tables} application tables`);
-    console.log(`manifest: ${manifestPath}`);
   } catch (error) {
     operationError = error;
   }
+  let closeError: unknown;
   try {
     await destination.close();
-  } catch (closeError) {
+  } catch (error) {
+    closeError = error;
+  }
+  if (closeError) {
     if (operationError instanceof CommitOutcomeUnknownError) {
       throw new CommitOutcomeUnknownError(
         new AggregateError([operationError.cause, closeError], "COMMIT outcome and destination connection close both failed"),
@@ -122,14 +160,84 @@ export async function runCli(
       );
     }
     if (operationError) throw new AggregateError([operationError, closeError], "Migration failed and the destination connection did not close cleanly");
-    console.error(`warning: migration committed, but the destination connection did not close cleanly: ${redactError(closeError)}`);
+    if (argumentsValue.verifyOnly) throw new DestinationVerificationCloseError(closeError);
+    throw new MigrationCommittedCloseError(closeError);
   }
   if (operationError) throw operationError;
+  if (!manifest) throw new Error("Migration completed without a manifest");
+  const action = argumentsValue.verifyOnly ? "verified" : "migrated and verified";
+  output.log(`${action}: ${manifest.totals.rows} rows across ${manifest.totals.tables} application tables`);
+  output.log(`manifest: ${manifestPath}`);
 }
 
-function redactError(error: unknown): string {
+export function redactError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi, "[redacted PostgreSQL URL]");
+}
+
+interface CliFailure {
+  exitCode: number;
+  message: string;
+}
+
+export function classifyCliError(error: unknown): CliFailure {
+  if (error instanceof MigrationCommittedManifestError) {
+    return {
+      exitCode: 2,
+      message: `migration committed and verified, but manifest publication failed: ${redactError(error.cause)}`,
+    };
+  }
+  if (error instanceof CommitOutcomeUnknownError) {
+    return {
+      exitCode: 3,
+      message: `migration COMMIT outcome is unknown; do not retry or use --replace until --verify-only establishes destination state: ${redactError(error.cause)}`,
+    };
+  }
+  if (error instanceof MigrationCommittedCloseError) {
+    return {
+      exitCode: 4,
+      message: `migration committed and verified, but the destination connection did not close cleanly: ${redactError(error.cause)}`,
+    };
+  }
+  if (error instanceof DestinationVerificationCloseError) {
+    return {
+      exitCode: 1,
+      message: `verification completed, but the destination connection did not close cleanly: ${redactError(error.cause)}`,
+    };
+  }
+  return {
+    exitCode: 1,
+    message: `migration failed before commit; no successful destination COMMIT was issued: ${redactError(error)}`,
+  };
+}
+
+interface RunMainDependencies {
+  environment?: NodeJS.ProcessEnv;
+  connect?: ConnectDestination;
+  migrate?: MigrateSnapshot;
+  output?: CliOutput;
+}
+
+export async function runMain(argv: string[], dependencies: RunMainDependencies = {}): Promise<number> {
+  const output = dependencies.output ?? console;
+  if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
+    output.log(usage);
+    return 0;
+  }
+  try {
+    await runCli(
+      argv,
+      dependencies.environment,
+      dependencies.connect,
+      dependencies.migrate,
+      output,
+    );
+    return 0;
+  } catch (error) {
+    const failure = classifyCliError(error);
+    output.error(failure.message);
+    return failure.exitCode;
+  }
 }
 
 async function canonicalPath(input: string): Promise<string> {
@@ -180,23 +288,5 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]).toLowerCase() : "";
 const modulePath = fileURLToPath(import.meta.url).toLowerCase();
 if (invokedPath === modulePath) {
-  const argv = process.argv.slice(2);
-  if (argv.includes("--help") || argv.includes("-h")) {
-    console.log(usage);
-  } else {
-    runCli(argv).catch((error) => {
-      if (error instanceof MigrationCommittedManifestError) {
-        console.error(`migration committed and verified, but manifest publication failed: ${redactError(error.cause)}`);
-        process.exitCode = 2;
-      } else if (error instanceof CommitOutcomeUnknownError) {
-        console.error(
-          `migration COMMIT outcome is unknown; do not retry or use --replace until --verify-only establishes destination state: ${redactError(error.cause)}`,
-        );
-        process.exitCode = 3;
-      } else {
-        console.error(`migration failed before commit; no successful destination COMMIT was issued: ${redactError(error)}`);
-        process.exitCode = 1;
-      }
-    });
-  }
+  process.exitCode = await runMain(process.argv.slice(2));
 }

@@ -4,7 +4,7 @@ import path from "node:path";
 import { PGlite, type PGliteInterface } from "@electric-sql/pglite";
 import { getTableColumns, getTableName, is } from "drizzle-orm";
 import { PgTable } from "drizzle-orm/pg-core";
-import { Client } from "pg";
+import { Client, type ClientConfig } from "pg";
 import * as appSchema from "../../src/server/db/schema";
 
 type SqlRow = Record<string, unknown>;
@@ -25,6 +25,14 @@ export interface TransactionalConnection extends SqlConnection {
   transaction<T>(callback: (connection: SqlConnection) => Promise<T>, options?: TransactionOptions): Promise<T>;
   close(): Promise<void>;
 }
+
+export interface PostgresClient {
+  connect(): Promise<void>;
+  query(text: string, values?: unknown[]): Promise<{ rows: SqlRow[] }>;
+  end(): Promise<void>;
+}
+
+export type PostgresClientFactory = (config: ClientConfig) => PostgresClient;
 
 export const APPLICATION_TABLES = [
   "account",
@@ -174,10 +182,13 @@ export function createPgliteDestination(client: PGliteInterface): TransactionalC
   };
 }
 
-export async function createPostgresDestination(connectionString: string): Promise<TransactionalConnection> {
+export async function createPostgresDestination(
+  connectionString: string,
+  createClient: PostgresClientFactory = createNodePostgresClient,
+): Promise<TransactionalConnection> {
   if (!connectionString) throw new Error("Destination URL is empty");
-  const ssl = hasRequiredSsl(connectionString) ? { rejectUnauthorized: false } : undefined;
-  const client = new Client({ connectionString, ssl });
+  assertRequiredSsl(connectionString);
+  const client = createClient({ connectionString, ssl: { rejectUnauthorized: false } });
   await client.connect();
   const connection = createPgQuery(client);
 
@@ -861,7 +872,7 @@ function createPgliteQuery(client: Pick<PGliteInterface, "query">): SqlConnectio
   };
 }
 
-function createPgQuery(client: Client): SqlConnection {
+function createPgQuery(client: Pick<PostgresClient, "query">): SqlConnection {
   return {
     query: async <T extends SqlRow = SqlRow>(text: string, values?: unknown[]): Promise<SqlResult<T>> => {
       const result = await client.query(text, values);
@@ -870,12 +881,33 @@ function createPgQuery(client: Client): SqlConnection {
   };
 }
 
-function hasRequiredSsl(connectionString: string): boolean {
+function assertRequiredSsl(connectionString: string): void {
+  let url: URL;
   try {
-    return new URL(connectionString).searchParams.get("sslmode") === "require";
+    url = new URL(connectionString);
   } catch {
     throw new Error("Destination URL is not a valid PostgreSQL URL");
   }
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw new Error("Destination URL is not a valid PostgreSQL URL");
+  }
+  if (url.searchParams.get("sslmode") !== "require") {
+    throw new Error("Destination URL must include sslmode=require; plaintext PostgreSQL connections are refused");
+  }
+}
+
+function createNodePostgresClient(config: ClientConfig): PostgresClient {
+  const client = new Client(config);
+  return {
+    connect: async () => {
+      await client.connect();
+    },
+    query: async (text, values) => {
+      const result = await client.query<SqlRow>(text, values);
+      return { rows: result.rows };
+    },
+    end: () => client.end(),
+  };
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
