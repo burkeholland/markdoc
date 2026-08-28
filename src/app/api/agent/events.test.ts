@@ -13,8 +13,9 @@ vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) })
 vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 
 const { getDb, schema } = await import("@/server/db");
-const { createDocument, upsertCollaborator } = await import("@/server/documents");
+const { createDocument, upsertCollaborator, updateDocument } = await import("@/server/documents");
 const { createApiToken } = await import("@/server/tokens");
+const { notify } = await import("@/server/notifications");
 const events = await import("@/server/agent-events");
 const { GET: GET_EVENTS } = await import("@/app/api/agent/documents/[id]/events/route");
 const { GET: GET_ALL_EVENTS } = await import("@/app/api/agent/events/route");
@@ -31,6 +32,7 @@ interface EventActor {
 }
 interface Ev {
   type: string;
+  documentId: string;
   actor: EventActor;
   diff?: string | null;
   body?: string;
@@ -45,9 +47,11 @@ interface Page {
 
 let owner: Actor;
 let cam: Actor;
+let alice: Actor;
 let docId: string;
 let token: string;
 let scribe: string;
+let aliceToken: string;
 
 const params = (id: string) => ({ params: Promise.resolve({ id }) });
 const req = (url: string, body?: unknown, method = body === undefined ? "GET" : "POST") =>
@@ -78,12 +82,15 @@ beforeAll(async () => {
   const db = await getDb();
   const [o] = await db.insert(schema.users).values({ name: "Olive", login: "olive", email: "olive@example.com" }).returning();
   const [c] = await db.insert(schema.users).values({ name: "Cam", login: "cam", email: "cam@example.com" }).returning();
+  const [a] = await db.insert(schema.users).values({ name: "Alice", login: "alice", email: "alice@example.com" }).returning();
   owner = { id: o.id, login: "olive", name: "Olive", image: null };
   cam = { id: c.id, login: "cam", name: "Cam", image: null };
+  alice = { id: a.id, login: "alice", name: "Alice", image: null };
   docId = (await createDocument({ ownerId: owner.id, title: "Watched", content: "# Watched\n\nFirst paragraph.\n" })).id;
   await upsertCollaborator(docId, "cam", "editor", owner.id);
   token = (await createApiToken(owner.id, "Copilot CLI")).token;
   scribe = (await createApiToken(owner.id, "Scribe")).token;
+  aliceToken = (await createApiToken(alice.id, "Alice Agent")).token;
 });
 
 describe("GET /api/agent/documents/:id/events — own writes", () => {
@@ -158,6 +165,26 @@ describe("GET /api/agent/documents/:id/events — own writes", () => {
     expect(page.events.find((e) => e.type === "comment.added")!.actor).toMatchObject({ id: owner.id, name: "Olive", login: "olive", kind: "user", agent: null, self: false });
     expect(page.events.find((e) => e.type === "mention")!.actor).toMatchObject({ login: "olive", kind: "user", self: false });
     expect(page.events.find((e) => e.type === "mention")!.agent).toBe("Copilot-CLI");
+  });
+
+  it("only returns cross-document mentions for documents the token user can open", async () => {
+    const privateDoc = await createDocument({ ownerId: owner.id, title: "Private instructions" });
+    const linkedDoc = await createDocument({ ownerId: owner.id, title: "Linked instructions" });
+    const sharedDoc = await createDocument({ ownerId: owner.id, title: "Shared instructions" });
+    await updateDocument(linkedDoc.id, { linkAccess: "comment" });
+    await upsertCollaborator(sharedDoc.id, alice.login, "viewer", owner.id);
+
+    const initial = (await (await asAgent(() => GET_ALL_EVENTS(req("/api/agent/events")), aliceToken)).json()) as Page;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await notify({ userLogin: alice.login, documentId: privateDoc.id, kind: "mention", actorLogin: owner.login, refId: "private-legacy", snippet: "@alice private" });
+    await notify({ userLogin: alice.login, documentId: linkedDoc.id, kind: "mention", actorLogin: owner.login, refId: "linked-mention", snippet: "@alice linked" });
+    await notify({ userLogin: alice.login, documentId: sharedDoc.id, kind: "mention", actorLogin: owner.login, refId: "shared-mention", snippet: "@alice shared" });
+
+    const response = await asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events?since=${initial.cursor}`)), aliceToken);
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as Page;
+    expect(page.events.filter((event) => event.type === "mention").map((event) => event.documentId).sort()).toEqual([linkedDoc.id, sharedDoc.id].sort());
+    expect(page.events.some((event) => event.documentId === privateDoc.id)).toBe(false);
   });
 
   it("parses includeSelf and explains content changes from recorded writes", () => {
