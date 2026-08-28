@@ -675,7 +675,7 @@ resource backupHeartbeatAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01
     enabled: true
     severity: 1
     evaluationFrequency: 'PT5M'
-    windowSize: 'PT20M'
+    windowSize: 'PT30M'
     scopes: [
       logs.id
     ]
