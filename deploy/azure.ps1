@@ -165,6 +165,7 @@ function Deploy-Infra(
   [bool]$InitializePostgres,
   [bool]$RotatePostgresPassword,
   [bool]$CommitPostgresPassword,
+  [bool]$ClearPendingPostgresPassword,
   [bool]$SimulatePostgresRotationFailure,
   [bool]$ConfigurePostgresRecovery,
   [string]$DatabaseConfigurationToken,
@@ -200,6 +201,7 @@ function Deploy-Infra(
         configureDatabase = @{ value = $InitializePostgres }
         rotateDatabasePassword = @{ value = $RotatePostgresPassword }
         commitDatabasePassword = @{ value = $CommitPostgresPassword }
+        clearPendingDatabasePassword = @{ value = $ClearPendingPostgresPassword }
         simulateDatabaseRotationFailure = @{ value = $SimulatePostgresRotationFailure }
         configureRecovery = @{ value = $ConfigurePostgresRecovery }
         databaseConfigurationToken = @{ value = $DatabaseConfigurationToken }
@@ -379,6 +381,7 @@ try {
     ([bool]$InitializeDatabase) `
     ([bool]$RotateDatabasePassword) `
     $false `
+    $false `
     ([bool]$SimulateDatabaseRotationFailure) `
     ([bool]$ConfigureRecovery) `
     $databaseConfigurationToken `
@@ -410,6 +413,21 @@ if ($RotateDatabasePassword) {
       $Matches[0]
     } else {
       'database-password-rotation=unknown'
+    }
+    if ($rotationState -notmatch 'database-password-rotation=reconciliation-required') {
+      [void](Deploy-Infra `
+        '' `
+        '' `
+        $false `
+        $false `
+        $false `
+        $false `
+        $false `
+        $true `
+        $false `
+        $false `
+        'unchanged' `
+        'unchanged')
     }
     throw "PostgreSQL password rotation did not commit ($rotationState). The active Key Vault secret and Container App were not changed."
   }
@@ -513,6 +531,7 @@ $outputs = Deploy-Infra `
   $true `
   $false `
   $false `
+  ([bool]$RotateDatabasePassword) `
   ([bool]$RotateDatabasePassword) `
   $false `
   $false `

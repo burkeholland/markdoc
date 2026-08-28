@@ -20,6 +20,7 @@ param enableVmBackup = false
 param configureDatabase = false
 param rotateDatabasePassword = false
 param commitDatabasePassword = false
+param clearPendingDatabasePassword = false
 param simulateDatabaseRotationFailure = false
 param configureRecovery = false
 param databaseConfigurationToken = 'unchanged'

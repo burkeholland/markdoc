@@ -78,6 +78,9 @@ param rotateDatabasePassword bool = false
 @description('Promote a successfully rotated PostgreSQL password to the active Key Vault secret.')
 param commitDatabasePassword bool = false
 
+@description('Disable and overwrite the temporary PostgreSQL rotation candidate after a terminal result.')
+param clearPendingDatabasePassword bool = false
+
 @description('Exercise the pre-change password rotation failure path without modifying PostgreSQL.')
 param simulateDatabaseRotationFailure bool = false
 
@@ -501,11 +504,14 @@ resource appDatabaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = i
   }
 }
 
-resource postgresPendingPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword) {
+resource postgresPendingPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword || clearPendingDatabasePassword) {
   parent: secretsVault
   name: postgresPendingPasswordSecretName
   properties: {
-    value: postgresAdminPassword
+    value: rotateDatabasePassword ? postgresAdminPassword : 'rotation-not-active'
+    attributes: {
+      enabled: rotateDatabasePassword
+    }
   }
 }
 
