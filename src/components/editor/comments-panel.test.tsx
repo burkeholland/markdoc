@@ -163,6 +163,31 @@ describe("CommentsPanel", () => {
     expect(screen.getByTestId("comments-empty-ask-agent-button")).toHaveFocus();
   });
 
+  it("tones resolved card backgrounds without dimming their metadata", () => {
+    const user = makeCollabUser("alice", "Alice");
+    session = new CollabSession({
+      docId: "doc",
+      user,
+      role: "owner",
+      getToken: async () => "token",
+      autoConnect: false,
+    });
+    session.keepAlive();
+    session.ytext.insert(0, "The quick brown fox jumps.");
+    const threadId = session.comments.add({ from: 4, to: 15, body: "@bob This is resolved.", author: user });
+    session.comments.reply(threadId, "Thanks.", user);
+    session.comments.setResolved(threadId, true, user);
+
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} focusTab={{ tab: "resolved", nonce: 1 }} />);
+
+    const thread = screen.getByTestId("comment-thread");
+    expect(thread).toHaveClass("bg-surface/80");
+    expect(thread).not.toHaveClass("opacity-80");
+    expect(screen.getAllByTestId("comment-timestamp")).toHaveLength(2);
+    expect(screen.getByTestId("comment-resolved-state")).toHaveTextContent("Resolved");
+    expect(screen.getByTestId("mention-chip")).toHaveTextContent("@bob");
+  });
+
   it("moves focus to the selected tab only when opening focus is requested", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({

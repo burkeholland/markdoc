@@ -1,4 +1,4 @@
-import { test, expect, devices, type Browser, type Page } from "@playwright/test";
+import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
@@ -66,6 +66,14 @@ const RICH_SYNTAX_VIEWPORTS = [
   { label: "640x400 at 2x", viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 },
 ] as const;
 
+const COMMENT_CONTRAST_VIEWPORTS = [
+  { label: "390x844", viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 },
+  { label: "640x400 at 2x", viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 },
+  { label: "853x759", viewport: { width: 853, height: 759 }, deviceScaleFactor: 1 },
+  { label: "1024x768", viewport: { width: 1024, height: 768 }, deviceScaleFactor: 1 },
+  { label: "1440x900", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
+] as const;
+
 /**
  * Rules disabled with a reason. Everything else in the wcag2a/aa + wcag21a/aa tag set is enforced.
  * - `color-contrast`: in the light theme axe cannot resolve contrast through `backdrop-blur` headers,
@@ -120,6 +128,63 @@ function computedContrast(foreground: string, background: string): number {
   };
   const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+async function expectRenderedTextContrast(locator: Locator, state: string) {
+  const samples = await locator.evaluateAll((elements) => {
+    type Rgba = [number, number, number, number];
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Canvas 2D context is unavailable");
+    const parse = (value: string): Rgba => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+      return [r, g, b, a / 255];
+    };
+    const over = (foreground: Rgba, background: Rgba): Rgba => {
+      const alpha = foreground[3] + background[3] * (1 - foreground[3]);
+      if (alpha === 0) return [0, 0, 0, 0];
+      return [
+        (foreground[0] * foreground[3] + background[0] * background[3] * (1 - foreground[3])) / alpha,
+        (foreground[1] * foreground[3] + background[1] * background[3] * (1 - foreground[3])) / alpha,
+        (foreground[2] * foreground[3] + background[2] * background[3] * (1 - foreground[3])) / alpha,
+        alpha,
+      ];
+    };
+    const rgb = (color: Rgba) => `rgb(${Math.round(color[0])}, ${Math.round(color[1])}, ${Math.round(color[2])})`;
+
+    return elements.map((element) => {
+      const ancestors: Element[] = [];
+      for (let current: Element | null = element; current; current = current.parentElement) ancestors.push(current);
+      let background: Rgba = [255, 255, 255, 1];
+      let opaqueAncestors = true;
+      for (const ancestor of ancestors.reverse()) {
+        const style = getComputedStyle(ancestor);
+        opaqueAncestors &&= Number(style.opacity) === 1;
+        background = over(parse(style.backgroundColor), background);
+      }
+      const foreground = parse(getComputedStyle(element).color);
+      return {
+        text: element.textContent?.trim() ?? "",
+        foreground: rgb(over(foreground, background)),
+        background: rgb(background),
+        opaqueAncestors,
+      };
+    });
+  });
+
+  expect(samples.length, `${state}: representative text exists`).toBeGreaterThan(0);
+  for (const sample of samples) {
+    expect(sample.opaqueAncestors, `${state}: "${sample.text}" has no dimmed ancestor`).toBe(true);
+    expect(
+      computedContrast(sample.foreground, sample.background),
+      `${state}: "${sample.text}" uses ${sample.foreground} on ${sample.background}`,
+    ).toBeGreaterThanOrEqual(4.5);
+  }
 }
 
 async function signInWithOptions(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
@@ -773,6 +838,109 @@ test.describe("axe: contrast", () => {
     }
     await context.close();
   });
+});
+
+test.describe("axe: comment metadata contrast", () => {
+  const login = "a11y-comment-contrast-owner-with-a-long-name";
+  let id: string;
+
+  test.beforeAll(async ({ browser }) => {
+    const owner = await signIn(browser, login);
+    try {
+      id = await createDocument(owner.page, "# Comment contrast\n\nShared text for every comment anchor.\n", "Comment contrast fixture");
+      const threadIds: string[] = [];
+      for (let start = 0; start < 25; start += 5) {
+        const responses = await Promise.all(
+          Array.from({ length: Math.min(5, 25 - start) }, (_, offset) => {
+            const index = start + offset;
+            const mention = index === 0 || index === 10 ? "@contrast-peer " : "";
+            return owner.page.request.post(`/api/documents/${id}/comments`, {
+              data: {
+                action: "add",
+                quote: "Shared text",
+                body: `${mention}${index < 10 ? "Resolved" : "Open"} contrast thread ${index + 1}.`,
+              },
+            });
+          }),
+        );
+        for (const response of responses) {
+          expect(response.ok()).toBeTruthy();
+          threadIds.push(((await response.json()) as { id: string }).id);
+        }
+      }
+      expect(
+        (
+          await owner.page.request.post(`/api/documents/${id}/comments`, {
+            data: { action: "reply", threadId: threadIds[0], body: "Reply timestamp." },
+          })
+        ).ok(),
+      ).toBeTruthy();
+      const resolved = await Promise.all(
+        threadIds.slice(0, 10).map((threadId) =>
+          owner.page.request.post(`/api/documents/${id}/comments`, {
+            data: { action: "resolve", threadId, resolved: true },
+          }),
+        ),
+      );
+      expect(resolved.every((response) => response.ok())).toBe(true);
+    } finally {
+      await owner.context.close();
+    }
+  });
+
+  for (const { label, viewport, deviceScaleFactor } of COMMENT_CONTRAST_VIEWPORTS) {
+    test(`timestamps, resolved labels and mentions at ${label}`, async ({ browser }) => {
+      const { page, context } = await signInWithOptions(browser, login, { viewport, deviceScaleFactor });
+      await page.evaluate(() => {
+        localStorage.setItem("markdoc:theme", "light");
+      });
+      await page.goto(`/d/${id}`);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      await expect(page.locator(".md-rich")).toBeVisible();
+
+      for (const theme of ["light", "dark"] as const) {
+        if (theme === "dark") await setTheme(page, theme);
+        if ((await page.getByTestId("comments-panel").count()) === 0) {
+          const toggle = page.getByTestId("comments-toggle");
+          await expect(toggle).toBeVisible();
+          await toggle.focus();
+          await page.keyboard.press("Enter");
+          await expect(toggle).toHaveAttribute("data-active", "true");
+        }
+        await expect(page.getByTestId("comments-panel")).toBeVisible();
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        const panel = page.getByTestId("comments-panel");
+
+        for (const [tab, count] of [
+          ["open", 15],
+          ["resolved", 10],
+        ] as const) {
+          await page.getByTestId(`comments-tab-${tab}`).click();
+          await expect(panel.getByTestId("comment-thread")).toHaveCount(count);
+          const axe = await new AxeBuilder({ page }).include('[data-testid="comments-panel"]').withRules(["color-contrast"]).analyze();
+          expect(
+            axe.violations.flatMap((violation) => violation.nodes),
+            `${label} ${theme} ${tab}: axe color-contrast nodes inside the populated comments panel`,
+          ).toHaveLength(0);
+          await expectRenderedTextContrast(panel.getByTestId("comment-timestamp"), `${label} ${theme} ${tab} timestamps`);
+          await expectRenderedTextContrast(panel.getByTestId("mention-chip"), `${label} ${theme} ${tab} mention chips`);
+          if (tab === "resolved") {
+            await expectRenderedTextContrast(panel.getByTestId("comment-resolved-state"), `${label} ${theme} resolved labels`);
+          }
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1),
+            `${label} ${theme} ${tab}: no horizontal page overflow`,
+          ).toBe(true);
+          expect(
+            await panel.evaluate((element) => element.scrollWidth <= element.clientWidth + 1),
+            `${label} ${theme} ${tab}: no horizontal panel overflow`,
+          ).toBe(true);
+        }
+      }
+
+      await context.close();
+    });
+  }
 });
 
 test.describe("axe: phone (iPhone 13)", () => {
