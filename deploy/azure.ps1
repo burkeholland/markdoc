@@ -434,7 +434,7 @@ if ($VerifyRecovery -or $ConfigureRecovery) {
     --resource-group $ResourceGroup `
     --name "$Name-pg" `
     --command-id RunShellScript `
-    --scripts '/usr/local/sbin/markdoc-restore-check' `
+    --scripts '/usr/local/sbin/markdoc-restore-check && sudo -u postgres /usr/local/sbin/markdoc-backup-monitor' `
     --query 'value[0].message' `
     --output tsv `
     --only-show-errors

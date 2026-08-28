@@ -463,4 +463,3 @@ systemctl enable --now \
   markdoc-logical-backup.timer \
   markdoc-backup-monitor.timer \
   markdoc-restore-check.timer
-sudo -u postgres /usr/local/sbin/markdoc-backup-monitor
