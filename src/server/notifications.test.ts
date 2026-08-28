@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -6,6 +6,8 @@ import * as Y from "yjs";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
+
+vi.mock("@/server/livedoc", () => ({ evictLiveDocument: vi.fn() }));
 
 const { getDb, schema } = await import("./db");
 const {
@@ -20,6 +22,7 @@ const {
   notifyShare,
   watchDocumentNotifications,
 } = await import("./notifications");
+const { deleteDocument, restoreDocument } = await import("./documents");
 const { CommentsModel } = await import("@/editor/collab/comments");
 const { SuggestionsModel } = await import("@/editor/collab/suggestions");
 const { makeCollabUser } = await import("@/editor/collab/shared");
@@ -49,10 +52,12 @@ const unread = async (login: string) => (await listNotifications(login, { unread
 const origin = (userId: string, name: string) => ({ source: "connection", connection: { context: { userId, docId: "n-doc1", role: "editor", name, login: name.toLowerCase(), avatar: null } } });
 
 describe("notifications", () => {
+  let ownerId: string;
   let aliceId: string;
   let bobId: string;
   beforeAll(async () => {
     const owner = await seedUser("owner", "Owner");
+    ownerId = owner.id;
     aliceId = (await seedUser("alice", "Alice")).id;
     bobId = (await seedUser("bob", "Bob")).id;
     const carol = await seedUser("carol", "Carol");
@@ -132,6 +137,28 @@ describe("notifications", () => {
     // Read items still list unless `unread` is requested.
     expect((await listNotifications("carol")).items).toHaveLength(2);
     expect(await unread("carol")).toHaveLength(1);
+  });
+
+  it("hides a trashed document's notifications without deleting them and restores their visibility", async () => {
+    await seedDocument("n-trash", "Temporary plan", ownerId, "comment");
+    await notify({ userLogin: "trash-reader", documentId: "n-trash", kind: "share", actorLogin: "owner", refId: "n-trash:trash-reader" });
+    await notify({ userLogin: "trash-reader", documentId: "n-trash", kind: "mention", actorLogin: "owner", refId: "trash-comment" });
+
+    expect((await listNotifications("trash-reader")).items.map((item) => item.documentId)).toEqual(["n-trash", "n-trash"]);
+    expect((await listNotifications("trash-reader", { unread: true })).items).toHaveLength(2);
+    expect(await unreadCount("trash-reader")).toBe(2);
+
+    await deleteDocument("n-trash");
+    expect((await listNotifications("trash-reader")).items).toEqual([]);
+    expect((await listNotifications("trash-reader", { unread: true })).items).toEqual([]);
+    expect(await unreadCount("trash-reader")).toBe(0);
+    const db = await getDb();
+    expect(await db.select().from(schema.notifications).where(eq(schema.notifications.documentId, "n-trash"))).toHaveLength(2);
+
+    await restoreDocument("n-trash");
+    expect((await listNotifications("trash-reader")).items).toHaveLength(2);
+    expect((await listNotifications("trash-reader", { unread: true })).items).toHaveLength(2);
+    expect(await unreadCount("trash-reader")).toBe(2);
   });
 
   it("read-all only touches the caller's rows", async () => {
