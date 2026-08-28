@@ -17,7 +17,7 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches } from "@codemirror/search";
-import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import { yCollab } from "y-codemirror.next";
 import type { CollabSession } from "../collab/session";
 import { codeEditorTheme } from "./theme";
 import { sourceHighlights, highlightClickHandler } from "./highlights";
@@ -77,6 +77,19 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     { key: "Mod-Alt-5", run: setHeading(5) },
     { key: "Mod-Alt-6", run: setHeading(6) },
   ]);
+  const undo = () => {
+    session.undo();
+    return true;
+  };
+  const redo = () => {
+    session.redo();
+    return true;
+  };
+  const historyKeymap = [
+    { key: "Mod-z", run: undo, preventDefault: true },
+    { key: "Mod-y", mac: "Mod-Shift-z", run: redo, preventDefault: true },
+    { key: "Mod-Shift-z", run: redo, preventDefault: true },
+  ];
 
   const extensions: Extension = [
     lineNumbers(),
@@ -112,7 +125,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     codePasteGuard({ onNotice: handlers.onNotice, undoManager: session.undoManager }),
     handlers.onMarkdownFileDrop ? codeMarkdownFileDrop(handlers.onMarkdownFileDrop) : [],
     // No searchKeymap: Mod-F is handled by the shared find bar in the editor shell.
-    keymap.of([...yUndoManagerKeymap, ...closeBracketsKeymap, ...defaultKeymap, indentWithTab]),
+    keymap.of([...historyKeymap, ...closeBracketsKeymap, ...defaultKeymap, indentWithTab]),
     EditorView.domEventHandlers({
       focus: () => {
         handlers.onFocus?.();
