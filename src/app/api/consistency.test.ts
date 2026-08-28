@@ -16,7 +16,7 @@ vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) })
 vi.mock("next/headers", () => ({ headers: async () => new Headers(bearer ? { authorization: `Bearer ${bearer}` } : {}) }));
 
 const { getDb, schema } = await import("@/server/db");
-const { createDocument, deleteDocument, addVersion, listCollaborators } = await import("@/server/documents");
+const { createDocument, deleteDocument, restoreDocument, addVersion, listCollaborators } = await import("@/server/documents");
 const { createApiToken } = await import("@/server/tokens");
 const { notify, NOTIFICATION_KINDS } = await import("@/server/notifications");
 const version = await import("@/app/api/documents/[id]/versions/[vid]/route");
@@ -26,6 +26,7 @@ const comments = await import("@/app/api/documents/[id]/comments/route");
 const tokens = await import("@/app/api/tokens/route");
 const catchAll = await import("@/app/api/[...rest]/route");
 const notifications = await import("@/app/api/notifications/route");
+const mentions = await import("@/app/api/mentions/route");
 const activity = await import("@/app/api/documents/[id]/activity/route");
 
 type Err = { error: string; issues?: { path: (string | number)[]; message: string }[] };
@@ -170,6 +171,35 @@ describe("unknown /api paths", () => {
 });
 
 describe("limit caps", () => {
+  it("notification routes hide trashed documents and show their rows again after restore", async () => {
+    type NotificationPage = { items: { documentId: string }[]; unreadCount: number };
+    const notificationPage = async () =>
+      (await (await notifications.GET(jsonReq("/api/notifications?unread=1&limit=100", "GET"))).json()) as NotificationPage;
+    const mentionPage = async () => (await (await mentions.GET()).json()) as NotificationPage;
+    const notificationBaseline = (await notificationPage()).unreadCount;
+    const mentionBaseline = (await mentionPage()).unreadCount;
+
+    const trashedDoc = await createDocument({ ownerId: eve.id, title: "Temporary notifications" });
+    await notify({ userLogin: "eve", documentId: trashedDoc.id, kind: "share", actorLogin: "drew", refId: `${trashedDoc.id}:eve` });
+    await notify({ userLogin: "eve", documentId: trashedDoc.id, kind: "mention", actorLogin: "drew", refId: `${trashedDoc.id}:comment` });
+
+    const expectVisible = async (notificationCount: number, mentionCount: number) => {
+      const notificationResult = await notificationPage();
+      const mentionResult = await mentionPage();
+      expect(notificationResult.items.filter((item) => item.documentId === trashedDoc.id)).toHaveLength(notificationCount);
+      expect(notificationResult.unreadCount).toBe(notificationBaseline + notificationCount);
+      expect(mentionResult.items.filter((item) => item.documentId === trashedDoc.id)).toHaveLength(mentionCount);
+      expect(mentionResult.unreadCount).toBe(mentionBaseline + mentionCount);
+    };
+
+    await expectVisible(2, 1);
+    await deleteDocument(trashedDoc.id);
+    await expectVisible(0, 0);
+    await restoreDocument(trashedDoc.id);
+    await expectVisible(2, 1);
+    await deleteDocument(trashedDoc.id);
+  });
+
   it("GET /api/notifications?limit= outside 1–100 is 400 with the zod issue, valid values work", async () => {
     await notify({ userLogin: "eve", documentId: docId, kind: "share", actorLogin: "drew", actorName: "Drew", refId: `${docId}:eve`, snippet: "viewer" });
     for (const limit of ["100000", "0", "-1", "abc", "1.5"]) {
