@@ -63,8 +63,8 @@ $secretStoreOperation = $null
 $resolvedSecretsPath = ''
 try {
   if ($SecretsPath) {
-    $resolvedSecretsPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SecretsPath)
-    $secretStoreOperation = Enter-ProtectedSecretStoreOperation $resolvedSecretsPath
+    $secretStoreOperation = Enter-ProtectedSecretStoreOperation $SecretsPath
+    $resolvedSecretsPath = $secretStoreOperation.Path
   }
 
   if ($ImageTag -and $ImageTag -notmatch '^[0-9a-f]{40}$') {

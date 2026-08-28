@@ -74,17 +74,44 @@ function Invoke-OperationWithGuaranteedCleanup {
   return $result
 }
 
-function Assert-ProtectedCurrentUserFileAcl {
+function Get-WindowsFileAccessControl {
   param(
     [Parameter(Mandatory)]
     [string]$Path
   )
 
   $file = [IO.FileInfo]::new($Path)
-  $acl = [IO.FileSystemAclExtensions]::GetAccessControl(
-    $file,
-    [Security.AccessControl.AccessControlSections]::Access
+  $sections = [Security.AccessControl.AccessControlSections]::Access
+  if ('System.IO.FileSystemAclExtensions' -as [type]) {
+    return [IO.FileSystemAclExtensions]::GetAccessControl($file, $sections)
+  }
+  return $file.GetAccessControl($sections)
+}
+
+function Set-WindowsFileAccessControl {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path,
+
+    [Parameter(Mandatory)]
+    [Security.AccessControl.FileSecurity]$Security
   )
+
+  $file = [IO.FileInfo]::new($Path)
+  if ('System.IO.FileSystemAclExtensions' -as [type]) {
+    [IO.FileSystemAclExtensions]::SetAccessControl($file, $Security)
+    return
+  }
+  $file.SetAccessControl($Security)
+}
+
+function Assert-ProtectedCurrentUserFileAcl {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $acl = Get-WindowsFileAccessControl $Path
   $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
   $rules = @(
     $acl.GetAccessRules(
@@ -122,23 +149,206 @@ function Set-ProtectedCurrentUserFileAcl {
     [Security.AccessControl.AccessControlType]::Allow
   )
   [void]$protectedAcl.AddAccessRule($currentUserRule)
-  [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path), $protectedAcl)
+  Set-WindowsFileAccessControl -Path $Path -Security $protectedAcl
   Assert-ProtectedCurrentUserFileAcl $Path
 }
 
-function Get-ProtectedSecretStoreOperationMutexName {
+if (-not ('MarkdocSecretStoreFileIdentity' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class MarkdocSecretStoreFileIdentity
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow;
+        public uint CreationTimeHigh;
+        public uint LastAccessTimeLow;
+        public uint LastAccessTimeHigh;
+        public uint LastWriteTimeLow;
+        public uint LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(
+        SafeFileHandle file,
+        StringBuilder path,
+        uint pathLength,
+        uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle file,
+        out ByHandleFileInformation information);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetShortPathName(
+        string longPath,
+        StringBuilder shortPath,
+        uint shortPathLength);
+
+    public string DosPath { get; private set; }
+    public string IdentityPath { get; private set; }
+    public uint LinkCount { get; private set; }
+
+    private MarkdocSecretStoreFileIdentity(string dosPath, string identityPath, uint linkCount)
+    {
+        DosPath = dosPath;
+        IdentityPath = identityPath;
+        LinkCount = linkCount;
+    }
+
+    private static string ReadFinalPath(SafeFileHandle file, uint flags)
+    {
+        var path = new StringBuilder(512);
+        var length = GetFinalPathNameByHandle(file, path, (uint)path.Capacity, flags);
+        if (length == 0)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        if (length >= path.Capacity)
+        {
+            path = new StringBuilder((int)length + 1);
+            length = GetFinalPathNameByHandle(file, path, (uint)path.Capacity, flags);
+            if (length == 0 || length >= path.Capacity)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+        return path.ToString();
+    }
+
+    public static MarkdocSecretStoreFileIdentity Resolve(SafeFileHandle file)
+    {
+        ByHandleFileInformation information;
+        if (!GetFileInformationByHandle(file, out information))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        const uint VolumeNameDos = 0;
+        const uint VolumeNameGuid = 1;
+        var dosPath = ReadFinalPath(file, VolumeNameDos);
+        var identityPath = dosPath.StartsWith(
+            @"\\?\UNC\",
+            StringComparison.OrdinalIgnoreCase)
+            ? null
+            : ReadFinalPath(file, VolumeNameGuid);
+        return new MarkdocSecretStoreFileIdentity(
+            dosPath,
+            identityPath,
+            information.NumberOfLinks);
+    }
+
+    public static string ReadShortPath(string longPath)
+    {
+        var path = new StringBuilder(512);
+        var length = GetShortPathName(longPath, path, (uint)path.Capacity);
+        if (length == 0)
+        {
+            return null;
+        }
+        if (length >= path.Capacity)
+        {
+            path = new StringBuilder((int)length + 1);
+            length = GetShortPathName(longPath, path, (uint)path.Capacity);
+            if (length == 0 || length >= path.Capacity)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+        return path.ToString();
+    }
+}
+'@
+}
+
+function ConvertFrom-WindowsExtendedPath {
   param(
     [Parameter(Mandatory)]
     [string]$Path
   )
 
-  $canonicalPath = [IO.Path]::GetFullPath($Path).ToUpperInvariant()
-  $pathBytes = [Text.Encoding]::UTF8.GetBytes($canonicalPath)
+  if ($Path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+    return "\\$($Path.Substring(8))"
+  }
+  if ($Path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+    return $Path.Substring(4)
+  }
+  return $Path
+}
+
+function Resolve-ProtectedSecretStoreOperationPath {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $providerPath = $Path
+  if (-not $Path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+    $providerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+  }
+  $fullPath = [IO.Path]::GetFullPath($providerPath)
+  $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+  try {
+    $file = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+  } catch [IO.FileNotFoundException] {
+    throw [IO.FileNotFoundException]::new(
+      "Production secrets store not found: $fullPath",
+      $_.Exception
+    )
+  } catch [IO.DirectoryNotFoundException] {
+    throw [IO.DirectoryNotFoundException]::new(
+      "Production secrets store directory not found: $fullPath",
+      $_.Exception
+    )
+  }
+  try {
+    $identity = [MarkdocSecretStoreFileIdentity]::Resolve($file.SafeFileHandle)
+  } finally {
+    $file.Dispose()
+  }
+
+  $canonicalPath = ConvertFrom-WindowsExtendedPath $identity.DosPath
+  if ($canonicalPath.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The production secrets store must be on a local Windows volume.'
+  }
+  if ($identity.LinkCount -ne 1) {
+    throw 'The production secrets store must not have hard-link aliases.'
+  }
+  Assert-ProtectedCurrentUserFileAcl $canonicalPath
+
+  return [pscustomobject]@{
+    Path = $identity.DosPath
+    Identity = $identity.IdentityPath.ToUpperInvariant()
+  }
+}
+
+function Get-ProtectedSecretStoreOperationMutexNameFromIdentity {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Identity
+  )
+
+  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $pathBytes = [Text.Encoding]::UTF8.GetBytes("$currentSid|$Identity")
   $hasher = [Security.Cryptography.SHA256]::Create()
   try {
     $pathHash = $hasher.ComputeHash($pathBytes)
-    $hashText = [Convert]::ToHexString($pathHash)
-    return "Local\Markdoc.AzureProduction.$hashText"
+    $hashText = [BitConverter]::ToString($pathHash).Replace('-', '')
+    return "Global\Markdoc.AzureProduction.$hashText"
   } finally {
     $hasher.Dispose()
     [Array]::Clear($pathBytes, 0, $pathBytes.Length)
@@ -148,17 +358,107 @@ function Get-ProtectedSecretStoreOperationMutexName {
   }
 }
 
+function Get-ProtectedSecretStoreOperationMutexName {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $resolvedPath = Resolve-ProtectedSecretStoreOperationPath $Path
+  return Get-ProtectedSecretStoreOperationMutexNameFromIdentity $resolvedPath.Identity
+}
+
+function New-ProtectedSecretStoreOperationMutexSecurity {
+  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $security = [Security.AccessControl.MutexSecurity]::new()
+  $security.SetAccessRuleProtection($true, $false)
+  $security.SetOwner($currentSid)
+  $currentUserRule = [Security.AccessControl.MutexAccessRule]::new(
+    $currentSid,
+    [Security.AccessControl.MutexRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow
+  )
+  [void]$security.AddAccessRule($currentUserRule)
+  return $security
+}
+
+function New-NamedMutexWithSecurity {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Name,
+
+    [Parameter(Mandatory)]
+    [Security.AccessControl.MutexSecurity]$Security,
+
+    [Parameter(Mandatory)]
+    [ref]$CreatedNew
+  )
+
+  if ('System.Threading.MutexAcl' -as [type]) {
+    return [System.Threading.MutexAcl]::Create($false, $Name, $CreatedNew, $Security)
+  }
+  return [Threading.Mutex]::new($false, $Name, $CreatedNew, $Security)
+}
+
+function Assert-ProtectedSecretStoreOperationMutexSecurity {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Name
+  )
+
+  $sections = (
+    [Security.AccessControl.AccessControlSections]::Owner -bor
+    [Security.AccessControl.AccessControlSections]::Access
+  )
+  $security = [Security.AccessControl.MutexSecurity]::new($Name, $sections)
+  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $owner = $security.GetOwner([Security.Principal.SecurityIdentifier])
+  $rules = @(
+    $security.GetAccessRules(
+      $true,
+      $true,
+      [Security.Principal.SecurityIdentifier]
+    )
+  )
+  $currentUserFullControl = @(
+    $rules | Where-Object {
+      $_.IdentityReference -eq $currentSid -and
+      $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+      ($_.MutexRights -band [Security.AccessControl.MutexRights]::FullControl) -eq
+        [Security.AccessControl.MutexRights]::FullControl
+    }
+  )
+  $foreignOrDenyRules = @(
+    $rules | Where-Object {
+      $_.IdentityReference -ne $currentSid -or
+      $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow
+    }
+  )
+  if (
+    $owner -ne $currentSid -or
+    -not $security.AreAccessRulesProtected -or
+    $currentUserFullControl.Count -ne 1 -or
+    $foreignOrDenyRules.Count -gt 0
+  ) {
+    throw 'The production operation lock is not restricted to the current Windows user.'
+  }
+}
+
 function Enter-ProtectedSecretStoreOperation {
   param(
     [Parameter(Mandatory)]
     [string]$Path
   )
 
-  $mutexName = Get-ProtectedSecretStoreOperationMutexName $Path
-  $mutex = [Threading.Mutex]::new($false, $mutexName)
+  $resolvedPath = Resolve-ProtectedSecretStoreOperationPath $Path
+  $mutexName = Get-ProtectedSecretStoreOperationMutexNameFromIdentity $resolvedPath.Identity
+  $createdNew = $false
+  $mutexSecurity = New-ProtectedSecretStoreOperationMutexSecurity
+  $mutex = New-NamedMutexWithSecurity -Name $mutexName -Security $mutexSecurity -CreatedNew ([ref]$createdNew)
   $acquired = $false
   $recoveredAbandonedOwner = $false
   try {
+    Assert-ProtectedSecretStoreOperationMutexSecurity $mutexName
     try {
       $acquired = $mutex.WaitOne(0)
     } catch [Threading.AbandonedMutexException] {
@@ -175,6 +475,7 @@ function Enter-ProtectedSecretStoreOperation {
       Mutex = $mutex
       Acquired = $true
       RecoveredAbandonedOwner = $recoveredAbandonedOwner
+      Path = $resolvedPath.Path
     }
   } catch {
     try {

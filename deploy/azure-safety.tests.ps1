@@ -23,6 +23,7 @@ Assert-True ($deploymentSource -match 'Invoke-AlreadyInitializedDatabaseRefusal'
 Assert-True ($deploymentSource -match 'Assert-ProtectedCurrentUserFileAcl') 'The production secret store must use the executable ACL helper.'
 Assert-True ($deploymentSource -match 'Save-ProtectedSecureStringStore') 'The production secret store must use atomic protected replacement.'
 Assert-True ($deploymentSource -match 'Enter-ProtectedSecretStoreOperation') 'The production workflow must acquire cross-process ownership.'
+Assert-True ($deploymentSource -match '\$resolvedSecretsPath = \$secretStoreOperation\.Path') 'Secret access must use the stable final path protected by ownership.'
 Assert-True ($deploymentSource -match 'Restore-CandidateOnlyDatabaseCredential') 'Legacy candidate-only state must use explicit credential reconciliation.'
 Assert-True ($deploymentSource -match 'Resolve-DatabaseDeploymentReadiness') 'Rotation recovery must be selected before initialization health discovery.'
 $operationAcquire = $deploymentSource.IndexOf('$secretStoreOperation = Enter-ProtectedSecretStoreOperation')
@@ -79,7 +80,7 @@ try {
     [Security.AccessControl.AccessControlType]::Allow
   )
   [void]$protectedAcl.AddAccessRule($currentUserRule)
-  [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($aclPath), $protectedAcl)
+  Set-WindowsFileAccessControl -Path $aclPath -Security $protectedAcl
   Assert-ProtectedCurrentUserFileAcl $aclPath
 
   $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
@@ -89,7 +90,7 @@ try {
     [Security.AccessControl.AccessControlType]::Allow
   )
   [void]$protectedAcl.AddAccessRule($foreignRule)
-  [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($aclPath), $protectedAcl)
+  Set-WindowsFileAccessControl -Path $aclPath -Security $protectedAcl
   try {
     Assert-ProtectedCurrentUserFileAcl $aclPath
     throw 'Expected foreign ACL rejection.'
@@ -98,6 +99,14 @@ try {
   }
 } finally {
   Remove-Item -LiteralPath $aclPath -Force
+}
+
+$missingStorePath = Join-Path ([IO.Path]::GetTempPath()) "markdoc-missing-$([guid]::NewGuid().ToString('N')).clixml"
+try {
+  [void](Resolve-ProtectedSecretStoreOperationPath $missingStorePath)
+  throw 'Expected missing production store rejection.'
+} catch {
+  Assert-True ($_.Exception.Message -match 'Production secrets store not found') 'A missing store must return an operator-facing error before ownership.'
 }
 
 function New-TestSecureString([int]$Length) {
@@ -159,16 +168,20 @@ function Assert-NoSecretStoreArtifacts([string]$Directory, [string]$StoreName) {
 function Start-PowerShellTestProcess([string]$ScriptPath, [string[]]$Arguments) {
   $startInfo = [Diagnostics.ProcessStartInfo]::new()
   $startInfo.FileName = (Get-Process -Id $PID).Path
-  foreach ($argument in @(
+  $processArguments = @(
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy',
     'Bypass',
     '-File',
     $ScriptPath
-  ) + $Arguments) {
-    [void]$startInfo.ArgumentList.Add($argument)
+  ) + $Arguments
+  foreach ($argument in $processArguments) {
+    if ($argument.Contains('"')) {
+      throw 'Ownership test process arguments must not contain quotation marks.'
+    }
   }
+  $startInfo.Arguments = ($processArguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
   $startInfo.UseShellExecute = $false
   $startInfo.RedirectStandardOutput = $true
   $startInfo.RedirectStandardError = $true
@@ -197,7 +210,7 @@ function Wait-TestPath([string]$Path, [Diagnostics.Process]$Process) {
 
 function Wait-TestProcess([Diagnostics.Process]$Process) {
   if (-not $Process.WaitForExit(15000)) {
-    $Process.Kill($true)
+    $Process.Kill()
     $Process.WaitForExit()
     throw 'Timed out waiting for the cross-process ownership test worker to exit.'
   }
@@ -242,6 +255,10 @@ try {
     Save-ProtectedSecureStringStore -Path $StorePath -Store $store
     [IO.File]::WriteAllText("$OperationPath.azure", 'azure')
   } elseif ($Mode -eq 'Acquire') {
+    $store = Import-Clixml -LiteralPath $ownership.Path
+    if ($store.PostgresAdminPassword -isnot [Security.SecureString]) {
+      throw 'The final protected I/O path could not import retained state.'
+    }
     [IO.File]::WriteAllText($OperationPath, 'acquired')
   } elseif ($Mode -eq 'Recover') {
     $store = Import-Clixml -LiteralPath $StorePath
@@ -264,6 +281,9 @@ try {
 [IO.File]::WriteAllText($ownershipWorkerPath, $ownershipWorkerSource, [Text.UTF8Encoding]::new($false))
 
 $ownershipProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+$junctionAliasPath = ''
+$symbolicLinkAliasPath = ''
+$substDrive = ''
 try {
   $sharedDirectory = Join-Path $ownershipTestRoot 'shared'
   [void](New-Item -ItemType Directory -Path $sharedDirectory)
@@ -282,24 +302,115 @@ try {
   $ownershipProcesses.Add($holder)
   Wait-TestPath $holderReadyPath $holder
 
-  $normalizedAlias = [IO.Path]::Combine(
-    [IO.Path]::GetDirectoryName($sharedStorePath),
-    '.',
-    [IO.Path]::GetFileName($sharedStorePath)
-  ).ToUpperInvariant()
-  $loser = Start-PowerShellTestProcess $ownershipWorkerPath @(
-    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
-    '-Mode', 'Mutate',
-    '-StorePath', $normalizedAlias,
-    '-OperationPath', $loserOperationPath
-  )
-  $ownershipProcesses.Add($loser)
-  $loserResult = Wait-TestProcess $loser
-  Assert-True ($loserResult.ExitCode -ne 0) 'A second process must fail while the canonical store is owned.'
-  Assert-True ($loserResult.StandardError -match 'Another Markdoc production operation owns this secrets store') 'Contention must return an explicit non-secret ownership error.'
-  Assert-True (-not [IO.File]::Exists("$loserOperationPath.entered")) 'The losing process must fail before importing or mutating secrets.'
-  Assert-True (-not [IO.File]::Exists("$loserOperationPath.azure")) 'The losing process must fail before invoking Azure operations.'
-  Assert-OriginalTestStore $sharedStorePath
+  $globalMutexName = Get-ProtectedSecretStoreOperationMutexName $sharedStorePath
+  Assert-True ($globalMutexName.StartsWith('Global\')) 'Ownership must use the cross-session Global namespace.'
+  $globalHandle = [Threading.Mutex]::OpenExisting($globalMutexName)
+  $globalHandle.Dispose()
+  $localHandle = $null
+  try {
+    $localName = "Local\$($globalMutexName.Substring('Global\'.Length))"
+    $localHandle = [Threading.Mutex]::OpenExisting($localName)
+    throw 'Expected the session-local namespace to remain empty.'
+  } catch {
+    Assert-True (
+      $_.Exception -is [Threading.WaitHandleCannotBeOpenedException] -or
+      $_.Exception.InnerException -is [Threading.WaitHandleCannotBeOpenedException]
+    ) 'The operation mutex must not resolve through the session-local namespace.'
+  } finally {
+    if ($localHandle) {
+      $localHandle.Dispose()
+    }
+  }
+
+  $resolvedSharedStore = Resolve-ProtectedSecretStoreOperationPath $sharedStorePath
+  $currentSidText = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $expectedNameBytes = [Text.Encoding]::UTF8.GetBytes("$currentSidText|$($resolvedSharedStore.Identity)")
+  $expectedNameHasher = [Security.Cryptography.SHA256]::Create()
+  try {
+    $expectedNameHash = $expectedNameHasher.ComputeHash($expectedNameBytes)
+    $expectedName = "Global\Markdoc.AzureProduction.$([BitConverter]::ToString($expectedNameHash).Replace('-', ''))"
+    Assert-Equal $expectedName $globalMutexName 'The operation identity must include the deployment SID and final filesystem path.'
+  } finally {
+    $expectedNameHasher.Dispose()
+    [Array]::Clear($expectedNameBytes, 0, $expectedNameBytes.Length)
+    if ($expectedNameHash) {
+      [Array]::Clear($expectedNameHash, 0, $expectedNameHash.Length)
+    }
+  }
+
+  $storeAliases = [Collections.Generic.List[object]]::new()
+  $storeAliases.Add([pscustomobject]@{
+    Name = 'normalized lexical'
+    Path = [IO.Path]::Combine(
+      [IO.Path]::GetDirectoryName($sharedStorePath),
+      '.',
+      [IO.Path]::GetFileName($sharedStorePath)
+    ).ToUpperInvariant()
+  })
+  $storeAliases.Add([pscustomobject]@{
+    Name = 'extended-length'
+    Path = "\\?\$sharedStorePath"
+  })
+
+  $aliasDirectory = Join-Path $ownershipTestRoot 'aliases'
+  [void](New-Item -ItemType Directory -Path $aliasDirectory)
+  $junctionAliasPath = Join-Path $aliasDirectory 'shared-junction'
+  [void](New-Item -ItemType Junction -Path $junctionAliasPath -Target $sharedDirectory)
+  $storeAliases.Add([pscustomobject]@{
+    Name = 'junction'
+    Path = Join-Path $junctionAliasPath 'production.clixml'
+  })
+
+  $symbolicLinkAliasPath = Join-Path $aliasDirectory 'production-link.clixml'
+  try {
+    [void](New-Item -ItemType SymbolicLink -Path $symbolicLinkAliasPath -Target $sharedStorePath)
+    $storeAliases.Add([pscustomobject]@{
+      Name = 'symbolic-link'
+      Path = $symbolicLinkAliasPath
+    })
+  } catch {
+    $symbolicLinkAliasPath = ''
+  }
+
+  $shortPath = [MarkdocSecretStoreFileIdentity]::ReadShortPath($sharedStorePath)
+  if ($shortPath -and $shortPath -ne $sharedStorePath) {
+    $storeAliases.Add([pscustomobject]@{
+      Name = 'short-name'
+      Path = $shortPath
+    })
+  }
+
+  foreach ($driveCode in 90..68) {
+    $candidateDrive = [char]$driveCode
+    if (-not (Test-Path -LiteralPath "${candidateDrive}:\")) {
+      & subst.exe "${candidateDrive}:" $sharedDirectory
+      if ($LASTEXITCODE -eq 0) {
+        $substDrive = [string]$candidateDrive
+        $storeAliases.Add([pscustomobject]@{
+          Name = 'mapped-drive'
+          Path = "${candidateDrive}:\production.clixml"
+        })
+        break
+      }
+    }
+  }
+
+  foreach ($alias in $storeAliases) {
+    $aliasOperationPath = "$loserOperationPath-$($alias.Name)"
+    $loser = Start-PowerShellTestProcess $ownershipWorkerPath @(
+      '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+      '-Mode', 'Mutate',
+      '-StorePath', $alias.Path,
+      '-OperationPath', $aliasOperationPath
+    )
+    $ownershipProcesses.Add($loser)
+    $loserResult = Wait-TestProcess $loser
+    Assert-True ($loserResult.ExitCode -ne 0) "A $($alias.Name) alias must contend with the canonical store owner."
+    Assert-True ($loserResult.StandardError -match 'Another Markdoc production operation owns this secrets store') 'Contention must return an explicit non-secret ownership error.'
+    Assert-True (-not [IO.File]::Exists("$aliasOperationPath.entered")) 'The losing process must fail before importing or mutating secrets.'
+    Assert-True (-not [IO.File]::Exists("$aliasOperationPath.azure")) 'The losing process must fail before invoking Azure operations.'
+    Assert-OriginalTestStore $sharedStorePath
+  }
 
   [IO.File]::WriteAllText($holderReleasePath, 'release')
   $holderResult = Wait-TestProcess $holder
@@ -337,7 +448,7 @@ try {
     (Get-ProtectedSecretStoreOperationMutexName $abandonedStorePath)
   )
   try {
-    $abandonedHolder.Kill($true)
+    $abandonedHolder.Kill()
     $abandonedHolder.WaitForExit()
     $recoveryPath = Join-Path $abandonedDirectory 'recovered'
     $recovery = Start-PowerShellTestProcess $ownershipWorkerPath @(
@@ -414,13 +525,107 @@ try {
   Assert-Equal 0 $firstHolderResult.ExitCode 'The distinct-store holder must release normally.'
   Assert-OriginalTestStore $firstStorePath
   Assert-OriginalTestStore $secondStorePath
+
+  $hardLinkDirectory = Join-Path $ownershipTestRoot 'hard-link'
+  [void](New-Item -ItemType Directory -Path $hardLinkDirectory)
+  $hardLinkStorePath = Join-Path $hardLinkDirectory 'production.clixml'
+  $hardLinkAliasPath = Join-Path $hardLinkDirectory 'production-alias.clixml'
+  New-ProtectedTestStore -Path $hardLinkStorePath -TestStore (New-TestSecretStore 0)
+  [void](New-Item -ItemType HardLink -Path $hardLinkAliasPath -Target $hardLinkStorePath)
+  try {
+    [void](Enter-ProtectedSecretStoreOperation $hardLinkAliasPath)
+    throw 'Expected hard-link alias rejection.'
+  } catch {
+    Assert-True ($_.Exception.Message -match 'must not have hard-link aliases') 'Hard-link aliases must be rejected before ownership or secret access.'
+  }
+  Assert-OriginalTestStore $hardLinkStorePath
+
+  $precreatedDirectory = Join-Path $ownershipTestRoot 'precreated'
+  [void](New-Item -ItemType Directory -Path $precreatedDirectory)
+  $precreatedStorePath = Join-Path $precreatedDirectory 'production.clixml'
+  New-ProtectedTestStore -Path $precreatedStorePath -TestStore (New-TestSecretStore 0)
+  $precreatedName = Get-ProtectedSecretStoreOperationMutexName $precreatedStorePath
+  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+  $hostileSecurity = [Security.AccessControl.MutexSecurity]::new()
+  $hostileSecurity.SetAccessRuleProtection($true, $false)
+  $hostileSecurity.SetOwner($currentSid)
+  [void]$hostileSecurity.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+    $currentSid,
+    [Security.AccessControl.MutexRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow
+  ))
+  [void]$hostileSecurity.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+    $usersSid,
+    [Security.AccessControl.MutexRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow
+  ))
+  $hostileCreated = $false
+  $hostileMutex = New-NamedMutexWithSecurity `
+    -Name $precreatedName `
+    -Security $hostileSecurity `
+    -CreatedNew ([ref]$hostileCreated)
+  try {
+    Assert-True $hostileCreated 'The hostile-precreation test must own a new deterministic name.'
+    try {
+      [void](Enter-ProtectedSecretStoreOperation $precreatedStorePath)
+      throw 'Expected hostile pre-created ownership rejection.'
+    } catch {
+      Assert-True ($_.Exception.Message -match 'not restricted to the current Windows user') 'A foreign-accessible pre-created lock must fail closed.'
+    }
+  } finally {
+    $hostileMutex.Dispose()
+  }
+
+  $localServiceSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-19')
+  $denyingSecurity = [Security.AccessControl.MutexSecurity]::new()
+  $denyingSecurity.SetAccessRuleProtection($true, $false)
+  $denyingSecurity.SetOwner($currentSid)
+  [void]$denyingSecurity.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+    $localServiceSid,
+    [Security.AccessControl.MutexRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow
+  ))
+  $denyingCreated = $false
+  $denyingMutex = New-NamedMutexWithSecurity `
+    -Name $precreatedName `
+    -Security $denyingSecurity `
+    -CreatedNew ([ref]$denyingCreated)
+  try {
+    Assert-True $denyingCreated 'The denial-precreation test must own a new deterministic name.'
+    try {
+      [void](Enter-ProtectedSecretStoreOperation $precreatedStorePath)
+      throw 'Expected inaccessible pre-created ownership rejection.'
+    } catch {
+      Assert-True (
+        $_.Exception -is [UnauthorizedAccessException] -or
+        $_.Exception.InnerException -is [UnauthorizedAccessException] -or
+        $_.Exception.Message -match 'access.*denied'
+      ) 'An inaccessible pre-created lock must fail closed.'
+    }
+  } finally {
+    $denyingMutex.Dispose()
+  }
+
+  $postHostileOwnership = Enter-ProtectedSecretStoreOperation $precreatedStorePath
+  Exit-ProtectedSecretStoreOperation $postHostileOwnership
+  Assert-OriginalTestStore $precreatedStorePath
 } finally {
   foreach ($process in $ownershipProcesses) {
     if (-not $process.HasExited) {
-      $process.Kill($true)
+      $process.Kill()
       $process.WaitForExit()
     }
     $process.Dispose()
+  }
+  if ($substDrive) {
+    & subst.exe "${substDrive}:" /D
+  }
+  if ($symbolicLinkAliasPath -and (Test-Path -LiteralPath $symbolicLinkAliasPath)) {
+    [IO.File]::Delete($symbolicLinkAliasPath)
+  }
+  if ($junctionAliasPath -and (Test-Path -LiteralPath $junctionAliasPath)) {
+    [IO.Directory]::Delete($junctionAliasPath)
   }
   Remove-Item -LiteralPath $ownershipTestRoot -Recurse -Force
 }
@@ -778,4 +983,4 @@ try {
 }
 Assert-Equal 'commit,verify,clear-candidate' ($events -join ',') 'A terminal cleanup failure must not roll back a healthy revision.'
 
-Write-Host 'azure safety tests: ok'
+Write-Host "azure safety tests: ok (PowerShell $($PSVersionTable.PSVersion))"
