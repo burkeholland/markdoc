@@ -687,7 +687,7 @@ fi
 unset ACTIVE_PASSWORD CANDIDATE_PASSWORD TOKEN
 echo 'database-password-rotation=reconciliation-required stage=rollback'
 exit 0
-''', databaseConfigurationToken, keyVaultAudience, keyVaultSecretUrl, keyVaultPendingSecretUrl, postgresAdminLogin, postgresDatabaseName, string(simulateDatabaseRotationFailure)), '\r', '')
+''', databaseConfigurationToken, keyVaultAudience, keyVaultSecretUrl, keyVaultPendingSecretUrl, postgresAdminLogin, postgresDatabaseName, simulateDatabaseRotationFailure ? 'true' : 'false'), '\r', '')
 
 resource postgresRotation 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = if (rotateDatabasePassword) {
   parent: postgresVm
