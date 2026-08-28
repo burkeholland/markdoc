@@ -535,7 +535,7 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       at: request.createdAt.toISOString(),
     });
   }
-  if (next.a < now.getTime()) {
+  if (reviews.length < 500 && next.a < now.getTime()) {
     next.a = now.getTime();
     next.ids = [];
   }
