@@ -36,6 +36,22 @@ import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { SyncDialog, type SyncActions } from "./sync-dialog";
 
 const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
+
+export async function pollDocumentSync(documentId: string, fresh: boolean): Promise<SyncStatusDto> {
+  try {
+    return await api.documents.sync(documentId, { fresh });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 413 && error.body?.status === "remote-unreadable") {
+      return {
+        ...emptySync(),
+        ...(error.body as Partial<SyncStatusDto>),
+        status: "remote-unreadable",
+      };
+    }
+    throw error;
+  }
+}
+
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
 import { AskAgentDialog, type AskAgentMode, type AskAgentSelection } from "./ask-agent-dialog";
@@ -399,7 +415,7 @@ export function EditorShell({
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async (fresh: boolean) => {
       try {
-        const s = await api.documents.sync(doc.id, { fresh });
+        const s = await pollDocumentSync(doc.id, fresh);
         if (cancelled) return;
         setSync(s);
         timer = setTimeout(() => void tick(false), s.pollMs ?? 60_000);
@@ -1196,5 +1212,4 @@ export function EditorShell({
     </TooltipProvider>
   );
 }
-
 
