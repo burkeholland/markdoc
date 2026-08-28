@@ -424,7 +424,7 @@ Step 'Finalizing the private VM network and rolling the Container App'
 $outputs = Deploy-Infra $image $appVersion $false $true $false $false 'unchanged' 'unchanged'
 Remove-BootstrapPublicIp $outputs.bootstrapPublicIpName.value
 
-if ($VerifyRecovery) {
+if ($VerifyRecovery -or $ConfigureRecovery) {
   if (-not $ConfigureRecovery) {
     Step 'Running the existing automated scratch restore verification.'
   } else {

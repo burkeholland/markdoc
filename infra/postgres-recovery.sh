@@ -277,14 +277,28 @@ started_cluster=1
 sudo -u postgres env PGCTLTIMEOUT=7000 "\${pg_bin}/pg_ctl" \
   -D "\$restore_dir" \
   -o "-c archive_mode=off -c hot_standby=off" \
+  -l "\$restore_dir/postgresql.log" \
   -w start >/dev/null
-sudo -u postgres psql \
-  -h "\$restore_dir" \
-  -p 55432 \
-  -d markdoc \
-  -v ON_ERROR_STOP=1 \
-  -Atc "select case when pg_is_in_recovery() then 0 else 1 end" |
-  grep -qx 1
+
+recovered=0
+for attempt in \$(seq 1 1380); do
+  if sudo -u postgres psql \
+    -h "\$restore_dir" \
+    -p 55432 \
+    -d markdoc \
+    -v ON_ERROR_STOP=1 \
+    -Atc "select case when pg_is_in_recovery() then 0 else 1 end" \
+    2>/dev/null |
+    grep -qx 1; then
+    recovered=1
+    break
+  fi
+  sleep 5
+done
+if [ "\$recovered" -ne 1 ]; then
+  echo 'Scratch PostgreSQL did not finish recovery within 115 minutes.' >&2
+  exit 1
+fi
 
 completed_epoch="\$(date +%s)"
 duration_seconds="\$((completed_epoch - started_epoch))"
@@ -442,7 +456,6 @@ systemctl restart postgresql
 sudo -u postgres pgbackrest --stanza="$STANZA" check
 sudo -u postgres pgbackrest --stanza="$STANZA" --type=full backup
 sudo -u postgres /usr/local/sbin/markdoc-logical-backup
-/usr/local/sbin/markdoc-restore-check
 
 systemctl daemon-reload
 systemctl enable --now \
