@@ -720,9 +720,9 @@ const ThreadCard = memo(function ThreadCard({
     <div
       ref={ref}
       className={cn(
-        "relative rounded-xl border bg-surface p-3 transition-shadow",
+        "relative rounded-xl border p-3 transition-shadow",
+        thread.resolved ? "bg-surface/80" : "bg-surface",
         active ? "border-accent shadow-md shadow-accent/10" : "border-line hover:border-line-2",
-        thread.resolved && "opacity-80",
       )}
       data-unread={unread || undefined}
       data-suggestion={suggestionState ?? undefined}
@@ -744,7 +744,9 @@ const ThreadCard = memo(function ThreadCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-[13px] font-semibold text-ink">{thread.authorName}</span>
-            <span className="shrink-0 text-xs text-ink-4">{relativeTime(thread.createdAt)}</span>
+            <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
+              {relativeTime(thread.createdAt)}
+            </span>
             <EditedMarker at={thread.editedAt} />
           </div>
           {editing === "root" && !thread.suggestionState ? (
@@ -839,7 +841,9 @@ const ThreadCard = memo(function ThreadCard({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
-                    <span className="shrink-0 text-xs text-ink-4">{relativeTime(r.createdAt)}</span>
+                    <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
+                      {relativeTime(r.createdAt)}
+                    </span>
                     <EditedMarker at={r.editedAt} />
                   </div>
                   {editing === r.id && !r.suggestionState ? (
@@ -937,7 +941,7 @@ const ThreadCard = memo(function ThreadCard({
         </div>
       )}
       {thread.resolved && (
-        <div className="mt-2 inline-flex items-center gap-1 text-xs text-success">
+        <div className="mt-2 inline-flex items-center gap-1 text-xs text-success" data-testid="comment-resolved-state">
           <CheckCheck size={13} /> Resolved {thread.resolvedAt ? relativeTime(thread.resolvedAt) : ""}
         </div>
       )}
@@ -968,7 +972,9 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-[13px] font-semibold text-ink">{s.authorName}</span>
-            <span className="shrink-0 text-xs text-ink-4">{relativeTime(s.createdAt)}</span>
+            <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
+              {relativeTime(s.createdAt)}
+            </span>
           </div>
           <p className="mt-0.5 text-[13px] leading-5 text-ink-2">
             <span className="font-medium">{s.type === "insert" ? "Add" : "Delete"}:</span>{" "}
@@ -1034,7 +1040,9 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
             <span className={cn("text-[13px] font-semibold", verdictTone(review.verdict))} data-testid="review-verdict">
               {reviewVerdictLabel(review.authorName, review.verdict)}
             </span>
-            <span className="text-xs text-ink-4">{relativeTime(new Date(review.createdAt).getTime())}</span>
+            <span className="text-xs text-ink-4" data-testid="comment-timestamp">
+              {relativeTime(new Date(review.createdAt).getTime())}
+            </span>
           </div>
           <div className="text-xs text-ink-3" data-testid="review-counts">
             {reviewSummaryLabel(mine.length, withSuggestion.length)}
