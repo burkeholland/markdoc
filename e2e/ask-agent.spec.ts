@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { AGENT_DOCS_URL } from "../src/lib/mcp";
 import { signIn, createDocument, openDocument, selectTextInRich, ensureCommentsOpen, type User } from "./helpers";
 
 /** Pull the notifications store now instead of waiting for the 30 s poll. */
@@ -56,6 +57,11 @@ test.describe("ask an agent", () => {
     await page.getByTestId("ask-agent-button").click();
     const dialog = page.getByTestId("ask-agent-dialog");
     await expect(dialog).toBeVisible();
+    const docsLink = page.getByTestId("ask-agent-docs-link");
+    await expect(docsLink).toBeVisible();
+    await expect(docsLink).toHaveAttribute("href", AGENT_DOCS_URL);
+    await expect(docsLink).toHaveAttribute("target", "_blank");
+    await expect(docsLink).toHaveAttribute("rel", "noreferrer");
     // Alice has a token, so no setup card; the selection is echoed back.
     await expect(page.getByTestId("agent-connect-card")).toHaveCount(0);
     await expect(page.getByTestId("ask-agent-selection")).toContainText("quick brown fox");

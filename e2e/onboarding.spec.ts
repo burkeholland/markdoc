@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { AGENT_DOCS_URL } from "../src/lib/mcp";
 import { signIn, createDocument, openDocument, selectTextInRich, shareWith, type User } from "./helpers";
 
 /**
@@ -206,6 +207,11 @@ test.describe("onboarding: Settings checklist", () => {
     const user = await signIn(browser, fresh("checklist"));
     const page = user.page;
     await page.goto("/settings");
+    const docsLink = page.getByTestId("agent-docs-link");
+    await expect(docsLink).toBeVisible();
+    await expect(docsLink).toHaveAttribute("href", AGENT_DOCS_URL);
+    await expect(docsLink).toHaveAttribute("target", "_blank");
+    await expect(docsLink).toHaveAttribute("rel", "noreferrer");
     const list = page.getByTestId("copilot-checklist");
     await expect(list).toBeVisible();
     await expect(list).toHaveAttribute("data-done", "0");
