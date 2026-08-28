@@ -186,17 +186,15 @@ const userWhere = (login: string) => eq(schema.notifications.userLogin, login.to
 
 const mentionDocumentAccessWhere = (login: string) => {
   const normalized = login.toLowerCase();
-  return and(
-    isNull(schema.documents.deletedAt),
-    or(
-      ne(schema.documents.linkAccess, "private"),
-      sql`exists (select 1 from ${schema.users} where ${schema.users.id} = ${schema.documents.ownerId} and lower(${schema.users.login}) = ${normalized})`,
-      sql`exists (select 1 from ${schema.collaborators} where ${schema.collaborators.documentId} = ${schema.documents.id} and lower(${schema.collaborators.login}) = ${normalized})`,
-    ),
+  return or(
+    ne(schema.documents.linkAccess, "private"),
+    sql`exists (select 1 from ${schema.users} where ${schema.users.id} = ${schema.documents.ownerId} and lower(${schema.users.login}) = ${normalized})`,
+    sql`exists (select 1 from ${schema.collaborators} where ${schema.collaborators.documentId} = ${schema.documents.id} and lower(${schema.collaborators.login}) = ${normalized})`,
   );
 };
 
-const visibleNotificationWhere = (login: string) => or(ne(schema.notifications.kind, "mention"), mentionDocumentAccessWhere(login));
+const visibleNotificationWhere = (login: string) =>
+  and(isNull(schema.documents.deletedAt), or(ne(schema.notifications.kind, "mention"), mentionDocumentAccessWhere(login)));
 
 /** The user's notifications, newest first, plus their total unread count. */
 export async function listNotifications(login: string, opts: { unread?: boolean; limit?: number; kind?: NotificationKind } = {}): Promise<NotificationPage> {
