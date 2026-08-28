@@ -4,6 +4,8 @@ import path from "node:path";
 import { PGlite, type PGliteInterface } from "@electric-sql/pglite";
 import { getTableColumns, getTableName, is } from "drizzle-orm";
 import { PgTable } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/pglite";
+import { migrate } from "drizzle-orm/pglite/migrator";
 import { Client, type ClientConfig } from "pg";
 import * as appSchema from "../../src/server/db/schema";
 
@@ -242,6 +244,8 @@ export async function migratePgliteSnapshot(options: MigrateSnapshotOptions): Pr
     source = new PGlite(sourceDataDir, { loadDataDir: new Blob([new Uint8Array(snapshotBytes)]) });
     await source.waitReady;
     const sourceConnection: SqlConnection = { query: createPgliteQuery(source) };
+    const sourceSnapshotSchema = await readSchemaVersion(sourceConnection);
+    await migrate(drizzle(source), { migrationsFolder: path.resolve("drizzle") });
     const sourceShape = await inspectDatabase(sourceConnection);
     const sourceData = await loadDatabaseData(sourceConnection, sourceShape);
 
@@ -268,7 +272,13 @@ export async function migratePgliteSnapshot(options: MigrateSnapshotOptions): Pr
       { readOnly: true },
     );
 
-    const manifest = combineManifest(snapshotBytes.byteLength, snapshotSha256, sourceShape, targetShape, sourceData.manifest);
+    const manifest = combineManifest(
+      snapshotBytes.byteLength,
+      snapshotSha256,
+      sourceSnapshotSchema,
+      targetShape,
+      sourceData.manifest,
+    );
     const preparedManifest = options.manifestPath ? await prepareManifest(options.manifestPath, manifest) : undefined;
     if (options.verifyOnly) {
       await preparedManifest?.publish();
@@ -760,14 +770,14 @@ function assertDataMatches(source: DataManifest, target: DataManifest): void {
 function combineManifest(
   snapshotBytes: number,
   snapshotSha256: string,
-  sourceShape: DatabaseShape,
+  sourceSnapshotSchema: SchemaVersion,
   targetShape: DatabaseShape,
   sourceData: DataManifest,
 ): MigrationManifest {
   return {
     formatVersion: 1,
     sourceSnapshot: { bytes: snapshotBytes, sha256: snapshotSha256 },
-    schema: { source: sourceShape.migration, target: targetShape.migration },
+    schema: { source: sourceSnapshotSchema, target: targetShape.migration },
     ...sourceData,
   };
 }
