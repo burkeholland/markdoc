@@ -372,15 +372,37 @@ if (-not $InfraOnly) {
       if ($LASTEXITCODE) { throw 'Could not extract the exact Git build context.' }
       Remove-Item -LiteralPath $buildArchive -Force
 
-      az acr build `
+      $buildRunId = az acr build `
         --registry $registry `
         --image "markdoc:$sourceSha" `
         --image "markdoc:$shortTag" `
         --build-arg "APP_VERSION=$sourceSha" `
         --file (Join-Path $buildContext 'Dockerfile') `
         $buildContext `
+        --no-logs `
+        --query runId `
+        --output tsv `
         --only-show-errors
-      if ($LASTEXITCODE) { throw 'Azure Container Registry build failed.' }
+      if ($LASTEXITCODE -or [string]::IsNullOrWhiteSpace($buildRunId)) {
+        throw 'Azure Container Registry build could not be queued.'
+      }
+
+      $buildStatus = ''
+      for ($attempt = 1; $attempt -le 120; $attempt++) {
+        $buildStatus = az acr task show-run `
+          --registry $registry `
+          --run-id $buildRunId `
+          --query status `
+          --output tsv `
+          --only-show-errors
+        if ($LASTEXITCODE) { throw "Could not read ACR build $buildRunId status." }
+        if ($buildStatus -eq 'Succeeded') { break }
+        if ($buildStatus -in @('Canceled', 'Error', 'Failed', 'Timeout')) {
+          throw "Azure Container Registry build $buildRunId finished with status $buildStatus."
+        }
+        Start-Sleep -Seconds 15
+      }
+      if ($buildStatus -ne 'Succeeded') { throw "Azure Container Registry build $buildRunId did not finish in 30 minutes." }
     } finally {
       if (Test-Path -LiteralPath $buildArchive) { Remove-Item -LiteralPath $buildArchive -Force }
       if (Test-Path -LiteralPath $buildContext) { Remove-Item -LiteralPath $buildContext -Recurse -Force }
