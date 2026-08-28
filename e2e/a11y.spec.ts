@@ -40,6 +40,32 @@ const DOC = [
   "",
 ].join("\n");
 
+const RICH_TYPESCRIPT_DOC = [
+  "```ts",
+  "interface Account {",
+  "  id: number;",
+  "  label: string;",
+  "}",
+  "",
+  "class AccountService {",
+  "  async findAccount(id: number): Promise<Account> {",
+  '    const endpoint = "/api/accounts";',
+  "    const retries = 3;",
+  "    // Return one account",
+  "    return { id, label: `${endpoint}/${retries}` };",
+  "  }",
+  "}",
+  "```",
+  "",
+].join("\n");
+
+const RICH_SYNTAX_VIEWPORTS = [
+  { label: "390x844", viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 },
+  { label: "1024x768", viewport: { width: 1024, height: 768 }, deviceScaleFactor: 1 },
+  { label: "1440x900", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
+  { label: "640x400 at 2x", viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 },
+] as const;
+
 /**
  * Rules disabled with a reason. Everything else in the wcag2a/aa + wcag21a/aa tag set is enforced.
  * - `color-contrast`: in the light theme axe cannot resolve contrast through `backdrop-blur` headers,
@@ -82,9 +108,22 @@ async function setTheme(page: Page, theme: "light" | "dark") {
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
-/** Sign in on a context that emulates an iPhone 13. */
-async function signInPhone(browser: Browser, login: string) {
-  const context = await browser.newContext({ ...devices["iPhone 13"] });
+function computedContrast(foreground: string, background: string): number {
+  const luminance = (color: string) => {
+    const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+    if (!channels || channels.length !== 3) throw new Error(`Cannot parse computed colour: ${color}`);
+    const [r, g, b] = channels.map((channel) => {
+      const value = channel / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+async function signInWithOptions(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
+  const context = await browser.newContext(options);
   const page = await context.newPage();
   await page.goto("/login");
   await page.getByTestId("dev-login").fill(login);
@@ -92,6 +131,11 @@ async function signInPhone(browser: Browser, login: string) {
   await page.waitForURL((url) => url.pathname === "/");
   await page.waitForLoadState("networkidle");
   return { context, page };
+}
+
+/** Sign in on a context that emulates an iPhone 13. */
+async function signInPhone(browser: Browser, login: string) {
+  return signInWithOptions(browser, login, { ...devices["iPhone 13"] });
 }
 
 async function seedDashboard(page: Page) {
@@ -540,6 +584,70 @@ test.describe("axe: contrast", () => {
     await scan(page, "editor (dark) split + outline + comments", { contrast: true });
     await context.close();
   });
+
+  for (const { label, viewport, deviceScaleFactor } of RICH_SYNTAX_VIEWPORTS) {
+    test(`light rich TypeScript syntax at ${label}`, async ({ browser }) => {
+      const login = `a11y-rich-syntax-${viewport.width}-${viewport.height}-${deviceScaleFactor}`;
+      const { page, context } = await signInWithOptions(browser, login, { viewport, deviceScaleFactor });
+      await page.evaluate(() => {
+        localStorage.setItem("markdoc:theme", "light");
+        localStorage.setItem("markdoc:layout", "rich");
+      });
+      const id = await createDocument(page, RICH_TYPESCRIPT_DOC, "Rich syntax contrast fixture");
+      await page.goto(`/d/${id}`);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+      await expect(page.getByTestId("code-column")).toBeHidden();
+      await expect(page.locator(".md-rich")).toBeVisible();
+
+      const block = page.locator('.md-rich pre[data-language="ts"]');
+      await block.scrollIntoViewIfNeeded();
+      await expect(block).toBeVisible();
+
+      const axe = await new AxeBuilder({ page }).include('.md-rich pre[data-language="ts"]').withRules(["color-contrast"]).analyze();
+      expect(
+        axe.violations.flatMap((violation) => violation.nodes),
+        `${label}: axe color-contrast nodes inside the visible TypeScript block`,
+      ).toHaveLength(0);
+
+      const background = await block.evaluate((element) => getComputedStyle(element).backgroundColor);
+      const tokens = await block.locator('[class*="hljs-"]').evaluateAll((elements) =>
+        elements.map((element) => ({
+          className: element.className,
+          color: getComputedStyle(element).color,
+          text: element.textContent,
+        })),
+      );
+      expect(tokens.length, `${label}: highlighted TypeScript tokens`).toBeGreaterThan(0);
+      for (const token of tokens) {
+        expect(
+          computedContrast(token.color, background),
+          `${label}: ${token.className} "${token.text}" uses ${token.color} on ${background}`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+
+      const colors = await block.evaluate((root) => {
+        const selectors = {
+          keyword: ".hljs-keyword",
+          string: ".hljs-string",
+          attribute: ".hljs-attr",
+          number: ".hljs-number",
+          comment: ".hljs-comment",
+          title: ".hljs-title",
+        };
+        return Object.fromEntries(
+          Object.entries(selectors).map(([name, selector]) => {
+            const token = root.querySelector(selector);
+            if (!token) throw new Error(`Missing representative ${name} token (${selector})`);
+            return [name, getComputedStyle(token).color];
+          }),
+        );
+      });
+      expect(colors.attribute, `${label}: attributes share the string token group`).toBe(colors.string);
+      expect(new Set([colors.keyword, colors.string, colors.number, colors.comment, colors.title])).toHaveProperty("size", 5);
+      await context.close();
+    });
+  }
 
   test("settings + reader, light + dark (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-contrast-pages");
