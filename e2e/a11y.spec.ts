@@ -150,6 +150,71 @@ async function seedDashboard(page: Page) {
   await expect(page.getByTestId("filter-trash")).toBeVisible();
 }
 
+const READER_SCROLL_REGIONS = ".reader-body pre, .reader-body table";
+
+async function expectReaderOverflowTabStops(page: Page, state: string) {
+  await expect
+    .poll(
+      () =>
+        page.locator(READER_SCROLL_REGIONS).evaluateAll(
+          (regions) =>
+            regions.filter((region) => region.scrollWidth > region.clientWidth + 1 && region.getAttribute("tabindex") !== "0").length,
+        ),
+      { message: `${state}: overflowing reader regions become keyboard focusable` },
+    )
+    .toBe(0);
+  const result = await page.locator(READER_SCROLL_REGIONS).evaluateAll((regions) =>
+    regions.map((region, index) => ({
+      index,
+      tag: region.tagName.toLowerCase(),
+      overflow: region.scrollWidth > region.clientWidth + 1,
+      tabIndex: region.getAttribute("tabindex"),
+    })),
+  );
+  const overflowing = result.filter((region) => region.overflow);
+  expect(overflowing.length, `${state}: at least one reader region overflows`).toBeGreaterThan(0);
+  expect(
+    overflowing.filter((region) => region.tabIndex !== "0"),
+    `${state}: every overflowing region is its own keyboard focus target`,
+  ).toEqual([]);
+  expect(
+    result.filter((region) => !region.overflow && region.tabIndex !== null),
+    `${state}: regions that fit do not add tab stops`,
+  ).toEqual([]);
+  return overflowing;
+}
+
+async function scanReaderScrollableRegions(page: Page, state: string) {
+  const violations = (await new AxeBuilder({ page }).withRules(["scrollable-region-focusable"]).analyze()).violations;
+  expect(violations, `${state}: scrollable-region-focusable`).toHaveLength(0);
+}
+
+async function expectReaderRegionKeyboardScroll(page: Page, selector: "pre" | "table", state: string) {
+  const regions = page.locator(`.reader-body ${selector}`);
+  const index = await regions.evaluateAll((elements) => elements.findIndex((element) => element.scrollWidth > element.clientWidth + 1));
+  expect(index, `${state}: an overflowing ${selector} exists`).toBeGreaterThanOrEqual(0);
+  const region = regions.nth(index);
+  await region.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+  await tabUntil(page, `.reader-body ${selector}`, 200);
+  await expect(region).toBeFocused();
+  const focusStyle = await region.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const probe = document.createElement("span");
+    probe.style.color = "var(--color-accent)";
+    document.body.append(probe);
+    const accent = getComputedStyle(probe).color;
+    probe.remove();
+    return { width: style.outlineWidth, offset: style.outlineOffset, color: style.outlineColor, accent };
+  });
+  expect(focusStyle.width, `${state}: ${selector} uses the 2 px focus ring`).toBe("2px");
+  expect(focusStyle.offset, `${state}: ${selector} focus ring has the standard offset`).toBe("2px");
+  expect(focusStyle.color, `${state}: ${selector} focus ring uses the accent color`).toBe(focusStyle.accent);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => region.evaluate((element) => element.scrollLeft), `${state}: ArrowRight scrolls the ${selector}`).toBeGreaterThan(0);
+}
+
 test.describe("axe: pages", () => {
   test("login", async ({ page }) => {
     await page.goto("/login");
@@ -219,6 +284,49 @@ test.describe("axe: pages", () => {
     await expect(page.getByRole("checkbox", { name: "Publish the reader", exact: true })).toBeDisabled();
     await scan(page, "reader /p/<id>");
     await context.close();
+  });
+
+  test("Burke-scale reader overflow regions are keyboard scrollable only when needed", async ({ browser }) => {
+    const user = await signIn(browser, "a11y-reader-overflow");
+    const id = await createDocument(user.page, LONG_DOC, "Reader overflow fixture");
+    expect((await user.page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+    await user.context.close();
+
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 390, height: 844 },
+    ]) {
+      const context = await browser.newContext({ viewport });
+      const page = await context.newPage();
+      await page.goto(`/p/${id}`);
+      await expect(page.getByTestId("reader-body")).toBeVisible();
+      const state = `reader ${viewport.width}×${viewport.height}`;
+      await expectReaderOverflowTabStops(page, state);
+      await scanReaderScrollableRegions(page, state);
+      if (viewport.width === 390) {
+        await expectReaderRegionKeyboardScroll(page, "pre", state);
+        await expectReaderRegionKeyboardScroll(page, "table", state);
+        await page.setViewportSize({ width: 768, height: 1024 });
+        await expect
+          .poll(() =>
+            page.locator(READER_SCROLL_REGIONS).evaluateAll((regions) => ({
+              overflowing: regions.filter((region) => region.scrollWidth > region.clientWidth + 1).length,
+              tabStops: regions.filter((region) => region.hasAttribute("tabindex")).length,
+            })),
+          )
+          .toEqual({ overflowing: 0, tabStops: 0 });
+      }
+      await context.close();
+    }
+
+    const zoomContext = await browser.newContext({ viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 });
+    const zoomPage = await zoomContext.newPage();
+    await zoomPage.goto(`/p/${id}`);
+    await expect(zoomPage.getByTestId("reader-body")).toBeVisible();
+    await expectReaderOverflowTabStops(zoomPage, "reader 640×400 at 200%");
+    await expectReaderRegionKeyboardScroll(zoomPage, "pre", "reader 640×400 at 200%");
+    await scanReaderScrollableRegions(zoomPage, "reader 640×400 at 200%");
+    await zoomContext.close();
   });
 });
 
