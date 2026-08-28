@@ -40,6 +40,32 @@ const DOC = [
   "",
 ].join("\n");
 
+const RICH_TYPESCRIPT_DOC = [
+  "```ts",
+  "interface Account {",
+  "  id: number;",
+  "  label: string;",
+  "}",
+  "",
+  "class AccountService {",
+  "  async findAccount(id: number): Promise<Account> {",
+  '    const endpoint = "/api/accounts";',
+  "    const retries = 3;",
+  "    // Return one account",
+  "    return { id, label: `${endpoint}/${retries}` };",
+  "  }",
+  "}",
+  "```",
+  "",
+].join("\n");
+
+const RICH_SYNTAX_VIEWPORTS = [
+  { label: "390x844", viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 },
+  { label: "1024x768", viewport: { width: 1024, height: 768 }, deviceScaleFactor: 1 },
+  { label: "1440x900", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
+  { label: "640x400 at 2x", viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 },
+] as const;
+
 /**
  * Rules disabled with a reason. Everything else in the wcag2a/aa + wcag21a/aa tag set is enforced.
  * - `color-contrast`: in the light theme axe cannot resolve contrast through `backdrop-blur` headers,
@@ -82,9 +108,22 @@ async function setTheme(page: Page, theme: "light" | "dark") {
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
-/** Sign in on a context that emulates an iPhone 13. */
-async function signInPhone(browser: Browser, login: string) {
-  const context = await browser.newContext({ ...devices["iPhone 13"] });
+function computedContrast(foreground: string, background: string): number {
+  const luminance = (color: string) => {
+    const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+    if (!channels || channels.length !== 3) throw new Error(`Cannot parse computed colour: ${color}`);
+    const [r, g, b] = channels.map((channel) => {
+      const value = channel / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+async function signInWithOptions(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
+  const context = await browser.newContext(options);
   const page = await context.newPage();
   await page.goto("/login");
   await page.getByTestId("dev-login").fill(login);
@@ -92,6 +131,11 @@ async function signInPhone(browser: Browser, login: string) {
   await page.waitForURL((url) => url.pathname === "/");
   await page.waitForLoadState("networkidle");
   return { context, page };
+}
+
+/** Sign in on a context that emulates an iPhone 13. */
+async function signInPhone(browser: Browser, login: string) {
+  return signInWithOptions(browser, login, { ...devices["iPhone 13"] });
 }
 
 async function seedDashboard(page: Page) {
@@ -104,6 +148,71 @@ async function seedDashboard(page: Page) {
   await expect(page.getByTestId("document-card").first()).toBeVisible();
   await expect(page.getByTestId("starred-strip")).toBeVisible();
   await expect(page.getByTestId("filter-trash")).toBeVisible();
+}
+
+const READER_SCROLL_REGIONS = ".reader-body pre, .reader-body table";
+
+async function expectReaderOverflowTabStops(page: Page, state: string) {
+  await expect
+    .poll(
+      () =>
+        page.locator(READER_SCROLL_REGIONS).evaluateAll(
+          (regions) =>
+            regions.filter((region) => region.scrollWidth > region.clientWidth + 1 && region.getAttribute("tabindex") !== "0").length,
+        ),
+      { message: `${state}: overflowing reader regions become keyboard focusable` },
+    )
+    .toBe(0);
+  const result = await page.locator(READER_SCROLL_REGIONS).evaluateAll((regions) =>
+    regions.map((region, index) => ({
+      index,
+      tag: region.tagName.toLowerCase(),
+      overflow: region.scrollWidth > region.clientWidth + 1,
+      tabIndex: region.getAttribute("tabindex"),
+    })),
+  );
+  const overflowing = result.filter((region) => region.overflow);
+  expect(overflowing.length, `${state}: at least one reader region overflows`).toBeGreaterThan(0);
+  expect(
+    overflowing.filter((region) => region.tabIndex !== "0"),
+    `${state}: every overflowing region is its own keyboard focus target`,
+  ).toEqual([]);
+  expect(
+    result.filter((region) => !region.overflow && region.tabIndex !== null),
+    `${state}: regions that fit do not add tab stops`,
+  ).toEqual([]);
+  return overflowing;
+}
+
+async function scanReaderScrollableRegions(page: Page, state: string) {
+  const violations = (await new AxeBuilder({ page }).withRules(["scrollable-region-focusable"]).analyze()).violations;
+  expect(violations, `${state}: scrollable-region-focusable`).toHaveLength(0);
+}
+
+async function expectReaderRegionKeyboardScroll(page: Page, selector: "pre" | "table", state: string) {
+  const regions = page.locator(`.reader-body ${selector}`);
+  const index = await regions.evaluateAll((elements) => elements.findIndex((element) => element.scrollWidth > element.clientWidth + 1));
+  expect(index, `${state}: an overflowing ${selector} exists`).toBeGreaterThanOrEqual(0);
+  const region = regions.nth(index);
+  await region.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+  await tabUntil(page, `.reader-body ${selector}`, 200);
+  await expect(region).toBeFocused();
+  const focusStyle = await region.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const probe = document.createElement("span");
+    probe.style.color = "var(--color-accent)";
+    document.body.append(probe);
+    const accent = getComputedStyle(probe).color;
+    probe.remove();
+    return { width: style.outlineWidth, offset: style.outlineOffset, color: style.outlineColor, accent };
+  });
+  expect(focusStyle.width, `${state}: ${selector} uses the 2 px focus ring`).toBe("2px");
+  expect(focusStyle.offset, `${state}: ${selector} focus ring has the standard offset`).toBe("2px");
+  expect(focusStyle.color, `${state}: ${selector} focus ring uses the accent color`).toBe(focusStyle.accent);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => region.evaluate((element) => element.scrollLeft), `${state}: ArrowRight scrolls the ${selector}`).toBeGreaterThan(0);
 }
 
 test.describe("axe: pages", () => {
@@ -175,6 +284,49 @@ test.describe("axe: pages", () => {
     await expect(page.getByRole("checkbox", { name: "Publish the reader", exact: true })).toBeDisabled();
     await scan(page, "reader /p/<id>");
     await context.close();
+  });
+
+  test("Burke-scale reader overflow regions are keyboard scrollable only when needed", async ({ browser }) => {
+    const user = await signIn(browser, "a11y-reader-overflow");
+    const id = await createDocument(user.page, LONG_DOC, "Reader overflow fixture");
+    expect((await user.page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+    await user.context.close();
+
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 390, height: 844 },
+    ]) {
+      const context = await browser.newContext({ viewport });
+      const page = await context.newPage();
+      await page.goto(`/p/${id}`);
+      await expect(page.getByTestId("reader-body")).toBeVisible();
+      const state = `reader ${viewport.width}×${viewport.height}`;
+      await expectReaderOverflowTabStops(page, state);
+      await scanReaderScrollableRegions(page, state);
+      if (viewport.width === 390) {
+        await expectReaderRegionKeyboardScroll(page, "pre", state);
+        await expectReaderRegionKeyboardScroll(page, "table", state);
+        await page.setViewportSize({ width: 768, height: 1024 });
+        await expect
+          .poll(() =>
+            page.locator(READER_SCROLL_REGIONS).evaluateAll((regions) => ({
+              overflowing: regions.filter((region) => region.scrollWidth > region.clientWidth + 1).length,
+              tabStops: regions.filter((region) => region.hasAttribute("tabindex")).length,
+            })),
+          )
+          .toEqual({ overflowing: 0, tabStops: 0 });
+      }
+      await context.close();
+    }
+
+    const zoomContext = await browser.newContext({ viewport: { width: 640, height: 400 }, deviceScaleFactor: 2 });
+    const zoomPage = await zoomContext.newPage();
+    await zoomPage.goto(`/p/${id}`);
+    await expect(zoomPage.getByTestId("reader-body")).toBeVisible();
+    await expectReaderOverflowTabStops(zoomPage, "reader 640×400 at 200%");
+    await expectReaderRegionKeyboardScroll(zoomPage, "pre", "reader 640×400 at 200%");
+    await scanReaderScrollableRegions(zoomPage, "reader 640×400 at 200%");
+    await zoomContext.close();
   });
 });
 
@@ -540,6 +692,70 @@ test.describe("axe: contrast", () => {
     await scan(page, "editor (dark) split + outline + comments", { contrast: true });
     await context.close();
   });
+
+  for (const { label, viewport, deviceScaleFactor } of RICH_SYNTAX_VIEWPORTS) {
+    test(`light rich TypeScript syntax at ${label}`, async ({ browser }) => {
+      const login = `a11y-rich-syntax-${viewport.width}-${viewport.height}-${deviceScaleFactor}`;
+      const { page, context } = await signInWithOptions(browser, login, { viewport, deviceScaleFactor });
+      await page.evaluate(() => {
+        localStorage.setItem("markdoc:theme", "light");
+        localStorage.setItem("markdoc:layout", "rich");
+      });
+      const id = await createDocument(page, RICH_TYPESCRIPT_DOC, "Rich syntax contrast fixture");
+      await page.goto(`/d/${id}`);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+      await expect(page.getByTestId("code-column")).toBeHidden();
+      await expect(page.locator(".md-rich")).toBeVisible();
+
+      const block = page.locator('.md-rich pre[data-language="ts"]');
+      await block.scrollIntoViewIfNeeded();
+      await expect(block).toBeVisible();
+
+      const axe = await new AxeBuilder({ page }).include('.md-rich pre[data-language="ts"]').withRules(["color-contrast"]).analyze();
+      expect(
+        axe.violations.flatMap((violation) => violation.nodes),
+        `${label}: axe color-contrast nodes inside the visible TypeScript block`,
+      ).toHaveLength(0);
+
+      const background = await block.evaluate((element) => getComputedStyle(element).backgroundColor);
+      const tokens = await block.locator('[class*="hljs-"]').evaluateAll((elements) =>
+        elements.map((element) => ({
+          className: element.className,
+          color: getComputedStyle(element).color,
+          text: element.textContent,
+        })),
+      );
+      expect(tokens.length, `${label}: highlighted TypeScript tokens`).toBeGreaterThan(0);
+      for (const token of tokens) {
+        expect(
+          computedContrast(token.color, background),
+          `${label}: ${token.className} "${token.text}" uses ${token.color} on ${background}`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+
+      const colors = await block.evaluate((root) => {
+        const selectors = {
+          keyword: ".hljs-keyword",
+          string: ".hljs-string",
+          attribute: ".hljs-attr",
+          number: ".hljs-number",
+          comment: ".hljs-comment",
+          title: ".hljs-title",
+        };
+        return Object.fromEntries(
+          Object.entries(selectors).map(([name, selector]) => {
+            const token = root.querySelector(selector);
+            if (!token) throw new Error(`Missing representative ${name} token (${selector})`);
+            return [name, getComputedStyle(token).color];
+          }),
+        );
+      });
+      expect(colors.attribute, `${label}: attributes share the string token group`).toBe(colors.string);
+      expect(new Set([colors.keyword, colors.string, colors.number, colors.comment, colors.title])).toHaveProperty("size", 5);
+      await context.close();
+    });
+  }
 
   test("settings + reader, light + dark (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-contrast-pages");

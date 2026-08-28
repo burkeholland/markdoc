@@ -7,6 +7,7 @@ import type { RenderedHeading } from "@/server/export/html";
 import { ReaderToc } from "./toc";
 import { UpdatePill } from "./update-pill";
 import { DownloadMenu } from "./download-menu";
+import { ReaderScrollableRegions } from "./scrollable-regions";
 
 export interface ReaderPageProps {
   docId: string;
@@ -78,7 +79,14 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
           {/* Safe to inject: `html` is the output of renderMarkdownBody, which runs rehype-sanitize
               (GitHub's default schema) before slugging/highlighting, so scripts, handlers and
               javascript: URLs never reach this point. */}
-          <div className="reader-body" data-testid="reader-body" data-hide-first-h1={hideFirstH1 || undefined} dangerouslySetInnerHTML={{ __html: html }} />
+          <div
+            className="reader-body"
+            data-testid="reader-body"
+            data-reader-overflow-root
+            data-hide-first-h1={hideFirstH1 || undefined}
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+          <ReaderScrollableRegions contentKey={initialHash} />
           <footer className="reader-footer mt-16 border-t border-line pt-5 text-xs text-ink-4">
             Made with{" "}
             <Link href={signedIn ? "/" : "/login"} className="font-medium text-ink-3 hover:text-accent">
