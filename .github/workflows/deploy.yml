@@ -1,7 +1,7 @@
 # Manual deployment to Azure Container Apps. Never runs on its own.
 #
 # One-time setup:
-#  1. Run deploy/azure.ps1 -InfraOnly once locally (or create the resources another way).
+#  1. Run deploy/azure.ps1 -InitializeDatabase -ConfigureRecovery once locally.
 #  2. Create an Entra app with federated credentials for this repo (OIDC) and give it
 #     Contributor + AcrPush on the resource group. Add repository secrets:
 #       AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
@@ -20,6 +20,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: markdoc-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     if: inputs.confirm == 'deploy'
@@ -35,14 +39,18 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Build image in ACR
         run: |
-          TAG=${GITHUB_SHA::7}
-          az acr build -r "${{ vars.AZURE_ACR_NAME }}" -t "markdoc:$TAG" -t markdoc:latest --file Dockerfile .
-          echo "IMAGE=$(az acr show -n "${{ vars.AZURE_ACR_NAME }}" --query loginServer -o tsv)/markdoc:$TAG" >> "$GITHUB_ENV"
+          SHORT_TAG=${GITHUB_SHA::12}
+          az acr build -r "${{ vars.AZURE_ACR_NAME }}" -t "markdoc:$GITHUB_SHA" -t "markdoc:$SHORT_TAG" --build-arg "APP_VERSION=$GITHUB_SHA" --file Dockerfile .
+          DIGEST=$(az acr manifest list-metadata -r "${{ vars.AZURE_ACR_NAME }}" -n markdoc --query "[?tags != null && contains(tags, '$GITHUB_SHA')] | [0].digest" -o tsv)
+          test -n "$DIGEST"
+          echo "IMAGE=$(az acr show -n "${{ vars.AZURE_ACR_NAME }}" --query loginServer -o tsv)/markdoc@$DIGEST" >> "$GITHUB_ENV"
       - name: Roll the Container App
         run: |
           az containerapp update -n "${{ vars.AZURE_APP_NAME }}" -g "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --image "$IMAGE" --set-env-vars "APP_VERSION=${GITHUB_SHA::7}"
+            --image "$IMAGE" --set-env-vars "APP_VERSION=$GITHUB_SHA"
           FQDN=$(az containerapp show -n "${{ vars.AZURE_APP_NAME }}" -g "${{ vars.AZURE_RESOURCE_GROUP }}" --query properties.configuration.ingress.fqdn -o tsv)
           echo "Deployed https://$FQDN"
           sleep 20
-          curl -fsS "https://$FQDN/api/health"
+          HEALTH=$(curl -fsS "https://$FQDN/api/health")
+          test "$(jq -r '.ok and .db' <<<"$HEALTH")" = true
+          test "$(jq -r '.version' <<<"$HEALTH")" = "$GITHUB_SHA"
