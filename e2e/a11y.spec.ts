@@ -705,6 +705,36 @@ test.describe("axe: phone (iPhone 13)", () => {
     await scan(page, "phone editor");
     await context.close();
   });
+
+  test("reader download keeps distinct accessible names across mobile and zoom breakpoints", async ({ browser }) => {
+    const owner = await signIn(browser, "a11y-phone-reader");
+    const id = await createDocument(owner.page, DOC, "Phone reader fixture");
+    expect((await owner.page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-body")).toBeVisible();
+
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 360, height: 800 },
+      { width: 390, height: 844 },
+      { width: 412, height: 915 },
+      { width: 640, height: 400 },
+      { width: 768, height: 1024 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const download = page.getByRole("button", { name: "Download Markdown", exact: true });
+      await expect(download).toHaveAttribute("data-testid", "reader-download");
+      await expect(page.getByRole("button", { name: "Download as…", exact: true })).toHaveAttribute("data-testid", "reader-download-menu");
+      await expect(download.locator("span")).toBeVisible({ visible: viewport.width >= 640 });
+      await scan(page, `reader download (${viewport.width}x${viewport.height})`);
+    }
+
+    await context.close();
+    await owner.context.close();
+  });
 });
 
 test.describe("manual checks", () => {
