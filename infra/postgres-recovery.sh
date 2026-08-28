@@ -119,6 +119,7 @@ chmod 0755 /usr/local/sbin/markdoc-logical-backup
 cat >/usr/local/sbin/markdoc-backup-monitor <<'MONITOR'
 #!/usr/bin/env bash
 set -euo pipefail
+cd /
 
 health_file="$(mktemp /var/lib/postgresql/markdoc-backup-health.XXXXXX.json)"
 trap 'rm -f "$health_file"' EXIT
