@@ -34,6 +34,9 @@
 .NOTES
   GitHub OAuth callback URL for the app: https://<app fqdn>/api/auth/callback/github
   The first run prints the FQDN; add it to the OAuth App, then rerun (or set MARKDOC_PUBLIC_URL).
+  This script provisions or reconfigures the whole template. An application release to the
+  existing production Container App is an image-only `az containerapp update` (README, "Deploy to
+  Azure" > "Production runbook"); it does not go through this script.
 #>
 param(
   [string]$Name = 'markdoc',
