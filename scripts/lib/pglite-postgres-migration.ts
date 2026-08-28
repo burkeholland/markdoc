@@ -186,9 +186,7 @@ export async function createPostgresDestination(
   connectionString: string,
   createClient: PostgresClientFactory = createNodePostgresClient,
 ): Promise<TransactionalConnection> {
-  if (!connectionString) throw new Error("Destination URL is empty");
-  assertRequiredSsl(connectionString);
-  const client = createClient({ connectionString, ssl: { rejectUnauthorized: false } });
+  const client = createClient(createPostgresClientConfig(connectionString));
   await client.connect();
   const connection = createPgQuery(client);
 
@@ -881,7 +879,8 @@ function createPgQuery(client: Pick<PostgresClient, "query">): SqlConnection {
   };
 }
 
-function assertRequiredSsl(connectionString: string): void {
+export function createPostgresClientConfig(connectionString: string): ClientConfig {
+  if (!connectionString) throw new Error("Destination URL is empty");
   let url: URL;
   try {
     url = new URL(connectionString);
@@ -894,6 +893,12 @@ function assertRequiredSsl(connectionString: string): void {
   if (url.searchParams.get("sslmode") !== "require") {
     throw new Error("Destination URL must include sslmode=require; plaintext PostgreSQL connections are refused");
   }
+  // node-postgres otherwise lets the URL's sslmode overwrite the explicit private-IP TLS policy below.
+  url.searchParams.delete("sslmode");
+  return {
+    connectionString: url.toString(),
+    ssl: { rejectUnauthorized: false },
+  };
 }
 
 function createNodePostgresClient(config: ClientConfig): PostgresClient {

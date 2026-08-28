@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   CommitOutcomeUnknownError,
+  createPostgresClientConfig,
   createPostgresDestination,
   MigrationCommittedManifestError,
   type MigrationManifest,
@@ -53,9 +54,10 @@ describe("PostgreSQL migration destination", () => {
     expect(client.connected).toBe(true);
     expect(factory).toHaveBeenCalledOnce();
     expect(factory.mock.calls[0][0]).toMatchObject({
-      connectionString: destinationUrl,
+      connectionString: "postgresql://fixture-user:fixture-password@database.internal/fixture",
       ssl: { rejectUnauthorized: false },
     });
+    expect(createPostgresClientConfig(destinationUrl)).toEqual(factory.mock.calls[0][0]);
 
     await expect(
       destination.transaction(async (transaction) => {

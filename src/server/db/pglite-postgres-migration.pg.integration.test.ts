@@ -11,6 +11,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   APPLICATION_TABLES,
+  createPostgresClientConfig,
   createPostgresDestination,
   migratePgliteSnapshot,
   type MigrationManifest,
@@ -29,10 +30,7 @@ describePostgres("PGlite to PostgreSQL 16 CLI integration", () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "markdoc-pg-integration-"));
     snapshot = path.join(root, "fixture.tar.gz");
 
-    const target = new Client({
-      connectionString: integrationUrl(),
-      ssl: { rejectUnauthorized: false },
-    });
+    const target = new Client(createPostgresClientConfig(integrationUrl()));
     await target.connect();
     try {
       const initialTables = await target.query<{ count: string }>(
