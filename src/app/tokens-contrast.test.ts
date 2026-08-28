@@ -37,7 +37,9 @@ const KNOBS = ["font-display", "paper", "chrome", "radius-control", "selection"]
 /** Knobs that are colours and therefore need a dark value too. */
 const COLOUR_KNOBS = ["paper", "chrome", "selection"];
 // Syntax colours axe sees as small text: CodeMirror on the editor surface / active line, highlight.js inside `pre` (surface-2).
-const SYNTAX = ["cm-number", "cm-variable", "hljs-number", "hljs-literal"];
+const MULTI_SURFACE_SYNTAX = ["cm-number", "cm-variable", "hljs-number", "hljs-literal"];
+const RICH_TYPESCRIPT_SYNTAX = ["hljs-comment", "hljs-keyword", "hljs-string-2", "hljs-number", "hljs-literal", "hljs-title-2"];
+const RICH_TYPESCRIPT_GROUPS = ["hljs-keyword", "hljs-string-2", "hljs-number", "hljs-comment", "hljs-title-2"];
 const CODE_SURFACES = ["p-surface", "p-surface-2", "p-paper", "p-chrome", "cm-active-line"];
 
 describe("tokens", () => {
@@ -98,8 +100,16 @@ describe("tokens", () => {
       // so a palette edit cannot quietly reintroduce the 3.6:1 orange (#ea580c).
       it("syntax number/literal colours are AA (≥ 4.5) on every surface code renders on", () => {
         for (const bg of CODE_SURFACES) {
-          for (const fg of SYNTAX) expect(contrast(hex(fg), hex(bg)), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+          for (const fg of MULTI_SURFACE_SYNTAX) expect(contrast(hex(fg), hex(bg)), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
         }
+      });
+      it("rich-pane TypeScript syntax colours are AA (≥ 4.5) on the code-block surface", () => {
+        for (const fg of RICH_TYPESCRIPT_SYNTAX) {
+          expect(contrast(hex(fg), hex("p-surface-2")), `${fg} on p-surface-2`).toBeGreaterThanOrEqual(4.5);
+        }
+      });
+      it("rich-pane TypeScript token groups retain distinct colours", () => {
+        expect(new Set(RICH_TYPESCRIPT_GROUPS.map(hex))).toHaveProperty("size", RICH_TYPESCRIPT_GROUPS.length);
       });
     });
   }
