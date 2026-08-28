@@ -294,6 +294,22 @@ if ($postgresVmExists) {
     --only-show-errors 2>$null
 }
 $databaseInitialized = $databaseSetupState -eq 'Succeeded'
+if ($postgresVmExists -and -not $databaseInitialized) {
+  $existingFqdn = az containerapp show `
+    --resource-group $ResourceGroup `
+    --name $Name `
+    --query 'properties.configuration.ingress.fqdn' `
+    --output tsv `
+    --only-show-errors 2>$null
+  if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existingFqdn)) {
+    try {
+      $existingHealth = Invoke-RestMethod "https://$existingFqdn/api/health" -TimeoutSec 10
+      $databaseInitialized = $existingHealth.ok -eq $true -and $existingHealth.db -eq $true
+    } catch {
+      $databaseInitialized = $false
+    }
+  }
+}
 
 if ($InitializeDatabase -and $databaseInitialized) {
   throw 'PostgreSQL initialization already succeeded; use ordinary deployment or explicit password rotation.'
