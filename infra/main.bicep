@@ -38,6 +38,10 @@ param memory string = '1Gi'
 param postgresAdminPassword string
 
 @secure()
+@description('Candidate PostgreSQL administrator password used only during explicit rotation.')
+param postgresCandidatePassword string
+
+@secure()
 @description('Auth.js secret (random 32+ bytes). Also signs collaboration tokens.')
 param authSecret string
 
@@ -78,14 +82,23 @@ param rotateDatabasePassword bool = false
 @description('Promote a successfully rotated PostgreSQL password to the active Key Vault secret.')
 param commitDatabasePassword bool = false
 
+@description('Restore the pre-rotation PostgreSQL password to the active Key Vault secrets during compensation.')
+param restoreDatabasePassword bool = false
+
 @description('Disable and overwrite the temporary PostgreSQL rotation candidate after a terminal result.')
 param clearPendingDatabasePassword bool = false
+
+@description('Reconcile PostgreSQL back to the pre-rotation credential after a failed application rollout.')
+param reconcileDatabasePassword bool = false
 
 @description('Exercise the pre-change password rotation failure path without modifying PostgreSQL.')
 param simulateDatabaseRotationFailure bool = false
 
 @description('Install or update PostgreSQL recovery services. Ordinary application redeployments must leave this false.')
 param configureRecovery bool = false
+
+@description('Exercise recovery deployment cleanup after temporary package egress has been enabled.')
+param simulateRecoveryConfigurationFailure bool = false
 
 @description('Explicit token that makes the database bootstrap extension rerun during an approved password rotation.')
 param databaseConfigurationToken string = 'initial'
@@ -111,6 +124,7 @@ var postgresAdminLogin = 'markdoc'
 var postgresDatabaseName = 'markdoc'
 var postgresPasswordSecretName = 'postgres-admin-password'
 var postgresPendingPasswordSecretName = 'postgres-admin-password-pending'
+var postgresRollbackPasswordSecretName = 'postgres-admin-password-rollback'
 var databaseUrlSecretName = 'database-url'
 var vnetName = '${name}-vnet'
 var environmentName = '${name}-prod-env'
@@ -129,6 +143,7 @@ var keyVaultDnsHost = substring(az.environment().suffixes.keyvaultDns, 1, length
 var keyVaultAudience = uriComponent('https://${keyVaultDnsHost}')
 var keyVaultSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresPasswordSecretName}?api-version=7.4'
 var keyVaultPendingSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresPendingPasswordSecretName}?api-version=7.4'
+var keyVaultRollbackSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${postgresRollbackPasswordSecretName}?api-version=7.4'
 var databaseUrlSecretUrl = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/secrets/${databaseUrlSecretName}'
 var postgresBaseSecurityRules = [
   {
@@ -488,29 +503,42 @@ resource secretsVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase || commitDatabasePassword) {
+var activePostgresPassword = commitDatabasePassword ? postgresCandidatePassword : postgresAdminPassword
+
+resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase || commitDatabasePassword || restoreDatabasePassword) {
   parent: secretsVault
   name: postgresPasswordSecretName
   properties: {
-    value: postgresAdminPassword
+    value: activePostgresPassword
   }
 }
 
-resource appDatabaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase || commitDatabasePassword) {
+resource appDatabaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase || commitDatabasePassword || restoreDatabasePassword) {
   parent: secretsVault
   name: databaseUrlSecretName
   properties: {
-    value: 'postgres://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgresPrivateIp}:5432/${postgresDatabaseName}?uselibpqcompat=true&sslmode=require'
+    value: 'postgres://${postgresAdminLogin}:${uriComponent(activePostgresPassword)}@${postgresPrivateIp}:5432/${postgresDatabaseName}?uselibpqcompat=true&sslmode=require'
   }
 }
 
-resource postgresPendingPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword || clearPendingDatabasePassword) {
+resource postgresPendingPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword || reconcileDatabasePassword || clearPendingDatabasePassword) {
   parent: secretsVault
   name: postgresPendingPasswordSecretName
   properties: {
-    value: rotateDatabasePassword ? postgresAdminPassword : 'rotation-not-active'
+    value: clearPendingDatabasePassword ? 'rotation-not-active' : postgresCandidatePassword
     attributes: {
-      enabled: rotateDatabasePassword
+      enabled: !clearPendingDatabasePassword
+    }
+  }
+}
+
+resource postgresRollbackPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword || reconcileDatabasePassword || clearPendingDatabasePassword) {
+  parent: secretsVault
+  name: postgresRollbackPasswordSecretName
+  properties: {
+    value: clearPendingDatabasePassword ? 'rotation-not-active' : postgresAdminPassword
+    attributes: {
+      enabled: !clearPendingDatabasePassword
     }
   }
 }
@@ -708,6 +736,88 @@ resource postgresRotation 'Microsoft.Compute/virtualMachines/runCommands@2024-07
   }
   dependsOn: [
     postgresPendingPasswordSecret
+    postgresRollbackPasswordSecret
+    postgresSecretReader
+  ]
+}
+
+var postgresReconciliationScript = replace(format('''
+#!/usr/bin/env bash
+set -u -o pipefail
+# Reconciliation configuration token: {0}
+
+if ! TOKEN="$(curl -fsS -H Metadata:true 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={1}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"; then
+  echo 'database-password-reconciliation=failed stage=managed-identity'
+  exit 0
+fi
+if ! ROLLBACK_PASSWORD="$(curl -fsS --oauth2-bearer "$TOKEN" '{2}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
+  echo 'database-password-reconciliation=failed stage=rollback-secret'
+  exit 0
+fi
+if ! CANDIDATE_PASSWORD="$(curl -fsS --oauth2-bearer "$TOKEN" '{3}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
+  echo 'database-password-reconciliation=failed stage=candidate-secret'
+  exit 0
+fi
+if [ -z "$ROLLBACK_PASSWORD" ] || [ "$ROLLBACK_PASSWORD" = 'rotation-not-active' ]; then
+  unset ROLLBACK_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-reconciliation=failed stage=rollback-secret'
+  exit 0
+fi
+
+PG_HBA="$(sudo -u postgres psql -Atc 'show hba_file')"
+if ! grep -q 'markdoc-password-rotation' "$PG_HBA"; then
+  sed -i '1ilocal all {4} scram-sha-256 # markdoc-password-rotation' "$PG_HBA"
+  sudo -u postgres psql -Atc 'select pg_reload_conf()' >/dev/null
+fi
+
+if PGPASSWORD="$ROLLBACK_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+  unset ROLLBACK_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-reconciliation=already-active'
+  exit 0
+fi
+
+if ! PGPASSWORD="$CANDIDATE_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+  unset ROLLBACK_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-reconciliation=failed stage=unknown-database-credential'
+  exit 0
+fi
+
+if ! sudo -u postgres psql \
+  -v ON_ERROR_STOP=1 \
+  --set=admin_password="$ROLLBACK_PASSWORD" <<'SQL'
+select format('alter role %I with login password %L', '{4}', :'admin_password') \gexec
+SQL
+then
+  unset ROLLBACK_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-reconciliation=failed stage=alter'
+  exit 0
+fi
+
+if PGPASSWORD="$ROLLBACK_PASSWORD" psql "host=/var/run/postgresql dbname={5} user={4}" -Atc 'select 1' 2>/dev/null | grep -qx 1; then
+  unset ROLLBACK_PASSWORD CANDIDATE_PASSWORD TOKEN
+  echo 'database-password-reconciliation=rolled-back'
+  exit 0
+fi
+
+unset ROLLBACK_PASSWORD CANDIDATE_PASSWORD TOKEN
+echo 'database-password-reconciliation=failed stage=verification'
+exit 0
+''', databaseConfigurationToken, keyVaultAudience, keyVaultRollbackSecretUrl, keyVaultPendingSecretUrl, postgresAdminLogin, postgresDatabaseName), '\r', '')
+
+resource postgresReconciliation 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = if (reconcileDatabasePassword) {
+  parent: postgresVm
+  name: 'reconcile-postgresql-password'
+  location: location
+  properties: {
+    asyncExecution: false
+    timeoutInSeconds: 600
+    source: {
+      script: postgresReconciliationScript
+    }
+  }
+  dependsOn: [
+    postgresPendingPasswordSecret
+    postgresRollbackPasswordSecret
     postgresSecretReader
   ]
 }
@@ -815,7 +925,8 @@ var postgresRecoveryScriptBody = replace(
   '__STORAGE_CONTAINER__',
   recoveryContainer.name
 )
-var postgresRecoveryScript = '# Recovery configuration version: ${recoveryConfigurationVersion}\n${postgresRecoveryScriptBody}'
+var postgresRecoveryFailureInjection = simulateRecoveryConfigurationFailure ? 'echo \'recovery-configuration=simulated-failure\'\nexit 42\n' : ''
+var postgresRecoveryScript = '# Recovery configuration version: ${recoveryConfigurationVersion}\n${postgresRecoveryFailureInjection}${postgresRecoveryScriptBody}'
 
 resource postgresRecovery 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = if (configureRecovery) {
   parent: postgresVm
@@ -823,6 +934,7 @@ resource postgresRecovery 'Microsoft.Compute/virtualMachines/runCommands@2024-07
   location: location
   properties: {
     asyncExecution: false
+    treatFailureAsDeploymentFailure: true
     timeoutInSeconds: 7200
     source: {
       script: postgresRecoveryScript
@@ -1155,6 +1267,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
     appSecretReader
     appDatabaseUrlSecret
     postgresSetup
+    postgresReconciliation
   ]
 }
 
@@ -1170,3 +1283,5 @@ output bootstrapPublicIpName string = postgresBootstrapIpName
 output postgresNatGatewayName string = postgresNatGateway.name
 output postgresAlertActionGroupName string = postgresAlertActionGroup.name
 output identityId string = identity.id
+output secretsVaultName string = secretsVault.name
+output secretsVaultId string = secretsVault.id
