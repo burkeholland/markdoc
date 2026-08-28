@@ -366,19 +366,19 @@ function Remove-BootstrapPublicIp([string]$PublicIpName) {
   }
 }
 
-function Get-PostgresNetworkRules {
-  $rulesJson = az network nsg rule list `
+function Get-PostgresNetworkRuleNames([string]$RuleName) {
+  $names = az network nsg rule list `
     --resource-group $ResourceGroup `
     --nsg-name "$Name-pg-nsg" `
-    --output json `
+    --query "[?name=='$RuleName'].name" `
+    --output tsv `
     --only-show-errors
   if ($LASTEXITCODE) { throw 'Could not inspect the PostgreSQL network security rules.' }
-  return @($rulesJson | ConvertFrom-Json)
+  return @($names | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
 function Restore-PostgresSteadyStateEgress {
-  $rules = @(Get-PostgresNetworkRules)
-  if (@($rules | Where-Object name -eq 'AllowApprovedPackageSetup').Count -gt 0) {
+  if (@(Get-PostgresNetworkRuleNames 'AllowApprovedPackageSetup').Count -gt 0) {
     az network nsg rule delete `
       --resource-group $ResourceGroup `
       --nsg-name "$Name-pg-nsg" `
@@ -387,17 +387,23 @@ function Restore-PostgresSteadyStateEgress {
     if ($LASTEXITCODE) { throw 'Could not remove temporary PostgreSQL package-install egress.' }
   }
 
-  $rules = @(Get-PostgresNetworkRules)
-  if (@($rules | Where-Object name -eq 'AllowApprovedPackageSetup').Count -gt 0) {
+  if (@(Get-PostgresNetworkRuleNames 'AllowApprovedPackageSetup').Count -gt 0) {
     throw 'Temporary PostgreSQL package-install egress is still present.'
   }
-  $denyRules = @($rules | Where-Object name -eq 'DenyOtherInternetEgress')
+  $denyJson = az network nsg rule show `
+    --resource-group $ResourceGroup `
+    --nsg-name "$Name-pg-nsg" `
+    --name 'DenyOtherInternetEgress' `
+    --query '{access:access,direction:direction,priority:priority,destinationAddressPrefix:destinationAddressPrefix}' `
+    --output json `
+    --only-show-errors
+  if ($LASTEXITCODE) { throw 'Could not inspect the steady-state PostgreSQL Internet deny rule.' }
+  $denyRule = $denyJson | ConvertFrom-Json
   if (
-    $denyRules.Count -ne 1 -or
-    $denyRules[0].access -ne 'Deny' -or
-    $denyRules[0].direction -ne 'Outbound' -or
-    $denyRules[0].priority -ne 260 -or
-    $denyRules[0].destinationAddressPrefix -ne 'Internet'
+    $denyRule.access -ne 'Deny' -or
+    $denyRule.direction -ne 'Outbound' -or
+    $denyRule.priority -ne 260 -or
+    $denyRule.destinationAddressPrefix -ne 'Internet'
   ) {
     throw 'The steady-state PostgreSQL Internet deny rule is missing or has unexpected semantics.'
   }
