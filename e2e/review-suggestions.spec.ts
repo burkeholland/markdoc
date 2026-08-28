@@ -98,7 +98,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     return docId;
   }
 
-  test("Suggest a change pre-fills the quote; the thread shows a diff; Accept replaces the text, resolves, and Ctrl+Z undoes it in one step", async () => {
+  test("a root suggestion preserves its exact decision through Undo and Redo across reloads", async () => {
     await freshDocument();
     const page = bob.page;
     await selectTextInRich(page, "very unique");
@@ -146,6 +146,27 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(aliceThread).toHaveAttribute("data-suggestion", "pending");
     await expect(aliceThread.getByTestId("suggestion-accept-comment")).toBeVisible();
     await expect(aliceThread.getByTestId("suggestion-reject-comment")).toBeVisible();
+
+    await alice.page.reload();
+    await ensureCommentsOpen(alice.page);
+    await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await alice.page.getByTestId("tb-redo").click();
+    await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
+    await alice.page.getByTestId("comments-tab-resolved").click();
+    await expect(aliceThread).toHaveAttribute("data-suggestion", "accepted");
+
+    await alice.page.reload();
+    await expect(alice.page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
+    await alice.page.getByTestId("tb-undo").click();
+    await expect.poll(() => codeText(alice.page)).toContain("Our product is very unique.");
+    await ensureCommentsOpen(alice.page);
+    await expect(aliceThread).toHaveAttribute("data-suggestion", "pending");
+
+    await alice.page.reload();
+    await ensureCommentsOpen(alice.page);
+    await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await alice.page.getByTestId("tb-redo").click();
+    await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
   });
 
   test("the composer's Suggest a change / Cancel / Comment sit on one row with single-line labels at every panel width", async () => {
@@ -287,16 +308,28 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       })
       .toMatchObject({ quote: "sales are good", currentText: "sales are good" });
 
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await page.getByTestId("tb-redo").click();
     await expect.poll(() => codeText(page)).toContain("sales are strong");
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
 
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await expect(page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
     await page.getByTestId("tb-undo").click();
     await expect.poll(() => codeText(page)).toContain("sales are good");
     await expect(reply()).toHaveAttribute("data-state", "pending");
     await page.reload();
     await ensureCommentsOpen(page);
+    await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await page.getByTestId("tb-redo").click();
+    await expect.poll(() => codeText(page)).toContain("sales are strong");
+    await expect(reply()).toHaveAttribute("data-state", "accepted");
+    await page.getByTestId("tb-undo").click();
+    await expect.poll(() => codeText(page)).toContain("sales are good");
     await expect(reply()).toHaveAttribute("data-state", "pending");
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
     await expect(reply().getByTestId("suggestion-accept-comment")).toBeVisible();
