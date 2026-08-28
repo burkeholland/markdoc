@@ -30,6 +30,12 @@ const noHorizontalScroll = (page: Page) =>
     return el.scrollWidth <= window.innerWidth;
   });
 
+const settingsViewports = [
+  { width: 320, height: 568 },
+  { width: 360, height: 800 },
+  { width: 390, height: 844 },
+] as const;
+
 test.describe("phone", () => {
   const phone = devices["iPhone 13"];
 
@@ -245,21 +251,33 @@ test.describe("phone", () => {
     await context.close();
   });
 
-  test("settings theme card at 390 px stacks the picker under its description", async ({ browser }) => {
-    const { context, page } = await signInOn(browser, "phone-settings", { ...phone });
-    await page.goto("/settings");
-    await page.waitForLoadState("networkidle");
-    const picker = page.getByTestId("theme-picker");
-    await expect(picker).toBeVisible();
-    expect(await noHorizontalScroll(page)).toBe(true);
-    const description = (await page.getByTestId("theme-description").boundingBox())!;
-    const pickerBox = (await picker.boundingBox())!;
-    expect(pickerBox.y).toBeGreaterThan(description.y + description.height - 1);
-    expect(pickerBox.x + pickerBox.width).toBeLessThanOrEqual(phone.viewport.width);
-    // The description gets the card's full width rather than being squeezed beside the control.
-    expect(description.width).toBeGreaterThan(phone.viewport.width / 2);
-    await context.close();
-  });
+  for (const viewport of settingsViewports) {
+    test(`settings at ${viewport.width} px keeps its header and theme card in the viewport`, async ({ browser }) => {
+      const { context, page } = await signInOn(browser, `phone-settings-${viewport.width}`, { ...phone, viewport });
+      await page.goto("/settings");
+      await page.waitForLoadState("networkidle");
+
+      const documentsLink = page.getByRole("link", { name: /Documents/i });
+      await expect(documentsLink).toBeVisible();
+      await expect(documentsLink).toHaveAccessibleName(/Documents/i);
+      const rootWidth = await page.evaluate(() => document.scrollingElement!.scrollWidth);
+      expect(rootWidth).toBeLessThanOrEqual(viewport.width);
+      const documentsBox = (await documentsLink.boundingBox())!;
+      expect(documentsBox.x).toBeGreaterThanOrEqual(0);
+      expect(documentsBox.x + documentsBox.width).toBeLessThanOrEqual(viewport.width);
+      expect(documentsBox.height).toBeGreaterThanOrEqual(32);
+
+      const picker = page.getByTestId("theme-picker");
+      await expect(picker).toBeVisible();
+      const description = (await page.getByTestId("theme-description").boundingBox())!;
+      const pickerBox = (await picker.boundingBox())!;
+      expect(pickerBox.y).toBeGreaterThan(description.y + description.height - 1);
+      expect(pickerBox.x + pickerBox.width).toBeLessThanOrEqual(viewport.width);
+      // The description gets the card's full width rather than being squeezed beside the control.
+      expect(description.width).toBeGreaterThan(viewport.width / 2);
+      await context.close();
+    });
+  }
 
   test("find bar at 390 px keeps the close button on the first row", async ({ browser }) => {
     const { context, page } = await signInOn(browser, "phone-find", { ...phone });
