@@ -35,6 +35,38 @@ export interface ReplySuggestionDecision {
   quote: string;
 }
 
+interface RootSuggestionDecision {
+  suggestionState: "accepted" | "rejected";
+  suggestionBy: string;
+  suggestionAt: number;
+  quote: string;
+}
+
+interface CommentResolutionSnapshot {
+  resolved: boolean;
+  resolvedBy: string | null;
+  resolvedAt: number | null;
+}
+
+export type CommentSuggestionTarget = { kind: "root" } | { kind: "reply"; replyId: string };
+
+/** Comment state restored alongside an accepted suggestion's text by CollabSession undo/redo. */
+export type CommentSuggestionSnapshot =
+  | {
+      kind: "root";
+      anchor: TextAnchor;
+      quote: string;
+      decision: RootSuggestionDecision | null;
+      resolution: CommentResolutionSnapshot;
+    }
+  | {
+      kind: "reply";
+      replyId: string;
+      anchor: TextAnchor;
+      quote: string;
+      decision: ReplySuggestionDecision | null;
+    };
+
 export function readReplySuggestionDecision(replyId: string, value: unknown): (ReplySuggestionDecision & { replyId: string }) | null {
   if (!value || typeof value !== "object") return null;
   const decision = value as Partial<ReplySuggestionDecision>;
@@ -258,6 +290,95 @@ export class CommentsModel {
     return map ? this.read(map) : null;
   }
 
+  snapshotSuggestion(id: string, target: CommentSuggestionTarget): CommentSuggestionSnapshot | null {
+    const map = this.ymap.get(id);
+    const anchor = map?.get("anchor") as TextAnchor | undefined;
+    if (!map || !anchor) return null;
+    const quote = (map.get("quote") as string) ?? "";
+
+    if (target.kind === "root") {
+      const suggestionState = map.get("suggestionState");
+      const suggestionBy = map.get("suggestionBy");
+      const suggestionAt = map.get("suggestionAt");
+      const suggestionQuote = map.get("suggestionQuote");
+      const decision: RootSuggestionDecision | null =
+        (suggestionState === "accepted" || suggestionState === "rejected") &&
+        typeof suggestionBy === "string" &&
+        typeof suggestionAt === "number" &&
+        typeof suggestionQuote === "string"
+          ? { suggestionState, suggestionBy, suggestionAt, quote: suggestionQuote }
+          : null;
+      return {
+        kind: "root",
+        anchor,
+        quote,
+        decision,
+        resolution: {
+          resolved: !!map.get("resolved"),
+          resolvedBy: (map.get("resolvedBy") as string | null) ?? null,
+          resolvedAt: (map.get("resolvedAt") as number | null) ?? null,
+        },
+      };
+    }
+
+    const replies = map.get("replies") as Y.Array<StoredReply> | undefined;
+    if (!replies?.toArray().some((reply) => reply.id === target.replyId)) return null;
+    const stored = readReplySuggestionDecision(target.replyId, (map.get("replySuggestions") as ReplySuggestionsMap | undefined)?.get(target.replyId));
+    const decision = stored
+      ? {
+          suggestionState: stored.suggestionState,
+          suggestionBy: stored.suggestionBy,
+          suggestionAt: stored.suggestionAt,
+          quote: stored.quote,
+        }
+      : null;
+    return { kind: "reply", replyId: target.replyId, anchor, quote, decision };
+  }
+
+  /** Restore the accepted target and its anchor in one comment transaction after text undo/redo. */
+  restoreSuggestion(id: string, snapshot: CommentSuggestionSnapshot): boolean {
+    const map = this.ymap.get(id);
+    if (!map) return false;
+    if (snapshot.kind === "reply") {
+      const replies = map.get("replies") as Y.Array<StoredReply> | undefined;
+      if (!replies?.toArray().some((reply) => reply.id === snapshot.replyId)) return false;
+    }
+
+    this.ydoc.transact(() => {
+      map.set("anchor", snapshot.anchor);
+      map.set("quote", snapshot.quote);
+      if (snapshot.kind === "root") {
+        if (snapshot.decision) {
+          map.set("suggestionState", snapshot.decision.suggestionState);
+          map.set("suggestionBy", snapshot.decision.suggestionBy);
+          map.set("suggestionAt", snapshot.decision.suggestionAt);
+          map.set("suggestionQuote", snapshot.decision.quote);
+        } else {
+          map.delete("suggestionState");
+          map.delete("suggestionBy");
+          map.delete("suggestionAt");
+          map.delete("suggestionQuote");
+        }
+        map.set("resolved", snapshot.resolution.resolved);
+        map.set("resolvedBy", snapshot.resolution.resolvedBy);
+        map.set("resolvedAt", snapshot.resolution.resolvedAt);
+        return;
+      }
+
+      let decisions = map.get("replySuggestions") as ReplySuggestionsMap | undefined;
+      if (snapshot.decision) {
+        if (!decisions) {
+          decisions = new Y.Map<ReplySuggestionDecision>();
+          map.set("replySuggestions", decisions);
+        }
+        decisions.set(snapshot.replyId, snapshot.decision);
+      } else {
+        decisions?.delete(snapshot.replyId);
+      }
+    }, COMMENTS_ORIGIN);
+    return true;
+  }
+
   add(input: { from: number; to: number; body: string; author: CollabUser }): string {
     const id = newId();
     const quote = this.ytext.toString().slice(input.from, input.to);
@@ -392,20 +513,10 @@ export class CommentsModel {
     this.ydoc.transact(() => this.ymap.delete(id), COMMENTS_ORIGIN);
   }
 
-  /** Restore or advance a thread's current anchored quote without changing any suggestion decisions. */
-  setAnchor(id: string, anchor: TextAnchor, quote: string) {
-    const map = this.ymap.get(id);
-    if (!map) return;
-    this.ydoc.transact(() => {
-      map.set("anchor", anchor);
-      map.set("quote", quote);
-    }, COMMENTS_ORIGIN);
-  }
-
   /**
    * Accept the thread's ```suggestion block: replace the anchored range with `proposed`, record the
    * decision and resolve the thread — all in one transaction (one undo step, one broadcast).
-   * Returns false when the thread is missing, already decided, or outdated (anchored text ≠ quote).
+   * Returns false when the thread is missing, already decided, outdated, or proposes no text change.
    */
   acceptSuggestion(id: string, proposed: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
     const map = this.ymap.get(id);
@@ -414,6 +525,7 @@ export class CommentsModel {
     if (thread.suggestionState || !thread.range) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    if (proposed === thread.quote) return false;
     const hasPendingReplySuggestion = thread.replies.some((reply) => !reply.suggestionState && parseSuggestionBlock(reply.body));
     this.ydoc.transact(() => {
       applyOps(this.ytext, diffOps(thread.quote, proposed, from));
@@ -459,6 +571,7 @@ export class CommentsModel {
     if (!block || reply.suggestionState || !thread.range) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    if (block.text === thread.quote) return false;
     let replySuggestions = map.get("replySuggestions") as ReplySuggestionsMap | undefined;
     if (!replySuggestions) {
       const created = new Y.Map<ReplySuggestionDecision>();
