@@ -428,7 +428,6 @@ Description=Run the Markdoc scratch restore proof weekly
 
 [Timer]
 OnCalendar=Sun *-*-* 05:00:00 UTC
-Persistent=true
 RandomizedDelaySec=30m
 
 [Install]
