@@ -290,6 +290,15 @@ export class CommentsModel {
     return map ? this.read(map) : null;
   }
 
+  /** Current replacement text for a root or reply suggestion, or null when the target is missing/not a suggestion. */
+  suggestionText(id: string, target: CommentSuggestionTarget): string | null {
+    const thread = this.get(id);
+    if (!thread) return null;
+    const body = target.kind === "root" ? thread.body : thread.replies.find((reply) => reply.id === target.replyId)?.body;
+    if (!body) return null;
+    return parseSuggestionBlock(body)?.text ?? null;
+  }
+
   snapshotSuggestion(id: string, target: CommentSuggestionTarget): CommentSuggestionSnapshot | null {
     const map = this.ymap.get(id);
     const anchor = map?.get("anchor") as TextAnchor | undefined;

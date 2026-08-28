@@ -16,8 +16,9 @@ import {
   type ConnectionPhase,
   type LocalPersistence,
 } from "./offline";
-import { perfMark, type CollabUser } from "./shared";
+import { createAnchor, newId, perfMark, resolveAnchor, type CollabUser, type TextAnchor } from "./shared";
 import type { Role } from "@/server/db/schema";
+import { applyOps, diffOps } from "../sync/text-diff";
 import {
   carryActiveIndex,
   DEFAULT_FIND_OPTIONS,
@@ -35,11 +36,229 @@ export type Surface = "code" | "rich";
 export type SaveState = ConnectionPhase;
 
 const COMMENT_SUGGESTION_META = Symbol("commentSuggestion");
+const COMMENT_SUGGESTION_TRANSITIONS = "commentSuggestionTransitions";
+const COMMENT_SUGGESTION_TRANSITION_VERSION = 1;
+const MAX_COMMENT_SUGGESTION_TRANSITIONS = 20;
+const COMMENT_SUGGESTION_HISTORY_ORIGIN = { name: "comment-suggestion-history" };
+const COMMENT_SUGGESTION_REPLAY_ORIGIN = { name: "comment-suggestion-replay" };
+
+interface CommentSuggestionTransitionSnapshot {
+  text: string;
+  range: TextAnchor;
+  comment: CommentSuggestionSnapshot;
+}
+
+interface CommentSuggestionTransition {
+  version: typeof COMMENT_SUGGESTION_TRANSITION_VERSION;
+  id: string;
+  actorId: string;
+  threadId: string;
+  target: CommentSuggestionTarget;
+  proposal: string;
+  createdAt: number;
+  phase: "applied" | "undone";
+  currentRange: TextAnchor;
+  currentComment: CommentSuggestionSnapshot;
+  before: CommentSuggestionTransitionSnapshot;
+  after: CommentSuggestionTransitionSnapshot;
+}
 
 interface CommentSuggestionMeta {
-  threadId: string;
-  before: CommentSuggestionSnapshot;
-  after: CommentSuggestionSnapshot;
+  transition: CommentSuggestionTransition;
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isYjsId(value: unknown): boolean {
+  return isRecord(value) && Number.isInteger(value.client) && Number.isInteger(value.clock);
+}
+
+function readTextAnchor(value: unknown): TextAnchor | null {
+  if (!isRecord(value)) return null;
+  const readRelativePosition = (position: unknown) => {
+    if (!isRecord(position)) return false;
+    const hasType = typeof position.tname === "string" || isYjsId(position.type);
+    return (
+      hasType &&
+      (position.item === undefined || isYjsId(position.item)) &&
+      (position.assoc === undefined || (typeof position.assoc === "number" && Number.isInteger(position.assoc)))
+    );
+  };
+  if (!readRelativePosition(value.start) || !readRelativePosition(value.end)) return null;
+  return { start: value.start as TextAnchor["start"], end: value.end as TextAnchor["end"] };
+}
+
+function readSuggestionDecision(
+  value: unknown,
+): { suggestionState: "accepted" | "rejected"; suggestionBy: string; suggestionAt: number; quote: string } | null | undefined {
+  if (value === null) return null;
+  if (
+    !isRecord(value) ||
+    (value.suggestionState !== "accepted" && value.suggestionState !== "rejected") ||
+    typeof value.suggestionBy !== "string" ||
+    typeof value.suggestionAt !== "number" ||
+    !Number.isFinite(value.suggestionAt) ||
+    typeof value.quote !== "string"
+  ) {
+    return undefined;
+  }
+  const suggestionState = value.suggestionState;
+  return {
+    suggestionState,
+    suggestionBy: value.suggestionBy,
+    suggestionAt: value.suggestionAt,
+    quote: value.quote,
+  };
+}
+
+function readCommentSuggestionSnapshot(value: unknown): CommentSuggestionSnapshot | null {
+  if (!isRecord(value) || (value.kind !== "root" && value.kind !== "reply")) return null;
+  const anchor = readTextAnchor(value.anchor);
+  const decision = readSuggestionDecision(value.decision);
+  if (!anchor || typeof value.quote !== "string" || decision === undefined) return null;
+
+  if (value.kind === "reply") {
+    if (typeof value.replyId !== "string" || !value.replyId) return null;
+    return { kind: "reply", replyId: value.replyId, anchor, quote: value.quote, decision };
+  }
+
+  const resolution = value.resolution;
+  if (
+    !isRecord(resolution) ||
+    typeof resolution.resolved !== "boolean" ||
+    (resolution.resolvedBy !== null && typeof resolution.resolvedBy !== "string") ||
+    (resolution.resolvedAt !== null && (typeof resolution.resolvedAt !== "number" || !Number.isFinite(resolution.resolvedAt)))
+  ) {
+    return null;
+  }
+  return {
+    kind: "root",
+    anchor,
+    quote: value.quote,
+    decision,
+    resolution: {
+      resolved: resolution.resolved,
+      resolvedBy: resolution.resolvedBy,
+      resolvedAt: resolution.resolvedAt,
+    },
+  };
+}
+
+function readTransitionSnapshot(value: unknown): CommentSuggestionTransitionSnapshot | null {
+  if (!isRecord(value) || typeof value.text !== "string") return null;
+  const range = readTextAnchor(value.range);
+  const comment = readCommentSuggestionSnapshot(value.comment);
+  return range && comment ? { text: value.text, range, comment } : null;
+}
+
+function readCommentSuggestionTransition(value: unknown): CommentSuggestionTransition | null {
+  if (!isRecord(value) || value.version !== COMMENT_SUGGESTION_TRANSITION_VERSION) return null;
+  const targetValue = value.target;
+  const target: CommentSuggestionTarget | null =
+    isRecord(targetValue) && targetValue.kind === "root"
+      ? { kind: "root" }
+      : isRecord(targetValue) && targetValue.kind === "reply" && typeof targetValue.replyId === "string" && targetValue.replyId
+        ? { kind: "reply", replyId: targetValue.replyId }
+        : null;
+  const before = readTransitionSnapshot(value.before);
+  const after = readTransitionSnapshot(value.after);
+  const currentRange = readTextAnchor(value.currentRange);
+  const currentComment = readCommentSuggestionSnapshot(value.currentComment);
+  if (
+    !target ||
+    !before ||
+    !after ||
+    !currentRange ||
+    !currentComment ||
+    typeof value.id !== "string" ||
+    !value.id ||
+    typeof value.actorId !== "string" ||
+    !value.actorId ||
+    typeof value.threadId !== "string" ||
+    !value.threadId ||
+    typeof value.proposal !== "string" ||
+    typeof value.createdAt !== "number" ||
+    !Number.isFinite(value.createdAt) ||
+    (value.phase !== "applied" && value.phase !== "undone") ||
+    before.text === after.text ||
+    before.comment.kind !== target.kind ||
+    after.comment.kind !== target.kind ||
+    currentComment.kind !== target.kind ||
+    before.comment.decision !== null ||
+    after.comment.decision?.suggestionState !== "accepted" ||
+    after.comment.decision.suggestionBy !== value.actorId ||
+    after.comment.decision.quote !== before.text ||
+    value.proposal !== after.text ||
+    before.comment.quote !== before.text
+  ) {
+    return null;
+  }
+  if (
+    target.kind === "reply" &&
+    (before.comment.kind !== "reply" ||
+      after.comment.kind !== "reply" ||
+      currentComment.kind !== "reply" ||
+      before.comment.replyId !== target.replyId ||
+      after.comment.replyId !== target.replyId ||
+      currentComment.replyId !== target.replyId)
+  ) {
+    return null;
+  }
+  if (
+    target.kind === "root" &&
+    (after.comment.kind !== "root" ||
+      !after.comment.resolution.resolved ||
+      after.comment.resolution.resolvedBy !== value.actorId ||
+      typeof after.comment.resolution.resolvedAt !== "number")
+  ) {
+    return null;
+  }
+  return {
+    version: COMMENT_SUGGESTION_TRANSITION_VERSION,
+    id: value.id,
+    actorId: value.actorId,
+    threadId: value.threadId,
+    target,
+    proposal: value.proposal,
+    createdAt: value.createdAt,
+    phase: value.phase,
+    currentRange,
+    currentComment,
+    before,
+    after,
+  };
+}
+
+function sameAnchor(a: TextAnchor, b: TextAnchor): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function sameDecision(
+  a: CommentSuggestionSnapshot["decision"],
+  b: CommentSuggestionSnapshot["decision"],
+): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.suggestionState === b.suggestionState &&
+    a.suggestionBy === b.suggestionBy &&
+    a.suggestionAt === b.suggestionAt &&
+    a.quote === b.quote
+  );
+}
+
+function sameCommentSuggestionSnapshot(a: CommentSuggestionSnapshot, b: CommentSuggestionSnapshot): boolean {
+  if (a.kind !== b.kind || !sameAnchor(a.anchor, b.anchor) || a.quote !== b.quote || !sameDecision(a.decision, b.decision)) return false;
+  if (a.kind === "reply" && b.kind === "reply") return a.replyId === b.replyId;
+  if (a.kind !== "root" || b.kind !== "root") return false;
+  return (
+    a.resolution.resolved === b.resolution.resolved &&
+    a.resolution.resolvedBy === b.resolution.resolvedBy &&
+    a.resolution.resolvedAt === b.resolution.resolvedAt
+  );
 }
 
 /** How long the "All changes saved" highlight stays after a reconnect. */
@@ -140,6 +359,7 @@ export class CollabSession {
   readonly ydoc = new Y.Doc();
   readonly ytext: Y.Text;
   readonly meta: Y.Map<unknown>;
+  private readonly commentSuggestionTransitions: Y.Map<unknown>;
   readonly provider: MarkdocProvider;
   readonly awareness: Awareness;
   readonly undoManager: Y.UndoManager;
@@ -212,6 +432,7 @@ export class CollabSession {
     this.mode = options.role === "viewer" || options.role === "commenter" ? "viewing" : "editing";
     this.ytext = this.ydoc.getText("content");
     this.meta = this.ydoc.getMap("meta");
+    this.commentSuggestionTransitions = this.ydoc.getMap(COMMENT_SUGGESTION_TRANSITIONS);
 
     // Mirror the document into IndexedDB so offline edits survive a refresh. `connect` waits for the
     // mirror (bounded) before opening the socket, so the sync handshake starts from what this device
@@ -375,9 +596,11 @@ export class CollabSession {
     this.undoManager.on("stack-item-popped", this.onUndoStackItemPopped);
     this.undoManager.on("stack-cleared", this.notify);
     this.comments.subscribe(this.notify);
+    this.comments.ymap.observeDeep(this.onCommentsChanged);
     this.suggestions.subscribe(this.notify);
     this.meta.observe(this.notify);
-    this.ytext.observe(this.notify);
+    this.commentSuggestionTransitions.observe(this.notify);
+    this.ytext.observe(this.onTextChanged);
     this.ytext.observe(this.refreshFind);
     this.undoManager.addTrackedOrigin(LOCAL_EDIT_ORIGIN);
     if (options.autoConnect === false) this.scheduleDestroy(ORPHAN_GRACE_MS);
@@ -881,6 +1104,16 @@ export class CollabSession {
     const target: CommentSuggestionTarget = replyId ? { kind: "reply", replyId } : { kind: "root" };
     const before = this.comments.snapshotSuggestion(threadId, target);
     if (!before) return false;
+    const proposal = this.comments.suggestionText(threadId, target);
+    if (proposal === null || proposal !== proposed) return false;
+    const beforeRange = resolveAnchor(this.ytext, before.anchor);
+    const sourceBefore = this.ytext.toString();
+    if (!beforeRange || sourceBefore.slice(beforeRange.from, beforeRange.to) !== before.quote) return false;
+    const beforeTransition: CommentSuggestionTransitionSnapshot = {
+      text: before.quote,
+      range: createAnchor(this.ytext, beforeRange.from, beforeRange.to),
+      comment: before,
+    };
 
     this.undoManager.stopCapturing();
     const previousUndoStackLength = this.undoManager.undoStack.length;
@@ -893,6 +1126,22 @@ export class CollabSession {
 
       const after = this.comments.snapshotSuggestion(threadId, target);
       if (!after) throw new Error("Accepted comment suggestion target disappeared");
+      const sourceAfter = this.ytext.toString();
+      const afterLength = beforeRange.to - beforeRange.from + sourceAfter.length - sourceBefore.length;
+      const afterEnd = beforeRange.from + afterLength;
+      if (
+        afterLength < 0 ||
+        afterEnd > sourceAfter.length ||
+        sourceBefore.slice(0, beforeRange.from) !== sourceAfter.slice(0, beforeRange.from) ||
+        sourceBefore.slice(beforeRange.to) !== sourceAfter.slice(afterEnd)
+      ) {
+        throw new Error("Accepted comment suggestion changed text outside its anchor");
+      }
+      const afterTransition: CommentSuggestionTransitionSnapshot = {
+        text: sourceAfter.slice(beforeRange.from, afterEnd),
+        range: createAnchor(this.ytext, beforeRange.from, afterEnd),
+        comment: after,
+      };
       const undoStackItem = this.undoManager.undoStack.at(-1);
       if (
         !undoStackItem ||
@@ -904,7 +1153,22 @@ export class CollabSession {
         }
         return false;
       }
-      undoStackItem.meta.set(COMMENT_SUGGESTION_META, { threadId, before, after } satisfies CommentSuggestionMeta);
+      const transition: CommentSuggestionTransition = {
+        version: COMMENT_SUGGESTION_TRANSITION_VERSION,
+        id: newId(),
+        actorId: this.user.id,
+        threadId,
+        target,
+        proposal,
+        createdAt: Date.now(),
+        phase: "applied",
+        currentRange: afterTransition.range,
+        currentComment: after,
+        before: beforeTransition,
+        after: afterTransition,
+      };
+      undoStackItem.meta.set(COMMENT_SUGGESTION_META, { transition } satisfies CommentSuggestionMeta);
+      this.writeCommentSuggestionTransition(transition);
       return true;
     } finally {
       this.undoManager.stopCapturing();
@@ -916,21 +1180,41 @@ export class CollabSession {
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
   undo() {
-    this.undoManager.undo();
+    this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
+    if (this.undoManager.canUndo()) this.undoManager.undo();
+    else this.replayCommentSuggestionTransition("applied");
     this.undoManager.stopCapturing();
   }
 
   redo() {
-    this.undoManager.redo();
+    this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
+    const stored = this.readStoredCommentSuggestionTransition();
+    const hasMatchingTransient =
+      stored?.phase === "undone" &&
+      this.undoManager.redoStack.some(
+        (item) => (item.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined)?.transition.id === stored.id,
+      );
+    const durable = hasMatchingTransient ? null : this.readCurrentCommentSuggestionTransition("undone");
+    if (durable) this.replayCommentSuggestionTransition("undone");
+    else if (this.undoManager.canRedo()) this.undoManager.redo();
     this.undoManager.stopCapturing();
   }
 
   get canUndo(): boolean {
-    return this.undoManager.canUndo();
+    this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
+    return this.undoManager.canUndo() || !!this.readCurrentCommentSuggestionTransition("applied");
   }
 
   get canRedo(): boolean {
-    return this.undoManager.canRedo();
+    this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
+    const stored = this.readStoredCommentSuggestionTransition();
+    const hasMatchingTransient =
+      stored?.phase === "undone" &&
+      this.undoManager.redoStack.some(
+        (item) => (item.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined)?.transition.id === stored.id,
+      );
+    const durable = hasMatchingTransient ? stored : this.readCurrentCommentSuggestionTransition("undone");
+    return this.undoManager.canRedo() || !!durable;
   }
 
   subscribe = (listener: Listener): (() => void) => {
@@ -953,13 +1237,167 @@ export class CollabSession {
   private onUndoStackItemPopped = (event: { stackItem: { meta: Map<unknown, unknown> }; type: "undo" | "redo" }) => {
     const meta = event.stackItem.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined;
     if (meta) {
-      const destination = event.type === "undo" ? this.undoManager.redoStack : this.undoManager.undoStack;
-      destination.at(-1)?.meta.set(COMMENT_SUGGESTION_META, meta);
-      const snapshot = event.type === "undo" ? meta.before : meta.after;
-      this.comments.restoreSuggestion(meta.threadId, snapshot);
+      const snapshot = event.type === "undo" ? meta.transition.before : meta.transition.after;
+      this.ydoc.transact(() => {
+        if (!this.comments.restoreSuggestion(meta.transition.threadId, snapshot.comment)) {
+          throw new Error("Comment suggestion target disappeared during transient replay");
+        }
+        const range = this.resolveTransitionRange(snapshot, meta.transition.currentRange);
+        if (!range) {
+          this.invalidateCommentSuggestionTransition(meta.transition.id);
+          return;
+        }
+        const updatedTransition: CommentSuggestionTransition = {
+          ...meta.transition,
+          phase: event.type === "undo" ? "undone" : "applied",
+          currentRange: createAnchor(this.ytext, range.from, range.to),
+          currentComment: snapshot.comment,
+        };
+        const destination = event.type === "undo" ? this.undoManager.redoStack : this.undoManager.undoStack;
+        destination.at(-1)?.meta.set(COMMENT_SUGGESTION_META, { transition: updatedTransition } satisfies CommentSuggestionMeta);
+        this.writeCommentSuggestionTransition(updatedTransition);
+      }, COMMENT_SUGGESTION_HISTORY_ORIGIN);
     }
     this.notify();
   };
+
+  private onTextChanged = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+    if (
+      transaction.local &&
+      transaction.origin !== this.undoManager &&
+      transaction.origin !== COMMENT_SUGGESTION_REPLAY_ORIGIN &&
+      this.readStoredCommentSuggestionTransition()?.phase === "undone"
+    ) {
+      const transition = this.readStoredCommentSuggestionTransition();
+      if (transition) this.invalidateCommentSuggestionTransition(transition.id);
+    }
+    this.notify();
+  };
+
+  private onCommentsChanged = (_events: Y.YEvent<Y.AbstractType<unknown>>[], transaction: Y.Transaction) => {
+    if (!transaction.local) return;
+    const transition = this.readStoredCommentSuggestionTransition();
+    if (transition?.phase === "undone" && !this.isCommentSuggestionTransitionCurrent(transition, "undone")) {
+      this.invalidateCommentSuggestionTransition(transition.id);
+    }
+  };
+
+  private readStoredCommentSuggestionTransition(): CommentSuggestionTransition | null {
+    const stored = this.commentSuggestionTransitions.get(this.user.id);
+    if (stored === undefined) return null;
+    const transition = readCommentSuggestionTransition(stored);
+    if (!transition || transition.actorId !== this.user.id) {
+      this.commentSuggestionTransitions.delete(this.user.id);
+      return null;
+    }
+    return transition;
+  }
+
+  private readCurrentCommentSuggestionTransition(phase: CommentSuggestionTransition["phase"]): CommentSuggestionTransition | null {
+    const transition = this.readStoredCommentSuggestionTransition();
+    if (!transition || transition.phase !== phase) return null;
+    if (!this.isCommentSuggestionTransitionCurrent(transition, phase)) {
+      this.invalidateCommentSuggestionTransition(transition.id);
+      return null;
+    }
+    return transition;
+  }
+
+  private isCommentSuggestionTransitionCurrent(
+    transition: CommentSuggestionTransition,
+    phase: CommentSuggestionTransition["phase"],
+  ): boolean {
+    if (transition.phase !== phase) return false;
+    const expected = phase === "applied" ? transition.after : transition.before;
+    const current = this.comments.snapshotSuggestion(transition.threadId, transition.target);
+    const range = this.resolveTransitionRange(expected, transition.currentRange);
+    return (
+      !!current &&
+      sameCommentSuggestionSnapshot(current, transition.currentComment) &&
+      this.comments.suggestionText(transition.threadId, transition.target) === transition.proposal &&
+      !!range
+    );
+  }
+
+  private discardInvalidCommentSuggestionStackItems(
+    stack: { meta: Map<unknown, unknown> }[],
+    phase: CommentSuggestionTransition["phase"],
+  ) {
+    while (stack.length > 0) {
+      const meta = stack.at(-1)!.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined;
+      if (!meta || this.isCommentSuggestionTransitionCurrent(meta.transition, phase)) return;
+      this.invalidateCommentSuggestionTransition(meta.transition.id);
+    }
+  }
+
+  private invalidateCommentSuggestionTransition(id: string) {
+    const stored = this.readStoredCommentSuggestionTransition();
+    if (stored?.id === id) this.commentSuggestionTransitions.delete(this.user.id);
+    for (const stack of [this.undoManager.undoStack, this.undoManager.redoStack]) {
+      for (let i = stack.length - 1; i >= 0; i--) {
+        const meta = stack[i].meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined;
+        if (meta?.transition.id === id) stack.splice(i, 1);
+      }
+    }
+    this.notify();
+  }
+
+  private resolveTransitionRange(
+    snapshot: CommentSuggestionTransitionSnapshot,
+    currentRange: TextAnchor,
+  ): { from: number; to: number } | null {
+    for (const anchor of [currentRange, snapshot.range, snapshot.comment.anchor]) {
+      let range: { from: number; to: number } | null;
+      try {
+        range = resolveAnchor(this.ytext, anchor);
+      } catch {
+        range = null;
+      }
+      if (range && this.ytext.toString().slice(range.from, range.to) === snapshot.text) return range;
+    }
+    return null;
+  }
+
+  private replayCommentSuggestionTransition(phase: CommentSuggestionTransition["phase"]): boolean {
+    const transition = this.readCurrentCommentSuggestionTransition(phase);
+    if (!transition) return false;
+    const current = phase === "applied" ? transition.after : transition.before;
+    const next = phase === "applied" ? transition.before : transition.after;
+    const range = this.resolveTransitionRange(current, transition.currentRange);
+    if (!range) {
+      this.commentSuggestionTransitions.delete(this.user.id);
+      return false;
+    }
+
+    this.ydoc.transact(() => {
+      applyOps(this.ytext, diffOps(current.text, next.text, range.from));
+      const replayAnchor = createAnchor(this.ytext, range.from, range.from + next.text.length);
+      const nextComment = { ...next.comment, anchor: replayAnchor };
+      if (!this.comments.restoreSuggestion(transition.threadId, nextComment)) {
+        throw new Error("Comment suggestion target disappeared during durable replay");
+      }
+      this.writeCommentSuggestionTransition({
+        ...transition,
+        phase: phase === "applied" ? "undone" : "applied",
+        currentRange: replayAnchor,
+        currentComment: nextComment,
+      });
+    }, COMMENT_SUGGESTION_REPLAY_ORIGIN);
+    this.notify();
+    return true;
+  }
+
+  private writeCommentSuggestionTransition(transition: CommentSuggestionTransition) {
+    this.ydoc.transact(() => {
+      this.commentSuggestionTransitions.set(transition.actorId, transition);
+      if (this.commentSuggestionTransitions.size <= MAX_COMMENT_SUGGESTION_TRANSITIONS) return;
+      const oldest = Array.from(this.commentSuggestionTransitions.entries())
+        .map(([actorId, value]) => ({ actorId, createdAt: readCommentSuggestionTransition(value)?.createdAt ?? Number.NEGATIVE_INFINITY }))
+        .sort((a, b) => a.createdAt - b.createdAt || a.actorId.localeCompare(b.actorId))
+        .slice(0, this.commentSuggestionTransitions.size - MAX_COMMENT_SUGGESTION_TRANSITIONS);
+      for (const item of oldest) this.commentSuggestionTransitions.delete(item.actorId);
+    }, COMMENT_SUGGESTION_HISTORY_ORIGIN);
+  }
 
   /** Monotonic counter used as a React snapshot for useSyncExternalStore. */
   version = 0;
@@ -990,6 +1428,9 @@ export class CollabSession {
     this.clearProlongedOffline();
     this.unregisterWindowListeners();
     this.listeners.clear();
+    this.commentSuggestionTransitions.unobserve(this.notify);
+    this.ytext.unobserve(this.onTextChanged);
+    this.comments.ymap.unobserveDeep(this.onCommentsChanged);
     this.binding.destroy();
     this.comments.destroy();
     this.suggestions.destroy();
