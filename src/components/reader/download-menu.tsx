@@ -9,7 +9,13 @@ export function DownloadMenu({ docId }: { docId: string }) {
   const href = (format: "md" | "html" | "pdf") => `/api/documents/${docId}/export?format=${format}&download=1`;
   return (
     <div className="flex items-stretch">
-      <button type="button" className="btn btn-sm btn-outline reader-split-main gap-1.5" onClick={() => navigateTo(href("md"))} data-testid="reader-download">
+      <button
+        type="button"
+        className="btn btn-sm btn-outline reader-split-main gap-1.5"
+        aria-label="Download Markdown"
+        onClick={() => navigateTo(href("md"))}
+        data-testid="reader-download"
+      >
         <Download size={14} />
         <span className="hidden sm:inline">Download</span>
       </button>
