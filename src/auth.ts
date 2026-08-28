@@ -1,9 +1,9 @@
 import NextAuth, { type NextAuthConfig, type DefaultSession } from "next-auth";
 import GitHub from "next-auth/providers/github";
 import Credentials from "next-auth/providers/credentials";
-import { DrizzleAdapter } from "@auth/drizzle-adapter";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
+import { GithubReconciliationAdapter, githubOAuthProfile } from "@/server/github-oauth-reconciliation";
 import { logAuthError } from "@/server/session-cookie";
 
 declare module "next-auth" {
@@ -39,14 +39,8 @@ async function buildConfig(): Promise<NextAuthConfig> {
         clientId: process.env.AUTH_GITHUB_ID,
         clientSecret: process.env.AUTH_GITHUB_SECRET,
         authorization: { params: { scope: "read:user user:email gist repo" } },
-        profile(profile) {
-          return {
-            id: String(profile.id),
-            name: profile.name ?? profile.login,
-            email: profile.email,
-            image: profile.avatar_url,
-            login: profile.login,
-          };
+        profile(profile, tokens) {
+          return githubOAuthProfile(profile, tokens);
         },
       }),
     );
@@ -84,12 +78,7 @@ async function buildConfig(): Promise<NextAuthConfig> {
   }
 
   return {
-    adapter: DrizzleAdapter(db, {
-      usersTable: schema.users,
-      accountsTable: schema.accounts,
-      sessionsTable: schema.sessions,
-      verificationTokensTable: schema.verificationTokens,
-    }),
+    adapter: GithubReconciliationAdapter(db),
     providers,
     // Database sessions for OAuth; the dev credentials provider needs JWT, so we
     // use JWT and enrich it from the database.
