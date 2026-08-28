@@ -14,8 +14,8 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const error = typeof params.error === "string" ? params.error : null;
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-surface-2 px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-8 shadow-xl shadow-black/5">
+    <main className="flex min-h-screen items-center justify-center bg-surface-2 px-4 py-4">
+      <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-xl shadow-black/5 sm:p-8" data-testid="login-card">
         <div className="mb-6 flex items-center gap-3">
           <Logo className="h-9 w-9" />
           <div>
@@ -36,7 +36,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
             </button>
           </form>
         ) : (
-          <div className="rounded-lg border border-dashed border-line-2 px-3 py-3 text-sm text-ink-3">
+          <div className="rounded-lg border border-dashed border-line-2 px-3 py-3 text-sm text-ink-3" data-testid="github-not-configured">
             GitHub sign-in is not configured. Set <code className="font-mono text-xs">AUTH_GITHUB_ID</code> and <code className="font-mono text-xs">AUTH_GITHUB_SECRET</code>.
           </div>
         )}
@@ -50,9 +50,9 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
             }}
           >
             <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-3">Development login</div>
-            <div className="flex gap-2">
-              <input name="login" className="input" placeholder="GitHub handle" defaultValue="" autoComplete="off" data-testid="dev-login" />
-              <button type="submit" className="btn btn-outline" data-testid="dev-login-submit">
+            <div className="flex flex-col gap-2 sm:flex-row" data-testid="dev-login-controls">
+              <input name="login" className="input min-w-0 flex-1" placeholder="GitHub handle" defaultValue="" autoComplete="off" data-testid="dev-login" />
+              <button type="submit" className="btn btn-outline w-full shrink-0 whitespace-nowrap sm:w-auto" data-testid="dev-login-submit">
                 Sign in
               </button>
             </div>
@@ -64,4 +64,3 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
     </main>
   );
 }
-

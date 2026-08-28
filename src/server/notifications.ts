@@ -3,7 +3,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { NotificationKind } from "@/server/db/schema";
 import { parseAgentMentions, parseMentions } from "@/editor/collab/mentions";
-import { readReply, type CommentReply } from "@/editor/collab/comments";
+import { readReply, readReplySuggestionDecision, type CommentReply } from "@/editor/collab/comments";
 import { resolveAnchor, newId } from "@/editor/collab/shared";
 import type { Suggestion } from "@/editor/collab/suggestions";
 import type { CollabClaims } from "@/server/collab/token";
@@ -291,13 +291,18 @@ export async function notifyShare(docId: string, login: string, role: string, ac
   return notify({ userLogin: login, documentId: docId, kind: "share", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${login.toLowerCase()}`, snippet: role });
 }
 
-/** `suggestion.accepted`: the author of a comment whose ```suggestion block was applied, unless they did it themselves. */
-export async function notifySuggestionAccepted(docId: string, thread: ThreadInfo, authorId: string, quote: string, actor: Actor): Promise<boolean> {
+/** `suggestion.accepted`: the author of a comment or reply whose suggestion was applied, unless they did it themselves. */
+export async function notifySuggestionAccepted(
+  docId: string,
+  target: { id: string; authorId: string; authorLogin: string | null },
+  quote: string,
+  actor: Actor,
+): Promise<boolean> {
   if (!actor.login) return false;
   // Agents' collab ids are `agent:<userId>:<token>`; the notification goes to the human behind the token.
-  const login = thread.authorLogin ?? (await loginForUserId(authorId.startsWith("agent:") ? authorId.split(":")[1] : authorId));
+  const login = target.authorLogin ?? (await loginForUserId(target.authorId.startsWith("agent:") ? target.authorId.split(":")[1] : target.authorId));
   if (!login) return false;
-  return notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: thread.id, snippet: quote });
+  return notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: target.id, snippet: quote });
 }
 
 // --- Live document watcher -----------------------------------------------------
@@ -350,8 +355,25 @@ export function watchDocumentNotifications(doc: Y.Doc, docId: string): () => voi
         if (event.changes.keys.has("suggestionState") && actor && map.get("suggestionState") === "accepted") {
           const thread = readThread(map);
           const authorId = str(map.get("authorId"));
-          if (thread && authorId) void notifySuggestionAccepted(docId, thread, authorId, str(map.get("quote")) ?? "", actor).catch(log("suggestion.accepted"));
+          if (thread && authorId) {
+            void notifySuggestionAccepted(docId, { id: thread.id, authorId, authorLogin: thread.authorLogin }, str(map.get("quote")) ?? "", actor).catch(log("suggestion.accepted"));
+          }
         }
+      } else if (event.target instanceof Y.Map && event.target.parent instanceof Y.Map && event.target.parent.parent === comments && event.target.parent.get("replySuggestions") === event.target) {
+        if (!actor) continue;
+        const decisions = event.target as Y.Map<unknown>;
+        const thread = readThread(decisions.parent as ThreadMap);
+        event.changes.keys.forEach((_change, replyId) => {
+          const decision = readReplySuggestionDecision(replyId, decisions.get(replyId));
+          const reply = thread?.replies.find((item) => item.id === replyId);
+          if (decision?.suggestionState !== "accepted" || !reply) return;
+          void notifySuggestionAccepted(
+            docId,
+            { id: reply.id, authorId: reply.authorId, authorLogin: reply.authorLogin ?? null },
+            decision.quote,
+            actor,
+          ).catch(log("reply suggestion.accepted"));
+        });
       } else if (event.target instanceof Y.Array) {
         const parent = event.target.parent;
         const thread = parent instanceof Y.Map ? readThread(parent as ThreadMap) : null;
@@ -361,6 +383,7 @@ export function watchDocumentNotifications(doc: Y.Doc, docId: string): () => voi
             if (!item || typeof item !== "object") continue;
             const reply = readReply(item as Parameters<typeof readReply>[0]);
             if (typeof reply.id !== "string" || typeof reply.body !== "string") continue;
+            if (reply.suggestionState === "accepted" || reply.suggestionState === "rejected") continue;
             void recordMentions(docId, reply.id, reply.authorLogin ?? null, reply.body, reply.authorName).catch(log("mention"));
             // Edited replies are re-inserted with the same id; idempotency keeps this a no-op for them.
             if (thread) void notifyReply(docId, thread, reply).catch(log("reply"));

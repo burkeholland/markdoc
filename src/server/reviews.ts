@@ -1,7 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { newId } from "@/editor/collab/shared";
-import { CommentsModel, type CommentThread } from "@/editor/collab/comments";
+import { CommentsModel, type CommentReply, type CommentThread } from "@/editor/collab/comments";
 import { hasSuggestionBlock } from "@/editor/collab/suggestion-block";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { mutateLiveDoc } from "@/server/livedoc";
@@ -123,10 +123,22 @@ export async function listReviews(docId: string): Promise<ReviewDto[]> {
  * Activity + notification for a decision on a comment's suggestion block. The comment's author
  * hears about an acceptance (kind `suggestion.accepted`) unless they accepted it themselves.
  */
-export async function recordSuggestionDecision(docId: string, thread: Pick<CommentThread, "id" | "authorId" | "authorName" | "body" | "quote">, accepted: boolean, actor: ActivityActor & { login: string | null }): Promise<void> {
-  await recordActivity(docId, actor, accepted ? "comment.suggestion.accepted" : "comment.suggestion.rejected", { threadId: thread.id, author: thread.authorName, quote: clip(thread.quote) });
+export async function recordSuggestionDecision(
+  docId: string,
+  thread: Pick<CommentThread, "id" | "authorId" | "authorName" | "body" | "quote">,
+  accepted: boolean,
+  actor: ActivityActor & { login: string | null },
+  reply?: Pick<CommentReply, "id" | "authorId" | "authorName"> | null,
+): Promise<void> {
+  const target = reply ?? thread;
+  await recordActivity(docId, actor, accepted ? "comment.suggestion.accepted" : "comment.suggestion.rejected", {
+    threadId: thread.id,
+    ...(reply ? { replyId: reply.id } : {}),
+    author: target.authorName,
+    quote: clip(thread.quote),
+  });
   if (!accepted || !actor.login) return;
-  const login = await loginForUserId(thread.authorId.startsWith("agent:") ? thread.authorId.split(":")[1] : thread.authorId);
+  const login = await loginForUserId(target.authorId.startsWith("agent:") ? target.authorId.split(":")[1] : target.authorId);
   if (!login || login === actor.login.toLowerCase()) return;
-  await notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: thread.id, snippet: thread.quote });
+  await notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: target.id, snippet: thread.quote });
 }

@@ -6,7 +6,7 @@ import { gapCursor } from "prosemirror-gapcursor";
 import { tableEditing } from "prosemirror-tables";
 import * as Y from "yjs";
 import { schema } from "../markdown/schema";
-import { markdownBindingPlugin } from "../sync/markdown-binding";
+import { markdownBindingKey, markdownBindingPlugin } from "../sync/markdown-binding";
 import type { CollabSession } from "../collab/session";
 import { markdownInputRules } from "./inputrules";
 import { codeHighlightPlugin } from "./code-highlight";
@@ -26,7 +26,8 @@ import {
   sinkListItem,
   liftListItem,
   insertHardBreak,
-  liftEmptyListItemOnBackspace,
+  liftFirstListItemOnBackspace,
+  deleteEmptyLaterListItemOnBackspace,
   goToNextCell,
   addRowBefore,
   addRowAfter,
@@ -97,6 +98,33 @@ const tableMenuKey = new PluginKey<{ hidden: boolean }>("tableMenu");
 /** Fired on the editor's DOM element when Esc hides the floating table menu or a selection change shows it again. */
 export const TABLE_MENU_EVENT = "markdoc:table-menu";
 
+interface VerticalRect {
+  top: number;
+  bottom: number;
+}
+
+/** Smallest scroll delta that fully reveals `target` inside `viewport`. */
+export function minimalVerticalScroll(viewport: VerticalRect, target: VerticalRect): number {
+  if (target.top < viewport.top) return target.top - viewport.top;
+  if (target.bottom > viewport.bottom) return target.bottom - viewport.bottom;
+  return 0;
+}
+
+function owningVerticalScroller(dom: HTMLElement): HTMLElement | null {
+  for (let element = dom.parentElement; element; element = element.parentElement) {
+    const overflow = getComputedStyle(element).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && element.scrollHeight > element.clientHeight) return element;
+  }
+  return null;
+}
+
+function revealRichSelection(view: import("prosemirror-view").EditorView) {
+  const scroller = owningVerticalScroller(view.dom);
+  if (!scroller) return;
+  const delta = minimalVerticalScroll(scroller.getBoundingClientRect(), view.coordsAtPos(view.state.selection.head));
+  if (delta !== 0) scroller.scrollTop += delta;
+}
+
 /**
  * Whether Esc hid the floating table menu (issue #163). The menu is a React component that keys off the
  * selection, so the hidden flag lives in plugin state: a meta transaction sets it, any explicit selection
@@ -148,24 +176,53 @@ export const escapeFloatingUi: Command = (state, dispatch) => {
   return false;
 };
 
+export type UndoSelectionSession = Pick<CollabSession, "activeSurface" | "binding" | "ydoc" | "ytext" | "undoManager">;
+
+interface RelativeSelection {
+  anchor: Y.RelativePosition;
+  head: Y.RelativePosition;
+}
+
+interface UndoSelectionMeta {
+  undo: RelativeSelection;
+  redo: RelativeSelection;
+}
+
 /** Restores the rich editor's selection after undo/redo driven by the shared Y.UndoManager. */
-function undoSelectionPlugin(session: CollabSession): Plugin {
+export function undoSelectionPlugin(session: UndoSelectionSession): Plugin {
   const metaKey = { name: "richSelection" };
   return new Plugin({
     view(view) {
-      const onAdded = ({ stackItem }: { stackItem: Y.UndoManager["undoStack"][number] }) => {
-        if (!view.hasFocus()) return;
+      let lastSelection: RelativeSelection | null = null;
+      const relativeSelection = (): RelativeSelection => {
         const map = session.binding.getSourceMap();
         const { anchor, head } = view.state.selection;
+        const sourceAnchor = map.pmToSrc(anchor);
+        const sourceHead = map.pmToSrc(head);
+        return {
+          anchor: Y.createRelativePositionFromTypeIndex(session.ytext, sourceAnchor),
+          head: Y.createRelativePositionFromTypeIndex(session.ytext, sourceHead),
+        };
+      };
+      const rememberSelection = () => {
+        if (view.hasFocus()) lastSelection = relativeSelection();
+      };
+      const saveSelection = ({ stackItem, origin }: { stackItem: Y.UndoManager["undoStack"][number]; origin: unknown }) => {
+        if (!view.hasFocus() || origin === session.undoManager) return;
+        const current = lastSelection ?? relativeSelection();
+        const saved = stackItem.meta.get(metaKey) as UndoSelectionMeta | undefined;
         stackItem.meta.set(metaKey, {
-          anchor: Y.createRelativePositionFromTypeIndex(session.ytext, map.pmToSrc(anchor)),
-          head: Y.createRelativePositionFromTypeIndex(session.ytext, map.pmToSrc(head)),
+          undo: saved?.undo ?? lastSelection ?? current,
+          redo: saved?.redo ?? current,
         });
       };
-      const onPopped = ({ stackItem }: { stackItem: Y.UndoManager["undoStack"][number] }) => {
-        const saved = stackItem.meta.get(metaKey) as { anchor: Y.RelativePosition; head: Y.RelativePosition } | undefined;
+      const onPopped = ({ stackItem, type }: { stackItem: Y.UndoManager["undoStack"][number]; type: "undo" | "redo" }) => {
+        const meta = stackItem.meta.get(metaKey) as UndoSelectionMeta | undefined;
+        const destinationStack = type === "undo" ? session.undoManager.redoStack : session.undoManager.undoStack;
+        if (meta) destinationStack.at(-1)?.meta.set(metaKey, meta);
+        const saved = meta?.[type];
         if (!saved || session.activeSurface !== "rich") return;
-        // The binding applies the text change on a microtask; restore after it.
+        // Restore after every Yjs observer and editor plugin has processed the text change.
         queueMicrotask(() => {
           if (view.isDestroyed) return;
           const map = session.binding.getSourceMap();
@@ -173,21 +230,34 @@ function undoSelectionPlugin(session: CollabSession): Plugin {
           const h = Y.createAbsolutePositionFromRelativePosition(saved.head, session.ydoc);
           if (!a || !h) return;
           const size = view.state.doc.content.size;
-          const anchor = Math.min(size, map.srcToPm(a.index));
-          const head = Math.min(size, map.srcToPm(h.index));
-          try {
-            view.dispatch(view.state.tr.setSelection(TextSelection.between(view.state.doc.resolve(anchor), view.state.doc.resolve(head))).scrollIntoView());
-          } catch {
-            /* positions no longer valid */
-          }
+          const anchor = Math.max(0, Math.min(size, map.srcToPm(a.index)));
+          const head = Math.max(0, Math.min(size, map.srcToPm(h.index)));
+          view.dispatch(view.state.tr.setSelection(TextSelection.between(view.state.doc.resolve(anchor), view.state.doc.resolve(head))));
+          revealRichSelection(view);
         });
       };
-      session.undoManager.on("stack-item-added", onAdded);
+      session.undoManager.on("stack-item-added", saveSelection);
+      session.undoManager.on("stack-item-updated", saveSelection);
       session.undoManager.on("stack-item-popped", onPopped);
+      view.dom.addEventListener("focus", rememberSelection);
       return {
+        update(nextView, previousState) {
+          if (!nextView.hasFocus()) return;
+          if (nextView.state.doc !== previousState.doc && !markdownBindingKey.getState(nextView.state)?.remote) {
+            queueMicrotask(() => {
+              if (view.isDestroyed || !view.hasFocus()) return;
+              const stackItem = session.undoManager.undoStack.at(-1);
+              const saved = stackItem?.meta.get(metaKey) as UndoSelectionMeta | undefined;
+              if (stackItem && saved) stackItem.meta.set(metaKey, { ...saved, redo: relativeSelection() });
+            });
+          }
+          if (nextView.state.selection !== previousState.selection || nextView.state.doc !== previousState.doc) rememberSelection();
+        },
         destroy() {
-          session.undoManager.off("stack-item-added", onAdded);
+          session.undoManager.off("stack-item-added", saveSelection);
+          session.undoManager.off("stack-item-updated", saveSelection);
           session.undoManager.off("stack-item-popped", onPopped);
+          view.dom.removeEventListener("focus", rememberSelection);
         },
       };
     },
@@ -225,6 +295,19 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
   // Shift+Enter: a hard break where Markdown has one (paragraphs, list items, quotes, cells);
   // headings cannot hold a line break, so there it acts like Enter.
   const lineBreak = chainCommands(exitCode, insertHardBreak(), enter);
+  const backspace = chainCommands(
+    deleteEmptyTableOnBackspace,
+    liftFirstListItemOnBackspace,
+    deleteEmptyLaterListItemOnBackspace,
+    liftFirstQuoteParagraphOnBackspace,
+    codeBlockToParagraphOnBackspace,
+    headingToParagraphOnBackspace,
+    baseKeymap.Backspace,
+  );
+  const isolatedBackspace: Command = (state, dispatch, view) => {
+    session.undoManager.stopCapturing();
+    return backspace(state, dispatch, view);
+  };
 
   const shortcuts = keymap({
     "Mod-z": undo,
@@ -270,16 +353,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     // through to the browser and moved focus out of the editor — task #437).
     Tab: guard(chainCommands(goToNextCell(1), addRowOnEnterAtEnd, sinkListItem(schema.nodes.list_item))),
     "Shift-Tab": guard(chainCommands(goToNextCell(-1), liftListItem(schema.nodes.list_item))),
-    Backspace: guard(
-      chainCommands(
-        deleteEmptyTableOnBackspace,
-        liftEmptyListItemOnBackspace,
-        liftFirstQuoteParagraphOnBackspace,
-        codeBlockToParagraphOnBackspace,
-        headingToParagraphOnBackspace,
-        baseKeymap.Backspace,
-      ),
-    ),
+    Backspace: guard(isolatedBackspace),
   });
 
   const guardedBase: Record<string, Command> = {};

@@ -4,11 +4,11 @@ import { cloneElement, createContext, memo, useCallback, useContext, useEffect, 
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import { QUICK_REACTIONS, type CommentThread, type Reactions } from "@/editor/collab/comments";
+import { QUICK_REACTIONS, type CommentReply, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
 import { agentMentionLogin, mentionTriggerAt } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
-import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor } from "@/editor/collab/suggestion-block";
+import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import { wordDiff } from "@/editor/diff";
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
@@ -61,6 +61,76 @@ export function SuggestionDiff({ from, to }: { from: string; to: string }) {
     <div className="suggestion-diff" data-testid="suggestion-diff">
       {parts.map((c, i) => (c.added ? <ins key={i}>{c.value}</ins> : c.removed ? <del key={i}>{c.value}</del> : <span key={i}>{c.value}</span>))}
       {to === "" && from !== "" && <span className="ml-1 text-xs italic text-ink-4">(deletes the text)</span>}
+    </div>
+  );
+}
+
+type CommentSuggestionState = "pending" | "accepted" | "rejected" | "outdated";
+
+interface CommentSuggestionTarget {
+  thread: CommentThread;
+  reply: CommentReply | null;
+  block: SuggestionBlock;
+  state: CommentSuggestionState;
+}
+
+function commentSuggestionState(thread: CommentThread, stored: CommentReply["suggestionState"] | CommentThread["suggestionState"], text: string): CommentSuggestionState {
+  return stored ?? (isSuggestionOutdated(thread, text) ? "outdated" : "pending");
+}
+
+function commentSuggestionSource(
+  thread: CommentThread,
+  target: Pick<CommentThread, "suggestionState" | "suggestionQuote"> | Pick<CommentReply, "suggestionState" | "suggestionQuote">,
+): string {
+  return target.suggestionState ? (target.suggestionQuote ?? thread.quote) : thread.quote;
+}
+
+/** Root and reply suggestion blocks in display order, with each reply retaining its own decision. */
+function commentSuggestionTargets(threads: CommentThread[], text: string): CommentSuggestionTarget[] {
+  return threads.flatMap((thread) => {
+    const targets: CommentSuggestionTarget[] = [];
+    const root = parseSuggestionBlock(thread.body);
+    if (root) targets.push({ thread, reply: null, block: root, state: commentSuggestionState(thread, thread.suggestionState, text) });
+    for (const reply of thread.replies) {
+      const block = parseSuggestionBlock(reply.body);
+      if (block) targets.push({ thread, reply, block, state: commentSuggestionState(thread, reply.suggestionState, text) });
+    }
+    return targets;
+  });
+}
+
+function SuggestionActions({
+  state,
+  canAccept,
+  canReject,
+  onAccept,
+  onReject,
+}: {
+  state: CommentSuggestionState;
+  canAccept: boolean;
+  canReject: boolean;
+  onAccept: () => void | Promise<void>;
+  onReject: () => void | Promise<unknown>;
+}) {
+  if ((state !== "pending" && state !== "outdated") || (!canAccept && !canReject)) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()} data-testid="suggestion-actions">
+      {canAccept && (
+        <button
+          type="button"
+          className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
+          disabled={state === "outdated"}
+          onClick={() => void onAccept()}
+          data-testid="suggestion-accept-comment"
+        >
+          <Check size={13} /> Accept suggestion
+        </button>
+      )}
+      {canReject && (
+        <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap" onClick={() => void onReject()} data-testid="suggestion-reject-comment">
+          <X size={13} /> Reject
+        </button>
+      )}
     </div>
   );
 }
@@ -295,18 +365,31 @@ function useCommentOps(session: CollabSession) {
         return session.comments.add({ from, to, body, author: session.user });
       },
       /** Accept the thread's suggestion block. Editors apply it locally (one undo step); returns false when it could not be applied. */
-      async acceptSuggestion(threadId: string, proposed: string): Promise<boolean> {
+      async acceptSuggestion(threadId: string, proposed: string, replyId?: string): Promise<boolean> {
         if (viaApi) {
-          await api.documents.comment(id, { action: "suggestion", threadId, decision: "accept" });
+          await api.documents.comment(id, { action: "suggestion", threadId, replyId, decision: "accept" });
           return true;
         }
-        return session.comments.acceptSuggestion(threadId, proposed, session.user);
+        const before = session.comments.get(threadId);
+        session.undoManager.stopCapturing();
+        const ok = replyId ? session.comments.acceptReplySuggestion(threadId, replyId, session.user) : session.comments.acceptSuggestion(threadId, proposed, session.user);
+        const after = session.comments.get(threadId);
+        if (ok && before && after) {
+          session.rememberCommentSuggestionUndo({
+            threadId,
+            before: { anchor: before.anchor, quote: before.quote },
+            after: { anchor: after.anchor, quote: after.quote },
+          });
+        }
+        session.undoManager.stopCapturing();
+        return ok;
       },
-      async rejectSuggestion(threadId: string): Promise<boolean> {
+      async rejectSuggestion(threadId: string, replyId?: string): Promise<boolean> {
         if (viaApi) {
-          await api.documents.comment(id, { action: "suggestion", threadId, decision: "reject" });
+          await api.documents.comment(id, { action: "suggestion", threadId, replyId, decision: "reject" });
           return true;
         }
+        if (replyId) return session.comments.rejectReplySuggestion(threadId, replyId, session.user);
         return session.comments.rejectSuggestion(threadId, session.user);
       },
       async reply(threadId: string, body: string) {
@@ -597,6 +680,7 @@ function Composer({
 const ThreadCard = memo(function ThreadCard({
   thread,
   session,
+  text,
   active,
   onReveal,
   ops,
@@ -605,6 +689,7 @@ const ThreadCard = memo(function ThreadCard({
 }: {
   thread: CommentThread;
   session: CollabSession;
+  text: string;
   active: boolean;
   onReveal: (offset: number) => void;
   ops: ReturnType<typeof useCommentOps>;
@@ -629,18 +714,15 @@ const ThreadCard = memo(function ThreadCard({
   }, [active, unread, session.docId, thread.id, replyIds]);
 
   const suggestion = useMemo(() => parseSuggestionBlock(thread.body), [thread.body]);
-  const suggestionState: "pending" | "accepted" | "rejected" | "outdated" | null = suggestion
-    ? thread.suggestionState ?? (isSuggestionOutdated(thread, session.ytext.toString()) ? "outdated" : "pending")
-    : null;
+  const suggestionState = suggestion ? commentSuggestionState(thread, thread.suggestionState, text) : null;
 
-  const accept = async () => {
-    if (!suggestion) return;
-    const ok = await ops.acceptSuggestion(thread.id, suggestion.text);
+  const accept = async (block: SuggestionBlock, reply: CommentReply | null = null) => {
+    const ok = await ops.acceptSuggestion(thread.id, block.text, reply?.id);
     if (!ok) {
       onToast?.("The quoted text changed — this suggestion is outdated.", "error");
       return;
     }
-    onToast?.(`Accepted suggestion from ${thread.authorName}.`, "success", { label: "Undo", onClick: () => session.undo() });
+    onToast?.(`Accepted suggestion from ${reply?.authorName ?? thread.authorName}.`, "success", { label: "Undo", onClick: () => session.undo() });
   };
 
   return (
@@ -674,7 +756,7 @@ const ThreadCard = memo(function ThreadCard({
             <span className="shrink-0 text-xs text-ink-4">{relativeTime(thread.createdAt)}</span>
             <EditedMarker at={thread.editedAt} />
           </div>
-          {editing === "root" ? (
+          {editing === "root" && !thread.suggestionState ? (
             <div className="mt-1">
               <Composer
                 placeholder="Edit comment"
@@ -705,17 +787,14 @@ const ThreadCard = memo(function ThreadCard({
                     {suggestionState === "rejected" && <span className="suggestion-badge">Rejected</span>}
                     {suggestion.warning && <span className="ml-auto text-[11px] text-ink-4">{suggestion.warning}</span>}
                   </div>
-                  <SuggestionDiff from={thread.quote} to={suggestion.text} />
-                  {canEdit && (suggestionState === "pending" || suggestionState === "outdated") && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <button type="button" className="btn btn-sm btn-primary gap-1.5" disabled={suggestionState === "outdated"} onClick={() => void accept()} data-testid="suggestion-accept-comment">
-                        <Check size={13} /> Accept suggestion
-                      </button>
-                      <button type="button" className="btn btn-sm btn-outline gap-1.5" onClick={() => void ops.rejectSuggestion(thread.id)} data-testid="suggestion-reject-comment">
-                        <X size={13} /> Reject
-                      </button>
-                    </div>
-                  )}
+                  <SuggestionDiff from={commentSuggestionSource(thread, thread)} to={suggestion.text} />
+                  <SuggestionActions
+                    state={suggestionState}
+                    canAccept={canEdit}
+                    canReject={canComment}
+                    onAccept={() => accept(suggestion)}
+                    onReject={() => ops.rejectSuggestion(thread.id)}
+                  />
                 </div>
               )}
               <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, null, emoji)} />
@@ -745,7 +824,7 @@ const ThreadCard = memo(function ThreadCard({
                 </button>
               }
             >
-              {thread.authorId === me && (
+              {thread.authorId === me && !thread.suggestionState && (
                 <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
                   Edit
                 </MenuItem>
@@ -760,72 +839,88 @@ const ThreadCard = memo(function ThreadCard({
 
       {thread.replies.length > 0 && (
         <div className="mt-3 flex flex-col gap-3 border-l border-line pl-3">
-          {thread.replies.map((r) => (
-            <div key={r.id} className="flex items-start gap-2.5" data-testid="comment-reply" data-reply-id={r.id}>
-              <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2">
-                  <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
-                  <span className="shrink-0 text-xs text-ink-4">{relativeTime(r.createdAt)}</span>
-                  <EditedMarker at={r.editedAt} />
-                </div>
-                {editing === r.id ? (
-                  <div className="mt-1">
-                    <Composer
-                      placeholder="Edit reply"
-                      initial={r.body}
-                      autoFocus
-                      submitLabel="Save"
-                      onSubmit={async (body) => {
-                        await ops.edit(thread.id, body, r.id);
-                        setEditing(null);
-                      }}
-                      onCancel={() => setEditing(null)}
-                    />
+          {thread.replies.map((r) => {
+            const block = parseSuggestionBlock(r.body);
+            const state = block ? commentSuggestionState(thread, r.suggestionState, text) : null;
+            return (
+              <div key={r.id} className="flex items-start gap-2.5" data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
+                <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
+                    <span className="shrink-0 text-xs text-ink-4">{relativeTime(r.createdAt)}</span>
+                    <EditedMarker at={r.editedAt} />
                   </div>
-                ) : (
-                  <>
-                    <MentionBody body={r.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
-                    {(() => {
-                      const block = parseSuggestionBlock(r.body);
-                      return block ? (
-                        <div className="suggestion-box mt-1.5" data-testid="suggestion-box" data-state="reply">
+                  {editing === r.id && !r.suggestionState ? (
+                    <div className="mt-1">
+                      <Composer
+                        placeholder="Edit reply"
+                        initial={r.body}
+                        autoFocus
+                        submitLabel="Save"
+                        onSubmit={async (body) => {
+                          await ops.edit(thread.id, body, r.id);
+                          setEditing(null);
+                        }}
+                        onCancel={() => setEditing(null)}
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <MentionBody body={r.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
+                      {block && state && (
+                        <div className="suggestion-box mt-1.5" onClick={(event) => event.stopPropagation()} data-testid="suggestion-box" data-state={state}>
                           <div className="suggestion-box-head">
                             <Wand2 size={12} aria-hidden />
                             <span>Suggested change</span>
+                            {state === "outdated" && (
+                              <span className="suggestion-badge" data-testid="suggestion-outdated" title="The quoted text changed since this was suggested">
+                                Outdated
+                              </span>
+                            )}
+                            {state === "accepted" && <span className="suggestion-badge suggestion-badge-ok">Accepted</span>}
+                            {state === "rejected" && <span className="suggestion-badge">Rejected</span>}
+                            {block.warning && <span className="ml-auto text-[11px] text-ink-4">{block.warning}</span>}
                           </div>
-                          <SuggestionDiff from={thread.quote} to={block.text} />
+                          <SuggestionDiff from={commentSuggestionSource(thread, r)} to={block.text} />
+                          <SuggestionActions
+                            state={state}
+                            canAccept={canEdit}
+                            canReject={canComment}
+                            onAccept={() => accept(block, r)}
+                            onReject={() => ops.rejectSuggestion(thread.id, r.id)}
+                          />
                         </div>
-                      ) : null;
-                    })()}
-                    <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
-                  </>
+                      )}
+                      <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
+                    </>
+                  )}
+                </div>
+                {(r.authorId === me || canModerate) && (
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <LazyMenu
+                      align="end"
+                      className="w-36"
+                      trigger={
+                        <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
+                          <MoreHorizontal size={14} />
+                        </button>
+                      }
+                    >
+                      {r.authorId === me && !r.suggestionState && (
+                        <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
+                          Edit
+                        </MenuItem>
+                      )}
+                      <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
+                        Delete
+                      </MenuItem>
+                    </LazyMenu>
+                  </div>
                 )}
               </div>
-              {(r.authorId === me || canModerate) && (
-                <div onClick={(e) => e.stopPropagation()}>
-                  <LazyMenu
-                    align="end"
-                    className="w-36"
-                    trigger={
-                      <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
-                        <MoreHorizontal size={14} />
-                      </button>
-                    }
-                  >
-                    {r.authorId === me && (
-                      <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
-                        Edit
-                      </MenuItem>
-                    )}
-                    <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
-                      Delete
-                    </MenuItem>
-                  </LazyMenu>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -907,15 +1002,14 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
 }
 
 /** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
-function ReviewCard({ review, threads, session, ops, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; ops: ReturnType<typeof useCommentOps>; onToast?: CommentsPanelProps["onToast"] }) {
+function ReviewCard({ review, threads, session, text, ops, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; onToast?: CommentsPanelProps["onToast"] }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const canEdit = session.role === "owner" || session.role === "editor";
   const mine = threads.filter((t) => review.threadIds.includes(t.id));
-  const text = session.ytext.toString();
-  const withSuggestion = mine.map((t) => ({ t, block: parseSuggestionBlock(t.body) })).filter((x): x is { t: CommentThread; block: NonNullable<ReturnType<typeof parseSuggestionBlock>> } => x.block !== null);
-  const pending = withSuggestion.filter((x) => !x.t.suggestionState);
-  const applicable = pending.filter((x) => !isSuggestionOutdated(x.t, text));
+  const withSuggestion = commentSuggestionTargets(mine, text);
+  const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
+  const applicable = pending.filter((target) => target.state === "pending");
 
   /** Each suggestion is its own transaction (its own undo step); failures are counted, not fatal. */
   const decideAll = async (accept: boolean) => {
@@ -923,9 +1017,9 @@ function ReviewCard({ review, threads, session, ops, onToast }: { review: Review
     let done = 0;
     let failed = 0;
     try {
-      for (const { t, block } of accept ? applicable : pending) {
+      for (const { thread, reply, block } of accept ? applicable : pending) {
         try {
-          const ok = accept ? await ops.acceptSuggestion(t.id, block.text) : await ops.rejectSuggestion(t.id);
+          const ok = accept ? await ops.acceptSuggestion(thread.id, block.text, reply?.id) : await ops.rejectSuggestion(thread.id, reply?.id);
           if (ok) done++;
           else failed++;
         } catch {
@@ -975,8 +1069,9 @@ function ReviewCard({ review, threads, session, ops, onToast }: { review: Review
       {open && (
         <ul className="mt-2 flex flex-col gap-1 border-t border-line pt-2" data-testid="review-threads">
           {mine.map((t) => {
-            const block = parseSuggestionBlock(t.body);
-            const state = block ? t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending") : null;
+            const targets = withSuggestion.filter((target) => target.thread.id === t.id);
+            const pendingTargets = targets.filter((target) => target.state === "pending" || target.state === "outdated");
+            const state = targets.length === 1 ? targets[0].state : pendingTargets.length > 0 ? `${pendingTargets.length} pending` : targets.length > 0 ? "all decided" : null;
             return (
               <li key={t.id}>
                 <button
@@ -1026,6 +1121,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
+  const text = useSessionValue(session, (s) => s.ytext.toString());
   const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode } = useSessionValue(
     session,
     (s) => ({
@@ -1045,23 +1141,30 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
+  const commentSuggestions = useMemo(
+    () => commentSuggestionTargets(threads, text).filter((target) => target.state === "pending" || target.state === "outdated"),
+    [threads, text],
+  );
+  const commentSuggestionThreads = threads.filter((thread) => commentSuggestions.some((target) => target.thread.id === thread.id));
+  const suggestionCount = suggestions.length + commentSuggestions.length;
   // Land on Suggestions when the user is suggesting or when that is the only tab with anything to review (#117).
-  const [tab, setTab] = useState<Tab>(() => (mode === "suggesting" || (open.length === 0 && suggestions.length > 0) ? "suggestions" : "open"));
+  const [tab, setTab] = useState<Tab>(() => (mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open"));
+  const [bulkBusy, setBulkBusy] = useState(false);
   const canAct = session.role === "owner" || session.role === "editor";
 
   // The first suggestion that appears while the panel is open switches to the Suggestions tab, once per mount,
   // so a user who switched back is not fought. Skipped while a comment is being composed on the Open tab.
   const autoSwitched = useRef(false);
-  const prevSuggestionCount = useRef(suggestions.length);
+  const prevSuggestionCount = useRef(suggestionCount);
   useEffect(() => {
-    const arrived = prevSuggestionCount.current === 0 && suggestions.length > 0;
-    prevSuggestionCount.current = suggestions.length;
+    const arrived = prevSuggestionCount.current === 0 && suggestionCount > 0;
+    prevSuggestionCount.current = suggestionCount;
     if (!arrived || autoSwitched.current || pending) return;
     if (mode !== "suggesting" && open.length > 0) return;
     autoSwitched.current = true;
     setTab("suggestions");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestions.length]);
+  }, [suggestionCount]);
 
   useEffect(() => {
     if (activeSuggestionId) setTab("suggestions");
@@ -1083,8 +1186,27 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   const tabs: { id: Tab; label: string; count: number }[] = [
     { id: "open", label: "Open", count: open.length },
     { id: "resolved", label: "Resolved", count: resolved.length },
-    { id: "suggestions", label: "Suggestions", count: suggestions.length },
+    { id: "suggestions", label: "Suggestions", count: suggestionCount },
   ];
+
+  const decideAllSuggestions = async (accept: boolean) => {
+    setBulkBusy(true);
+    try {
+      if (accept) session.suggestions.acceptAll();
+      else session.suggestions.rejectAll();
+      for (const { thread, reply, block, state } of commentSuggestions) {
+        if (accept && state === "outdated") continue;
+        try {
+          if (accept) await ops.acceptSuggestion(thread.id, block.text, reply?.id);
+          else await ops.rejectSuggestion(thread.id, reply?.id);
+        } catch {
+          // Another collaborator may have decided it while this batch was running.
+        }
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   return (
     <MentionCandidatesContext.Provider value={candidates}>
@@ -1117,7 +1239,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
         {tab === "open" && reviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {reviews.map((r) => (
-              <ReviewCard key={r.id} review={r} threads={threads} session={session} ops={ops} onToast={onToast} />
+              <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
             ))}
           </div>
         )}
@@ -1146,10 +1268,10 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
         {tab === "open" &&
           (open.length === 0 && !pending ? (
             <EmptyState icon={<MessageSquare size={28} />} title="No open comments">
-              {suggestions.length > 0 && (
+              {suggestionCount > 0 && (
                 <span className="mb-3 flex flex-wrap items-center justify-center gap-1 text-ink-3" data-testid="comments-empty-suggestions">
                   <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={() => setTab("suggestions")} data-testid="comments-empty-suggestions-button">
-                    <Sparkles size={13} /> {suggestions.length === 1 ? "1 suggestion" : `${suggestions.length} suggestions`} waiting <ArrowRight size={13} />
+                    <Sparkles size={13} /> {suggestionCount === 1 ? "1 suggestion" : `${suggestionCount} suggestions`} waiting <ArrowRight size={13} />
                   </button>
                 </span>
               )}
@@ -1164,16 +1286,16 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
               )}
             </EmptyState>
           ) : (
-            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
+            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} text={text} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
           ))}
         {tab === "resolved" &&
           (resolved.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
-            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
+            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} text={text} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
           ))}
         {tab === "suggestions" &&
-          (suggestions.length === 0 ? (
+          (suggestionCount === 0 ? (
             <EmptyState icon={<Sparkles size={28} />} title="No pending suggestions">
               Switch to <strong>Suggesting</strong> mode to propose edits that others can accept or reject.
             </EmptyState>
@@ -1181,16 +1303,35 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
             <>
               {canAct && (
                 <div className="flex items-center justify-end gap-2 text-xs">
-                  <button type="button" className="btn btn-sm btn-ghost text-success" onClick={() => session.suggestions.acceptAll()} data-testid="accept-all">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost text-success"
+                    disabled={bulkBusy || (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))}
+                    onClick={() => void decideAllSuggestions(true)}
+                    data-testid="accept-all"
+                  >
                     Accept all
                   </button>
-                  <button type="button" className="btn btn-sm btn-ghost text-danger" onClick={() => session.suggestions.rejectAll()} data-testid="reject-all">
+                  <button type="button" className="btn btn-sm btn-ghost text-danger" disabled={bulkBusy} onClick={() => void decideAllSuggestions(false)} data-testid="reject-all">
                     Reject all
                   </button>
                 </div>
               )}
               {suggestions.map((s) => (
                 <SuggestionCard key={s.id} s={s} session={session} active={s.id === activeSuggestionId} onReveal={onReveal} />
+              ))}
+              {commentSuggestionThreads.map((thread) => (
+                <ThreadCard
+                  key={`suggestion-${thread.id}`}
+                  thread={thread}
+                  session={session}
+                  text={text}
+                  active={thread.id === activeCommentId}
+                  unread={hasUnread(thread)}
+                  onReveal={onReveal}
+                  ops={ops}
+                  onToast={onToast}
+                />
               ))}
             </>
           ))}
@@ -1199,4 +1340,3 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
     </MentionCandidatesContext.Provider>
   );
 }
-

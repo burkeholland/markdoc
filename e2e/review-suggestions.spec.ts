@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, type User } from "./helpers";
 
 const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
@@ -38,6 +38,35 @@ async function suggestChange(page: Page, quote: string, replacement: string) {
   await expect(composer).toHaveValue(`\`\`\`suggestion\n${quote}\n\`\`\``);
   await page.keyboard.type(replacement);
   await page.keyboard.press("ControlOrMeta+Enter");
+}
+
+async function addComment(page: Page, quote: string, body: string): Promise<string> {
+  await selectTextInRich(page, quote);
+  await page.getByTestId("tb-comment").click();
+  const composer = page.getByTestId("comment-composer");
+  await expect(composer).toBeFocused();
+  await composer.fill(body);
+  await page.keyboard.press("ControlOrMeta+Enter");
+  const thread = page.getByTestId("comment-thread").filter({ hasText: body }).first();
+  await expect(thread).toBeVisible();
+  return (await thread.getAttribute("data-thread-id"))!;
+}
+
+async function expectSuggestionTransition(diff: Locator, from: string, to: string) {
+  await expect
+    .poll(() =>
+      diff.evaluate((element) => {
+        let renderedFrom = "";
+        let renderedTo = "";
+        for (const child of element.children) {
+          const value = child.textContent ?? "";
+          if (child.tagName !== "INS") renderedFrom += value;
+          if (child.tagName !== "DEL") renderedTo += value;
+        }
+        return { from: renderedFrom, to: renderedTo };
+      }),
+    )
+    .toEqual({ from, to });
 }
 
 test.describe("review suggestions: ```suggestion blocks in comments, Accept / Reject, agent reviews", () => {
@@ -166,6 +195,201 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     }
   });
 
+  test("an agent reply suggestion has responsive actions, applies within one second, persists its exact decision, and undoes in one step", async ({}, testInfo) => {
+    const docId = await freshDocument();
+    const threadId = await addComment(bob.page, "sales are good", "Can Copilot tighten this?");
+    const { id: replyId } = await mcp<{ id: string }>(alice.page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId,
+      body: "Yes — this is more direct.\n\n```suggestion\nsales are strong\n```",
+    });
+    const page = alice.page;
+    const reply = () => page.locator(`[data-testid="comment-reply"][data-reply-id="${replyId}"]`);
+    const expectReplyEditHidden = async () => {
+      await reply().getByRole("button", { name: "Reply actions" }).click();
+      await expect(page.getByRole("menuitem", { name: "Delete", exact: true })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Edit", exact: true })).toHaveCount(0);
+      await page.keyboard.press("Escape");
+    };
+    await expect(reply()).toHaveAttribute("data-state", "pending");
+
+    for (const [width, height] of [
+      [552, 1211],
+      [1280, 800],
+    ] as const) {
+      await page.setViewportSize({ width, height });
+      await ensureCommentsOpen(page);
+      const box = reply().getByTestId("suggestion-box");
+      await expect(box).toBeVisible();
+      const boxMetrics = await box.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+      expect(boxMetrics.scrollWidth, `${width}px suggestion box overflow`).toBeLessThanOrEqual(boxMetrics.clientWidth);
+      for (const [testId, label] of [
+        ["suggestion-accept-comment", "Accept suggestion"],
+        ["suggestion-reject-comment", "Reject"],
+      ] as const) {
+        const button = reply().getByTestId(testId);
+        await expect(button).toBeVisible();
+        await expect(button).toHaveText(label);
+        const metrics = await button.evaluate((element) => ({
+          clientHeight: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+          right: element.getBoundingClientRect().right,
+        }));
+        expect(metrics.scrollHeight, `${width}px ${label} wrapped`).toBeLessThanOrEqual(metrics.clientHeight);
+        expect(metrics.right, `${width}px ${label} outside viewport`).toBeLessThanOrEqual(width);
+      }
+      if (width === 552) {
+        const path = testInfo.outputPath("reply-suggestion-552x1211.png");
+        await page.screenshot({ path });
+        await testInfo.attach("reply-suggestion-552x1211", { path, contentType: "image/png" });
+      }
+    }
+
+    const started = Date.now();
+    await reply().getByTestId("suggestion-accept-comment").click();
+    await expect.poll(() => codeText(page), { timeout: 1_000 }).toContain("sales are strong");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    await expect(reply()).toHaveAttribute("data-state", "accepted");
+    await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
+    await expect(page.getByTestId("toast")).toContainText("Accepted suggestion from Copilot");
+    await expect(page.getByTestId("toast-action")).toHaveText("Undo");
+    await expectReplyEditHidden();
+
+    const comments = (await (await page.request.get(`/api/documents/${docId}/comments`)).json()) as {
+      comments: { id: string; replies: { id: string; suggestion: { state: string; source: string; at: string | null } | null }[] }[];
+    };
+    expect(comments.comments.find((thread) => thread.id === threadId)?.replies.find((item) => item.id === replyId)?.suggestion).toMatchObject({
+      state: "accepted",
+      source: "sales are good",
+      at: expect.any(String),
+    });
+    const activity = (await (await page.request.get(`/api/documents/${docId}/activity?limit=200`)).json()) as {
+      items: { action: string; detail: { replyId?: string; threadId?: string } }[];
+    };
+    expect(activity.items.filter((item) => item.action === "comment.suggestion.accepted" && item.detail.replyId === replyId)).toEqual([
+      expect.objectContaining({ detail: expect.objectContaining({ threadId, replyId }) }),
+    ]);
+
+    await page.getByTestId("toast-action").click();
+    await expect.poll(() => codeText(page)).toContain("sales are good");
+    await expect
+      .poll(async () => {
+        const undone = (await (await page.request.get(`/api/documents/${docId}/comments`)).json()) as {
+          comments: { id: string; quote: string; currentText: string | null }[];
+        };
+        return undone.comments.find((thread) => thread.id === threadId);
+      })
+      .toMatchObject({ quote: "sales are good", currentText: "sales are good" });
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await expect(reply()).toHaveAttribute("data-state", "accepted");
+    await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
+    await expectReplyEditHidden();
+  });
+
+  test("reply suggestions stay independent in bulk review; outdated replies can be rejected once", async () => {
+    const docId = await freshDocument();
+    const page = alice.page;
+    const bulkThreadId = await addComment(bob.page, "very unique", "Give me two alternatives.");
+    const first = await mcp<{ id: string }>(page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId: bulkThreadId,
+      body: "First option.\n\n```suggestion\nunique\n```",
+    });
+    const second = await mcp<{ id: string }>(page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId: bulkThreadId,
+      body: "Second option.\n\n```suggestion\ndistinctive\n```",
+    });
+
+    await page.getByTestId("comments-tab-suggestions").click();
+    await expect(page.getByTestId("comments-tab-suggestions")).toHaveText(/Suggestions\s*2$/);
+    await page.getByTestId("accept-all").click();
+    await expect.poll(() => codeText(page)).toContain("Our product is distinctive.");
+    await page.getByTestId("comments-tab-open").click();
+    const bulkThread = page.locator(`[data-testid="comment-thread"][data-thread-id="${bulkThreadId}"]`);
+    const firstReply = bulkThread.locator(`[data-reply-id="${first.id}"]`);
+    const secondReply = bulkThread.locator(`[data-reply-id="${second.id}"]`);
+    await expect(firstReply).toHaveAttribute("data-state", "accepted");
+    await expect(secondReply).toHaveAttribute("data-state", "accepted");
+    await expectSuggestionTransition(firstReply.getByTestId("suggestion-diff"), "very unique", "unique");
+    await expectSuggestionTransition(secondReply.getByTestId("suggestion-diff"), "unique", "distinctive");
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await page.getByTestId("comments-tab-open").click();
+    const reloadedBulkThread = page.locator(`[data-testid="comment-thread"][data-thread-id="${bulkThreadId}"]`);
+    await expectSuggestionTransition(reloadedBulkThread.locator(`[data-reply-id="${first.id}"]`).getByTestId("suggestion-diff"), "very unique", "unique");
+    await expectSuggestionTransition(reloadedBulkThread.locator(`[data-reply-id="${second.id}"]`).getByTestId("suggestion-diff"), "unique", "distinctive");
+
+    const staleThreadId = await addComment(bob.page, "sales are good", "Can this be stronger?");
+    const stale = await mcp<{ id: string }>(page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId: staleThreadId,
+      body: "Try this.\n\n```suggestion\nsales are excellent\n```",
+    });
+    const staleReply = page.locator(`[data-testid="comment-reply"][data-reply-id="${stale.id}"]`);
+    await expect(staleReply).toHaveAttribute("data-state", "pending");
+    await selectTextInRich(page, "good");
+    await page.keyboard.type("okay");
+    await expect.poll(() => codeText(page)).toContain("sales are okay");
+    await expect(staleReply).toHaveAttribute("data-state", "outdated");
+    await expect(staleReply.getByTestId("suggestion-accept-comment")).toBeDisabled();
+    await expect(staleReply.getByTestId("suggestion-reject-comment")).toBeEnabled();
+
+    const staleAccept = await page.request.post(`/api/documents/${docId}/comments`, {
+      data: { action: "suggestion", threadId: staleThreadId, replyId: stale.id, decision: "accept" },
+    });
+    expect(staleAccept.status()).toBe(409);
+    await staleReply.getByTestId("suggestion-reject-comment").click();
+    await expect(staleReply).toHaveAttribute("data-state", "rejected");
+    expect(await codeText(page)).toContain("sales are okay");
+    const repeat = await page.request.post(`/api/documents/${docId}/comments`, {
+      data: { action: "suggestion", threadId: staleThreadId, replyId: stale.id, decision: "reject" },
+    });
+    expect(repeat.status()).toBe(409);
+    await page.reload();
+    await ensureCommentsOpen(page);
+    await expect(page.locator(`[data-testid="comment-reply"][data-reply-id="${stale.id}"]`)).toHaveAttribute("data-state", "rejected");
+  });
+
+  test("an accepted root keeps its original diff while a pending reply follows the advanced anchor", async () => {
+    const docId = await freshDocument();
+    const page = bob.page;
+    await selectTextInRich(page, "sales are good");
+    await page.getByTestId("tb-comment").click();
+    await page.getByTestId("comment-composer").fill("Root option.\n\n```suggestion\nsales are strong\n```");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    const authoredThread = page.getByTestId("comment-thread").filter({ hasText: "Root option." }).first();
+    await expect(authoredThread).toBeVisible();
+    const threadId = (await authoredThread.getAttribute("data-thread-id"))!;
+    const reply = await mcp<{ id: string }>(alice.page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId,
+      body: "Another option.\n\n```suggestion\nsales are excellent\n```",
+    });
+
+    const thread = alice.page.locator(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`);
+    await thread.getByTestId("suggestion-box").first().getByTestId("suggestion-accept-comment").click();
+    await expect.poll(() => codeText(alice.page)).toContain("sales are strong");
+    await alice.page.getByTestId("comments-tab-resolved").click();
+    await expect(thread).toHaveAttribute("data-suggestion", "accepted");
+    const replyCard = thread.locator(`[data-reply-id="${reply.id}"]`);
+    await expect(replyCard).toHaveAttribute("data-state", "pending");
+    await expectSuggestionTransition(thread.getByTestId("suggestion-diff").first(), "sales are good", "sales are strong");
+    await expectSuggestionTransition(replyCard.getByTestId("suggestion-diff"), "sales are strong", "sales are excellent");
+
+    await alice.page.reload();
+    await ensureCommentsOpen(alice.page);
+    const reloaded = alice.page.locator(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`);
+    await expectSuggestionTransition(reloaded.getByTestId("suggestion-diff").first(), "sales are good", "sales are strong");
+    await expectSuggestionTransition(reloaded.locator(`[data-reply-id="${reply.id}"]`).getByTestId("suggestion-diff"), "sales are strong", "sales are excellent");
+  });
+
   test("Reject keeps the text; editing the quoted text first marks the suggestion Outdated and disables Accept", async () => {
     await freshDocument();
     const page = alice.page;
@@ -264,6 +488,13 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       comments: [{ quote: "The end is near.", body: "Softer close.\n\n```suggestion\nThat is all for now.\n```" }],
     });
     await expect(alice.page.getByTestId("review-card").first()).toBeVisible();
+    const replyThreadId = await addComment(bob.page, "We launched recently", "Could an agent tighten this?");
+    const reply = await mcp<{ id: string }>(alice.page, token, "markdoc_comment", {
+      id: docId,
+      action: "reply",
+      threadId: replyThreadId,
+      body: "Yes.\n\n```suggestion\nWe launched in March\n```",
+    });
 
     await shareWith(alice.page, docId, "carol", "viewer");
     const carol = await signIn(browser, "carol");
@@ -276,6 +507,11 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       await expect(thread.getByTestId("suggestion-diff")).toBeVisible();
       await expect(thread.getByTestId("suggestion-accept-comment")).toHaveCount(0);
       await expect(thread.getByTestId("suggestion-reject-comment")).toHaveCount(0);
+      const replySuggestion = carol.page.locator(`[data-testid="comment-reply"][data-reply-id="${reply.id}"]`);
+      await expect(replySuggestion).toHaveAttribute("data-state", "pending");
+      await expect(replySuggestion.getByTestId("suggestion-diff")).toBeVisible();
+      await expect(replySuggestion.getByTestId("suggestion-accept-comment")).toHaveCount(0);
+      await expect(replySuggestion.getByTestId("suggestion-reject-comment")).toHaveCount(0);
       await expect(carol.page.getByTestId("review-card").first()).toBeVisible();
       await expect(carol.page.getByTestId("review-accept-all")).toHaveCount(0);
       await expect(carol.page.getByTestId("review-reject-all")).toHaveCount(0);

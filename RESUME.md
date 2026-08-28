@@ -1,11 +1,19 @@
 # Resuming Markdoc after a machine wipe
 
 What Markdoc keeps on the box, where it lives, what the snapshot contains, and how to get back
-to a running `http://localhost:3000` from GitHub plus one snapshot. The factory-wide script
+to a running `http://SURF:3000` from GitHub plus one snapshot. The factory-wide script
 (`burkeholland/factory-resume/bootstrap.ps1`, owned by the board team) clones every repo under
 `$FACTORY_ROOT`, restores the latest `factory-state` snapshot, re-registers scheduled tasks,
 starts services and then runs `scripts/live/resume-check.ps1` from this repo. Everything
 Markdoc-specific it relies on is described here.
+
+`http://SURF:3000` is the canonical live browser URL (`http://SURF.local:3000` is the hostname
+alias). Do not bookmark or publish a `192.168.*` address: DHCP can change it, and numeric addresses
+printed by the server are secondary adapter diagnostics only. The canonical name comes directly
+from the Windows machine identity rather than an interface, so a WSL virtual adapter is never
+selected. The first move from an old numeric origin requires one sign-in at `SURF`; cookies,
+`localStorage`, and IndexedDB are origin-scoped. Reconnect and save any unsynced edit at the old
+origin before moving, or copy it manually -- it cannot be invisibly migrated to the hostname.
 
 ## State on this machine
 

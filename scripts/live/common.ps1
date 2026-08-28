@@ -16,6 +16,22 @@ function Write-Step {
   Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message)
 }
 
+function Get-StableMachineHostname {
+  # DNS host name is machine identity, not an adapter choice. Strip an mDNS suffix so SURF and
+  # SURF.local always produce the same canonical URL and a WSL virtual adapter can never win.
+  $name = [System.Net.Dns]::GetHostName()
+  if (-not $name) { $name = $env:COMPUTERNAME }
+  $name = "$name".Trim().TrimEnd('.')
+  if ($name.ToLowerInvariant().EndsWith('.local')) { $name = $name.Substring(0, $name.Length - 6) }
+  if (-not $name) { return 'localhost' }
+  return $name
+}
+
+function Get-LiveAccessUrl {
+  param([int]$Port)
+  return "http://$(Get-StableMachineHostname):$Port"
+}
+
 function Write-OpsLog {
   # One "<ts> <message>" line appended to an ops log (markdoc-data\watchdog.log, markdoc-data\snapshot.log) and
   # echoed to the console. The scheduled tasks run hidden, so the file is the only trace a run leaves; a log that
@@ -370,4 +386,3 @@ function Get-DocumentsAsDevUser {
   }
   return $null
 }
-

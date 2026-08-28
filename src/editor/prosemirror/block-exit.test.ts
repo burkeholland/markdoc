@@ -14,7 +14,8 @@ import {
   exitTableBelow,
   headingToParagraphOnBackspace,
   insertHardBreak,
-  liftEmptyListItemOnBackspace,
+  liftFirstListItemOnBackspace,
+  deleteEmptyLaterListItemOnBackspace,
   liftEmptyQuoteParagraph,
   liftFirstQuoteParagraphOnBackspace,
   splitListItemUnchecked,
@@ -42,7 +43,8 @@ const shiftEnter = chainCommands(exitCode, insertHardBreak(), enter);
 const modEnter = chainCommands(exitCode, exitTableBelow, insertHardBreak());
 const backspace = chainCommands(
   deleteEmptyTableOnBackspace,
-  liftEmptyListItemOnBackspace,
+  liftFirstListItemOnBackspace,
+  deleteEmptyLaterListItemOnBackspace,
   liftFirstQuoteParagraphOnBackspace,
   codeBlockToParagraphOnBackspace,
   headingToParagraphOnBackspace,
@@ -74,6 +76,35 @@ function press(state: EditorState, command: Command): EditorState {
   });
   expect(ok, "the key is handled by the editor").toBe(true);
   return next;
+}
+
+/** Runs the project keymap, then models the browser's native inline deletion when it falls through. */
+function pressBackspace(state: EditorState): EditorState {
+  let next = state;
+  if (backspace(state, (tr) => (next = state.apply(tr)))) return next;
+  const { from, to } = state.selection;
+  expect(from, "native Backspace has a character before the caret").toBeGreaterThan(0);
+  return state.apply(state.tr.delete(from - 1, to));
+}
+
+function selectionInListItem(markdown: string, itemIndex: number, from: number, to = from): EditorState {
+  const doc = parseMarkdown(markdown).doc;
+  let found: { pos: number; size: number } | null = null;
+  let seen = 0;
+  doc.descendants((node, pos, parent) => {
+    if (found) return false;
+    if (node.type === schema.nodes.paragraph && parent?.type === schema.nodes.list_item && seen++ === itemIndex) {
+      found = { pos: pos + 1, size: node.content.size };
+      return false;
+    }
+    return true;
+  });
+  if (!found) throw new Error(`no list item ${itemIndex} in ${markdown}`);
+  const { pos, size } = found as { pos: number; size: number };
+  return EditorState.create({
+    doc,
+    selection: TextSelection.create(doc, pos + Math.min(from, size), pos + Math.min(to, size)),
+  });
 }
 
 function type(state: EditorState, text: string): EditorState {
@@ -189,10 +220,10 @@ describe("blockquote", () => {
 });
 
 describe("lists", () => {
-  for (const [name, text, item] of [
-    ["bullet", "- one\n- two", "- "],
-    ["ordered", "1. one\n2. two", "3. "],
-    ["task", "- [ ] one\n- [x] two", "- [ ] "],
+  for (const [name, text, item, firstMarker, secondMarker, remainingMarker, markerPattern] of [
+    ["bullet", "- one\n- two", "- ", "- first bullet text", "- second bullet text", "- second bullet text", /^- /gm],
+    ["ordered", "1. one\n2. two", "3. ", "1. first bullet text", "2. second bullet text", "1. second bullet text", /^\d+\. /gm],
+    ["task", "- [ ] one\n- [x] two", "- [ ] ", "- [ ] first bullet text", "- [x] second bullet text", "- [x] second bullet text", /^- \[[ x]\] /gm],
   ] as const) {
     it(`${name}: Enter makes an item, Enter on the empty item leaves the list`, () => {
       let s = press(caretIn(text, "paragraph", undefined, 1), enter);
@@ -213,6 +244,76 @@ describe("lists", () => {
       const lifted = press(caretIn(text, "paragraph", 0, 0), backspace);
       expect(caretPath(lifted)).toBe("paragraph");
       expect(md(lifted).split("\n")[0]).toBe("one");
+    });
+
+    it(`${name}: repeated Backspace at the first item start removes structure, joins backward, then deletes one character`, () => {
+      const initial = `Paragraph above.\n\n${firstMarker}\n${secondMarker}\n\nParagraph below.`;
+      let s = pressBackspace(selectionInListItem(initial, 0, 0));
+      expect(md(s)).toBe(`Paragraph above.\n\nfirst bullet text\n\n${remainingMarker}\n\nParagraph below.`);
+      expect(caretPath(s)).toBe("paragraph");
+      expect(s.selection.$from.parentOffset).toBe(0);
+      s = pressBackspace(s);
+      expect(md(s)).toBe(`Paragraph above.first bullet text\n\n${remainingMarker}\n\nParagraph below.`);
+      expect(s.selection.$from.parentOffset).toBe("Paragraph above.".length);
+      s = pressBackspace(s);
+      expect(md(s)).toBe(`Paragraph abovefirst bullet text\n\n${remainingMarker}\n\nParagraph below.`);
+      expect((md(s).match(markerPattern) ?? []).length).toBe(1);
+    });
+
+    it(`${name}: Backspace at the end or over a selection only deletes that content`, () => {
+      const initial = `Paragraph above.\n\n${firstMarker}\n${secondMarker}\n\nParagraph below.`;
+      const atEnd = pressBackspace(selectionInListItem(initial, 0, "first bullet text".length));
+      expect(md(atEnd)).toBe(initial.replace("first bullet text", "first bullet tex"));
+
+      const selected = pressBackspace(selectionInListItem(initial, 1, 0, "second bullet text".length));
+      expect(selected.doc.textContent).not.toContain("second bullet text");
+      expect(selected.doc.textContent).toContain("first bullet text");
+      expect((md(selected).match(markerPattern) ?? []).length).toBe(2);
+    });
+
+    it(`${name}: later and empty items join backward without resurrecting their marker`, () => {
+      const initial = `Paragraph above.\n\n${firstMarker}\n${secondMarker}\n\nParagraph below.`;
+      let later = pressBackspace(selectionInListItem(initial, 1, 0));
+      expect((md(later).match(markerPattern) ?? []).length).toBe(1);
+      expect(later.doc.textContent.match(/first bullet text/g)).toHaveLength(1);
+      expect(later.doc.textContent.match(/second bullet text/g)).toHaveLength(1);
+      expect(later.selection.$from.parentOffset).toBe(0);
+      later = pressBackspace(later);
+      expect((md(later).match(markerPattern) ?? []).length).toBe(1);
+      expect(later.doc.textContent).toContain("first bullet textsecond bullet text");
+      later = pressBackspace(later);
+      expect((md(later).match(markerPattern) ?? []).length).toBe(1);
+      expect(later.doc.textContent).toContain("first bullet texsecond bullet text");
+
+      let selected = pressBackspace(selectionInListItem(initial, 1, 0, "second bullet text".length));
+      expect((md(selected).match(markerPattern) ?? []).length).toBe(2);
+      selected = pressBackspace(selected);
+      const afterRemoval = md(selected);
+      expect((afterRemoval.match(markerPattern) ?? []).length).toBe(1);
+      selected = pressBackspace(selected);
+      expect(md(selected)).toBe(afterRemoval.replace("first bullet text", "first bullet tex"));
+      expect((md(selected).match(markerPattern) ?? []).length).toBe(1);
+
+      const emptyFirst = `Paragraph above.\n\n${firstMarker.replace("first bullet text", "")}\n${secondMarker}\n\nParagraph below.`;
+      let empty = pressBackspace(selectionInListItem(emptyFirst, 0, 0));
+      expect((md(empty).match(markerPattern) ?? []).length).toBe(1);
+      empty = pressBackspace(empty);
+      expect((md(empty).match(markerPattern) ?? []).length).toBe(1);
+
+      const emptySecond = `Paragraph above.\n\n${firstMarker}\n${secondMarker.replace("second bullet text", "")}\n\nParagraph below.`;
+      empty = pressBackspace(selectionInListItem(emptySecond, 1, 0));
+      const emptyRemoved = md(empty);
+      expect((emptyRemoved.match(markerPattern) ?? []).length).toBe(1);
+      empty = pressBackspace(empty);
+      expect(md(empty)).toBe(emptyRemoved.replace("first bullet text", "first bullet tex"));
+
+      let selectedFirst = pressBackspace(selectionInListItem(initial, 0, 0, "first bullet text".length));
+      expect((md(selectedFirst).match(markerPattern) ?? []).length).toBe(2);
+      selectedFirst = pressBackspace(selectedFirst);
+      expect((md(selectedFirst).match(markerPattern) ?? []).length).toBe(1);
+      selectedFirst = pressBackspace(selectedFirst);
+      expect((md(selectedFirst).match(markerPattern) ?? []).length).toBe(1);
+      expect(selectedFirst.doc.textContent).toContain("second bullet text");
     });
   }
 });

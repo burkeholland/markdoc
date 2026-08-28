@@ -16,7 +16,7 @@ import {
   type ConnectionPhase,
   type LocalPersistence,
 } from "./offline";
-import { perfMark, type CollabUser } from "./shared";
+import { perfMark, type CollabUser, type TextAnchor } from "./shared";
 import type { Role } from "@/server/db/schema";
 import {
   carryActiveIndex,
@@ -33,6 +33,14 @@ import type { HeadingInfo } from "../markdown/parse";
 export type EditMode = "editing" | "suggesting" | "viewing";
 export type Surface = "code" | "rich";
 export type SaveState = ConnectionPhase;
+
+const COMMENT_SUGGESTION_ANCHOR_META = Symbol("commentSuggestionAnchor");
+
+interface CommentSuggestionAnchorMeta {
+  threadId: string;
+  before: { anchor: TextAnchor; quote: string };
+  after: { anchor: TextAnchor; quote: string };
+}
 
 /** How long the "All changes saved" highlight stays after a reconnect. */
 export const RECOVERED_FLASH_MS = 2000;
@@ -354,7 +362,7 @@ export class CollabSession {
     this.binding.holdRemoteSync();
     this.undoManager.addTrackedOrigin(this.binding);
     this.undoManager.on("stack-item-added", this.notify);
-    this.undoManager.on("stack-item-popped", this.notify);
+    this.undoManager.on("stack-item-popped", this.onUndoStackItemPopped);
     this.undoManager.on("stack-cleared", this.notify);
     this.comments.subscribe(this.notify);
     this.suggestions.subscribe(this.notify);
@@ -862,6 +870,10 @@ export class CollabSession {
   // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
+  rememberCommentSuggestionUndo(meta: CommentSuggestionAnchorMeta) {
+    this.undoManager.undoStack.at(-1)?.meta.set(COMMENT_SUGGESTION_ANCHOR_META, meta);
+  }
+
   undo() {
     this.undoManager.undo();
     this.undoManager.stopCapturing();
@@ -895,6 +907,15 @@ export class CollabSession {
       this.version++;
       for (const l of this.listeners) l();
     });
+  };
+
+  private onUndoStackItemPopped = (event: { stackItem: { meta: Map<unknown, unknown> }; type: "undo" | "redo" }) => {
+    const meta = event.stackItem.meta.get(COMMENT_SUGGESTION_ANCHOR_META) as CommentSuggestionAnchorMeta | undefined;
+    if (meta) {
+      const snapshot = event.type === "undo" ? meta.before : meta.after;
+      this.comments.setAnchor(meta.threadId, snapshot.anchor, snapshot.quote);
+    }
+    this.notify();
   };
 
   /** Monotonic counter used as a React snapshot for useSyncExternalStore. */
@@ -941,4 +962,3 @@ export function defaultWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/collab`;
 }
-

@@ -26,7 +26,7 @@ import { closeDb, getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
-import { lanAddresses } from "../scripts/lib/dev-origins.mjs";
+import { localAccess } from "../scripts/lib/dev-origins.mjs";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -38,6 +38,7 @@ const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const bindHost = process.env.HOST ?? "0.0.0.0";
 const hostname = bindHost === "0.0.0.0" || bindHost === "::" ? undefined : bindHost;
 const port = Number(process.env.PORT ?? 3000);
+const localUrls = localAccess(port);
 
 // Exit trace (task #614): the live server once died with nothing in live.log. Whatever ends this process
 // leaves one line here, with the uptime, so a silent death can be told apart from a kill or a crash.
@@ -214,11 +215,15 @@ async function main() {
     });
   } else {
     await initialListen;
-    const shownHost = hostname ?? "localhost";
-    console.log(`> Markdoc ready on http://${shownHost}:${port} (${dev ? "development" : "production"})`);
+    const shownHost = hostname ?? localUrls.canonicalHost;
+    console.log(`> Markdoc ready on http://${shownHost}:${port} (${hostname ? "configured host" : "stable hostname"}; ${dev ? "development" : "production"})`);
     console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);
     if (!hostname) {
-      for (const ip of lanAddresses()) console.log(`> Also reachable on the LAN at http://${ip}:${port}`);
+      for (const alias of localUrls.aliases) console.log(`> Hostname alias: ${alias.url}`);
+      console.log(`> Loopback diagnostic: http://localhost:${port}`);
+      for (const numeric of localUrls.numeric) {
+        console.log(`> Numeric diagnostic (${numeric.interfaceName}${numeric.virtual ? ", virtual" : ""}): ${numeric.url}`);
+      }
     }
   }
 

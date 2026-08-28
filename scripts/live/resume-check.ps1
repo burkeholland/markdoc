@@ -35,6 +35,7 @@ $liveRoot = if ($LiveRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedPr
 $pgliteDir = Join-Path $dataRoot 'pglite'
 $liveLog = Join-Path $dataRoot 'live.log'
 $startLive = Join-Path $PSScriptRoot 'start-live.ps1'
+$liveUrl = Get-LiveAccessUrl -Port $Port
 $script:failed = $false
 
 function Write-Check {
@@ -248,7 +249,7 @@ if (-not $health) {
 }
 if ($health) {
   if (-not $health.db) { Fail 'server' "/api/health answers but db=$($health.db)" }
-  Write-Check 'ok' 'server' "/api/health 200 on :$Port (db=$($health.db) collab=$($health.collab) version=$($health.version))"
+  Write-Check 'ok' 'server' "$liveUrl/api/health 200 (db=$($health.db) collab=$($health.collab) version=$($health.version))"
 
   # 8. backup route reachable with the token, documents listable with the dev login
   $meta = if ($token) { Get-BackupMeta -Port $Port -Token $token } else { $null }
@@ -280,4 +281,5 @@ if ($health) {
 
 Write-Host ''
 Write-Host "resume-check: OK$(if ($DryRun) { ' (dry run; nothing changed)' })"
+Write-Host "  Open $liveUrl (stable hostname; numeric IPs are diagnostics only)."
 exit 0

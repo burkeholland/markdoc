@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { createAnchor, newId, resolveAnchor, type CollabUser, type TextAnchor } from "./shared";
 import { parseMentions } from "./mentions";
 import { applyOps, diffOps } from "../sync/text-diff";
+import { parseSuggestionBlock } from "./suggestion-block";
 
 export interface CommentReply {
   id: string;
@@ -18,6 +19,33 @@ export interface CommentReply {
   mentions: string[];
   /** Emoji → ids of the users who reacted with it. */
   reactions: Reactions;
+  /** Decision on the body's ```suggestion block, if one was made. */
+  suggestionState?: "accepted" | "rejected" | null;
+  suggestionBy?: string | null;
+  suggestionAt?: number | null;
+  /** Anchored text at decision time, so decided diffs remain stable after the thread advances. */
+  suggestionQuote?: string | null;
+}
+
+/** Durable per-reply decision. The containing Y.Map key is the reply id. */
+export interface ReplySuggestionDecision {
+  suggestionState: "accepted" | "rejected";
+  suggestionBy: string;
+  suggestionAt: number;
+  quote: string;
+}
+
+export function readReplySuggestionDecision(replyId: string, value: unknown): (ReplySuggestionDecision & { replyId: string }) | null {
+  if (!value || typeof value !== "object") return null;
+  const decision = value as Partial<ReplySuggestionDecision>;
+  if (
+    (decision.suggestionState !== "accepted" && decision.suggestionState !== "rejected") ||
+    typeof decision.suggestionBy !== "string" ||
+    typeof decision.suggestionAt !== "number" ||
+    typeof decision.quote !== "string"
+  )
+    return null;
+  return { ...(decision as ReplySuggestionDecision), replyId };
 }
 
 /** Emoji → ids of the users who reacted with it. */
@@ -68,6 +96,15 @@ export interface CommentThread {
   suggestionState?: "accepted" | "rejected" | null;
   suggestionBy?: string | null;
   suggestionAt?: number | null;
+  /** Anchored text at decision time, so decided diffs remain stable after the thread advances. */
+  suggestionQuote?: string | null;
+}
+
+export class DecidedSuggestionEditError extends Error {
+  constructor(public readonly state: "accepted" | "rejected") {
+    super(`Cannot edit a suggestion that was already ${state}`);
+    this.name = "DecidedSuggestionEditError";
+  }
 }
 
 export const COMMENTS_ORIGIN = { name: "comments" };
@@ -76,6 +113,7 @@ type ThreadMap = Y.Map<unknown>;
 
 /** Reply as stored in the Y.Array; older entries may lack `mentions`. Reactions live in the thread's `reactions` map. */
 type StoredReply = Omit<CommentReply, "mentions" | "reactions"> & { mentions?: unknown };
+type ReplySuggestionsMap = Y.Map<ReplySuggestionDecision>;
 
 /**
  * Reactions are one flat Y.Map per thread keyed by `<replyId or "">␟<emoji>␟<userId>` → user name.
@@ -162,6 +200,7 @@ export class CommentsModel {
 
   private read(map: ThreadMap): CommentThread {
     const replies = map.get("replies") as Y.Array<StoredReply> | undefined;
+    const replySuggestions = map.get("replySuggestions") as ReplySuggestionsMap | undefined;
     const anchor = map.get("anchor") as TextAnchor;
     const { byTarget, names } = readReactions(map.get("reactions") as ReactionsMap | undefined);
     return {
@@ -181,11 +220,26 @@ export class CommentsModel {
       mentions: readMentions(map.get("mentions")),
       reactions: byTarget.get("") ?? {},
       reactorNames: names,
-      replies: replies ? replies.toArray().map((r) => readReply(r, byTarget.get(r.id) ?? {})) : [],
+      replies: replies
+        ? replies.toArray().map((r) => {
+            const reply = readReply(r, byTarget.get(r.id) ?? {});
+            const decision = readReplySuggestionDecision(reply.id, replySuggestions?.get(reply.id));
+            return decision
+              ? {
+                  ...reply,
+                  suggestionState: decision.suggestionState,
+                  suggestionBy: decision.suggestionBy,
+                  suggestionAt: decision.suggestionAt,
+                  suggestionQuote: decision.quote,
+                }
+              : reply;
+          })
+        : [],
       range: anchor ? resolveAnchor(this.ytext, anchor) : null,
       suggestionState: (map.get("suggestionState") as "accepted" | "rejected" | null) ?? null,
       suggestionBy: (map.get("suggestionBy") as string | null) ?? null,
       suggestionAt: (map.get("suggestionAt") as number | null) ?? null,
+      suggestionQuote: (map.get("suggestionQuote") as string | null) ?? null,
     };
   }
 
@@ -221,6 +275,7 @@ export class CommentsModel {
       map.set("createdAt", Date.now());
       map.set("resolved", false);
       map.set("replies", new Y.Array<StoredReply>());
+      map.set("replySuggestions", new Y.Map<ReplySuggestionDecision>());
       map.set("reactions", new Y.Map<string>());
       this.ymap.set(id, map);
     }, COMMENTS_ORIGIN);
@@ -256,6 +311,8 @@ export class CommentsModel {
   editBody(id: string, body: string, replyId?: string) {
     const map = this.ymap.get(id);
     if (!map) return;
+    const suggestionState = replyId ? this.read(map).replies.find((reply) => reply.id === replyId)?.suggestionState : map.get("suggestionState");
+    if (suggestionState === "accepted" || suggestionState === "rejected") throw new DecidedSuggestionEditError(suggestionState);
     this.ydoc.transact(() => {
       if (!replyId) {
         if (map.get("body") !== body) map.set("editedAt", Date.now());
@@ -288,6 +345,7 @@ export class CommentsModel {
           if (key.startsWith(replyId + REACTION_SEP)) reactions.delete(key);
         }
       }
+      (map.get("replySuggestions") as ReplySuggestionsMap | undefined)?.delete(replyId);
     }, COMMENTS_ORIGIN);
   }
 
@@ -334,6 +392,16 @@ export class CommentsModel {
     this.ydoc.transact(() => this.ymap.delete(id), COMMENTS_ORIGIN);
   }
 
+  /** Restore or advance a thread's current anchored quote without changing any suggestion decisions. */
+  setAnchor(id: string, anchor: TextAnchor, quote: string) {
+    const map = this.ymap.get(id);
+    if (!map) return;
+    this.ydoc.transact(() => {
+      map.set("anchor", anchor);
+      map.set("quote", quote);
+    }, COMMENTS_ORIGIN);
+  }
+
   /**
    * Accept the thread's ```suggestion block: replace the anchored range with `proposed`, record the
    * decision and resolve the thread — all in one transaction (one undo step, one broadcast).
@@ -346,14 +414,20 @@ export class CommentsModel {
     if (thread.suggestionState || !thread.range) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    const hasPendingReplySuggestion = thread.replies.some((reply) => !reply.suggestionState && parseSuggestionBlock(reply.body));
     this.ydoc.transact(() => {
       applyOps(this.ytext, diffOps(thread.quote, proposed, from));
       map.set("suggestionState", "accepted");
       map.set("suggestionBy", by.id);
       map.set("suggestionAt", Date.now());
+      map.set("suggestionQuote", thread.quote);
       map.set("resolved", true);
       map.set("resolvedBy", by.id);
       map.set("resolvedAt", Date.now());
+      if (hasPendingReplySuggestion) {
+        map.set("anchor", createAnchor(this.ytext, from, from + proposed.length));
+        map.set("quote", proposed);
+      }
     }, origin);
     return true;
   }
@@ -366,6 +440,62 @@ export class CommentsModel {
       map.set("suggestionState", "rejected");
       map.set("suggestionBy", by.id);
       map.set("suggestionAt", Date.now());
+      map.set("suggestionQuote", (map.get("quote") as string) ?? "");
+    }, origin);
+    return true;
+  }
+
+  /**
+   * Accept a reply's ```suggestion block against its parent thread's anchor. Unlike accepting the
+   * root suggestion, this decides only the reply; the thread and its other suggestions stay open.
+   */
+  acceptReplySuggestion(id: string, replyId: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
+    const map = this.ymap.get(id);
+    if (!map) return false;
+    const thread = this.read(map);
+    const reply = thread.replies.find((item) => item.id === replyId);
+    if (!reply) return false;
+    const block = parseSuggestionBlock(reply.body);
+    if (!block || reply.suggestionState || !thread.range) return false;
+    const { from, to } = thread.range;
+    if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    let replySuggestions = map.get("replySuggestions") as ReplySuggestionsMap | undefined;
+    if (!replySuggestions) {
+      const created = new Y.Map<ReplySuggestionDecision>();
+      this.ydoc.transact(() => map.set("replySuggestions", created), origin);
+      replySuggestions = created;
+    }
+    const decisions = replySuggestions;
+
+    this.ydoc.transact(() => {
+      applyOps(this.ytext, diffOps(thread.quote, block.text, from));
+      const at = Date.now();
+      decisions.set(replyId, { suggestionState: "accepted", suggestionBy: by.id, suggestionAt: at, quote: thread.quote });
+      map.set("anchor", createAnchor(this.ytext, from, from + block.text.length));
+      map.set("quote", block.text);
+    }, origin);
+    return true;
+  }
+
+  /** Reject a reply's suggestion without changing the text. Allowed even when the anchor is outdated. */
+  rejectReplySuggestion(id: string, replyId: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
+    const map = this.ymap.get(id);
+    if (!map) return false;
+    const thread = this.read(map);
+    const reply = thread.replies.find((item) => item.id === replyId);
+    if (!reply) return false;
+    if (reply.suggestionState || !parseSuggestionBlock(reply.body)) return false;
+    let replySuggestions = map.get("replySuggestions") as ReplySuggestionsMap | undefined;
+    if (!replySuggestions) {
+      const created = new Y.Map<ReplySuggestionDecision>();
+      this.ydoc.transact(() => map.set("replySuggestions", created), origin);
+      replySuggestions = created;
+    }
+    const decisions = replySuggestions;
+
+    this.ydoc.transact(() => {
+      const at = Date.now();
+      decisions.set(replyId, { suggestionState: "rejected", suggestionBy: by.id, suggestionAt: at, quote: thread.quote });
     }, origin);
     return true;
   }
