@@ -1,4 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
+import { AGENT_DOCS_URL } from "../src/lib/mcp";
 import { createDocument, openDocument, selectTextInRich } from "./helpers";
 
 /**
@@ -58,6 +59,13 @@ test.describe("keep an agent here", () => {
 
     const panel = popover.getByTestId("keep-agent-panel");
     await expect(panel).toBeVisible();
+    await expect(panel.getByTestId("keep-agent-clients")).toHaveText("Works with any MCP client: Copilot CLI, VS Code, Claude, Cursor.");
+    const docsLink = panel.getByTestId("keep-agent-docs-link");
+    await expect(docsLink).toBeVisible();
+    await expect(docsLink).toHaveText("Agent docs · Sit in a document");
+    await expect(docsLink).toHaveAttribute("href", `${AGENT_DOCS_URL}#sit-in-a-document`);
+    await expect(docsLink).toHaveAttribute("target", "_blank");
+    await expect(docsLink).toHaveAttribute("rel", "noreferrer");
     const prompt = popover.getByTestId("keep-agent-prompt");
     const text = (await prompt.innerText()).trim();
     const m = text.match(PROMPT_RE);
