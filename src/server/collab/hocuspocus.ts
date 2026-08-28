@@ -107,16 +107,10 @@ export function createCollabServer() {
     },
 
     async beforeHandleMessage({ connection }) {
+      // Access changes, token revocation, and token expiry are pushed to live connections.
+      // Do not query here: a transition is waiting for this message to drain, and steady-state
+      // Yjs/awareness traffic must not add database round trips per message.
       if (collabAccessChangeBlocks(connection)) connection.readOnly = true;
-      if (!isVerifiedCollabClaims(connection.context) || connection.context.principal !== "token") return;
-      const current = await resolveStableCollabAccess(connection.context);
-      if (!current) {
-        connection.readOnly = true;
-        connection.close({ code: 4401, reason: "Unauthorized" });
-        throw unauthorizedCollabError();
-      }
-      connection.context = current;
-      connection.readOnly = !canEdit(current.role);
     },
 
     async onLoadDocument({ document, documentName }: onLoadDocumentPayload<CollabContext>) {
