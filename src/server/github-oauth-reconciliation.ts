@@ -5,7 +5,8 @@ import type { Db } from "@/server/db";
 import { schema } from "@/server/db";
 
 const GITHUB_IDENTITY_FIELD = "__markdocGithubIdentity";
-const GITHUB_LOGIN_PATTERN = /^(?!.*--)[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/;
+const GITHUB_PROVIDER_LOGIN_PATTERN = /^[a-z\d][a-z\d-]{0,38}$/;
+const GITHUB_RECONCILIATION_LOGIN_PATTERN = /^(?!.*--)[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/;
 const GITHUB_ACCOUNT_ID_PATTERN = /^\d{1,32}$/;
 
 export type GithubIdentityConflictReason =
@@ -62,7 +63,13 @@ export interface GithubTokenSet {
 export function normalizeGithubLogin(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const login = value.trim().toLowerCase();
-  return GITHUB_LOGIN_PATTERN.test(login) ? login : null;
+  return GITHUB_RECONCILIATION_LOGIN_PATTERN.test(login) ? login : null;
+}
+
+function normalizeProviderGithubLogin(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const login = value.trim().toLowerCase();
+  return GITHUB_PROVIDER_LOGIN_PATTERN.test(login) ? login : null;
 }
 
 function normalizeProviderAccountId(value: unknown): string | null {
@@ -111,7 +118,7 @@ function githubAccountTokens(tokens: GithubTokenSet): GithubIdentityMarker["acco
 export function githubOAuthProfile(profile: GithubProviderProfile, tokens: GithubTokenSet = {}) {
   const providerAccountId = String(profile.id).trim();
   const rawLogin = typeof profile.login === "string" ? profile.login.trim().toLowerCase() : "";
-  const login = normalizeGithubLogin(rawLogin);
+  const login = normalizeProviderGithubLogin(rawLogin);
 
   return {
     id: providerAccountId,
@@ -134,7 +141,7 @@ function githubMarker(data: AdapterUser): GithubIdentityMarker | null {
   if (
     marker.provider !== "github" ||
     normalizeProviderAccountId(marker.providerAccountId) !== marker.providerAccountId ||
-    normalizeGithubLogin(marker.login) !== marker.login ||
+    normalizeProviderGithubLogin(marker.login) !== marker.login ||
     !marker.account ||
     typeof marker.account !== "object" ||
     typeof marker.account.access_token !== "string" ||
@@ -143,6 +150,12 @@ function githubMarker(data: AdapterUser): GithubIdentityMarker | null {
     throw new GithubIdentityReconciliationError("invalid_profile");
   }
   return { ...marker, account: githubAccountTokens(marker.account) };
+}
+
+function withoutGithubMarker(data: AdapterUser): AdapterUser {
+  const user = { ...data } as AdapterUser & Partial<MarkedGithubUser>;
+  delete user[GITHUB_IDENTITY_FIELD];
+  return user;
 }
 
 function adapterUser(row: typeof schema.users.$inferSelect): AdapterUser {
@@ -328,7 +341,11 @@ export function GithubReconciliationAdapter(db: Db): Adapter {
     ...base,
     async createUser(data) {
       const marker = githubMarker(data);
-      return marker ? createOrReconcileGithubUser(db, data, marker) : createUser(data);
+      if (!marker) return createUser(data);
+      const reconciliationLogin = normalizeGithubLogin(marker.login);
+      return reconciliationLogin
+        ? createOrReconcileGithubUser(db, data, { ...marker, login: reconciliationLogin })
+        : createUser(withoutGithubMarker(data));
     },
     async linkAccount(data) {
       if (data.provider === "github") {

@@ -301,7 +301,7 @@ interface InitialSelection {
   };
 }
 
-const LOGIN_PATTERN = /^(?!.*--)[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/;
+const LOGIN_PATTERN = /^[a-z\d][a-z\d-]{0,38}$/;
 const ACCOUNT_ID_PATTERN = /^\d{1,32}$/;
 const HASH_PREFIX_LENGTH = 12;
 

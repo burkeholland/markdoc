@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import {
   type GithubIdentityRepairManifestStore,
   type GithubIdentityRepairQueryClient,
+  normalizeRepairGithubLogin,
   REPAIR_APPLICATION_TABLES,
   REPAIR_SCHEMA_TABLES,
   repairGithubIdentity,
@@ -33,6 +34,14 @@ describe("GitHub identity repair", () => {
     await Promise.all(
       testRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
     );
+  });
+
+  it("accepts provider-supplied legacy GitHub logins while rejecting unnormalizable input", () => {
+    expect(normalizeRepairGithubLogin(" D--B ")).toBe("d--b");
+    expect(normalizeRepairGithubLogin("x--")).toBe("x--");
+    expect(normalizeRepairGithubLogin("-leading")).toBeNull();
+    expect(normalizeRepairGithubLogin("bad_login")).toBeNull();
+    expect(normalizeRepairGithubLogin("")).toBeNull();
   });
 
   it("dry-runs a complete plan and rolls every simulated write back", async () => {

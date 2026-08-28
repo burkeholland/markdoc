@@ -295,13 +295,42 @@ describe("GitHub OAuth identity reconciliation", () => {
     expect(linked).toMatchObject({ userId: user.id, provider: "example" });
   });
 
-  it("surfaces invalid GitHub profile identifiers from the adapter without database writes", async () => {
+  it.each([
+    ["d--b", 836011],
+    ["x--", 836012],
+  ])("creates an ordinary OAuth identity for provider-supplied noncanonical login %s", async (login, accountId) => {
+    const old = await legacy(login);
+    const user = await createGithubUser(profile(login, accountId));
+    await linkGithub(account(user.id, accountId));
+
+    expect(user.id).not.toBe(old.id);
+    expect(user.login).toBe(login);
+    const users = await db
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .where(sql`lower(trim(${schema.users.login})) = ${login}`);
+    expect(users).toHaveLength(2);
+    expect(users.map(({ id }) => id)).toContain(old.id);
+    const linked = await db
+      .select({ userId: schema.accounts.userId })
+      .from(schema.accounts)
+      .where(and(eq(schema.accounts.provider, "github"), eq(schema.accounts.providerAccountId, String(accountId))));
+    expect(linked).toEqual([{ userId: user.id }]);
+  });
+
+  it("surfaces unnormalizable GitHub profile identifiers from the adapter without database writes", async () => {
     await expect(
-      createGithubUser({ ...githubOAuthProfile({ id: 836011, login: "bad--login" }), emailVerified: null } as AdapterUser),
+      createGithubUser(profile("bad_login", 836013)),
     ).rejects.toBeInstanceOf(ReconciliationError);
     await expect(
-      createGithubUser({ ...githubOAuthProfile({ id: "not-numeric", login: "valid-login" }), emailVerified: null } as AdapterUser),
+      createGithubUser({
+        ...githubOAuthProfile(
+          { id: "not-numeric", login: "valid-login" },
+          { access_token: "profile-access-token" },
+        ),
+        emailVerified: null,
+      } as AdapterUser),
     ).rejects.toBeInstanceOf(ReconciliationError);
-    expect(await db.select().from(schema.accounts).where(eq(schema.accounts.providerAccountId, "836011"))).toHaveLength(0);
+    expect(await db.select().from(schema.accounts).where(eq(schema.accounts.providerAccountId, "836013"))).toHaveLength(0);
   });
 });

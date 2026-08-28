@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
@@ -12,21 +14,40 @@ const integrationEnvironmentName = "MARKDOC_PG_INTEGRATION_URL";
 const describePostgres = process.env[integrationEnvironmentName] ? describe : describe.skip;
 
 describePostgres("GitHub identity reconciliation on PostgreSQL", () => {
-  const schemaName = `markdoc_identity_${process.pid}_${Date.now()}`;
+  const runId = `${process.pid}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const schemaName = `markdoc_identity_${runId}`;
+  const migrationsSchema = `${schemaName}_migrations`;
+  const migrationRoot = path.resolve(
+    ".data",
+    `github-oauth-reconciliation-pg-${process.pid}-${randomUUID()}`,
+  );
   let administrator: Client;
   let pool: Pool;
 
   beforeAll(async () => {
     const connectionString = process.env[integrationEnvironmentName];
     if (!connectionString) throw new Error(`${integrationEnvironmentName} is required for the PostgreSQL integration`);
+    await fs.mkdir(migrationRoot, { recursive: true });
+    const migrationsFolder = path.join(migrationRoot, "drizzle");
+    await fs.cp(path.resolve("drizzle"), migrationsFolder, { recursive: true });
+    for (const entry of await fs.readdir(migrationsFolder)) {
+      if (!entry.endsWith(".sql")) continue;
+      const migrationPath = path.join(migrationsFolder, entry);
+      const migrationSql = await fs.readFile(migrationPath, "utf8");
+      await fs.writeFile(
+        migrationPath,
+        migrationSql.replaceAll(`"public".`, `"${schemaName}".`),
+        "utf8",
+      );
+    }
     const config = createPostgresClientConfig(connectionString);
     administrator = new Client(config);
     await administrator.connect();
     await administrator.query(`CREATE SCHEMA "${schemaName}"`);
     pool = new Pool({ ...config, max: 4, options: `-c search_path=${schemaName}` });
     await migrate(drizzle(pool, { schema }), {
-      migrationsFolder: path.resolve("drizzle"),
-      migrationsSchema: schemaName,
+      migrationsFolder,
+      migrationsSchema,
     });
   }, 120_000);
 
@@ -34,8 +55,10 @@ describePostgres("GitHub identity reconciliation on PostgreSQL", () => {
     if (pool) await pool.end();
     if (administrator) {
       await administrator.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+      await administrator.query(`DROP SCHEMA IF EXISTS "${migrationsSchema}" CASCADE`);
       await administrator.end();
     }
+    await fs.rm(migrationRoot, { recursive: true, force: true });
   });
 
   it("serializes concurrent first sign-ins into one canonical user and account", async () => {
