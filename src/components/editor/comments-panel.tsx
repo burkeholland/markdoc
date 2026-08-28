@@ -78,6 +78,13 @@ function commentSuggestionState(thread: CommentThread, stored: CommentReply["sug
   return stored ?? (isSuggestionOutdated(thread, text) ? "outdated" : "pending");
 }
 
+function commentSuggestionSource(
+  thread: CommentThread,
+  target: Pick<CommentThread, "suggestionState" | "suggestionQuote"> | Pick<CommentReply, "suggestionState" | "suggestionQuote">,
+): string {
+  return target.suggestionState ? (target.suggestionQuote ?? thread.quote) : thread.quote;
+}
+
 /** Root and reply suggestion blocks in display order, with each reply retaining its own decision. */
 function commentSuggestionTargets(threads: CommentThread[], text: string): CommentSuggestionTarget[] {
   return threads.flatMap((thread) => {
@@ -749,7 +756,7 @@ const ThreadCard = memo(function ThreadCard({
             <span className="shrink-0 text-xs text-ink-4">{relativeTime(thread.createdAt)}</span>
             <EditedMarker at={thread.editedAt} />
           </div>
-          {editing === "root" ? (
+          {editing === "root" && !thread.suggestionState ? (
             <div className="mt-1">
               <Composer
                 placeholder="Edit comment"
@@ -780,7 +787,7 @@ const ThreadCard = memo(function ThreadCard({
                     {suggestionState === "rejected" && <span className="suggestion-badge">Rejected</span>}
                     {suggestion.warning && <span className="ml-auto text-[11px] text-ink-4">{suggestion.warning}</span>}
                   </div>
-                  <SuggestionDiff from={thread.quote} to={suggestion.text} />
+                  <SuggestionDiff from={commentSuggestionSource(thread, thread)} to={suggestion.text} />
                   <SuggestionActions
                     state={suggestionState}
                     canAccept={canEdit}
@@ -817,7 +824,7 @@ const ThreadCard = memo(function ThreadCard({
                 </button>
               }
             >
-              {thread.authorId === me && (
+              {thread.authorId === me && !thread.suggestionState && (
                 <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
                   Edit
                 </MenuItem>
@@ -844,7 +851,7 @@ const ThreadCard = memo(function ThreadCard({
                     <span className="shrink-0 text-xs text-ink-4">{relativeTime(r.createdAt)}</span>
                     <EditedMarker at={r.editedAt} />
                   </div>
-                  {editing === r.id ? (
+                  {editing === r.id && !r.suggestionState ? (
                     <div className="mt-1">
                       <Composer
                         placeholder="Edit reply"
@@ -875,7 +882,7 @@ const ThreadCard = memo(function ThreadCard({
                             {state === "rejected" && <span className="suggestion-badge">Rejected</span>}
                             {block.warning && <span className="ml-auto text-[11px] text-ink-4">{block.warning}</span>}
                           </div>
-                          <SuggestionDiff from={thread.quote} to={block.text} />
+                          <SuggestionDiff from={commentSuggestionSource(thread, r)} to={block.text} />
                           <SuggestionActions
                             state={state}
                             canAccept={canEdit}
@@ -900,7 +907,7 @@ const ThreadCard = memo(function ThreadCard({
                         </button>
                       }
                     >
-                      {r.authorId === me && (
+                      {r.authorId === me && !r.suggestionState && (
                         <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
                           Edit
                         </MenuItem>

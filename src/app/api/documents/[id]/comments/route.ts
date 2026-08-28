@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
-import { CommentsModel, isEmoji, type CommentReply, type CommentThread } from "@/editor/collab/comments";
+import { CommentsModel, DecidedSuggestionEditError, isEmoji, type CommentReply, type CommentThread } from "@/editor/collab/comments";
 import { isSuggestionOutdated, parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
@@ -103,7 +103,12 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           if (!thread) throw new HttpError(404, "Comment not found");
           const ownerId = body.replyId ? thread.replies.find((r) => r.id === body.replyId)?.authorId : thread.authorId;
           if (ownerId !== user.id && role !== "owner") throw new HttpError(403, "You can only edit your own comments");
-          model.editBody(body.threadId, body.body, body.replyId);
+          try {
+            model.editBody(body.threadId, body.body, body.replyId);
+          } catch (error) {
+            if (error instanceof DecidedSuggestionEditError) throw new HttpError(409, error.message);
+            throw error;
+          }
           break;
         }
         case "delete": {
@@ -224,7 +229,13 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
         suggestion: (() => {
           const block = parseSuggestionBlock(t.body);
           if (!block) return null;
-          return { text: block.text, state: t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"), by: t.suggestionBy ?? null, at: t.suggestionAt ? new Date(t.suggestionAt).toISOString() : null };
+          return {
+            text: block.text,
+            source: t.suggestionState ? (t.suggestionQuote ?? t.quote) : t.quote,
+            state: t.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"),
+            by: t.suggestionBy ?? null,
+            at: t.suggestionAt ? new Date(t.suggestionAt).toISOString() : null,
+          };
         })(),
         reactions: t.reactions,
         replies: t.replies.map((r) => ({
@@ -238,7 +249,13 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
           suggestion: (() => {
             const block = parseSuggestionBlock(r.body);
             if (!block) return null;
-            return { text: block.text, state: r.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"), by: r.suggestionBy ?? null, at: r.suggestionAt ? new Date(r.suggestionAt).toISOString() : null };
+            return {
+              text: block.text,
+              source: r.suggestionState ? (r.suggestionQuote ?? t.quote) : t.quote,
+              state: r.suggestionState ?? (isSuggestionOutdated(t, text) ? "outdated" : "pending"),
+              by: r.suggestionBy ?? null,
+              at: r.suggestionAt ? new Date(r.suggestionAt).toISOString() : null,
+            };
           })(),
           reactions: r.reactions,
         })),

@@ -53,9 +53,19 @@ async function createUser(login: string, name: string): Promise<TestActor> {
   return { id: user.id, login, name, image: null };
 }
 
-type SuggestionJson = { text: string; state: "pending" | "outdated" | "accepted" | "rejected"; by: string | null; at: string | null };
+type SuggestionJson = { text: string; source: string; state: "pending" | "outdated" | "accepted" | "rejected"; by: string | null; at: string | null };
 type ReplyJson = { id: string; body: string; author: string; authorId: string; suggestion: SuggestionJson | null };
-type ThreadJson = { id: string; body: string; author: string; authorId: string; mentions: string[]; quote: string | null; currentText: string | null; replies: ReplyJson[] };
+type ThreadJson = {
+  id: string;
+  body: string;
+  author: string;
+  authorId: string;
+  mentions: string[];
+  quote: string | null;
+  currentText: string | null;
+  suggestion: SuggestionJson | null;
+  replies: ReplyJson[];
+};
 
 describe("POST /api/documents/:id/comments as a commenter", () => {
   let server: Server;
@@ -180,6 +190,7 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     let comments = ((await (await get(docId)).json()) as { comments: ThreadJson[] }).comments;
     let thread = comments.find((item) => item.id === root.id)!;
     expect(thread.replies.map((reply) => reply.suggestion?.state)).toEqual(["pending", "pending"]);
+    expect(thread.replies.map((reply) => reply.suggestion?.source)).toEqual(["First paragraph.", "First paragraph."]);
 
     actor = victor;
     expect((await post(docId, { action: "suggestion", threadId: root.id, replyId: first.id, decision: "accept" })).status).toBe(403);
@@ -194,9 +205,9 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
 
     comments = ((await (await get(docId)).json()) as { comments: ThreadJson[] }).comments;
     thread = comments.find((item) => item.id === root.id)!;
-    expect(thread.replies[0].suggestion).toMatchObject({ state: "accepted", by: alice.id });
+    expect(thread.replies[0].suggestion).toMatchObject({ state: "accepted", by: alice.id, source: "First paragraph." });
     expect(thread.replies[0].suggestion?.at).toBeTruthy();
-    expect(thread.replies[1].suggestion?.state).toBe("pending");
+    expect(thread.replies[1].suggestion).toMatchObject({ state: "pending", source: "Opening paragraph." });
 
     let activity = await listActivity(docId, { limit: 100 });
     expect(activity.items.filter((item) => item.action === "comment.suggestion.accepted" && item.detail.replyId === first.id)).toHaveLength(1);
@@ -208,7 +219,9 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     expect(acceptedSecond.status).toBe(200);
     await waitFor(() => aliceDoc.getText(TEXT_KEY).toString().includes("Introductory paragraph."));
     comments = ((await (await get(docId)).json()) as { comments: ThreadJson[] }).comments;
-    expect(comments.find((item) => item.id === root.id)!.replies.map((reply) => reply.suggestion?.state)).toEqual(["accepted", "accepted"]);
+    thread = comments.find((item) => item.id === root.id)!;
+    expect(thread.replies.map((reply) => reply.suggestion?.state)).toEqual(["accepted", "accepted"]);
+    expect(thread.replies.map((reply) => reply.suggestion?.source)).toEqual(["First paragraph.", "Opening paragraph."]);
     activity = await listActivity(docId, { limit: 100 });
     expect(activity.items.filter((item) => item.action === "comment.suggestion.accepted" && [first.id, second.id].includes(String(item.detail.replyId)))).toHaveLength(2);
   });
@@ -246,17 +259,81 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     expect(activity.items.filter((item) => item.action === "comment.suggestion.rejected" && item.detail.replyId === suggestion.id)).toHaveLength(1);
   });
 
-  it("does not let a decided root suggestion mask a pending reply suggestion", async () => {
+  it("keeps an accepted root's source while a pending reply follows the advanced anchor", async () => {
     actor = alice;
     const root = (await (await post(docId, { action: "add", quote: "Introductory paragraph.", body: "```suggestion\nLead paragraph.\n```" })).json()) as { id: string };
     actor = carol;
     const reply = (await (await post(docId, { action: "reply", threadId: root.id, body: "```suggestion\nOpening paragraph.\n```" })).json()) as { id: string };
-    expect((await post(docId, { action: "suggestion", threadId: root.id, decision: "reject" })).status).toBe(200);
 
     actor = alice;
+    expect((await post(docId, { action: "suggestion", threadId: root.id, decision: "accept" })).status).toBe(200);
+    let comments = ((await (await get(docId)).json()) as { comments: ThreadJson[] }).comments;
+    let thread = comments.find((item) => item.id === root.id)!;
+    expect(thread.suggestion).toMatchObject({ state: "accepted", source: "Introductory paragraph." });
+    expect(thread.replies[0].suggestion).toMatchObject({ state: "pending", source: "Lead paragraph." });
+
     const accepted = await post(docId, { action: "suggestion", threadId: root.id, replyId: reply.id, decision: "accept" });
     expect(accepted.status).toBe(200);
     expect(await accepted.json()).toEqual({ ok: true, state: "accepted", replyId: reply.id });
+    comments = ((await (await get(docId)).json()) as { comments: ThreadJson[] }).comments;
+    thread = comments.find((item) => item.id === root.id)!;
+    expect(thread.suggestion?.source).toBe("Introductory paragraph.");
+    expect(thread.replies[0].suggestion).toMatchObject({ state: "accepted", source: "Lead paragraph." });
+  });
+
+  it("returns 409 when accepted or rejected root and reply suggestion bodies are edited", async () => {
+    const immutableDoc = await createDocument({ ownerId: alice.id, content: "Alpha beta gamma delta." });
+    await upsertCollaborator(immutableDoc.id, carol.login, "commenter", alice.id);
+
+    actor = alice;
+    const acceptedRoot = (await (
+      await post(immutableDoc.id, { action: "add", quote: "Alpha", body: "First draft.\n\n```suggestion\nALPHA\n```" })
+    ).json()) as { id: string };
+    const acceptedRootBody = "Updated draft.\n\n```suggestion\nALPHA\n```";
+    expect((await post(immutableDoc.id, { action: "edit", threadId: acceptedRoot.id, body: acceptedRootBody })).status).toBe(200);
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: acceptedRoot.id, decision: "accept" })).status).toBe(200);
+
+    const rejectedRootBody = "Leave beta alone.\n\n```suggestion\nBETA\n```";
+    const rejectedRoot = (await (await post(immutableDoc.id, { action: "add", quote: "beta", body: rejectedRootBody })).json()) as { id: string };
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: rejectedRoot.id, decision: "reject" })).status).toBe(200);
+
+    const acceptedParent = (await (await post(immutableDoc.id, { action: "add", quote: "gamma", body: "A reply can revise this." })).json()) as { id: string };
+    actor = carol;
+    const acceptedReplyBody = "Try this.\n\n```suggestion\nGAMMA\n```";
+    const acceptedReply = (await (
+      await post(immutableDoc.id, { action: "reply", threadId: acceptedParent.id, body: acceptedReplyBody })
+    ).json()) as { id: string };
+    actor = alice;
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: acceptedParent.id, replyId: acceptedReply.id, decision: "accept" })).status).toBe(200);
+
+    const rejectedParent = (await (await post(immutableDoc.id, { action: "add", quote: "delta", body: "Another reply can revise this." })).json()) as { id: string };
+    actor = carol;
+    const rejectedReplyBody = "Or this.\n\n```suggestion\nDELTA\n```";
+    const rejectedReply = (await (
+      await post(immutableDoc.id, { action: "reply", threadId: rejectedParent.id, body: rejectedReplyBody })
+    ).json()) as { id: string };
+    expect((await post(immutableDoc.id, { action: "suggestion", threadId: rejectedParent.id, replyId: rejectedReply.id, decision: "reject" })).status).toBe(200);
+
+    const targets: { threadId: string; replyId?: string; state: "accepted" | "rejected"; editor: TestActor }[] = [
+      { threadId: acceptedRoot.id, state: "accepted", editor: alice },
+      { threadId: rejectedRoot.id, state: "rejected", editor: alice },
+      { threadId: acceptedParent.id, replyId: acceptedReply.id, state: "accepted", editor: carol },
+      { threadId: rejectedParent.id, replyId: rejectedReply.id, state: "rejected", editor: carol },
+    ];
+    for (const target of targets) {
+      actor = target.editor;
+      const response = await post(immutableDoc.id, { action: "edit", threadId: target.threadId, replyId: target.replyId, body: "Changed after the decision." });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: `Cannot edit a suggestion that was already ${target.state}` });
+    }
+
+    actor = alice;
+    expect((await post(immutableDoc.id, { action: "edit", threadId: acceptedParent.id, replyId: acceptedReply.id, body: "Owner bypass." })).status).toBe(409);
+    const comments = ((await (await get(immutableDoc.id)).json()) as { comments: ThreadJson[] }).comments;
+    expect(comments.find((thread) => thread.id === acceptedRoot.id)?.body).toBe(acceptedRootBody);
+    expect(comments.find((thread) => thread.id === rejectedRoot.id)?.body).toBe(rejectedRootBody);
+    expect(comments.find((thread) => thread.id === acceptedParent.id)?.replies[0].body).toBe(acceptedReplyBody);
+    expect(comments.find((thread) => thread.id === rejectedParent.id)?.replies[0].body).toBe(rejectedReplyBody);
   });
 
   it("answers 404 for a reply to an unknown thread and records nothing", async () => {
