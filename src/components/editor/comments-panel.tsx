@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -13,6 +13,7 @@ import { wordDiff } from "@/editor/diff";
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
+import { rovingIndex } from "@/lib/a11y";
 import { cn, relativeTime } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
 import "./comments.css";
@@ -350,6 +351,8 @@ export interface CommentsPanelProps {
   onAskAgent?: () => void;
   /** Switch to a tab from outside; bump `nonce` to switch again to the same tab. */
   focusTab?: { tab: "open" | "resolved" | "suggestions"; nonce: number } | null;
+  /** Move focus to the selected tab when this panel mounts. */
+  focusOnMount?: boolean;
   /** Shell toast (Accept suggestion offers Undo). */
   onToast?: (message: string, kind?: "info" | "success" | "error", action?: { label: string; onClick?: () => void }) => void;
 }
@@ -1105,7 +1108,7 @@ function useReviews(session: CollabSession): ReviewDto[] {
   return reviews;
 }
 
-export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab, onToast }: CommentsPanelProps) {
+export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab, focusOnMount = false, onToast }: CommentsPanelProps) {
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
@@ -1135,10 +1138,28 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   );
   const commentSuggestionThreads = threads.filter((thread) => commentSuggestions.some((target) => target.thread.id === thread.id));
   const suggestionCount = suggestions.length + commentSuggestions.length;
-  // Land on Suggestions when the user is suggesting or when that is the only tab with anything to review (#117).
-  const [tab, setTab] = useState<Tab>(() => (mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open"));
+  // Preserve the tab for current work; otherwise land on Suggestions when suggesting or when it is the only populated tab (#117).
+  const [tab, setTab] = useState<Tab>(() => {
+    if (focusTab) return focusTab.tab;
+    if (pending) return "open";
+    if (activeSuggestionId) return "suggestions";
+    if (activeCommentId) {
+      const activeThread = threads.find((thread) => thread.id === activeCommentId);
+      if (activeThread) return activeThread.resolved ? "resolved" : "open";
+    }
+    return mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open";
+  });
   const [bulkBusy, setBulkBusy] = useState(false);
   const canAct = session.role === "owner" || session.role === "editor";
+  const tablistRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!focusOnMount) return;
+    const timer = window.setTimeout(() => {
+      tablistRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
+    });
+    return () => window.clearTimeout(timer);
+  }, [focusOnMount]);
 
   // The first suggestion that appears while the panel is open switches to the Suggestions tab, once per mount,
   // so a user who switched back is not fought. Skipped while a comment is being composed on the Open tab.
@@ -1177,6 +1198,17 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
     { id: "suggestions", label: "Suggestions", count: suggestionCount },
   ];
 
+  const onTablistKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = rovingIndex(event.key, current, items.length, { orientation: "horizontal", wrap: true });
+    if (next < 0) return;
+    event.preventDefault();
+    setTab(tabs[next].id);
+    items[next]?.focus();
+  };
+
   const decideAllSuggestions = async (accept: boolean) => {
     setBulkBusy(true);
     try {
@@ -1205,7 +1237,14 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           <X size={16} />
         </button>
       </div>
-      <div className="flex gap-1 border-b border-line px-3 py-2" role="tablist" aria-label="Comment lists">
+      <div
+        ref={tablistRef}
+        className="flex gap-1 border-b border-line px-3 py-2"
+        role="tablist"
+        aria-label="Comment lists"
+        aria-orientation="horizontal"
+        onKeyDown={onTablistKeyDown}
+      >
         {tabs.map((t) => (
           <button
             key={t.id}
@@ -1214,8 +1253,10 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
             id={`comments-tab-${t.id}`}
             aria-selected={tab === t.id}
             aria-controls="comments-tabpanel"
+            tabIndex={tab === t.id ? 0 : -1}
             className={cn("rounded-md px-2.5 py-1 text-xs font-medium", tab === t.id ? "bg-surface text-ink shadow-sm ring-1 ring-line" : "text-ink-3 hover:text-ink")}
             onClick={() => setTab(t.id)}
+            onFocus={() => setTab(t.id)}
             data-testid={`comments-tab-${t.id}`}
           >
             {t.label}
