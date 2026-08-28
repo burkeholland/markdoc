@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { eq } from "drizzle-orm";
 import * as Y from "yjs";
 
 process.env.PGLITE_DATA_DIR = "memory://";
@@ -29,9 +30,9 @@ async function seedUser(login: string, name: string) {
   return user;
 }
 
-async function seedDocument(id: string, title: string, ownerId: string) {
+async function seedDocument(id: string, title: string, ownerId: string, linkAccess: "private" | "comment" = "private") {
   const db = await getDb();
-  await db.insert(schema.documents).values({ id, title, ownerId, content: "# " + title });
+  await db.insert(schema.documents).values({ id, title, ownerId, content: "# " + title, linkAccess });
 }
 
 const until = async (check: () => Promise<boolean>, ms = 5000) => {
@@ -54,9 +55,14 @@ describe("notifications", () => {
     const owner = await seedUser("owner", "Owner");
     aliceId = (await seedUser("alice", "Alice")).id;
     bobId = (await seedUser("bob", "Bob")).id;
-    await seedUser("carol", "Carol");
-    await seedDocument("n-doc1", "Launch plan", owner.id);
+    const carol = await seedUser("carol", "Carol");
+    const mallory = await seedUser("mallory", "Mallory");
+    await seedDocument("n-doc1", "Launch plan", owner.id, "comment");
     await seedDocument("n-doc2", "Release notes", owner.id);
+    await seedDocument("n-private", "Mallory private plan", mallory.id);
+    await seedDocument("n-link", "Mallory linked plan", mallory.id, "comment");
+    const db = await getDb();
+    await db.insert(schema.collaborators).values({ documentId: "n-private", login: carol.login!, role: "commenter", addedBy: mallory.id });
   });
 
   it("records mentions idempotently per comment and mentioned login, never yourself", async () => {
@@ -290,6 +296,31 @@ describe("notifications", () => {
     expect((await unread("alice")).filter((n) => isTrackedSuggestionDecision(n.kind))).toHaveLength(3);
     stop();
     model.destroy();
+  });
+
+  it("only delivers mentions to people who can open the document", async () => {
+    const aliceBefore = await unreadCount("alice", "mention");
+
+    expect(await recordMentions("n-private", "private-denied", "mallory", "@alice hi")).toBe(0);
+    expect(await unreadCount("alice", "mention")).toBe(aliceBefore);
+    expect((await listNotifications("alice", { kind: "mention" })).items.some((item) => item.refId === "private-denied")).toBe(false);
+
+    // Read-time filtering also protects against inaccessible rows created before this check existed.
+    expect(await notify({ userLogin: "alice", documentId: "n-private", kind: "mention", actorLogin: "mallory", refId: "legacy-private", snippet: "@alice old mention" })).toBe(true);
+    const db = await getDb();
+    expect(await db.select().from(schema.notifications).where(eq(schema.notifications.refId, "legacy-private"))).toHaveLength(1);
+    expect(await unreadCount("alice", "mention")).toBe(aliceBefore);
+    expect((await listNotifications("alice", { kind: "mention" })).items.some((item) => item.refId === "legacy-private")).toBe(false);
+
+    expect(await recordMentions("n-link", "link-allowed", "mallory", "@alice hi")).toBe(1);
+    expect(await unreadCount("alice", "mention")).toBe(aliceBefore + 1);
+    expect((await listNotifications("alice", { kind: "mention" })).items.some((item) => item.refId === "link-allowed")).toBe(true);
+
+    expect(await recordMentions("n-private", "collaborator-allowed", "mallory", "@carol hi")).toBe(1);
+    expect((await listNotifications("carol", { kind: "mention" })).items.some((item) => item.refId === "collaborator-allowed")).toBe(true);
+
+    expect(await recordMentions("n-private", "owner-allowed", "carol", "@mallory hi")).toBe(1);
+    expect((await listNotifications("mallory", { kind: "mention" })).items.some((item) => item.refId === "owner-allowed")).toBe(true);
   });
 
   it("migration 0008 copies legacy mention rows and drops the old table", () => {

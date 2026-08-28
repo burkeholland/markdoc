@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, gte, inArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { createTwoFilesPatch } from "diff";
 import { getDb, schema } from "@/server/db";
 import type { SessionUser } from "@/server/documents";
@@ -442,8 +442,8 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
 }
 
 /**
- * Cross-document inbox: @mentions of the token's user and new "Ask an agent" requests on every document
- * they own or collaborate on. Content changes are not included (watch a document for those).
+ * Cross-document inbox: @mentions on every document the token's user can open, plus new "Ask an agent"
+ * requests on documents they own or collaborate on. Content changes are not included.
  */
 export async function collectUserEvents(user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: null }), events: [] };
@@ -457,7 +457,16 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       .select({ n: schema.notifications, title: schema.documents.title })
       .from(schema.notifications)
       .innerJoin(schema.documents, eq(schema.documents.id, schema.notifications.documentId))
-      .where(and(eq(schema.notifications.userLogin, login), eq(schema.notifications.kind, "mention"), gt(schema.notifications.createdAt, new Date(cursor.n))))
+      .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
+      .where(
+        and(
+          eq(schema.notifications.userLogin, login),
+          eq(schema.notifications.kind, "mention"),
+          gt(schema.notifications.createdAt, new Date(cursor.n)),
+          isNull(schema.documents.deletedAt),
+          or(eq(schema.documents.ownerId, user.id), ne(schema.documents.linkAccess, "private"), sql`${schema.collaborators.login} is not null`),
+        ),
+      )
       .orderBy(asc(schema.notifications.createdAt))
       .limit(200);
     for (const { n, title } of mentions) {
