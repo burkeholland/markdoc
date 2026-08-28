@@ -59,6 +59,9 @@ Set-Location (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'azure-safety.ps1')
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'
+if ($ImageTag -and $ImageTag -notmatch '^[0-9a-f]{40}$') {
+  throw '-ImageTag must be a full 40-character Git commit SHA.'
+}
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI not found: https://aka.ms/installazurecli' }
 az account show -o none 2>$null
@@ -119,22 +122,30 @@ if ($SecretsPath) {
   }
 }
 $secureValues.PostgresCandidatePassword = $secureValues.PostgresAdminPassword
+$rotationRecoveryProperties = @(
+  'PostgresRotationPreviousImage',
+  'PostgresRotationPreviousAppVersion',
+  'PostgresRotationPreviousRevision',
+  'PostgresRotationAppUrl'
+)
+$hasStoredRotationCandidate = [bool](
+  $store -and $store.PSObject.Properties['PostgresCandidatePassword']
+)
+$storedRotationRecoveryPropertyCount = @(
+  $rotationRecoveryProperties | Where-Object {
+    $store -and $store.PSObject.Properties[$_]
+  }
+).Count
+$hasRetainedRotationCandidate = (
+  $hasStoredRotationCandidate -and
+  $storedRotationRecoveryPropertyCount -eq $rotationRecoveryProperties.Count
+)
 
 function Assert-ProductionSecretStoreAcl {
   if (-not $resolvedSecretsPath -or -not $store) {
     throw 'Password rotation state requires the DPAPI-encrypted production secrets store.'
   }
-  $acl = [IO.File]::GetAccessControl($resolvedSecretsPath)
-  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-  $foreignAllow = @(
-    $acl.Access | Where-Object {
-      $_.AccessControlType -eq 'Allow' -and
-      $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]) -ne $currentSid
-    }
-  )
-  if (-not $acl.AreAccessRulesProtected -or $foreignAllow.Count -gt 0) {
-    throw 'The production secrets store ACL is not restricted to the current Windows user.'
-  }
+  Assert-ProtectedCurrentUserFileAcl $resolvedSecretsPath
 }
 
 function Save-ProductionSecretStore {
@@ -163,19 +174,80 @@ function New-RotationCandidatePassword {
   }
 }
 
-function Initialize-RotationCandidate {
+function Get-RotationRecoveryState {
   Assert-ProductionSecretStoreAcl
-  $property = $store.PSObject.Properties['PostgresCandidatePassword']
-  if ($property) {
-    if ($property.Value -isnot [Security.SecureString]) {
-      throw 'Secrets file property PostgresCandidatePassword must be a SecureString.'
-    }
-  } else {
-    $store | Add-Member -NotePropertyName PostgresCandidatePassword -NotePropertyValue (New-RotationCandidatePassword)
-    Save-ProductionSecretStore
-    $property = $store.PSObject.Properties['PostgresCandidatePassword']
+  $candidate = $store.PSObject.Properties['PostgresCandidatePassword']
+  if (-not $candidate -or $candidate.Value -isnot [Security.SecureString]) {
+    throw 'Secrets file property PostgresCandidatePassword must be a SecureString.'
   }
-  $secureValues.PostgresCandidatePassword = $property.Value
+  $values = @{}
+  foreach ($propertyName in $rotationRecoveryProperties) {
+    $property = $store.PSObject.Properties[$propertyName]
+    if (-not $property -or $property.Value -isnot [Security.SecureString]) {
+      throw "Retained password rotation state is missing SecureString property $propertyName."
+    }
+    $values[$propertyName] = ConvertTo-PlainText $property.Value
+  }
+  if (
+    $values.PostgresRotationPreviousImage -notmatch '@sha256:[0-9a-f]{64}$' -or
+    $values.PostgresRotationPreviousAppVersion -notmatch '^[0-9a-f]{40}$' -or
+    [string]::IsNullOrWhiteSpace($values.PostgresRotationPreviousRevision) -or
+    $values.PostgresRotationAppUrl -notmatch '^https://[^/]+$'
+  ) {
+    throw 'Retained password rotation recovery metadata is invalid.'
+  }
+
+  $secureValues.PostgresCandidatePassword = $candidate.Value
+  return [pscustomobject]@{
+    PreviousImage = $values.PostgresRotationPreviousImage
+    PreviousAppVersion = $values.PostgresRotationPreviousAppVersion
+    PreviousRevision = $values.PostgresRotationPreviousRevision
+    AppUrl = $values.PostgresRotationAppUrl
+  }
+}
+
+function Initialize-RotationCandidate(
+  [string]$PreviousImage,
+  [string]$PreviousAppVersion,
+  [string]$PreviousRevision,
+  [string]$AppUrl
+) {
+  Assert-ProductionSecretStoreAcl
+  $candidate = $store.PSObject.Properties['PostgresCandidatePassword']
+  $recoveryPropertyCount = @(
+    $rotationRecoveryProperties | Where-Object { $store.PSObject.Properties[$_] }
+  ).Count
+  if ($candidate -and $recoveryPropertyCount -eq $rotationRecoveryProperties.Count) {
+    return Get-RotationRecoveryState
+  }
+  if ($recoveryPropertyCount -ne 0) {
+    throw 'The DPAPI-encrypted password rotation recovery metadata is incomplete.'
+  }
+
+  $recoveryValues = [ordered]@{
+    PostgresRotationPreviousImage = $PreviousImage
+    PostgresRotationPreviousAppVersion = $PreviousAppVersion
+    PostgresRotationPreviousRevision = $PreviousRevision
+    PostgresRotationAppUrl = $AppUrl
+  }
+  if (
+    $PreviousImage -notmatch '@sha256:[0-9a-f]{64}$' -or
+    $PreviousAppVersion -notmatch '^[0-9a-f]{40}$' -or
+    [string]::IsNullOrWhiteSpace($PreviousRevision) -or
+    $AppUrl -notmatch '^https://[^/]+$'
+  ) {
+    throw 'Password rotation recovery metadata is invalid.'
+  }
+  if (-not $candidate) {
+    $store | Add-Member -NotePropertyName PostgresCandidatePassword -NotePropertyValue (New-RotationCandidatePassword)
+  } elseif ($candidate.Value -isnot [Security.SecureString]) {
+    throw 'Secrets file property PostgresCandidatePassword must be a SecureString.'
+  }
+  foreach ($entry in $recoveryValues.GetEnumerator()) {
+    $store | Add-Member -NotePropertyName $entry.Key -NotePropertyValue (ConvertFrom-PlainText $entry.Value)
+  }
+  Save-ProductionSecretStore
+  return Get-RotationRecoveryState
 }
 
 function Complete-RotationSecretStore([bool]$PromoteCandidate) {
@@ -188,6 +260,9 @@ function Complete-RotationSecretStore([bool]$PromoteCandidate) {
     $secureValues.PostgresAdminPassword = $candidate.Value
   }
   $store.PSObject.Properties.Remove('PostgresCandidatePassword')
+  foreach ($propertyName in $rotationRecoveryProperties) {
+    $store.PSObject.Properties.Remove($propertyName)
+  }
   Save-ProductionSecretStore
   $secureValues.PostgresCandidatePassword = $secureValues.PostgresAdminPassword
 }
@@ -343,7 +418,11 @@ function Remove-BootstrapPublicIp([string]$PublicIpName) {
       --output tsv `
       --only-show-errors
     if ($LASTEXITCODE) { throw 'Could not verify the PostgreSQL VM network interface.' }
-    if ($attached) {
+    $attachedIsBootstrap = (
+      -not [string]::IsNullOrWhiteSpace($attached) -and
+      $attached -match "/publicIPAddresses/$([regex]::Escape($PublicIpName))$"
+    )
+    if ($attachedIsBootstrap) {
       az network nic ip-config update `
         --resource-group $ResourceGroup `
         --nic-name "$Name-pg-nic" `
@@ -360,7 +439,14 @@ function Remove-BootstrapPublicIp([string]$PublicIpName) {
       --query 'ipConfigurations[0].publicIPAddress.id' `
       --output tsv `
       --only-show-errors
-    if ($LASTEXITCODE -or $attached) { throw 'The PostgreSQL bootstrap public IP is still attached.' }
+    if (
+      $LASTEXITCODE -or (
+        -not [string]::IsNullOrWhiteSpace($attached) -and
+        $attached -match "/publicIPAddresses/$([regex]::Escape($PublicIpName))$"
+      )
+    ) {
+      throw 'The PostgreSQL bootstrap public IP is still attached.'
+    }
   }
 
   $publicIpId = az network public-ip list `
@@ -432,7 +518,8 @@ function Get-ActiveContainerAppRevisions {
 
 function Restore-ContainerAppRevision([string]$RevisionName) {
   $active = @(Get-ActiveContainerAppRevisions)
-  if ($RevisionName -notin $active) {
+  $alreadySoleActive = $active.Count -eq 1 -and $active[0] -eq $RevisionName
+  if (-not $alreadySoleActive) {
     az containerapp revision activate `
       --resource-group $ResourceGroup `
       --name $Name `
@@ -450,6 +537,7 @@ function Restore-ContainerAppRevision([string]$RevisionName) {
   if ($active.Count -ne 1 -or $active[0] -ne $RevisionName) {
     throw "Container App revision $RevisionName was not restored as the only active revision."
   }
+  if ($alreadySoleActive) { return }
 
   az containerapp revision restart `
     --resource-group $ResourceGroup `
@@ -566,9 +654,6 @@ if ($postgresVmExists -and -not $databaseInitialized) {
   }
 }
 
-if ($InitializeDatabase -and $databaseInitialized) {
-  throw 'PostgreSQL initialization already succeeded; use ordinary deployment or explicit password rotation.'
-}
 if ($RotateDatabasePassword -and -not $postgresVmExists) {
   throw 'The PostgreSQL VM does not exist; use -InitializeDatabase for first provision.'
 }
@@ -599,6 +684,11 @@ if (-not $postgresVmExists -and -not $InitializeDatabase) {
 if ($postgresVmExists -and -not $databaseInitialized -and -not $InitializeDatabase) {
   throw 'PostgreSQL initialization is incomplete. Resume it with the explicit -InitializeDatabase flag.'
 }
+if ($InitializeDatabase -and $databaseInitialized) {
+  Invoke-AlreadyInitializedDatabaseRefusal `
+    -CleanupTemporaryEgress { Restore-PostgresSteadyStateEgress } `
+    -RemoveBootstrapPublicIp { Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip" }
+}
 
 $databaseConfigurationToken = if ($InitializeDatabase -or $RotateDatabasePassword) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
 $recoveryConfigurationVersion = if ($ConfigureRecovery) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
@@ -607,173 +697,147 @@ $rotationAppVersion = ''
 $rotationRevision = ''
 $rotationAppUrl = ''
 
-if ($RotateDatabasePassword) {
-  $rotationImage = az containerapp show `
+function Get-CurrentRotationContext {
+  $previousImage = az containerapp show `
     --resource-group $ResourceGroup `
     --name $Name `
     --query 'properties.template.containers[0].image' `
     --output tsv `
     --only-show-errors
-  $rotationAppVersion = az containerapp show `
+  if ($LASTEXITCODE) { throw 'Could not inspect the existing Container App image before password rotation.' }
+
+  $previousAppVersion = az containerapp show `
     --resource-group $ResourceGroup `
     --name $Name `
     --query "properties.template.containers[0].env[?name=='APP_VERSION'] | [0].value" `
     --output tsv `
     --only-show-errors
-  $rotationFqdn = az containerapp show `
+  if ($LASTEXITCODE) { throw 'Could not inspect the existing Container App version before password rotation.' }
+
+  $previousFqdn = az containerapp show `
     --resource-group $ResourceGroup `
     --name $Name `
     --query 'properties.configuration.ingress.fqdn' `
     --output tsv `
     --only-show-errors
-  $rotationActiveRevisions = @(Get-ActiveContainerAppRevisions)
-  if (
-    $LASTEXITCODE -or
-    $rotationImage -notmatch '@sha256:[0-9a-f]{64}$' -or
-    $rotationAppVersion -notmatch '^[0-9a-f]{40}$' -or
-    [string]::IsNullOrWhiteSpace($rotationFqdn) -or
-    $rotationActiveRevisions.Count -ne 1
-  ) {
-    throw 'Password rotation requires one healthy existing Container App revision, image, and APP_VERSION.'
-  }
-  $rotationRevision = $rotationActiveRevisions[0]
-  $rotationAppUrl = "https://$rotationFqdn"
-  [void](Wait-AppHealth $rotationAppUrl $rotationAppVersion)
-  Initialize-RotationCandidate
-}
+  if ($LASTEXITCODE) { throw 'Could not inspect the existing Container App FQDN before password rotation.' }
 
-Step 'Deploying private infrastructure without changing the existing PostgreSQL database.'
-if ($InitializeDatabase) {
-  Step 'Explicit first provision: temporarily enabling bootstrap networking and creating the database login.'
-} elseif ($RotateDatabasePassword) {
-  Step 'Explicit password rotation: staging a candidate secret and using the rollback-capable private run command.'
+  $previousActiveRevisions = @(Get-ActiveContainerAppRevisions)
+  if (
+    $previousImage -notmatch '@sha256:[0-9a-f]{64}$' -or
+    $previousAppVersion -notmatch '^[0-9a-f]{40}$' -or
+    [string]::IsNullOrWhiteSpace($previousFqdn) -or
+    $previousActiveRevisions.Count -ne 1
+  ) {
+    throw 'Password rotation requires one existing Container App revision, immutable image, and APP_VERSION.'
+  }
+
+  return [pscustomobject]@{
+    PreviousImage = $previousImage
+    PreviousAppVersion = $previousAppVersion
+    PreviousRevision = $previousActiveRevisions[0]
+    AppUrl = "https://$previousFqdn"
+  }
 }
-if ($ConfigureRecovery) {
-  Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
-}
-$temporaryPublicIp = [bool]$InitializeDatabase
-$temporaryPackageEgress = [bool]($InitializeDatabase -or $ConfigureRecovery)
-$initialCleanup = @()
-if ($temporaryPackageEgress) {
-  $initialCleanup += @{ Action = { Restore-PostgresSteadyStateEgress } }
-}
-if ($temporaryPublicIp) {
-  $initialCleanup += @{ Action = { Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip" } }
-}
-$outputs = Invoke-OperationWithGuaranteedCleanup `
-  -Context 'Initial private infrastructure deployment' `
-  -Operation {
-    $stageOutputs = Deploy-Infra `
-      -Image '' `
-      -AppVersion '' `
-      -BootstrapPublicIp $temporaryPublicIp `
-      -EnableVmBackup $false `
-      -InitializePostgres ([bool]$InitializeDatabase) `
-      -RotatePostgresPassword ([bool]$RotateDatabasePassword) `
-      -CommitPostgresPassword $false `
-      -RestorePostgresPassword $false `
-      -ClearPendingPostgresPassword $false `
-      -ReconcilePostgresPassword $false `
-      -SimulatePostgresRotationFailure ([bool]$SimulateDatabaseRotationFailure) `
-      -ConfigurePostgresRecovery ([bool]$ConfigureRecovery) `
-      -SimulatePostgresRecoveryFailure ([bool]$SimulateRecoveryConfigurationFailure) `
-      -DatabaseConfigurationToken $databaseConfigurationToken `
-      -RecoveryConfigurationVersion $recoveryConfigurationVersion
-    if ($ConfigureRecovery) {
-      $recoveryExecution = Get-ManagedRunCommandResult 'configure-postgresql-recovery'
-      if ($recoveryExecution.executionState -ne 'Succeeded' -or $recoveryExecution.exitCode -ne 0) {
-        throw 'The PostgreSQL recovery configuration failed on the VM.'
-      }
-    }
-    return $stageOutputs
-  } `
-  -CleanupActions $initialCleanup
 
 if ($RotateDatabasePassword) {
-  $rotationExecution = Get-ManagedRunCommandResult 'rotate-postgresql-password'
-  $rotationResult = [string]$rotationExecution.output
+  $rotationPreparation = Resolve-RotationPreparation `
+    -HasRetainedCandidate $hasRetainedRotationCandidate `
+    -LoadRetainedCandidate { Get-RotationRecoveryState } `
+    -GetFreshContext { Get-CurrentRotationContext } `
+    -AssertFreshRevisionHealthy {
+      param($context)
+      [void](Wait-AppHealth $context.AppUrl $context.PreviousAppVersion)
+    } `
+    -CreateFreshCandidate {
+      param($context)
+      Initialize-RotationCandidate `
+        -PreviousImage $context.PreviousImage `
+        -PreviousAppVersion $context.PreviousAppVersion `
+        -PreviousRevision $context.PreviousRevision `
+        -AppUrl $context.AppUrl
+    }
+  $rotationImage = $rotationPreparation.PreviousImage
+  $rotationAppVersion = $rotationPreparation.PreviousAppVersion
+  $rotationRevision = $rotationPreparation.PreviousRevision
+  $rotationAppUrl = $rotationPreparation.AppUrl
+}
+
+function Clear-RotationCandidateInfrastructure([bool]$EnableVmBackup) {
+  $cleanupOutputs = Deploy-Infra `
+    -Image '' `
+    -AppVersion '' `
+    -BootstrapPublicIp $false `
+    -EnableVmBackup $EnableVmBackup `
+    -InitializePostgres $false `
+    -RotatePostgresPassword $false `
+    -CommitPostgresPassword $false `
+    -RestorePostgresPassword $false `
+    -ClearPendingPostgresPassword $true `
+    -ReconcilePostgresPassword $false `
+    -SimulatePostgresRotationFailure $false `
+    -ConfigurePostgresRecovery $false `
+    -SimulatePostgresRecoveryFailure $false `
+    -DatabaseConfigurationToken 'unchanged' `
+    -RecoveryConfigurationVersion 'unchanged'
+  Assert-RotationCandidatesDisabled $cleanupOutputs.secretsVaultId.value
+}
+
+function Restore-PreviousDatabaseCredential {
+  $rollbackOutputs = Deploy-Infra `
+    -Image $rotationImage `
+    -AppVersion $rotationAppVersion `
+    -BootstrapPublicIp $false `
+    -EnableVmBackup $true `
+    -InitializePostgres $false `
+    -RotatePostgresPassword $false `
+    -CommitPostgresPassword $false `
+    -RestorePostgresPassword $true `
+    -ClearPendingPostgresPassword $false `
+    -ReconcilePostgresPassword $true `
+    -SimulatePostgresRotationFailure $false `
+    -ConfigurePostgresRecovery $false `
+    -SimulatePostgresRecoveryFailure $false `
+    -DatabaseConfigurationToken $databaseConfigurationToken `
+    -RecoveryConfigurationVersion 'unchanged'
+  $reconciliation = Get-ManagedRunCommandResult 'reconcile-postgresql-password'
+  $reconciliationResult = [string]$reconciliation.output
   if (
-    $rotationExecution.executionState -ne 'Succeeded' -or
-    $rotationExecution.exitCode -ne 0 -or
-    $rotationResult -notmatch 'database-password-rotation=(committed|already-committed)'
+    $reconciliation.executionState -ne 'Succeeded' -or
+    $reconciliation.exitCode -ne 0 -or
+    $reconciliationResult -notmatch 'database-password-reconciliation=(rolled-back|already-active)'
   ) {
-    $rotationState = if ($rotationResult -match 'database-password-rotation=[a-z-]+(?: stage=[a-z-]+)?') {
+    $state = if ($reconciliationResult -match 'database-password-reconciliation=[a-z-]+(?: stage=[a-z-]+)?') {
       $Matches[0]
     } else {
-      'database-password-rotation=unknown'
+      'database-password-reconciliation=unknown'
     }
-    $safeTerminalStates = @(
-      'database-password-rotation=failed stage=managed-identity',
-      'database-password-rotation=failed stage=active-secret',
-      'database-password-rotation=failed stage=candidate-secret',
-      'database-password-rotation=failed stage=preflight-simulation',
-      'database-password-rotation=failed stage=alter',
-      'database-password-rotation=rolled-back stage=candidate-verification'
-    )
-    $canClearCandidate = (
-      $rotationExecution.executionState -eq 'Succeeded' -and
-      $rotationExecution.exitCode -eq 0 -and
-      $rotationState -in $safeTerminalStates
-    )
-    if ($canClearCandidate) {
-      $rotationFailure = [InvalidOperationException]::new(
-        "PostgreSQL password rotation did not commit ($rotationState). The active Key Vault secret and Container App were not changed."
-      )
-      [void](Invoke-OperationWithGuaranteedCleanup `
-        -Context 'Pre-change PostgreSQL password rotation' `
-        -Operation { throw $rotationFailure } `
-        -CleanupActions @(
-          @{
-            Action = {
-              [void](Wait-AppHealth $rotationAppUrl $rotationAppVersion)
-              $cleanupOutputs = Deploy-Infra `
-                -Image '' `
-                -AppVersion '' `
-                -BootstrapPublicIp $false `
-                -EnableVmBackup $false `
-                -InitializePostgres $false `
-                -RotatePostgresPassword $false `
-                -CommitPostgresPassword $false `
-                -RestorePostgresPassword $false `
-                -ClearPendingPostgresPassword $true `
-                -ReconcilePostgresPassword $false `
-                -SimulatePostgresRotationFailure $false `
-                -ConfigurePostgresRecovery $false `
-                -SimulatePostgresRecoveryFailure $false `
-                -DatabaseConfigurationToken 'unchanged' `
-                -RecoveryConfigurationVersion 'unchanged'
-              Assert-RotationCandidatesDisabled $cleanupOutputs.secretsVaultId.value
-              Complete-RotationSecretStore $false
-            }
-          }
-        ))
-    }
-    throw "PostgreSQL password rotation requires manual reconciliation ($rotationState); the encrypted candidate was retained."
+    throw "PostgreSQL compensation did not verify the original credential ($state)."
   }
-  Write-Host ($rotationResult | Select-String -Pattern 'database-password-rotation=(committed|already-committed)' | Select-Object -First 1)
+  Write-Host ($reconciliationResult | Select-String -Pattern 'database-password-reconciliation=(rolled-back|already-active)' | Select-Object -First 1)
+  Restore-ContainerAppRevision $rotationRevision
+  [void](Wait-AppHealth $rotationAppUrl $rotationAppVersion)
+  Assert-ContainerAppDatabaseSecretReference
+  Clear-RotationCandidateInfrastructure $true
+  Complete-RotationSecretStore $false
+  Write-Host "database-password-compensation=verified revision=$rotationRevision"
 }
 
-$registry = $outputs.registryName.value
-$appUrl = $outputs.appUrl.value
-$image = ''
-$appVersion = ''
-
-if ($InitializeDatabase) {
-  az backup vault backup-properties set `
-    --resource-group $ResourceGroup `
-    --name $outputs.backupVaultName.value `
-    --backup-storage-redundancy LocallyRedundant `
-    --output none `
-    --only-show-errors
-  if ($LASTEXITCODE) { throw 'Could not set locally redundant backup storage before enabling protection.' }
+function Clear-UnchangedRotationCandidate {
+  [void](Wait-AppHealth $rotationAppUrl $rotationAppVersion)
+  Clear-RotationCandidateInfrastructure $true
+  Complete-RotationSecretStore $false
+  Write-Host 'database-password-rotation=unchanged candidate=cleared'
 }
 
-if (-not $InfraOnly) {
-  if ($RotateDatabasePassword) {
-    $image = $rotationImage
-    $appVersion = $rotationAppVersion
-  } elseif ($ImageTag) {
-    if ($ImageTag -notmatch '^[0-9a-f]{40}$') { throw '-ImageTag must be a full 40-character Git commit SHA.' }
+function Resolve-ApplicationArtifact($StageOutputs) {
+  if ($InfraOnly) {
+    return [pscustomobject]@{ Image = ''; AppVersion = '' }
+  }
+
+  $registry = $StageOutputs.registryName.value
+  $resolvedAppVersion = ''
+  if ($ImageTag) {
     $available = az acr repository show-tags `
       --name $registry `
       --repository markdoc `
@@ -781,7 +845,7 @@ if (-not $InfraOnly) {
       --output tsv `
       --only-show-errors
     if ($LASTEXITCODE -or $available -ne $ImageTag) { throw "Image tag $ImageTag does not exist in registry $registry." }
-    $appVersion = $ImageTag
+    $resolvedAppVersion = $ImageTag
   } else {
     Step "Building immutable image for application source $sourceSha in Azure Container Registry"
     $buildContext = Join-Path ([IO.Path]::GetTempPath()) "markdoc-build-$([guid]::NewGuid().ToString('N'))"
@@ -829,123 +893,198 @@ if (-not $InfraOnly) {
       if (Test-Path -LiteralPath $buildArchive) { Remove-Item -LiteralPath $buildArchive -Force }
       if (Test-Path -LiteralPath $buildContext) { Remove-Item -LiteralPath $buildContext -Recurse -Force }
     }
-    $appVersion = $sourceSha
+    $resolvedAppVersion = $sourceSha
   }
 
   $digest = az acr manifest list-metadata `
     --registry $registry `
     --name markdoc `
-    --query "[?tags != null && contains(tags, '$appVersion')] | [0].digest" `
+    --query "[?tags != null && contains(tags, '$resolvedAppVersion')] | [0].digest" `
     --output tsv `
     --only-show-errors
-  if ($LASTEXITCODE -or $digest -notmatch '^sha256:[0-9a-f]{64}$') { throw "Could not resolve the immutable image digest for $appVersion." }
-  $image = "$($outputs.registryLoginServer.value)/markdoc@$digest"
+  if ($LASTEXITCODE -or $digest -notmatch '^sha256:[0-9a-f]{64}$') {
+    throw "Could not resolve the immutable image digest for $resolvedAppVersion."
+  }
+  return [pscustomobject]@{
+    Image = "$($StageOutputs.registryLoginServer.value)/markdoc@$digest"
+    AppVersion = $resolvedAppVersion
+  }
 }
 
-Step 'Finalizing the private VM network and rolling the Container App'
+$outputs = $null
+$image = ''
+$appVersion = ''
 if ($RotateDatabasePassword) {
-  $outputs = Invoke-RotationFinalization `
-    -Commit {
-      Deploy-Infra `
-        -Image $image `
-        -AppVersion $appVersion `
-        -BootstrapPublicIp $false `
-        -EnableVmBackup $true `
-        -InitializePostgres $false `
-        -RotatePostgresPassword $false `
-        -CommitPostgresPassword $true `
-        -RestorePostgresPassword $false `
-        -ClearPendingPostgresPassword $false `
-        -ReconcilePostgresPassword $false `
-        -SimulatePostgresRotationFailure $false `
-        -ConfigurePostgresRecovery $false `
-        -SimulatePostgresRecoveryFailure $false `
-        -DatabaseConfigurationToken $databaseConfigurationToken `
-        -RecoveryConfigurationVersion 'unchanged'
+  Step 'Explicit password rotation: staging a candidate secret and using the rollback-capable private run command.'
+  if ($ConfigureRecovery) {
+    Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
+  }
+  $image = $rotationImage
+  $appVersion = $rotationAppVersion
+  $rotationCleanup = @()
+  if ($ConfigureRecovery) {
+    $rotationCleanup += @{ Action = { Restore-PostgresSteadyStateEgress } }
+  }
+  $outputs = Invoke-OperationWithGuaranteedCleanup `
+    -Context 'PostgreSQL password rotation' `
+    -Operation {
+      Invoke-RotationFinalization `
+        -Commit {
+          $stageOutputs = Deploy-Infra `
+            -Image '' `
+            -AppVersion '' `
+            -BootstrapPublicIp $false `
+            -EnableVmBackup $false `
+            -InitializePostgres $false `
+            -RotatePostgresPassword $true `
+            -CommitPostgresPassword $false `
+            -RestorePostgresPassword $false `
+            -ClearPendingPostgresPassword $false `
+            -ReconcilePostgresPassword $false `
+            -SimulatePostgresRotationFailure ([bool]$SimulateDatabaseRotationFailure) `
+            -ConfigurePostgresRecovery ([bool]$ConfigureRecovery) `
+            -SimulatePostgresRecoveryFailure ([bool]$SimulateRecoveryConfigurationFailure) `
+            -DatabaseConfigurationToken $databaseConfigurationToken `
+            -RecoveryConfigurationVersion $recoveryConfigurationVersion
+
+          if ($ConfigureRecovery) {
+            $recoveryExecution = Get-ManagedRunCommandResult 'configure-postgresql-recovery'
+            if ($recoveryExecution.executionState -ne 'Succeeded' -or $recoveryExecution.exitCode -ne 0) {
+              throw 'The PostgreSQL recovery configuration failed on the VM.'
+            }
+          }
+
+          $rotationExecution = Get-ManagedRunCommandResult 'rotate-postgresql-password'
+          $rotationResult = [string]$rotationExecution.output
+          if (
+            $rotationExecution.executionState -ne 'Succeeded' -or
+            $rotationExecution.exitCode -ne 0 -or
+            $rotationResult -notmatch 'database-password-rotation=(committed|already-committed)'
+          ) {
+            $rotationState = if ($rotationResult -match 'database-password-rotation=[a-z-]+(?: stage=[a-z-]+)?') {
+              $Matches[0]
+            } else {
+              'database-password-rotation=unknown'
+            }
+            $rotationFailure = [InvalidOperationException]::new(
+              "PostgreSQL password rotation did not commit ($rotationState)."
+            )
+            if (
+              $rotationExecution.executionState -eq 'Succeeded' -and
+              $rotationExecution.exitCode -eq 0 -and
+              $rotationState -in @(
+                'database-password-rotation=failed stage=managed-identity',
+                'database-password-rotation=failed stage=active-secret',
+                'database-password-rotation=failed stage=candidate-secret',
+                'database-password-rotation=failed stage=preflight-simulation',
+                'database-password-rotation=rolled-back stage=candidate-verification'
+              )
+            ) {
+              $rotationFailure.Data['DatabaseState'] = 'unchanged'
+            }
+            throw $rotationFailure
+          }
+          Write-Host ($rotationResult | Select-String -Pattern 'database-password-rotation=(committed|already-committed)' | Select-Object -First 1)
+
+          Step 'Finalizing the private VM network and rolling the Container App'
+          return Deploy-Infra `
+            -Image $image `
+            -AppVersion $appVersion `
+            -BootstrapPublicIp $false `
+            -EnableVmBackup $true `
+            -InitializePostgres $false `
+            -RotatePostgresPassword $false `
+            -CommitPostgresPassword $true `
+            -RestorePostgresPassword $false `
+            -ClearPendingPostgresPassword $false `
+            -ReconcilePostgresPassword $false `
+            -SimulatePostgresRotationFailure $false `
+            -ConfigurePostgresRecovery $false `
+            -SimulatePostgresRecoveryFailure $false `
+            -DatabaseConfigurationToken $databaseConfigurationToken `
+            -RecoveryConfigurationVersion 'unchanged'
+        } `
+        -Verify {
+          param($committedOutputs)
+          [void](Wait-NewActiveContainerAppRevision $rotationRevision)
+          [void](Wait-AppHealth $committedOutputs.appUrl.value $appVersion)
+          Assert-ContainerAppDatabaseSecretReference
+        } `
+        -Compensate {
+          param($primaryError)
+          if ($primaryError.Exception.Data['DatabaseState'] -eq 'unchanged') {
+            Clear-UnchangedRotationCandidate
+          } else {
+            Restore-PreviousDatabaseCredential
+          }
+        } `
+        -TerminalCleanup {
+          Clear-RotationCandidateInfrastructure $true
+          Complete-RotationSecretStore $true
+        } `
+        -SimulatePostChangeFailure:$SimulatePostChangeDatabaseRotationFailure
     } `
-    -Verify {
-      param($committedOutputs)
-      [void](Wait-NewActiveContainerAppRevision $rotationRevision)
-      [void](Wait-AppHealth $committedOutputs.appUrl.value $appVersion)
-      Assert-ContainerAppDatabaseSecretReference
-    } `
-    -Compensate {
-      $rollbackOutputs = Deploy-Infra `
-        -Image $rotationImage `
-        -AppVersion $rotationAppVersion `
-        -BootstrapPublicIp $false `
-        -EnableVmBackup $true `
-        -InitializePostgres $false `
-        -RotatePostgresPassword $false `
-        -CommitPostgresPassword $false `
-        -RestorePostgresPassword $true `
-        -ClearPendingPostgresPassword $false `
-        -ReconcilePostgresPassword $true `
-        -SimulatePostgresRotationFailure $false `
-        -ConfigurePostgresRecovery $false `
-        -SimulatePostgresRecoveryFailure $false `
-        -DatabaseConfigurationToken $databaseConfigurationToken `
-        -RecoveryConfigurationVersion 'unchanged'
-      $reconciliation = Get-ManagedRunCommandResult 'reconcile-postgresql-password'
-      $reconciliationResult = [string]$reconciliation.output
-      if (
-        $reconciliation.executionState -ne 'Succeeded' -or
-        $reconciliation.exitCode -ne 0 -or
-        $reconciliationResult -notmatch 'database-password-reconciliation=(rolled-back|already-active)'
-      ) {
-        $state = if ($reconciliationResult -match 'database-password-reconciliation=[a-z-]+(?: stage=[a-z-]+)?') {
-          $Matches[0]
-        } else {
-          'database-password-reconciliation=unknown'
-        }
-        throw "PostgreSQL compensation did not verify the original credential ($state)."
-      }
-      Write-Host ($reconciliationResult | Select-String -Pattern 'database-password-reconciliation=(rolled-back|already-active)' | Select-Object -First 1)
-      Restore-ContainerAppRevision $rotationRevision
-      [void](Wait-AppHealth $rollbackOutputs.appUrl.value $rotationAppVersion)
-      Assert-ContainerAppDatabaseSecretReference
-      $cleanupOutputs = Deploy-Infra `
-        -Image '' `
-        -AppVersion '' `
-        -BootstrapPublicIp $false `
-        -EnableVmBackup $true `
-        -InitializePostgres $false `
-        -RotatePostgresPassword $false `
-        -CommitPostgresPassword $false `
-        -RestorePostgresPassword $false `
-        -ClearPendingPostgresPassword $true `
-        -ReconcilePostgresPassword $false `
-        -SimulatePostgresRotationFailure $false `
-        -ConfigurePostgresRecovery $false `
-        -SimulatePostgresRecoveryFailure $false `
-        -DatabaseConfigurationToken 'unchanged' `
-        -RecoveryConfigurationVersion 'unchanged'
-      Assert-RotationCandidatesDisabled $cleanupOutputs.secretsVaultId.value
-      Complete-RotationSecretStore $false
-      Write-Host "database-password-compensation=verified revision=$rotationRevision"
-    } `
-    -TerminalCleanup {
-      $cleanupOutputs = Deploy-Infra `
-        -Image '' `
-        -AppVersion '' `
-        -BootstrapPublicIp $false `
-        -EnableVmBackup $true `
-        -InitializePostgres $false `
-        -RotatePostgresPassword $false `
-        -CommitPostgresPassword $false `
-        -RestorePostgresPassword $false `
-        -ClearPendingPostgresPassword $true `
-        -ReconcilePostgresPassword $false `
-        -SimulatePostgresRotationFailure $false `
-        -ConfigurePostgresRecovery $false `
-        -SimulatePostgresRecoveryFailure $false `
-        -DatabaseConfigurationToken 'unchanged' `
-        -RecoveryConfigurationVersion 'unchanged'
-      Assert-RotationCandidatesDisabled $cleanupOutputs.secretsVaultId.value
-      Complete-RotationSecretStore $true
-    } `
-    -SimulatePostChangeFailure:$SimulatePostChangeDatabaseRotationFailure
+    -CleanupActions $rotationCleanup
 } else {
+  Step 'Deploying private infrastructure without changing the existing PostgreSQL database.'
+  if ($InitializeDatabase) {
+    Step 'Explicit first provision: temporarily enabling bootstrap networking and creating the database login.'
+  }
+  if ($ConfigureRecovery) {
+    Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
+  }
+  $temporaryPublicIp = [bool]$InitializeDatabase
+  $temporaryPackageEgress = [bool]($InitializeDatabase -or $ConfigureRecovery)
+  $initialCleanup = @()
+  if ($temporaryPackageEgress) {
+    $initialCleanup += @{ Action = { Restore-PostgresSteadyStateEgress } }
+  }
+  if ($temporaryPublicIp) {
+    $initialCleanup += @{ Action = { Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip" } }
+  }
+  $outputs = Invoke-OperationWithGuaranteedCleanup `
+    -Context 'Initial private infrastructure deployment' `
+    -Operation {
+      $stageOutputs = Deploy-Infra `
+        -Image '' `
+        -AppVersion '' `
+        -BootstrapPublicIp $temporaryPublicIp `
+        -EnableVmBackup $false `
+        -InitializePostgres ([bool]$InitializeDatabase) `
+        -RotatePostgresPassword $false `
+        -CommitPostgresPassword $false `
+        -RestorePostgresPassword $false `
+        -ClearPendingPostgresPassword $false `
+        -ReconcilePostgresPassword $false `
+        -SimulatePostgresRotationFailure $false `
+        -ConfigurePostgresRecovery ([bool]$ConfigureRecovery) `
+        -SimulatePostgresRecoveryFailure ([bool]$SimulateRecoveryConfigurationFailure) `
+        -DatabaseConfigurationToken $databaseConfigurationToken `
+        -RecoveryConfigurationVersion $recoveryConfigurationVersion
+      if ($ConfigureRecovery) {
+        $recoveryExecution = Get-ManagedRunCommandResult 'configure-postgresql-recovery'
+        if ($recoveryExecution.executionState -ne 'Succeeded' -or $recoveryExecution.exitCode -ne 0) {
+          throw 'The PostgreSQL recovery configuration failed on the VM.'
+        }
+      }
+      return $stageOutputs
+    } `
+    -CleanupActions $initialCleanup
+
+  if ($InitializeDatabase) {
+    az backup vault backup-properties set `
+      --resource-group $ResourceGroup `
+      --name $outputs.backupVaultName.value `
+      --backup-storage-redundancy LocallyRedundant `
+      --output none `
+      --only-show-errors
+    if ($LASTEXITCODE) { throw 'Could not set locally redundant backup storage before enabling protection.' }
+  }
+
+  $artifact = Resolve-ApplicationArtifact $outputs
+  $image = $artifact.Image
+  $appVersion = $artifact.AppVersion
+  Step 'Finalizing the private VM network and rolling the Container App'
   $outputs = Deploy-Infra `
     -Image $image `
     -AppVersion $appVersion `
@@ -963,6 +1102,7 @@ if ($RotateDatabasePassword) {
     -DatabaseConfigurationToken $databaseConfigurationToken `
     -RecoveryConfigurationVersion 'unchanged'
 }
+$appUrl = $outputs.appUrl.value
 Remove-BootstrapPublicIp $outputs.bootstrapPublicIpName.value
 
 if ($VerifyRecovery -or $ConfigureRecovery) {

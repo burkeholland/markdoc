@@ -74,6 +74,87 @@ function Invoke-OperationWithGuaranteedCleanup {
   return $result
 }
 
+function Assert-ProtectedCurrentUserFileAcl {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $file = [IO.FileInfo]::new($Path)
+  $acl = [IO.FileSystemAclExtensions]::GetAccessControl(
+    $file,
+    [Security.AccessControl.AccessControlSections]::Access
+  )
+  $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $rules = @(
+    $acl.GetAccessRules(
+      $true,
+      $true,
+      [Security.Principal.SecurityIdentifier]
+    )
+  )
+  if ($rules.Count -eq 0) {
+    throw 'The production secrets store ACL has no readable access rules.'
+  }
+  $foreignAllow = @(
+    $rules | Where-Object {
+      $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+      $_.IdentityReference -ne $currentSid
+    }
+  )
+  if (-not $acl.AreAccessRulesProtected -or $foreignAllow.Count -gt 0) {
+    throw 'The production secrets store ACL is not restricted to the current Windows user.'
+  }
+}
+
+function Resolve-RotationPreparation {
+  param(
+    [Parameter(Mandatory)]
+    [bool]$HasRetainedCandidate,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$LoadRetainedCandidate,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$GetFreshContext,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$AssertFreshRevisionHealthy,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$CreateFreshCandidate
+  )
+
+  if ($HasRetainedCandidate) {
+    return & $LoadRetainedCandidate
+  }
+
+  $freshContext = & $GetFreshContext
+  [void](& $AssertFreshRevisionHealthy $freshContext)
+  return & $CreateFreshCandidate $freshContext
+}
+
+function Invoke-AlreadyInitializedDatabaseRefusal {
+  param(
+    [Parameter(Mandatory)]
+    [scriptblock]$CleanupTemporaryEgress,
+
+    [Parameter(Mandatory)]
+    [scriptblock]$RemoveBootstrapPublicIp
+  )
+
+  $refusal = [InvalidOperationException]::new(
+    'PostgreSQL initialization already succeeded; use ordinary deployment or explicit password rotation.'
+  )
+  [void](Invoke-OperationWithGuaranteedCleanup `
+    -Context 'Already-initialized PostgreSQL cleanup' `
+    -Operation { throw $refusal } `
+    -CleanupActions @(
+      @{ Action = $CleanupTemporaryEgress },
+      @{ Action = $RemoveBootstrapPublicIp }
+    ))
+}
+
 function Invoke-RotationFinalization {
   param(
     [Parameter(Mandatory)]
