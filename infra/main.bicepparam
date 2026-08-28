@@ -16,3 +16,7 @@ param appVersion = readEnvironmentVariable('APP_VERSION', '')
 param publicUrl = readEnvironmentVariable('MARKDOC_PUBLIC_URL', '')
 param bootstrapPublicIp = false
 param enableVmBackup = false
+param configureDatabase = false
+param configureRecovery = false
+param databaseConfigurationToken = 'unchanged'
+param recoveryConfigurationVersion = 'v1'

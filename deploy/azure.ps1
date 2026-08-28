@@ -15,11 +15,14 @@
 
 .EXAMPLE
   # Every property in this CLIXML object must be a DPAPI-encrypted SecureString.
-  .\deploy\azure.ps1 -SecretsPath "$env:LOCALAPPDATA\markdoc\azure-production-secrets.clixml"
+  .\deploy\azure.ps1 -SecretsPath "$env:LOCALAPPDATA\markdoc\azure-production-secrets.clixml" -InitializeDatabase -ConfigureRecovery
 
 .EXAMPLE
+  .\deploy\azure.ps1 -SourceCommit 0123456789abcdef0123456789abcdef01234567
   .\deploy\azure.ps1 -ImageTag 0123456789abcdef0123456789abcdef01234567
   .\deploy\azure.ps1 -InfraOnly
+  .\deploy\azure.ps1 -RotateDatabasePassword
+  .\deploy\azure.ps1 -ConfigureRecovery -VerifyRecovery
   .\deploy\azure.ps1 -Small
   .\deploy\azure.ps1 -ScaleToZero
   .\deploy\azure.ps1 -Destroy
@@ -34,7 +37,12 @@ param(
   [string]$Location = 'eastus2',
   [string]$SecretsPath = '',
   [string]$ImageTag = '',
+  [string]$SourceCommit = '',
   [switch]$InfraOnly,
+  [switch]$InitializeDatabase,
+  [switch]$RotateDatabasePassword,
+  [switch]$ConfigureRecovery,
+  [switch]$VerifyRecovery,
   [switch]$Small,
   [switch]$ScaleToZero,
   [switch]$Destroy
@@ -100,7 +108,9 @@ foreach ($provider in @(
   'Microsoft.ManagedIdentity',
   'Microsoft.Network',
   'Microsoft.OperationalInsights',
-  'Microsoft.RecoveryServices'
+  'Microsoft.RecoveryServices',
+  'Microsoft.Insights',
+  'Microsoft.Storage'
 )) {
   az provider register -n $provider --wait -o none
   if ($LASTEXITCODE) { throw "Provider registration failed: $provider" }
@@ -113,11 +123,45 @@ if ($LASTEXITCODE) { throw 'Resource group creation failed' }
 $cpu = if ($Small) { '0.25' } else { '0.5' }
 $memory = if ($Small) { '0.5Gi' } else { '1Gi' }
 $minReplicas = if ($ScaleToZero) { 0 } else { 1 }
-$sourceSha = (git rev-parse HEAD).Trim()
-if ($LASTEXITCODE -or $sourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the current Git commit.' }
+$deploymentSha = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -or $deploymentSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the current Git commit.' }
+$worktreeChanges = @(git status --porcelain --untracked-files=all)
+if ($LASTEXITCODE) { throw 'Could not inspect the deployment worktree.' }
+if ($worktreeChanges.Count -gt 0) { throw 'Refusing to deploy from a dirty worktree. Commit or remove every change first.' }
+
+$sourceSha = if ($SourceCommit) { $SourceCommit.ToLowerInvariant() } else { $deploymentSha }
+if ($sourceSha -notmatch '^[0-9a-f]{40}$') { throw '-SourceCommit must be a full 40-character Git commit SHA.' }
+git cat-file -e "$sourceSha^{commit}" 2>$null
+if ($LASTEXITCODE) { throw "Source commit $sourceSha is not available in this checkout." }
+
+if ($SourceCommit -and $sourceSha -ne $deploymentSha) {
+  $allowedDeploymentPaths = @('Dockerfile', 'README.md', 'deploy/', 'infra/')
+  $productChanges = @(
+    git diff --name-only $sourceSha $deploymentSha -- . |
+      Where-Object {
+        $path = $_.Replace('\', '/')
+        -not ($allowedDeploymentPaths | Where-Object {
+          $path -eq $_ -or $path.StartsWith($_, [StringComparison]::Ordinal)
+        })
+      }
+  )
+  if ($LASTEXITCODE) { throw "Could not compare source commit $sourceSha with deployment commit $deploymentSha." }
+  if ($productChanges.Count -gt 0) {
+    throw "-SourceCommit differs from this deployment commit in application files: $($productChanges -join ', ')"
+  }
+}
 $shortTag = $sourceSha.Substring(0, 12)
 
-function Deploy-Infra([string]$Image, [string]$AppVersion, [bool]$BootstrapPublicIp, [bool]$EnableVmBackup) {
+function Deploy-Infra(
+  [string]$Image,
+  [string]$AppVersion,
+  [bool]$BootstrapPublicIp,
+  [bool]$EnableVmBackup,
+  [bool]$ConfigureDatabase,
+  [bool]$ConfigurePostgresRecovery,
+  [string]$DatabaseConfigurationToken,
+  [string]$RecoveryConfigurationVersion
+) {
   $tempParameters = Join-Path ([IO.Path]::GetTempPath()) "markdoc-azure-$([guid]::NewGuid().ToString('N')).parameters.json"
   $plainValues = @{}
   $json = $null
@@ -144,6 +188,10 @@ function Deploy-Infra([string]$Image, [string]$AppVersion, [bool]$BootstrapPubli
         publicUrl = @{ value = if ($env:MARKDOC_PUBLIC_URL) { $env:MARKDOC_PUBLIC_URL } else { '' } }
         bootstrapPublicIp = @{ value = $BootstrapPublicIp }
         enableVmBackup = @{ value = $EnableVmBackup }
+        configureDatabase = @{ value = $ConfigureDatabase }
+        configureRecovery = @{ value = $ConfigurePostgresRecovery }
+        databaseConfigurationToken = @{ value = $DatabaseConfigurationToken }
+        recoveryConfigurationVersion = @{ value = $RecoveryConfigurationVersion }
       }
     }
     $json = $parameters | ConvertTo-Json -Depth 8
@@ -168,41 +216,138 @@ function Deploy-Infra([string]$Image, [string]$AppVersion, [bool]$BootstrapPubli
 }
 
 function Remove-BootstrapPublicIp([string]$PublicIpName) {
-  $attached = az network nic show `
+  $nicId = az network nic list `
     --resource-group $ResourceGroup `
-    --name "$Name-pg-nic" `
-    --query 'ipConfigurations[0].publicIPAddress.id' `
+    --query "[?name=='$Name-pg-nic'] | [0].id" `
     --output tsv `
     --only-show-errors
-  if ($LASTEXITCODE) { throw 'Could not verify the PostgreSQL VM network interface.' }
-  if ($attached) { throw 'The PostgreSQL bootstrap public IP is still attached; refusing to delete it.' }
+  if ($LASTEXITCODE) { throw 'Could not inspect the PostgreSQL VM network interface during cleanup.' }
 
-  $exists = az network public-ip show `
+  if (-not [string]::IsNullOrWhiteSpace($nicId)) {
+    $attached = az network nic show `
+      --resource-group $ResourceGroup `
+      --name "$Name-pg-nic" `
+      --query 'ipConfigurations[0].publicIPAddress.id' `
+      --output tsv `
+      --only-show-errors
+    if ($LASTEXITCODE) { throw 'Could not verify the PostgreSQL VM network interface.' }
+    if ($attached) {
+      az network nic ip-config update `
+        --resource-group $ResourceGroup `
+        --nic-name "$Name-pg-nic" `
+        --name 'primary' `
+        --remove publicIPAddress `
+        --output none `
+        --only-show-errors
+      if ($LASTEXITCODE) { throw 'Could not detach the PostgreSQL bootstrap public IP.' }
+    }
+
+    $attached = az network nic show `
+      --resource-group $ResourceGroup `
+      --name "$Name-pg-nic" `
+      --query 'ipConfigurations[0].publicIPAddress.id' `
+      --output tsv `
+      --only-show-errors
+    if ($LASTEXITCODE -or $attached) { throw 'The PostgreSQL bootstrap public IP is still attached.' }
+  }
+
+  $publicIpId = az network public-ip list `
     --resource-group $ResourceGroup `
-    --name $PublicIpName `
-    --query id `
+    --query "[?name=='$PublicIpName'] | [0].id" `
     --output tsv `
-    --only-show-errors 2>$null
-  if ($LASTEXITCODE -eq 0 -and $exists) {
+    --only-show-errors
+  if ($LASTEXITCODE) { throw 'Could not inspect the PostgreSQL bootstrap public IP during cleanup.' }
+  if (-not [string]::IsNullOrWhiteSpace($publicIpId)) {
     az network public-ip delete --resource-group $ResourceGroup --name $PublicIpName --only-show-errors
     if ($LASTEXITCODE) { throw 'Could not delete the PostgreSQL bootstrap public IP.' }
   }
 }
 
-Step 'Deploying private infrastructure. Initial PostgreSQL setup can take several minutes.'
-$outputs = Deploy-Infra '' '' $true $false
+$postgresVmId = az vm show `
+  --resource-group $ResourceGroup `
+  --name "$Name-pg" `
+  --query id `
+  --output tsv `
+  --only-show-errors 2>$null
+$postgresVmExists = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($postgresVmId)
+
+if ($InitializeDatabase -and $postgresVmExists) {
+  throw 'The PostgreSQL VM already exists; -InitializeDatabase is only valid for first provision.'
+}
+if ($RotateDatabasePassword -and -not $postgresVmExists) {
+  throw 'The PostgreSQL VM does not exist; use -InitializeDatabase for first provision.'
+}
+if ($InitializeDatabase -and $RotateDatabasePassword) {
+  throw '-InitializeDatabase and -RotateDatabasePassword are mutually exclusive.'
+}
+if (-not $postgresVmExists -and -not $InitializeDatabase) {
+  throw 'The PostgreSQL VM does not exist. First provision requires the explicit -InitializeDatabase flag.'
+}
+
+$configureDatabase = [bool]($InitializeDatabase -or $RotateDatabasePassword)
+$databaseConfigurationToken = if ($configureDatabase) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
+$recoveryConfigurationVersion = if ($ConfigureRecovery) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
+$preDeployImage = ''
+$preDeployAppVersion = ''
+
+if ($RotateDatabasePassword) {
+  $preDeployImage = az containerapp show `
+    --resource-group $ResourceGroup `
+    --name $Name `
+    --query 'properties.template.containers[0].image' `
+    --output tsv `
+    --only-show-errors
+  $preDeployAppVersion = az containerapp show `
+    --resource-group $ResourceGroup `
+    --name $Name `
+    --query "properties.template.containers[0].env[?name=='APP_VERSION'] | [0].value" `
+    --output tsv `
+    --only-show-errors
+  if ($LASTEXITCODE -or [string]::IsNullOrWhiteSpace($preDeployImage) -or [string]::IsNullOrWhiteSpace($preDeployAppVersion)) {
+    throw 'Password rotation requires a healthy existing Container App image and APP_VERSION.'
+  }
+}
+
+Step 'Deploying private infrastructure without changing the existing PostgreSQL database.'
+if ($InitializeDatabase) {
+  Step 'Explicit first provision: temporarily enabling bootstrap networking and creating the database login.'
+} elseif ($RotateDatabasePassword) {
+  Step 'Explicit password rotation: updating the PostgreSQL login without enabling public networking.'
+}
+if ($ConfigureRecovery) {
+  Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
+}
+$temporaryPublicIp = [bool]($InitializeDatabase -or $ConfigureRecovery)
+try {
+  $outputs = Deploy-Infra `
+    $preDeployImage `
+    $preDeployAppVersion `
+    $temporaryPublicIp `
+    $false `
+    $configureDatabase `
+    ([bool]$ConfigureRecovery) `
+    $databaseConfigurationToken `
+    $recoveryConfigurationVersion
+} finally {
+  if ($temporaryPublicIp) {
+    Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip"
+  }
+}
+
 $registry = $outputs.registryName.value
 $appUrl = $outputs.appUrl.value
 $image = ''
 $appVersion = ''
 
-az backup vault backup-properties set `
-  --resource-group $ResourceGroup `
-  --name $outputs.backupVaultName.value `
-  --backup-storage-redundancy LocallyRedundant `
-  --output none `
-  --only-show-errors
-if ($LASTEXITCODE) { throw 'Could not set locally redundant backup storage before enabling protection.' }
+if ($InitializeDatabase) {
+  az backup vault backup-properties set `
+    --resource-group $ResourceGroup `
+    --name $outputs.backupVaultName.value `
+    --backup-storage-redundancy LocallyRedundant `
+    --output none `
+    --only-show-errors
+  if ($LASTEXITCODE) { throw 'Could not set locally redundant backup storage before enabling protection.' }
+}
 
 if (-not $InfraOnly) {
   if ($ImageTag) {
@@ -216,16 +361,30 @@ if (-not $InfraOnly) {
     if ($LASTEXITCODE -or $available -ne $ImageTag) { throw "Image tag $ImageTag does not exist in registry $registry." }
     $appVersion = $ImageTag
   } else {
-    Step "Building immutable image for source $sourceSha in Azure Container Registry"
-    az acr build `
-      --registry $registry `
-      --image "markdoc:$sourceSha" `
-      --image "markdoc:$shortTag" `
-      --build-arg "APP_VERSION=$sourceSha" `
-      --file Dockerfile `
-      . `
-      --only-show-errors
-    if ($LASTEXITCODE) { throw 'Azure Container Registry build failed.' }
+    Step "Building immutable image for application source $sourceSha in Azure Container Registry"
+    $buildContext = Join-Path ([IO.Path]::GetTempPath()) "markdoc-build-$([guid]::NewGuid().ToString('N'))"
+    $buildArchive = "$buildContext.tar"
+    try {
+      [void](New-Item -ItemType Directory -Path $buildContext)
+      git archive --format=tar --output=$buildArchive $deploymentSha
+      if ($LASTEXITCODE) { throw "Could not create an exact build context from deployment commit $deploymentSha." }
+      tar -xf $buildArchive -C $buildContext
+      if ($LASTEXITCODE) { throw 'Could not extract the exact Git build context.' }
+      Remove-Item -LiteralPath $buildArchive -Force
+
+      az acr build `
+        --registry $registry `
+        --image "markdoc:$sourceSha" `
+        --image "markdoc:$shortTag" `
+        --build-arg "APP_VERSION=$sourceSha" `
+        --file (Join-Path $buildContext 'Dockerfile') `
+        $buildContext `
+        --only-show-errors
+      if ($LASTEXITCODE) { throw 'Azure Container Registry build failed.' }
+    } finally {
+      if (Test-Path -LiteralPath $buildArchive) { Remove-Item -LiteralPath $buildArchive -Force }
+      if (Test-Path -LiteralPath $buildContext) { Remove-Item -LiteralPath $buildContext -Recurse -Force }
+    }
     $appVersion = $sourceSha
   }
 
@@ -240,8 +399,28 @@ if (-not $InfraOnly) {
 }
 
 Step 'Finalizing the private VM network and rolling the Container App'
-$outputs = Deploy-Infra $image $appVersion $false $true
+$outputs = Deploy-Infra $image $appVersion $false $true $false $false 'unchanged' 'unchanged'
 Remove-BootstrapPublicIp $outputs.bootstrapPublicIpName.value
+
+if ($VerifyRecovery) {
+  if (-not $ConfigureRecovery) {
+    Step 'Running the existing automated scratch restore verification.'
+  } else {
+    Step 'Running the newly configured automated scratch restore verification.'
+  }
+  $restoreResult = az vm run-command invoke `
+    --resource-group $ResourceGroup `
+    --name "$Name-pg" `
+    --command-id RunShellScript `
+    --scripts '/usr/local/sbin/markdoc-restore-check' `
+    --query 'value[0].message' `
+    --output tsv `
+    --only-show-errors
+  if ($LASTEXITCODE -or $restoreResult -notmatch 'restore-check=ok') {
+    throw 'The PostgreSQL scratch restore verification failed.'
+  }
+  Write-Host $restoreResult
+}
 
 Write-Host "App URL: $appUrl" -ForegroundColor Green
 Write-Host "Registry: $($outputs.registryLoginServer.value)"
@@ -254,5 +433,6 @@ if (-not $InfraOnly) {
     Write-Host "health check not answering yet ($($_.Exception.Message)); give it a minute." -ForegroundColor Yellow
   }
   Write-Host "GitHub OAuth callback: $appUrl/api/auth/callback/github"
+  Write-Host "Recovery storage: $($outputs.recoveryStorageName.value)/$($outputs.recoveryContainerName.value)"
   Write-Host "Logs: az containerapp logs show -n $Name -g $ResourceGroup --follow"
 }

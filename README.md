@@ -234,7 +234,7 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 ## Deploy to Azure
 
-The target is **Azure Container Apps** with a private PostgreSQL VM. The VM has no public IP after bootstrap, accepts TLS database connections only from the Container Apps subnet, and is protected by an encrypted daily VM backup retained for seven days. Infrastructure is in `infra/main.bicep`; `deploy/azure.ps1` provisions everything and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
+The target is **Azure Container Apps** with a private PostgreSQL VM. The VM has no public IP after bootstrap and accepts TLS database connections only from the Container Apps subnet. Infrastructure is in `infra/main.bicep`; `deploy/azure.ps1` provisions everything and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
 
 ```powershell
 $env:MARKDOC_PG_PASSWORD = '<strong password>'
@@ -242,22 +242,34 @@ $env:MARKDOC_AUTH_SECRET = '<openssl rand -base64 32>'
 $env:MARKDOC_GITHUB_CLIENT_ID = '<oauth app id>'
 $env:MARKDOC_GITHUB_CLIENT_SECRET = '<oauth app secret>'
 $env:MARKDOC_VM_SSH_PUBLIC_KEY = Get-Content "$HOME\.ssh\id_ed25519.pub" -Raw
-.\deploy\azure.ps1             # first run prints the app URL; add it as the OAuth callback, then rerun
+.\deploy\azure.ps1 -InitializeDatabase -ConfigureRecovery
+# The first run prints the app URL; add it as the OAuth callback, then rerun normally.
 ```
 
 For unattended production deployment, pass `-SecretsPath <file>` instead. The CLIXML file must contain `PostgresAdminPassword`, `AuthSecret`, `GitHubClientId`, `GitHubClientSecret`, and `VmAdminSshPublicKey` as DPAPI-encrypted `SecureString` properties. Secure Bicep values are written to a randomly named parameter file only for the duration of each Azure CLI call and removed in `finally`; they are never command-line arguments.
 
-Approximate monthly cost (East US 2, pay-as-you-go list prices):
+Ordinary reruns deliberately do not attach a VM public IP, write the PostgreSQL password to Key Vault, rerun database bootstrap, restart PostgreSQL, or change database ownership. A new environment requires the explicit `-InitializeDatabase` flag. Password rotation requires `-RotateDatabasePassword`; recovery configuration changes require `-ConfigureRecovery`. `-SourceCommit <full-sha>` labels the image with an accepted application commit only when every application file in the clean deployment checkout matches that commit. `-ImageTag <full-sha>` reuses an existing ACR image. Run `-VerifyRecovery` to restore the latest physical backup into an isolated scratch cluster without stopping or modifying production.
+
+The PostgreSQL recovery layers are:
+
+- pgBackRest continuously archives WAL to a private Azure Blob container using the VM's managed identity. `archive_timeout=240s` bounds the recovery point to five minutes after a write, including quiet periods.
+- A full physical pgBackRest backup and a separate `pg_dump` logical backup run daily. pgBackRest retains seven full backups; logical dumps expire after 30 days.
+- Azure Recovery Services also keeps seven daily encrypted VM recovery points. This is an additional disaster-recovery layer, not the point-in-time database backup.
+- A five-minute systemd check validates repository access, physical-backup freshness, and unresolved archive failures. Its heartbeat and failures flow through Azure Monitor Agent to Log Analytics; Azure Monitor alert rules detect a failure or a missing heartbeat.
+- A weekly job restores the latest physical backup to an isolated local socket and temporary data directory, starts it on port 55432, verifies the `markdoc` database after recovery, records the duration off-VM, then removes the scratch cluster. Run `-VerifyRecovery` after recovery changes and confirm it finishes within the two-hour RTO.
+
+Approximate monthly cost shape (East US 2, pay-as-you-go; storage, backup, and logs vary with database size and traffic, so verify current prices in the Azure Pricing Calculator):
 
 | Resource | Size | ~$/month |
 | --- | --- | --- |
 | Container App | 0.5 vCPU / 1 GiB, one always-on replica | 34 |
 | Container App (`-Small`) | 0.25 vCPU / 0.5 GiB | 14 |
 | Container App (`-ScaleToZero`) | sleeps when nobody is connected | ~0 idle |
-| PostgreSQL VM | Standard B1ms, 32 GiB Standard SSD | varies |
-| Recovery Services backup | daily, seven-day LRS retention | varies |
+| PostgreSQL VM + OS disk | Standard B1ms, 32 GiB Standard SSD LRS | usage-priced |
+| PostgreSQL recovery storage | Standard StorageV2 LRS, hot tier; WAL + 7 physical + 30 logical daily backups | capacity/operations |
+| Recovery Services backup | Standard vault, daily VM recovery point, seven-day LRS retention | protected-instance/storage |
 | Container Registry | Basic | 5 |
-| Log Analytics | first 5 GiB free, 1 GiB/day cap | ~0 |
+| Log Analytics / Azure Monitor | 30-day logs, 1 GiB/day workspace cap, two backup alerts | ingestion/alerts |
 
 The collaboration server keeps open documents in memory, so the app runs as a single replica; scaling out would need Hocuspocus's Redis extension.
 

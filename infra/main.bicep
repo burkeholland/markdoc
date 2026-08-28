@@ -1,5 +1,5 @@
 // Markdoc on Azure: Container Apps (app + WebSocket), a private PostgreSQL VM,
-// Container Registry, Log Analytics, and Recovery Services backup.
+// Container Registry, Log Analytics, and PostgreSQL-aware off-VM recovery.
 // Deploy with deploy/azure.ps1 or:
 //   az deployment group create -g <rg> -f infra/main.bicep -p @<parameters.json>
 //
@@ -59,14 +59,28 @@ param vmAdminUsername string = 'markdocops'
 @description('Public URL of the app (for Auth.js callbacks). Leave empty to use the Container App FQDN.')
 param publicUrl string = ''
 
-@description('Attach a locked-down public IP temporarily so the VM can install PostgreSQL. The deploy script removes it after bootstrap.')
+@description('Attach a deny-inbound public IP temporarily for approved database or recovery package setup. The deploy script always removes it afterward.')
 param bootstrapPublicIp bool = false
 
 @description('Protect the PostgreSQL VM after the deploy script sets the vault to locally redundant storage.')
 param enableVmBackup bool = false
 
+@description('Create or rotate the PostgreSQL login. Ordinary application redeployments must leave this false.')
+param configureDatabase bool = false
+
+@description('Install or update PostgreSQL recovery services. Ordinary application redeployments must leave this false.')
+param configureRecovery bool = false
+
+@description('Explicit token that makes the database bootstrap extension rerun during an approved password rotation.')
+param databaseConfigurationToken string = 'initial'
+
+@description('Explicit version for an approved recovery configuration update.')
+param recoveryConfigurationVersion string = 'v1'
+
 var registryName = replace('${name}acr${uniqueString(resourceGroup().id)}', '-', '')
 var keyVaultName = take(replace('${name}kv${uniqueString(resourceGroup().id)}', '-', ''), 24)
+var recoveryStorageName = 'mdr${uniqueString(resourceGroup().id, name)}'
+var recoveryContainerName = 'postgres-backups'
 var postgresVmName = '${name}-pg'
 var postgresNicName = '${postgresVmName}-nic'
 var postgresNsgName = '${postgresVmName}-nsg'
@@ -193,6 +207,14 @@ resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' =
   name: postgresSubnetName
   properties: {
     addressPrefix: postgresSubnetPrefix
+    serviceEndpoints: [
+      {
+        service: 'Microsoft.Storage'
+        locations: [
+          location
+        ]
+      }
+    ]
     networkSecurityGroup: {
       id: postgresNsg.id
     }
@@ -311,7 +333,7 @@ resource secretsVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource postgresPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (configureDatabase) {
   parent: secretsVault
   name: postgresPasswordSecretName
   properties: {
@@ -365,11 +387,19 @@ if ! grep -q 'markdoc-container-apps' "$PG_HBA"; then
   echo 'hostssl all all {3} scram-sha-256 # markdoc-container-apps' >> "$PG_HBA"
 fi
 
-if sudo -u postgres psql -Atc "select 1 from pg_roles where rolname = '{4}'" | grep -qx 1; then
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -c "alter role {4} with login password '$ADMIN_PASSWORD'"
-else
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -c "create role {4} with login password '$ADMIN_PASSWORD'"
-fi
+sudo -u postgres psql \
+  -v ON_ERROR_STOP=1 \
+  --set=admin_password="$ADMIN_PASSWORD" <<'SQL'
+select format(
+  case
+    when exists (select from pg_roles where rolname = '{4}')
+      then 'alter role %I with login password %L'
+    else 'create role %I with login password %L'
+  end,
+  '{4}',
+  :'admin_password'
+) \gexec
+SQL
 if ! sudo -u postgres psql -Atc "select 1 from pg_database where datname = '{5}'" | grep -qx 1; then
   sudo -u postgres createdb --owner={4} {5}
 fi
@@ -384,7 +414,7 @@ echo 'PostgreSQL did not become ready' >&2
 exit 1
 ''', keyVaultAudience, keyVaultSecretUrl, postgresPrivateIp, appSubnetPrefix, postgresAdminLogin, postgresDatabaseName)
 
-resource postgresSetup 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' = {
+resource postgresSetup 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' = if (configureDatabase) {
   parent: postgresVm
   name: 'install-postgresql'
   location: location
@@ -393,6 +423,7 @@ resource postgresSetup 'Microsoft.Compute/virtualMachines/extensions@2024-03-01'
     type: 'CustomScript'
     typeHandlerVersion: '2.1'
     autoUpgradeMinorVersion: true
+    forceUpdateTag: databaseConfigurationToken
     protectedSettings: {
       commandToExecute: 'bash -c "echo ${base64(postgresSetupScript)} | base64 -d | tr -d \'\\r\' | bash"'
     }
@@ -401,6 +432,275 @@ resource postgresSetup 'Microsoft.Compute/virtualMachines/extensions@2024-03-01'
     postgresPasswordSecret
     postgresSecretReader
   ]
+}
+
+resource recoveryStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: recoveryStorageName
+  location: location
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    accessTier: 'Hot'
+    allowBlobPublicAccess: false
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
+    minimumTlsVersion: 'TLS1_2'
+    publicNetworkAccess: 'Enabled'
+    supportsHttpsTrafficOnly: true
+    networkAcls: {
+      bypass: 'AzureServices'
+      defaultAction: 'Deny'
+      virtualNetworkRules: [
+        {
+          action: 'Allow'
+          id: postgresSubnet.id
+        }
+      ]
+    }
+  }
+}
+
+resource recoveryBlobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: recoveryStorage
+  name: 'default'
+  properties: {
+    deleteRetentionPolicy: {
+      enabled: true
+      days: 7
+    }
+    containerDeleteRetentionPolicy: {
+      enabled: true
+      days: 7
+    }
+  }
+}
+
+resource recoveryContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: recoveryBlobService
+  name: recoveryContainerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource recoveryLifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
+  parent: recoveryStorage
+  name: 'default'
+  properties: {
+    policy: {
+      rules: [
+        {
+          name: 'expire-logical-backups'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: [
+                'blockBlob'
+              ]
+              prefixMatch: [
+                '${recoveryContainerName}/logical/'
+              ]
+            }
+            actions: {
+              baseBlob: {
+                delete: {
+                  daysAfterModificationGreaterThan: 30
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
+resource postgresRecoveryContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(recoveryStorage.id, postgresVm.id, 'storage-blob-data-contributor')
+  scope: recoveryStorage
+  properties: {
+    principalId: postgresVm.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+  }
+}
+
+var postgresRecoveryScriptBody = replace(
+  replace(
+    replace(loadTextContent('./postgres-recovery.sh'), '\r', ''),
+    '__STORAGE_ACCOUNT__',
+    recoveryStorage.name
+  ),
+  '__STORAGE_CONTAINER__',
+  recoveryContainer.name
+)
+var postgresRecoveryScript = '# Recovery configuration version: ${recoveryConfigurationVersion}\n${postgresRecoveryScriptBody}'
+
+resource postgresRecovery 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = if (configureRecovery) {
+  parent: postgresVm
+  name: 'configure-postgresql-recovery'
+  location: location
+  properties: {
+    asyncExecution: false
+    timeoutInSeconds: 7200
+    source: {
+      script: postgresRecoveryScript
+    }
+  }
+  dependsOn: [
+    postgresRecoveryContributor
+    postgresSetup
+  ]
+}
+
+resource postgresMonitorRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' = {
+  name: '${name}-postgres-backup'
+  location: location
+  kind: 'Linux'
+  properties: {
+    dataSources: {
+      syslog: [
+        {
+          name: 'markdocBackupSyslog'
+          facilityNames: [
+            'local0'
+          ]
+          logLevels: [
+            'Info'
+            'Notice'
+            'Warning'
+            'Error'
+            'Critical'
+            'Alert'
+            'Emergency'
+          ]
+          streams: [
+            'Microsoft-Syslog'
+          ]
+        }
+      ]
+    }
+    destinations: {
+      logAnalytics: [
+        {
+          name: 'markdocWorkspace'
+          workspaceResourceId: logs.id
+        }
+      ]
+    }
+    dataFlows: [
+      {
+        streams: [
+          'Microsoft-Syslog'
+        ]
+        destinations: [
+          'markdocWorkspace'
+        ]
+      }
+    ]
+  }
+}
+
+resource postgresMonitorAssociation 'Microsoft.Insights/dataCollectionRuleAssociations@2023-03-11' = {
+  name: '${name}-postgres-backup'
+  scope: postgresVm
+  properties: {
+    dataCollectionRuleId: postgresMonitorRule.id
+  }
+}
+
+resource postgresMonitorAgent 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' = if (configureRecovery) {
+  parent: postgresVm
+  name: 'AzureMonitorLinuxAgent'
+  location: location
+  properties: {
+    publisher: 'Microsoft.Azure.Monitor'
+    type: 'AzureMonitorLinuxAgent'
+    typeHandlerVersion: '1.0'
+    autoUpgradeMinorVersion: true
+    enableAutomaticUpgrade: true
+  }
+  dependsOn: [
+    postgresRecovery
+    postgresMonitorAssociation
+  ]
+}
+
+resource backupFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${name}-postgres-backup-failure'
+  location: location
+  properties: {
+    displayName: 'Markdoc PostgreSQL backup failure'
+    description: 'Fires when the VM backup monitor reports an archive, repository, or freshness failure.'
+    enabled: true
+    severity: 1
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT10M'
+    scopes: [
+      logs.id
+    ]
+    targetResourceTypes: [
+      'Microsoft.OperationalInsights/workspaces'
+    ]
+    criteria: {
+      allOf: [
+        {
+          query: 'Syslog | where Facility == "local0" and (SyslogMessage contains "backup-health=failed" or SyslogMessage contains "logical-backup=failed" or SyslogMessage contains "restore-check=failed")'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: []
+    }
+  }
+}
+
+resource backupHeartbeatAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${name}-postgres-backup-heartbeat'
+  location: location
+  properties: {
+    displayName: 'Markdoc PostgreSQL backup monitor heartbeat missing'
+    description: 'Fires when no successful PostgreSQL recovery health check reaches Log Analytics for ten minutes.'
+    enabled: true
+    severity: 1
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT20M'
+    scopes: [
+      logs.id
+    ]
+    targetResourceTypes: [
+      'Microsoft.OperationalInsights/workspaces'
+    ]
+    criteria: {
+      allOf: [
+        {
+          query: 'Syslog | where Facility == "local0" and ProcessName == "markdoc-backup-monitor" and SyslogMessage contains "backup-health=ok"'
+          timeAggregation: 'Count'
+          operator: 'LessThan'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: []
+    }
+  }
 }
 
 resource backupVault 'Microsoft.RecoveryServices/vaults@2023-06-01' = {
@@ -560,5 +860,7 @@ output registryName string = registry.name
 output postgresHost string = postgresPrivateIp
 output postgresVmName string = postgresVm.name
 output backupVaultName string = backupVault.name
+output recoveryStorageName string = recoveryStorage.name
+output recoveryContainerName string = recoveryContainer.name
 output bootstrapPublicIpName string = postgresBootstrapIpName
 output identityId string = identity.id
