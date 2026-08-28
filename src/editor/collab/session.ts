@@ -883,20 +883,32 @@ export class CollabSession {
     if (!before) return false;
 
     this.undoManager.stopCapturing();
-    const accepted = replyId
-      ? this.comments.acceptReplySuggestion(threadId, replyId, this.user)
-      : this.comments.acceptSuggestion(threadId, proposed, this.user);
-    if (accepted) {
+    const previousUndoStackLength = this.undoManager.undoStack.length;
+    const previousUndoStackItem = this.undoManager.undoStack.at(-1);
+    try {
+      const accepted = replyId
+        ? this.comments.acceptReplySuggestion(threadId, replyId, this.user)
+        : this.comments.acceptSuggestion(threadId, proposed, this.user);
+      if (!accepted) return false;
+
       const after = this.comments.snapshotSuggestion(threadId, target);
       if (!after) throw new Error("Accepted comment suggestion target disappeared");
-      this.rememberCommentSuggestionUndo({ threadId, before, after });
+      const undoStackItem = this.undoManager.undoStack.at(-1);
+      if (
+        !undoStackItem ||
+        undoStackItem === previousUndoStackItem ||
+        this.undoManager.undoStack.length !== previousUndoStackLength + 1
+      ) {
+        if (!this.comments.restoreSuggestion(threadId, before)) {
+          throw new Error("Could not restore comment suggestion after undo capture failed");
+        }
+        return false;
+      }
+      undoStackItem.meta.set(COMMENT_SUGGESTION_META, { threadId, before, after } satisfies CommentSuggestionMeta);
+      return true;
+    } finally {
+      this.undoManager.stopCapturing();
     }
-    this.undoManager.stopCapturing();
-    return accepted;
-  }
-
-  private rememberCommentSuggestionUndo(meta: CommentSuggestionMeta) {
-    this.undoManager.undoStack.at(-1)?.meta.set(COMMENT_SUGGESTION_META, meta);
   }
 
   // Y.UndoManager keeps merging edits into the newest stack item for `captureTimeout` after the

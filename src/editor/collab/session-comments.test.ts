@@ -73,11 +73,16 @@ describe("CollabSession accepted comment suggestion undo", () => {
     const threadId = current.comments.add({ from: 4, to: 15, body, author: alice });
     const pendingReplyId = current.comments.reply(threadId, "Another option.\n\n```suggestion\nswift auburn\n```", alice)!;
     current.comments.setResolved(threadId, true, alice);
+    current.replaceSource([{ from: TEXT.length, to: TEXT.length, text: "!" }]);
     const before = rootState(current.comments.get(threadId)!);
+    const textBefore = current.ytext.toString();
+    const undoStackLengthBefore = current.undoManager.undoStack.length;
+    const undoStackItemBefore = current.undoManager.undoStack.at(-1);
 
     expect(current.acceptCommentSuggestion(threadId, "slow red")).toBe(true);
-    expect(current.undoManager.undoStack).toHaveLength(1);
-    expect(current.ytext.toString()).toBe("The slow red fox jumps.");
+    expect(current.undoManager.undoStack).toHaveLength(undoStackLengthBefore + 1);
+    expect(current.undoManager.undoStack.at(-1)).not.toBe(undoStackItemBefore);
+    expect(current.ytext.toString()).toBe("The slow red fox jumps.!");
     const accepted = rootState(current.comments.get(threadId)!);
     expect(accepted).toMatchObject({
       quote: "slow red",
@@ -91,13 +96,13 @@ describe("CollabSession accepted comment suggestion undo", () => {
 
     current.undo();
     const undone = current.comments.get(threadId)!;
-    expect(current.ytext.toString()).toBe(TEXT);
+    expect(current.ytext.toString()).toBe(textBefore);
     expect(rootState(undone)).toEqual(before);
     expect(undone.replies.find((reply) => reply.id === pendingReplyId)?.suggestionState).toBeUndefined();
     expect(() => current.comments.editBody(threadId, body)).not.toThrow();
 
     current.redo();
-    expect(current.ytext.toString()).toBe("The slow red fox jumps.");
+    expect(current.ytext.toString()).toBe("The slow red fox jumps.!");
     expect(rootState(current.comments.get(threadId)!)).toEqual(accepted);
     expect(() => current.comments.editBody(threadId, body)).toThrow(DecidedSuggestionEditError);
   });
@@ -110,13 +115,18 @@ describe("CollabSession accepted comment suggestion undo", () => {
     const siblingBody = "Another option.\n\n```suggestion\nswift auburn\n```";
     const siblingId = current.comments.reply(threadId, siblingBody, alice)!;
     expect(current.comments.rejectReplySuggestion(threadId, siblingId, alice)).toBe(true);
+    current.replaceSource([{ from: TEXT.length, to: TEXT.length, text: "!" }]);
     const before = current.comments.get(threadId)!;
     const beforeTarget = replyState(before.replies.find((reply) => reply.id === targetId)!);
     const siblingDecision = replyState(before.replies.find((reply) => reply.id === siblingId)!);
+    const textBefore = current.ytext.toString();
+    const undoStackLengthBefore = current.undoManager.undoStack.length;
+    const undoStackItemBefore = current.undoManager.undoStack.at(-1);
 
     expect(current.acceptCommentSuggestion(threadId, "slow red", targetId)).toBe(true);
-    expect(current.undoManager.undoStack).toHaveLength(1);
-    expect(current.ytext.toString()).toBe("The slow red fox jumps.");
+    expect(current.undoManager.undoStack).toHaveLength(undoStackLengthBefore + 1);
+    expect(current.undoManager.undoStack.at(-1)).not.toBe(undoStackItemBefore);
+    expect(current.ytext.toString()).toBe("The slow red fox jumps.!");
     const accepted = current.comments.get(threadId)!;
     const acceptedTarget = replyState(accepted.replies.find((reply) => reply.id === targetId)!);
     expect(acceptedTarget).toMatchObject({
@@ -129,7 +139,7 @@ describe("CollabSession accepted comment suggestion undo", () => {
 
     current.undo();
     const undone = current.comments.get(threadId)!;
-    expect(current.ytext.toString()).toBe(TEXT);
+    expect(current.ytext.toString()).toBe(textBefore);
     expect(undone.anchor).toEqual(before.anchor);
     expect(undone.quote).toBe(before.quote);
     expect(replyState(undone.replies.find((reply) => reply.id === targetId)!)).toEqual(beforeTarget);
@@ -139,10 +149,45 @@ describe("CollabSession accepted comment suggestion undo", () => {
 
     current.redo();
     const redone = current.comments.get(threadId)!;
-    expect(current.ytext.toString()).toBe("The slow red fox jumps.");
+    expect(current.ytext.toString()).toBe("The slow red fox jumps.!");
     expect(redone.anchor).toEqual(accepted.anchor);
     expect(redone.quote).toBe(accepted.quote);
     expect(replyState(redone.replies.find((reply) => reply.id === targetId)!)).toEqual(acceptedTarget);
     expect(replyState(redone.replies.find((reply) => reply.id === siblingId)!)).toEqual(siblingDecision);
+  });
+
+  it.each(["root", "reply"] as const)("rejects an identical %s suggestion without touching prior undo history", (target) => {
+    const current = setup();
+    current.replaceSource([{ from: TEXT.length, to: TEXT.length, text: "!" }]);
+    const undoStackItem = current.undoManager.undoStack.at(-1)!;
+    const undoStackMetaSize = undoStackItem.meta.size;
+    const body = "Keep this wording.\n\n```suggestion\nquick brown\n```";
+    const threadId = current.comments.add({
+      from: 4,
+      to: 15,
+      body: target === "root" ? body : "Could this be clearer?",
+      author: alice,
+    });
+    const replyId = target === "reply" ? current.comments.reply(threadId, body, alice)! : undefined;
+
+    expect(current.acceptCommentSuggestion(threadId, "quick brown", replyId)).toBe(false);
+    expect(current.ytext.toString()).toBe(`${TEXT}!`);
+    expect(current.undoManager.undoStack).toEqual([undoStackItem]);
+    expect(undoStackItem.meta.size).toBe(undoStackMetaSize);
+    const pending = current.comments.get(threadId)!;
+    if (replyId) {
+      expect(pending.replies.find((reply) => reply.id === replyId)?.suggestionState).toBeUndefined();
+    } else {
+      expect(pending.suggestionState).toBeNull();
+    }
+
+    current.undo();
+    expect(current.ytext.toString()).toBe(TEXT);
+    const afterUndo = current.comments.get(threadId)!;
+    if (replyId) {
+      expect(afterUndo.replies.find((reply) => reply.id === replyId)?.suggestionState).toBeUndefined();
+    } else {
+      expect(afterUndo.suggestionState).toBeNull();
+    }
   });
 });

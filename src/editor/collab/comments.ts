@@ -516,7 +516,7 @@ export class CommentsModel {
   /**
    * Accept the thread's ```suggestion block: replace the anchored range with `proposed`, record the
    * decision and resolve the thread — all in one transaction (one undo step, one broadcast).
-   * Returns false when the thread is missing, already decided, or outdated (anchored text ≠ quote).
+   * Returns false when the thread is missing, already decided, outdated, or proposes no text change.
    */
   acceptSuggestion(id: string, proposed: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
     const map = this.ymap.get(id);
@@ -525,6 +525,7 @@ export class CommentsModel {
     if (thread.suggestionState || !thread.range) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    if (proposed === thread.quote) return false;
     const hasPendingReplySuggestion = thread.replies.some((reply) => !reply.suggestionState && parseSuggestionBlock(reply.body));
     this.ydoc.transact(() => {
       applyOps(this.ytext, diffOps(thread.quote, proposed, from));
@@ -570,6 +571,7 @@ export class CommentsModel {
     if (!block || reply.suggestionState || !thread.range) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
+    if (block.text === thread.quote) return false;
     let replySuggestions = map.get("replySuggestions") as ReplySuggestionsMap | undefined;
     if (!replySuggestions) {
       const created = new Y.Map<ReplySuggestionDecision>();

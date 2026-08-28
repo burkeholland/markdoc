@@ -79,4 +79,43 @@ describe("CommentsPanel accepted suggestion toast", () => {
     expect(screen.getByTestId("suggestion-accept-comment")).toBeVisible();
     expect(screen.getByTestId("suggestion-reject-comment")).toBeVisible();
   });
+
+  it.each(["root", "reply"] as const)("does not offer Undo for an identical %s suggestion", async (target) => {
+    const user = makeCollabUser("alice", "Alice");
+    session = new CollabSession({
+      docId: "doc",
+      user,
+      role: "owner",
+      getToken: async () => "token",
+      autoConnect: false,
+    });
+    session.keepAlive();
+    const text = "The quick brown fox jumps.";
+    session.ytext.insert(0, text);
+    session.replaceSource([{ from: text.length, to: text.length, text: "!" }]);
+    const undoStackItem = session.undoManager.undoStack.at(-1)!;
+    const body = "Keep this wording.\n\n```suggestion\nquick brown\n```";
+    const threadId = session.comments.add({
+      from: 4,
+      to: 15,
+      body: target === "root" ? body : "Could this be clearer?",
+      author: user,
+    });
+    const replyId = target === "reply" ? session.comments.reply(threadId, body, user)! : undefined;
+    const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} onToast={onToast} />);
+
+    fireEvent.click(screen.getByTestId("suggestion-accept-comment"));
+    await waitFor(() => expect(onToast).toHaveBeenCalled());
+
+    expect(onToast.mock.lastCall?.[1]).toBe("error");
+    expect(onToast.mock.lastCall?.[2]).toBeUndefined();
+    expect(session.undoManager.undoStack).toEqual([undoStackItem]);
+    const pending = session.comments.get(threadId)!;
+    if (replyId) {
+      expect(pending.replies.find((reply) => reply.id === replyId)?.suggestionState).toBeUndefined();
+    } else {
+      expect(pending.suggestionState).toBeNull();
+    }
+  });
 });
