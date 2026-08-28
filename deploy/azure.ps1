@@ -59,19 +59,27 @@ Set-Location (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'azure-safety.ps1')
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'
-if ($ImageTag -and $ImageTag -notmatch '^[0-9a-f]{40}$') {
-  throw '-ImageTag must be a full 40-character Git commit SHA.'
-}
+$secretStoreOperation = $null
+$resolvedSecretsPath = ''
+try {
+  if ($SecretsPath) {
+    $resolvedSecretsPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SecretsPath)
+    $secretStoreOperation = Enter-ProtectedSecretStoreOperation $resolvedSecretsPath
+  }
 
-if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI not found: https://aka.ms/installazurecli' }
-az account show -o none 2>$null
-if ($LASTEXITCODE) { Step 'Signing in to Azure'; az login -o none; if ($LASTEXITCODE) { throw 'az login failed' } }
+  if ($ImageTag -and $ImageTag -notmatch '^[0-9a-f]{40}$') {
+    throw '-ImageTag must be a full 40-character Git commit SHA.'
+  }
 
-if ($Destroy) {
-  Step "Deleting resource group $ResourceGroup and everything in it"
-  az group delete -n $ResourceGroup --yes --no-wait
-  return
-}
+  if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI not found: https://aka.ms/installazurecli' }
+  az account show -o none 2>$null
+  if ($LASTEXITCODE) { Step 'Signing in to Azure'; az login -o none; if ($LASTEXITCODE) { throw 'az login failed' } }
+
+  if ($Destroy) {
+    Step "Deleting resource group $ResourceGroup and everything in it"
+    az group delete -n $ResourceGroup --yes --no-wait
+    return
+  }
 
 function ConvertTo-PlainText([Security.SecureString]$Value) {
   $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
@@ -100,27 +108,25 @@ $secretDefinitions = @(
   @{ Property = 'VmAdminSshPublicKey'; Environment = 'MARKDOC_VM_SSH_PUBLIC_KEY' }
 )
 
-$secureValues = @{}
-$resolvedSecretsPath = ''
-$store = $null
-if ($SecretsPath) {
-  $resolvedSecretsPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SecretsPath)
-  if (-not (Test-Path -LiteralPath $resolvedSecretsPath)) { throw "Secrets file not found: $resolvedSecretsPath" }
-  $store = Import-Clixml -LiteralPath $resolvedSecretsPath
-  foreach ($definition in $secretDefinitions) {
-    $property = $store.PSObject.Properties[$definition.Property]
-    if (-not $property -or $property.Value -isnot [Security.SecureString]) {
-      throw "Secrets file property $($definition.Property) must be a SecureString."
+  $secureValues = @{}
+  $store = $null
+  if ($resolvedSecretsPath) {
+    if (-not (Test-Path -LiteralPath $resolvedSecretsPath)) { throw "Secrets file not found: $resolvedSecretsPath" }
+    $store = Import-Clixml -LiteralPath $resolvedSecretsPath
+    foreach ($definition in $secretDefinitions) {
+      $property = $store.PSObject.Properties[$definition.Property]
+      if (-not $property -or $property.Value -isnot [Security.SecureString]) {
+        throw "Secrets file property $($definition.Property) must be a SecureString."
+      }
+      $secureValues[$definition.Property] = $property.Value
     }
-    $secureValues[$definition.Property] = $property.Value
+  } else {
+    foreach ($definition in $secretDefinitions) {
+      $value = (Get-Item "env:$($definition.Environment)" -ErrorAction SilentlyContinue).Value
+      if (-not $value) { throw "Set `$env:$($definition.Environment) first (see the script header), or pass -SecretsPath." }
+      $secureValues[$definition.Property] = ConvertFrom-PlainText $value
+    }
   }
-} else {
-  foreach ($definition in $secretDefinitions) {
-    $value = (Get-Item "env:$($definition.Environment)" -ErrorAction SilentlyContinue).Value
-    if (-not $value) { throw "Set `$env:$($definition.Environment) first (see the script header), or pass -SecretsPath." }
-    $secureValues[$definition.Property] = ConvertFrom-PlainText $value
-  }
-}
 $secureValues.PostgresCandidatePassword = $secureValues.PostgresAdminPassword
 $rotationRecoveryProperties = @(
   'PostgresRotationPreviousImage',
@@ -1241,4 +1247,7 @@ if (-not $InfraOnly) {
   Write-Host "GitHub OAuth callback: $appUrl/api/auth/callback/github"
   Write-Host "Recovery storage: $($outputs.recoveryStorageName.value)/$($outputs.recoveryContainerName.value)"
   Write-Host "Logs: az containerapp logs show -n $Name -g $ResourceGroup --follow"
+}
+} finally {
+  Exit-ProtectedSecretStoreOperation $secretStoreOperation
 }

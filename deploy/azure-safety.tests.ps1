@@ -22,8 +22,23 @@ Assert-True ($deploymentSource -match 'Resolve-RotationPreparation') 'Rotation m
 Assert-True ($deploymentSource -match 'Invoke-AlreadyInitializedDatabaseRefusal') 'Already-initialized retries must run targeted cleanup before refusing.'
 Assert-True ($deploymentSource -match 'Assert-ProtectedCurrentUserFileAcl') 'The production secret store must use the executable ACL helper.'
 Assert-True ($deploymentSource -match 'Save-ProtectedSecureStringStore') 'The production secret store must use atomic protected replacement.'
+Assert-True ($deploymentSource -match 'Enter-ProtectedSecretStoreOperation') 'The production workflow must acquire cross-process ownership.'
 Assert-True ($deploymentSource -match 'Restore-CandidateOnlyDatabaseCredential') 'Legacy candidate-only state must use explicit credential reconciliation.'
 Assert-True ($deploymentSource -match 'Resolve-DatabaseDeploymentReadiness') 'Rotation recovery must be selected before initialization health discovery.'
+$operationAcquire = $deploymentSource.IndexOf('$secretStoreOperation = Enter-ProtectedSecretStoreOperation')
+$secretImport = $deploymentSource.IndexOf('$store = Import-Clixml')
+$firstAzureInvocation = $deploymentSource.IndexOf('az account show')
+$operationRelease = $deploymentSource.LastIndexOf('Exit-ProtectedSecretStoreOperation')
+Assert-True (
+  $operationAcquire -ge 0 -and
+  $operationAcquire -lt $secretImport -and
+  $operationAcquire -lt $firstAzureInvocation
+) 'Workflow ownership must be acquired before secret import and every Azure invocation.'
+$releaseFromFinally = [regex]::Match(
+  $deploymentSource,
+  '(?ms)\}\s*finally\s*\{\s*Exit-ProtectedSecretStoreOperation \$secretStoreOperation\s*\}\s*$'
+)
+Assert-True ($operationRelease -gt $secretImport -and $releaseFromFinally.Success) 'Workflow ownership must be released from the top-level finally block.'
 $candidateOnlyRecovery = [regex]::Match(
   $deploymentSource,
   '(?m)function Restore-CandidateOnlyDatabaseCredential\(\$CurrentApplication\) \{(?<body>[\s\S]+?)^}'
@@ -139,6 +154,275 @@ function Assert-NoSecretStoreArtifacts([string]$Directory, [string]$StoreName) {
       Where-Object { $_.Name -ne $StoreName }
   )
   Assert-Equal 0 $artifacts.Count 'Atomic store replacement must remove generated sibling artifacts.'
+}
+
+function Start-PowerShellTestProcess([string]$ScriptPath, [string[]]$Arguments) {
+  $startInfo = [Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = (Get-Process -Id $PID).Path
+  foreach ($argument in @(
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    $ScriptPath
+  ) + $Arguments) {
+    [void]$startInfo.ArgumentList.Add($argument)
+  }
+  $startInfo.UseShellExecute = $false
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  if (-not $process.Start()) {
+    throw 'Could not start the cross-process ownership test worker.'
+  }
+  return $process
+}
+
+function Wait-TestPath([string]$Path, [Diagnostics.Process]$Process) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  while (-not [IO.File]::Exists($Path)) {
+    if ($Process.HasExited) {
+      $workerError = $Process.StandardError.ReadToEnd()
+      throw "The ownership test worker exited before becoming ready: $workerError"
+    }
+    if ([DateTime]::UtcNow -ge $deadline) {
+      throw 'Timed out waiting for the cross-process ownership test worker.'
+    }
+    Start-Sleep -Milliseconds 50
+  }
+}
+
+function Wait-TestProcess([Diagnostics.Process]$Process) {
+  if (-not $Process.WaitForExit(15000)) {
+    $Process.Kill($true)
+    $Process.WaitForExit()
+    throw 'Timed out waiting for the cross-process ownership test worker to exit.'
+  }
+  return [pscustomobject]@{
+    ExitCode = $Process.ExitCode
+    StandardOutput = $Process.StandardOutput.ReadToEnd()
+    StandardError = $Process.StandardError.ReadToEnd()
+  }
+}
+
+$ownershipTestRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-secret-ownership-tests-$([guid]::NewGuid().ToString('N'))"
+[void](New-Item -ItemType Directory -Path $ownershipTestRoot)
+$ownershipWorkerPath = Join-Path $ownershipTestRoot 'ownership-worker.ps1'
+$ownershipWorkerSource = @'
+param(
+  [Parameter(Mandatory)]
+  [string]$SafetyPath,
+  [Parameter(Mandatory)]
+  [string]$Mode,
+  [Parameter(Mandatory)]
+  [string]$StorePath,
+  [string]$ReadyPath = '',
+  [string]$ReleasePath = '',
+  [string]$OperationPath = ''
+)
+$ErrorActionPreference = 'Stop'
+. $SafetyPath
+$ownership = $null
+try {
+  $ownership = Enter-ProtectedSecretStoreOperation $StorePath
+  if ($ReadyPath) {
+    [IO.File]::WriteAllText($ReadyPath, 'ready')
+  }
+  if ($Mode -eq 'Hold') {
+    while (-not [IO.File]::Exists($ReleasePath)) {
+      Start-Sleep -Milliseconds 50
+    }
+  } elseif ($Mode -eq 'Mutate') {
+    [IO.File]::WriteAllText("$OperationPath.entered", 'entered')
+    $store = Import-Clixml -LiteralPath $StorePath
+    $store.PostgresCandidatePassword = $store.AuthSecret
+    Save-ProtectedSecureStringStore -Path $StorePath -Store $store
+    [IO.File]::WriteAllText("$OperationPath.azure", 'azure')
+  } elseif ($Mode -eq 'Acquire') {
+    [IO.File]::WriteAllText($OperationPath, 'acquired')
+  } elseif ($Mode -eq 'Recover') {
+    $store = Import-Clixml -LiteralPath $StorePath
+    if (
+      -not $store.PSObject.Properties['PostgresCandidatePassword'] -or
+      $store.PostgresCandidatePassword -isnot [Security.SecureString]
+    ) {
+      throw 'Retained recovery state was unavailable after abandoned ownership.'
+    }
+    [IO.File]::WriteAllText($OperationPath, [string]$ownership.RecoveredAbandonedOwner)
+  } elseif ($Mode -eq 'Exception') {
+    throw 'simulated owner exception'
+  } else {
+    throw "Unknown ownership test mode: $Mode"
+  }
+} finally {
+  Exit-ProtectedSecretStoreOperation $ownership
+}
+'@
+[IO.File]::WriteAllText($ownershipWorkerPath, $ownershipWorkerSource, [Text.UTF8Encoding]::new($false))
+
+$ownershipProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+try {
+  $sharedDirectory = Join-Path $ownershipTestRoot 'shared'
+  [void](New-Item -ItemType Directory -Path $sharedDirectory)
+  $sharedStorePath = Join-Path $sharedDirectory 'production.clixml'
+  New-ProtectedTestStore -Path $sharedStorePath -TestStore (New-TestSecretStore 0)
+  $holderReadyPath = Join-Path $sharedDirectory 'holder.ready'
+  $holderReleasePath = Join-Path $sharedDirectory 'holder.release'
+  $loserOperationPath = Join-Path $sharedDirectory 'loser'
+  $holder = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Hold',
+    '-StorePath', $sharedStorePath,
+    '-ReadyPath', $holderReadyPath,
+    '-ReleasePath', $holderReleasePath
+  )
+  $ownershipProcesses.Add($holder)
+  Wait-TestPath $holderReadyPath $holder
+
+  $normalizedAlias = [IO.Path]::Combine(
+    [IO.Path]::GetDirectoryName($sharedStorePath),
+    '.',
+    [IO.Path]::GetFileName($sharedStorePath)
+  ).ToUpperInvariant()
+  $loser = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Mutate',
+    '-StorePath', $normalizedAlias,
+    '-OperationPath', $loserOperationPath
+  )
+  $ownershipProcesses.Add($loser)
+  $loserResult = Wait-TestProcess $loser
+  Assert-True ($loserResult.ExitCode -ne 0) 'A second process must fail while the canonical store is owned.'
+  Assert-True ($loserResult.StandardError -match 'Another Markdoc production operation owns this secrets store') 'Contention must return an explicit non-secret ownership error.'
+  Assert-True (-not [IO.File]::Exists("$loserOperationPath.entered")) 'The losing process must fail before importing or mutating secrets.'
+  Assert-True (-not [IO.File]::Exists("$loserOperationPath.azure")) 'The losing process must fail before invoking Azure operations.'
+  Assert-OriginalTestStore $sharedStorePath
+
+  [IO.File]::WriteAllText($holderReleasePath, 'release')
+  $holderResult = Wait-TestProcess $holder
+  Assert-Equal 0 $holderResult.ExitCode 'The first owner must release normally.'
+
+  $reacquiredPath = Join-Path $sharedDirectory 'reacquired'
+  $reacquired = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Acquire',
+    '-StorePath', $sharedStorePath,
+    '-OperationPath', $reacquiredPath
+  )
+  $ownershipProcesses.Add($reacquired)
+  $reacquiredResult = Wait-TestProcess $reacquired
+  Assert-Equal 0 $reacquiredResult.ExitCode 'A later process must acquire after normal release.'
+  Assert-True ([IO.File]::Exists($reacquiredPath)) 'Normal release must make the store available to the next process.'
+  Assert-OriginalTestStore $sharedStorePath
+
+  $abandonedDirectory = Join-Path $ownershipTestRoot 'abandoned'
+  [void](New-Item -ItemType Directory -Path $abandonedDirectory)
+  $abandonedStorePath = Join-Path $abandonedDirectory 'production.clixml'
+  New-ProtectedTestStore -Path $abandonedStorePath -TestStore (New-TestSecretStore 0)
+  $abandonedReadyPath = Join-Path $abandonedDirectory 'holder.ready'
+  $abandonedReleasePath = Join-Path $abandonedDirectory 'holder.release'
+  $abandonedHolder = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Hold',
+    '-StorePath', $abandonedStorePath,
+    '-ReadyPath', $abandonedReadyPath,
+    '-ReleasePath', $abandonedReleasePath
+  )
+  $ownershipProcesses.Add($abandonedHolder)
+  Wait-TestPath $abandonedReadyPath $abandonedHolder
+  $guardian = [Threading.Mutex]::OpenExisting(
+    (Get-ProtectedSecretStoreOperationMutexName $abandonedStorePath)
+  )
+  try {
+    $abandonedHolder.Kill($true)
+    $abandonedHolder.WaitForExit()
+    $recoveryPath = Join-Path $abandonedDirectory 'recovered'
+    $recovery = Start-PowerShellTestProcess $ownershipWorkerPath @(
+      '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+      '-Mode', 'Recover',
+      '-StorePath', $abandonedStorePath,
+      '-OperationPath', $recoveryPath
+    )
+    $ownershipProcesses.Add($recovery)
+    $recoveryResult = Wait-TestProcess $recovery
+    Assert-Equal 0 $recoveryResult.ExitCode 'A later process must recover abandoned ownership.'
+    Assert-Equal 'True' ([IO.File]::ReadAllText($recoveryPath)) 'Abandoned ownership must be recognized while retained state is recovered.'
+    Assert-OriginalTestStore $abandonedStorePath
+  } finally {
+    $guardian.Dispose()
+  }
+
+  $exceptionDirectory = Join-Path $ownershipTestRoot 'exception'
+  [void](New-Item -ItemType Directory -Path $exceptionDirectory)
+  $exceptionStorePath = Join-Path $exceptionDirectory 'production.clixml'
+  New-ProtectedTestStore -Path $exceptionStorePath -TestStore (New-TestSecretStore 0)
+  $exceptionOwner = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Exception',
+    '-StorePath', $exceptionStorePath
+  )
+  $ownershipProcesses.Add($exceptionOwner)
+  $exceptionResult = Wait-TestProcess $exceptionOwner
+  Assert-True ($exceptionResult.ExitCode -ne 0) 'An owner exception must remain explicit.'
+  Assert-True ($exceptionResult.StandardError -match 'simulated owner exception') 'The owner exception must not be hidden by release.'
+  $afterExceptionPath = Join-Path $exceptionDirectory 'reacquired'
+  $afterException = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Acquire',
+    '-StorePath', $exceptionStorePath,
+    '-OperationPath', $afterExceptionPath
+  )
+  $ownershipProcesses.Add($afterException)
+  $afterExceptionResult = Wait-TestProcess $afterException
+  Assert-Equal 0 $afterExceptionResult.ExitCode 'The finally path must release ownership after an exception.'
+  Assert-True ([IO.File]::Exists($afterExceptionPath)) 'Exception release must allow the next process to enter.'
+  Assert-OriginalTestStore $exceptionStorePath
+
+  $independentDirectory = Join-Path $ownershipTestRoot 'independent'
+  [void](New-Item -ItemType Directory -Path $independentDirectory)
+  $firstStorePath = Join-Path $independentDirectory 'first.clixml'
+  $secondStorePath = Join-Path $independentDirectory 'second.clixml'
+  New-ProtectedTestStore -Path $firstStorePath -TestStore (New-TestSecretStore 0)
+  New-ProtectedTestStore -Path $secondStorePath -TestStore (New-TestSecretStore 0)
+  $independentReadyPath = Join-Path $independentDirectory 'holder.ready'
+  $independentReleasePath = Join-Path $independentDirectory 'holder.release'
+  $firstHolder = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Hold',
+    '-StorePath', $firstStorePath,
+    '-ReadyPath', $independentReadyPath,
+    '-ReleasePath', $independentReleasePath
+  )
+  $ownershipProcesses.Add($firstHolder)
+  Wait-TestPath $independentReadyPath $firstHolder
+  $independentAcquirePath = Join-Path $independentDirectory 'second-acquired'
+  $independentAcquire = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Acquire',
+    '-StorePath', $secondStorePath,
+    '-OperationPath', $independentAcquirePath
+  )
+  $ownershipProcesses.Add($independentAcquire)
+  $independentResult = Wait-TestProcess $independentAcquire
+  Assert-Equal 0 $independentResult.ExitCode 'Distinct protected stores must not share workflow ownership.'
+  Assert-True ([IO.File]::Exists($independentAcquirePath)) 'A distinct store must be independently available.'
+  [IO.File]::WriteAllText($independentReleasePath, 'release')
+  $firstHolderResult = Wait-TestProcess $firstHolder
+  Assert-Equal 0 $firstHolderResult.ExitCode 'The distinct-store holder must release normally.'
+  Assert-OriginalTestStore $firstStorePath
+  Assert-OriginalTestStore $secondStorePath
+} finally {
+  foreach ($process in $ownershipProcesses) {
+    if (-not $process.HasExited) {
+      $process.Kill($true)
+      $process.WaitForExit()
+    }
+    $process.Dispose()
+  }
+  Remove-Item -LiteralPath $ownershipTestRoot -Recurse -Force
 }
 
 $storeTestRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-secret-store-tests-$([guid]::NewGuid().ToString('N'))"

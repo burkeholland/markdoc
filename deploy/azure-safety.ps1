@@ -126,6 +126,88 @@ function Set-ProtectedCurrentUserFileAcl {
   Assert-ProtectedCurrentUserFileAcl $Path
 }
 
+function Get-ProtectedSecretStoreOperationMutexName {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $canonicalPath = [IO.Path]::GetFullPath($Path).ToUpperInvariant()
+  $pathBytes = [Text.Encoding]::UTF8.GetBytes($canonicalPath)
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try {
+    $pathHash = $hasher.ComputeHash($pathBytes)
+    $hashText = [Convert]::ToHexString($pathHash)
+    return "Local\Markdoc.AzureProduction.$hashText"
+  } finally {
+    $hasher.Dispose()
+    [Array]::Clear($pathBytes, 0, $pathBytes.Length)
+    if ($pathHash) {
+      [Array]::Clear($pathHash, 0, $pathHash.Length)
+    }
+  }
+}
+
+function Enter-ProtectedSecretStoreOperation {
+  param(
+    [Parameter(Mandatory)]
+    [string]$Path
+  )
+
+  $mutexName = Get-ProtectedSecretStoreOperationMutexName $Path
+  $mutex = [Threading.Mutex]::new($false, $mutexName)
+  $acquired = $false
+  $recoveredAbandonedOwner = $false
+  try {
+    try {
+      $acquired = $mutex.WaitOne(0)
+    } catch [Threading.AbandonedMutexException] {
+      $acquired = $true
+      $recoveredAbandonedOwner = $true
+    }
+    if (-not $acquired) {
+      throw [InvalidOperationException]::new(
+        'Another Markdoc production operation owns this secrets store.'
+      )
+    }
+
+    return [pscustomobject]@{
+      Mutex = $mutex
+      Acquired = $true
+      RecoveredAbandonedOwner = $recoveredAbandonedOwner
+    }
+  } catch {
+    try {
+      if ($acquired) {
+        $mutex.ReleaseMutex()
+      }
+    } finally {
+      $mutex.Dispose()
+    }
+    throw
+  }
+}
+
+function Exit-ProtectedSecretStoreOperation {
+  param(
+    [AllowNull()]
+    [object]$Ownership
+  )
+
+  if (-not $Ownership) {
+    return
+  }
+
+  try {
+    if ($Ownership.Acquired) {
+      $Ownership.Mutex.ReleaseMutex()
+      $Ownership.Acquired = $false
+    }
+  } finally {
+    $Ownership.Mutex.Dispose()
+  }
+}
+
 function Assert-SecureStringStore {
   param(
     [Parameter(Mandatory)]
