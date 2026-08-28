@@ -123,6 +123,8 @@ export function EditorShell({
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [outlineDrawerOpen, setOutlineDrawerOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<SidePanel>(null);
+  const [focusCommentsOnOpen, setFocusCommentsOnOpen] = useState(false);
+  const restoreCommentsToggleRef = useRef(false);
   const breakpoint = useBreakpoint();
   const isPhone = breakpoint === "phone";
   const isTablet = breakpoint === "tablet";
@@ -577,7 +579,15 @@ export function EditorShell({
   }, [doc.id, doc.storage, router, toast]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
-  const toggleComments = useCallback(() => setSidePanel((p) => (p === "comments" ? null : "comments")), []);
+  const toggleComments = useCallback(
+    (focusPanel = true) => {
+      const closing = sidePanel === "comments";
+      restoreCommentsToggleRef.current = closing;
+      setFocusCommentsOnOpen(!closing && focusPanel);
+      setSidePanel(closing ? null : "comments");
+    },
+    [sidePanel],
+  );
 
   // "Ask an agent": the dialog captures the selection when it opens; results come back through the
   // shared document (meta.agentRequests, mirrored by the server) so the pill and toast are realtime.
@@ -586,7 +596,13 @@ export function EditorShell({
   // A focus request only applies to the panel it opened; once the panel closes, a later reopen picks
   // its own landing tab (Suggestions in Suggesting mode, #117) instead of replaying the stale request.
   useEffect(() => {
-    if (sidePanel !== "comments") setCommentsFocus(null);
+    if (sidePanel === "comments") return;
+    setCommentsFocus(null);
+    setFocusCommentsOnOpen(false);
+    if (sidePanel === null && restoreCommentsToggleRef.current) {
+      restoreCommentsToggleRef.current = false;
+      document.querySelector<HTMLElement>('[data-testid="comments-toggle"]')?.focus({ preventScroll: true });
+    }
   }, [sidePanel]);
   const openAskAgent = useCallback(() => {
     if (!session.canComment) return;
@@ -891,7 +907,10 @@ export function EditorShell({
       window.removeEventListener("keydown", onKey, true);
     };
   }, [session, followUserId, richScroller, codeView, richView]);
-  const closeSidePanel = useCallback(() => setSidePanel(null), []);
+  const closeSidePanel = useCallback(() => {
+    restoreCommentsToggleRef.current = sidePanel === "comments";
+    setSidePanel(null);
+  }, [sidePanel]);
   const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
   const closeOutlineDrawer = useCallback(() => setOutlineDrawerOpen(false), []);
 
@@ -934,7 +953,16 @@ export function EditorShell({
 
   const panel =
     sidePanel === "comments" ? (
-      <CommentsPanel session={session} onClose={closeSidePanel} onReveal={reveal} onPendingDone={() => actions.focusCollapsed()} onAskAgent={openAskAgent} focusTab={commentsFocus} onToast={toast} />
+      <CommentsPanel
+        session={session}
+        onClose={closeSidePanel}
+        onReveal={reveal}
+        onPendingDone={() => actions.focusCollapsed()}
+        onAskAgent={openAskAgent}
+        focusTab={commentsFocus}
+        focusOnMount={focusCommentsOnOpen}
+        onToast={toast}
+      />
     ) : sidePanel === "versions" ? (
       <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (
@@ -1212,4 +1240,3 @@ export function EditorShell({
     </TooltipProvider>
   );
 }
-
