@@ -135,7 +135,7 @@ git cat-file -e "$sourceSha^{commit}" 2>$null
 if ($LASTEXITCODE) { throw "Source commit $sourceSha is not available in this checkout." }
 
 if ($SourceCommit -and $sourceSha -ne $deploymentSha) {
-  $allowedDeploymentPaths = @('Dockerfile', 'README.md', 'deploy/', 'infra/')
+  $allowedDeploymentPaths = @('Dockerfile', 'README.md', '.github/workflows/deploy.yml', 'deploy/', 'infra/')
   $productChanges = @(
     git diff --name-only $sourceSha $deploymentSha -- . |
       Where-Object {
