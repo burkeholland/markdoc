@@ -55,7 +55,6 @@ param(
   [switch]$Destroy
 )
 $ErrorActionPreference = 'Stop'
-Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 Set-Location (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'azure-safety.ps1')
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
@@ -116,7 +115,7 @@ function Assert-ProductionSecretStoreAcl {
   if (-not $resolvedSecretsPath -or -not $store) {
     throw 'Password rotation state requires the DPAPI-encrypted production secrets store.'
   }
-  $acl = Get-Acl -LiteralPath $resolvedSecretsPath
+  $acl = [IO.File]::GetAccessControl($resolvedSecretsPath)
   $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
   $foreignAllow = @(
     $acl.Access | Where-Object {
