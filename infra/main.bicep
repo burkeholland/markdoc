@@ -621,11 +621,11 @@ if ! TOKEN="$(curl -fsS -H Metadata:true 'http://169.254.169.254/metadata/identi
   echo 'database-password-rotation=failed stage=managed-identity'
   exit 0
 fi
-if ! ACTIVE_PASSWORD="$(curl -fsS -H "Authorization: ******" '{2}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
+if ! ACTIVE_PASSWORD="$(curl -fsS --oauth2-bearer "$TOKEN" '{2}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
   echo 'database-password-rotation=failed stage=active-secret'
   exit 0
 fi
-if ! CANDIDATE_PASSWORD="$(curl -fsS -H "Authorization: ******" '{3}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
+if ! CANDIDATE_PASSWORD="$(curl -fsS --oauth2-bearer "$TOKEN" '{3}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"; then
   echo 'database-password-rotation=failed stage=candidate-secret'
   exit 0
 fi
