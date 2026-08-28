@@ -30,14 +30,14 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   return (
     <main className="min-h-screen bg-surface-2">
       <header className="border-b border-line bg-surface">
-        <div className="mx-auto flex h-16 max-w-4xl items-center gap-4 px-6">
+        <div className="mx-auto flex h-16 max-w-4xl items-center gap-2 px-3 min-[390px]:gap-4 min-[390px]:px-6">
           <Link href="/" className="flex items-center gap-2.5">
             <Logo className="h-8 w-8" />
-            <span className="text-lg font-semibold text-ink">Markdoc</span>
+            <span className="sr-only text-lg font-semibold text-ink min-[390px]:not-sr-only">Markdoc</span>
           </Link>
-          <span className="text-ink-4">/</span>
+          <span className="hidden text-ink-4 min-[390px]:inline">/</span>
           <span className="text-sm font-medium text-ink-2">Settings</span>
-          <Link href="/" className="btn btn-ghost btn-sm ml-auto gap-1.5">
+          <Link href="/" className="btn btn-ghost btn-sm ml-auto shrink-0 gap-1.5">
             <ArrowLeft size={14} /> Documents
           </Link>
         </div>

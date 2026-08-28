@@ -442,8 +442,8 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
 }
 
 /**
- * Cross-document inbox: @mentions on every document the token's user can open, plus new "Ask an agent"
- * requests on documents they own or collaborate on. Content changes are not included.
+ * Cross-document inbox: @mentions on every document the token's user can open, plus reviews and new
+ * "Ask an agent" requests on documents they own or collaborate on. Content changes are not included.
  */
 export async function collectUserEvents(user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: null }), events: [] };
@@ -474,6 +474,33 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       const agents = n.agentTargets ?? parseAgentMentions(n.snippet).filter((mention) => mention.login === login).map((mention) => mention.agent);
       events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: agents[0] ?? mentionedAgent(n.snippet, login), agents, actor: mentionActor(n, user), at: n.createdAt.toISOString() });
     }
+  }
+
+  const selfId = selfActorId(user);
+  const reviews = await db
+    .select({ activity: schema.activity })
+    .from(schema.activity)
+    .innerJoin(schema.documents, eq(schema.documents.id, schema.activity.documentId))
+    .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
+    .where(
+      and(
+        eq(schema.activity.action, "review.create"),
+        gte(schema.activity.createdAt, new Date(cursor.a)),
+        isNull(schema.documents.deletedAt),
+        or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`),
+      ),
+    )
+    .orderBy(asc(schema.activity.createdAt), asc(schema.activity.id))
+    .limit(500);
+  for (const { activity } of reviews) {
+    const ms = activity.createdAt.getTime();
+    if (ms === cursor.a && cursor.ids.includes(activity.id)) continue;
+    if (ms > next.a) {
+      next.a = ms;
+      next.ids = [activity.id];
+    } else if (ms === next.a && !next.ids.includes(activity.id)) next.ids.push(activity.id);
+    const event = activityToEvent(activity, selfId);
+    if (event) events.push(event);
   }
 
   const requests = await db
@@ -508,9 +535,12 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       at: request.createdAt.toISOString(),
     });
   }
-  next.a = Math.max(next.a, now.getTime());
-  next.ids = [];
+  if (reviews.length < 500 && next.a < now.getTime()) {
+    next.a = now.getTime();
+    next.ids = [];
+  }
   const kept = keep(events, opts);
+  await resolveLogins(kept);
   kept.sort((x, y) => x.at.localeCompare(y.at));
   return { cursor: encodeCursor(next), events: kept };
 }

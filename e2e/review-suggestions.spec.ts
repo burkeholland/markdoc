@@ -478,7 +478,12 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect
       .poll(
         async () => {
-          const w = await mcp<{ cursor: string; events: { type: string; threadId?: string | null }[] }>(page, token, "markdoc_watch", { id: docId, since: watch0.cursor, wait: 1 });
+          const w = await mcp<{ cursor: string; events: { type: string; threadId?: string | null }[] }>(page, token, "markdoc_watch", {
+            id: docId,
+            since: watch0.cursor,
+            wait: 1,
+            includeSelf: true,
+          });
           return w.events.map((e) => e.type);
         },
         { timeout: 10_000 },
