@@ -370,19 +370,7 @@ function useCommentOps(session: CollabSession) {
           await api.documents.comment(id, { action: "suggestion", threadId, replyId, decision: "accept" });
           return true;
         }
-        const before = session.comments.get(threadId);
-        session.undoManager.stopCapturing();
-        const ok = replyId ? session.comments.acceptReplySuggestion(threadId, replyId, session.user) : session.comments.acceptSuggestion(threadId, proposed, session.user);
-        const after = session.comments.get(threadId);
-        if (ok && before && after) {
-          session.rememberCommentSuggestionUndo({
-            threadId,
-            before: { anchor: before.anchor, quote: before.quote },
-            after: { anchor: after.anchor, quote: after.quote },
-          });
-        }
-        session.undoManager.stopCapturing();
-        return ok;
+        return session.acceptCommentSuggestion(threadId, proposed, replyId);
       },
       async rejectSuggestion(threadId: string, replyId?: string): Promise<boolean> {
         if (viaApi) {
