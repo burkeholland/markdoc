@@ -202,12 +202,24 @@ public sealed class MarkdocSecretStoreFileIdentity
     public string DosPath { get; private set; }
     public string IdentityPath { get; private set; }
     public uint LinkCount { get; private set; }
+    public uint VolumeSerialNumber { get; private set; }
+    public uint FileIndexHigh { get; private set; }
+    public uint FileIndexLow { get; private set; }
 
-    private MarkdocSecretStoreFileIdentity(string dosPath, string identityPath, uint linkCount)
+    private MarkdocSecretStoreFileIdentity(
+        string dosPath,
+        string identityPath,
+        uint linkCount,
+        uint volumeSerialNumber,
+        uint fileIndexHigh,
+        uint fileIndexLow)
     {
         DosPath = dosPath;
         IdentityPath = identityPath;
         LinkCount = linkCount;
+        VolumeSerialNumber = volumeSerialNumber;
+        FileIndexHigh = fileIndexHigh;
+        FileIndexLow = fileIndexLow;
     }
 
     private static string ReadFinalPath(SafeFileHandle file, uint flags)
@@ -249,7 +261,10 @@ public sealed class MarkdocSecretStoreFileIdentity
         return new MarkdocSecretStoreFileIdentity(
             dosPath,
             identityPath,
-            information.NumberOfLinks);
+            information.NumberOfLinks,
+            information.VolumeSerialNumber,
+            information.FileIndexHigh,
+            information.FileIndexLow);
     }
 
     public static string ReadShortPath(string longPath)
@@ -293,7 +308,9 @@ function ConvertFrom-WindowsExtendedPath {
 function Resolve-ProtectedSecretStoreOperationPath {
   param(
     [Parameter(Mandatory)]
-    [string]$Path
+    [string]$Path,
+
+    [switch]$KeepIdentityHandle
   )
 
   $providerPath = $Path
@@ -302,6 +319,7 @@ function Resolve-ProtectedSecretStoreOperationPath {
   }
   $fullPath = [IO.Path]::GetFullPath($providerPath)
   $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+  $file = $null
   try {
     $file = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
   } catch [IO.FileNotFoundException] {
@@ -317,22 +335,37 @@ function Resolve-ProtectedSecretStoreOperationPath {
   }
   try {
     $identity = [MarkdocSecretStoreFileIdentity]::Resolve($file.SafeFileHandle)
+
+    $canonicalPath = ConvertFrom-WindowsExtendedPath $identity.DosPath
+    if ($canonicalPath.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
+      throw 'The production secrets store must be on a local Windows volume.'
+    }
+    if ($identity.LinkCount -ne 1) {
+      throw 'The production secrets store must not have hard-link aliases.'
+    }
+    Assert-ProtectedCurrentUserFileAcl $canonicalPath
+
+    $result = [pscustomobject]@{
+      RequestedPath = $fullPath
+      Path = $identity.DosPath
+      Identity = $identity.IdentityPath
+      PhysicalIdentity = (
+        '{0:X8}:{1:X8}{2:X8}' -f
+          $identity.VolumeSerialNumber,
+          $identity.FileIndexHigh,
+          $identity.FileIndexLow
+      )
+      IdentityHandle = $null
+    }
+    if ($KeepIdentityHandle) {
+      $result.IdentityHandle = $file
+      $file = $null
+    }
+    return $result
   } finally {
-    $file.Dispose()
-  }
-
-  $canonicalPath = ConvertFrom-WindowsExtendedPath $identity.DosPath
-  if ($canonicalPath.StartsWith('\\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The production secrets store must be on a local Windows volume.'
-  }
-  if ($identity.LinkCount -ne 1) {
-    throw 'The production secrets store must not have hard-link aliases.'
-  }
-  Assert-ProtectedCurrentUserFileAcl $canonicalPath
-
-  return [pscustomobject]@{
-    Path = $identity.DosPath
-    Identity = $identity.IdentityPath.ToUpperInvariant()
+    if ($file) {
+      $file.Dispose()
+    }
   }
 }
 
@@ -365,7 +398,21 @@ function Get-ProtectedSecretStoreOperationMutexName {
   )
 
   $resolvedPath = Resolve-ProtectedSecretStoreOperationPath $Path
-  return Get-ProtectedSecretStoreOperationMutexNameFromIdentity $resolvedPath.Identity
+  return Get-ProtectedSecretStoreOperationMutexNameFromIdentity "LOCATION|$($resolvedPath.Identity)"
+}
+
+function Get-ProtectedSecretStoreOperationMutexNames {
+  param(
+    [Parameter(Mandatory)]
+    [object]$ResolvedPath
+  )
+
+  [string[]]$names = @(
+    Get-ProtectedSecretStoreOperationMutexNameFromIdentity "LOCATION|$($ResolvedPath.Identity)"
+    Get-ProtectedSecretStoreOperationMutexNameFromIdentity "FILE|$($ResolvedPath.PhysicalIdentity)"
+  )
+  [Array]::Sort($names, [StringComparer]::Ordinal)
+  return $names
 }
 
 function New-ProtectedSecretStoreOperationMutexSecurity {
@@ -444,48 +491,209 @@ function Assert-ProtectedSecretStoreOperationMutexSecurity {
   }
 }
 
+function Assert-ProtectedSecretStoreOperationIdentity {
+  param(
+    [Parameter(Mandatory)]
+    [object]$ResolvedPath
+  )
+
+  $reopenedFiles = [Collections.Generic.List[IO.FileStream]]::new()
+  try {
+    $identities = [Collections.Generic.List[object]]::new()
+    $identities.Add(
+      [MarkdocSecretStoreFileIdentity]::Resolve($ResolvedPath.IdentityHandle.SafeFileHandle)
+    )
+
+    [string[]]$pathsToReopen = @($ResolvedPath.RequestedPath, $ResolvedPath.Path)
+    $previousPath = $null
+    foreach ($pathToReopen in $pathsToReopen) {
+      if ($previousPath -and [string]::Equals($previousPath, $pathToReopen, [StringComparison]::Ordinal)) {
+        continue
+      }
+      $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+      try {
+        $reopenedFile = [IO.File]::Open(
+          $pathToReopen,
+          [IO.FileMode]::Open,
+          [IO.FileAccess]::Read,
+          $share
+        )
+      } catch [IO.FileNotFoundException] {
+        throw [InvalidOperationException]::new(
+          'The production secrets store identity changed while ownership was being acquired.',
+          $_.Exception
+        )
+      } catch [IO.DirectoryNotFoundException] {
+        throw [InvalidOperationException]::new(
+          'The production secrets store identity changed while ownership was being acquired.',
+          $_.Exception
+        )
+      } catch [UnauthorizedAccessException] {
+        throw [InvalidOperationException]::new(
+          'The production secrets store identity changed while ownership was being acquired.',
+          $_.Exception
+        )
+      } catch [IO.IOException] {
+        throw [InvalidOperationException]::new(
+          'The production secrets store identity changed while ownership was being acquired.',
+          $_.Exception
+        )
+      }
+      $reopenedFiles.Add($reopenedFile)
+      $identities.Add(
+        [MarkdocSecretStoreFileIdentity]::Resolve($reopenedFile.SafeFileHandle)
+      )
+      $previousPath = $pathToReopen
+    }
+
+    foreach ($identity in $identities) {
+      $physicalIdentity = (
+        '{0:X8}:{1:X8}{2:X8}' -f
+          $identity.VolumeSerialNumber,
+          $identity.FileIndexHigh,
+          $identity.FileIndexLow
+      )
+      if (
+        -not [string]::Equals(
+          $identity.IdentityPath,
+          $ResolvedPath.Identity,
+          [StringComparison]::Ordinal
+        ) -or
+        -not [string]::Equals(
+          $physicalIdentity,
+          $ResolvedPath.PhysicalIdentity,
+          [StringComparison]::Ordinal
+        ) -or
+        $identity.LinkCount -ne 1
+      ) {
+        throw [InvalidOperationException]::new(
+          'The production secrets store identity changed while ownership was being acquired.'
+        )
+      }
+    }
+
+    Assert-ProtectedCurrentUserFileAcl (
+      ConvertFrom-WindowsExtendedPath $ResolvedPath.Path
+    )
+  } finally {
+    foreach ($reopenedFile in $reopenedFiles) {
+      $reopenedFile.Dispose()
+    }
+  }
+}
+
+function Close-ProtectedSecretStoreOperationLocks {
+  param(
+    [Parameter(Mandatory)]
+    [AllowEmptyCollection()]
+    [object[]]$Locks
+  )
+
+  $releaseErrors = [Collections.Generic.List[Management.Automation.ErrorRecord]]::new()
+  for ($index = $Locks.Count - 1; $index -ge 0; $index--) {
+    $lock = $Locks[$index]
+    try {
+      if ($lock.Acquired) {
+        $lock.Mutex.ReleaseMutex()
+        $lock.Acquired = $false
+      }
+    } catch {
+      $releaseErrors.Add($_)
+    } finally {
+      try {
+        $lock.Mutex.Dispose()
+      } catch {
+        $releaseErrors.Add($_)
+      }
+    }
+  }
+
+  if ($releaseErrors.Count -eq 1) {
+    throw $releaseErrors[0]
+  }
+  if ($releaseErrors.Count -gt 1) {
+    $first = $releaseErrors[0]
+    $remaining = $releaseErrors.ToArray()[1..($releaseErrors.Count - 1)]
+    throw (New-CombinedOperationException `
+      -Message "Production operation lock cleanup failed: $((
+        $releaseErrors | ForEach-Object { $_.Exception.Message }
+      ) -join '; ')" `
+      -PrimaryError $first `
+      -SecondaryErrors $remaining)
+  }
+}
+
 function Enter-ProtectedSecretStoreOperation {
   param(
     [Parameter(Mandatory)]
     [string]$Path
   )
 
-  $resolvedPath = Resolve-ProtectedSecretStoreOperationPath $Path
-  $mutexName = Get-ProtectedSecretStoreOperationMutexNameFromIdentity $resolvedPath.Identity
-  $createdNew = $false
-  $mutexSecurity = New-ProtectedSecretStoreOperationMutexSecurity
-  $mutex = New-NamedMutexWithSecurity -Name $mutexName -Security $mutexSecurity -CreatedNew ([ref]$createdNew)
-  $acquired = $false
+  $resolvedPath = Resolve-ProtectedSecretStoreOperationPath $Path -KeepIdentityHandle
+  $locks = [Collections.Generic.List[object]]::new()
   $recoveredAbandonedOwner = $false
   try {
-    Assert-ProtectedSecretStoreOperationMutexSecurity $mutexName
-    try {
-      $acquired = $mutex.WaitOne(0)
-    } catch [Threading.AbandonedMutexException] {
-      $acquired = $true
-      $recoveredAbandonedOwner = $true
-    }
-    if (-not $acquired) {
-      throw [InvalidOperationException]::new(
-        'Another Markdoc production operation owns this secrets store.'
-      )
+    $mutexSecurity = New-ProtectedSecretStoreOperationMutexSecurity
+    foreach ($mutexName in (Get-ProtectedSecretStoreOperationMutexNames $resolvedPath)) {
+      $createdNew = $false
+      $mutex = New-NamedMutexWithSecurity `
+        -Name $mutexName `
+        -Security $mutexSecurity `
+        -CreatedNew ([ref]$createdNew)
+      $lock = [pscustomobject]@{
+        Name = $mutexName
+        Mutex = $mutex
+        Acquired = $false
+      }
+      $locks.Add($lock)
+      Assert-ProtectedSecretStoreOperationMutexSecurity $mutexName
+      try {
+        $lock.Acquired = $mutex.WaitOne(0)
+      } catch [Threading.AbandonedMutexException] {
+        $lock.Acquired = $true
+        $recoveredAbandonedOwner = $true
+      }
+      if (-not $lock.Acquired) {
+        throw [InvalidOperationException]::new(
+          'Another Markdoc production operation owns this secrets store.'
+        )
+      }
     }
 
+    Assert-ProtectedSecretStoreOperationIdentity $resolvedPath
+    $resolvedPath.IdentityHandle.Dispose()
+    $resolvedPath.IdentityHandle = $null
+
     return [pscustomobject]@{
-      Mutex = $mutex
-      Acquired = $true
+      Locks = $locks.ToArray()
       RecoveredAbandonedOwner = $recoveredAbandonedOwner
       Path = $resolvedPath.Path
     }
   } catch {
+    $primaryError = $_
+    $cleanupErrors = [Collections.Generic.List[Management.Automation.ErrorRecord]]::new()
     try {
-      if ($acquired) {
-        $mutex.ReleaseMutex()
-      }
-    } finally {
-      $mutex.Dispose()
+      Close-ProtectedSecretStoreOperationLocks $locks.ToArray()
+    } catch {
+      $cleanupErrors.Add($_)
     }
-    throw
+    try {
+      if ($resolvedPath.IdentityHandle) {
+        $resolvedPath.IdentityHandle.Dispose()
+        $resolvedPath.IdentityHandle = $null
+      }
+    } catch {
+      $cleanupErrors.Add($_)
+    }
+    if ($cleanupErrors.Count -gt 0) {
+      throw (New-CombinedOperationException `
+        -Message "Production operation ownership failed: $($primaryError.Exception.Message) Cleanup also failed: $((
+          $cleanupErrors | ForEach-Object { $_.Exception.Message }
+        ) -join '; ')" `
+        -PrimaryError $primaryError `
+        -SecondaryErrors $cleanupErrors.ToArray())
+    }
+    throw $primaryError
   }
 }
 
@@ -499,14 +707,7 @@ function Exit-ProtectedSecretStoreOperation {
     return
   }
 
-  try {
-    if ($Ownership.Acquired) {
-      $Ownership.Mutex.ReleaseMutex()
-      $Ownership.Acquired = $false
-    }
-  } finally {
-    $Ownership.Mutex.Dispose()
-  }
+  Close-ProtectedSecretStoreOperationLocks $Ownership.Locks
 }
 
 function Assert-SecureStringStore {

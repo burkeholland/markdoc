@@ -1,3 +1,7 @@
+param(
+  [switch]$RequireCaseSensitiveOwnership
+)
+
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'azure-safety.ps1')
 
@@ -221,6 +225,31 @@ function Wait-TestProcess([Diagnostics.Process]$Process) {
   }
 }
 
+function Enable-TestDirectoryCaseSensitivity([string]$Path) {
+  $fsutil = Get-Command fsutil.exe -ErrorAction SilentlyContinue
+  if (-not $fsutil) {
+    return $false
+  }
+  $startInfo = [Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $fsutil.Source
+  $startInfo.Arguments = "file setCaseSensitiveInfo `"$Path`" enable"
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  try {
+    if (-not $process.Start()) {
+      return $false
+    }
+    $process.WaitForExit()
+    return $process.ExitCode -eq 0
+  } finally {
+    $process.Dispose()
+  }
+}
+
 $ownershipTestRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-secret-ownership-tests-$([guid]::NewGuid().ToString('N'))"
 [void](New-Item -ItemType Directory -Path $ownershipTestRoot)
 $ownershipWorkerPath = Join-Path $ownershipTestRoot 'ownership-worker.ps1'
@@ -234,10 +263,36 @@ param(
   [string]$StorePath,
   [string]$ReadyPath = '',
   [string]$ReleasePath = '',
-  [string]$OperationPath = ''
+  [string]$OperationPath = '',
+  [string]$IdentityReadyPath = '',
+  [string]$IdentityReleasePath = '',
+  [string]$LocksReadyPath = '',
+  [string]$LocksReleasePath = ''
 )
 $ErrorActionPreference = 'Stop'
 . $SafetyPath
+$originalGetMutexNames = ${function:Get-ProtectedSecretStoreOperationMutexNames}
+$originalAssertIdentity = ${function:Assert-ProtectedSecretStoreOperationIdentity}
+if ($IdentityReadyPath) {
+  function Get-ProtectedSecretStoreOperationMutexNames {
+    param([object]$ResolvedPath)
+    [IO.File]::WriteAllText($IdentityReadyPath, 'ready')
+    while (-not [IO.File]::Exists($IdentityReleasePath)) {
+      Start-Sleep -Milliseconds 25
+    }
+    return & $originalGetMutexNames $ResolvedPath
+  }
+}
+if ($LocksReadyPath) {
+  function Assert-ProtectedSecretStoreOperationIdentity {
+    param([object]$ResolvedPath)
+    [IO.File]::WriteAllText($LocksReadyPath, 'ready')
+    while (-not [IO.File]::Exists($LocksReleasePath)) {
+      Start-Sleep -Milliseconds 25
+    }
+    & $originalAssertIdentity $ResolvedPath
+  }
+}
 $ownership = $null
 try {
   $ownership = Enter-ProtectedSecretStoreOperation $StorePath
@@ -324,7 +379,9 @@ try {
 
   $resolvedSharedStore = Resolve-ProtectedSecretStoreOperationPath $sharedStorePath
   $currentSidText = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $expectedNameBytes = [Text.Encoding]::UTF8.GetBytes("$currentSidText|$($resolvedSharedStore.Identity)")
+  $expectedNameBytes = [Text.Encoding]::UTF8.GetBytes(
+    "$currentSidText|LOCATION|$($resolvedSharedStore.Identity)"
+  )
   $expectedNameHasher = [Security.Cryptography.SHA256]::Create()
   try {
     $expectedNameHash = $expectedNameHasher.ComputeHash($expectedNameBytes)
@@ -337,6 +394,12 @@ try {
       [Array]::Clear($expectedNameHash, 0, $expectedNameHash.Length)
     }
   }
+  $sharedMutexNames = @(Get-ProtectedSecretStoreOperationMutexNames $resolvedSharedStore)
+  Assert-Equal 2 $sharedMutexNames.Count 'Protected-store ownership must include location and physical-file locks.'
+  Assert-True ($sharedMutexNames[0] -ne $sharedMutexNames[1]) 'Location and physical-file ownership names must remain distinct.'
+  Assert-True (
+    [string]::CompareOrdinal($sharedMutexNames[0], $sharedMutexNames[1]) -lt 0
+  ) 'Multiple ownership identities must be acquired in deterministic ordinal order.'
 
   $storeAliases = [Collections.Generic.List[object]]::new()
   $storeAliases.Add([pscustomobject]@{
@@ -539,6 +602,207 @@ try {
     Assert-True ($_.Exception.Message -match 'must not have hard-link aliases') 'Hard-link aliases must be rejected before ownership or secret access.'
   }
   Assert-OriginalTestStore $hardLinkStorePath
+
+  $raceDirectory = Join-Path $ownershipTestRoot 'rename-hard-link-race'
+  [void](New-Item -ItemType Directory -Path $raceDirectory)
+  $raceOriginalPath = Join-Path $raceDirectory 'original.clixml'
+  $raceRenamedPath = Join-Path $raceDirectory 'renamed.clixml'
+  New-ProtectedTestStore -Path $raceOriginalPath -TestStore (New-TestSecretStore 0)
+  $raceOriginalIdentity = Resolve-ProtectedSecretStoreOperationPath $raceOriginalPath
+  $raceOriginalLocationMutex = Get-ProtectedSecretStoreOperationMutexName $raceOriginalPath
+  $raceOriginalPhysicalMutex = @(
+    Get-ProtectedSecretStoreOperationMutexNames $raceOriginalIdentity |
+      Where-Object { $_ -ne $raceOriginalLocationMutex }
+  )[0]
+  $firstIdentityReady = Join-Path $raceDirectory 'first.identity-ready'
+  $firstIdentityRelease = Join-Path $raceDirectory 'first.identity-release'
+  $firstLocksReady = Join-Path $raceDirectory 'first.locks-ready'
+  $firstLocksRelease = Join-Path $raceDirectory 'first.locks-release'
+  $firstRaceOperation = Join-Path $raceDirectory 'first-operation'
+  $firstRacer = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Mutate',
+    '-StorePath', $raceOriginalPath,
+    '-OperationPath', $firstRaceOperation,
+    '-IdentityReadyPath', $firstIdentityReady,
+    '-IdentityReleasePath', $firstIdentityRelease,
+    '-LocksReadyPath', $firstLocksReady,
+    '-LocksReleasePath', $firstLocksRelease
+  )
+  $ownershipProcesses.Add($firstRacer)
+  Wait-TestPath $firstIdentityReady $firstRacer
+  Move-Item -LiteralPath $raceOriginalPath -Destination $raceRenamedPath
+  $raceRenamedIdentity = Resolve-ProtectedSecretStoreOperationPath $raceRenamedPath
+  $raceRenamedLocationMutex = Get-ProtectedSecretStoreOperationMutexName $raceRenamedPath
+  $raceRenamedPhysicalMutex = @(
+    Get-ProtectedSecretStoreOperationMutexNames $raceRenamedIdentity |
+      Where-Object { $_ -ne $raceRenamedLocationMutex }
+  )[0]
+  Assert-True ($raceOriginalLocationMutex -ne $raceRenamedLocationMutex) 'The rename race must resolve distinct location ownership names.'
+  Assert-Equal $raceOriginalPhysicalMutex $raceRenamedPhysicalMutex 'The rename race must resolve one common physical-file ownership name.'
+
+  $secondIdentityReady = Join-Path $raceDirectory 'second.identity-ready'
+  $secondIdentityRelease = Join-Path $raceDirectory 'second.identity-release'
+  $secondRaceOperation = Join-Path $raceDirectory 'second-operation'
+  $secondRacer = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Mutate',
+    '-StorePath', $raceRenamedPath,
+    '-OperationPath', $secondRaceOperation,
+    '-IdentityReadyPath', $secondIdentityReady,
+    '-IdentityReleasePath', $secondIdentityRelease
+  )
+  $ownershipProcesses.Add($secondRacer)
+  Wait-TestPath $secondIdentityReady $secondRacer
+  [void](New-Item -ItemType HardLink -Path $raceOriginalPath -Target $raceRenamedPath)
+
+  [IO.File]::WriteAllText($firstIdentityRelease, 'release')
+  Wait-TestPath $firstLocksReady $firstRacer
+  [IO.File]::WriteAllText($secondIdentityRelease, 'release')
+  $secondRaceResult = Wait-TestProcess $secondRacer
+  Assert-True ($secondRaceResult.ExitCode -ne 0) 'A renamed alias must contend on the common physical-file ownership.'
+  Assert-True ($secondRaceResult.StandardError -match 'Another Markdoc production operation owns this secrets store') 'The physical-file race loser must return the ownership refusal.'
+  Assert-True (-not [IO.File]::Exists("$secondRaceOperation.entered")) 'The physical-file race loser must not enter or mutate.'
+
+  [IO.File]::WriteAllText($firstLocksRelease, 'release')
+  $firstRaceResult = Wait-TestProcess $firstRacer
+  Assert-True ($firstRaceResult.ExitCode -ne 0) 'The race winner must reject the changed location and link count during revalidation.'
+  Assert-True ($firstRaceResult.StandardError -match 'identity changed while ownership was being acquired') 'The race winner must return an explicit identity-change refusal.'
+  Assert-True (-not [IO.File]::Exists("$firstRaceOperation.entered")) 'The revalidation failure must occur before secret import or mutation.'
+  Assert-OriginalTestStore $raceRenamedPath
+
+  $renameDirectory = Join-Path $ownershipTestRoot 'revalidate-rename'
+  [void](New-Item -ItemType Directory -Path $renameDirectory)
+  $renameStorePath = Join-Path $renameDirectory 'production.clixml'
+  $renamedStorePath = Join-Path $renameDirectory 'moved.clixml'
+  New-ProtectedTestStore -Path $renameStorePath -TestStore (New-TestSecretStore 0)
+  $renameIdentityReady = Join-Path $renameDirectory 'identity-ready'
+  $renameIdentityRelease = Join-Path $renameDirectory 'identity-release'
+  $renameOperationPath = Join-Path $renameDirectory 'operation'
+  $renameWorker = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Mutate',
+    '-StorePath', $renameStorePath,
+    '-OperationPath', $renameOperationPath,
+    '-IdentityReadyPath', $renameIdentityReady,
+    '-IdentityReleasePath', $renameIdentityRelease
+  )
+  $ownershipProcesses.Add($renameWorker)
+  Wait-TestPath $renameIdentityReady $renameWorker
+  Move-Item -LiteralPath $renameStorePath -Destination $renamedStorePath
+  [IO.File]::WriteAllText($renameIdentityRelease, 'release')
+  $renameResult = Wait-TestProcess $renameWorker
+  Assert-True ($renameResult.ExitCode -ne 0) 'A rename after resolution must fail revalidation.'
+  Assert-True ($renameResult.StandardError -match 'identity changed while ownership was being acquired') 'A rename after resolution must return the explicit identity-change refusal.'
+  Assert-True (-not [IO.File]::Exists("$renameOperationPath.entered")) 'Rename revalidation must fail before secret import or mutation.'
+  Assert-OriginalTestStore $renamedStorePath
+
+  $replacementDirectory = Join-Path $ownershipTestRoot 'revalidate-replacement'
+  [void](New-Item -ItemType Directory -Path $replacementDirectory)
+  $replacementStorePath = Join-Path $replacementDirectory 'production.clixml'
+  $replacementCandidatePath = Join-Path $replacementDirectory 'candidate.clixml'
+  $replacementBackupPath = Join-Path $replacementDirectory 'backup.clixml'
+  New-ProtectedTestStore -Path $replacementStorePath -TestStore (New-TestSecretStore 0)
+  New-ProtectedTestStore -Path $replacementCandidatePath -TestStore (New-TestSecretStore 10)
+  $replacementIdentityReady = Join-Path $replacementDirectory 'identity-ready'
+  $replacementIdentityRelease = Join-Path $replacementDirectory 'identity-release'
+  $replacementOperationPath = Join-Path $replacementDirectory 'operation'
+  $replacementWorker = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Mutate',
+    '-StorePath', $replacementStorePath,
+    '-OperationPath', $replacementOperationPath,
+    '-IdentityReadyPath', $replacementIdentityReady,
+    '-IdentityReleasePath', $replacementIdentityRelease
+  )
+  $ownershipProcesses.Add($replacementWorker)
+  Wait-TestPath $replacementIdentityReady $replacementWorker
+  [IO.File]::Replace(
+    $replacementCandidatePath,
+    $replacementStorePath,
+    $replacementBackupPath,
+    $true
+  )
+  [IO.File]::WriteAllText($replacementIdentityRelease, 'release')
+  $replacementResult = Wait-TestProcess $replacementWorker
+  Assert-True ($replacementResult.ExitCode -ne 0) 'A replacement after resolution must fail revalidation.'
+  Assert-True ($replacementResult.StandardError -match 'identity changed while ownership was being acquired') 'A replacement after resolution must return the explicit identity-change refusal.'
+  Assert-True (-not [IO.File]::Exists("$replacementOperationPath.entered")) 'Replacement revalidation must fail before secret import or mutation.'
+  Assert-ProtectedCurrentUserFileAcl $replacementStorePath
+  $replacementStore = Import-Clixml -LiteralPath $replacementStorePath
+  Assert-Equal 30 $replacementStore.PostgresAdminPassword.Length 'The replacement test must leave the distinct replacement file at the canonical path.'
+
+  $newLinkDirectory = Join-Path $ownershipTestRoot 'revalidate-new-link'
+  [void](New-Item -ItemType Directory -Path $newLinkDirectory)
+  $newLinkStorePath = Join-Path $newLinkDirectory 'production.clixml'
+  $newLinkAliasPath = Join-Path $newLinkDirectory 'alias.clixml'
+  New-ProtectedTestStore -Path $newLinkStorePath -TestStore (New-TestSecretStore 0)
+  $newLinkIdentityReady = Join-Path $newLinkDirectory 'identity-ready'
+  $newLinkIdentityRelease = Join-Path $newLinkDirectory 'identity-release'
+  $newLinkOperationPath = Join-Path $newLinkDirectory 'operation'
+  $newLinkWorker = Start-PowerShellTestProcess $ownershipWorkerPath @(
+    '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+    '-Mode', 'Mutate',
+    '-StorePath', $newLinkStorePath,
+    '-OperationPath', $newLinkOperationPath,
+    '-IdentityReadyPath', $newLinkIdentityReady,
+    '-IdentityReleasePath', $newLinkIdentityRelease
+  )
+  $ownershipProcesses.Add($newLinkWorker)
+  Wait-TestPath $newLinkIdentityReady $newLinkWorker
+  [void](New-Item -ItemType HardLink -Path $newLinkAliasPath -Target $newLinkStorePath)
+  [IO.File]::WriteAllText($newLinkIdentityRelease, 'release')
+  $newLinkResult = Wait-TestProcess $newLinkWorker
+  Assert-True ($newLinkResult.ExitCode -ne 0) 'A hard link added after resolution must fail revalidation.'
+  Assert-True ($newLinkResult.StandardError -match 'identity changed while ownership was being acquired') 'A new hard link must return the explicit identity-change refusal.'
+  Assert-True (-not [IO.File]::Exists("$newLinkOperationPath.entered")) 'Hard-link revalidation must fail before secret import or mutation.'
+  Assert-OriginalTestStore $newLinkStorePath
+
+  $caseSensitiveDirectory = Join-Path $ownershipTestRoot 'case-sensitive'
+  [void](New-Item -ItemType Directory -Path $caseSensitiveDirectory)
+  if (Enable-TestDirectoryCaseSensitivity $caseSensitiveDirectory) {
+    $lowerCaseStorePath = Join-Path $caseSensitiveDirectory 'store.clixml'
+    $upperCaseStorePath = Join-Path $caseSensitiveDirectory 'STORE.clixml'
+    New-ProtectedTestStore -Path $lowerCaseStorePath -TestStore (New-TestSecretStore 0)
+    New-ProtectedTestStore -Path $upperCaseStorePath -TestStore (New-TestSecretStore 10)
+    $lowerCaseMutexName = Get-ProtectedSecretStoreOperationMutexName $lowerCaseStorePath
+    $upperCaseMutexName = Get-ProtectedSecretStoreOperationMutexName $upperCaseStorePath
+    Assert-True ($lowerCaseMutexName -ne $upperCaseMutexName) 'Case-distinct files in a case-sensitive directory must have distinct location ownership.'
+
+    $caseHolderReady = Join-Path $caseSensitiveDirectory 'holder.ready'
+    $caseHolderRelease = Join-Path $caseSensitiveDirectory 'holder.release'
+    $caseHolder = Start-PowerShellTestProcess $ownershipWorkerPath @(
+      '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+      '-Mode', 'Hold',
+      '-StorePath', $lowerCaseStorePath,
+      '-ReadyPath', $caseHolderReady,
+      '-ReleasePath', $caseHolderRelease
+    )
+    $ownershipProcesses.Add($caseHolder)
+    Wait-TestPath $caseHolderReady $caseHolder
+    $caseAcquirePath = Join-Path $caseSensitiveDirectory 'upper-acquired'
+    $caseAcquire = Start-PowerShellTestProcess $ownershipWorkerPath @(
+      '-SafetyPath', (Join-Path $PSScriptRoot 'azure-safety.ps1'),
+      '-Mode', 'Acquire',
+      '-StorePath', $upperCaseStorePath,
+      '-OperationPath', $caseAcquirePath
+    )
+    $ownershipProcesses.Add($caseAcquire)
+    $caseAcquireResult = Wait-TestProcess $caseAcquire
+    Assert-Equal 0 $caseAcquireResult.ExitCode 'Case-distinct protected stores must operate independently.'
+    Assert-True ([IO.File]::Exists($caseAcquirePath)) 'The second case-distinct store must acquire while the first is owned.'
+    [IO.File]::WriteAllText($caseHolderRelease, 'release')
+    $caseHolderResult = Wait-TestProcess $caseHolder
+    Assert-Equal 0 $caseHolderResult.ExitCode 'The case-sensitive store holder must release normally.'
+    Assert-OriginalTestStore $lowerCaseStorePath
+    Assert-ProtectedCurrentUserFileAcl $upperCaseStorePath
+    $upperCaseStore = Import-Clixml -LiteralPath $upperCaseStorePath
+    Assert-Equal 30 $upperCaseStore.PostgresAdminPassword.Length 'The case-distinct store must retain independent data.'
+  } elseif ($RequireCaseSensitiveOwnership) {
+    throw 'Case-sensitive protected-store ownership is required but unavailable on this host.'
+  } else {
+    Write-Host 'case-sensitive ownership test: skipped (directory case sensitivity unavailable)'
+  }
 
   $precreatedDirectory = Join-Path $ownershipTestRoot 'precreated'
   [void](New-Item -ItemType Directory -Path $precreatedDirectory)
