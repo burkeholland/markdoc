@@ -13,8 +13,11 @@ import { clearingCookie, decodeEmbedSession, findStaleSessionCookie, hasSessionC
 export async function proxy(request: NextRequest) {
   const cookieHeader = request.headers.get("cookie");
   const embed = await decodeEmbedSession(cookieHeader);
+  const isEmbeddedDocument = embed
+    && request.nextUrl.pathname === `/d/${embed.documentId}`
+    && request.nextUrl.searchParams.get("embed") === "1";
   const withFramePolicy = (response: NextResponse) => {
-    if (embed) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}`);
+    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}`);
     return response;
   };
   if (!hasSessionCookie(cookieHeader)) return withFramePolicy(NextResponse.next());

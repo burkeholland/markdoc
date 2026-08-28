@@ -11,10 +11,10 @@ const { EMBED_SESSION_COOKIE, SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSI
 
 const OLD_SECRET = "old-secret-old-secret-old-secret-old";
 
-function request(cookie?: string, extra: Record<string, string> = {}) {
+function request(cookie?: string, extra: Record<string, string> = {}, path = "/") {
   const headers = new Headers(extra);
   if (cookie) headers.set("cookie", cookie);
-  return new NextRequest("http://localhost:3610/", { headers });
+  return new NextRequest(new URL(path, "http://localhost:3610"), { headers });
 }
 
 /** The Cookie header the route behind the proxy will see (Next carries overridden request headers in `x-middleware-request-*`). */
@@ -114,9 +114,13 @@ describe("proxy: stale session cookie", () => {
       salt: EMBED_SESSION_COOKIE,
       maxAge: 300,
     });
-    const res = await proxy(request(`${EMBED_SESSION_COOKIE}=${token}`));
+    const cookie = `${EMBED_SESSION_COOKIE}=${token}`;
+    const res = await proxy(request(cookie, {}, "/d/doc-1?embed=1"));
     expect(res.headers.get("content-security-policy")).toBe("frame-ancestors http://127.0.0.1:4749");
     expect(setCookies(res)).toHaveLength(0);
+
+    const asset = await proxy(request(cookie, {}, "/api/assets/asset-1"));
+    expect(asset.headers.get("content-security-policy")).toBeNull();
   });
 });
 
