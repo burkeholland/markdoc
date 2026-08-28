@@ -90,8 +90,11 @@ export async function focusCodeEnd(page: Page) {
 }
 
 export async function selectTextInRich(page: Page, text: string) {
-  await page.evaluate((needle) => {
-    const root = document.querySelector(".md-rich")!;
+  const rich = page.locator(".md-rich");
+  // "Saved" can precede the deferred rich-pane rebuild, while the server-rendered stand-in is visible.
+  await expect(rich).toBeVisible();
+  await expect(rich).toContainText(text);
+  await rich.evaluate((root, needle) => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let node: Node | null;
     while ((node = walker.nextNode())) {
@@ -103,7 +106,7 @@ export async function selectTextInRich(page: Page, text: string) {
         const sel = window.getSelection()!;
         sel.removeAllRanges();
         sel.addRange(range);
-        (root as HTMLElement).focus();
+        root.focus();
         return;
       }
     }
