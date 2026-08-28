@@ -3,10 +3,12 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { canEdit, getDocumentAccess, getUserById } from "@/server/documents";
 import type { LinkAccess, Role } from "@/server/db/schema";
+import type { TokenScope } from "@/server/db/schema";
+import { resolveApiTokenById } from "@/server/tokens";
 import { getCollab } from "./registry";
-import type { CollabClaims } from "./token";
+import { isVerifiedCollabClaims, type CollabClaims, type VerifiedCollabClaims } from "./token";
 
-type CollabContext = CollabClaims;
+type CollabContext = CollabClaims & { version?: 2; principal?: "user" | "token" };
 
 const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" };
 
@@ -42,6 +44,26 @@ function loginOf(context: CollabContext): string | null {
   return context.login?.trim().toLowerCase() ?? null;
 }
 
+const ROLE_RANK: Record<Role, number> = { viewer: 0, commenter: 1, editor: 2, owner: 3 };
+const TOKEN_ROLE_CAP: Record<TokenScope, Role | null> = { read: "viewer", comment: "commenter", full: null };
+
+function narrowestRole(...roles: Role[]): Role {
+  return roles.reduce((narrowest, role) => (ROLE_RANK[role] < ROLE_RANK[narrowest] ? role : narrowest));
+}
+
+/** Revocation is immediate for live token-backed sockets, not deferred until their next write. */
+export function disconnectCollabToken(tokenId: string): void {
+  const collab = getCollab();
+  if (!collab) return;
+  for (const document of collab.documents.values()) {
+    for (const connection of document.getConnections() as Connection<CollabContext>[]) {
+      if (connection.context.tokenId !== tokenId) continue;
+      connection.readOnly = true;
+      connection.close(UNAUTHORIZED);
+    }
+  }
+}
+
 /**
  * Wait until an owner-initiated access change that could affect this identity has committed: a
  * change to this collaborator, or a link-access change on the document (which reaches everyone).
@@ -51,7 +73,25 @@ export async function waitForCollabAccessChange(docId: string, login: string | n
 }
 
 /** Resolve token identity and role from current database state instead of trusting the role claim. */
-export async function resolveCollabAccess(claims: CollabClaims): Promise<CollabContext | null> {
+export async function resolveCollabAccess(claims: VerifiedCollabClaims): Promise<CollabContext | null> {
+  if (claims.principal === "token") {
+    const actor = await resolveApiTokenById(claims.tokenId);
+    if (!actor || actor.id !== claims.userId || actor.scope !== claims.tokenScope) return null;
+    if (actor.documentIds?.length && !actor.documentIds.includes(claims.docId)) return null;
+    const access = await getDocumentAccess(claims.docId, actor);
+    if (!access) return null;
+    const cap = TOKEN_ROLE_CAP[actor.scope];
+    const role = narrowestRole(claims.role, cap ?? access.role, access.role);
+    return {
+      ...claims,
+      role,
+      name: actor.name ?? actor.login ?? claims.name,
+      login: actor.login ?? null,
+      avatar: actor.image ?? null,
+      tokenExpiresAt: actor.expiresAt?.getTime() ?? null,
+    };
+  }
+  if (claims.principal !== "user") return null;
   const user = await getUserById(claims.userId);
   if (!user && !(claims.userId.startsWith("anon-") && claims.login === null)) return null;
 
@@ -78,7 +118,7 @@ export async function resolveCollabAccess(claims: CollabClaims): Promise<CollabC
 }
 
 /** Resolve access from a database snapshot that did not overlap a collaboration access change. */
-export async function resolveStableCollabAccess(claims: CollabClaims): Promise<CollabContext | null> {
+export async function resolveStableCollabAccess(claims: VerifiedCollabClaims): Promise<CollabContext | null> {
   for (;;) {
     const revision = state.revision;
     await waitForCollabAccessChange(claims.docId, claims.login);
@@ -151,7 +191,7 @@ async function transitionAccess({ docId, key, select, gate, mutation, what }: Ac
 
     await Promise.all(
       connections.map(async (connection) => {
-        const current = await resolveCollabAccess(connection.context as CollabContext);
+        const current = isVerifiedCollabClaims(connection.context) ? await resolveCollabAccess(connection.context) : null;
         applyCurrentAccess(connection, current);
       }),
     );
@@ -160,7 +200,7 @@ async function transitionAccess({ docId, key, select, gate, mutation, what }: Ac
     await Promise.all(
       connections.map(async (connection) => {
         try {
-          const current = await resolveCollabAccess(connection.context as CollabContext);
+          const current = isVerifiedCollabClaims(connection.context) ? await resolveCollabAccess(connection.context) : null;
           applyCurrentAccess(connection, current);
         } catch (recoveryError) {
           connection.readOnly = true;

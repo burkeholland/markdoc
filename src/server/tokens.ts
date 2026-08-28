@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import type { TokenScope } from "@/server/db/schema";
 import type { SessionUser } from "@/server/documents";
+import { agentMentionSlug } from "@/editor/collab/mentions";
 
 const TOKEN_PREFIX = "mdk_";
 const newId = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
@@ -52,21 +53,48 @@ export interface CreateTokenOptions {
   documentIds?: string[] | null;
 }
 
+export class AgentMentionConflictError extends Error {
+  constructor() {
+    super("Another active token has the same @mention name");
+    this.name = "AgentMentionConflictError";
+  }
+}
+
+function constraintName(error: unknown): string | null {
+  let current = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
+    if ("constraint" in current && typeof current.constraint === "string") return current.constraint;
+    current = "cause" in current ? current.cause : null;
+  }
+  return null;
+}
+
 export async function createApiToken(userId: string, name: string, options: number | null | CreateTokenOptions = {}): Promise<CreatedToken> {
   const opts: CreateTokenOptions = typeof options === "number" || options === null ? { expiresInDays: options } : options;
   if (Array.isArray(opts.documentIds) && opts.documentIds.length === 0) {
     throw new RangeError("documentIds must contain at least one document when provided");
   }
   const db = await getDb();
+  await db
+    .update(schema.apiTokens)
+    .set({ mentionSlug: null })
+    .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt), lt(schema.apiTokens.expiresAt, new Date())));
   const token = TOKEN_PREFIX + randomSecret();
   const prefix = token.slice(0, TOKEN_PREFIX.length + 6);
   const expiresAt = opts.expiresInDays ? new Date(Date.now() + opts.expiresInDays * 86_400_000) : null;
   const scope = opts.scope ?? "full";
   const documentIds = opts.documentIds ? Array.from(new Set(opts.documentIds)) : null;
-  const [row] = await db
-    .insert(schema.apiTokens)
-    .values({ id: newId(), userId, name: name.trim().slice(0, 80) || "Token", prefix, tokenHash: hashToken(token), expiresAt, scope, documentIds })
-    .returning();
+  const normalizedName = name.trim().slice(0, 80) || "Token";
+  let row: typeof schema.apiTokens.$inferSelect;
+  try {
+    [row] = await db
+      .insert(schema.apiTokens)
+      .values({ id: newId(), userId, name: normalizedName, mentionSlug: agentMentionSlug(normalizedName).toLowerCase(), prefix, tokenHash: hashToken(token), expiresAt, scope, documentIds })
+      .returning();
+  } catch (error) {
+    if (constraintName(error) === "api_token_user_mention_slug_unique") throw new AgentMentionConflictError();
+    throw error;
+  }
   return { id: row.id, name: row.name, prefix: row.prefix, token, scope: row.scope, documentIds: row.documentIds, createdAt: row.createdAt, expiresAt: row.expiresAt };
 }
 
@@ -109,10 +137,13 @@ export async function revokeApiToken(userId: string, tokenId: string): Promise<b
   const db = await getDb();
   const rows = await db
     .update(schema.apiTokens)
-    .set({ revokedAt: new Date() })
+    .set({ revokedAt: new Date(), mentionSlug: null })
     .where(and(eq(schema.apiTokens.id, tokenId), eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
     .returning();
-  return rows.length > 0;
+  if (rows.length === 0) return false;
+  const { disconnectCollabToken } = await import("@/server/collab/authorization");
+  disconnectCollabToken(tokenId);
+  return true;
 }
 
 export interface TokenActor extends SessionUser {
@@ -122,9 +153,43 @@ export interface TokenActor extends SessionUser {
   scope: TokenScope;
   /** Documents the token is restricted to; null = all of the user's. */
   documentIds: string[] | null;
+  expiresAt: Date | null;
 }
 
 const lastUsedWrites = new Map<string, number>();
+
+type TokenWithUser = {
+  token: typeof schema.apiTokens.$inferSelect;
+  user: typeof schema.users.$inferSelect;
+};
+
+function resolvedActor(row: TokenWithUser): TokenActor | null {
+  if (row.token.revokedAt) return null;
+  if (row.token.expiresAt && row.token.expiresAt.getTime() < Date.now()) return null;
+  return {
+    id: row.user.id,
+    login: row.user.login,
+    name: row.user.name,
+    image: row.user.image,
+    agent: row.token.name,
+    tokenId: row.token.id,
+    scope: row.token.scope,
+    documentIds: row.token.documentIds?.length ? row.token.documentIds : null,
+    expiresAt: row.token.expiresAt,
+  };
+}
+
+async function writeLastUsed(tokenId: string): Promise<void> {
+  const db = await getDb();
+  await db.update(schema.apiTokens).set({ lastUsedAt: new Date() }).where(eq(schema.apiTokens.id, tokenId));
+}
+
+function noteTokenUse(tokenId: string): void {
+  const last = lastUsedWrites.get(tokenId) ?? 0;
+  if (Date.now() - last <= 60_000) return;
+  lastUsedWrites.set(tokenId, Date.now());
+  void writeLastUsed(tokenId).catch((error) => console.error("record API token use failed", error));
+}
 
 /** Resolve a bearer token to the user it belongs to. Returns null for unknown, expired or revoked tokens. */
 export async function resolveApiToken(token: string): Promise<TokenActor | null> {
@@ -135,23 +200,31 @@ export async function resolveApiToken(token: string): Promise<TokenActor | null>
     .from(schema.apiTokens)
     .innerJoin(schema.users, eq(schema.users.id, schema.apiTokens.userId))
     .where(eq(schema.apiTokens.tokenHash, hashToken(token)));
-  if (!row) return null;
-  if (row.token.revokedAt) return null;
-  if (row.token.expiresAt && row.token.expiresAt.getTime() < Date.now()) return null;
-  // Record usage at most once a minute per token to keep the hot path cheap.
-  const last = lastUsedWrites.get(row.token.id) ?? 0;
-  if (Date.now() - last > 60_000) {
-    lastUsedWrites.set(row.token.id, Date.now());
-    void db.update(schema.apiTokens).set({ lastUsedAt: new Date() }).where(eq(schema.apiTokens.id, row.token.id));
-  }
-  return {
-    id: row.user.id,
-    login: row.user.login,
-    name: row.user.name,
-    image: row.user.image,
-    agent: row.token.name,
-    tokenId: row.token.id,
-    scope: row.token.scope,
-    documentIds: row.token.documentIds?.length ? row.token.documentIds : null,
-  };
+  const actor = row ? resolvedActor(row) : null;
+  if (actor) noteTokenUse(actor.tokenId);
+  return actor;
+}
+
+/** Re-resolve an embedded session on every request so token revocation and expiry still take effect. */
+export async function resolveApiTokenById(tokenId: string): Promise<TokenActor | null> {
+  const db = await getDb();
+  const [row] = await db
+    .select({ token: schema.apiTokens, user: schema.users })
+    .from(schema.apiTokens)
+    .innerJoin(schema.users, eq(schema.users.id, schema.apiTokens.userId))
+    .where(eq(schema.apiTokens.id, tokenId));
+  const actor = row ? resolvedActor(row) : null;
+  if (actor) noteTokenUse(actor.tokenId);
+  return actor;
+}
+
+/** A named mention must resolve to one active token, not every token whose display name has the same slug. */
+export async function isAgentMentionUnique(userId: string, tokenId: string | null, name: string): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db
+    .select({ id: schema.apiTokens.id, name: schema.apiTokens.name, expiresAt: schema.apiTokens.expiresAt })
+    .from(schema.apiTokens)
+    .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)));
+  const slug = agentMentionSlug(name).toLowerCase();
+  return !rows.some((row) => row.id !== tokenId && (!row.expiresAt || row.expiresAt.getTime() >= Date.now()) && agentMentionSlug(row.name).toLowerCase() === slug);
 }

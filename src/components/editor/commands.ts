@@ -53,6 +53,8 @@ export interface EditorCommandContext {
   };
   doc: { id: string; title: string; storage: string; githubUrl?: string | null };
   isOwner: boolean;
+  /** The Copilot canvas keeps document work and hides navigation/account operations. */
+  embed?: boolean;
   slashWhere: SlashWhere;
   setDialog: (kind: DialogKind) => void;
   openLink: () => void;
@@ -309,7 +311,13 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
 
   const help: Command[] = [{ id: "help:shortcuts", title: "Keyboard shortcuts", keywords: ["help", "keys", "hotkeys", "cheatsheet"], group: "Help", icon: "Keyboard", shortcut: "Mod-/", run: () => ctx.setDialog("shortcuts") }];
 
-  return [...navigation, ...formatting, ...slashCommands(ctx), ...document, ...view, ...help];
+  if (!ctx.embed) return [...navigation, ...formatting, ...slashCommands(ctx), ...document, ...view, ...help];
+  const canvasNavigation = navigation.filter((command) => command.id !== "nav:recent" && command.id !== "nav:dashboard");
+  const canvasDocument = document.filter(
+    (command) =>
+      !["doc:share", "doc:publish", "doc:download-md", "doc:download-html", "doc:download-pdf", "doc:copy-markdown", "doc:reader", "doc:duplicate", "doc:trash"].includes(command.id),
+  );
+  return [...canvasNavigation, ...formatting, ...slashCommands(ctx), ...canvasDocument, ...view, ...help];
 }
 
 export interface DashboardCommandContext {

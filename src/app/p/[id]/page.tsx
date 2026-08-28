@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
-import { currentUser } from "@/server/http";
-import { canComment, getDocumentAccess, getUserById } from "@/server/documents";
+import { currentUser, getEffectiveDocumentAccess } from "@/server/http";
+import { canComment, getUserById } from "@/server/documents";
 import { readLiveText } from "@/server/livedoc";
 import { contentHash, renderMarkdownBody } from "@/server/export/html";
 import { ReaderPage } from "@/components/reader/reader-page";
@@ -15,14 +15,14 @@ export const revalidate = 0;
 export async function generateMetadata({ params }: PageProps<"/p/[id]">): Promise<Metadata> {
   const { id } = await params;
   const user = await currentUser();
-  const access = await getDocumentAccess(id, user);
+  const access = await getEffectiveDocumentAccess(id, user);
   return { title: access?.doc.title ?? "Document", robots: { index: false } };
 }
 
 export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">) {
   const { id } = await params;
   const user = await currentUser();
-  const access = await getDocumentAccess(id, user);
+  const access = await getEffectiveDocumentAccess(id, user);
   if (!access) {
     // Same behaviour as /d: signed-out visitors are sent to sign in, signed-in strangers see 404.
     if (!user) redirect(`/login?next=${encodeURIComponent(`/p/${id}`)}`);

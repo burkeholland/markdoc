@@ -57,3 +57,8 @@ export function mcpPublicOrigin(req: Request, env?: { MARKDOC_URL?: string }): s
     return requestUrl.origin;
   }
 }
+
+/** Whether the browser-facing origin is HTTPS, including when TLS terminates at a trusted proxy. */
+export function publicRequestUsesHttps(req: Request): boolean {
+  return new URL(mcpPublicOrigin(req)).protocol === "https:";
+}

@@ -458,6 +458,8 @@ export interface HeaderProps {
   onCreateToken?: () => void;
   /** Bumped by the command palette's "Keep an agent here": opens the agent pill on that view. */
   keepAgentNonce?: number;
+  /** Canvas mode: hide navigation, sharing, publishing, and account menus. */
+  embed?: boolean;
 }
 
 /** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
@@ -502,7 +504,7 @@ function GitHubEntryLabel({ configured, children }: { configured: boolean; child
 }
 
 export const Header = memo(function Header(props: HeaderProps) {
-  const { session, doc, compact, githubConfigured } = props;
+  const { session, doc, compact, githubConfigured, embed = false } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
@@ -511,11 +513,15 @@ export const Header = memo(function Header(props: HeaderProps) {
   const settled = useOpenSettled(session);
 
   return (
-    <header className="app-header safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header">
+    <header className="app-header safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header" data-embed={embed || undefined}>
       {compact ? (
         <button type="button" className="icon-btn h-9 w-9 shrink-0" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
           <PanelLeft size={20} />
         </button>
+      ) : embed ? (
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center" aria-label="Markdoc" data-testid="embed-logo">
+          <Logo className="h-8 w-8" />
+        </span>
       ) : (
         <Link href="/" className="icon-btn h-10 w-10 shrink-0" aria-label="Back to documents" title="All documents">
           <Logo className="h-8 w-8" />
@@ -523,7 +529,7 @@ export const Header = memo(function Header(props: HeaderProps) {
       )}
       <div className="flex min-w-0 flex-1 items-center gap-2 md:gap-4">
         <TitleEditor session={session} fallback={doc.title} compact={compact} />
-        {!compact && <HeaderStar docId={doc.id} ready={settled} />}
+        {!embed && !compact && <HeaderStar docId={doc.id} ready={settled} />}
         <SaveIndicator session={session} compact={compact} />
       </div>
       <div className="flex shrink-0 items-center gap-1 md:gap-3">
@@ -535,8 +541,8 @@ export const Header = memo(function Header(props: HeaderProps) {
           <ModeSwitcher session={session} />
           <PresenceStack session={session} onJump={props.onJumpToUser} />
         </div>
-        {session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
-        {!compact && (
+        {!embed && session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
+        {!embed && !compact && (
           <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
             <UserPlus size={17} />
             Share
@@ -552,7 +558,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             )}
           </button>
         </Tip>
-        <Menu onOpenChange={(o) => o && props.onMoreMenuOpen?.()}>
+        {!embed && <Menu onOpenChange={(o) => o && props.onMoreMenuOpen?.()}>
           <MenuTrigger asChild>
             <button type="button" className="icon-btn" aria-label="More" data-testid="more-menu">
               <MoreVertical size={20} />
@@ -649,8 +655,8 @@ export const Header = memo(function Header(props: HeaderProps) {
               </>
             )}
           </MenuContent>
-        </Menu>
-        {!compact && (
+        </Menu>}
+        {!embed && !compact && (
           <Menu>
             <div className="flex items-stretch" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
               {linked && canEdit && props.sync ? (
@@ -750,5 +756,3 @@ export const Header = memo(function Header(props: HeaderProps) {
     </header>
   );
 });
-
-

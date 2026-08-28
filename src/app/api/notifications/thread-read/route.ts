@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { handler, json, readJson, requireUser } from "@/server/http";
+import { handler, json, readJson, requireAccess, requireScope, requireUser } from "@/server/http";
 import { markRefsRead } from "@/server/notifications";
 
 const schema = z.object({ documentId: z.string().min(1), refIds: z.array(z.string().min(1)).max(500) });
@@ -10,7 +10,9 @@ const schema = z.object({ documentId: z.string().min(1), refIds: z.array(z.strin
  */
 export const POST = handler(async (req: Request) => {
   const user = await requireUser();
+  requireScope(user, "comment", "mark notifications read");
   const body = await readJson(req, (d) => schema.parse(d));
+  await requireAccess(body.documentId, "view");
   if (!user.login) return json({ ok: true, count: 0 });
   const count = await markRefsRead(user.login, body.documentId, body.refIds);
   return json({ ok: true, count });

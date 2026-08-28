@@ -284,18 +284,20 @@ describe("agents in the @-mention picker", () => {
     expect(later.agents.map((a) => a.name)).toContain("Scribe");
   });
 
-  it("@owner/Agent by the owner reaches the agent's watch as a mention without badging the owner", async () => {
+  it("@owner/Agent by the owner returns every named agent target without badging the owner", async () => {
     const { cursor } = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events`), params(docId)))).json()) as { cursor: string };
     const before = (await (await asHuman(() => GET_NOTIFICATIONS(req(`/api/notifications?unread=1`)))).json()) as { unreadCount: number };
     const waiting = asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${cursor}&wait=20`), params(docId)));
     await sleep(100);
-    const add = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "Second paragraph", body: "@olive/Copilot tighten this" }), params(docId)));
+    const body = `@olive/Other-agent ${"context ".repeat(20)}@olive/Copilot tighten this`;
+    const add = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "Second paragraph", body }), params(docId)));
     expect(add.status).toBe(200);
     const started = Date.now();
-    const page = (await (await waiting).json()) as { events: { type: string; snippet?: string; agent?: string | null; byLogin?: string | null }[] };
+    const page = (await (await waiting).json()) as { events: { type: string; snippet?: string; agent?: string | null; agents?: string[]; byLogin?: string | null }[] };
     expect(Date.now() - started).toBeLessThan(2000);
     const mention = page.events.find((e) => e.type === "mention");
-    expect(mention).toMatchObject({ snippet: "@olive/Copilot tighten this", agent: "Copilot", byLogin: "olive" });
+    expect(mention).toMatchObject({ agent: "Other-agent", agents: ["Other-agent", "Copilot"], byLogin: "olive" });
+    expect(mention?.snippet).not.toContain("@olive/Copilot");
     // Pre-read for the owner: no new unread notification.
     const after = (await (await asHuman(() => GET_NOTIFICATIONS(req(`/api/notifications?unread=1`)))).json()) as { unreadCount: number };
     expect(after.unreadCount).toBe(before.unreadCount);

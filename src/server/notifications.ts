@@ -26,6 +26,7 @@ export interface NotifyInput {
   /** Thread, reply or suggestion id; the document id for shares. */
   refId: string;
   snippet?: string;
+  agentTargets?: string[];
   /**
    * Keep the row even when the actor is the recipient, but store it already read: the row reaches the
    * recipient's agents (they watch the notifications table) without ringing the human's bell.
@@ -43,6 +44,30 @@ export async function notify(input: NotifyInput): Promise<boolean> {
   const self = !!input.actorLogin && input.actorLogin.toLowerCase() === userLogin;
   if (self && !input.selfAsRead) return false;
   const db = await getDb();
+  if (input.kind === "mention" && input.agentTargets) {
+    const [existing] = await db
+      .select({ id: schema.notifications.id, agentTargets: schema.notifications.agentTargets })
+      .from(schema.notifications)
+      .where(and(userWhere(userLogin), eq(schema.notifications.kind, "mention"), eq(schema.notifications.refId, input.refId)))
+      .limit(1);
+    const normalized = (targets: string[] | null) => (targets ?? []).map((target) => target.toLowerCase()).sort();
+    if (existing) {
+      if (JSON.stringify(normalized(existing.agentTargets)) === JSON.stringify(normalized(input.agentTargets))) return false;
+      await db
+        .update(schema.notifications)
+        .set({
+          actorLogin: input.actorLogin ?? null,
+          actorName: input.actorName ?? input.actorLogin ?? null,
+          snippet: snippetOf(input.snippet ?? ""),
+          agentTargets: input.agentTargets,
+          createdAt: new Date(),
+          readAt: self ? new Date() : null,
+        })
+        .where(eq(schema.notifications.id, existing.id));
+      wakeDocument(input.documentId);
+      return true;
+    }
+  }
   const inserted = await db
     .insert(schema.notifications)
     .values({
@@ -54,6 +79,7 @@ export async function notify(input: NotifyInput): Promise<boolean> {
       actorName: input.actorName ?? input.actorLogin ?? null,
       refId: input.refId,
       snippet: snippetOf(input.snippet ?? ""),
+      agentTargets: input.agentTargets ?? null,
       readAt: self ? new Date() : null,
     })
     .onConflictDoNothing({ target: [schema.notifications.userLogin, schema.notifications.kind, schema.notifications.refId] })
@@ -80,11 +106,28 @@ export async function notifyMany(logins: Iterable<string | null | undefined>, in
  */
 export async function recordMentions(docId: string, commentId: string, byLogin: string | null, body: string, byName?: string | null): Promise<number> {
   const logins = parseMentions(body);
+  const db = await getDb();
+  const existing = await db
+    .select({ id: schema.notifications.id, userLogin: schema.notifications.userLogin })
+    .from(schema.notifications)
+    .where(and(eq(schema.notifications.documentId, docId), eq(schema.notifications.kind, "mention"), eq(schema.notifications.refId, commentId)));
+  const current = new Set(logins);
+  const removed = existing.filter((notification) => !current.has(notification.userLogin));
+  if (removed.length > 0) {
+    await db.delete(schema.notifications).where(inArray(schema.notifications.id, removed.map((notification) => notification.id)));
+    wakeDocument(docId);
+  }
   if (logins.length === 0) return 0;
-  const agentOwners = new Set(parseAgentMentions(body).map((m) => m.login));
+  const agentTargets = new Map<string, string[]>();
+  for (const mention of parseAgentMentions(body)) {
+    const targets = agentTargets.get(mention.login) ?? [];
+    if (!targets.some((target) => target.toLowerCase() === mention.agent.toLowerCase())) targets.push(mention.agent);
+    agentTargets.set(mention.login, targets);
+  }
   let n = 0;
   for (const login of logins) {
-    const ok = await notify({ userLogin: login, documentId: docId, kind: "mention", actorLogin: byLogin, actorName: byName ?? byLogin, refId: commentId, snippet: body, selfAsRead: agentOwners.has(login) });
+    const targets = agentTargets.get(login) ?? [];
+    const ok = await notify({ userLogin: login, documentId: docId, kind: "mention", actorLogin: byLogin, actorName: byName ?? byLogin, refId: commentId, snippet: body, agentTargets: targets, selfAsRead: targets.length > 0 });
     if (ok) n++;
   }
   return n;
@@ -99,6 +142,7 @@ export interface NotificationItem {
   actorName: string | null;
   refId: string;
   snippet: string;
+  agentTargets: string[] | null;
   createdAt: Date;
   readAt: Date | null;
 }
@@ -134,6 +178,7 @@ export async function listNotifications(login: string, opts: { unread?: boolean;
       actorName: schema.notifications.actorName,
       refId: schema.notifications.refId,
       snippet: schema.notifications.snippet,
+      agentTargets: schema.notifications.agentTargets,
       createdAt: schema.notifications.createdAt,
       readAt: schema.notifications.readAt,
     })
@@ -157,34 +202,37 @@ export async function unreadCount(login: string, kind?: NotificationKind): Promi
 }
 
 /** Mark one notification read. Only its recipient may; returns false if nothing changed. */
-export async function markNotificationRead(id: string, login: string): Promise<boolean> {
+export async function markNotificationRead(id: string, login: string, documentIds?: string[] | null): Promise<boolean> {
+  if (documentIds && documentIds.length === 0) return false;
   const db = await getDb();
   const updated = await db
     .update(schema.notifications)
     .set({ readAt: new Date() })
-    .where(and(eq(schema.notifications.id, id), userWhere(login), isNull(schema.notifications.readAt)))
+    .where(and(eq(schema.notifications.id, id), userWhere(login), isNull(schema.notifications.readAt), documentIds ? inArray(schema.notifications.documentId, documentIds) : undefined))
     .returning();
   return updated.length > 0;
 }
 
 /** True when the notification exists and is addressed to `login`, whether or not it has been read. */
-export async function notificationBelongsTo(id: string, login: string): Promise<boolean> {
+export async function notificationBelongsTo(id: string, login: string, documentIds?: string[] | null): Promise<boolean> {
+  if (documentIds && documentIds.length === 0) return false;
   const db = await getDb();
   const [row] = await db
     .select({ id: schema.notifications.id })
     .from(schema.notifications)
-    .where(and(eq(schema.notifications.id, id), userWhere(login)))
+    .where(and(eq(schema.notifications.id, id), userWhere(login), documentIds ? inArray(schema.notifications.documentId, documentIds) : undefined))
     .limit(1);
   return Boolean(row);
 }
 
-/** Mark all of the user's unread notifications read. Returns how many changed. */
-export async function markAllNotificationsRead(login: string): Promise<number> {
+/** Mark all of the user's unread notifications read, optionally within a token's document boundary. */
+export async function markAllNotificationsRead(login: string, documentIds?: string[] | null): Promise<number> {
+  if (documentIds && documentIds.length === 0) return 0;
   const db = await getDb();
   const updated = await db
     .update(schema.notifications)
     .set({ readAt: new Date() })
-    .where(and(userWhere(login), isNull(schema.notifications.readAt)))
+    .where(and(userWhere(login), isNull(schema.notifications.readAt), documentIds ? inArray(schema.notifications.documentId, documentIds) : undefined))
     .returning();
   return updated.length;
 }

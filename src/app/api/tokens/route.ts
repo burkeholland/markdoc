@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { TokenScope } from "@/server/db/schema";
 import { handler, json, readJson, requireUser, HttpError } from "@/server/http";
-import { createApiToken, listApiTokens, TOKEN_SCOPES } from "@/server/tokens";
+import { AgentMentionConflictError, createApiToken, isAgentMentionUnique, listApiTokens, TOKEN_SCOPES } from "@/server/tokens";
 import { getDocumentAccess } from "@/server/documents";
 
 /** List your API tokens. Sessions only: a leaked token must not be able to enumerate its siblings. */
@@ -40,7 +40,16 @@ export const POST = handler(async (req: Request) => {
   for (const id of documentIds ?? []) {
     if (!(await getDocumentAccess(id, user))) throw new HttpError(404, `Document not found: ${id}`);
   }
-  const created = await createApiToken(user.id, body.name, { expiresInDays: body.expiresInDays ?? null, scope: (body.scope as TokenScope | undefined) ?? "full", documentIds });
+  if (!(await isAgentMentionUnique(user.id, null, body.name))) {
+    throw new HttpError(409, "Another active token has the same @mention name; choose a distinct token name");
+  }
+  let created;
+  try {
+    created = await createApiToken(user.id, body.name, { expiresInDays: body.expiresInDays ?? null, scope: (body.scope as TokenScope | undefined) ?? "full", documentIds });
+  } catch (error) {
+    if (error instanceof AgentMentionConflictError) throw new HttpError(409, `${error.message}; choose a distinct token name`);
+    throw error;
+  }
   return json(
     { token: { ...created, createdAt: created.createdAt.toISOString(), expiresAt: created.expiresAt?.toISOString() ?? null } },
     { status: 201 },
