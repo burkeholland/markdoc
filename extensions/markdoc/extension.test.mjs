@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { startMarkdocExtension } from "./extension-core.mjs";
@@ -17,6 +17,17 @@ async function listen(server) {
 async function close(server) {
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
+}
+
+async function requestWithHost(url, host) {
+  return new Promise((resolve, reject) => {
+    const req = request(url, { headers: { Host: host } }, (res) => {
+      res.resume();
+      res.once("end", () => resolve(res.statusCode));
+    });
+    req.once("error", reject);
+    req.end();
+  });
 }
 
 async function until(check, timeoutMs = 2_000) {
@@ -138,6 +149,10 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
     const opened = await canvasOptions.open({ instanceId: "instance-1", input: { id: "doc-1" } });
     assert.match(opened.url, /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]+$/);
     assert.doesNotMatch(opened.url, /test-token/);
+    const shellAddress = runtime.instances.get("instance-1").server.address();
+    assert(shellAddress && typeof shellAddress !== "string");
+    assert.equal(shellAddress.address, "127.0.0.1");
+    assert.equal(await requestWithHost(opened.url, `unrelated.invalid:${shellAddress.port}`), 421);
     const shellResponse = await fetch(opened.url);
     const shellBody = await shellResponse.text();
     assert.doesNotMatch(shellBody, /test-token/);

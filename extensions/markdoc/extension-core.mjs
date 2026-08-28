@@ -230,16 +230,21 @@ function closeServer(server) {
 async function startShell(entry, fetchImpl) {
   const markdoc = new URL(entry.config.origin);
   let shellHostname = "127.0.0.1";
-  let listenOnLoopback = true;
   if (markdoc.protocol === "http:") {
     if (!(await resolvesLocally(markdoc.hostname))) {
       throw new Error("A plain-http MARKDOC_URL must resolve to this machine so the embedded session cookie remains same-site; use HTTPS for remote Markdoc servers");
     }
     shellHostname = markdoc.hostname;
-    listenOnLoopback = false;
   }
   const server = createServer((req, res) => {
     void (async () => {
+      const expectedHost = entry.shellUrl ? new URL(entry.shellUrl).host.toLowerCase() : "";
+      if (!expectedHost || String(req.headers.host ?? "").toLowerCase() !== expectedHost) {
+        res.statusCode = 421;
+        res.setHeader("Cache-Control", "no-store");
+        res.end("Misdirected request");
+        return;
+      }
       const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
       if (req.method === "GET" && requestUrl.pathname === entry.path) {
         const frameOrigin = new URL(entry.config.origin).origin;
@@ -280,8 +285,7 @@ async function startShell(entry, fetchImpl) {
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    if (listenOnLoopback) server.listen(0, "127.0.0.1", resolve);
-    else server.listen(0, resolve);
+    server.listen(0, shellHostname, resolve);
   });
   const address = server.address();
   if (!address || typeof address === "string") {
