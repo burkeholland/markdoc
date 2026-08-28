@@ -15,13 +15,16 @@ export class ApiError extends Error {
   }
 }
 
-export type SyncState = "in-sync" | "local-ahead" | "remote-ahead" | "diverged";
+export type SyncState = "in-sync" | "local-ahead" | "remote-ahead" | "diverged" | "remote-unreadable";
 export interface SyncStatusDto {
   status: SyncState;
   remote: { sha: string | null; revision: string | null; url: string | null; updatedAt: string | null };
   localChanged: boolean;
   remoteChanged: boolean;
   lines: { local: number; remote: number };
+  /** Present when GitHub reports a file that is too large for Markdoc to read. */
+  size?: number | null;
+  limit?: number;
   /** Suggested client poll interval (SYNC_POLL_MS on the server; 60 s by default). */
   pollMs?: number;
   /** Only with `?content=1`: the GitHub file as it is now. */
