@@ -55,6 +55,7 @@ param(
   [switch]$Destroy
 )
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 Set-Location (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'azure-safety.ps1')
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
