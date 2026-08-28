@@ -186,10 +186,20 @@ export function WebhooksPanel() {
           </div>
         </form>
       )}
-      {error && <div className="mx-5 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
+      {error && (
+        <div className="mx-5 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+          {error}
+        </div>
+      )}
 
       {created && (
-        <div className="m-5 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/40" data-testid="webhook-created">
+        <div
+          className="m-5 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/40"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-testid="webhook-created"
+        >
           <div className="mb-2 text-sm font-medium text-green-900 dark:text-green-200">Webhook added. Copy the signing secret now; it will not be shown again.</div>
           <SecretField value={created.secret} />
           <p className="mt-2 text-xs text-ink-3">

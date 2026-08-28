@@ -66,8 +66,8 @@ describe("renderDocumentHtml", () => {
     expect(html).toContain("<del>old</del>");
     expect(html).toContain('<a href="https://example.com">https://example.com</a>');
     expect(html).toMatch(/<ul>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ul>/);
-    expect(html).toContain('<input type="checkbox" checked disabled>');
-    expect(html).toContain('<input type="checkbox" disabled>');
+    expect(html).toContain('<input type="checkbox" checked disabled aria-label="done">');
+    expect(html).toContain('<input type="checkbox" disabled aria-label="todo">');
     expect(html).toMatch(/<table>[\s\S]*<th>A<\/th>[\s\S]*<td>2<\/td>[\s\S]*<\/table>/);
     expect(html).toMatch(/<pre><code class="[^"]*language-ts[^"]*">/);
     expect(html).toContain('<span class="hljs-keyword">const</span>');

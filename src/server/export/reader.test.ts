@@ -40,11 +40,8 @@ const FIXTURE = [
   "",
 ].join("\n");
 
-// Captured from renderDocumentHtml BEFORE the body renderer was split out (commit 15a728f):
-// the body between <main> and </main>, and the SHA-256 of the whole page (styles included).
-// Length and hash re-captured after the stylesheet's vertical-rhythm change (task #346); the body is unchanged.
-// Re-captured again for the Ink & teal look (task #416): Fraunces @import + stone/teal colours in the <style>; body unchanged.
-const FIXTURE_BODY_BEFORE = `<h1 id="reader-fixture">Reader Fixture</h1>
+// Expected body between <main> and </main>, plus the SHA-256 of the whole page (styles included).
+const FIXTURE_BODY = `<h1 id="reader-fixture">Reader Fixture</h1>
 <p>Intro paragraph with <strong>bold</strong> and <code>code</code>.</p>
 <h2 id="first-section">First Section</h2>
 <ul>
@@ -71,11 +68,11 @@ const FIXTURE_BODY_BEFORE = `<h1 id="reader-fixture">Reader Fixture</h1>
 </table>
 <p><img src="https://docs.example.com/api/assets/abc123" alt="pic"></p>
 <ul class="contains-task-list">
-<li class="task-list-item"><input type="checkbox" checked disabled> done</li>
-<li class="task-list-item"><input type="checkbox" disabled> todo</li>
+<li class="task-list-item"><input type="checkbox" checked disabled aria-label="done"> done</li>
+<li class="task-list-item"><input type="checkbox" disabled aria-label="todo"> todo</li>
 </ul>`;
-const FIXTURE_SHA256_BEFORE = "5f47cd50108adb1b4d07dfcf609d476a2156c6c1ab00133f4161deec34523b92";
-const FIXTURE_LENGTH_BEFORE = 5782;
+const FIXTURE_SHA256 = "5d677c48da15bcd6021a93a09a1d4cb1b8fcea81b4e3b34fd59d4d9abcbc104e";
+const FIXTURE_LENGTH = 5818;
 
 describe("renderMarkdownBody", () => {
   it("returns h1-h6 headings whose ids match the anchors in the HTML", async () => {
@@ -109,14 +106,21 @@ describe("renderMarkdownBody", () => {
     expect(html).not.toContain("onerror");
     expect(html).toContain('<h1 id="ok">Ok</h1>');
   });
+
+  it("labels task checkboxes from their visible text and preserves read-only state", async () => {
+    const { html } = await renderMarkdownBody("- [x] Review **the draft**\n  - [ ] Ask for feedback\n- [ ] Publish the guide\n", { assetBaseUrl: BASE });
+    expect(html).toContain('<input type="checkbox" checked disabled aria-label="Review the draft"> Review <strong>the draft</strong>');
+    expect(html).toContain('<input type="checkbox" disabled aria-label="Ask for feedback"> Ask for feedback');
+    expect(html).toContain('<input type="checkbox" disabled aria-label="Publish the guide"> Publish the guide');
+  });
 });
 
 describe("renderDocumentHtml after the refactor", () => {
-  it("produces byte-identical output for the fixture", async () => {
+  it("produces the expected output for the fixture", async () => {
     const html = await renderDocumentHtml({ title: "Reader <Fixture>", markdown: FIXTURE, assetBaseUrl: BASE });
-    expect(html.length).toBe(FIXTURE_LENGTH_BEFORE);
-    expect(html).toContain(`<main class="markdoc">\n${FIXTURE_BODY_BEFORE}\n</main>`);
-    expect(createHash("sha256").update(html).digest("hex")).toBe(FIXTURE_SHA256_BEFORE);
+    expect(html.length).toBe(FIXTURE_LENGTH);
+    expect(html).toContain(`<main class="markdoc">\n${FIXTURE_BODY}\n</main>`);
+    expect(createHash("sha256").update(html).digest("hex")).toBe(FIXTURE_SHA256);
   });
 });
 

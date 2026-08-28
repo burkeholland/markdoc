@@ -31,6 +31,11 @@ const DOC = [
   "",
   "![Markdoc logo](/favicon.ico)",
   "",
+  "## Tasks",
+  "",
+  "- [x] Review accessibility notes",
+  "- [ ] Publish the reader",
+  "",
   "Closing words at the end.",
   "",
 ].join("\n");
@@ -164,6 +169,10 @@ test.describe("axe: pages", () => {
     expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
     await page.goto(`/p/${id}`);
     await expect(page.getByTestId("reader-body")).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Review accessibility notes", exact: true })).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Publish the reader", exact: true })).not.toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Review accessibility notes", exact: true })).toBeDisabled();
+    await expect(page.getByRole("checkbox", { name: "Publish the reader", exact: true })).toBeDisabled();
     await scan(page, "reader /p/<id>");
     await context.close();
   });
