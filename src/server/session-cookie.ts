@@ -1,4 +1,4 @@
-import { decode, getToken } from "next-auth/jwt";
+import { decode, encode, getToken } from "next-auth/jwt";
 
 /**
  * Detect an Auth.js session cookie the current AUTH_SECRET cannot read — left behind by a secret
@@ -95,6 +95,36 @@ export async function findStaleSessionCookie(cookieHeader: string | null | undef
 /** Set-Cookie attributes that expire a session cookie; mirrors Auth.js's own cookie options so the browser matches it. */
 export function clearingCookie(name: string, secure: boolean) {
   return { name, value: "", path: "/", maxAge: 0, expires: new Date(0), httpOnly: true, sameSite: "lax" as const, secure };
+}
+
+/** Auth.js's default session lifetime (30 days), also the `exp` of the minted JWT. */
+export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
+
+/** The user fields Auth.js's `jwt` callback puts in the session token (see `src/auth.ts`). */
+export interface SessionCookieUser {
+  id: string;
+  login: string | null;
+  name: string | null;
+  email?: string | null;
+  image: string | null;
+}
+
+/**
+ * Mint the session cookie Auth.js would set after a sign-in for `user`: the same JWE, secret, salt
+ * (the cookie name) and attributes, so `auth()` reads it like any other session. Used by the embed
+ * handoff (`GET /embed/:nonce`), where an API token — not GitHub OAuth — has already identified the
+ * user. `secure` picks the `__Secure-` cookie Auth.js uses on https.
+ */
+export async function mintSessionCookie(user: SessionCookieUser, secure: boolean, secrets: string[] = sessionSecrets(), maxAge = SESSION_MAX_AGE_S) {
+  if (secrets.length === 0) throw new Error("AUTH_SECRET is not configured");
+  const name = secure ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
+  const value = await encode({
+    token: { sub: user.id, login: user.login, name: user.name, email: user.email ?? null, picture: user.image },
+    secret: secrets,
+    salt: name,
+    maxAge,
+  });
+  return { name, value, path: "/", maxAge, httpOnly: true, sameSite: "lax" as const, secure };
 }
 
 /**
