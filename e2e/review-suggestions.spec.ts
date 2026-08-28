@@ -148,8 +148,8 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(aliceThread.getByTestId("suggestion-reject-comment")).toBeVisible();
 
     await alice.page.reload();
-    await ensureCommentsOpen(alice.page);
     await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await ensureCommentsOpen(alice.page);
     await alice.page.getByTestId("tb-redo").click();
     await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
     await alice.page.getByTestId("comments-tab-resolved").click();
@@ -163,8 +163,8 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(aliceThread).toHaveAttribute("data-suggestion", "pending");
 
     await alice.page.reload();
-    await ensureCommentsOpen(alice.page);
     await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await ensureCommentsOpen(alice.page);
     await alice.page.getByTestId("tb-redo").click();
     await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
   });
@@ -309,22 +309,22 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       .toMatchObject({ quote: "sales are good", currentText: "sales are good" });
 
     await page.reload();
-    await ensureCommentsOpen(page);
     await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await ensureCommentsOpen(page);
     await page.getByTestId("tb-redo").click();
     await expect.poll(() => codeText(page)).toContain("sales are strong");
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
 
     await page.reload();
-    await ensureCommentsOpen(page);
     await expect(page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
+    await ensureCommentsOpen(page);
     await page.getByTestId("tb-undo").click();
     await expect.poll(() => codeText(page)).toContain("sales are good");
     await expect(reply()).toHaveAttribute("data-state", "pending");
     await page.reload();
-    await ensureCommentsOpen(page);
     await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
+    await ensureCommentsOpen(page);
     await page.getByTestId("tb-redo").click();
     await expect.poll(() => codeText(page)).toContain("sales are strong");
     await expect(reply()).toHaveAttribute("data-state", "accepted");
