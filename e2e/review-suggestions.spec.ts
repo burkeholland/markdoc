@@ -69,6 +69,14 @@ async function expectSuggestionTransition(diff: Locator, from: string, to: strin
     .toEqual({ from, to });
 }
 
+async function pressSourceHistory(page: Page, key: "ControlOrMeta+z" | "ControlOrMeta+Shift+z") {
+  const source = page.locator(".cm-content");
+  await expect(source).toBeVisible();
+  await source.click();
+  await expect(source).toBeFocused();
+  await page.keyboard.press(key);
+}
+
 test.describe("review suggestions: ```suggestion blocks in comments, Accept / Reject, agent reviews", () => {
   let alice: User;
   let bob: User;
@@ -150,14 +158,14 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await alice.page.reload();
     await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(alice.page);
-    await alice.page.getByTestId("tb-redo").click();
+    await pressSourceHistory(alice.page, "ControlOrMeta+Shift+z");
     await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
     await alice.page.getByTestId("comments-tab-resolved").click();
     await expect(aliceThread).toHaveAttribute("data-suggestion", "accepted");
 
     await alice.page.reload();
     await expect(alice.page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
-    await alice.page.getByTestId("tb-undo").click();
+    await pressSourceHistory(alice.page, "ControlOrMeta+z");
     await expect.poll(() => codeText(alice.page)).toContain("Our product is very unique.");
     await ensureCommentsOpen(alice.page);
     await expect(aliceThread).toHaveAttribute("data-suggestion", "pending");
@@ -165,7 +173,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await alice.page.reload();
     await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(alice.page);
-    await alice.page.getByTestId("tb-redo").click();
+    await pressSourceHistory(alice.page, "ControlOrMeta+Shift+z");
     await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
   });
 
@@ -311,7 +319,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await page.reload();
     await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(page);
-    await page.getByTestId("tb-redo").click();
+    await pressSourceHistory(page, "ControlOrMeta+Shift+z");
     await expect.poll(() => codeText(page)).toContain("sales are strong");
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionTransition(reply().getByTestId("suggestion-diff"), "sales are good", "sales are strong");
@@ -319,13 +327,13 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await page.reload();
     await expect(page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(page);
-    await page.getByTestId("tb-undo").click();
+    await pressSourceHistory(page, "ControlOrMeta+z");
     await expect.poll(() => codeText(page)).toContain("sales are good");
     await expect(reply()).toHaveAttribute("data-state", "pending");
     await page.reload();
     await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(page);
-    await page.getByTestId("tb-redo").click();
+    await pressSourceHistory(page, "ControlOrMeta+Shift+z");
     await expect.poll(() => codeText(page)).toContain("sales are strong");
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await page.getByTestId("tb-undo").click();
