@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Check, Copy, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
@@ -11,6 +11,9 @@ export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
 
 /** Placeholder shown where the user's token goes until one is inlined. */
 export const TOKEN_PLACEHOLDER = "MARKDOC_TOKEN";
+export const COPILOT_APP_INSTALL = "mkdir -p ~/.copilot/extensions/markdoc && cp -R extensions/markdoc/. ~/.copilot/extensions/markdoc/";
+const COPILOT_APP_DOCS = "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md#inside-the-copilot-app";
+type ConnectTarget = "copilot-cli" | "mcp-clients" | "copilot-app";
 
 /**
  * The MCP config for Copilot CLI / VS Code / Claude / Cursor pointing at this server's remote
@@ -104,6 +107,27 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
   const base = origin || "http://localhost:3000";
   const config = mcpHttpConfigFor(base, token ?? undefined);
   const stdioConfig = mcpConfigFor(base, token ?? undefined);
+  const [target, setTarget] = useState<ConnectTarget>("copilot-cli");
+  const tabsId = useId();
+  const targets: { id: ConnectTarget; label: string }[] = [
+    { id: "copilot-cli", label: "Copilot CLI" },
+    { id: "mcp-clients", label: "VS Code / other MCP clients" },
+    { id: "copilot-app", label: "Copilot app" },
+  ];
+  const selectTarget = (next: ConnectTarget, focus = false) => {
+    setTarget(next);
+    if (focus) document.getElementById(`${tabsId}-${next}`)?.focus();
+  };
+  const moveTarget = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % targets.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + targets.length) % targets.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = targets.length - 1;
+    else return;
+    event.preventDefault();
+    selectTarget(targets[next].id, true);
+  };
   return (
     <section className={cn("relative rounded-xl border border-violet-200 bg-violet-50/60 p-4 dark:border-violet-900 dark:bg-violet-950/30", className)} data-testid="agent-connect-card" aria-label="Connect an agent">
       {onDismiss && (
@@ -118,6 +142,25 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
         Requests you send from the editor are picked up by your own agent — GitHub Copilot CLI by default — through the Markdoc MCP server. Nothing runs on
         the Markdoc side; your agent does the work and proposes it back as suggestions.
       </p>
+      <div className="mt-3 flex flex-wrap gap-1 rounded-lg bg-surface-2 p-1" role="tablist" aria-label="Agent client">
+        {targets.map((item, index) => (
+          <button
+            key={item.id}
+            id={`${tabsId}-${item.id}`}
+            type="button"
+            role="tab"
+            aria-selected={target === item.id}
+            aria-controls={`${tabsId}-panel`}
+            tabIndex={target === item.id ? 0 : -1}
+            className={cn("rounded-md px-2.5 py-1.5 text-xs font-medium", target === item.id ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink")}
+            onClick={() => selectTarget(item.id)}
+            onKeyDown={(event) => moveTarget(event, index)}
+            data-testid={`agent-connect-tab-${item.id}`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
       <ol className="mt-3 flex flex-col gap-3 text-sm text-ink-2">
         {!hideTokenStep && (
           <li className="flex gap-3">
@@ -139,39 +182,71 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
         <li className="flex gap-3">
           <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-violet-600 text-[11px] font-semibold text-white">{hideTokenStep ? 1 : 2}</span>
           <div className="min-w-0 flex-1">
-            <div className="mb-1.5">
-              Add Markdoc to Copilot CLI: run <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">/mcp add</code> and paste this (or merge it into{" "}
-              <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">~/.copilot/mcp-config.json</code>; VS Code takes the same shape in{" "}
-              <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">.vscode/mcp.json</code>). It connects to this server over HTTP — no checkout needed.
-              {!token && (
-                <>
-                  {" "}
-                  Replace <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{TOKEN_PLACEHOLDER}</code> with your token.
-                </>
-              )}
-            </div>
-            <CopyBlock value={config} label="MCP configuration" testId="agent-connect-config" />
-            <details className="mt-2 text-xs text-ink-3">
-              <summary className="cursor-pointer select-none" data-testid="agent-connect-stdio-toggle">
-                Client without HTTP support? Run the server from a checkout (stdio)
-              </summary>
-              <div className="mt-2">
-                <div className="mb-1.5">
-                  Point <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">args</code> at your Markdoc checkout.
-                </div>
-                <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="agent-connect-config-stdio" />
+            {target === "copilot-app" ? (
+              <div id={`${tabsId}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${target}`} data-testid="agent-connect-copilot-app">
+                <p className="mb-1.5">
+                  Copy the canvas extension from this checkout into Copilot&apos;s personal extensions directory, then start a new app session. Copilot asks for{" "}
+                  <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">MARKDOC_URL</code> and{" "}
+                  <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">MARKDOC_TOKEN</code>; use <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{base}</code> for the URL.
+                </p>
+                <CopyBlock value={COPILOT_APP_INSTALL} label="Copilot app install command" testId="agent-connect-app-install" />
+                <a className="mt-2 inline-flex text-xs font-medium text-accent hover:underline" href={COPILOT_APP_DOCS} target="_blank" rel="noreferrer">
+                  Inside the Copilot app setup and limits
+                </a>
               </div>
-            </details>
-            <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" scope={scope} />
+            ) : (
+              <div id={`${tabsId}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${target}`}>
+                <div className="mb-1.5">
+                  {target === "copilot-cli" ? (
+                    <>
+                      Add Markdoc to Copilot CLI: run <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">/mcp add</code> and paste this, or merge it into{" "}
+                      <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">~/.copilot/mcp-config.json</code>.
+                    </>
+                  ) : (
+                    <>
+                      Add this Streamable HTTP server to your client. VS Code puts the same shape under <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">servers</code> in{" "}
+                      <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">.vscode/mcp.json</code>.
+                    </>
+                  )}{" "}
+                  It connects to this server over HTTP — no checkout needed.
+                  {!token && (
+                    <>
+                      {" "}
+                      Replace <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{TOKEN_PLACEHOLDER}</code> with your token.
+                    </>
+                  )}
+                </div>
+                <CopyBlock value={config} label="MCP configuration" testId="agent-connect-config" />
+                <details className="mt-2 text-xs text-ink-3">
+                  <summary className="cursor-pointer select-none" data-testid="agent-connect-stdio-toggle">
+                    Client without HTTP support? Run the server from a checkout (stdio)
+                  </summary>
+                  <div className="mt-2">
+                    <div className="mb-1.5">
+                      Point <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">args</code> at your Markdoc checkout.
+                    </div>
+                    <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="agent-connect-config-stdio" />
+                  </div>
+                </details>
+                <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" scope={scope} />
+              </div>
+            )}
           </div>
         </li>
         <li className="flex gap-3">
           <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-violet-600 text-[11px] font-semibold text-white">{hideTokenStep ? 2 : 3}</span>
           <div className="flex flex-1 flex-wrap items-center gap-2">
             <TerminalSquare size={14} className="text-ink-3" />
-            <span>
-              Ask Copilot: <q className="font-medium text-ink">Check Markdoc for requests</q>. It lists what you asked for, claims it and replies with suggestions you accept or reject here.
-            </span>
+            {target === "copilot-app" ? (
+              <span>
+                In a new Copilot app session, ask <q className="font-medium text-ink">Open my document in Markdoc</q> or run{" "}
+                <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">/markdoc open &lt;id&gt;</code>. Requests, mentions, comments, and reviews made in the panel are pushed into that session.
+              </span>
+            ) : (
+              <span>
+                Ask Copilot: <q className="font-medium text-ink">Check Markdoc for requests</q>. It lists what you asked for, claims it and replies with suggestions you accept or reject here.
+              </span>
+            )}
           </div>
         </li>
       </ol>

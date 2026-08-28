@@ -17,7 +17,8 @@ const { attachCollab, protectUpgradePath } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
 const { registerCollab } = await import("./collab/registry");
 const { createDocument, removeCollaborator, updateDocument, upsertCollaborator } = await import("./documents");
-const { changeCollaboratorAccess, changeLinkAccess } = await import("./collab/authorization");
+const { changeCollaboratorAccess, changeLinkAccess, collabAccessChangeBlocks } = await import("./collab/authorization");
+const { createApiToken } = await import("./tokens");
 
 function waitFor(check: () => boolean, timeout = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -32,6 +33,18 @@ function waitFor(check: () => boolean, timeout = 5000): Promise<void> {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function withTimeout<T>(promise: Promise<T>, timeout = 1000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out waiting for concurrent collaboration work")), timeout);
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /** Classify one Hocuspocus wire message: `sync-step1|2`, `update`, `awareness`, `auth`, `sync-status`, … */
 function describeMessage(data: ArrayBuffer | Uint8Array): { type: string; bytes: number } {
@@ -262,6 +275,67 @@ describe("collaboration server", () => {
     expect(v.provider.authorizedScope).toBe("readonly");
     v.provider.destroy();
     v.socket.destroy();
+  });
+
+  it("settles a token-backed pending message and access transition without deadlocking", async () => {
+    const db = await getDb();
+    const [owner] = await db.insert(schema.users).values({ name: "Transition owner", login: "transition-owner", email: "transition-owner@example.com" }).returning();
+    const [editor] = await db.insert(schema.users).values({ name: "Transition editor", login: "transition-editor", email: "transition-editor@example.com" }).returning();
+    const doc = await createDocument({ ownerId: owner.id, content: "Pending" });
+    await upsertCollaborator(doc.id, editor.login!, "editor", owner.id);
+    const apiToken = await createApiToken(editor.id, "Transition agent", { scope: "full", documentIds: [doc.id] });
+    const token = await signCollabToken({
+      userId: editor.id,
+      docId: doc.id,
+      role: "editor",
+      name: editor.name!,
+      login: editor.login,
+      avatar: null,
+      tokenId: apiToken.id,
+      tokenScope: apiToken.scope,
+      tokenExpiresAt: apiToken.expiresAt?.getTime() ?? null,
+    });
+    const client = connect(token, doc.id);
+    await waitFor(() => client.provider.isSynced);
+    const connection = hocuspocus.documents.get(doc.id)?.getConnections().find((candidate) => candidate.context.tokenId === apiToken.id);
+    expect(connection).toBeDefined();
+    if (!connection) throw new Error("token-backed collaboration connection was not registered");
+
+    const originalBeforeHandleMessage = connection.callbacks.beforeHandleMessage;
+    let releasePending!: () => void;
+    const pendingReleased = new Promise<void>((resolve) => {
+      releasePending = resolve;
+    });
+    let markPending!: () => void;
+    const pendingStarted = new Promise<void>((resolve) => {
+      markPending = resolve;
+    });
+    let held = false;
+    connection.callbacks.beforeHandleMessage = async (candidate, update) => {
+      if (!held) {
+        held = true;
+        markPending();
+        await pendingReleased;
+      }
+      return originalBeforeHandleMessage(candidate, update);
+    };
+
+    try {
+      client.ydoc.getText(TEXT_KEY).insert(client.ydoc.getText(TEXT_KEY).length, " message");
+      await withTimeout(pendingStarted);
+      const transition = changeCollaboratorAccess(doc.id, editor.login!, "viewer", async () => {
+        await upsertCollaborator(doc.id, editor.login!, "viewer", owner.id);
+      });
+      await waitFor(() => collabAccessChangeBlocks(connection), 1000);
+      releasePending();
+      await withTimeout(Promise.all([transition, connection.waitForPendingMessages()]));
+      expect(connection.readOnly).toBe(true);
+      expect(connection.context.role).toBe("viewer");
+    } finally {
+      releasePending();
+      client.provider.destroy();
+      client.socket.destroy();
+    }
   });
 
   it("revokes stale editor sockets and tokens, then permits a newly shared editor", async () => {

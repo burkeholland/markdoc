@@ -175,6 +175,11 @@ test.describe("ask an agent", () => {
       await expect(page.getByTestId("token-name")).toBeVisible();
       await expect(page.getByTestId("agent-connect-card")).toBeVisible();
       await expect(page.getByTestId("agent-connect-config")).toContainText(`"url": "${origin}/api/mcp"`);
+      await expect(page.getByRole("tab", { name: "Copilot CLI" })).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("tab", { name: "VS Code / other MCP clients" })).toBeVisible();
+      await page.getByRole("tab", { name: "Copilot app" }).click();
+      await expect(page.getByTestId("agent-connect-app-install")).toContainText("~/.copilot/extensions/markdoc");
+      await expect(page.getByRole("link", { name: "Inside the Copilot app setup and limits" })).toHaveAttribute("href", /agents\.md#inside-the-copilot-app$/);
       await page.getByTestId("settings-back-to-document").click();
       await page.waitForURL((u) => u.pathname === `/d/${id}`);
     } finally {

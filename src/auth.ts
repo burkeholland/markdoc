@@ -11,6 +11,7 @@ declare module "next-auth" {
     user: {
       id: string;
       login: string | null;
+      agent?: string | null;
     } & DefaultSession["user"];
   }
   interface User {
@@ -112,6 +113,7 @@ async function buildConfig(): Promise<NextAuthConfig> {
           session.user.login = (token.login as string | null) ?? null;
           session.user.image = (token.picture as string | null) ?? session.user.image;
           session.user.name = (token.name as string | null) ?? session.user.name;
+          session.user.agent = (token.agent as string | null) ?? null;
         }
         return session;
       },

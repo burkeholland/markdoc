@@ -9,7 +9,7 @@ import {
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
-import { verifyCollabToken, type CollabClaims } from "./token";
+import { isVerifiedCollabClaims, verifyCollabToken, type CollabClaims, type VerifiedCollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
 import { boundTitle } from "@/server/document-title";
@@ -26,7 +26,7 @@ import {
 
 export { hydrateDoc, META_KEY, TEXT_KEY };
 
-export type CollabContext = CollabClaims;
+export type CollabContext = CollabClaims & { version?: 2; principal?: "user" | "token" };
 
 /** Interval after which a new automatic version snapshot is taken while editing. */
 export const AUTO_VERSION_INTERVAL_MS = Number(process.env.AUTO_VERSION_INTERVAL_MS ?? 10 * 60 * 1000);
@@ -36,6 +36,32 @@ export function createCollabServer() {
   // first incoming change. A client still holding an IndexedDB mirror of the *previous* (never
   // persisted) seed merges it with this one into the text twice; that exact shape is reverted.
   const freshlySeeded = new Map<string, string>();
+  const tokenExpiryTimers = new WeakMap<connectedPayload<CollabContext>["connection"], ReturnType<typeof setTimeout>>();
+
+  const armTokenExpiry = (connection: connectedPayload<CollabContext>["connection"], expiresAt: number | null | undefined) => {
+    const current = tokenExpiryTimers.get(connection);
+    if (current) clearTimeout(current);
+    if (!expiresAt) return;
+    const schedule = () => {
+      const remaining = expiresAt - Date.now();
+      const timer = setTimeout(() => {
+        if (remaining > 2_147_000_000) {
+          schedule();
+          return;
+        }
+        connection.readOnly = true;
+        connection.close({ code: 4401, reason: "Unauthorized" });
+      }, Math.max(0, Math.min(remaining, 2_147_000_000)));
+      timer.unref?.();
+      tokenExpiryTimers.set(connection, timer);
+    };
+    connection.onClose(() => {
+      const timer = tokenExpiryTimers.get(connection);
+      if (timer) clearTimeout(timer);
+      tokenExpiryTimers.delete(connection);
+    });
+    schedule();
+  };
 
   const hocuspocus = new Hocuspocus<CollabContext>({
     name: "markdoc",
@@ -48,7 +74,7 @@ export function createCollabServer() {
     flushDelay: false,
 
     async onAuthenticate({ token, documentName, connectionConfig }: onAuthenticatePayload<CollabContext>) {
-      let claims: CollabClaims;
+      let claims: VerifiedCollabClaims;
       try {
         claims = await verifyCollabToken(token);
       } catch {
@@ -64,6 +90,11 @@ export function createCollabServer() {
     async connected({ connection, context }: connectedPayload<CollabContext>) {
       // Seal the small race between authentication and adding the connection to the live document:
       // a concurrent share change either sees this connection or this hook waits for that change.
+      if (!isVerifiedCollabClaims(context)) {
+        connection.readOnly = true;
+        connection.close({ code: 4401, reason: "Unauthorized" });
+        return;
+      }
       const current = await resolveStableCollabAccess(context);
       if (!current) {
         connection.readOnly = true;
@@ -72,9 +103,13 @@ export function createCollabServer() {
       }
       connection.context = current;
       connection.readOnly = !canEdit(current.role);
+      armTokenExpiry(connection, current.tokenExpiresAt);
     },
 
     async beforeHandleMessage({ connection }) {
+      // Access changes, token revocation, and token expiry are pushed to live connections.
+      // Do not query here: a transition is waiting for this message to drain, and steady-state
+      // Yjs/awareness traffic must not add database round trips per message.
       if (collabAccessChangeBlocks(connection)) connection.readOnly = true;
     },
 

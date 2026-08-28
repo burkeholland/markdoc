@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { auth } from "@/auth";
 import { getDocumentAccess, type AccessOptions, type DocumentAccess, type SessionUser } from "@/server/documents";
-import { resolveApiToken, looksLikeApiToken, scopeSatisfies } from "@/server/tokens";
+import { resolveApiToken, resolveApiTokenById, looksLikeApiToken, scopeSatisfies } from "@/server/tokens";
 import type { Role, TokenScope } from "@/server/db/schema";
 import { UnrenderableDocumentError } from "@/editor/markdown/renderable";
 import { failedAuthAllowed, rateLimitingEnabled, recordFailedAuth, takeApiRequest, withRateLimitHeaders, type TakeResult } from "@/server/rate-limit";
+import { decodeEmbedSession } from "@/server/session-cookie";
+import { mcpPublicOrigin } from "@/server/mcp-origin";
 
 export class HttpError extends Error {
   constructor(
@@ -54,6 +56,14 @@ export interface Actor extends SessionUser {
   scope?: TokenScope;
   /** Documents the token is restricted to; null/undefined = all of the user's documents. */
   documentIds?: string[] | null;
+  /** Set only for a token-backed canvas cookie. */
+  embedDocumentId?: string;
+  /** Exact canvas-shell origin allowed to frame and renew this embedded session. */
+  embedParentOrigin?: string;
+  /** Browser-session expiry in epoch milliseconds; the embedded editor renews before this time. */
+  embedSessionExpiresAt?: number;
+  /** API-token expiry, retained so collaboration sockets cannot outlive it. */
+  tokenExpiresAt?: Date | null;
 }
 
 /**
@@ -68,17 +78,40 @@ export async function currentUser(): Promise<Actor | null> {
     if (looksLikeApiToken(token)) {
       const actor = await resolveBearer(token, h);
       if (!actor) throw new HttpError(401, "Invalid or revoked API token");
-      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds };
+      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds, tokenExpiresAt: actor.expiresAt };
     }
   }
   const session = await auth();
-  if (!session?.user?.id) return null;
-  return {
-    id: session.user.id,
-    login: session.user.login ?? null,
-    name: session.user.name ?? null,
-    image: session.user.image ?? null,
-  };
+  const normalSession = session?.user?.id ? session.user : null;
+  if (normalSession) {
+    return {
+      id: normalSession.id,
+      login: normalSession.login ?? null,
+      name: normalSession.name ?? null,
+      image: normalSession.image ?? null,
+    };
+  }
+  const embed = await decodeEmbedSession(h.get("cookie"));
+  if (embed) {
+    const actor = await resolveApiTokenById(embed.tokenId);
+    if (!actor || actor.id !== embed.userId || !tokenAllowsDocument(actor, embed.documentId)) return null;
+    return {
+      ...actor,
+      documentIds: [embed.documentId],
+      embedDocumentId: embed.documentId,
+      embedParentOrigin: embed.parentOrigin,
+      embedSessionExpiresAt: embed.expiresAt,
+      tokenExpiresAt: actor.expiresAt,
+    };
+  }
+  return null;
+}
+
+/** Bound editor path for an embed-only browser; a primary Auth.js session always keeps precedence. */
+export async function embeddedDocumentPath(primaryUserId: string | null | undefined): Promise<string | null> {
+  if (primaryUserId) return null;
+  const user = await currentUser();
+  return user?.embedDocumentId ? `/d/${user.embedDocumentId}?embed=1` : null;
 }
 
 export async function requireUser(): Promise<Actor> {
@@ -132,6 +165,15 @@ export function requireCanCreateDocuments(user: Actor, action = "create document
 export function tokenAllowsDocument(user: Actor | null | undefined, docId: string): boolean {
   if (!user?.documentIds?.length) return true;
   return user.documentIds.includes(docId);
+}
+
+/** Access as an embedded token actually experiences it, including document and role caps. */
+export async function getEffectiveDocumentAccess(docId: string, user: Actor | null, options: AccessOptions = {}): Promise<DocumentAccess | null> {
+  if (user && !tokenAllowsDocument(user, docId)) return null;
+  const access = await getDocumentAccess(docId, user, options);
+  if (!access || !user?.scope) return access;
+  const cap = ROLE_CAP[user.scope];
+  return cap && roleRank(cap) < roleRank(access.role) ? { ...access, role: cap } : access;
 }
 
 export interface RequireAccessOptions extends AccessOptions {
@@ -196,6 +238,8 @@ export function handler<T extends unknown[]>(fn: (...args: T) => Promise<Respons
 
 async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, args: T, budget: TakeResult | null): Promise<Response> {
   try {
+    const req = args[0] instanceof Request ? args[0] : null;
+    if (req) requireSameOriginMutation(req);
     if (budget && !budget.ok) throw new RateLimitError("Rate limit exceeded.", budget);
     return await fn(...args);
   } catch (err) {
@@ -208,6 +252,19 @@ async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, a
     // and its bound parameters, so it goes to the log only.
     console.error(err);
     return json({ error: "Unexpected error" }, { status: 500 });
+  }
+}
+
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/** `SameSite=None` canvas cookies must not authorize writes initiated by another site. */
+export function requireSameOriginMutation(req: Request): void {
+  if (SAFE_METHODS.has(req.method.toUpperCase())) return;
+  if (req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")) return;
+  const fetchSite = req.headers.get("sec-fetch-site")?.toLowerCase();
+  const origin = req.headers.get("origin");
+  if (fetchSite === "cross-site" || origin === "null" || (origin && origin !== mcpPublicOrigin(req))) {
+    throw new HttpError(403, "Cross-site browser mutations are not allowed");
   }
 }
 

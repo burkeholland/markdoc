@@ -66,8 +66,17 @@ type FakeProvider = {
 };
 const lastProvider = () => (HocuspocusProvider as unknown as { last: FakeProvider }).last;
 
-function makeSession(getToken: () => Promise<string> = async () => "token"): CollabSession {
-  return new CollabSession({ docId: "doc", user: makeCollabUser("a", "Alice"), role: "owner", getToken });
+function makeSession(
+  getToken: () => Promise<string> = async () => "token",
+  preserveLocalOnAuthFailure = false,
+): CollabSession {
+  return new CollabSession({
+    docId: "doc",
+    user: makeCollabUser("a", "Alice"),
+    role: "owner",
+    getToken,
+    preserveLocalOnAuthFailure,
+  });
 }
 
 describe("CollabSession reconnect across a server restart (#190)", () => {
@@ -177,6 +186,25 @@ describe("CollabSession reconnect across a server restart (#190)", () => {
     expect(other.authError).toBe("permission-denied");
     expect(clearOther).toHaveBeenCalledTimes(1);
     other.destroy();
+  });
+
+  it("retains local canvas edits and reconnects when an expired embed session returns 401", async () => {
+    const expired = Object.assign(new Error("The embedded session has expired"), { status: 401 });
+    const session = makeSession(async () => {
+      throw expired;
+    }, true);
+    const clearLocal = vi.spyOn(session, "clearLocal").mockResolvedValue();
+    const provider = lastProvider();
+    await expect(provider.opts.token()).rejects.toBe(expired);
+    provider.opts.onAuthenticationFailed({
+      reason: "Failed to get token during sendToken(): Error: The embedded session has expired",
+    });
+
+    expect(session.authError).toBeNull();
+    expect(clearLocal).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(TOKEN_RETRY_DELAY_MS + 1);
+    expect(provider.configuration.websocketProvider.connectCalls).toBe(1);
+    session.destroy();
   });
 
   it("says the edits are kept on this device once the connection has been down for a while", () => {

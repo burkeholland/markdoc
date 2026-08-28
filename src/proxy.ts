@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { clearingCookie, findStaleSessionCookie, hasSessionCookie, STALE_SESSION_MESSAGE, stripCookies } from "@/server/session-cookie";
+import { clearingCookie, decodeEmbedSession, findStaleSessionCookie, hasSessionCookie, STALE_SESSION_MESSAGE, stripCookies } from "@/server/session-cookie";
 
 /**
  * Clear a session cookie the current AUTH_SECRET cannot read (#1139). Auth.js's own `session` action
@@ -12,16 +12,24 @@ import { clearingCookie, findStaleSessionCookie, hasSessionCookie, STALE_SESSION
  */
 export async function proxy(request: NextRequest) {
   const cookieHeader = request.headers.get("cookie");
-  if (!hasSessionCookie(cookieHeader)) return NextResponse.next();
+  const embed = await decodeEmbedSession(cookieHeader);
+  const isEmbeddedDocument = embed
+    && request.nextUrl.pathname === `/d/${embed.documentId}`
+    && request.nextUrl.searchParams.get("embed") === "1";
+  const withFramePolicy = (response: NextResponse) => {
+    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}`);
+    return response;
+  };
+  if (!hasSessionCookie(cookieHeader)) return withFramePolicy(NextResponse.next());
   const stale = await findStaleSessionCookie(cookieHeader);
-  if (!stale) return NextResponse.next();
+  if (!stale) return withFramePolicy(NextResponse.next());
 
   console.warn(`[auth][warn] ${STALE_SESSION_MESSAGE} (${stale.reason})`);
   const headers = new Headers(request.headers);
   headers.set("cookie", stripCookies(cookieHeader as string, stale.names));
   const response = NextResponse.next({ request: { headers } });
   for (const name of stale.names) response.cookies.set(clearingCookie(name, stale.secure));
-  return response;
+  return withFramePolicy(response);
 }
 
 export const config = {

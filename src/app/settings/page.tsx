@@ -7,12 +7,15 @@ import { TokensPanel } from "@/components/settings/tokens-panel";
 import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { listRequestsForUser } from "@/server/agent-requests";
+import { embeddedDocumentPath } from "@/server/http";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ next?: string | string[] }> }) {
   const session = await auth();
+  const embedPath = await embeddedDocumentPath(session?.user?.id);
+  if (embedPath) redirect(embedPath);
   if (!session?.user?.id) redirect("/login?next=/settings");
   const origin = process.env.AUTH_URL?.replace(/\/$/, "") ?? "";
   const rawNext = (await searchParams).next;

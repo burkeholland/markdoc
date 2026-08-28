@@ -120,6 +120,14 @@ describe("buildCommands", () => {
     expect(ids(inTable)).toContain("block:text");
   });
 
+  it("keeps canvas editing commands but removes operations outside the embedded document", () => {
+    const canvas = ids(buildCommands(stubCtx({ embed: true })));
+    expect(canvas).toEqual(expect.arrayContaining(["nav:heading", "format:bold", "block:heading1", "doc:comments", "doc:find", "mode:viewing", "layout:code", "view:outline", "help:shortcuts"]));
+    expect(canvas).not.toEqual(
+      expect.arrayContaining(["nav:recent", "nav:dashboard", "doc:share", "doc:publish", "doc:download-md", "doc:copy-markdown", "doc:reader", "doc:duplicate", "doc:trash"]),
+    );
+  });
+
   it("lists headings and recent documents as children", async () => {
     const ctx = stubCtx();
     const byId = new Map(buildCommands(ctx).map((c) => [c.id, c]));

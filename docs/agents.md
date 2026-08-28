@@ -8,6 +8,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 
 - [1. Create a token](#1-create-a-token)
 - [2. Connect an MCP client](#2-connect-an-mcp-client)
+  - [Inside the Copilot app](#inside-the-copilot-app)
   - [MCP tools](#mcp-tools)
   - [What an agent session looks like](#what-an-agent-session-looks-like)
   - [Permissions in Copilot CLI](#permissions-in-copilot-cli)
@@ -81,6 +82,36 @@ For GitHub Copilot CLI put that in `~/.copilot/mcp-config.json` (or run `/mcp ad
 ```
 
 From a checkout you can also run `npm run mcp` with `MARKDOC_URL` and `MARKDOC_TOKEN` set. Both transports register the same tool set from `mcp/tools.mjs`; `npm run mcp:smoke` (with `MARKDOC_URL` and `MARKDOC_TOKEN`) checks a running server over HTTP with a real MCP client.
+
+### Inside the Copilot app
+
+Markdoc also ships an experimental [Copilot app canvas extension](../extensions/markdoc/) that keeps the complete editor beside the chat. Install it from a checkout (the extension host provides the SDK, so there is no build or runtime install):
+
+```sh
+mkdir -p ~/.copilot/extensions/markdoc
+cp -R extensions/markdoc/. ~/.copilot/extensions/markdoc/
+```
+
+In PowerShell:
+
+```powershell
+$dest = "$HOME\.copilot\extensions\markdoc"
+New-Item -ItemType Directory -Force $dest | Out-Null
+Copy-Item .\extensions\markdoc\* $dest -Recurse -Force
+```
+
+Set `MARKDOC_URL` (the origin you use in a browser, with no path) and `MARKDOC_TOKEN` (a Markdoc token) in the environment that launches Copilot, then start a new app session. Then ask *"Open my document in Markdoc"* or invoke `/markdoc open <document-id>`. The canvas contains both editor panes, formatting and **Ask an agent**, comments, mode, and live presence; dashboard navigation and sharing, publishing, and account menus stay outside the embedded surface.
+
+While a canvas is open, the extension appears in the document as **Copilot app** and long-polls the document event feed. It pushes these human actions into the same chat, once each:
+
+- `request.created`, including the request id, instruction, mode, and selected quote; the prompt points Copilot to `markdoc_claim_request`, an editing tool, and `markdoc_complete_request`.
+- `mention`, including the mentioned comment or reply id and snippet; the prompt points to `markdoc_comments` and `markdoc_comment`.
+- `comment.added`, including the thread id, body, and anchored quote; the prompt points to `markdoc_comments` and `markdoc_comment`.
+- `review.created`, including the review id, verdict, and summary; the prompt points to `markdoc_comments`, `markdoc_read_document`, `markdoc_comment`, and `markdoc_suggest`.
+
+The API token never enters the canvas URL or browser. A random local shell requests `POST /api/embed/handoff` with the token, then gives the frame a fresh 60-second, single-use URL bound to that shell's exact origin. Only an iframe navigation from that origin can spend it; a replay, expired URL, top-level navigation, or different parent is refused. The handoff issues a five-minute encrypted `markdoc.embed-session` cookie instead of replacing the user's Auth.js login and redirects to `/d/<id>?embed=1`. The editor renews that cookie before expiry; if renewal is interrupted, the shell reloads the frame through a fresh one-time handoff without exposing the token. The cookie retains the API token id, document id, and permitted parent origin. Every response carries a matching `frame-ancestors` policy, and every request rechecks that the token is still live and reapplies its `read` / `comment` / `full` scope and document restriction. Revoking the token also stops renewal and new requests from an open embed.
+
+For plain HTTP, the shell uses the same hostname as `MARKDOC_URL` so the browser treats the framed session cookie as same-site; that hostname must resolve to the machine running Copilot. Remote Markdoc deployments must use HTTPS, where the embed cookie is `SameSite=None; Secure; Partitioned` and cross-site mutation requests are rejected. Pushed event fields are marked as untrusted collaborator content, and the dedicated canvas session is restricted to the Markdoc tools needed to read, comment, suggest, rewrite, claim, and complete work; filesystem, shell, browser, GitHub, and other global tools are unavailable to event-driven turns. Current limits: canvases and personal extensions are experimental Copilot features; the graphical canvas requires the Copilot app. Copilot CLI can load the extension with `copilot --experimental`, but does not display the canvas. One Markdoc canvas is active per Copilot session; a second panel is refused so document-scoped cookies cannot collide. Reuse the existing panel with `open_document`, or close it first. The extension pushes only the four event types above (not every keystroke, reply, resolution, or suggestion decision), needs the app process to reach `MARKDOC_URL`, and stops polling and leaves presence as soon as the canvas closes. A named `@user/Agent` mention reaches only a token with a unique active mention name, and a comment containing the mention produces one push rather than a comment turn plus a mention turn. Active turns receive events in queue order; an idle session starts the pushed turn immediately.
 
 ### MCP tools
 

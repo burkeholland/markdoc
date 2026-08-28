@@ -17,6 +17,9 @@ export const POST = handler(async (_req: Request, { params }: Params) => {
     name: user?.name ?? user?.login ?? "Anonymous",
     login: user?.login ?? null,
     avatar: user?.image ?? null,
+    tokenId: user?.tokenId,
+    tokenScope: user?.scope,
+    tokenExpiresAt: user?.tokenExpiresAt?.getTime() ?? null,
   });
   return json({ token, role });
 });

@@ -70,6 +70,23 @@ describe("notifications", () => {
     expect(bob[0]).toMatchObject({ kind: "mention", refId: "c1", actorLogin: "alice", documentTitle: "Launch plan", snippet: "hi @Bob and @carol, see a@b.com" });
   });
 
+  it("updates persisted agent targets when a comment mention is edited", async () => {
+    expect(await recordMentions("n-doc1", "agent-edit", "alice", "@owner/Agent-A please check")).toBe(1);
+    expect(await recordMentions("n-doc1", "agent-edit", "alice", "@owner/Agent-B please check")).toBe(1);
+    const item = (await listNotifications("owner", { kind: "mention" })).items.find((notification) => notification.refId === "agent-edit");
+    expect(item?.agentTargets).toEqual(["Agent-B"]);
+  });
+
+  it("retracts stale recipients when an edited comment replaces or removes mentions", async () => {
+    await recordMentions("n-doc1", "agent-remove", "alice", "@owner/Agent-A and @bob please check");
+    await recordMentions("n-doc1", "agent-remove", "alice", "@carol/Agent-B please check");
+    expect((await listNotifications("owner", { kind: "mention" })).items.some((item) => item.refId === "agent-remove")).toBe(false);
+    expect((await listNotifications("bob", { kind: "mention" })).items.some((item) => item.refId === "agent-remove")).toBe(false);
+    expect((await listNotifications("carol", { kind: "mention" })).items.find((item) => item.refId === "agent-remove")?.agentTargets).toEqual(["Agent-B"]);
+    await recordMentions("n-doc1", "agent-remove", "alice", "No one is mentioned now");
+    expect((await listNotifications("carol", { kind: "mention" })).items.some((item) => item.refId === "agent-remove")).toBe(false);
+  });
+
   it("is idempotent per (user, kind, ref) and ignores self-notifications", async () => {
     const input = { userLogin: "Carol", documentId: "n-doc2", kind: "share" as const, actorLogin: "owner", actorName: "Owner", refId: "n-doc2:carol", snippet: "editor" };
     expect(await notify(input)).toBe(true);
@@ -118,6 +135,13 @@ describe("notifications", () => {
     expect(await unreadCount("dave")).toBe(0);
     expect(await unreadCount("bob")).toBe(1);
     expect(await markAllNotificationsRead("dave")).toBe(0);
+  });
+
+  it("scopes read-all to the documents bound to a token", async () => {
+    await notify({ userLogin: "scoped-reader", documentId: "n-doc1", kind: "reply", actorLogin: "bob", refId: "scoped-r1" });
+    await notify({ userLogin: "scoped-reader", documentId: "n-doc2", kind: "reply", actorLogin: "bob", refId: "scoped-r2" });
+    expect(await markAllNotificationsRead("scoped-reader", ["n-doc1"])).toBe(1);
+    expect((await unread("scoped-reader")).map((item) => item.documentId)).toEqual(["n-doc2"]);
   });
 
   it("marks every notification about a set of refs read (opening a thread)", async () => {

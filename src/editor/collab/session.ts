@@ -122,6 +122,8 @@ export interface CollabSessionOptions {
    * itself after {@link ORPHAN_GRACE_MS} unless {@link CollabSession.keepAlive} (or `connect`) is called.
    */
   autoConnect?: boolean;
+   /** Canvas sessions retry authorization failures without deleting their IndexedDB recovery copy. */
+   preserveLocalOnAuthFailure?: boolean;
 }
 
 /** How long a deferred-connect session waits to be adopted before it frees its Y.Doc and provider. */
@@ -294,6 +296,14 @@ export class CollabSession {
           // the local copy stays and the connection is retried shortly. Wiping here lost every offline
           // edit on the first reload after a restart (#190).
           console.warn("[markdoc] collaboration token fetch failed; retrying", failure);
+          this.scheduleReconnect(TOKEN_RETRY_DELAY_MS);
+          this.notify();
+          return;
+        }
+        if (options.preserveLocalOnAuthFailure) {
+          // The canvas shell renews a short-lived browser session out of band. A 401 during that
+          // handoff is not proof that document access was revoked, so retain the recovery copy.
+          console.warn("[markdoc] embedded collaboration authorization failed; retaining local changes");
           this.scheduleReconnect(TOKEN_RETRY_DELAY_MS);
           this.notify();
           return;

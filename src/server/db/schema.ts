@@ -199,6 +199,8 @@ export const apiTokens = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     /** Human label, e.g. "GitHub Copilot CLI". Shown as the agent's name in the app. */
     name: text("name").notNull(),
+    /** Normalized name used by @mentions; null after revocation so the name can be reused. */
+    mentionSlug: text("mention_slug"),
     /** First characters of the token for identification in lists. */
     prefix: text("prefix").notNull(),
     tokenHash: text("token_hash").notNull().unique(),
@@ -215,7 +217,7 @@ export const apiTokens = pgTable(
     expiresAt: timestamp("expires_at", { mode: "date", withTimezone: true }),
     revokedAt: timestamp("revoked_at", { mode: "date", withTimezone: true }),
   },
-  (t) => [index("api_token_user_idx").on(t.userId)],
+  (t) => [index("api_token_user_idx").on(t.userId), uniqueIndex("api_token_user_mention_slug_unique").on(t.userId, t.mentionSlug)],
 );
 
 /** Binary assets (images) embedded in documents. Bytes live in the database behind src/server/assets.ts. */
@@ -262,6 +264,8 @@ export const notifications = pgTable(
     /** Thread, reply or suggestion id the notification is about; the document id for shares. */
     refId: text("ref_id").notNull(),
     snippet: text("snippet").notNull().default(""),
+    /** Every `@user/Agent` target parsed from the complete body before the display snippet is clipped. */
+    agentTargets: text("agent_targets").array(),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     readAt: timestamp("read_at", { mode: "date", withTimezone: true }),
   },
@@ -442,5 +446,3 @@ export type NewDocument = typeof documents.$inferInsert;
 export type Version = typeof versions.$inferSelect;
 export type Collaborator = typeof collaborators.$inferSelect;
 export type User = typeof users.$inferSelect;
-
-
