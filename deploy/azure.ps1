@@ -79,6 +79,15 @@ function ConvertTo-PlainText([Security.SecureString]$Value) {
   }
 }
 
+function ConvertFrom-PlainText([string]$Value) {
+  $secureValue = New-Object Security.SecureString
+  foreach ($character in $Value.ToCharArray()) {
+    $secureValue.AppendChar($character)
+  }
+  $secureValue.MakeReadOnly()
+  return $secureValue
+}
+
 $secretDefinitions = @(
   @{ Property = 'PostgresAdminPassword'; Environment = 'MARKDOC_PG_PASSWORD' },
   @{ Property = 'AuthSecret'; Environment = 'MARKDOC_AUTH_SECRET' },
@@ -106,7 +115,7 @@ if ($SecretsPath) {
   foreach ($definition in $secretDefinitions) {
     $value = (Get-Item "env:$($definition.Environment)" -ErrorAction SilentlyContinue).Value
     if (-not $value) { throw "Set `$env:$($definition.Environment) first (see the script header), or pass -SecretsPath." }
-    $secureValues[$definition.Property] = ConvertTo-SecureString $value -AsPlainText -Force
+    $secureValues[$definition.Property] = ConvertFrom-PlainText $value
   }
 }
 $secureValues.PostgresCandidatePassword = $secureValues.PostgresAdminPassword
@@ -146,7 +155,7 @@ function New-RotationCandidatePassword {
   try {
     $generator.GetBytes($bytes)
     $plainText = [Convert]::ToBase64String($bytes)
-    return ConvertTo-SecureString $plainText -AsPlainText -Force
+    return ConvertFrom-PlainText $plainText
   } finally {
     $generator.Dispose()
     [Array]::Clear($bytes, 0, $bytes.Length)
