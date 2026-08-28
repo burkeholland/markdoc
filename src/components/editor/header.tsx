@@ -416,7 +416,7 @@ export interface HeaderProps {
   session: CollabSession;
   doc: DocumentDto;
   commentsOpen: boolean;
-  onToggleComments: () => void;
+  onToggleComments: (focusPanel?: boolean) => void;
   /** Open the thread/suggestion/document a notification points at (the item is already marked read). */
   onOpenNotification: (n: NotificationDto) => void;
   onShare: () => void;
@@ -595,7 +595,14 @@ export const Header = memo(function Header(props: HeaderProps) {
           </button>
         )}
         <Tip label={props.commentsOpen ? "Hide comments" : "Show comments"} shortcut={shortcut("Mod-Alt-M")}>
-          <button type="button" className="icon-btn relative" onClick={props.onToggleComments} data-active={props.commentsOpen} aria-label="Comments" data-testid="comments-toggle">
+          <button
+            type="button"
+            className="icon-btn relative"
+            onClick={(event) => props.onToggleComments(event.detail === 0)}
+            data-active={props.commentsOpen}
+            aria-label="Comments"
+            data-testid="comments-toggle"
+          >
             <MessageSquare size={20} />
             {openComments > 0 && (
               <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-on-accent" data-testid="comments-badge">
