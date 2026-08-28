@@ -1,5 +1,6 @@
 import { handler, json, requireUser, tokenAllowsDocument, HttpError } from "@/server/http";
 import { clampWait, pollEvents, parseIncludeSelf, InvalidCursorError, WAIT_MAX_S } from "@/server/agent-events";
+import { isAgentMentionUnique } from "@/server/tokens";
 
 /**
  * Cross-document long-poll for an idle agent: @mentions of the token's user and new "Ask an agent" requests
@@ -9,6 +10,9 @@ import { clampWait, pollEvents, parseIncludeSelf, InvalidCursorError, WAIT_MAX_S
 export const GET = handler(async (req: Request) => {
   const user = await requireUser();
   if (!user.agent) throw new HttpError(403, "This endpoint is for API tokens (agents). Create one at /settings");
+  if (!(await isAgentMentionUnique(user.id, user.tokenId ?? null, user.agent))) {
+    throw new HttpError(409, "This token's @mention name is ambiguous; rename or revoke the colliding token");
+  }
   const q = new URL(req.url).searchParams;
   const page = await pollEvents(null, user, q.get("since"), clampWait(q.get("wait")), { includeSelf: parseIncludeSelf(q.get("includeSelf")) }).catch((err) => {
     if (err instanceof InvalidCursorError) throw new HttpError(400, err.message);

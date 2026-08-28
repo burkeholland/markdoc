@@ -1,4 +1,4 @@
-import { handler, json, requireUser, HttpError } from "@/server/http";
+import { handler, json, requireScope, requireUser, HttpError } from "@/server/http";
 import { markNotificationRead, notificationBelongsTo } from "@/server/notifications";
 
 type Params = { params: Promise<{ id: string }> };
@@ -11,8 +11,9 @@ type Params = { params: Promise<{ id: string }> };
 export const POST = handler(async (_req: Request, { params }: Params) => {
   const { id } = await params;
   const user = await requireUser();
+  requireScope(user, "comment", "mark notifications read");
   if (!user.login) throw new HttpError(404, "Notification not found");
-  const changed = await markNotificationRead(id, user.login);
-  if (!changed && !(await notificationBelongsTo(id, user.login))) throw new HttpError(404, "Notification not found");
+  const changed = await markNotificationRead(id, user.login, user.documentIds);
+  if (!changed && !(await notificationBelongsTo(id, user.login, user.documentIds))) throw new HttpError(404, "Notification not found");
   return json({ ok: true, changed });
 });

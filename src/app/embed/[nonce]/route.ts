@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
-import { getDb, schema } from "@/server/db";
 import { consumeHandoff, type HandoffFailure } from "@/server/embed-handoff";
-import { handler, HttpError } from "@/server/http";
+import { handler, HttpError, tokenAllowsDocument } from "@/server/http";
 import { mcpPublicOrigin } from "@/server/mcp-origin";
 import { mintSessionCookie } from "@/server/session-cookie";
+import { resolveApiTokenById } from "@/server/tokens";
 
 type Params = { params: Promise<{ nonce: string }> };
 
@@ -22,19 +21,40 @@ function servedOverHttps(req: Request): boolean {
 }
 
 /**
- * Spend a handoff nonce from `POST /api/embed/handoff`: set the normal session cookie for the user
+ * Spend a handoff nonce from `POST /api/embed/handoff`: set an isolated embed cookie for the user
  * the token belonged to and redirect to `/d/:id?embed=1`. Valid once and for 60 s; anything else is
  * `410`. No other way in: the nonce carries no document or user from the caller, both come from the
  * token that minted it.
  */
 export const GET = handler(async (req: Request, { params }: Params) => {
   const { nonce } = await params;
-  const result = consumeHandoff(nonce);
+  if (req.headers.get("sec-fetch-dest") !== "iframe") {
+    throw new HttpError(403, "This handoff must be opened by the Markdoc canvas", { reason: "frame" });
+  }
+  let parentOrigin: string;
+  try {
+    parentOrigin = new URL(req.headers.get("referer") ?? "").origin;
+  } catch {
+    throw new HttpError(403, "The Markdoc canvas origin is missing", { reason: "frame" });
+  }
+  const result = consumeHandoff(nonce, parentOrigin);
   if (!result.ok) throw new HttpError(410, GONE[result.reason], { reason: result.reason });
-  const db = await getDb();
-  const [user] = await db.select().from(schema.users).where(eq(schema.users.id, result.handoff.userId));
-  if (!user) throw new HttpError(410, GONE.unknown, { reason: "unknown" });
-  const cookie = await mintSessionCookie({ id: user.id, login: user.login ?? null, name: user.name ?? null, email: user.email ?? null, image: user.image ?? null }, servedOverHttps(req));
+  const user = await resolveApiTokenById(result.handoff.tokenId);
+  if (!user || user.id !== result.handoff.userId || !tokenAllowsDocument(user, result.handoff.documentId)) {
+    throw new HttpError(410, GONE.unknown, { reason: "unknown" });
+  }
+  const cookie = await mintSessionCookie(
+    {
+      id: user.id,
+      login: user.login,
+      name: user.name ?? null,
+      image: user.image ?? null,
+      embedTokenId: user.tokenId,
+      embedDocumentId: result.handoff.documentId,
+      embedParentOrigin: result.handoff.parentOrigin,
+    },
+    servedOverHttps(req),
+  );
   const res = NextResponse.redirect(`${mcpPublicOrigin(req)}/d/${result.handoff.documentId}?embed=1`, { status: 302 });
   res.cookies.set(cookie);
   res.headers.set("Cache-Control", "no-store");

@@ -1,0 +1,1 @@
+ALTER TABLE "notification" ADD COLUMN "agent_targets" text[];

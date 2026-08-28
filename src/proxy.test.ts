@@ -7,7 +7,7 @@ process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.AUTH_SECRET_1;
 
 const { proxy } = await import("@/proxy");
-const { SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
+const { EMBED_SESSION_COOKIE, SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
 
 const OLD_SECRET = "old-secret-old-secret-old-secret-old";
 
@@ -100,6 +100,23 @@ describe("proxy: stale session cookie", () => {
     const res = await proxy(request(undefined, { authorization: "Bearer mdk_notasessiontoken" }));
     expect(setCookies(res)).toHaveLength(0);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("binds a valid embed session response to its canvas parent origin", async () => {
+    const token = await encode({
+      token: {
+        sub: "u1",
+        embedTokenId: "token-1",
+        embedDocumentId: "doc-1",
+        embedParentOrigin: "http://127.0.0.1:4749",
+      },
+      secret: process.env.AUTH_SECRET!,
+      salt: EMBED_SESSION_COOKIE,
+      maxAge: 300,
+    });
+    const res = await proxy(request(`${EMBED_SESSION_COOKIE}=${token}`));
+    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors http://127.0.0.1:4749");
+    expect(setCookies(res)).toHaveLength(0);
   });
 });
 

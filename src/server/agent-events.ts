@@ -41,7 +41,7 @@ export type AgentEvent =
   | { type: "comment.added" | "comment.replied" | "comment.resolved"; documentId: string; threadId: string | null; author: string; authorKind: string; body: string; quote: string | null; actor: EventActor; at: string }
   | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; replyId?: string; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
   | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; actor: EventActor; at: string }
-  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; actor: EventActor; at: string }
+  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; agents: string[]; actor: EventActor; at: string }
   | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; actor: EventActor; at: string }
   | { type: "activity"; documentId: string; action: string; actor: EventActor; actorName: string; actorKind: string; detail: Record<string, unknown>; at: string };
 
@@ -421,7 +421,8 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
       .limit(200);
     for (const m of mentions) {
       next.n = Math.max(next.n, m.createdAt.getTime());
-      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, agent: mentionedAgent(m.snippet, login), actor: mentionActor(m, user), at: m.createdAt.toISOString() });
+      const agents = m.agentTargets ?? parseAgentMentions(m.snippet).filter((mention) => mention.login === login).map((mention) => mention.agent);
+      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, agent: agents[0] ?? mentionedAgent(m.snippet, login), agents, actor: mentionActor(m, user), at: m.createdAt.toISOString() });
     }
   }
 
@@ -461,7 +462,8 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       .limit(200);
     for (const { n, title } of mentions) {
       next.n = Math.max(next.n, n.createdAt.getTime());
-      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: mentionedAgent(n.snippet, login), actor: mentionActor(n, user), at: n.createdAt.toISOString() });
+      const agents = n.agentTargets ?? parseAgentMentions(n.snippet).filter((mention) => mention.login === login).map((mention) => mention.agent);
+      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: agents[0] ?? mentionedAgent(n.snippet, login), agents, actor: mentionActor(n, user), at: n.createdAt.toISOString() });
     }
   }
 

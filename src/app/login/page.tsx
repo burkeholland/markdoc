@@ -3,6 +3,7 @@ import { GitHubIcon } from "@/components/ui/primitives";
 import { signIn, auth, devLoginEnabled, githubConfigured } from "@/auth";
 import { Logo } from "@/components/editor/header";
 import { loginReturnPath } from "./return-path";
+import { currentUser } from "@/server/http";
 
 export const metadata = { title: "Sign in" };
 
@@ -10,7 +11,12 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const session = await auth();
   const params = await searchParams;
   const next = loginReturnPath(params.next);
-  if (session?.user) redirect(next);
+  if (session?.user.embedDocumentId) {
+    const user = await currentUser();
+    if (user) redirect(`/d/${session.user.embedDocumentId}?embed=1`);
+  } else if (session?.user) {
+    redirect(next);
+  }
   const error = typeof params.error === "string" ? params.error : null;
 
   return (

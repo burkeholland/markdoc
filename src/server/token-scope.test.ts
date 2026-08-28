@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, vi } from "vitest";
+import { SignJWT } from "jose";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -18,7 +19,7 @@ vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument } = await import("@/server/documents");
-const { createApiToken } = await import("@/server/tokens");
+const { createApiToken, revokeApiToken } = await import("@/server/tokens");
 const { requireAccess, requireScope, scopeError, HttpError } = await import("@/server/http");
 const content = await import("@/app/api/documents/[id]/content/route");
 const comments = await import("@/app/api/documents/[id]/comments/route");
@@ -30,6 +31,13 @@ const duplicate = await import("@/app/api/documents/[id]/duplicate/route");
 const star = await import("@/app/api/documents/[id]/star/route");
 const me = await import("@/app/api/me/route");
 const tokens = await import("@/app/api/tokens/route");
+const collabToken = await import("@/app/api/documents/[id]/collab-token/route");
+const { verifyCollabToken } = await import("@/server/collab/token");
+const { resolveCollabAccess } = await import("@/server/collab/authorization");
+const { notify, listNotifications } = await import("@/server/notifications");
+const readAllNotifications = await import("@/app/api/notifications/read-all/route");
+const readThreadNotifications = await import("@/app/api/notifications/thread-read/route");
+const readNotification = await import("@/app/api/notifications/[id]/read/route");
 
 type Err = { error: string; scope?: string; requiredScope?: string };
 
@@ -107,6 +115,51 @@ describe("a read token", () => {
     const after = await as(readToken, () => content.GET(jsonReq(`/api/documents/${d1}/content`, "GET"), params(d1)));
     expect(((await after.json()) as { content: string }).content).toContain("Alpha");
   });
+
+  it("keeps collaboration claims read-scoped and invalidates them when the API token is revoked", async () => {
+    const created = await createApiToken(owner.id, "Socket reader", { scope: "read", documentIds: [d1] });
+    const response = await as(created.token, () => collabToken.POST(jsonReq(`/api/documents/${d1}/collab-token`, "POST"), params(d1)));
+    expect(response.status).toBe(200);
+    const signed = (await response.json()) as { token: string; role: string };
+    expect(signed.role).toBe("viewer");
+    const claims = await verifyCollabToken(signed.token);
+    expect(claims).toMatchObject({ version: 2, principal: "token", role: "viewer", tokenId: created.id, tokenScope: "read" });
+    expect(await resolveCollabAccess(claims)).toMatchObject({ role: "viewer", tokenId: created.id });
+    expect(await revokeApiToken(owner.id, created.id)).toBe(true);
+    expect(await resolveCollabAccess(claims)).toBeNull();
+  });
+
+  it("rejects unversioned collaboration credentials", async () => {
+    const legacy = await new SignJWT({
+      userId: owner.id,
+      docId: d1,
+      role: "owner",
+      name: owner.name,
+      login: owner.login,
+      avatar: null,
+    })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(owner.id)
+      .setAudience("markdoc-collab")
+      .setExpirationTime("1h")
+      .sign(new TextEncoder().encode(process.env.AUTH_SECRET!));
+    await expect(verifyCollabToken(legacy)).rejects.toThrow();
+  });
+
+  it("cannot change notification read state", async () => {
+    await notify({ userLogin: owner.login, documentId: d1, kind: "reply", actorLogin: "someone-else", refId: "read-token-note" });
+    const item = (await listNotifications(owner.login, { unread: true, limit: 100 })).items.find((notification) => notification.refId === "read-token-note")!;
+    expect((await as(readToken, () => readAllNotifications.POST())).status).toBe(403);
+    expect((await as(readToken, () => readNotification.POST(jsonReq(`/api/notifications/${item.id}/read`, "POST"), params(item.id)))).status).toBe(403);
+    expect(
+      (
+        await as(readToken, () =>
+          readThreadNotifications.POST(jsonReq("/api/notifications/thread-read", "POST", { documentId: d1, refIds: [item.refId] })),
+        )
+      ).status,
+    ).toBe(403);
+    expect((await listNotifications(owner.login, { unread: true, limit: 100 })).items.some((notification) => notification.refId === item.refId)).toBe(true);
+  });
 });
 
 describe("a comment token", () => {
@@ -163,6 +216,22 @@ describe("a token restricted to one document", () => {
     expect(copy.status).toBe(403);
     expect((await as(commentToken, () => star.PUT(jsonReq(`/api/documents/${d1}/star`, "PUT"), params(d1)))).status).toBe(200);
   });
+
+  it("cannot mark notifications from another document read", async () => {
+    await notify({ userLogin: owner.login, documentId: d1, kind: "reply", actorLogin: "someone-else", refId: "token-note-d1" });
+    await notify({ userLogin: owner.login, documentId: d2, kind: "reply", actorLogin: "someone-else", refId: "token-note-d2" });
+    expect((await as(d1Token, () => readAllNotifications.POST())).status).toBe(200);
+    const unread = await listNotifications(owner.login, { unread: true, limit: 100 });
+    expect(unread.items.some((item) => item.refId === "token-note-d1")).toBe(false);
+    expect(unread.items.some((item) => item.refId === "token-note-d2")).toBe(true);
+
+    const otherNotification = unread.items.find((item) => item.refId === "token-note-d2")!;
+    expect((await as(d1Token, () => readNotification.POST(jsonReq(`/api/notifications/${otherNotification.id}/read`, "POST"), params(otherNotification.id)))).status).toBe(404);
+    const otherThread = await as(d1Token, () =>
+      readThreadNotifications.POST(jsonReq("/api/notifications/thread-read", "POST", { documentId: d2, refIds: ["token-note-d2"] })),
+    );
+    expect(otherThread.status).toBe(404);
+  });
 });
 
 describe("GET /api/me", () => {
@@ -214,6 +283,13 @@ describe("POST /api/tokens", () => {
 
     const list = (await (await as(null, () => tokens.GET())).json()) as { tokens: { id: string; scope: string; documentIds: string[] | null }[] };
     expect(list.tokens.find((t) => t.id === body.token.id)).toMatchObject({ scope: "comment", documentIds: [d1] });
+  });
+
+  it("refuses active token names that collapse to the same mention slug", async () => {
+    expect((await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Canvas Name" })))).status).toBe(201);
+    const collision = await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Canvas-Name" })));
+    expect(collision.status).toBe(409);
+    expect(await collision.json()).toMatchObject({ error: expect.stringContaining("@mention name") });
   });
 });
 

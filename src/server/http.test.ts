@@ -17,6 +17,7 @@ const { apiLimiter, RATE_LIMITS, RateLimiter, callerKey, clientIp, routeClass, R
 const me = await import("@/app/api/me/route");
 const documents = await import("@/app/api/documents/route");
 const star = await import("@/app/api/documents/[id]/star/route");
+const { handler, json } = await import("@/server/http");
 
 const BASE = "http://localhost:3700";
 
@@ -73,6 +74,30 @@ describe("RateLimiter", () => {
     expect(limiter.take("write:k", limit).ok).toBe(false);
     now += 60_000;
     expect(limiter.take("write:k", limit)).toMatchObject({ ok: true, remaining: 29 });
+  });
+
+  describe("cross-site mutation protection", () => {
+    const write = handler(async (req: Request) => json({ ok: req.method === "POST" }));
+
+    it("rejects cookie-backed cross-site writes while allowing same-origin and bearer requests", async () => {
+      const crossSite = new Request(`${BASE}/api/test`, {
+        method: "POST",
+        headers: { origin: "https://attacker.example", "sec-fetch-site": "cross-site" },
+      });
+      expect((await write(crossSite)).status).toBe(403);
+
+      const sameOrigin = new Request(`${BASE}/api/test`, {
+        method: "POST",
+        headers: { origin: BASE, "sec-fetch-site": "same-origin" },
+      });
+      expect((await write(sameOrigin)).status).toBe(200);
+
+      const bearer = new Request(`${BASE}/api/test`, {
+        method: "POST",
+        headers: { authorization: "Bearer mdk_test", origin: "https://agent.example", "sec-fetch-site": "cross-site" },
+      });
+      expect((await write(bearer)).status).toBe(200);
+    });
   });
 
   it("sweeps idle buckets once a minute", () => {

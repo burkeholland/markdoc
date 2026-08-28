@@ -59,5 +59,17 @@ describe("api tokens", () => {
     const { eq } = await import("drizzle-orm");
     await db.update(schema.apiTokens).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(schema.apiTokens.id, expired.id));
     expect(await resolveApiToken(expired.token)).toBeNull();
+    await expect(createApiToken(userId, "old")).resolves.toMatchObject({ name: "old" });
+  });
+
+  it("atomically reserves normalized mention names and releases them on revocation", async () => {
+    const results = await Promise.allSettled([
+      createApiToken(userId, "Concurrent Canvas"),
+      createApiToken(userId, "Concurrent-Canvas"),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+    const winner = results.find((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof createApiToken>>> => result.status === "fulfilled")!.value;
+    expect(await revokeApiToken(userId, winner.id)).toBe(true);
+    await expect(createApiToken(userId, "Concurrent Canvas")).resolves.toMatchObject({ name: "Concurrent Canvas" });
   });
 });

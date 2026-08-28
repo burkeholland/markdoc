@@ -7,6 +7,7 @@ import { TokensPanel } from "@/components/settings/tokens-panel";
 import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { listRequestsForUser } from "@/server/agent-requests";
+import { currentUser } from "@/server/http";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
@@ -14,6 +15,10 @@ export const dynamic = "force-dynamic";
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ next?: string | string[] }> }) {
   const session = await auth();
   if (!session?.user?.id) redirect("/login?next=/settings");
+  if (session.user.embedDocumentId) {
+    const user = await currentUser();
+    redirect(user ? `/d/${session.user.embedDocumentId}?embed=1` : "/login");
+  }
   const origin = process.env.AUTH_URL?.replace(/\/$/, "") ?? "";
   const rawNext = (await searchParams).next;
   const nextParam = Array.isArray(rawNext) ? rawNext[0] : rawNext;

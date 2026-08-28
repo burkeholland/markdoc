@@ -1,9 +1,9 @@
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { EditorShell } from "@/components/editor/editor-shell";
-import { currentUser } from "@/server/http";
+import { currentUser, getEffectiveDocumentAccess } from "@/server/http";
 import { githubConfigured } from "@/auth";
-import { getDocumentAccess, getGitHubToken } from "@/server/documents";
+import { getGitHubToken } from "@/server/documents";
 import { publicDocument } from "@/server/dto";
 import { readLiveText } from "@/server/livedoc";
 import { renderMarkdownBody } from "@/server/export/html";
@@ -13,14 +13,15 @@ export const dynamic = "force-dynamic";
 export async function generateMetadata({ params }: PageProps<"/d/[id]">): Promise<Metadata> {
   const { id } = await params;
   const user = await currentUser();
-  const access = await getDocumentAccess(id, user);
+  const access = await getEffectiveDocumentAccess(id, user);
   return { title: access?.doc.title ?? "Document" };
 }
 
-export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
+export default async function DocumentPage({ params, searchParams }: PageProps<"/d/[id]">) {
   const { id } = await params;
   const user = await currentUser();
-  const access = await getDocumentAccess(id, user);
+  const embed = Boolean(user?.embedDocumentId) || (await searchParams).embed === "1";
+  const access = await getEffectiveDocumentAccess(id, user);
   if (!access) {
     if (!user) redirect(`/login?next=${encodeURIComponent(`/d/${id}`)}`);
     notFound();
@@ -41,6 +42,7 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
       githubAvailable={githubAvailable}
       githubConfigured={githubConfigured}
       initialHtml={initialHtml}
+      embed={embed}
     />
   );
 }

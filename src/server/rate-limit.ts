@@ -152,7 +152,7 @@ export function callerKey(headers: Headers): string {
   }
   const cookie = headers.get("cookie");
   if (cookie) {
-    const session = cookie.split(";").map((c) => c.trim()).find((c) => /^(__Secure-)?authjs\.session-token(\.\d+)?=/.test(c));
+    const session = cookie.split(";").map((c) => c.trim()).find((c) => /^((__Secure-)?authjs\.session-token|(__Secure-)?markdoc\.embed-session)(\.\d+)?=/.test(c));
     if (session) return `ses:${shortHash(session.slice(session.indexOf("=") + 1))}`;
   }
   return `ip:${clientIp(headers)}`;

@@ -62,6 +62,8 @@ export interface EditorShellProps {
   githubAvailable: boolean;
   /** The server has a GitHub OAuth app; without it the GitHub entry points are disabled (#162). */
   githubConfigured: boolean;
+  /** Canvas mode keeps editing controls but removes navigation and account/share menus. */
+  embed?: boolean;
   /**
    * Server-rendered HTML of the document, shown in the rich column until the editor holds the
    * live text, so a long document is readable as soon as the page loads (issue #118). Null when
@@ -81,7 +83,7 @@ type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
 
-export function EditorShell({ doc: initialDoc, role, user, githubAvailable, githubConfigured, initialHtml = null }: EditorShellProps) {
+export function EditorShell({ doc: initialDoc, role, user, githubAvailable, githubConfigured, initialHtml = null, embed = false }: EditorShellProps) {
   const router = useRouter();
   const session = useCollabSession(initialDoc.id, user, role);
   const [doc, setDoc] = useState(initialDoc);
@@ -706,6 +708,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
     session: { canEdit: session.canEdit, canComment: session.canComment, mode: session.mode, canChangeMode, setMode: (m) => session.setMode(m) },
     doc,
     isOwner,
+    embed,
     slashWhere: { inTable: format.tablePos >= 0, canComment: session.canComment },
     setDialog,
     openLink,
@@ -906,6 +909,7 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
           onCancelRequest={cancelAgentRequest}
           onCreateToken={goCreateToken}
           keepAgentNonce={keepAgentNonce}
+          embed={embed}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onAskAgent={openAskAgent} onImage={openImage} onTable={openTable} />
         {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onAskAgent={openAskAgent} onComment={focusCommentComposer} />}
@@ -1057,14 +1061,18 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
           onSyncScroll={setSyncScroll}
           onIssueSelect={onIssueSelect}
           onShortcuts={openShortcuts}
-          onStorage={openStorage}
+          onStorage={embed ? undefined : openStorage}
           compact={isPhone}
         />
 
-        <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
-        <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} />
-        <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
-        <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />
+        {!embed && (
+          <>
+            <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
+            <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} />
+            <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
+            <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />
+          </>
+        )}
         <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />
         <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />
         <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />
@@ -1123,9 +1131,6 @@ export function EditorShell({ doc: initialDoc, role, user, githubAvailable, gith
     </TooltipProvider>
   );
 }
-
-
-
 
 
 

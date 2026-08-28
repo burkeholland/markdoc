@@ -5,6 +5,10 @@ import { mcpPublicOrigin } from "@/server/mcp-origin";
 
 const schema = z.object({
   documentId: z.string().min(1).max(64),
+  parentOrigin: z.string().url().refine((value) => {
+    const url = new URL(value);
+    return value === url.origin && (url.protocol === "http:" || url.protocol === "https:");
+  }, "parentOrigin must be an HTTP(S) origin"),
 });
 
 /**
@@ -15,10 +19,10 @@ const schema = z.object({
  * 60 s (`GET /embed/:nonce` → `410` afterwards). Spends the token's write budget like other routes.
  */
 export const POST = handler(async (req: Request) => {
-  const { documentId } = await readJson(req, (d) => schema.parse(d));
+  const { documentId, parentOrigin } = await readJson(req, (d) => schema.parse(d));
   const { user } = await requireAccess(documentId, "view");
-  if (!user?.agent) throw new HttpError(403, "This endpoint is for API tokens (agents). Create one at /settings");
-  const { nonce, expiresAt } = createHandoff(user.id, documentId);
+  if (!user?.agent || !user.tokenId) throw new HttpError(403, "This endpoint is for API tokens (agents). Create one at /settings");
+  const { nonce, expiresAt } = createHandoff(user.id, documentId, user.tokenId, parentOrigin);
   const url = `${mcpPublicOrigin(req)}/embed/${nonce}`;
   return json({ url, documentId, expiresAt: new Date(expiresAt).toISOString(), ttlMs: HANDOFF_TTL_MS }, { status: 201 });
 });

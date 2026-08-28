@@ -1,0 +1,16 @@
+{
+  "name": "markdoc-copilot-canvas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "extension.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test extension.test.mjs"
+  },
+  "devDependencies": {
+    "@github/copilot-sdk": "^1.0.1"
+  }
+}

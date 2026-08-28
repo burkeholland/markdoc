@@ -28,7 +28,7 @@ export interface StatusBarProps {
   onSyncScroll: (on: boolean) => void;
   onIssueSelect: (issue: LintIssue) => void;
   onShortcuts: () => void;
-  onStorage: () => void;
+  onStorage?: () => void;
   /** Phone: word count · storage · ⋯ menu (layout, wrap, sync scrolling and theme live inside). */
   compact?: boolean;
 }
@@ -59,6 +59,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
           type="button"
           className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink"
           onClick={onStorage}
+          disabled={!onStorage}
           title={doc.storage === "repo" ? `${doc.repoOwner}/${doc.repoName}: ${doc.repoPath}` : doc.storage === "gist" ? `Gist ${doc.gistId}` : "Stored in Markdoc"}
           data-testid="storage-indicator"
         >
@@ -181,6 +182,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         type="button"
         className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink"
         onClick={onStorage}
+        disabled={!onStorage}
         title={doc.storage === "repo" ? `${doc.repoOwner}/${doc.repoName}: ${doc.repoPath}` : doc.storage === "gist" ? `Gist ${doc.gistId}` : "Stored in Markdoc"}
         data-testid="storage-indicator"
       >
@@ -197,6 +199,5 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     </footer>
   );
 });
-
 
 

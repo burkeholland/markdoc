@@ -9,6 +9,8 @@ import { decode, encode, getToken } from "next-auth/jwt";
 
 export const SESSION_COOKIE = "authjs.session-token";
 export const SECURE_SESSION_COOKIE = `__Secure-${SESSION_COOKIE}`;
+export const EMBED_SESSION_COOKIE = "markdoc.embed-session";
+export const SECURE_EMBED_SESSION_COOKIE = `__Secure-${EMBED_SESSION_COOKIE}`;
 
 /** The one line logged for a stale cookie; no stack trace — it is the browser's state, not a server fault. */
 export const STALE_SESSION_MESSAGE = "session cookie signed with an old secret — cleared";
@@ -97,8 +99,7 @@ export function clearingCookie(name: string, secure: boolean) {
   return { name, value: "", path: "/", maxAge: 0, expires: new Date(0), httpOnly: true, sameSite: "lax" as const, secure };
 }
 
-/** Auth.js's default session lifetime (30 days), also the `exp` of the minted JWT. */
-export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
+export const EMBED_SESSION_MAX_AGE_S = 5 * 60;
 
 /** The user fields Auth.js's `jwt` callback puts in the session token (see `src/auth.ts`). */
 export interface SessionCookieUser {
@@ -107,24 +108,86 @@ export interface SessionCookieUser {
   name: string | null;
   email?: string | null;
   image: string | null;
+  /** Present only for a token-backed embed session. */
+  embedTokenId?: string;
+  /** The only document that token-backed session may access. */
+  embedDocumentId?: string;
+  /** The loopback canvas origin allowed to frame this session. */
+  embedParentOrigin?: string;
+}
+
+export interface EmbedSessionClaims {
+  userId: string;
+  login: string | null;
+  name: string | null;
+  image: string | null;
+  tokenId: string;
+  documentId: string;
+  parentOrigin: string;
 }
 
 /**
- * Mint the session cookie Auth.js would set after a sign-in for `user`: the same JWE, secret, salt
- * (the cookie name) and attributes, so `auth()` reads it like any other session. Used by the embed
- * handoff (`GET /embed/:nonce`), where an API token — not GitHub OAuth — has already identified the
- * user. `secure` picks the `__Secure-` cookie Auth.js uses on https.
+ * Mint a short-lived JWE in a dedicated cookie that Auth.js does not treat as the user's primary
+ * session. The API layer decodes it explicitly and reapplies the backing token's live restrictions.
  */
-export async function mintSessionCookie(user: SessionCookieUser, secure: boolean, secrets: string[] = sessionSecrets(), maxAge = SESSION_MAX_AGE_S) {
+export async function mintSessionCookie(user: SessionCookieUser, secure: boolean, secrets: string[] = sessionSecrets(), maxAge = EMBED_SESSION_MAX_AGE_S) {
   if (secrets.length === 0) throw new Error("AUTH_SECRET is not configured");
-  const name = secure ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
+  if (!user.embedTokenId || !user.embedDocumentId || !user.embedParentOrigin) throw new Error("Embed session claims are required");
+  const name = secure ? SECURE_EMBED_SESSION_COOKIE : EMBED_SESSION_COOKIE;
   const value = await encode({
-    token: { sub: user.id, login: user.login, name: user.name, email: user.email ?? null, picture: user.image },
+    token: {
+      sub: user.id,
+      login: user.login,
+      name: user.name,
+      email: user.email ?? null,
+      picture: user.image,
+      embedTokenId: user.embedTokenId,
+      embedDocumentId: user.embedDocumentId,
+      embedParentOrigin: user.embedParentOrigin,
+    },
     secret: secrets,
     salt: name,
     maxAge,
   });
-  return { name, value, path: "/", maxAge, httpOnly: true, sameSite: "lax" as const, secure };
+  return { name, value, path: "/", maxAge, httpOnly: true, sameSite: secure ? ("none" as const) : ("lax" as const), secure, partitioned: secure };
+}
+
+/** Decode the dedicated canvas cookie without exposing it to Auth.js as the user's primary session. */
+export async function decodeEmbedSession(cookieHeader: string | null | undefined, secrets: string[] = sessionSecrets()): Promise<EmbedSessionClaims | null> {
+  if (!cookieHeader || secrets.length === 0) return null;
+  for (const [name, secure] of [
+    [SECURE_EMBED_SESSION_COOKIE, true],
+    [EMBED_SESSION_COOKIE, false],
+  ] as const) {
+    const raw = await getToken({ req: { headers: { cookie: cookieHeader } }, cookieName: name, secureCookie: secure, salt: name, secret: secrets, raw: true });
+    if (!raw) continue;
+    try {
+      const payload = await decode({ token: raw, secret: secrets, salt: name });
+      if (
+        !payload
+        || typeof payload.sub !== "string"
+        || typeof payload.embedTokenId !== "string"
+        || typeof payload.embedDocumentId !== "string"
+        || typeof payload.embedParentOrigin !== "string"
+        || typeof payload.exp !== "number"
+        || payload.exp <= Math.floor(Date.now() / 1000)
+      ) {
+        continue;
+      }
+      return {
+        userId: payload.sub,
+        login: typeof payload.login === "string" ? payload.login : null,
+        name: typeof payload.name === "string" ? payload.name : null,
+        image: typeof payload.picture === "string" ? payload.picture : null,
+        tokenId: payload.embedTokenId,
+        documentId: payload.embedDocumentId,
+        parentOrigin: payload.embedParentOrigin,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /**
