@@ -6,8 +6,10 @@ import {
   CommitOutcomeUnknownError,
   createPostgresClientConfig,
   createPostgresDestination,
+  DestinationTlsVerificationError,
   MigrationCommittedManifestError,
   type MigrationManifest,
+  POSTGRES_TLS_VERIFICATION_QUERY,
   type PostgresClient,
   type PostgresClientFactory,
   type TransactionalConnection,
@@ -28,6 +30,7 @@ class FakePostgresClient implements PostgresClient {
   connected = false;
   ended = false;
   failures = new Map<string, Error>();
+  tlsRows: Record<string, unknown>[] = [{ ssl: true }];
 
   async connect(): Promise<void> {
     this.connected = true;
@@ -37,6 +40,7 @@ class FakePostgresClient implements PostgresClient {
     this.queries.push(text);
     const failure = this.failures.get(text);
     if (failure) throw failure;
+    if (text === POSTGRES_TLS_VERIFICATION_QUERY) return { rows: this.tlsRows };
     return { rows: [] };
   }
 
@@ -65,7 +69,7 @@ describe("PostgreSQL migration destination", () => {
         return "committed";
       }),
     ).resolves.toBe("committed");
-    expect(client.queries).toEqual(["BEGIN", "SELECT $1::text", "COMMIT"]);
+    expect(client.queries).toEqual([POSTGRES_TLS_VERIFICATION_QUERY, "BEGIN", "SELECT $1::text", "COMMIT"]);
 
     await destination.close();
     expect(client.ended).toBe(true);
@@ -74,12 +78,41 @@ describe("PostgreSQL migration destination", () => {
   it.each([
     "postgresql://database.internal/fixture",
     "postgresql://database.internal/fixture?sslmode=disable",
+    "postgresql://database.internal/fixture?sslmode=require&ssl=0",
+    "postgresql://database.internal/fixture?sslmode=require&sslmode=require",
+    "postgresql://database.internal/fixture?sslmode=require&sslrootcert=certificate.pem",
     "https://database.internal/fixture?sslmode=require",
     "not a URL",
   ])("refuses a destination that cannot prove required PostgreSQL TLS: %s", async (url) => {
     const factory = vi.fn<PostgresClientFactory>();
     await expect(createPostgresDestination(url, factory)).rejects.toThrow(/PostgreSQL URL|sslmode=require/);
     expect(factory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "plaintext", rows: [{ ssl: false }] },
+    { name: "missing", rows: [] },
+  ])("closes a connected $name backend before any schema or data access", async ({ rows }) => {
+    const client = new FakePostgresClient();
+    client.tlsRows = rows;
+
+    await expect(createPostgresDestination(destinationUrl, () => client)).rejects.toBeInstanceOf(
+      DestinationTlsVerificationError,
+    );
+    expect(client.connected).toBe(true);
+    expect(client.ended).toBe(true);
+    expect(client.queries).toEqual([POSTGRES_TLS_VERIFICATION_QUERY]);
+  });
+
+  it("closes a connection when runtime TLS verification cannot be queried", async () => {
+    const client = new FakePostgresClient();
+    client.failures.set(POSTGRES_TLS_VERIFICATION_QUERY, new Error("pg_stat_ssl unavailable"));
+
+    await expect(createPostgresDestination(destinationUrl, () => client)).rejects.toThrow(
+      /TLS could not be verified after connect; migration was not started/,
+    );
+    expect(client.ended).toBe(true);
+    expect(client.queries).toEqual([POSTGRES_TLS_VERIFICATION_QUERY]);
   });
 
   it("rolls back a failed callback and preserves its original error", async () => {
@@ -93,7 +126,12 @@ describe("PostgreSQL migration destination", () => {
         throw injected;
       }),
     ).rejects.toBe(injected);
-    expect(client.queries).toEqual(["BEGIN", "UPDATE document SET title = 'changed'", "ROLLBACK"]);
+    expect(client.queries).toEqual([
+      POSTGRES_TLS_VERIFICATION_QUERY,
+      "BEGIN",
+      "UPDATE document SET title = 'changed'",
+      "ROLLBACK",
+    ]);
   });
 
   it("reports both the operation and rollback errors", async () => {
@@ -109,7 +147,7 @@ describe("PostgreSQL migration destination", () => {
 
     expect(failure).toBeInstanceOf(AggregateError);
     expect((failure as AggregateError).errors).toHaveLength(2);
-    expect(client.queries).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(client.queries).toEqual([POSTGRES_TLS_VERIFICATION_QUERY, "BEGIN", "ROLLBACK"]);
   });
 
   it("classifies an unconfirmed write COMMIT without attempting rollback", async () => {
@@ -118,7 +156,7 @@ describe("PostgreSQL migration destination", () => {
     const destination = await createPostgresDestination(destinationUrl, () => client);
 
     await expect(destination.transaction(async () => "written")).rejects.toBeInstanceOf(CommitOutcomeUnknownError);
-    expect(client.queries).toEqual(["BEGIN", "COMMIT"]);
+    expect(client.queries).toEqual([POSTGRES_TLS_VERIFICATION_QUERY, "BEGIN", "COMMIT"]);
   });
 
   it("does not classify a read-only COMMIT failure as an unknown write outcome", async () => {
@@ -129,7 +167,7 @@ describe("PostgreSQL migration destination", () => {
     const failure = await destination.transaction(async () => "read", { readOnly: true }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(CommitOutcomeUnknownError);
-    expect(client.queries).toEqual(["BEGIN", "COMMIT"]);
+    expect(client.queries).toEqual([POSTGRES_TLS_VERIFICATION_QUERY, "BEGIN", "COMMIT"]);
   });
 });
 
@@ -260,6 +298,29 @@ describe("migration CLI", () => {
     expect(closeExitCode).toBe(4);
     expect(closeOutput.errors[0]).toMatch(/committed and verified.*did not close cleanly/);
     expect(closeOutput.errors[0]).not.toContain("fixture-password");
+  });
+
+  it("reports runtime TLS rejection without logging destination credentials or running migration", async () => {
+    const output = recordingOutput();
+    const client = new FakePostgresClient();
+    client.tlsRows = [{ ssl: false }];
+    const migrate = vi.fn();
+
+    const exitCode = await runMain(argv, {
+      environment: { NODE_ENV: "test", TEST_DATABASE_URL: destinationUrl },
+      connect: (url) => createPostgresDestination(url, () => client),
+      migrate,
+      output,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(migrate).not.toHaveBeenCalled();
+    expect(client.ended).toBe(true);
+    expect(output.logs).toEqual([]);
+    expect(output.errors).toHaveLength(1);
+    expect(output.errors[0]).toMatch(/failed before commit.*TLS was not reported as encrypted/);
+    expect(output.errors[0]).not.toContain(destinationUrl);
+    expect(output.errors[0]).not.toContain(new URL(destinationUrl).password);
   });
 
   it("redacts PostgreSQL URLs without exposing encoded credentials", () => {

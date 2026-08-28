@@ -36,6 +36,9 @@ export interface PostgresClient {
 
 export type PostgresClientFactory = (config: ClientConfig) => PostgresClient;
 
+export const POSTGRES_TLS_VERIFICATION_QUERY =
+  "SELECT ssl FROM pg_catalog.pg_stat_ssl WHERE pid = pg_backend_pid()";
+
 export const APPLICATION_TABLES = [
   "account",
   "activity",
@@ -152,6 +155,16 @@ export class CommitOutcomeUnknownError extends Error {
   }
 }
 
+export class DestinationTlsVerificationError extends Error {
+  readonly cause: unknown;
+
+  constructor(reason: string, cause?: unknown) {
+    super(`Destination PostgreSQL TLS ${reason}; migration was not started`);
+    this.name = "DestinationTlsVerificationError";
+    this.cause = cause;
+  }
+}
+
 export interface MigrationHooks {
   afterTable?: (table: string) => Promise<void> | void;
 }
@@ -190,6 +203,15 @@ export async function createPostgresDestination(
 ): Promise<TransactionalConnection> {
   const client = createClient(createPostgresClientConfig(connectionString));
   await client.connect();
+  let tlsRows: SqlRow[] | undefined;
+  try {
+    ({ rows: tlsRows } = await client.query(POSTGRES_TLS_VERIFICATION_QUERY));
+  } catch (error) {
+    await closeUnverifiedPostgresClient(client, "could not be verified after connect", error);
+  }
+  if (tlsRows?.length !== 1 || tlsRows[0]?.ssl !== true) {
+    await closeUnverifiedPostgresClient(client, "was not reported as encrypted after connect");
+  }
   const connection = createPgQuery(client);
 
   return {
@@ -900,15 +922,38 @@ export function createPostgresClientConfig(connectionString: string): ClientConf
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
     throw new Error("Destination URL is not a valid PostgreSQL URL");
   }
-  if (url.searchParams.get("sslmode") !== "require") {
-    throw new Error("Destination URL must include sslmode=require; plaintext PostgreSQL connections are refused");
+  const tlsParameters = [...url.searchParams.entries()].filter(([name]) => name.toLowerCase().startsWith("ssl"));
+  if (
+    tlsParameters.length !== 1 ||
+    tlsParameters[0][0].toLowerCase() !== "sslmode" ||
+    tlsParameters[0][1] !== "require"
+  ) {
+    throw new Error(
+      "Destination URL must contain exactly sslmode=require and no other ssl* options; plaintext PostgreSQL connections are refused",
+    );
   }
-  // node-postgres otherwise lets the URL's sslmode overwrite the explicit private-IP TLS policy below.
-  url.searchParams.delete("sslmode");
+  url.searchParams.delete(tlsParameters[0][0]);
   return {
     connectionString: url.toString(),
     ssl: { rejectUnauthorized: false },
   };
+}
+
+async function closeUnverifiedPostgresClient(
+  client: PostgresClient,
+  reason: string,
+  verificationError?: unknown,
+): Promise<never> {
+  try {
+    await client.end();
+  } catch (closeError) {
+    const errors = verificationError === undefined ? [closeError] : [verificationError, closeError];
+    throw new DestinationTlsVerificationError(
+      `${reason}, and the unverified connection did not close cleanly`,
+      new AggregateError(errors, "PostgreSQL TLS verification and connection close failed"),
+    );
+  }
+  throw new DestinationTlsVerificationError(reason, verificationError);
 }
 
 function createNodePostgresClient(config: ClientConfig): PostgresClient {

@@ -72,6 +72,10 @@ describePostgres("PGlite to PostgreSQL 16 CLI integration", () => {
 
   it("migrates, verifies, refuses, detects corruption, and rolls replacement back over TLS", async () => {
     const url = integrationUrl();
+    const downgradeUrl = new URL(url);
+    downgradeUrl.searchParams.append("ssl", "0");
+    await expect(createPostgresDestination(downgradeUrl.toString())).rejects.toThrow(/no other ssl\* options/);
+
     const migrateManifestPath = path.join(root, "migrate-manifest.json");
     const migration = await runCliProcess(baseArguments("restore-migrate", migrateManifestPath), url);
     assertSecretFree(migration, url);
@@ -220,6 +224,8 @@ describePostgres("PGlite to PostgreSQL 16 CLI integration", () => {
             postgresVersion,
             serverVersionNumber,
             ssl: true,
+            runtimeTlsVerifiedBeforeAccess: true,
+            tlsDowngradeRejectedBeforeConnect: true,
             tlsContract: "sslmode=require encryption on a private-IP endpoint; certificate identity is not validated",
             manifest: {
               tables: manifest.totals.tables,
