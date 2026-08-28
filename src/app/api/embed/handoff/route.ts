@@ -2,6 +2,7 @@ import { z } from "zod";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { createHandoff, HANDOFF_TTL_MS } from "@/server/embed-handoff";
 import { mcpPublicOrigin } from "@/server/mcp-origin";
+import { EMBED_SESSION_MAX_AGE_S } from "@/server/session-cookie";
 
 const schema = z.object({
   documentId: z.string().min(1).max(64),
@@ -24,7 +25,16 @@ export const POST = handler(async (req: Request) => {
   if (!user?.agent || !user.tokenId) throw new HttpError(403, "This endpoint is for API tokens (agents). Create one at /settings");
   const { nonce, expiresAt } = createHandoff(user.id, documentId, user.tokenId, parentOrigin);
   const url = `${mcpPublicOrigin(req)}/embed/${nonce}`;
-  return json({ url, documentId, expiresAt: new Date(expiresAt).toISOString(), ttlMs: HANDOFF_TTL_MS }, { status: 201 });
+  return json(
+    {
+      url,
+      documentId,
+      expiresAt: new Date(expiresAt).toISOString(),
+      ttlMs: HANDOFF_TTL_MS,
+      sessionTtlMs: EMBED_SESSION_MAX_AGE_S * 1000,
+    },
+    { status: 201 },
+  );
 });
 
 export const dynamic = "force-dynamic";

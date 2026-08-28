@@ -26,8 +26,15 @@ const { createApiToken } = await import("@/server/tokens");
 const { revokeApiToken } = await import("@/server/tokens");
 const { apiLimiter } = await import("@/server/rate-limit");
 const handoffs = await import("@/server/embed-handoff");
-const { EMBED_SESSION_COOKIE, SESSION_COOKIE } = await import("@/server/session-cookie");
+const {
+  EMBED_SESSION_COOKIE,
+  EMBED_SESSION_MAX_AGE_S,
+  SESSION_COOKIE,
+  mintSessionCookie,
+} = await import("@/server/session-cookie");
+const { embeddedDocumentPath } = await import("@/server/http");
 const { POST } = await import("./route");
+const { POST: RENEW } = await import("@/app/api/embed/session/route");
 const { GET } = await import("@/app/embed/[nonce]/route");
 const { GET: GET_ME } = await import("@/app/api/me/route");
 const { GET: GET_TOKENS } = await import("@/app/api/tokens/route");
@@ -93,9 +100,15 @@ describe("canvas embed handoff", () => {
     const response = await create(token, documentId);
     expect(response.status).toBe(201);
     expect(response.headers.get("X-RateLimit-Limit")).not.toBeNull();
-    const body = (await response.json()) as { url: string; documentId: string; ttlMs: number };
+    const body = (await response.json()) as {
+      url: string;
+      documentId: string;
+      ttlMs: number;
+      sessionTtlMs: number;
+    };
     expect(body.documentId).toBe(documentId);
     expect(body.ttlMs).toBe(60_000);
+    expect(body.sessionTtlMs).toBe(EMBED_SESSION_MAX_AGE_S * 1000);
     expect(new URL(body.url).origin).toBe(BASE);
   });
 
@@ -122,6 +135,7 @@ describe("canvas embed handoff", () => {
     const identity = await GET_ME();
     expect(await identity.json()).toMatchObject({ agent: "Copilot app", scope: "comment", documentIds: [documentId] });
     expect((await GET_TOKENS()).status).toBe(403);
+    expect(await embeddedDocumentPath(null)).toBe(`/d/${documentId}?embed=1`);
 
     const replay = await GET(frameRequest(nonce), context(nonce));
     expect(replay.status).toBe(410);
@@ -159,5 +173,61 @@ describe("canvas embed handoff", () => {
     requestHeaders = new Headers({ cookie: `${EMBED_SESSION_COOKIE}=${encodeURIComponent(encoded)}` });
     authSession = { user: { id: other.id, login: other.login, name: "Other owner", image: null } };
     expect(await (await GET_ME()).json()).toMatchObject({ user: { id: other.id }, agent: null });
+    expect(await embeddedDocumentPath(other.id)).toBeNull();
+  });
+
+  it("renews a live embed session and refuses renewal after token revocation", async () => {
+    const revocable = await createApiToken(owner.id, "Renewable Copilot app", {
+      scope: "comment",
+      documentIds: [documentId],
+    });
+    const { nonce } = handoffs.createHandoff(owner.id, documentId, revocable.id, PARENT);
+    const opened = await GET(frameRequest(nonce), context(nonce));
+    const encoded = cookieValue(opened, EMBED_SESSION_COOKIE);
+    requestHeaders = new Headers({ cookie: `${EMBED_SESSION_COOKIE}=${encodeURIComponent(encoded)}` });
+    const renewRequest = () => new Request(`${BASE}/api/embed/session`, {
+      method: "POST",
+      headers: { origin: BASE },
+    });
+
+    const renewed = await RENEW(renewRequest());
+    expect(renewed.status).toBe(200);
+    expect(await renewed.json()).toMatchObject({ ttlMs: EMBED_SESSION_MAX_AGE_S * 1000 });
+    expect(cookieValue(renewed, EMBED_SESSION_COOKIE)).not.toBe(encoded);
+
+    expect(await revokeApiToken(owner.id, revocable.id)).toBe(true);
+    const refused = await RENEW(renewRequest());
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({ reason: "embed_access_revoked" });
+  });
+
+  it("refuses renewal once the dedicated embed session has expired", async () => {
+    const cookie = await mintSessionCookie(
+      {
+        id: owner.id,
+        login: owner.login,
+        name: "Embed owner",
+        image: null,
+        embedTokenId: tokenId,
+        embedDocumentId: documentId,
+        embedParentOrigin: PARENT,
+      },
+      false,
+      [process.env.AUTH_SECRET!],
+      1,
+    );
+    requestHeaders = new Headers({ cookie: `${cookie.name}=${encodeURIComponent(cookie.value)}` });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2_000);
+    try {
+      const response = await RENEW(new Request(`${BASE}/api/embed/session`, {
+        method: "POST",
+        headers: { origin: BASE },
+      }));
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({ reason: "embed_session_expired" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

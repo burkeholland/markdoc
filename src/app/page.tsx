@@ -8,17 +8,14 @@ import { GitHubIcon } from "@/components/ui/primitives";
 import { Dashboard } from "@/components/dashboard/dashboard";
 import { getGitHubToken, listDocumentsForUser } from "@/server/documents";
 import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, isDashboardSort } from "@/lib/dashboard-sort";
-import { currentUser } from "@/server/http";
+import { embeddedDocumentPath } from "@/server/http";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const session = await auth();
-  if (session?.user.embedDocumentId) {
-    const user = await currentUser();
-    if (user) redirect(`/d/${session.user.embedDocumentId}?embed=1`);
-    return <Landing />;
-  }
+  const embedPath = await embeddedDocumentPath(session?.user?.id);
+  if (embedPath) redirect(embedPath);
   if (session?.user?.id) {
     const user = { id: session.user.id, login: session.user.login ?? null, name: session.user.name ?? null, image: session.user.image ?? null };
     const [docs, token, cookieStore] = await Promise.all([listDocumentsForUser(user), getGitHubToken(user.id), cookies()]);
@@ -95,4 +92,3 @@ function Landing() {
     </main>
   );
 }
-

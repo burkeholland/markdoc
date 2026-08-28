@@ -162,6 +162,9 @@ export type SearchResultDto = Omit<SearchResult, "updatedAt" | "createdAt" | "la
 };
 
 export const api = {
+  embed: {
+    renewSession: () => request<{ expiresAt: string; ttlMs: number }>("/api/embed/session", { method: "POST" }),
+  },
   documents: {
     list: (opts: { starred?: boolean; trash?: boolean } = {}) =>
       request<{ documents: DocumentSummaryDto[] }>(`/api/documents${opts.trash ? "?trash=1" : opts.starred ? "?starred=1" : ""}`),

@@ -17,10 +17,10 @@ export async function generateMetadata({ params }: PageProps<"/d/[id]">): Promis
   return { title: access?.doc.title ?? "Document" };
 }
 
-export default async function DocumentPage({ params, searchParams }: PageProps<"/d/[id]">) {
+export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
   const { id } = await params;
   const user = await currentUser();
-  const embed = Boolean(user?.embedDocumentId) || (await searchParams).embed === "1";
+  const embed = user?.embedDocumentId === id;
   const access = await getEffectiveDocumentAccess(id, user);
   if (!access) {
     if (!user) redirect(`/login?next=${encodeURIComponent(`/d/${id}`)}`);
@@ -43,6 +43,8 @@ export default async function DocumentPage({ params, searchParams }: PageProps<"
       githubConfigured={githubConfigured}
       initialHtml={initialHtml}
       embed={embed}
+      embedParentOrigin={user?.embedParentOrigin}
+      embedSessionExpiresAt={user?.embedSessionExpiresAt}
     />
   );
 }

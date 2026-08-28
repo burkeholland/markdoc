@@ -98,6 +98,48 @@ describe("RateLimiter", () => {
       });
       expect((await write(bearer)).status).toBe(200);
     });
+
+    it("uses the browser-facing host and protocol behind LAN and HTTPS proxies", async () => {
+      for (const request of [
+        new Request("http://127.0.0.1:3200/api/test", {
+          method: "POST",
+          headers: {
+            host: "SURF:3200",
+            origin: "http://surf:3200",
+            "x-forwarded-host": "SURF:3200",
+          },
+        }),
+        new Request("http://127.0.0.1:3200/api/test", {
+          method: "POST",
+          headers: {
+            host: "SURF.local:3200",
+            origin: "http://surf.local:3200",
+            "x-forwarded-host": "SURF.local:3200",
+          },
+        }),
+        new Request("http://127.0.0.1:3200/api/test", {
+          method: "POST",
+          headers: {
+            origin: "https://markdoc.example",
+            "x-forwarded-host": "markdoc.example",
+            "x-forwarded-proto": "https",
+          },
+        }),
+      ]) {
+        expect((await write(request)).status).toBe(200);
+      }
+
+      const spoofedSameSite = new Request("http://127.0.0.1:3200/api/test", {
+        method: "POST",
+        headers: {
+          origin: "https://attacker.example",
+          "sec-fetch-site": "same-origin",
+          "x-forwarded-host": "markdoc.example",
+          "x-forwarded-proto": "https",
+        },
+      });
+      expect((await write(spoofedSameSite)).status).toBe(403);
+    });
   });
 
   it("sweeps idle buckets once a minute", () => {

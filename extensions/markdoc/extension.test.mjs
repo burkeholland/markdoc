@@ -97,7 +97,7 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
         for await (const chunk of req) body += chunk;
         handoffRequest = JSON.parse(body);
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ url: `${origin}/embed/nonce` }));
+        res.end(JSON.stringify({ url: `${origin}/embed/nonce`, sessionTtlMs: 300_000 }));
         return;
       }
       res.statusCode = 404;
@@ -162,6 +162,10 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
     assert.equal(frameResponse.headers.get("location"), `${origin}/embed/nonce`);
     assert.equal(handoffs, 1);
     assert.deepEqual(handoffRequest, { documentId: "doc-1", parentOrigin: new URL(opened.url).origin });
+    const stateResponse = await fetch(`${opened.url}/state`);
+    const state = await stateResponse.json();
+    assert.equal(state.documentId, "doc-1");
+    assert(state.sessionRefreshAt > Date.now() + 200_000);
     await until(() => sends.length === 1);
     await delay(50);
     assert.equal(sends.length, 1);

@@ -179,6 +179,7 @@ export function displayPromptForEvent(event, title) {
 
 function shellHtml(entry) {
   const scriptPath = JSON.stringify(entry.path);
+  const frameOrigin = JSON.stringify(new URL(entry.config.origin).origin);
   const title = String(entry.title).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
   return `<!doctype html>
 <html lang="en">
@@ -195,16 +196,32 @@ function shellHtml(entry) {
   <iframe id="markdoc" title="${title}" src="${entry.path}/frame?revision=${entry.revision}" allow="clipboard-read; clipboard-write"></iframe>
   <script nonce="${entry.scriptNonce}">
     const base = ${scriptPath};
+    const frameOrigin = ${frameOrigin};
+    const frame = document.getElementById("markdoc");
     let revision = ${entry.revision};
+    let sessionRefreshAt = 0;
+    let refreshing = false;
+    frame.addEventListener("load", () => { refreshing = false; });
+    window.addEventListener("message", (event) => {
+      if (event.origin !== frameOrigin || event.source !== frame.contentWindow) return;
+      if (event.data?.type !== "markdoc:embed-session") return;
+      const expiresAt = Number(event.data.expiresAt);
+      if (Number.isFinite(expiresAt)) sessionRefreshAt = Math.max(sessionRefreshAt, expiresAt - 30000);
+    });
     setInterval(async () => {
       try {
         const response = await fetch(base + "/state", { cache: "no-store" });
         if (!response.ok) return;
         const state = await response.json();
+        if (Number.isFinite(state.sessionRefreshAt)) sessionRefreshAt = Math.max(sessionRefreshAt, state.sessionRefreshAt);
         if (state.revision !== revision) {
           revision = state.revision;
           document.title = state.title;
-          document.getElementById("markdoc").src = base + "/frame?revision=" + revision;
+          refreshing = true;
+          frame.src = base + "/frame?revision=" + revision;
+        } else if (sessionRefreshAt && Date.now() >= sessionRefreshAt && !refreshing) {
+          refreshing = true;
+          frame.src = base + "/frame?revision=" + revision + "&renew=" + Date.now();
         }
       } catch (error) {
         console.error("Markdoc canvas state poll failed", error);
@@ -257,7 +274,12 @@ async function startShell(entry, fetchImpl) {
         return;
       }
       if (req.method === "GET" && requestUrl.pathname === `${entry.path}/state`) {
-        sendJson(res, 200, { documentId: entry.documentId, title: entry.title, revision: entry.revision });
+        sendJson(res, 200, {
+          documentId: entry.documentId,
+          title: entry.title,
+          revision: entry.revision,
+          sessionRefreshAt: entry.sessionRefreshAt,
+        });
         return;
       }
       if (req.method === "GET" && requestUrl.pathname === `${entry.path}/frame`) {
@@ -265,6 +287,11 @@ async function startShell(entry, fetchImpl) {
           documentId: entry.documentId,
           parentOrigin: new URL(entry.shellUrl).origin,
         });
+        const sessionTtlMs = Number(handoff.sessionTtlMs);
+        if (Number.isFinite(sessionTtlMs) && sessionTtlMs > 0) {
+          const margin = Math.min(30_000, Math.max(1_000, Math.floor(sessionTtlMs / 4)));
+          entry.sessionRefreshAt = Date.now() + Math.max(1_000, sessionTtlMs - margin);
+        }
         res.statusCode = 302;
         res.setHeader("Location", handoff.url);
         res.setHeader("Cache-Control", "no-store");
@@ -568,6 +595,7 @@ export async function startMarkdocExtension({
         abort: null,
         pollTask: null,
         presenceTimer: null,
+        sessionRefreshAt: 0,
         closed: false,
       };
       try {

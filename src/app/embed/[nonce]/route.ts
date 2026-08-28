@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { consumeHandoff, type HandoffFailure } from "@/server/embed-handoff";
 import { handler, HttpError, tokenAllowsDocument } from "@/server/http";
-import { mcpPublicOrigin } from "@/server/mcp-origin";
+import { mcpPublicOrigin, publicRequestUsesHttps } from "@/server/mcp-origin";
 import { mintSessionCookie } from "@/server/session-cookie";
 import { resolveApiTokenById } from "@/server/tokens";
 
@@ -12,13 +12,6 @@ const GONE: Record<HandoffFailure, string> = {
   expired: "This link has expired (it was valid for 60 s). Ask the agent to open the document again.",
   used: "This link was already used. Ask the agent to open the document again.",
 };
-
-/** Auth.js uses the `__Secure-` cookie when the site is served over https (directly or behind a proxy). */
-function servedOverHttps(req: Request): boolean {
-  const forwarded = req.headers.get("x-forwarded-proto")?.split(",", 1)[0]?.trim().toLowerCase();
-  if (forwarded) return forwarded === "https";
-  return new URL(req.url).protocol === "https:";
-}
 
 /**
  * Spend a handoff nonce from `POST /api/embed/handoff`: set an isolated embed cookie for the user
@@ -53,7 +46,7 @@ export const GET = handler(async (req: Request, { params }: Params) => {
       embedDocumentId: result.handoff.documentId,
       embedParentOrigin: result.handoff.parentOrigin,
     },
-    servedOverHttps(req),
+    publicRequestUsesHttps(req),
   );
   const res = NextResponse.redirect(`${mcpPublicOrigin(req)}/d/${result.handoff.documentId}?embed=1`, { status: 302 });
   res.cookies.set(cookie);

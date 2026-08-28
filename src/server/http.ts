@@ -7,6 +7,7 @@ import type { Role, TokenScope } from "@/server/db/schema";
 import { UnrenderableDocumentError } from "@/editor/markdown/renderable";
 import { failedAuthAllowed, rateLimitingEnabled, recordFailedAuth, takeApiRequest, withRateLimitHeaders, type TakeResult } from "@/server/rate-limit";
 import { decodeEmbedSession } from "@/server/session-cookie";
+import { mcpPublicOrigin } from "@/server/mcp-origin";
 
 export class HttpError extends Error {
   constructor(
@@ -57,6 +58,10 @@ export interface Actor extends SessionUser {
   documentIds?: string[] | null;
   /** Set only for a token-backed canvas cookie. */
   embedDocumentId?: string;
+  /** Exact canvas-shell origin allowed to frame and renew this embedded session. */
+  embedParentOrigin?: string;
+  /** Browser-session expiry in epoch milliseconds; the embedded editor renews before this time. */
+  embedSessionExpiresAt?: number;
   /** API-token expiry, retained so collaboration sockets cannot outlive it. */
   tokenExpiresAt?: Date | null;
 }
@@ -76,20 +81,37 @@ export async function currentUser(): Promise<Actor | null> {
       return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds, tokenExpiresAt: actor.expiresAt };
     }
   }
-  const [session, embed] = await Promise.all([auth(), decodeEmbedSession(h.get("cookie"))]);
-  const normalSession = session?.user?.id && !session.user.embedTokenId && !session.user.embedDocumentId ? session.user : null;
-  if (embed && (!normalSession || normalSession.id === embed.userId)) {
+  const session = await auth();
+  const normalSession = session?.user?.id ? session.user : null;
+  if (normalSession) {
+    return {
+      id: normalSession.id,
+      login: normalSession.login ?? null,
+      name: normalSession.name ?? null,
+      image: normalSession.image ?? null,
+    };
+  }
+  const embed = await decodeEmbedSession(h.get("cookie"));
+  if (embed) {
     const actor = await resolveApiTokenById(embed.tokenId);
     if (!actor || actor.id !== embed.userId || !tokenAllowsDocument(actor, embed.documentId)) return null;
-    return { ...actor, documentIds: [embed.documentId], embedDocumentId: embed.documentId, tokenExpiresAt: actor.expiresAt };
+    return {
+      ...actor,
+      documentIds: [embed.documentId],
+      embedDocumentId: embed.documentId,
+      embedParentOrigin: embed.parentOrigin,
+      embedSessionExpiresAt: embed.expiresAt,
+      tokenExpiresAt: actor.expiresAt,
+    };
   }
-  if (!normalSession) return null;
-  return {
-    id: normalSession.id,
-    login: normalSession.login ?? null,
-    name: normalSession.name ?? null,
-    image: normalSession.image ?? null,
-  };
+  return null;
+}
+
+/** Bound editor path for an embed-only browser; a primary Auth.js session always keeps precedence. */
+export async function embeddedDocumentPath(primaryUserId: string | null | undefined): Promise<string | null> {
+  if (primaryUserId) return null;
+  const user = await currentUser();
+  return user?.embedDocumentId ? `/d/${user.embedDocumentId}?embed=1` : null;
 }
 
 export async function requireUser(): Promise<Actor> {
@@ -240,9 +262,8 @@ export function requireSameOriginMutation(req: Request): void {
   if (SAFE_METHODS.has(req.method.toUpperCase())) return;
   if (req.headers.get("authorization")?.toLowerCase().startsWith("bearer ")) return;
   const fetchSite = req.headers.get("sec-fetch-site")?.toLowerCase();
-  if (fetchSite === "same-origin") return;
   const origin = req.headers.get("origin");
-  if (fetchSite === "cross-site" || origin === "null" || (origin && origin !== new URL(req.url).origin)) {
+  if (fetchSite === "cross-site" || origin === "null" || (origin && origin !== mcpPublicOrigin(req))) {
     throw new HttpError(403, "Cross-site browser mutations are not allowed");
   }
 }

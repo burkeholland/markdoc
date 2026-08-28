@@ -124,6 +124,7 @@ export interface EmbedSessionClaims {
   tokenId: string;
   documentId: string;
   parentOrigin: string;
+  expiresAt: number;
 }
 
 /**
@@ -182,6 +183,7 @@ export async function decodeEmbedSession(cookieHeader: string | null | undefined
         tokenId: payload.embedTokenId,
         documentId: payload.embedDocumentId,
         parentOrigin: payload.embedParentOrigin,
+        expiresAt: payload.exp * 1000,
       };
     } catch {
       continue;
