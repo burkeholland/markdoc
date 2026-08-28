@@ -96,6 +96,39 @@ function textOf(node: Element): string {
   return out;
 }
 
+function taskTextOf(node: Element): string {
+  let out = "";
+  for (const child of node.children) {
+    if (child.type === "text") out += child.value;
+    else if (child.type === "element" && child.tagName !== "ul" && child.tagName !== "ol") out += taskTextOf(child);
+  }
+  return out;
+}
+
+function taskCheckboxOf(node: Element): Element | undefined {
+  for (const child of node.children) {
+    if (child.type !== "element") continue;
+    if (child.tagName === "input" && child.properties?.type === "checkbox") return child;
+    if (child.tagName !== "ul" && child.tagName !== "ol") {
+      const checkbox = taskCheckboxOf(child);
+      if (checkbox) return checkbox;
+    }
+  }
+}
+
+/** Give each read-only GFM task checkbox the visible text of its own list item. */
+function rehypeLabelTaskCheckboxes(): (tree: HastRoot) => void {
+  return (tree) => {
+    visitElements(tree, (item) => {
+      if (item.tagName !== "li" || !Array.isArray(item.properties?.className) || !item.properties.className.includes("task-list-item")) return;
+      const checkbox = taskCheckboxOf(item);
+      if (checkbox && checkbox.properties.ariaLabel === undefined) {
+        checkbox.properties.ariaLabel = taskTextOf(item).replace(/\s+/g, " ").trim() || "Task";
+      }
+    });
+  };
+}
+
 /** Collect headings (after rehype-slug has assigned ids) into the sink. */
 function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => void {
   return (tree) => {
@@ -121,6 +154,7 @@ export async function renderMarkdownFragment(markdown: string, { assetBaseUrl }:
     .use(remarkGfm)
     .use(remarkRehype, { handlers: { yaml: () => undefined, toml: () => undefined } })
     .use(rehypeSanitize, sanitizeSchema)
+    .use(() => rehypeLabelTaskCheckboxes())
     .use(rehypeSlug)
     .use(() => rehypeCollectHeadings(headings))
     .use(rehypeHighlight)
