@@ -702,13 +702,26 @@ async function selectAndValidateInitialState(
   const legacy = profiles.find((profile) => profile.id !== duplicate.id);
   if (!legacy) throw new GithubIdentityRepairError("LOGIN_USER_COUNT");
 
-  const [legacyAccounts, legacySessions, duplicateAccounts, duplicateSessions] =
-    await Promise.all([
-      countWhere(client, `SELECT COUNT(*)::text AS count FROM account WHERE "userId" = $1`, [legacy.id]),
-      countWhere(client, `SELECT COUNT(*)::text AS count FROM session WHERE "userId" = $1`, [legacy.id]),
-      countWhere(client, `SELECT COUNT(*)::text AS count FROM account WHERE "userId" = $1`, [duplicate.id]),
-      countWhere(client, `SELECT COUNT(*)::text AS count FROM session WHERE "userId" = $1`, [duplicate.id]),
-    ]);
+  const legacyAccounts = await countWhere(
+    client,
+    `SELECT COUNT(*)::text AS count FROM account WHERE "userId" = $1`,
+    [legacy.id],
+  );
+  const legacySessions = await countWhere(
+    client,
+    `SELECT COUNT(*)::text AS count FROM session WHERE "userId" = $1`,
+    [legacy.id],
+  );
+  const duplicateAccounts = await countWhere(
+    client,
+    `SELECT COUNT(*)::text AS count FROM account WHERE "userId" = $1`,
+    [duplicate.id],
+  );
+  const duplicateSessions = await countWhere(
+    client,
+    `SELECT COUNT(*)::text AS count FROM session WHERE "userId" = $1`,
+    [duplicate.id],
+  );
 
   const legacyEmail = legacy.email?.trim().toLowerCase() ?? null;
   if (
