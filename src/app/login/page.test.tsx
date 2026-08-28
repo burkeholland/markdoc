@@ -14,6 +14,9 @@ vi.mock("@/auth", () => ({
 }));
 vi.mock("@/components/editor/header", () => ({ Logo: () => null }));
 vi.mock("@/components/ui/primitives", () => ({ GitHubIcon: () => null }));
+// The page is rendered outside a Next request scope here; `embeddedDocumentPath` reads request
+// headers to look for a canvas session cookie, so give it an empty request like the API tests do.
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 import LoginPage from "./page";
 
