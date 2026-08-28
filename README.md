@@ -156,6 +156,7 @@ Every `npm run` script, and the environment variables the test tooling reads:
 | `db:generate` | `drizzle-kit generate`: a new migration under `drizzle/` after a schema change. |
 | `mcp` | Run the MCP server from a checkout (`MARKDOC_URL`, `MARKDOC_TOKEN`). |
 | `mcp:smoke` | Checks a running server's `/api/mcp` with a real MCP client (`MARKDOC_URL`, `MARKDOC_TOKEN`): the `GET` card, the `401` without a token, `tools/list` against the stdio list with annotations, whoami, create and read. |
+| `repair:github-identity` | Audits or repairs one legacy development identity and its empty GitHub OAuth duplicate. It is dry-run by default; see the reviewed procedure below. |
 | `MARKDOC_URL` / `MARKDOC_INTERNAL_URL` | Canonical public origin used in MCP links / trusted internal origin for the remote MCP route's REST callbacks. The custom server sets the internal origin to its own listener; other deployments default to `http://127.0.0.1:$PORT`. Set `MARKDOC_URL` behind a reverse proxy and set `MARKDOC_INTERNAL_URL` only when loopback cannot reach Markdoc. Both values must be bare http(s) origins: move any former URL-prefix routing to the proxy because paths, credentials, queries, and fragments now fail closed. Request forwarding headers never choose the callback destination. |
 | `repair:imported-ystate` | Re-seeds `ystate` for documents imported before `8e1f8c9` whose stored text disagrees with it (`-- --dry-run` reports, `-- --id <docId>` targets one); run with the live server stopped. |
 | `E2E_PORT` | Private port and Next cache (`.next-e2e-<port>`) for one e2e run; give each worktree its own on a shared machine. |
@@ -164,6 +165,27 @@ Every `npm run` script, and the environment variables the test tooling reads:
 | `READER_POLL_MS` | How often the reader view (`/p/:id`) polls for a newer version (default 30 s). |
 
 `npm run test:e2e` deletes its Next cache (`.next-e2e`, or `.next-e2e-<port>`) before and after every run; `e2e/global-setup.ts` probes `/api/health` and warms the editor and API routes first so a cold compile never fails the first test. `next dev` appends the dist dir in use to `include` in `tsconfig.json`; `test:e2e` and `dev:port` revert that on exit when it is the only change, otherwise they print the diff (`npm run tsconfig:revert` does the same by hand). `next build` and `next typegen` type-check `tsconfig.build.json` instead — it extends the base, excludes `e2e/**`, `playwright.config.ts`, `scripts/**/*.mts` and `*.test.ts(x)` (the container image context has none of them) and, because it `extends`, Next never rewrites it; `npm run typecheck` (`tsc` on `tsconfig.json`) still covers the test code. `scripts/github-smoke.mts` exercises gist and repository publishing against the real GitHub API (needs a running server with `GITHUB_TOKEN` and a scratch repository; see the file header); `scripts/agent-smoke.mts`, `scripts/mcp-smoke.mts`, `scripts/perf-*.mts` and `scripts/screenshot.mts` are one-off dev tools with usage in their headers.
+
+### One-time GitHub identity repair
+
+`repair:github-identity` repairs only the case where a safe legacy development user and an otherwise empty OAuth duplicate have the same normalized GitHub login. It preserves the legacy user ID, moves exactly one GitHub account, and refuses unknown user references, ambiguous logins or email conflicts, extra accounts or sessions, and any application row tied to the duplicate user ID. Login-keyed collaborator and notification rows stay attached to the same normalized login and are fingerprinted without being rewritten. The command never merges application data.
+
+Have the affected user sign out, take a database backup, and stop Markdoc so the repaired identity cannot write during the procedure. Markdoc sessions are JWT-backed, so this database command cannot revoke an existing browser cookie that still names the duplicate user ID; the repaired user must start with a fresh GitHub sign-in after the service restarts. Supply identifiers through the environment rather than credential-bearing command arguments:
+
+```bash
+export DATABASE_URL='postgresql://.../?sslmode=require'
+export MARKDOC_REPAIR_LEGACY_LOGIN='expected-login'
+export MARKDOC_REPAIR_GITHUB_ACCOUNT_ID='expected-numeric-id'
+export MARKDOC_REPAIR_MANIFEST='/secure/operator-path/github-identity-rollback.json'
+
+npm run repair:github-identity                 # dry-run; always rolls back
+npm run repair:github-identity -- --apply      # one transaction; stages the rollback manifest before commit
+npm run repair:github-identity -- --verify     # no-write verification against the manifest
+```
+
+Review the dry-run counts before `--apply`. Output contains only counts, booleans, classification labels, and hash prefixes. The checksummed rollback manifest contains the two user profile rows needed to reconstruct the deleted duplicate, but no OAuth tokens; store it as sensitive identity metadata and do not commit it.
+
+Rollback is deliberately narrow: while Markdoc is still stopped and only if `--verify` passed, run `npm run repair:github-identity -- --rollback` with the same environment. It restores the original two profile rows and moves the same account back. Any changed profile, account, authentication row, or classified application fingerprint since apply makes rollback fail without writes. Once the repaired identity has signed in or created new data, restore from the database backup instead.
 
 ### Run the production build locally
 
