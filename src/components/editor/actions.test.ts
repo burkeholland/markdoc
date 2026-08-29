@@ -81,8 +81,11 @@ const cmScrollEffects = (code: Fixture["code"]) => {
 describe("EditorActions.revealSource (#992)", () => {
   let frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 1;
+  let now = 0;
   beforeEach(() => {
     frames = new Map();
+    now = 1_000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
       frames.set(nextFrame, cb);
       return nextFrame++;
@@ -93,12 +96,15 @@ describe("EditorActions.revealSource (#992)", () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
+  /** Run one animation frame, 100 ms after the previous one. */
   const frame = () => {
+    now += 100;
     const pending = [...frames.values()];
     frames.clear();
-    for (const cb of pending) cb(performance.now());
+    for (const cb of pending) cb(now);
   };
 
   it("scrolls the rich pane's own scroller so the commented line ends up centred, capping the glide to one viewport", () => {
@@ -158,9 +164,30 @@ describe("EditorActions.revealSource (#992)", () => {
     actions.revealSource(16);
     // A scroll-sync mirror (or layout shift) yanks the pane to a top-aligned position mid-flight.
     scroller.scrollTop = lineTop;
-    for (let i = 0; i < 6; i++) frame();
+    frame(); // 100 ms: too early to call it settled
+    frame(); // 200 ms
+    expect(scroller.scrollTo).toHaveBeenCalledTimes(1);
+    frame(); // 300 ms, unchanged for two frames: settled off target
     expect(scroller.scrollTo).toHaveBeenCalledTimes(2);
     expect(scroller.scrollTo.mock.calls[1][0]).toEqual({ top: centred(lineTop), behavior: "auto" });
+    expect(frames.size).toBe(0);
+  });
+
+  it("does not mistake a glide that is slow to start for a settled one", () => {
+    const { actions, scroller, lineTop } = setup();
+    actions.revealSource(16);
+    // The fake scrollTo landed instantly; pretend the animator has not moved yet, then glides late.
+    scroller.scrollTop = centred(lineTop) - VIEWPORT;
+    frame(); // 100 ms, no movement
+    frame(); // 200 ms, still none: a real glide may take this long to move a pixel
+    expect(scroller.scrollTo).toHaveBeenCalledTimes(1);
+    scroller.scrollTop = centred(lineTop) - 300;
+    frame(); // 300 ms, moving
+    scroller.scrollTop = centred(lineTop);
+    frame(); // 400 ms, arrived
+    frame();
+    frame(); // unchanged for two frames on target: nothing to correct
+    expect(scroller.scrollTo).toHaveBeenCalledTimes(1);
     expect(frames.size).toBe(0);
   });
 

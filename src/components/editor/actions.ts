@@ -545,13 +545,14 @@ export class EditorActions {
   }
 
   /**
-   * Once the smooth scroll settles (scrollTop unchanged for two frames, or 2 s at most), re-measure the
-   * target and correct once, instantly, if something (a scroll-sync mirror, a late layout shift) moved
-   * the pane off it. Any user scroll or key on the pane cancels the watch so it never fights the user.
+   * Once the smooth scroll settles (scrollTop unchanged for two frames, checked only after the glide has
+   * had 250 ms to start; 2 s at most), re-measure the target and correct once, instantly, if something (a
+   * scroll-sync mirror, a late layout shift) moved the pane off it. Any user scroll or key on the pane
+   * cancels the watch so it never fights the user.
    */
   private watchRichReveal(view: PMView, scroller: HTMLElement, pos: number) {
+    const started = performance.now();
     let last = scroller.scrollTop;
-    let frames = 0;
     let still = 0;
     let frame = 0;
     const stop = () => {
@@ -560,14 +561,14 @@ export class EditorActions {
       if (this.revealWatch === stop) this.revealWatch = null;
     };
     const tick = () => {
-      frames++;
       const top = scroller.scrollTop;
       if (top === last) still++;
       else {
         still = 0;
         last = top;
       }
-      if ((frames >= 4 && still >= 2) || frames >= 120) {
+      const elapsed = performance.now() - started;
+      if ((elapsed >= REVEAL_SETTLE_MIN_MS && still >= 2) || elapsed >= REVEAL_SETTLE_MAX_MS) {
         stop();
         if (view.isDestroyed || !scroller.isConnected) return;
         const target = this.richCentreTop(view, scroller, pos);
@@ -583,6 +584,9 @@ export class EditorActions {
 }
 
 const REVEAL_CANCEL_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
+/** Chromium's smooth scroll may not move a full pixel in its first ~100 ms; do not mistake that for "settled". */
+const REVEAL_SETTLE_MIN_MS = 250;
+const REVEAL_SETTLE_MAX_MS = 2_000;
 
 /** Whether a box at `top` (viewport-relative) with `height` lies inside the middle 60 % of a viewport. */
 function withinMiddle(top: number, height: number, viewport: number): boolean {
