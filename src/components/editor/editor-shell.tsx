@@ -627,7 +627,7 @@ export function EditorShell({
   );
 
   // "Ask an agent": the dialog captures the selection when it opens; results come back through the
-  // shared document (meta.agentRequests, mirrored by the server) so the pill and toast are realtime.
+  // shared document (meta.agentRequests, mirrored by the server) so the presence stack and toast are realtime.
   const [askAgent, setAskAgent] = useState<{ selection: AskAgentSelection | null } | null>(null);
   const [commentsFocus, setCommentsFocus] = useState<{ tab: "open" | "resolved" | "suggestions"; nonce: number } | null>(null);
   // A focus request only applies to the panel it opened; once the panel closes, a later reopen picks
