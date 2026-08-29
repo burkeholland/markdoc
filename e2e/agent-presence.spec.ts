@@ -262,7 +262,9 @@ test.describe("agent presence and watch", () => {
     const row = page.getByTestId("presence-popover").locator('[data-testid="presence-row"][data-agent]');
     const activity = row.getByTestId("presence-activity");
     await expect(activity).toBeVisible();
-    await expect(activity).toHaveText(/^proposed changes · \d+ s ago$/);
+    await expect(activity).toHaveText(/^proposed changes · (just now|\d+ s ago)$/);
+    // The row ticks: after the first seconds the wording moves on to a count.
+    await expect(activity).toHaveText(/^proposed changes · \d+ s ago$/, { timeout: 12_000 });
     await expect(row.getByTestId("presence-section")).toContainText("proposed changes");
     await page.screenshot({ path: "test-results/agent-presence-activity.png", clip: { x: 0, y: 0, width: 1280, height: 480 } });
     await page.keyboard.press("Escape");

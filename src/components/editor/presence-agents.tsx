@@ -23,9 +23,10 @@ export function activityVerb(action: string): string {
   return action === "suggested" ? "proposed changes" : action === "commented" ? "commented" : action === "reviewed" ? "reviewed suggestions" : "edited";
 }
 
-/** "12 s ago" — `relativeTime` says "just now" for the whole 45 s window, too coarse for a live row. */
+/** "just now" for the first seconds, then "12 s ago" — `relativeTime` says "just now" for the whole 45 s window, too coarse for a live row. */
 export function secondsAgo(at: number, now: number): string {
-  return `${Math.max(0, Math.round((now - at) / 1000))} s ago`;
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  return s < 5 ? "just now" : `${s} s ago`;
 }
 
 /**

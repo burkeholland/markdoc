@@ -54,9 +54,11 @@ describe("presence wording", () => {
     expect(activityVerb("anything-else")).toBe("edited");
   });
 
-  it("counts seconds and never goes negative", () => {
+  it("counts seconds, says 'just now' at first and never goes negative", () => {
     expect(secondsAgo(NOW - 12_400, NOW)).toBe("12 s ago");
-    expect(secondsAgo(NOW + 3_000, NOW)).toBe("0 s ago");
+    expect(secondsAgo(NOW - 5_000, NOW)).toBe("5 s ago");
+    expect(secondsAgo(NOW - 2_000, NOW)).toBe("just now");
+    expect(secondsAgo(NOW + 3_000, NOW)).toBe("just now");
   });
 
   it("pluralises the waiting label", () => {
