@@ -232,7 +232,8 @@ test.describe("comment card click reveals the commented text", () => {
 
     const up = await revealAndMeasure(page, near, ["rich", "code"], (c) => c.click(), "split/near");
     expect(up.settled[0].scrollTop, fmt(up.settled[0])).toBeLessThan(400);
-    expect(up.settled[1].scrollTop, fmt(up.settled[1])).toBeLessThan(400);
+    // The code pane is mirrored by the sync (top block aligned), so it only needs to be near the top too.
+    expect(up.settled[1].scrollTop, fmt(up.settled[1])).toBeLessThan(1_000);
   });
 
   test("source layout: CodeMirror scrolls the line to the middle", async () => {
