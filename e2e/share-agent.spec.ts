@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument } from "./helpers";
+import { createDocument, openDocument } from "./helpers";
 
 /**
  * The Share dialog's "Collaborate with an agent" card: the Copilot CLI config for this server's
