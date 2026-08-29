@@ -270,7 +270,7 @@ describe("slash menu undo", () => {
 
   it("covers every editing item", () => {
     expect(commandItems.map((i) => i.id).sort()).toEqual(Object.keys(EXPECTED).sort());
-    expect(SLASH_ITEMS.filter((item) => item.run).map((i) => i.id).sort()).toEqual(["comment", "image", "link"]);
+    expect(SLASH_ITEMS.filter((item) => item.run).map((i) => i.id).sort()).toEqual(["agent", "comment", "image", "link"]);
   });
 
   it.each(commandItems.map((item) => [item.id, item] as const))("%s is one undo step and leaves the typed query as its own", (id, item) => {
@@ -345,6 +345,26 @@ describe("slash menu undo", () => {
     expect(seen.stackItems).toBe(1);
     undoManager.undo();
     expect(ytext.toString()).toBe("Hello\n\n/imageWorld");
+  });
+
+  it("'/ag' + the agent item hands off to the dialog with the typed text gone from the document", () => {
+    type("/ag");
+    expect(ytext.toString()).toBe("Hello\n\n/agWorld");
+    const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
+    let opened = 0;
+    let docWhenOpened = "";
+    applySlashItem(
+      view,
+      () => {
+        docWhenOpened = ytext.toString();
+        agent.run!({ view, where: { inTable: false, canComment: true }, openImage: () => {}, openLink: () => {}, startComment: () => {}, keepAgent: () => opened++ }, "");
+      },
+      undoManager,
+    );
+    expect(opened).toBe(1);
+    expect(docWhenOpened).toBe(ORIGINAL);
+    expect(ytext.toString()).toBe(ORIGINAL);
+    expect(slashMenuState(view.state)).toBeNull();
   });
 
   it("still works when the menu is not open", () => {

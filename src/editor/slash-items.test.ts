@@ -12,7 +12,22 @@ describe("slash items", () => {
       expect(item.icon.length).toBeGreaterThan(0);
       expect(SLASH_GROUPS).toContain(item.group);
     }
-    expect(SLASH_ITEMS.map((i) => i.id)).toEqual(expect.arrayContaining(["text", "heading1", "heading2", "heading3", "bullet", "numbered", "task", "quote", "code", "divider", "table", "image", "link", "comment", "date"]));
+    expect(SLASH_ITEMS.map((i) => i.id)).toEqual(expect.arrayContaining(["text", "heading1", "heading2", "heading3", "bullet", "numbered", "task", "quote", "code", "divider", "table", "image", "link", "comment", "date", "agent"]));
+  });
+
+  it("'ag' finds 'Keep an agent here' (the /agent item) and nothing else", () => {
+    expect(ids("ag")).toEqual(["agent"]);
+    expect(ids("agent")).toEqual(["agent"]);
+    expect(ids("copilot")).toEqual(["agent"]);
+    const agent = SLASH_ITEMS.find((i) => i.id === "agent")!;
+    expect(agent.title).toBe("Keep an agent here");
+    expect(agent.description).toBe("Get the exact sentence that keeps an agent in this document");
+    expect(agent.icon).toBe("Bot");
+    expect(agent.run).toBeTypeOf("function");
+    // Hands off to the shell's dialog; it does not edit the document.
+    let opened = 0;
+    agent.run!({ keepAgent: () => opened++ } as unknown as Parameters<NonNullable<typeof agent.run>>[0], "");
+    expect(opened).toBe(1);
   });
 
   it("an empty query returns every item in group order", () => {

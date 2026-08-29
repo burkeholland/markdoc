@@ -160,6 +160,8 @@ describe("buildCommands", () => {
     const cmds = buildCommands(stubCtx({ keepAgent: () => calls.push("keep-agent") }));
     const hits = ids(filterCommands("agent", cmds));
     expect(hits).toContain("doc:keep-agent");
+    // The `/agent` slash item is the same action; the palette lists it once.
+    expect(ids(cmds)).not.toContain("block:agent");
     cmds.find((c) => c.id === "doc:keep-agent")!.run();
     expect(calls).toEqual(["keep-agent"]);
   });
