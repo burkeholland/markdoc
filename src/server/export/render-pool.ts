@@ -48,7 +48,7 @@ function workerPath(): string {
       ? ["dist/render-worker.mjs", "src/server/export/render-markdown.ts"]
       : ["src/server/export/render-markdown.ts", "dist/render-worker.mjs"];
   for (const rel of candidates) {
-    const abs = path.resolve(process.cwd(), rel);
+    const abs = path.resolve(/* turbopackIgnore: true */ process.cwd(), rel);
     if (existsSync(abs)) return abs;
   }
   throw new Error(`Markdown render worker not found (looked for ${candidates.join(", ")} under ${process.cwd()})`);
