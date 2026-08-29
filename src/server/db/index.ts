@@ -33,6 +33,12 @@ async function create(): Promise<Db> {
       max: Number(process.env.DATABASE_POOL_MAX ?? 10),
       ssl: /sslmode=require/.test(url) || process.env.DATABASE_SSL === "1" ? { rejectUnauthorized: false } : undefined,
     });
+    // node-postgres emits "error" on the pool when an *idle* client's connection dies (PostgreSQL restart,
+    // pg_terminate_backend, VM patching, network blip). With no listener Node raises it as an uncaught
+    // exception and server/index.ts exits the process (seen in production as "terminating connection due
+    // to administrator command" → exit 1 → container restart). The pool has already dropped the dead
+    // client; the next query opens a fresh one. Message only: never the error object or connection string.
+    pool.on("error", (err) => console.warn("[db] idle client error:", err.message));
     const db = drizzle(pool, { schema });
     registry.close = () => pool.end();
     const { migrate } = await import("drizzle-orm/node-postgres/migrator");

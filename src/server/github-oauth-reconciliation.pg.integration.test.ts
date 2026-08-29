@@ -45,6 +45,8 @@ describePostgres("GitHub identity reconciliation on PostgreSQL", () => {
     await administrator.connect();
     await administrator.query(`CREATE SCHEMA "${schemaName}"`);
     pool = new Pool({ ...config, max: 4, options: `-c search_path=${schemaName}` });
+    // Same as src/server/db/index.ts: an idle client dropped by the server must not become an uncaught exception.
+    pool.on("error", (err) => console.warn("[db] idle client error:", err.message));
     await migrate(drizzle(pool, { schema }), {
       migrationsFolder,
       migrationsSchema,
