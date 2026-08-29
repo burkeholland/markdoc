@@ -31,6 +31,7 @@ import { StatusBar, type Layout } from "./status-bar";
 import { CommentsPanel } from "./comments-panel";
 import { VersionsPanel, VersionDiffView, prefetchVersions, type VersionPreview } from "./versions-panel";
 import { ActivityPanel } from "./activity-panel";
+import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY, clampPanelWidth, panelMaxFor, parseStoredPanelWidth } from "./panel-resize-handle";
 import { ShareDialog } from "./share-dialog";
 import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { SyncDialog, type SyncActions } from "./sync-dialog";
@@ -101,6 +102,13 @@ interface Toast {
 type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
+
+const subscribeResize = (notify: () => void) => {
+  window.addEventListener("resize", notify);
+  return () => window.removeEventListener("resize", notify);
+};
+const readPanelMax = () => panelMaxFor(window.innerWidth);
+const serverPanelMax = () => PANEL_MAX;
 
 const EMBED_RENEW_MARGIN_MS = 90_000;
 const EMBED_RENEW_RETRY_MS = 15_000;
@@ -237,6 +245,35 @@ export function EditorShell({
       // Ignore storage errors; the setting still applies for this session.
     }
   }, []);
+  // Desktop side panel width (Comments / Versions / Activity share it). The upper bound follows
+  // the window; the remembered width is read once and clamped whenever the window gets narrower.
+  const [panelWidth, setPanelWidthState] = useState(PANEL_DEFAULT);
+  const panelMax = useSyncExternalStore(subscribeResize, readPanelMax, serverPanelMax);
+  useEffect(() => {
+    let stored: number | null = null;
+    try {
+      stored = parseStoredPanelWidth(localStorage.getItem(PANEL_WIDTH_KEY));
+    } catch {
+      // Storage may be unavailable (private mode); keep the default width.
+    }
+    if (stored !== null) setPanelWidthState(clampPanelWidth(stored, PANEL_MIN, panelMaxFor(window.innerWidth)));
+  }, []);
+  const setPanelWidth = useCallback(
+    (next: number) => {
+      const width = clampPanelWidth(next, PANEL_MIN, panelMax);
+      setPanelWidthState(width);
+      try {
+        localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+      } catch {
+        // Ignore storage errors; the width still applies for this session.
+      }
+    },
+    [panelMax],
+  );
+  const resetPanelWidth = useCallback(() => setPanelWidth(PANEL_DEFAULT), [setPanelWidth]);
+  useEffect(() => {
+    if (panelWidth > panelMax) setPanelWidth(panelMax);
+  }, [panelWidth, panelMax, setPanelWidth]);
 
   const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
   const slashMenu = useSlashMenuController();
@@ -1156,7 +1193,11 @@ export function EditorShell({
                 {panel}
               </div>
             ) : (
-              panel
+              // Desktop: the panel takes the remembered width; the grip on its left edge resizes it.
+              <div className="relative flex shrink-0 [&>aside]:w-full [&>aside]:min-w-0" style={{ width: panelWidth }} data-testid="side-panel">
+                <PanelResizeHandle width={panelWidth} min={PANEL_MIN} max={panelMax} onResize={setPanelWidth} onReset={resetPanelWidth} />
+                {panel}
+              </div>
             ))}
         </main>
         <StatusBar
