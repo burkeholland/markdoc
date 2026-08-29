@@ -910,6 +910,10 @@ export function EditorShell({
   const showRich = shownLayout !== "code" && !versionPreview;
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
   useScrollSync({ session, code: codeView, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
+  // revealSource scrolls only the active surface while the sync mirrors the panes onto each other.
+  useEffect(() => {
+    actions.setScrollSynced(syncScroll && showCode && showRich);
+  }, [actions, syncScroll, showCode, showRich]);
 
   // Re-centre on the followed cursor (debounced) whenever it moves or the panes change.
   useEffect(() => {

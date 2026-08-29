@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -21,6 +21,9 @@ type Tab = "open" | "resolved" | "suggestions";
 
 /** The anchored text above a comment: a soft rounded highlight, never a coloured bar (docs/agents.md, UI conventions). */
 const QUOTE_CLASS = "mb-2 truncate rounded-md bg-amber-50 px-2 py-0.5 text-xs text-ink-3 dark:bg-amber-950/40";
+
+/** Controls inside a comment card: clicks on them act on the control, not on the card. */
+const CARD_CONTROLS = "a, button, input, textarea, select, [role='menu'], [role='menuitem'], [role='listbox']";
 
 /** Someone who can be @mentioned: present in the document, a collaborator, or an agent (present or recently active). */
 export interface MentionCandidate {
@@ -715,6 +718,24 @@ const ThreadCard = memo(function ThreadCard({
     onToast?.(`Accepted suggestion from ${reply?.authorName ?? thread.authorName}.`, "success", { label: "Undo", onClick: () => session.undo() });
   };
 
+  // The card itself is the "show me the text" control; a thread whose text is gone still becomes
+  // active and says why the document did not move, instead of silently doing nothing.
+  const reveal = () => {
+    session.setActiveComment(thread.id);
+    if (thread.range) onReveal(thread.range.from);
+    else onToast?.("The text this comment referred to was removed.", "info");
+  };
+  const onCardClick = (event: MouseEvent<HTMLDivElement>) => {
+    const control = (event.target as HTMLElement).closest(CARD_CONTROLS);
+    if (control && event.currentTarget.contains(control)) return;
+    reveal();
+  };
+  const onCardKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    reveal();
+  };
+
   return (
     <div
       ref={ref}
@@ -725,10 +746,11 @@ const ThreadCard = memo(function ThreadCard({
       )}
       data-unread={unread || undefined}
       data-suggestion={suggestionState ?? undefined}
-      onClick={() => {
-        session.setActiveComment(thread.id);
-        if (thread.range) onReveal(thread.range.from);
-      }}
+      role="article"
+      aria-label={`Comment by ${thread.authorName}`}
+      tabIndex={0}
+      onClick={onCardClick}
+      onKeyDown={onCardKeyDown}
       data-testid="comment-thread"
       data-thread-id={thread.id}
     >
