@@ -110,6 +110,7 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 | `AUTH_SECRET` | yes | Signs sessions and collaboration tokens. |
 | `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` | for GitHub login | GitHub OAuth App credentials. |
 | `AUTH_URL` | in production | Public URL, e.g. `https://markdoc.example.com`. |
+| `MARKDOC_CANONICAL_HOST` | optional | Bare hostname (e.g. `markdoc.example.com`) the site should be reached on. When set, a top-level `GET`/`HEAD` that arrives on any other host (such as the Container App's default `*.azurecontainerapps.io` name after a custom-domain cutover) is answered `308` to `https://<host>` with the same path and query; `/api/*`, WebSocket upgrades and writes pass through. Unset (the default) changes nothing; an invalid value logs one warning and is ignored. See `docs/custom-domain.md`. |
 | `DATABASE_URL` | in production | Postgres connection string. Omit locally to use PGlite in `.data/pglite`. |
 | `DATABASE_SSL` | optional | Set to `1` to require TLS (Azure PostgreSQL). |
 | `AUTH_DEV_LOGIN` | dev only | `1` enables the development login (ignored when `NODE_ENV=production`); `force` enables it in production too, only for smoke-testing a local build. |
