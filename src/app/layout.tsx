@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono, Fraunces } from "next/font/google";
 import { THEME_BOOT_SCRIPT } from "@/lib/theme";
+import { publicOrigin } from "@/server/public-origin";
 import "./globals.css";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"], display: "swap" });
@@ -12,6 +13,9 @@ const fraunces = Fraunces({ variable: "--font-fraunces", subsets: ["latin"], dis
 const BRAND_CLEANUP_SCRIPT = `(function(){try{localStorage.removeItem("markdoc:brand");}catch(e){}})();`;
 
 export const metadata: Metadata = {
+  // Relative image URLs below resolve against this; without it Next falls back to http://localhost:3000
+  // in production and link previews (Slack, Teams, X, iMessage) show no image.
+  metadataBase: new URL(publicOrigin()),
   title: { default: "Markdoc", template: "%s · Markdoc" },
   description: "Markdown, together. Write in real time, review with comments and suggestions, keep every version.",
   icons: { icon: [{ url: "/brand/favicon.svg", type: "image/svg+xml" }, { url: "/favicon.ico", sizes: "32x32" }] },
