@@ -2,6 +2,14 @@ import { test, expect } from "@playwright/test";
 import { createDocument, openDocument } from "./helpers";
 
 /**
+ * Share dialog height at 1280×800 on main (368ccc3), agent card always open: the dialog was capped at
+ * 768 px (100dvh − 2rem) and scrolled, its content 1231 px tall. With the card collapsed by default
+ * (task #919) the whole dialog must fit with at least 120 px to spare against that cap.
+ */
+const MAIN_DIALOG_HEIGHT = 768;
+const MAIN_DIALOG_SCROLL_HEIGHT = 1231;
+
+/**
  * The Share dialog's "Collaborate with an agent" card: the Copilot CLI config for this server's
  * remote MCP endpoint, a token minted in place, and Copy. The endpoint itself is covered by
  * src/app/api/mcp/route.test.ts and scripts/mcp-smoke.mjs; here we check the card and that the URL
@@ -19,7 +27,42 @@ test.describe("share dialog · collaborate with an agent", () => {
     await openDocument(page, id);
     const origin = await page.evaluate(() => window.location.origin);
 
+    // Layout (task #919): at 1280×800 the dialog opens with the agent card collapsed and fits without scrolling.
+    await page.setViewportSize({ width: 1280, height: 800 });
     await page.getByTestId("share-button").click();
+    const dialog = page.getByRole("dialog", { name: /share/i });
+    await expect(dialog).toBeVisible();
+    await expect(page.getByText("Nobody else has been added yet.")).toBeVisible();
+    const toggle = page.getByTestId("share-agent-toggle");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("share-agent-config")).toHaveCount(0);
+    const size = await dialog.evaluate((el) => ({ height: el.getBoundingClientRect().height, scrollHeight: el.scrollHeight }));
+    test.info().annotations.push({ type: "share-dialog-height", description: `collapsed ${size.height} px (scroll ${size.scrollHeight}) vs main ${MAIN_DIALOG_HEIGHT} px (scroll ${MAIN_DIALOG_SCROLL_HEIGHT})` });
+    console.log(`share dialog @1280x800: collapsed height ${size.height} px, scrollHeight ${size.scrollHeight} px; main was ${MAIN_DIALOG_HEIGHT} px (scrollHeight ${MAIN_DIALOG_SCROLL_HEIGHT})`);
+    expect(size.height).toBeLessThanOrEqual(MAIN_DIALOG_HEIGHT - 120);
+    expect(size.scrollHeight).toBeLessThanOrEqual(size.height + 1);
+    // Vertical order: add-people form → people list → Copy link row → General access → the agent disclosure; the footer is Done alone.
+    const top = (testId: string) => page.getByTestId(testId).evaluate((el) => el.getBoundingClientRect().top);
+    const tops = { login: await top("share-login"), owner: await page.getByText("@share-agent-owner").evaluate((el) => el.getBoundingClientRect().top), copyLink: await top("copy-link"), linkAccess: await top("link-access"), toggle: await top("share-agent-toggle") };
+    expect(tops.login).toBeLessThan(tops.owner);
+    expect(tops.owner).toBeLessThan(tops.copyLink);
+    expect(tops.copyLink).toBeLessThan(tops.linkAccess);
+    expect(tops.linkAccess).toBeLessThan(tops.toggle);
+    const footerButtons = page.getByTestId("share-footer").getByRole("button");
+    await expect(footerButtons).toHaveCount(1);
+    await expect(footerButtons).toHaveText("Done");
+    await expect(page.getByTestId("editor-link")).toContainText(`/d/${id}`);
+    await expect(page.getByTestId("copy-link-hint")).toHaveText("Anyone listed above can open this link.");
+    if (process.env.SHOT_DIR) await dialog.screenshot({ path: `${process.env.SHOT_DIR}/share-dialog-collapsed.png` });
+    // Copy link: one click → "Copied" (the clipboard flows themselves are e2e/clipboard.spec.ts).
+    await page.getByTestId("copy-link").click();
+    await expect(page.getByTestId("copy-link")).toHaveText("Copied", { timeout: 1_000 });
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${origin}/d/${id}`);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Expand the disclosure: the card is what it was, in three steps.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
     const card = page.getByTestId("share-agent-card");
     await expect(card).toBeVisible();
     await expect(card).toContainText("Connect GitHub Copilot CLI, VS Code or any MCP client");
@@ -29,6 +72,12 @@ test.describe("share dialog · collaborate with an agent", () => {
     await expect(config).toContainText('"type": "http"');
     await expect(config).toContainText(["Bearer", "MARKDOC_TOKEN"].join(" "));
     await expect(page.getByTestId("share-agent-setup-link")).toHaveAttribute("href", "/settings#tokens");
+    // Step 1: the scope picker (3 radios, Comment & suggest by default) and "Only this document" (ticked by default).
+    const scopeGroup = page.getByRole("radiogroup", { name: "Token scope" });
+    await expect(scopeGroup.getByRole("radio")).toHaveCount(3);
+    await expect(page.getByTestId("share-agent-scope-comment")).toBeChecked();
+    await expect(page.getByTestId("share-agent-restrict")).toBeChecked();
+    if (process.env.SHOT_DIR) await dialog.screenshot({ path: `${process.env.SHOT_DIR}/share-dialog-expanded.png` });
 
     // "Stop the permission prompts": the --allow-tool line uses the same server key as the config above it.
     const ALLOW_LINE = "copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence),markdoc(markdoc_append),markdoc(markdoc_create_document)'";
@@ -48,11 +97,22 @@ test.describe("share dialog · collaborate with an agent", () => {
     expect(body.name).toBe("markdoc");
     expect(body.tools).toBeGreaterThan(0);
 
-    // Create a token: the config now carries a real secret and the button is gone.
-    await page.getByTestId("share-agent-create-token").click();
+    // Create a token: the config now carries a real secret and the button is gone. The default path
+    // (Comment & suggest) is unchanged; "Only this document" is unticked here so the token reaches all
+    // documents, as it always did — the POST body says so (the restricted variant is the next test).
+    await page.getByTestId("share-agent-restrict").uncheck();
+    const [tokenRequest] = await Promise.all([
+      page.waitForRequest((req) => req.url().endsWith("/api/tokens") && req.method() === "POST"),
+      page.getByTestId("share-agent-create-token").click(),
+    ]);
+    expect(tokenRequest.postDataJSON()).toEqual({ name: "GitHub Copilot CLI", expiresInDays: 90, scope: "comment", documentIds: null });
     await expect(config).toContainText(["Bearer", "mdk_"].join(" "));
     await expect(config).not.toContainText("MARKDOC_TOKEN");
     await expect(page.getByTestId("share-agent-create-token")).toHaveCount(0);
+    // The picker is bound to the minted token now.
+    await expect(page.getByTestId("share-agent-scope-comment")).toBeDisabled();
+    await expect(page.getByTestId("share-agent-restrict")).toBeDisabled();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
     // The card mints a comment-scoped token (#124): the scope is printed next to the allow line, which no longer
     // pre-allows the tools that scope cannot run (append, create_document).
     await expect(page.getByTestId("share-agent-scope-chip")).toHaveText("comment");
@@ -130,6 +190,53 @@ test.describe("share dialog · collaborate with an agent", () => {
     expect(((await noComment.json()) as { error: string }).error).toContain("read-scoped");
     const other = await createDocument(page, "# Other\n\nNot for the bot.\n", "Other");
     expect((await page.request.get(`${origin}/api/documents/${other}/content`, { headers: ro })).status()).toBe(404);
+    await context.close();
+  });
+
+  test("the scope picker mints a full-access token for this document only, and says so", async ({ browser }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto("/login");
+    await page.getByTestId("dev-login").fill("share-agent-scoper");
+    await page.getByTestId("dev-login-submit").click();
+    await page.waitForURL((url) => url.pathname === "/");
+    const id = await createDocument(page, "# Scoped share\n\nHello agent.\n", "Scoped share");
+    const other = await createDocument(page, "# Elsewhere\n\nNot this one.\n", "Elsewhere");
+    await openDocument(page, id);
+    const origin = await page.evaluate(() => window.location.origin);
+
+    await page.getByTestId("share-button").click();
+    await page.getByTestId("share-agent-toggle").click();
+    await expect(page.getByTestId("share-agent-scope-comment")).toBeChecked();
+    await page.getByTestId("share-agent-scope-full").check();
+    await expect(page.getByTestId("share-agent-restrict")).toBeChecked();
+    const [tokenRequest] = await Promise.all([
+      page.waitForRequest((req) => req.url().endsWith("/api/tokens") && req.method() === "POST"),
+      page.getByTestId("share-agent-create-token").click(),
+    ]);
+    expect(tokenRequest.postDataJSON()).toEqual({ name: "GitHub Copilot CLI", expiresInDays: 90, scope: "full", documentIds: [id] });
+
+    // The card reflects the choice: chip, allow line with every pre-allow tool, and the note under the config.
+    const card = page.getByTestId("share-agent-card");
+    await expect(page.getByTestId("share-agent-scope-chip")).toHaveText("full");
+    await expect(page.getByTestId("share-agent-scope")).toContainText("Full");
+    await expect(card).toContainText("full-access: it can do anything you can in this document");
+    await expect(card).not.toContainText("other documents");
+    expect((await page.getByTestId("share-agent-allow-line").innerText()).trim()).toBe(
+      "copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence),markdoc(markdoc_append),markdoc(markdoc_create_document)'",
+    );
+    for (const scope of ["read", "comment", "full"]) await expect(page.getByTestId(`share-agent-scope-${scope}`)).toBeDisabled();
+    await expect(page.getByTestId("share-agent-restrict")).toBeDisabled();
+
+    // …and the token really is full-scoped and restricted: rewriting this document works, the other one does not exist for it.
+    const config = page.getByTestId("share-agent-config");
+    const parsed = JSON.parse((await config.innerText()).trim()) as { mcpServers: { markdoc: { headers: { Authorization: string } } } };
+    const token = parsed.mcpServers.markdoc.headers.Authorization.split(" ")[1];
+    const bearer = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
+    const who = (await (await page.request.get(`${origin}/api/me`, { headers: bearer })).json()) as { scope: string; documentIds: string[] | null };
+    expect(who).toMatchObject({ scope: "full", documentIds: [id] });
+    expect((await page.request.put(`${origin}/api/documents/${id}/content`, { headers: bearer, data: { content: "# Rewritten by the bot\n" } })).status()).toBe(200);
+    expect((await page.request.get(`${origin}/api/documents/${other}/content`, { headers: bearer })).status()).toBe(404);
     await context.close();
   });
 });
