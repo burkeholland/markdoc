@@ -167,6 +167,13 @@ async function addComment(page: Page, docId: string, quote: string, body: string
   return ((await res.json()) as { id: string }).id;
 }
 
+/** Before/after screenshots for the task report, only when REVEAL_SHOTS_DIR points outside the repo. */
+async function shot(page: Page, name: string) {
+  const dir = process.env.REVEAL_SHOTS_DIR;
+  if (!dir) return;
+  await page.screenshot({ path: `${dir}/${name}.png` });
+}
+
 test.describe("comment card click reveals the commented text", () => {
   let user: User;
   let page: Page;
@@ -204,9 +211,11 @@ test.describe("comment card click reveals the commented text", () => {
     await scrollPaneTo(page, "rich", 0);
     const tall = await read(page, "rich", far);
     expect(tall.scrollHeight, `rich pane is tall enough (${tall.scrollHeight} px)`).toBeGreaterThan(3_000);
+    await shot(page, "text-before-click");
 
     const down = await revealAndMeasure(page, far, ["rich"], (c) => c.click(), "text/far");
     expect(down.settled[0].scrollTop, fmt(down.settled[0])).toBeGreaterThan(2_000);
+    await shot(page, "text-after-click");
 
     const up = await revealAndMeasure(page, near, ["rich"], (c) => c.click(), "text/near");
     expect(up.settled[0].scrollTop, fmt(up.settled[0])).toBeLessThan(400);
@@ -225,10 +234,12 @@ test.describe("comment card click reveals the commented text", () => {
     await scrollPaneTo(page, "rich", 0);
     await scrollPaneTo(page, "code", 0);
     await expect.poll(() => read(page, "rich", far).then((r) => r.scrollTop)).toBeLessThan(2);
+    await shot(page, "split-before-click");
 
     const down = await revealAndMeasure(page, far, ["rich", "code"], (c) => c.click(), "split/far");
     expect(down.settled[0].scrollTop, fmt(down.settled[0])).toBeGreaterThan(2_000);
     expect(down.settled[1].scrollTop, fmt(down.settled[1])).toBeGreaterThan(2_000);
+    await shot(page, "split-after-click");
 
     const up = await revealAndMeasure(page, near, ["rich", "code"], (c) => c.click(), "split/near");
     expect(up.settled[0].scrollTop, fmt(up.settled[0])).toBeLessThan(400);
