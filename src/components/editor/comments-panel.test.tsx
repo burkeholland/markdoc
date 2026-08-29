@@ -120,6 +120,58 @@ describe("CommentsPanel", () => {
     }
   });
 
+  it.each(["root", "reply"] as const)("renders a pending %s suggestion as the proposed text with no diff markup", (target) => {
+    const user = makeCollabUser("alice", "Alice");
+    session = new CollabSession({
+      docId: "doc",
+      user,
+      role: "owner",
+      getToken: async () => "token",
+      autoConnect: false,
+    });
+    session.keepAlive();
+    session.ytext.insert(0, "The quick brown fox jumps.");
+    const body = "Try this.\n\n```suggestion\nslow red\n```";
+    const threadId = session.comments.add({ from: 4, to: 15, body: target === "root" ? body : "Could this be clearer?", author: user });
+    if (target === "reply") session.comments.reply(threadId, body, user);
+
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+
+    const box = screen.getByTestId("suggestion-box");
+    expect(box).toHaveAttribute("data-state", "pending");
+    expect(screen.getByTestId("suggestion-text").textContent).toBe("slow red");
+    expect(box.querySelectorAll("ins, del")).toHaveLength(0);
+    expect(screen.queryByTestId("suggestion-deletes")).toBeNull();
+    expect(screen.getByTestId("suggestion-accept-comment")).toBeEnabled();
+    expect(screen.getByTestId("suggestion-reject-comment")).toBeEnabled();
+  });
+
+  it.each(["root", "reply"] as const)("renders an empty %s suggestion as 'Deletes the highlighted text'", (target) => {
+    const user = makeCollabUser("alice", "Alice");
+    session = new CollabSession({
+      docId: "doc",
+      user,
+      role: "owner",
+      getToken: async () => "token",
+      autoConnect: false,
+    });
+    session.keepAlive();
+    session.ytext.insert(0, "The quick brown fox jumps.");
+    const body = "Drop it.\n\n```suggestion\n```";
+    const threadId = session.comments.add({ from: 4, to: 15, body: target === "root" ? body : "Is this needed?", author: user });
+    if (target === "reply") session.comments.reply(threadId, body, user);
+
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+
+    const box = screen.getByTestId("suggestion-box");
+    expect(box).toHaveAttribute("data-state", "pending");
+    const deletes = screen.getByTestId("suggestion-deletes");
+    expect(deletes).toHaveTextContent("Deletes the highlighted text");
+    expect(screen.getByTestId("suggestion-text")).toContainElement(deletes);
+    expect(screen.getByTestId("suggestion-text").textContent).toBe("Deletes the highlighted text");
+    expect(box.querySelectorAll("ins, del")).toHaveLength(0);
+  });
+
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({
