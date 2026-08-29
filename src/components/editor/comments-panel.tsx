@@ -475,6 +475,7 @@ function Composer({
   }, [value]);
 
   // The keyboard reference lives in the Save / send button's tooltip (and its accessible description), not under the box.
+  // Each item is held together with no-break spaces so the wrapped tooltip breaks between shortcuts, never inside one.
   const mod = isMac ? "⌘" : "Ctrl";
   const shortcuts = [
     editing ? "Enter saves" : "Enter sends",
@@ -485,7 +486,9 @@ function Composer({
     `${mod}+E code`,
     `${mod}+K link`,
     "@ mentions",
-  ].join(" · ");
+  ]
+    .map((item) => item.replaceAll(" ", "\u00a0"))
+    .join(" · ");
 
   /** Insert a suggestion block for the quoted text and select its contents so typing replaces them. */
   const insertSuggestion = () => {

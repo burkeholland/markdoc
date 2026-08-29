@@ -145,7 +145,7 @@ test.describe("comment composer: auto-grow, full-width editing, shortcuts in the
     const tip = await hoverShortcuts(page, thread);
     await expect(tip).toContainText("Enter saves");
     await expect(tip).toContainText("Esc cancels");
-    await expect(tip).toContainText(/(Ctrl|⌘)\+B bold/);
+    await expect(tip).toContainText(/(Ctrl|⌘)\+B\sbold/);
     // The long label wraps inside the panel instead of one ~550 px line across the editor.
     const tipBox = (await tip.boundingBox())!;
     const panelBox = (await page.getByTestId("comments-panel").boundingBox())!;
@@ -153,7 +153,7 @@ test.describe("comment composer: auto-grow, full-width editing, shortcuts in the
     expect(tipBox.width).toBeLessThanOrEqual(280);
     expect(tipBox.x).toBeGreaterThanOrEqual(panelBox.x);
     expect(tipBox.x + tipBox.width).toBeLessThanOrEqual(panelBox.x + panelBox.width);
-    await expect(thread.getByTestId("comment-submit")).toHaveAttribute("aria-description", /Esc cancels/);
+    await expect(thread.getByTestId("comment-submit")).toHaveAttribute("aria-description", /Esc\scancels/);
     if (process.env.SHOT_DIR) await page.getByTestId("comments-panel").screenshot({ path: `${process.env.SHOT_DIR}/composer-edit-14-lines-tooltip.png` });
     await dismissTooltip(page);
 
