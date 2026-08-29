@@ -1157,6 +1157,50 @@ resource postgresBackup 'Microsoft.RecoveryServices/vaults/backupFabrics/protect
   }
 }
 
+// Every deployment re-PUTs backupPolicy, and Azure Backup answers each PUT with its built-in
+// Sev0 "Modify policy with shorter retention" alert even though retention never changes.
+// This rule strips the action groups from exactly that alert on this vault; backup-job
+// failures and every other vault alert keep their normal routing.
+resource backupPolicyRedeployAlertSuppression 'Microsoft.AlertsManagement/actionRules@2021-08-08' = {
+  name: '${backupVaultName}-policy-redeploy-suppression'
+  location: 'Global'
+  properties: {
+    description: 'Suppress the built-in Azure Backup alert raised when a Bicep deployment re-PUTs the unchanged ${backupPolicyName} policy. Only the policy-modification alert is affected.'
+    enabled: true
+    scopes: [
+      backupVault.id
+    ]
+    conditions: [
+      {
+        field: 'MonitorService'
+        operator: 'Equals'
+        values: [
+          'Azure Backup'
+        ]
+      }
+      {
+        field: 'Severity'
+        operator: 'Equals'
+        values: [
+          'Sev0'
+        ]
+      }
+      {
+        field: 'Description'
+        operator: 'Equals'
+        values: [
+          'A Modify Policy operation for RSVault has been executed'
+        ]
+      }
+    ]
+    actions: [
+      {
+        actionType: 'RemoveAllActionGroups'
+      }
+    ]
+  }
+}
+
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: environmentName
   location: location
