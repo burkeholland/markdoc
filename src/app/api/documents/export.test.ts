@@ -95,7 +95,7 @@ describe("GET /api/documents/[id]/export", () => {
       const exporting = exportOf(doc.id, "?format=html");
       await new Promise((r) => setTimeout(r, 50));
       const started = performance.now();
-      const health = await healthGET();
+      const health = await healthGET(new Request("http://localhost/api/health"));
       const healthMs = performance.now() - started;
       expect(health.status).toBe(200);
       expect(healthMs).toBeLessThan(200);
