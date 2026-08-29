@@ -353,7 +353,7 @@ function emptyManifest(): MigrationManifest {
       documents: { count: 0, sha256: emptyHash },
       assets: { count: 0, bytes: 0, sha256: emptyHash },
     },
-    totals: { tables: 17, rows: 0 },
+    totals: { tables: 18, rows: 0 },
     sequences: {},
   };
 }

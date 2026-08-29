@@ -22,6 +22,7 @@ export const REPAIR_SCHEMA_TABLES = [
   "collaborator",
   "document",
   "notification",
+  "ownership_transfer",
   "recent",
   "review",
   "session",
@@ -349,6 +350,9 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
                          created_at::text AS created_at,
                          read_at::text AS read_at
                     FROM notification`,
+  ownership_transfer: `SELECT xmin::text AS row_version,
+                              id, status, created_at::text AS created_at
+                         FROM ownership_transfer`,
   recent: `SELECT xmin::text AS row_version,
                   user_id, document_id, opened_at::text AS opened_at
              FROM recent`,

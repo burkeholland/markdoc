@@ -117,6 +117,7 @@ export async function seedMigrationFixture(source: PGlite): Promise<void> {
 }
 
 export async function setMigrationFixtureSchemaToVersion15(source: PGlite): Promise<void> {
+  await source.query(`DROP TABLE ownership_transfer`);
   await source.query(`ALTER TABLE api_token DROP COLUMN mention_slug`);
   await source.query(`ALTER TABLE notification DROP COLUMN agent_targets`);
   await source.query(

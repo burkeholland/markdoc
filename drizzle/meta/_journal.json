@@ -120,6 +120,13 @@
       "when": 1787883262768,
       "tag": "0016_notification_agent_targets",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787964039572,
+      "tag": "0017_ownership_transfer",
+      "breakpoints": true
     }
   ]
 }
