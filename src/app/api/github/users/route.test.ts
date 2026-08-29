@@ -96,6 +96,17 @@ describe("GET /api/github/users", () => {
       bearer = null;
     }
   });
+
+  it("answers 400 \"No GitHub token\" outside the mock for a user who signed in without GitHub", async () => {
+    process.env.GITHUB_MOCK = "0";
+    try {
+      const res = await get("?q=oc");
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as Body).error).toBe("No GitHub token. Sign in with GitHub.");
+    } finally {
+      process.env.GITHUB_MOCK = "1";
+    }
+  });
 });
 
 describe("searchUsers()", () => {
