@@ -35,7 +35,7 @@ export default defineConfig({
   testDir: "./e2e",
   // Compiles the editor and API routes once before the first spec (no-op with PROD_BASE_URL).
   globalSetup: "./e2e/global-setup.ts",
-  // Removes the per-run dist dir (best-effort) and reverts Next's tsconfig.json `include` churn.
+  // Reverts Next's tsconfig.json `include` churn; the dist dir is removed by posttest:e2e and the pre-run delete above.
   globalTeardown: "./e2e/global-teardown.ts",
   timeout: 90_000,
   expect: { timeout: 15_000 },
