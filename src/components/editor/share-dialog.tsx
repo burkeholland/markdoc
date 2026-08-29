@@ -1,12 +1,13 @@
 "use client";
 
 import { memo, useEffect, useRef, useState, type RefObject } from "react";
-import { BookOpen, Bot, Check, Copy, Globe, KeyRound, Link2, Loader2, Lock, Trash2, UserPlus } from "lucide-react";
+import { BookOpen, Bot, Check, Copy, Globe, KeyRound, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
 import { api, type ApiTokenDto, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
+import { CollaboratorLoginInput } from "@/components/editor/collaborator-login-input";
 import { CopyBlock, mcpConfigFor, mcpHttpConfigFor, TOKEN_PLACEHOLDER } from "@/components/settings/agent-connect-card";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 import type { TokenScopeName } from "@/lib/mcp";
@@ -36,6 +37,7 @@ export const ShareDialog = memo(function ShareDialog({
   const [owner, setOwner] = useState<{ login: string | null; name: string | null; image: string | null } | null>(null);
   const [login, setLogin] = useState("");
   const [role, setRole] = useState<Exclude<Role, "owner">>("editor");
+  const roleSelect = useRef<HTMLSelectElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [origin, setOrigin] = useState("");
@@ -115,17 +117,13 @@ export const ShareDialog = memo(function ShareDialog({
               void add();
             }}
           >
-            <div className="relative flex-1">
-              <UserPlus size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
-              <input
-                className="input pl-9"
-                placeholder="GitHub handle, e.g. octocat"
-                value={login}
-                onChange={(e) => setLogin(e.target.value)}
-                data-testid="share-login"
-              />
-            </div>
-            <select className="select" value={role} onChange={(e) => setRole(e.target.value as Exclude<Role, "owner">)} aria-label="Role for new collaborator" data-testid="share-role">
+            <CollaboratorLoginInput
+              value={login}
+              onChange={setLogin}
+              exclude={[...(owner?.login ? [owner.login] : []), ...(collabs?.map((c) => c.login) ?? [])]}
+              onPick={() => roleSelect.current?.focus()}
+            />
+            <select ref={roleSelect} className="select" value={role} onChange={(e) => setRole(e.target.value as Exclude<Role, "owner">)} aria-label="Role for new collaborator" data-testid="share-role">
               <option value="editor">Editor</option>
               <option value="commenter">Commenter</option>
               <option value="viewer">Viewer</option>
