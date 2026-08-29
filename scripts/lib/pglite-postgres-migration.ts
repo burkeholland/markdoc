@@ -48,6 +48,7 @@ export const APPLICATION_TABLES = [
   "collaborator",
   "document",
   "notification",
+  "ownership_transfer",
   "recent",
   "review",
   "session",

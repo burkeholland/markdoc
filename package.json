@@ -22,6 +22,7 @@
     "build:server": "node scripts/build-server.mjs",
     "resume-check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/live/resume-check.ps1",
     "repair:github-identity": "tsx scripts/repair-github-identity.mts",
+    "transfer:legacy-ownership": "tsx scripts/transfer-legacy-ownership.mts",
     "repair:imported-ystate": "tsx scripts/repair-imported-ystate.mts",
     "domain:preflight": "tsx scripts/custom-domain-preflight.mts",
     "mcp": "node mcp/server.mjs",

@@ -441,6 +441,24 @@ export const webhookDeliveries = pgTable(
 
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 
+export type OwnershipTransferStatus = "applied" | "rolled_back";
+
+/**
+ * Rollback record written by `scripts/transfer-legacy-ownership.mts` in the same transaction as the
+ * transfer it describes: the deleted source `user` row, every (table, pk, column, old value) it changed
+ * and the fingerprints `--rollback` must see before it reverses them. Never read by the app.
+ */
+export const ownershipTransfers = pgTable("ownership_transfer", {
+  id: text("id").primaryKey(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  sourceUserJson: jsonb("source_user_json").$type<Record<string, unknown>>().notNull(),
+  movedRowsJson: jsonb("moved_rows_json").$type<unknown[]>().notNull(),
+  postFingerprintsJson: jsonb("post_fingerprints_json").$type<Record<string, unknown>>().notNull(),
+  status: text("status").$type<OwnershipTransferStatus>().notNull().default("applied"),
+});
+
+export type OwnershipTransfer = typeof ownershipTransfers.$inferSelect;
+
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
 export type Version = typeof versions.$inferSelect;

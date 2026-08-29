@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 17, userForeignKeys: 10 },
+        schema: { tables: 18, userForeignKeys: 10 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
