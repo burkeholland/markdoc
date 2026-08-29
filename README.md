@@ -247,7 +247,7 @@ Production is the one Container App `markdoc` in `markdoc-rg` (East US 2), and i
 4. Keep the previous revision, now inactive at its own digest, as the rollback. Reactivate it (`az containerapp revision activate --revision <previous>`), or run `az containerapp update --image` with the previous digest and `APP_VERSION`; either way only the application changes and the database is untouched. Never reverse the database because an app image failed: if the new revision may have accepted writes, PostgreSQL still holds them and the previous image keeps serving them.
 5. Record the source SHA, image digest, and the new and previous revision names.
 
-Facts about the current deployment, recorded here rather than proposed for change: the Container App, registry, Key Vault, identity, logs, and the private PostgreSQL VM the template describes live in `markdoc-rg` (East US 2). The authoritative production database is the Azure Database for PostgreSQL Flexible Server `markdraftdb` (Burstable B1ms, 32 GiB, 7-day backups) in `markdraft-rg`, Canada Central, reached through the Key Vault `database-url` secret with `DATABASE_SSL=1`. Because `infra/main.bicep` composes `database-url` from the VM's private address whenever `configureDatabase`, `commitDatabasePassword` or `restoreDatabasePassword` is set, the `-InitializeDatabase`, `-RotateDatabasePassword` and recovery flags below act on the VM in the template, not on `markdraftdb`; do not run them against production expecting otherwise.
+Facts about the current deployment, recorded here rather than proposed for change: everything, including the database, lives in `markdoc-rg` (East US 2) on the same VNet (`markdoc-vnet`). The authoritative production database is the private PostgreSQL VM `markdoc-pg` that `infra/main.bicep` describes: Standard_B1ms, Ubuntu 24.04, no public IP, NIC in the `markdoc-vnet/postgres` subnet, NSG `markdoc-pg-nsg` allowing TCP 5432 only from the Container Apps subnet `10.42.0.0/23`, protected by pgBackRest plus the Recovery Services vault `markdoc-backup` (policy `daily-7-days`). The app reaches PostgreSQL over TLS on the VM's private address through the Key Vault `database-url` secret with `DATABASE_SSL=1`; warm `/api/health` reports `latencyMs` of 1–3 ms. Because `infra/main.bicep` composes `database-url` from that private address whenever `configureDatabase`, `commitDatabasePassword` or `restoreDatabasePassword` is set, the `-InitializeDatabase`, `-RotateDatabasePassword` and recovery flags below act on the production database VM and are production-affecting operations; an app-only release never runs them. Database rollback or restore uses the VM's pgBackRest backups and WAL archive (`infra/postgres-recovery.sh`, `-VerifyRecovery`), not a managed-service point-in-time restore.
 
 ### Provisioning a new environment
 
@@ -278,15 +278,14 @@ The PostgreSQL recovery layers are:
 - A two-minute systemd check validates repository access, physical-backup freshness, the age of any pending WAL archive backlog, pgBackRest spool status, and unresolved archive failures. The five-minute backlog-age bound is tied to `archive_timeout=240s`; an idle database with no unarchived WAL does not false-alert. Its secret-free health object includes archive age and backlog measurements. Its heartbeat and failures flow through a restricted NAT egress path to Log Analytics, and both Azure Monitor rules notify the production action group.
 - A weekly job restores the latest physical backup to an isolated local socket and temporary data directory, starts it on port 55432, verifies the `markdoc` database after recovery, records the duration off-VM, then removes the scratch cluster. Run `-VerifyRecovery` after recovery changes and confirm it finishes within the two-hour RTO.
 
-Approximate monthly cost shape (pay-as-you-go; `markdoc-rg` resources are East US 2 list prices, the database server is billed in Canada Central; storage, backup, and logs vary with database size and traffic, so verify current prices in the Azure Pricing Calculator):
+Approximate monthly cost shape (pay-as-you-go, East US 2 list prices; storage, backup, and logs vary with database size and traffic, so verify current prices in the Azure Pricing Calculator):
 
 | Resource | Size | ~$/month |
 | --- | --- | --- |
 | Container App | 0.5 vCPU / 1 GiB, one always-on replica | 34 |
 | Container App (`-Small`) | 0.25 vCPU / 0.5 GiB | 14 |
 | Container App (`-ScaleToZero`) | sleeps when nobody is connected | ~0 idle |
-| PostgreSQL Flexible Server (`markdraftdb`, `markdraft-rg`) | Burstable B1ms, 32 GiB, 7-day backups; the authoritative database | ~16 |
-| PostgreSQL VM + OS disk (template) | Standard B1ms, 32 GiB Standard SSD LRS | usage-priced |
+| PostgreSQL VM + OS disk (`markdoc-pg`, `markdoc-rg`) | Standard B1ms, 32 GiB Standard SSD LRS; the production database | usage-priced |
 | PostgreSQL controlled egress | Standard NAT Gateway + one Standard public IP; no public IP on the VM | usage/data-priced |
 | PostgreSQL recovery storage | Standard StorageV2 LRS, hot tier; WAL + 7 physical + 30 logical daily backups | capacity/operations |
 | Recovery Services backup | Standard vault, daily VM recovery point, seven-day LRS retention | protected-instance/storage |
