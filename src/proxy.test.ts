@@ -124,6 +124,117 @@ describe("proxy: stale session cookie", () => {
   });
 });
 
+describe("proxy: canonical host redirect", () => {
+  const CANONICAL = "markdoc.example.com";
+  const on = (host: string, path = "/", extra: Record<string, string> = {}) => request(undefined, { host, ...extra }, path);
+
+  afterEach(() => {
+    delete process.env.MARKDOC_CANONICAL_HOST;
+  });
+
+  it("unset: no redirect, and the request passes through unchanged", async () => {
+    delete process.env.MARKDOC_CANONICAL_HOST;
+    const res = await proxy(on("markdoc.old.azurecontainerapps.io", "/d/abc?x=1"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("empty string is unset", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = "";
+    const res = await proxy(on("markdoc.old.azurecontainerapps.io"));
+    expect(res.status).toBe(200);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("set + same host: no redirect", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(on(CANONICAL, "/d/abc?x=1"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("set + different host GET: 308 to https://<canonical> with the path and query kept", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(on("markdoc.old.azurecontainerapps.io", "/d/abc?x=1"));
+    expect(res.status).toBe(308);
+    expect(res.headers.get("location")).toBe(`https://${CANONICAL}/d/abc?x=1`);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("HEAD redirects like GET", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(new NextRequest(new URL("/", "http://localhost:3610"), { method: "HEAD", headers: { host: "old.example" } }));
+    expect(res.status).toBe(308);
+    expect(res.headers.get("location")).toBe(`https://${CANONICAL}/`);
+  });
+
+  it("set + different host POST: no redirect", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(new NextRequest(new URL("/d/abc", "http://localhost:3610"), { method: "POST", headers: { host: "old.example" } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("set + different host GET /api/*: no redirect (health probes and agents on the old URL keep working)", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    for (const path of ["/api/health", "/api/mcp", "/api/documents/abc"]) {
+      const res = await proxy(on("old.example", path));
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("location"), path).toBeNull();
+    }
+  });
+
+  it("a WebSocket upgrade is never redirected", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(on("old.example", "/collab", { upgrade: "websocket", connection: "Upgrade" }));
+    expect(res.status).toBe(200);
+  });
+
+  it("x-forwarded-host wins over host", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const same = await proxy(on("old.example", "/", { "x-forwarded-host": CANONICAL }));
+    expect(same.status).toBe(200);
+    const other = await proxy(on(CANONICAL, "/", { "x-forwarded-host": "old.example, proxy.internal" }));
+    expect(other.status).toBe(308);
+    expect(other.headers.get("location")).toBe(`https://${CANONICAL}/`);
+  });
+
+  it("a :443 suffix and different case still equal the canonical host", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    expect((await proxy(on(`${CANONICAL}:443`))).status).toBe(200);
+    expect((await proxy(on(CANONICAL.toUpperCase()))).status).toBe(200);
+    expect((await proxy(on("old.example:443"))).status).toBe(308);
+  });
+
+  it("no host header at all passes through", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(new NextRequest(new URL("/", "http://localhost:3610")));
+    expect(res.status).toBe(200);
+  });
+
+  it.each(["https://markdoc.example.com", "markdoc.example.com/", "markdoc.example.com:443", "mark doc.example", "user@markdoc.example.com"])(
+    "invalid value %j: no redirect and exactly one [proxy][warn] line, then silence",
+    async (value) => {
+      process.env.MARKDOC_CANONICAL_HOST = value;
+      expect((await proxy(on("old.example"))).status).toBe(200);
+      expect((await proxy(on("old.example", "/d/abc"))).status).toBe(200);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toMatch(/^\[proxy\]\[warn\] MARKDOC_CANONICAL_HOST/);
+      expect(String(warn.mock.calls[0][0])).not.toContain(value);
+      expect(String(warn.mock.calls[0][0])).not.toMatch(/\n\s+at /);
+    },
+  );
+
+  it("the redirect runs before the stale-cookie logic and sets no cookies", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
+    const res = await proxy(request(`${SESSION_COOKIE}=not-a-jwt`, { host: "old.example" }, "/"));
+    expect(res.status).toBe(308);
+    expect(setCookies(res)).toHaveLength(0);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
 describe("session-cookie helpers", () => {
   it("hasSessionCookie / stripCookies", () => {
     expect(hasSessionCookie(null)).toBe(false);
