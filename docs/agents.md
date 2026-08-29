@@ -33,6 +33,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
   - [Review a document](#review-a-document)
   - [Sit in a document](#sit-in-a-document)
 - [What people see](#what-people-see)
+- [UI conventions](#ui-conventions)
 
 ## 1. Create a token
 
@@ -556,3 +557,7 @@ done
 - The agent's comments with a bot badge; replies from people are readable through `markdoc_comments`.
 - Every action in the document's **Activity** panel under the token's name, marked as an agent.
 - Version history entries attributed to *"you via &lt;agent&gt;"*. In the history panel people can tick any two versions to compare them (old → new, with a Swap button, the authors of every version in the range, and `[` / `]` to jump between change hunks; a paragraph that only moved shows once as *moved* rather than red + green), name an auto version inline, restore it, or copy it as a new document.
+
+## UI conventions
+
+- Never use a coloured left border or left bar to mark, highlight or select a UI item (a review card, a quoted line, the current entry of a list) — use a soft filled pill, an even border all round, weight or colour of the text instead; the only vertical lines on the left are carets and remote cursors, and Markdown blockquotes inside document content, which are content, not UI.

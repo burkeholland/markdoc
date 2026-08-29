@@ -1,5 +1,10 @@
 /* Comment bodies (inline Markdown) and reactions. Scoped to the comments panel; nothing here leaks into the editor. */
 
+/* A long unbroken word, path or URL wraps inside its card instead of widening it past the panel. */
+.comment-body {
+  overflow-wrap: anywhere;
+}
+
 .comment-body .comment-paragraph + .comment-paragraph {
   margin-top: 0.375rem;
 }
@@ -10,6 +15,9 @@
   padding: 0 0.3em;
   border-radius: 0.25rem;
   background: var(--color-surface-3, rgba(127, 127, 127, 0.15));
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 
 .comment-body .comment-link {
@@ -185,11 +193,12 @@
   color: var(--color-ink-2, inherit);
 }
 
-/* Review card at the top of the Comments panel. */
+/* Review card at the top of the Comments panel. An even 1 px border all round and a faint lift set it
+   apart from plain threads together with the avatar and bold verdict — never a coloured edge (docs/agents.md, UI conventions). */
 .review-card {
   border: 1px solid var(--color-line, #e5e7eb);
-  border-left: 3px solid var(--color-accent, #2563eb);
   border-radius: 0.75rem;
   background: var(--color-surface, #fff);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
   padding: 0.625rem 0.75rem;
 }

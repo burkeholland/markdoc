@@ -60,16 +60,17 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
         Contents
         <ChevronDown size={15} className={cn("ml-auto transition-transform", open && "rotate-180")} />
       </button>
-      <div className="mb-2 hidden text-[11px] font-semibold uppercase tracking-wider text-ink-4 lg:block">On this page</div>
-      <ol id="reader-toc-list" className={cn("reader-toc-list mt-2 flex-col gap-0.5 border-l border-line lg:mt-0 lg:flex", open ? "flex" : "hidden")}>
+      <div className="mb-2 hidden pl-2 text-[11px] font-semibold uppercase tracking-wider text-ink-4 lg:block">On this page</div>
+      <ol id="reader-toc-list" className={cn("reader-toc-list mt-2 flex-col gap-0.5 lg:mt-0 lg:flex", open ? "flex" : "hidden")}>
         {headings.map((h) => (
           <li key={h.id}>
+            {/* The current entry is a soft filled pill (never a bar at the edge — docs/agents.md, UI conventions); h3s indent under their h2. */}
             <a
               href={`#${h.id}`}
               className={cn(
-                "block border-l-2 py-1 text-[13px] leading-snug transition-colors hover:text-ink",
-                h.level === 3 ? "pl-6" : "pl-3",
-                active === h.id ? "-ml-px border-accent font-medium text-accent" : "-ml-px border-transparent text-ink-3",
+                "block rounded-md py-1 pr-2 text-[13px] leading-snug transition-colors",
+                h.level === 3 ? "pl-5" : "pl-2",
+                active === h.id ? "bg-accent-soft font-medium text-accent" : "text-ink-3 hover:bg-surface-2 hover:text-ink",
               )}
               aria-current={active === h.id ? "location" : undefined}
               data-testid="reader-toc-entry"

@@ -19,6 +19,9 @@ import "./comments.css";
 
 type Tab = "open" | "resolved" | "suggestions";
 
+/** The anchored text above a comment: a soft rounded highlight, never a coloured bar (docs/agents.md, UI conventions). */
+const QUOTE_CLASS = "mb-2 truncate rounded-md bg-amber-50 px-2 py-0.5 text-xs text-ink-3 dark:bg-amber-950/40";
+
 /** Someone who can be @mentioned: present in the document, a collaborator, or an agent (present or recently active). */
 export interface MentionCandidate {
   /** What follows `@` when picked; for agents `<ownerLogin>/<slug>`. */
@@ -48,7 +51,7 @@ export function MentionBody({ body, className }: { body: string; className?: str
   const content = useMemo(() => renderCommentBody(parseSuggestionBlock(body)?.prose ?? body), [body]);
   if (content === null) return null;
   return (
-    <div className={cn("comment-body", className)} data-testid="comment-body">
+    <div className={cn("comment-body min-w-0 break-words", className)} data-testid="comment-body">
       {content}
     </div>
   );
@@ -731,7 +734,7 @@ const ThreadCard = memo(function ThreadCard({
     >
       {unread && <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-accent" aria-label="Unread activity" data-testid="thread-unread-dot" />}
       {thread.quote && (
-        <div className="mb-2 truncate border-l-2 border-amber-400 pl-2 text-xs text-ink-3" title={thread.quote}>
+        <div className={QUOTE_CLASS} title={thread.quote} data-testid="comment-quote">
           {thread.range ? thread.quote : <span className="italic">(original text removed) </span>}
         </div>
       )}
@@ -994,15 +997,33 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
   );
 }
 
+/** Threads of a review that still exist in the document (a deleted thread simply drops out). */
+function reviewThreads(review: ReviewDto, threads: CommentThread[]): CommentThread[] {
+  return threads.filter((t) => review.threadIds.includes(t.id));
+}
+
+/**
+ * A review is open while one of its threads is unresolved or still carries a pending (or outdated)
+ * suggestion. Once every suggestion is decided and every thread resolved — or all of its threads were
+ * deleted — it is resolved and lists at the top of the Resolved tab instead of Open (Burke, task #994).
+ */
+export function isReviewOpen(review: ReviewDto, threads: CommentThread[], text: string): boolean {
+  const mine = reviewThreads(review, threads);
+  if (mine.some((t) => !t.resolved)) return true;
+  return commentSuggestionTargets(mine, text).some((target) => target.state === "pending" || target.state === "outdated");
+}
+
 /** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
 function ReviewCard({ review, threads, session, text, ops, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; onToast?: CommentsPanelProps["onToast"] }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const canEdit = session.role === "owner" || session.role === "editor";
-  const mine = threads.filter((t) => review.threadIds.includes(t.id));
+  const canComment = session.canComment;
+  const mine = reviewThreads(review, threads);
   const withSuggestion = commentSuggestionTargets(mine, text);
   const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
   const applicable = pending.filter((target) => target.state === "pending");
+  const unresolved = mine.filter((t) => !t.resolved);
 
   /** Each suggestion is its own transaction (its own undo step); failures are counted, not fatal. */
   const decideAll = async (accept: boolean) => {
@@ -1027,6 +1048,28 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
     onToast?.(`${accept ? "Accepted" : "Rejected"} ${done} suggestion${done === 1 ? "" : "s"} from ${review.authorName}${tail ? ` (${tail})` : ""}.`, failed ? "error" : "success");
   };
 
+  /** Resolves every open thread of the review so a fully decided review can leave the Open tab (it lists under Resolved). */
+  const resolveAll = async () => {
+    setBusy(true);
+    let done = 0;
+    try {
+      for (const t of unresolved) {
+        try {
+          await ops.resolve(t.id, true);
+          done++;
+        } catch {
+          // Another collaborator may have resolved or deleted it while this batch was running.
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+    onToast?.(`Resolved ${done} comment${done === 1 ? "" : "s"} from ${review.authorName}.`, "success");
+  };
+
+  const partial = applicable.length !== pending.length;
+  const acceptTitle = partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions";
+
   return (
     <div className="review-card" data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
       <div className="flex items-start gap-2.5">
@@ -1050,14 +1093,47 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
           {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         </button>
       </div>
+      {/* Two equal columns, single-line labels at every panel width (280–720 px). The "(n of m)" count only
+          shows once the row is wide enough for it; the tooltip always carries the full wording. */}
       {canEdit && pending.length > 0 && (
-        <div className="mt-2 flex items-center gap-2">
-          <button type="button" className="btn btn-sm btn-primary gap-1.5" disabled={busy || applicable.length === 0} onClick={() => void decideAll(true)} data-testid="review-accept-all">
-            <CheckCheck size={13} /> Accept all suggestions
-            {applicable.length !== pending.length && <span className="text-[11px] opacity-80">({applicable.length} of {pending.length})</span>}
+        <div className="@container mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            className="btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2"
+            disabled={busy || applicable.length === 0}
+            onClick={() => void decideAll(true)}
+            title={acceptTitle}
+            aria-label={acceptTitle}
+            data-testid="review-accept-all"
+          >
+            <CheckCheck size={13} aria-hidden /> Accept all
+            {partial && <span className="hidden text-[11px] opacity-80 @min-[18rem]:inline">({applicable.length} of {pending.length})</span>}
           </button>
-          <button type="button" className="btn btn-sm btn-outline gap-1.5" disabled={busy} onClick={() => void decideAll(false)} data-testid="review-reject-all">
-            <X size={13} /> Reject all
+          <button
+            type="button"
+            className="btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2"
+            disabled={busy}
+            onClick={() => void decideAll(false)}
+            title="Reject all suggestions"
+            aria-label="Reject all suggestions"
+            data-testid="review-reject-all"
+          >
+            <X size={13} aria-hidden /> Reject all
+          </button>
+        </div>
+      )}
+      {/* Every suggestion decided but comments still open: one click clears the review from Open. */}
+      {canComment && pending.length === 0 && unresolved.length > 0 && (
+        <div className="mt-2 flex">
+          <button
+            type="button"
+            className="btn btn-sm btn-outline gap-1.5 whitespace-nowrap"
+            disabled={busy}
+            onClick={() => void resolveAll()}
+            title={`Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`}
+            data-testid="review-resolve-all"
+          >
+            <Check size={13} aria-hidden /> Resolve all
           </button>
         </div>
       )}
@@ -1136,6 +1212,9 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const open = threads.filter((t) => !t.resolved);
   const resolved = threads.filter((t) => t.resolved);
+  // Decided reviews leave Open: a card sits in Open while a thread of its is unresolved or a suggestion is pending.
+  const openReviews = reviews.filter((r) => isReviewOpen(r, threads, text));
+  const resolvedReviews = reviews.filter((r) => !isReviewOpen(r, threads, text));
   const commentSuggestions = useMemo(
     () => commentSuggestionTargets(threads, text).filter((target) => target.state === "pending" || target.state === "outdated"),
     [threads, text],
@@ -1268,17 +1347,17 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           </button>
         ))}
       </div>
-      <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
-        {tab === "open" && reviews.length > 0 && (
+      <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
+        {tab === "open" && openReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
-            {reviews.map((r) => (
+            {openReviews.map((r) => (
               <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
             ))}
           </div>
         )}
         {pending && tab === "open" && (
           <div className="rounded-xl border border-accent bg-surface p-3 shadow-md shadow-accent/10" data-testid="pending-comment">
-            <div className="mb-2 truncate border-l-2 border-amber-400 pl-2 text-xs text-ink-3">
+            <div className={QUOTE_CLASS} data-testid="comment-quote">
               {session.ytext.toString().slice(pending.from, pending.to) || "Selected text"}
             </div>
             <Composer
@@ -1321,8 +1400,15 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           ) : (
             open.map((t) => <ThreadCard key={t.id} thread={t} session={session} text={text} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
           ))}
+        {tab === "resolved" && resolvedReviews.length > 0 && (
+          <div className="flex flex-col gap-2" data-testid="review-cards">
+            {resolvedReviews.map((r) => (
+              <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
+            ))}
+          </div>
+        )}
         {tab === "resolved" &&
-          (resolved.length === 0 ? (
+          (resolved.length === 0 && resolvedReviews.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
             resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} text={text} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)

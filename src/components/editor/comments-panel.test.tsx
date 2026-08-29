@@ -34,7 +34,24 @@ vi.mock("@/lib/notifications-store", () => ({
 
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
-import { CommentsPanel, type CommentsPanelProps } from "./comments-panel";
+import { api } from "@/lib/api";
+import type { ReviewDto } from "@/server/reviews";
+import { CommentsPanel, isReviewOpen, type CommentsPanelProps } from "./comments-panel";
+
+function reviewDto(id: string, threadIds: string[]): ReviewDto {
+  return {
+    id,
+    documentId: "doc",
+    authorId: "alice",
+    authorName: "Copilot",
+    collabAuthorId: "agent:alice:Copilot",
+    agent: "Copilot",
+    verdict: "request_changes",
+    summary: `Review ${id}.`,
+    threadIds,
+    createdAt: new Date().toISOString(),
+  };
+}
 
 describe("CommentsPanel", () => {
   let session: CollabSession | null = null;
@@ -268,5 +285,88 @@ describe("CommentsPanel", () => {
     editorControl.focus();
     view.rerender(<Harness open focusOnMount />);
     await waitFor(() => expect(screen.getByRole("tab", { name: "Open" })).toHaveFocus());
+  });
+
+  it("keeps a review in Open until every suggestion is decided and every thread resolved; Resolve all clears it", async () => {
+    const user = makeCollabUser("alice", "Alice");
+    session = new CollabSession({
+      docId: "doc",
+      user,
+      role: "owner",
+      getToken: async () => "token",
+      autoConnect: false,
+    });
+    session.keepAlive();
+    const text = "The quick brown fox jumps over the lazy dog. The end is near.";
+    session.ytext.insert(0, text);
+    const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+    const suggest = (quote: string, proposed: string) =>
+      session!.comments.add({ from: text.indexOf(quote), to: text.indexOf(quote) + quote.length, body: `Tighter.\n\n\`\`\`suggestion\n${proposed}\n\`\`\``, author: agent });
+    const pendingIds = [suggest("quick", "fast"), suggest("brown", "red"), suggest("lazy", "sleepy")];
+    // A second review whose only thread is already resolved, and a third whose thread was deleted.
+    const resolvedId = session.comments.add({ from: text.indexOf("The end"), to: text.indexOf("The end") + 7, body: "Good close.", author: agent });
+    session.comments.setResolved(resolvedId, true, user);
+    const deletedId = session.comments.add({ from: 0, to: 3, body: "Gone soon.", author: agent });
+    session.comments.remove(deletedId);
+    const reviews = [reviewDto("r-pending", pendingIds), reviewDto("r-resolved", [resolvedId]), reviewDto("r-deleted", [deletedId])];
+    vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as Awaited<ReturnType<typeof api.documents.reviews>>);
+
+    const threads = () => session!.comments.list();
+    expect(isReviewOpen(reviews[0], threads(), text)).toBe(true);
+    expect(isReviewOpen(reviews[1], threads(), text)).toBe(false);
+    expect(isReviewOpen(reviews[2], threads(), text)).toBe(false);
+
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} onToast={() => {}} />);
+    const cards = () => screen.queryAllByTestId("review-card").map((card) => card.getAttribute("data-review-id"));
+    await waitFor(() => expect(cards()).toEqual(["r-pending"]));
+    expect(screen.getByRole("tab", { name: /Open/ })).toHaveAttribute("aria-selected", "true");
+
+    // Reject all: the suggestions are decided but the threads stay open, so the card stays and offers Resolve all.
+    fireEvent.click(screen.getByTestId("review-reject-all"));
+    await waitFor(() => expect(screen.getByTestId("review-resolve-all")).toBeVisible());
+    expect(screen.queryByTestId("review-accept-all")).toBeNull();
+    expect(cards()).toEqual(["r-pending"]);
+    expect(threads().filter((t) => pendingIds.includes(t.id)).every((t) => t.suggestionState === "rejected" && !t.resolved)).toBe(true);
+
+    fireEvent.click(screen.getByTestId("review-resolve-all"));
+    await waitFor(() => expect(cards()).toEqual([]));
+    expect(threads().filter((t) => pendingIds.includes(t.id)).every((t) => t.resolved)).toBe(true);
+    expect(isReviewOpen(reviews[0], threads(), text)).toBe(false);
+
+    // Resolved lists the decided reviews first, then the resolved threads.
+    fireEvent.click(screen.getByRole("tab", { name: /Resolved/ }));
+    await waitFor(() => expect(cards()).toEqual(["r-pending", "r-resolved", "r-deleted"]));
+    expect(screen.queryByTestId("review-accept-all")).toBeNull();
+    expect(screen.queryByTestId("review-reject-all")).toBeNull();
+    expect(screen.queryByTestId("review-resolve-all")).toBeNull();
+    expect(screen.getAllByTestId("comment-thread")).toHaveLength(4);
+  });
+
+  it("accepting every suggestion of a review resolves its threads, so the card leaves Open at once", async () => {
+    const user = makeCollabUser("alice", "Alice");
+    session = new CollabSession({
+      docId: "doc",
+      user,
+      role: "owner",
+      getToken: async () => "token",
+      autoConnect: false,
+    });
+    session.keepAlive();
+    const text = "The quick brown fox.";
+    session.ytext.insert(0, text);
+    const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+    const a = session.comments.add({ from: 4, to: 9, body: "```suggestion\nfast\n```", author: agent });
+    const b = session.comments.add({ from: 10, to: 15, body: "```suggestion\nred\n```", author: agent });
+    const reviews = [reviewDto("r1", [a, b])];
+    vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as Awaited<ReturnType<typeof api.documents.reviews>>);
+
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} onToast={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("review-accept-all")).toBeVisible());
+    fireEvent.click(screen.getByTestId("review-accept-all"));
+    await waitFor(() => expect(session!.ytext.toString()).toBe("The fast red fox."));
+    await waitFor(() => expect(screen.queryAllByTestId("review-card")).toHaveLength(0));
+    expect(screen.queryByTestId("review-resolve-all")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: /Resolved/ }));
+    await waitFor(() => expect(screen.getAllByTestId("review-card")).toHaveLength(1));
   });
 });
