@@ -66,7 +66,7 @@ function setup(opts: { surface?: "code" | "rich"; lineTop?: number; codeVisible?
   actions.setCodeView(code);
   actions.setRichView(rich);
   actions.setRichScroller(scroller);
-  return { actions, code, rich, scroller: scroller as Fixture["scroller"], scrollTopsAtScrollTo, lineTop };
+  return { actions, code, rich, scroller: scroller as unknown as Fixture["scroller"], scrollTopsAtScrollTo, lineTop };
 }
 
 /** scrollTop that centres the line. */
