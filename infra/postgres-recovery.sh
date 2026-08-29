@@ -448,7 +448,7 @@ PY
   'health/restore-latest.json' \
   'application/json'
 install -o postgres -g postgres -m 0640 /dev/null /var/lib/pgbackrest/restore-last-success
-logger -p local0.info -t markdoc-restore-check 'restore-check=ok'
+logger -p local0.info -t markdoc-restore-check "restore-check=ok duration-seconds=\$duration_seconds"
 printf 'restore-check=ok duration-seconds=%s completed-at=%s\n' \
   "\$duration_seconds" \
   "\$completed_at"
@@ -548,6 +548,7 @@ Description=Run the Markdoc scratch restore proof weekly
 
 [Timer]
 OnCalendar=Sun *-*-* 05:00:00 UTC
+Persistent=true
 RandomizedDelaySec=30m
 
 [Install]
