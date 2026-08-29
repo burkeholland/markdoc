@@ -401,7 +401,7 @@ Access changes are authoritative for live sessions, not just for the next open. 
 | `GET /api/mentions` / `POST /api/mentions/:id/read` | | signed in | **Deprecated, removed next release**: alias of `GET /api/notifications?unread=1&kind=mention` (also returns the old `mentions` array) and of `POST /api/notifications/:id/read`. |
 | `GET /api/tokens`, `POST /api/tokens` | `{ name, expiresInDays?, scope?, documentIds? }` | session only | List your API tokens (each with `scope` and `documentIds`); create one (`201`, the secret is returned once). `scope` is `read`, `comment` or `full` (default `full`); `documentIds` restricts the token to documents you can see (an unknown id → `404`; empty or omitted = all). Tokens cannot call these (`403`), so a leaked token cannot enumerate its siblings. |
 | `DELETE /api/tokens/:id` | | session only | Revoke a token. |
-| `GET /api/health` | | public | `{ ok, version }`. |
+| `GET /api/health` | `?probe=live` | public | Full check: `{ ok, db, collab, documentsLoaded, connections, latencyMs, version }` after one database round trip (`503 { ok: false, error }` when the database does not answer). With `?probe=live` the answer is `{ ok: true, probe: "live", collab, version }` and never touches the database — that is what the platform's liveness probe calls. |
 
 ### Mentioning people
 

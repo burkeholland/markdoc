@@ -1283,18 +1283,23 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
             { name: 'APP_VERSION', value: empty(appVersion) ? last(split(image, ':')) : appVersion }
             { name: 'DEPLOYMENT_CONFIGURATION_VERSION', value: deploymentConfigurationToken }
           ]
+          // Startup waits for the full check (database round trip); Liveness must not: a slow or
+          // restarting PostgreSQL is not a reason to kill a healthy process (task #987). The default
+          // probe timeout is 1 s; a cold connection to the B1ms VM alone takes ~45 ms plus TLS jitter.
           probes: [
             {
               type: 'Startup'
               httpGet: { path: '/api/health', port: 3000 }
               initialDelaySeconds: 5
               periodSeconds: 5
+              timeoutSeconds: 5
               failureThreshold: 12
             }
             {
               type: 'Liveness'
-              httpGet: { path: '/api/health', port: 3000 }
+              httpGet: { path: '/api/health?probe=live', port: 3000 }
               periodSeconds: 30
+              timeoutSeconds: 5
               failureThreshold: 3
             }
           ]
