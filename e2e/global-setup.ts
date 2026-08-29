@@ -44,8 +44,15 @@ export default async function globalSetup(config: FullConfig) {
 
   const webServer = config.webServer;
   const loadGated = Boolean(webServer?.command.includes("load.mjs"));
+  // Cap for each first-hit compile below (editor route, API routes). The webServer timeout already
+  // adapts to the load gate (480 s vs 180 s); on a saturated box the flat 120 s cap failed the warm-up,
+  // so it follows the gate too. E2E_WARMUP_TIMEOUT_MS overrides both (unset, empty or non-numeric
+  // values fall through to the default).
+  const envTimeout = Number(process.env.E2E_WARMUP_TIMEOUT_MS);
+  const envTimeoutSet = Number.isFinite(envTimeout) && envTimeout > 0;
+  const WARMUP_STEP_TIMEOUT_MS = envTimeoutSet ? envTimeout : loadGated ? 300_000 : 120_000;
   console.log(
-    `[e2e warm-up] load gate ${loadGated ? "ON" : "OFF"}: webServer "${webServer?.command ?? "<none>"}" (timeout ${Math.round((webServer?.timeout ?? 0) / 1000)} s)`,
+    `[e2e warm-up] load gate ${loadGated ? "ON" : "OFF"}: webServer "${webServer?.command ?? "<none>"}" (timeout ${Math.round((webServer?.timeout ?? 0) / 1000)} s); warm-up step timeout ${WARMUP_STEP_TIMEOUT_MS} ms (${envTimeoutSet ? "E2E_WARMUP_TIMEOUT_MS" : "default"})`,
   );
 
   const startedAt = Date.now();
@@ -99,11 +106,11 @@ export default async function globalSetup(config: FullConfig) {
       await page.goto(`/d/${docId}`);
       const saveState = page.getByTestId("save-state");
       try {
-        await saveState.waitFor({ state: "attached", timeout: 120_000 });
+        await saveState.waitFor({ state: "attached", timeout: WARMUP_STEP_TIMEOUT_MS });
         await page.waitForFunction(
           () => document.querySelector('[data-testid="save-state"]')?.getAttribute("data-state") === "saved",
           undefined,
-          { timeout: 120_000 },
+          { timeout: WARMUP_STEP_TIMEOUT_MS },
         );
       } catch (err) {
         const state = await saveState.getAttribute("data-state").catch(() => null);
@@ -126,7 +133,7 @@ export default async function globalSetup(config: FullConfig) {
     ];
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {
-        const res = await page.request.get(route, { timeout: 120_000 });
+        const res = await page.request.get(route, { timeout: WARMUP_STEP_TIMEOUT_MS });
         if (!res.ok()) throw new Error(`[e2e warm-up] ${route} -> ${res.status()}`);
       });
     }
@@ -134,7 +141,7 @@ export default async function globalSetup(config: FullConfig) {
     // First-hit compiles of these write routes also exceeded the 15 s expect timeout in
     // history.spec.ts and images.spec.ts on a loaded box, so take those hits here as well.
     await timed("POST /api/documents/<id>/versions", async () => {
-      const res = await page.request.post(`/api/documents/${docId}/versions`, { data: { title: "warm-up" }, timeout: 120_000 });
+      const res = await page.request.post(`/api/documents/${docId}/versions`, { data: { title: "warm-up" }, timeout: WARMUP_STEP_TIMEOUT_MS });
       if (!res.ok()) throw new Error(`[e2e warm-up] versions -> ${res.status()}`);
     });
     await timed("POST /api/documents/<id>/assets", async () => {
@@ -145,12 +152,12 @@ export default async function globalSetup(config: FullConfig) {
       const res = await page.request.post(`/api/documents/${docId}/assets?name=warm.png`, {
         headers: { "content-type": "image/png" },
         data: png,
-        timeout: 120_000,
+        timeout: WARMUP_STEP_TIMEOUT_MS,
       });
       if (!res.ok()) throw new Error(`[e2e warm-up] assets -> ${res.status()}`);
     });
     await timed("GET /api/documents/<id>/comments", async () => {
-      const res = await page.request.get(`/api/documents/${docId}/comments`, { timeout: 120_000 });
+      const res = await page.request.get(`/api/documents/${docId}/comments`, { timeout: WARMUP_STEP_TIMEOUT_MS });
       if (!res.ok()) throw new Error(`[e2e warm-up] comments -> ${res.status()}`);
     });
   } finally {
@@ -158,7 +165,7 @@ export default async function globalSetup(config: FullConfig) {
     await page.close().catch(() => undefined);
     if (docId) {
       await timed("DELETE /api/documents/<id>", async () => {
-        const res = await context.request.delete(`/api/documents/${docId}`, { timeout: 120_000 }).catch((err: unknown) => {
+        const res = await context.request.delete(`/api/documents/${docId}`, { timeout: WARMUP_STEP_TIMEOUT_MS }).catch((err: unknown) => {
           console.log(`[e2e warm-up] delete failed (non-fatal): ${String(err)}`);
           return null;
         });
