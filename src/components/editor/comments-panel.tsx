@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -486,7 +486,6 @@ function Composer({
     `${mod}+K link`,
     "@ mentions",
   ].join(" · ");
-  const shortcutsId = useId();
 
   /** Insert a suggestion block for the quoted text and select its contents so typing replaces them. */
   const insertSuggestion = () => {
@@ -695,21 +694,21 @@ function Composer({
           </button>
         )}
         <Tip label={shortcuts} side="top" testId="composer-shortcuts">
+          {/* aria-description is ARIA 1.3: Chrome, Firefox 119+, Safari 16.4+ and axe-core know it, jsx-a11y's ARIA 1.2 table does not yet. */}
+          {/* eslint-disable-next-line jsx-a11y/role-supports-aria-props */}
           <button
             type="button"
             className="btn btn-primary btn-sm whitespace-nowrap"
             disabled={!value.trim() || busy}
             onClick={() => void submit()}
-            aria-describedby={shortcutsId}
+            // Read after the button's name by screen readers, so keyboard users get the shortcuts without hovering.
+            // (Not aria-label, which would replace "Save"; not title, which would add a second, native tooltip.)
+            aria-description={shortcuts}
             data-testid="comment-submit"
           >
             {submitLabel}
           </button>
         </Tip>
-        {/* Read as the button's description, so keyboard and screen-reader users get the shortcuts without hovering. */}
-        <span id={shortcutsId} className="sr-only">
-          {shortcuts}
-        </span>
       </div>
     </div>
   );

@@ -26,8 +26,9 @@ test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", ()
     await alice.page.getByTestId("tb-comment").click();
     const composer = alice.page.getByTestId("comment-composer");
     await expect(composer).toBeFocused();
-    // The hint row appears while the composer has focus.
-    await expect(alice.page.getByTestId("comment-format-hint")).toBeVisible();
+    // Nothing is rendered under the box (#984): the shortcuts live in the send button's tooltip.
+    await expect(alice.page.getByTestId("comment-format-hint")).toHaveCount(0);
+    await expect(alice.page.getByText("Shift+Enter newline")).toHaveCount(0);
 
     await alice.page.keyboard.type("Please read the docs");
     // Select "docs" and make it bold with the shortcut.
