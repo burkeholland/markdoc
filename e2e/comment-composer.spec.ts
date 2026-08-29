@@ -58,7 +58,16 @@ const metrics = (textarea: Locator) =>
     left: el.getBoundingClientRect().left,
   }));
 
-const cardMetrics = (card: Locator) => card.evaluate((el) => ({ clientWidth: el.clientWidth, width: el.getBoundingClientRect().width, left: el.getBoundingClientRect().left }));
+const cardMetrics = (card: Locator) =>
+  card.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return {
+      clientWidth: el.clientWidth,
+      innerWidth: el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+      width: el.getBoundingClientRect().width,
+      left: el.getBoundingClientRect().left,
+    };
+  });
 
 /** §4.6: the textarea's only following sibling inside the composer is the button row; no legend or hint text anywhere. */
 async function expectNothingUnderTheBox(page: Page, textarea: Locator) {
@@ -81,7 +90,10 @@ async function hoverShortcuts(page: Page, composerScope: Locator): Promise<Locat
 
 /** Move the pointer off the button and wait for the tooltip to go, so its text never leaks into later counts. */
 async function dismissTooltip(page: Page) {
-  await page.mouse.move(5, 5);
+  // Radix keeps a hoverable tooltip open until it sees the pointer travel outside its grace area,
+  // so leave the button in steps instead of teleporting in a single move event.
+  await page.mouse.move(5, 5, { steps: 20 });
+  await page.mouse.move(10, 10);
   await expect(page.getByTestId("composer-shortcuts")).toHaveCount(0);
 }
 
@@ -115,7 +127,7 @@ test.describe("comment composer: auto-grow, full-width editing, shortcuts in the
     const card = await cardMetrics(thread);
     console.log(
       `[984] §4.1 edit 14 lines: textarea clientHeight=${m.clientHeight} scrollHeight=${m.scrollHeight} offsetHeight=${m.offsetHeight} ` +
-        `| §4.3 textarea width=${m.width.toFixed(1)} card clientWidth=${card.clientWidth} ratio=${(m.width / card.clientWidth).toFixed(3)} indent=${(m.left - card.left).toFixed(1)}px`,
+        `| §4.3 textarea width=${m.width.toFixed(1)} card clientWidth=${card.clientWidth} ratio=${(m.width / card.clientWidth).toFixed(3)} (card inner width=${card.innerWidth.toFixed(1)}) indent=${(m.left - card.left).toFixed(1)}px`,
     );
     expect(m.clientHeight).toBeGreaterThanOrEqual(200);
     expect(m.scrollHeight - m.clientHeight).toBeLessThanOrEqual(2);
@@ -134,6 +146,13 @@ test.describe("comment composer: auto-grow, full-width editing, shortcuts in the
     await expect(tip).toContainText("Enter saves");
     await expect(tip).toContainText("Esc cancels");
     await expect(tip).toContainText(/(Ctrl|⌘)\+B bold/);
+    // The long label wraps inside the panel instead of one ~550 px line across the editor.
+    const tipBox = (await tip.boundingBox())!;
+    const panelBox = (await page.getByTestId("comments-panel").boundingBox())!;
+    console.log(`[984] tooltip: width=${tipBox.width.toFixed(1)} height=${tipBox.height.toFixed(1)} left=${tipBox.x.toFixed(1)} panel left=${panelBox.x.toFixed(1)}`);
+    expect(tipBox.width).toBeLessThanOrEqual(280);
+    expect(tipBox.x).toBeGreaterThanOrEqual(panelBox.x);
+    expect(tipBox.x + tipBox.width).toBeLessThanOrEqual(panelBox.x + panelBox.width);
     await expect(thread.getByTestId("comment-submit")).toHaveAttribute("aria-description", /Esc cancels/);
     if (process.env.SHOT_DIR) await page.getByTestId("comments-panel").screenshot({ path: `${process.env.SHOT_DIR}/composer-edit-14-lines-tooltip.png` });
     await dismissTooltip(page);
@@ -241,8 +260,14 @@ test.describe("comment composer: auto-grow, full-width editing, shortcuts in the
     const m = await metrics(edit);
     const card = await cardMetrics(thread);
     const replyBox = await cardMetrics(reply);
-    console.log(`[984] §4.3 edit reply: textarea width=${m.width.toFixed(1)} card clientWidth=${card.clientWidth} ratio=${(m.width / card.clientWidth).toFixed(3)} indent from reply=${(m.left - replyBox.left).toFixed(1)}px`);
-    expect(m.width).toBeGreaterThanOrEqual(0.9 * card.clientWidth);
+    console.log(
+      `[984] §4.3 edit reply: textarea width=${m.width.toFixed(1)} reply row width=${replyBox.width.toFixed(1)} card clientWidth=${card.clientWidth} card inner width=${card.innerWidth.toFixed(1)} ` +
+        `ratio to inner=${(m.width / card.innerWidth).toFixed(3)} indent from reply=${(m.left - replyBox.left).toFixed(1)}px`,
+    );
+    // Replies sit in the thread rail (1 px line + 12 px gutter), so the box spans the whole reply row
+    // and ≥ 90 % of the card's inner (padding-box) width, rather than 90 % of the card's clientWidth.
+    expect(m.width).toBeGreaterThanOrEqual(replyBox.width - 1);
+    expect(m.width).toBeGreaterThanOrEqual(0.9 * card.innerWidth);
     expect(m.left - replyBox.left).toBeLessThanOrEqual(1);
     await expectNothingUnderTheBox(page, edit);
     const editTip = await hoverShortcuts(page, reply);

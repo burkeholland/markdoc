@@ -693,7 +693,7 @@ function Composer({
             Cancel
           </button>
         )}
-        <Tip label={shortcuts} side="top" testId="composer-shortcuts">
+        <Tip label={shortcuts} side="top" wrap testId="composer-shortcuts">
           {/* aria-description is ARIA 1.3: Chrome, Firefox 119+, Safari 16.4+ and axe-core know it, jsx-a11y's ARIA 1.2 table does not yet. */}
           {/* eslint-disable-next-line jsx-a11y/role-supports-aria-props */}
           <button
