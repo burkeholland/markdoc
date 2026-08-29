@@ -142,7 +142,7 @@
   background: var(--color-accent-soft, rgba(37, 99, 235, 0.1));
 }
 
-/* GitHub-style suggestion block inside a comment: word diff of the quoted text → the proposal, then Accept / Reject. */
+/* GitHub-style suggestion block inside a comment: the proposed text (the passage it replaces is highlighted in the document), then Accept / Reject. */
 .suggestion-box {
   border: 1px solid var(--color-line, #e5e7eb);
   border-radius: 0.5rem;
@@ -177,29 +177,12 @@
   border-color: currentColor;
 }
 
-.suggestion-diff {
+.suggestion-text {
   font-size: 13px;
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--color-ink-2, inherit);
-}
-
-.suggestion-diff ins {
-  text-decoration: none;
-  background: rgba(34, 197, 94, 0.18);
-  color: var(--color-success, #15803d);
-  border-radius: 2px;
-}
-
-.suggestion-diff del {
-  background: rgba(239, 68, 68, 0.15);
-  color: #b91c1c;
-  border-radius: 2px;
-}
-
-:is(.dark, [data-theme="dark"]) .suggestion-diff del {
-  color: #fca5a5;
 }
 
 /* Review card at the top of the Comments panel. */

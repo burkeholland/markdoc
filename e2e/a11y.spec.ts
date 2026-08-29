@@ -642,7 +642,7 @@ test.describe("axe: editor", () => {
     await context.close();
   });
 
-  test("review card and a comment with a suggestion diff (Accept / Reject, Outdated)", async ({ browser }) => {
+  test("review card and a comment with a suggestion (Accept / Reject, Outdated)", async ({ browser }) => {
     const { page, context, id } = await openEditorFixture(browser, "a11y-editor-review");
     // An agent review with one suggestion and one plain comment, posted over REST with a token (task #397).
     const tok = await page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 1 } });
@@ -663,9 +663,9 @@ test.describe("axe: editor", () => {
     await expect(page.getByTestId("review-card")).toBeVisible();
     await page.getByTestId("review-toggle").click();
     await expect(page.getByTestId("review-thread-link")).toHaveCount(2);
-    await expect(page.getByTestId("suggestion-diff").first()).toBeVisible();
+    await expect(page.getByTestId("suggestion-text").first()).toHaveText("An intro paragraph with a");
     await expect(page.getByTestId("suggestion-accept-comment")).toBeEnabled();
-    await scan(page, "editor + review card + suggestion diff");
+    await scan(page, "editor + review card + suggestion");
     await context.close();
   });
 

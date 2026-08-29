@@ -9,7 +9,6 @@ import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
 import { agentMentionLogin, mentionTriggerAt } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
-import { wordDiff } from "@/editor/diff";
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
@@ -55,13 +54,17 @@ export function MentionBody({ body, className }: { body: string; className?: str
   );
 }
 
-/** Compact word-level diff of the quoted text → the proposed text (same renderer as version compare). */
-export function SuggestionDiff({ from, to }: { from: string; to: string }) {
-  const parts = useMemo(() => wordDiff(from, to), [from, to]);
+/** The proposed replacement as plain text: the passage it applies to is already highlighted in the document, so no diff. */
+export function SuggestionText({ text }: { text: string }) {
   return (
-    <div className="suggestion-diff" data-testid="suggestion-diff">
-      {parts.map((c, i) => (c.added ? <ins key={i}>{c.value}</ins> : c.removed ? <del key={i}>{c.value}</del> : <span key={i}>{c.value}</span>))}
-      {to === "" && from !== "" && <span className="ml-1 text-xs italic text-ink-4">(deletes the text)</span>}
+    <div className="suggestion-text" data-testid="suggestion-text">
+      {text === "" ? (
+        <span className="italic text-ink-4" data-testid="suggestion-deletes">
+          Deletes the highlighted text
+        </span>
+      ) : (
+        text
+      )}
     </div>
   );
 }
@@ -77,13 +80,6 @@ interface CommentSuggestionTarget {
 
 function commentSuggestionState(thread: CommentThread, stored: CommentReply["suggestionState"] | CommentThread["suggestionState"], text: string): CommentSuggestionState {
   return stored ?? (isSuggestionOutdated(thread, text) ? "outdated" : "pending");
-}
-
-function commentSuggestionSource(
-  thread: CommentThread,
-  target: Pick<CommentThread, "suggestionState" | "suggestionQuote"> | Pick<CommentReply, "suggestionState" | "suggestionQuote">,
-): string {
-  return target.suggestionState ? (target.suggestionQuote ?? thread.quote) : thread.quote;
 }
 
 /** Root and reply suggestion blocks in display order, with each reply retaining its own decision. */
@@ -780,7 +776,7 @@ const ThreadCard = memo(function ThreadCard({
                     {suggestionState === "rejected" && <span className="suggestion-badge">Rejected</span>}
                     {suggestion.warning && <span className="ml-auto text-[11px] text-ink-4">{suggestion.warning}</span>}
                   </div>
-                  <SuggestionDiff from={commentSuggestionSource(thread, thread)} to={suggestion.text} />
+                  <SuggestionText text={suggestion.text} />
                   <SuggestionActions
                     state={suggestionState}
                     canAccept={canEdit}
@@ -877,7 +873,7 @@ const ThreadCard = memo(function ThreadCard({
                             {state === "rejected" && <span className="suggestion-badge">Rejected</span>}
                             {block.warning && <span className="ml-auto text-[11px] text-ink-4">{block.warning}</span>}
                           </div>
-                          <SuggestionDiff from={commentSuggestionSource(thread, r)} to={block.text} />
+                          <SuggestionText text={block.text} />
                           <SuggestionActions
                             state={state}
                             canAccept={canEdit}
