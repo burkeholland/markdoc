@@ -248,7 +248,7 @@ export const api = {
   tokens: {
     list: () => request<{ tokens: ApiTokenDto[] }>("/api/tokens"),
     /** Mint a personal access token (browser sessions only); the secret comes back once. `scope` defaults to `full` server-side. */
-    create: (name: string, expiresInDays: number | null = 90, options: { scope?: TokenScope; documentIds?: string[] } = {}) =>
+    create: (name: string, expiresInDays: number | null = 90, options: { scope?: TokenScope; documentIds?: string[] | null } = {}) =>
       request<{ token: { id: string; name: string; token: string; prefix: string; scope: TokenScope; documentIds: string[] | null } }>("/api/tokens", {
         method: "POST",
         body: JSON.stringify({ name, expiresInDays, ...options }),

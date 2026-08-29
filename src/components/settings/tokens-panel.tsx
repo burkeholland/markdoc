@@ -61,7 +61,8 @@ export function ScopeChip({ scope, className }: { scope: TokenScopeName; classNa
   );
 }
 
-const SCOPES: TokenScopeName[] = ["read", "comment", "full"];
+/** The scope radio order (narrowest first), shared with the Share dialog's agent card. */
+export const SCOPES: TokenScopeName[] = ["read", "comment", "full"];
 
 export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false }: { origin: string; userLogin: string; next?: string | null; hasAgentRequests?: boolean }) {
   const [tokens, setTokens] = useState<TokenRow[] | null>(null);
