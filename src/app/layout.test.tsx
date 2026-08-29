@@ -12,10 +12,16 @@ vi.mock("next/font/google", () => {
 
 const { metadata } = await import("./layout");
 
+/** `metadata.metadataBase` as the URL it must be (the type also admits a string). */
+function metadataBase(): URL {
+  const base = metadata.metadataBase;
+  if (!(base instanceof URL)) throw new Error(`metadataBase is ${String(base)}, not a URL`);
+  return base;
+}
+
 describe("root metadata", () => {
   it("sets metadataBase from the public origin", () => {
-    expect(metadata.metadataBase).toBeInstanceOf(URL);
-    expect(metadata.metadataBase?.origin).toBe("https://example.test");
+    expect(metadataBase().origin).toBe("https://example.test");
   });
 
   it("resolves the Open Graph image to an absolute URL on that origin", () => {
@@ -23,6 +29,6 @@ describe("root metadata", () => {
     const first = Array.isArray(images) ? images[0] : images;
     expect(first).toBeDefined();
     const image = typeof first === "string" || first instanceof URL ? first : first!.url;
-    expect(new URL(image, metadata.metadataBase!).href).toBe("https://example.test/brand/og.png");
+    expect(new URL(image, metadataBase()).href).toBe("https://example.test/brand/og.png");
   });
 });

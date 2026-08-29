@@ -1,6 +1,7 @@
 import { httpOrigin } from "@/server/mcp-origin";
 
-type PublicOriginEnv = Partial<Pick<NodeJS.ProcessEnv, "AUTH_URL" | "MARKDOC_URL" | "PORT">>;
+/** The variables `publicOrigin` reads. `process.env` qualifies as-is; tests pass a literal. */
+type PublicOriginEnv = Partial<Pick<NodeJS.ProcessEnv, "AUTH_URL" | "MARKDOC_URL" | "PORT">> & { readonly [key: string]: string | undefined };
 
 const DEFAULT_PORT = 3000;
 
