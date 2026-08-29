@@ -57,7 +57,7 @@ import { NotificationsBell } from "@/components/notifications/notifications-bell
 import type { NotificationDto } from "@/lib/api";
 import { pendingRequests, useAgentRequests } from "./agent-requests";
 import { KeepAgentHereDialog } from "./keep-agent-here";
-import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, useAgentActivity, waitingLabel } from "./presence-agents";
+import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, useAgentActivity, waitingLabel } from "./presence-agents";
 import { signOutSafely } from "@/lib/sign-out";
 
 /** The Markdoc mark (public/brand/mark.svg): a document with a folded corner and the `#` heading glyph. Follows the accent token. */
@@ -237,6 +237,9 @@ function AgentAvatar({ name, color, size }: { name: string; color: string; size:
   );
 }
 
+/** How long an optimistically cancelled request stays hidden before it may come back (the server refused). */
+const CANCEL_GRACE_MS = 8_000;
+
 export interface PresenceStackProps {
   session: CollabSession;
   onJump?: (user: PresenceUser) => void;
@@ -253,9 +256,24 @@ export interface PresenceStackProps {
 export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }: PresenceStackProps) {
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const followUserId = useSessionValue(session, (s) => s.followUserId);
-  const pending = pendingRequests(useAgentRequests(session));
+  const requests = useAgentRequests(session);
   const activity = useAgentActivity(session);
   const [open, setOpen] = useState(false);
+  // Cancel is optimistic: the row and the placeholder go at once; the mirror catches up a moment later. If the
+  // server refuses (editor-shell toasts the error) the request is still pending after the grace period and returns.
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(() => new Set());
+  const pending = pendingRequests(requests).filter((r) => !cancelling.has(r.id));
+  useEffect(() => {
+    if (cancelling.size === 0) return;
+    const stillPending = new Set(pendingRequests(requests).map((r) => r.id));
+    if ([...cancelling].every((id) => stillPending.has(id))) return;
+    setCancelling(new Set([...cancelling].filter((id) => stillPending.has(id))));
+  }, [requests, cancelling]);
+  const cancelRequest = (id: string) => {
+    setCancelling((prev) => new Set(prev).add(id));
+    onCancelRequest?.(id);
+    setTimeout(() => setCancelling((prev) => (prev.has(id) ? new Set([...prev].filter((x) => x !== id)) : prev)), CANCEL_GRACE_MS);
+  };
   // Idle dimming is time-based; re-evaluate it every 15 s while the stack is mounted. A fresh agent
   // activity ("proposed changes · 12 s ago") ticks every 5 s for the 45 s it shows.
   const [now, setNow] = useState(() => Date.now());
@@ -269,8 +287,12 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
   const extra = users.length - shown.length;
   const others = users.filter((u) => !u.isLocal);
   const agents = users.filter((u) => u.isAgent);
-  const busy = busyAgentNames(pending, activity, now);
-  const waiting = pending.length > 0 && agents.length === 0;
+  const busy = busyAgentNames(requests, activity, now);
+  // No agent in presence but requests pending: the stack shows a dashed placeholder. It reads "waiting" until an
+  // agent claims one (agents may claim over REST/MCP before they ever announce themselves), then "working".
+  const noAgent = agents.length === 0 && pending.length > 0;
+  const unseenWorker = noAgent ? pendingWorker(pending) : null;
+  const waiting = noAgent && !unseenWorker;
   const nameOf = (userId: string) => users.find((u) => !u.isAgent && u.id === userId)?.name ?? null;
   const jump = (u: PresenceUser) => {
     if (u.cursor === null) return;
@@ -316,10 +338,10 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
               <span className="avatar text-[13px]">+{extra}</span>
             </Tip>
           )}
-          {waiting && (
-            <Tip label={waitingLabel(pending.length)}>
+          {noAgent && (
+            <Tip label={unseenWorker ? `${unseenWorker} (agent) — working` : waitingLabel(pending.length)}>
               <span className="relative inline-flex">
-                <WaitingPlaceholder count={pending.length} size={36} />
+                <WaitingPlaceholder count={pending.length} workingBy={unseenWorker} size={36} />
               </span>
             </Tip>
           )}
@@ -385,7 +407,7 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
             );
           })}
         </ul>
-        {pending.length > 0 && <PresenceRequests session={session} pending={pending} nameOf={nameOf} onCancel={onCancelRequest} />}
+        {pending.length > 0 && <PresenceRequests session={session} pending={pending} nameOf={nameOf} onCancel={onCancelRequest ? cancelRequest : undefined} />}
         {waiting && (
           <p className="px-2 pb-1 pt-1.5 text-xs text-ink-3" data-testid="presence-waiting-note">
             {waitingLabel(pending.length)} — none is sitting in this document.

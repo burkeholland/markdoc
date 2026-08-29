@@ -607,7 +607,8 @@ test.describe("axe: editor", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /share/i })).not.toBeVisible();
 
-    // Ask an agent dialog (with the first-run connect card when the user has no token), then the requests pill.
+    // Ask an agent dialog (with the first-run connect card when the user has no token), then the request in the
+    // presence popover (waiting placeholder in the stack, Requests section with Cancel) and the Keep-an-agent dialog.
     await page.evaluate(() => window.localStorage.removeItem("markdoc:agent-connect-dismissed"));
     await page.getByTestId("ask-agent-button").click();
     await expect(page.getByTestId("ask-agent-dialog")).toBeVisible();
@@ -616,13 +617,21 @@ test.describe("axe: editor", () => {
     await scan(page, "editor + ask-agent dialog");
     await page.getByTestId("ask-agent-send").click();
     await expect(page.getByTestId("ask-agent-dialog")).toHaveCount(0);
-    await expect(page.getByTestId("agent-requests-pill")).toBeVisible();
-    await scan(page, "editor + agent requests pill");
-    await page.getByTestId("agent-requests-pill").click();
-    await expect(page.getByTestId("agent-requests-list")).toBeVisible();
-    await scan(page, "editor + agent requests menu");
-    await page.getByTestId("agent-request-cancel").first().click();
-    await expect(page.getByTestId("agent-requests-pill")).toHaveCount(0);
+    await expect(page.getByTestId("presence").getByTestId("presence-waiting")).toBeVisible();
+    await scan(page, "editor + presence waiting placeholder");
+    await page.getByTestId("presence").click();
+    await expect(page.getByTestId("presence-popover")).toBeVisible();
+    await expect(page.getByTestId("presence-requests")).toBeVisible();
+    await scan(page, "editor + presence popover with a request");
+    await page.getByTestId("presence-request-cancel").first().click();
+    await expect(page.getByTestId("presence-requests")).toHaveCount(0);
+    await expect(page.getByTestId("presence").getByTestId("presence-waiting")).toHaveCount(0);
+    await page.getByTestId("presence-popover").getByTestId("keep-agent-here").click();
+    await expect(page.getByTestId("presence-popover")).toHaveCount(0);
+    await expect(page.getByTestId("keep-agent-dialog")).toBeVisible();
+    await scan(page, "editor + keep-agent dialog");
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("keep-agent-dialog")).toHaveCount(0);
 
     // Image dialog.
     await page.getByTestId("tb-image").click();

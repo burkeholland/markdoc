@@ -29,14 +29,18 @@ export function secondsAgo(at: number, now: number): string {
 }
 
 /**
- * Names of the agents that count as working right now: whoever holds a claimed request, plus the
- * agent behind a fresh `agentActivity`. Agents are matched by name — the token name is what presence,
- * `claimedBy` and `agentActivity.name` all carry.
+ * Names of the agents that count as working right now: whoever holds a claimed request, plus the agent
+ * behind a fresh `agentActivity` — unless that agent has since finished (or lost) a request, in which case the
+ * activity was the work it just delivered and the badge goes with the request. Agents are matched by name:
+ * the token name is what presence, `claimedBy` and `agentActivity.name` all carry.
  */
-export function busyAgentNames(pending: AgentRequestMirror[], activity: AgentActivity | null, now: number): Set<string> {
+export function busyAgentNames(requests: AgentRequestMirror[], activity: AgentActivity | null, now: number): Set<string> {
   const names = new Set<string>();
-  for (const r of pending) if (r.status === "claimed" && r.claimedBy) names.add(r.claimedBy);
-  if (isRecentActivity(activity, now)) names.add(activity.name);
+  for (const r of requests) if (r.status === "claimed" && r.claimedBy) names.add(r.claimedBy);
+  if (isRecentActivity(activity, now)) {
+    const finishedSince = requests.some((r) => (r.status === "done" || r.status === "cancelled") && r.claimedBy === activity.name && r.updatedAt >= activity.at);
+    if (!finishedSince) names.add(activity.name);
+  }
   return names;
 }
 
@@ -54,24 +58,34 @@ export function AgentBusyBadge({ name }: { name: string }) {
   );
 }
 
-/** Dashed bot placeholder in the stack while requests wait and no agent is present. */
-export function WaitingPlaceholder({ count, size }: { count: number; size: number }) {
+/**
+ * Dashed bot placeholder in the stack while requests are pending and no agent is present. If an agent has
+ * already claimed one (without announcing itself) the placeholder stands in for it and carries the busy badge.
+ */
+export function WaitingPlaceholder({ count, workingBy, size }: { count: number; workingBy?: string | null; size: number }) {
   return (
     <span
-      className="inline-flex shrink-0 items-center justify-center rounded-full border-2 border-dashed border-violet-400 bg-surface text-violet-500 ring-2 ring-surface dark:border-violet-500 dark:text-violet-300"
+      className="relative inline-flex shrink-0 items-center justify-center rounded-full border-2 border-dashed border-violet-400 bg-surface text-violet-500 ring-2 ring-surface dark:border-violet-500 dark:text-violet-300"
       style={{ width: size, height: size }}
       role="img"
-      aria-label={waitingLabel(count)}
+      aria-label={workingBy ? `${workingBy} is working` : waitingLabel(count)}
       data-testid="presence-waiting"
       data-count={count}
+      data-state={workingBy ? "working" : "waiting"}
     >
       <Bot size={Math.round(size * 0.5)} aria-hidden="true" />
+      {workingBy ? <AgentBusyBadge name={workingBy} /> : null}
     </span>
   );
 }
 
 export function waitingLabel(count: number): string {
   return `${count} request${count === 1 ? "" : "s"} waiting for an agent`;
+}
+
+/** The agent that claimed a pending request, if any — when none is in presence the placeholder stands in for it. */
+export function pendingWorker(pending: AgentRequestMirror[]): string | null {
+  return pending.find((r) => r.status === "claimed" && r.claimedBy)?.claimedBy ?? null;
 }
 
 /** "proposed changes · 12 s ago" appended to an agent's presence row while its activity is fresh. */
