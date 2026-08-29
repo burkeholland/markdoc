@@ -249,3 +249,39 @@ export async function currentGitHubLogin(octokit: Octokit): Promise<string> {
   const { data } = await octokit.users.getAuthenticated();
   return data.login;
 }
+
+export interface GitHubUserSummary {
+  login: string;
+  /** Search results carry no display name; the UI shows `@login`. */
+  name: string | null;
+  avatarUrl: string;
+}
+
+export interface UserSearchResult {
+  users: GitHubUserSummary[];
+  /** GitHub refused the search (403/429 — the search API allows 30 calls a minute); the list is empty, not an error. */
+  limited: boolean;
+}
+
+/** How many suggestions a login prefix search returns (one autocomplete list). */
+export const USER_SEARCH_LIMIT = 8;
+
+/**
+ * GitHub accounts whose login matches `prefix`, for the Share dialog's handle autocomplete. Only
+ * user accounts (an organization cannot sign in, so it can never be a collaborator). A rate-limited
+ * search is reported as `limited` with no users so that adding by exact handle keeps working.
+ */
+export async function searchUsers(octokit: Octokit, prefix: string): Promise<UserSearchResult> {
+  if (isGitHubMock()) return { users: mockGithub.searchUsers(prefix), limited: false };
+  try {
+    const { data } = await octokit.search.users({ q: `${prefix} in:login type:user`, per_page: USER_SEARCH_LIMIT });
+    return {
+      users: data.items.slice(0, USER_SEARCH_LIMIT).map((u) => ({ login: u.login, name: null, avatarUrl: u.avatar_url })),
+      limited: false,
+    };
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 403 || status === 429) return { users: [], limited: true };
+    throw err;
+  }
+}

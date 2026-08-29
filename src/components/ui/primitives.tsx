@@ -187,6 +187,12 @@ export function DialogContent({
             first.focus({ preventScroll: true });
           }
         }}
+        onEscapeKeyDown={(e) => {
+          // An expanded combobox (the Share dialog's handle suggestions) takes the first Escape to close
+          // its list; the dialog closes on the next one. Radix listens on the document in the capture
+          // phase, so the combobox cannot stop the event itself.
+          if ((e.target as Element | null)?.closest?.('[role="combobox"][aria-expanded="true"]')) e.preventDefault();
+        }}
         onCloseAutoFocus={(e) => {
           e.preventDefault();
           restoreFocus(returnRef.current);

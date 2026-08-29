@@ -66,6 +66,13 @@ export interface CollaboratorDto {
   image: string | null;
 }
 
+/** One GitHub account from `GET /api/github/users`; `name` is null (the search API does not return it). */
+export interface GitHubUserDto {
+  login: string;
+  name: string | null;
+  avatarUrl: string;
+}
+
 export interface NotificationDto {
   id: string;
   kind: NotificationKind;
@@ -266,6 +273,8 @@ export const api = {
     branches: (owner: string, repo: string) => request<{ branches: string[] }>(`/api/github/repos/${owner}/${repo}/branches`),
     files: (owner: string, repo: string, ref: string) =>
       request<{ files: { path: string; size?: number; sha: string }[] }>(`/api/github/repos/${owner}/${repo}/files?ref=${encodeURIComponent(ref)}`),
+    /** GitHub accounts whose login starts with `q` (2–39 login characters), for the Share dialog; `limited` when GitHub rate-limited the search. */
+    searchUsers: (q: string, init?: RequestInit) => request<{ users: GitHubUserDto[]; limited: boolean }>(`/api/github/users?q=${encodeURIComponent(q)}`, init),
   },
   import: (body: Record<string, unknown>) => request<{ document: { id: string; title: string } }>("/api/import", { method: "POST", body: JSON.stringify(body) }),
   notifications: {
