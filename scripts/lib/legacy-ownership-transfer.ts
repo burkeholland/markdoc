@@ -300,6 +300,9 @@ export async function transferLegacyOwnership(
   try {
     await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
     began = true;
+    // Row fingerprints and the rollback record render timestamps through to_jsonb; pin the session
+    // time zone so apply, verify and rollback agree byte for byte whatever the server default is.
+    await client.query("SET LOCAL TIME ZONE 'UTC'");
     await acquireLocks(client, [`legacy-transfer-login:${sourceLogin}`, `legacy-transfer-account:${providerAccountId}`]);
     await auditUserForeignKeys(client);
     const rollbackTableReady = await hasRollbackTable(client);
@@ -636,19 +639,19 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
     }
   }
 
-  // (document, user) keyed rows: move unless the target already has one for the same document.
-  const stars = await client.query<Row>(`SELECT * FROM star WHERE user_id = $1 ORDER BY document_id`, [source.id]);
-  for (const row of stars.rows) {
-    const documentId = String(row.document_id);
+  // (document, user) keyed rows: move unless the target already has one for the same document. Rows that
+  // will be deleted are captured as PostgreSQL renders them (to_jsonb) so jsonb_populate_record restores
+  // them exactly, microseconds included; a driver-side Date would truncate timestamps to milliseconds.
+  const stars = await client.query<{ row: Row; document_id: string }>(`SELECT to_jsonb(s) AS row, s.document_id FROM star s WHERE s.user_id = $1 ORDER BY s.document_id`, [source.id]);
+  for (const { row, document_id: documentId } of stars.rows) {
     const duplicate = await countWhere(client, `SELECT COUNT(*)::text AS count FROM star WHERE document_id = $1 AND user_id = $2`, [documentId, target.id]);
-    if (duplicate) add({ kind: "delete", table: "star", key: { document_id: documentId, user_id: source.id }, row: jsonRow(row), label: "star.user_id deduplicated" });
+    if (duplicate) add({ kind: "delete", table: "star", key: { document_id: documentId, user_id: source.id }, row, label: "star.user_id deduplicated" });
     else update("star", { document_id: documentId, user_id: source.id }, "user_id", source.id, target.id, "star.user_id moved");
   }
-  const recents = await client.query<Row>(`SELECT * FROM recent WHERE user_id = $1 ORDER BY document_id`, [source.id]);
-  for (const row of recents.rows) {
-    const documentId = String(row.document_id);
+  const recents = await client.query<{ row: Row; document_id: string }>(`SELECT to_jsonb(r) AS row, r.document_id FROM recent r WHERE r.user_id = $1 ORDER BY r.document_id`, [source.id]);
+  for (const { row, document_id: documentId } of recents.rows) {
     const duplicate = await countWhere(client, `SELECT COUNT(*)::text AS count FROM recent WHERE document_id = $1 AND user_id = $2`, [documentId, target.id]);
-    if (duplicate) add({ kind: "delete", table: "recent", key: { user_id: source.id, document_id: documentId }, row: jsonRow(row), label: "recent.user_id deduplicated" });
+    if (duplicate) add({ kind: "delete", table: "recent", key: { user_id: source.id, document_id: documentId }, row, label: "recent.user_id deduplicated" });
     else update("recent", { user_id: source.id, document_id: documentId }, "user_id", source.id, target.id, "recent.user_id moved");
   }
 
@@ -657,55 +660,54 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
   const movedCollaborators = new Map<string, string>();
   const collaboratorKey = (documentId: string, login: string) => `${documentId}\0${login}`;
   if (sourceLogin !== targetLogin) {
-    const collaborators = await client.query<Row & { document_id: string; login: string; owner_id: string }>(
-      `SELECT c.*, d.owner_id FROM collaborator c JOIN document d ON d.id = c.document_id
+    const collaborators = await client.query<{ row: Row; document_id: string; login: string; owner_id: string }>(
+      `SELECT to_jsonb(c) AS row, c.document_id, c.login, d.owner_id FROM collaborator c JOIN document d ON d.id = c.document_id
         WHERE lower(btrim(c.login)) = $1 ORDER BY c.document_id, c.login`,
       [sourceLogin],
     );
-    for (const row of collaborators.rows) {
-      const { owner_id: ownerId, ...collaborator } = row;
-      const key = { document_id: row.document_id, login: row.login };
+    for (const { row, document_id: documentId, login, owner_id: ownerId } of collaborators.rows) {
+      const key = { document_id: documentId, login };
       if (ownerId === target.id || ownerId === source.id) {
-        add({ kind: "delete", table: "collaborator", key, row: jsonRow(collaborator), label: "collaborator.login owner_deleted" });
-        deletedCollaborators.add(collaboratorKey(row.document_id, row.login));
+        add({ kind: "delete", table: "collaborator", key, row, label: "collaborator.login owner_deleted" });
+        deletedCollaborators.add(collaboratorKey(documentId, login));
         continue;
       }
       const duplicate = await countWhere(
         client,
         `SELECT COUNT(*)::text AS count FROM collaborator WHERE document_id = $1 AND lower(btrim(login)) = $2`,
-        [row.document_id, targetLogin],
+        [documentId, targetLogin],
       );
       if (duplicate) {
-        add({ kind: "delete", table: "collaborator", key, row: jsonRow(collaborator), label: "collaborator.login deduplicated" });
-        deletedCollaborators.add(collaboratorKey(row.document_id, row.login));
+        add({ kind: "delete", table: "collaborator", key, row, label: "collaborator.login deduplicated" });
+        deletedCollaborators.add(collaboratorKey(documentId, login));
       } else {
-        update("collaborator", key, "login", row.login, targetLogin, "collaborator.login moved");
-        movedCollaborators.set(collaboratorKey(row.document_id, row.login), targetLogin);
+        update("collaborator", key, "login", login, targetLogin, "collaborator.login moved");
+        movedCollaborators.set(collaboratorKey(documentId, login), targetLogin);
       }
     }
     // The target becomes the owner of every source document: an owner is never their own collaborator.
-    const ownerRows = await client.query<Row & { document_id: string; login: string }>(
-      `SELECT c.* FROM collaborator c JOIN document d ON d.id = c.document_id
+    const ownerRows = await client.query<{ row: Row; document_id: string; login: string }>(
+      `SELECT to_jsonb(c) AS row, c.document_id, c.login FROM collaborator c JOIN document d ON d.id = c.document_id
         WHERE d.owner_id = $1 AND lower(btrim(c.login)) = $2 ORDER BY c.document_id, c.login`,
       [source.id, targetLogin],
     );
-    for (const row of ownerRows.rows) {
-      add({ kind: "delete", table: "collaborator", key: { document_id: row.document_id, login: row.login }, row: jsonRow(row), label: "collaborator.login owner_deleted" });
-      deletedCollaborators.add(collaboratorKey(row.document_id, row.login));
+    for (const { row, document_id: documentId, login } of ownerRows.rows) {
+      add({ kind: "delete", table: "collaborator", key: { document_id: documentId, login }, row, label: "collaborator.login owner_deleted" });
+      deletedCollaborators.add(collaboratorKey(documentId, login));
     }
 
-    const notifications = await client.query<Row & { id: string; kind: string; ref_id: string }>(
-      `SELECT * FROM notification WHERE lower(btrim(user_login)) = $1 ORDER BY id`,
+    const notifications = await client.query<{ row: Row; id: string; kind: string; ref_id: string; user_login: string }>(
+      `SELECT to_jsonb(n) AS row, n.id, n.kind, n.ref_id, n.user_login FROM notification n WHERE lower(btrim(n.user_login)) = $1 ORDER BY n.id`,
       [sourceLogin],
     );
-    for (const row of notifications.rows) {
+    for (const { row, id, kind, ref_id: refId, user_login: userLogin } of notifications.rows) {
       const duplicate = await countWhere(
         client,
         `SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(user_login)) = $1 AND kind = $2 AND ref_id = $3`,
-        [targetLogin, row.kind, row.ref_id],
+        [targetLogin, kind, refId],
       );
-      if (duplicate) add({ kind: "delete", table: "notification", key: { id: row.id }, row: jsonRow(row), label: "notification.user_login deduplicated" });
-      else update("notification", { id: row.id }, "user_login", String(row.user_login), targetLogin, "notification.user_login moved");
+      if (duplicate) add({ kind: "delete", table: "notification", key: { id }, row, label: "notification.user_login deduplicated" });
+      else update("notification", { id }, "user_login", userLogin, targetLogin, "notification.user_login moved");
     }
     const actorLogins = await client.query<{ id: string; actor_login: string }>(
       `SELECT id, actor_login FROM notification WHERE lower(btrim(actor_login)) = $1 ORDER BY id`,
@@ -1011,17 +1013,6 @@ function parseCount(value: unknown): number {
   const count = Number(value);
   if (!Number.isSafeInteger(count) || count < 0) throw new LegacyOwnershipTransferError("INTERNAL");
   return count;
-}
-
-/** Row values as they round-trip through JSON so `jsonb_populate_record` can re-insert them. */
-function jsonRow(row: Row): Row {
-  const result: Row = {};
-  for (const [column, value] of Object.entries(row)) {
-    if (value instanceof Date) result[column] = value.toISOString();
-    else if (value instanceof Uint8Array) result[column] = `\\x${Buffer.from(value).toString("hex")}`;
-    else result[column] = value;
-  }
-  return result;
 }
 
 function isUserRow(value: unknown): value is UserRow {
