@@ -54,6 +54,9 @@ export function mockGetGist(gistId: string) {
   return gists.get(gistId) ?? null;
 }
 
+/** GitHub accounts the fake knows for user search; more than eight `octo…` logins so the eight-suggestion cap is observable. */
+const MOCK_USERS = ["octocat", "octodog", "octofox", "octopus", "octoling", "octobot", "octonaut", "octopod", "octoprint", "monalisa", "hubot", "defunkt", "mojombo"];
+
 export const mockGithub = {
   async readRepoFile(owner: string, repo: string, path: string, ref: string) {
     const file = repos.get(repoKey(owner, repo, ref, path));
@@ -133,5 +136,12 @@ export const mockGithub = {
     return [...repos.entries()]
       .filter(([key]) => key.startsWith(prefix))
       .map(([key, file]) => ({ path: key.slice(prefix.length), type: "file" as const, size: file.size, sha: file.sha }));
+  },
+  /** Fixed accounts for the Share dialog's handle autocomplete, matched on the login prefix (case-insensitive), at most 8. */
+  searchUsers(prefix: string) {
+    const needle = prefix.toLowerCase();
+    return MOCK_USERS.filter((login) => login.toLowerCase().startsWith(needle))
+      .slice(0, 8)
+      .map((login) => ({ login, name: null, avatarUrl: `https://avatars.githubusercontent.com/${login}?s=40` }));
   },
 };
