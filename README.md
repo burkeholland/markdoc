@@ -188,6 +188,23 @@ Review the dry-run counts before `--apply`. Output contains only counts, boolean
 
 Rollback is deliberately narrow: while Markdoc is still stopped and only if `--verify` passed, run `npm run repair:github-identity -- --rollback` with the same environment. It restores the original two profile rows and moves the same account back. Any changed profile, account, authentication row, or classified application fingerprint since apply makes rollback fail without writes. Once the repaired identity has signed in or created new data, restore from the database backup instead.
 
+### One-time legacy ownership transfer
+
+`transfer:legacy-ownership` covers the case the repair command refuses by design: a legacy development-login user (`<login>@dev.local`, unverified email, no account or session rows) owns documents, and the GitHub user who should own them already has real data of their own. It moves everything the legacy user owns or is referenced by to the user behind one GitHub `account` row and then deletes the legacy user. It handles every foreign key to `user.id` in the schema (a test fails if one is added without being listed), the id-shaped text columns (`document.last_edited_by`, `collaborator.added_by`, `version.created_by`, `activity.actor_id` including `agent:<id>:` prefixes) and the login-keyed `collaborator` and `notification` rows; per-document rows the target already has are deleted and reported as deduplicated, and a collaborator row on a document the target now owns is deleted rather than kept. Comment authorship inside document CRDT state is counted but not rewritten. Identity inputs come only from the environment; `DATABASE_URL` follows the same contract as the app (`sslmode=require|verify-ca|verify-full`, or `DATABASE_SSL=1`) and the tool also refuses to run unless `pg_stat_ssl` reports an encrypted session:
+
+```bash
+export DATABASE_URL='postgresql://.../?sslmode=require'
+export MARKDOC_TRANSFER_SOURCE_LOGIN='legacy-login'
+export MARKDOC_TRANSFER_TARGET_GITHUB_ACCOUNT_ID='target-numeric-github-id'
+
+npm run transfer:legacy-ownership                                     # dry-run; counts only, always rolls back
+npm run transfer:legacy-ownership -- --apply                          # one serializable transaction; prints transfer_id
+npm run transfer:legacy-ownership -- --verify [--transfer-id <id>]    # no-write check that the applied state is intact
+npm run transfer:legacy-ownership -- --rollback --transfer-id <id>    # reverses the transfer if nothing changed since
+```
+
+Stop Markdoc and take a backup first, as for the repair. The rollback record is a row in the `ownership_transfer` table (created by the app's Drizzle migrations), written in the same transaction as the transfer, so it survives the ephemeral container; `--apply` refuses with `MIGRATION_MISSING` until the app has migrated. Output is counts, booleans, login lengths, classification labels and the transfer id — never user ids, environment values or the record's contents. Refusals exit `1` with a classification (`SOURCE_USER_COUNT`, `SOURCE_NOT_LEGACY`, `SOURCE_HAS_ACCOUNT_OR_SESSION`, `TARGET_ACCOUNT_COUNT`, `TARGET_IS_SOURCE`, `NOTHING_TO_TRANSFER`, `SCHEMA_USER_FK_DRIFT`, `RESIDUAL_REFERENCES`, `STATE_CHANGED`, …) and write nothing; exit `0` is success, `2` means the transfer committed but its rollback record could not be read back, and `3` means the commit outcome is unknown (check `--verify` before doing anything else). `--rollback` re-inserts the legacy user and reverses each recorded change only while every moved row still matches its post-apply fingerprint; otherwise restore from the backup.
+
 ### Run the production build locally
 
 The production server is `next build` plus the custom server bundled to `dist/server.mjs` (esbuild, see `scripts/build-server.mjs`). Exercise it before a deploy:

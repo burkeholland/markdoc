@@ -9,7 +9,6 @@ import * as schema from "../../src/server/db/schema";
 import {
   type LegacyOwnershipTransferQueryClient,
   type LegacyOwnershipTransferReport,
-  TRANSFER_COUNT_LABELS,
   TRANSFER_LOGIN_REFERENCES,
   TRANSFER_SOFT_USER_REFERENCES,
   TRANSFER_USER_FOREIGN_KEYS,
