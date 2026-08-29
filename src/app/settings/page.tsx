@@ -8,6 +8,7 @@ import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { listRequestsForUser } from "@/server/agent-requests";
 import { embeddedDocumentPath } from "@/server/http";
+import { publicOrigin } from "@/server/public-origin";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
@@ -17,7 +18,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const embedPath = await embeddedDocumentPath(session?.user?.id);
   if (embedPath) redirect(embedPath);
   if (!session?.user?.id) redirect("/login?next=/settings");
-  const origin = process.env.AUTH_URL?.replace(/\/$/, "") ?? "";
+  const origin = publicOrigin();
   const rawNext = (await searchParams).next;
   const nextParam = Array.isArray(rawNext) ? rawNext[0] : rawNext;
   // Only relative document paths: never bounce the user off-site.
