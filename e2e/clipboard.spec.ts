@@ -56,15 +56,16 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     const id = await createDocument(page, "# Clipboard\n\nOn the LAN.\n", "Clipboard");
     await openDocument(page, id);
 
-    // 1. Share → Collaborate card → Copy.
+    // 1. Share → Collaborate card (collapsed by default) → Copy.
     await page.getByTestId("share-button").click();
+    await page.getByTestId("share-agent-toggle").click();
     await expect(page.getByTestId("share-agent-config")).toContainText('"type": "http"');
     await page.getByTestId("share-agent-copy").click();
     await expect(page.getByTestId("share-agent-copy")).toHaveText(COPIED_OR_HINT);
     // Chromium honours execCommand("copy") inside a click, so this is normally the success branch; record which.
     test.info().annotations.push({ type: "share-agent-copy", description: await page.getByTestId("share-agent-copy").innerText() });
 
-    // 2. Copy link at the bottom of the dialog.
+    // 2. Copy link under the people list.
     await page.getByTestId("copy-link").click();
     await expect(page.getByTestId("copy-link")).toHaveText(COPIED_OR_HINT);
     await page.keyboard.press("Escape");
@@ -90,6 +91,7 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     await openDocument(page, id);
 
     await page.getByTestId("share-button").click();
+    await page.getByTestId("share-agent-toggle").click();
     const config = page.getByTestId("share-agent-config");
     await expect(config).toContainText('"type": "http"');
     await page.getByTestId("share-agent-copy").click();
@@ -124,6 +126,7 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     const readClipboard = async () => (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n");
 
     await page.getByTestId("share-button").click();
+    await page.getByTestId("share-agent-toggle").click();
     const config = page.getByTestId("share-agent-config");
     await expect(config).toContainText('"type": "http"');
     // The Bearer line wraps instead of being clipped: the <pre> is no wider than its card.
