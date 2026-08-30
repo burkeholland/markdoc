@@ -16,7 +16,7 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers(bearer ? { aut
 
 const { getDb, schema } = await import("@/server/db");
 const { createApiToken } = await import("@/server/tokens");
-const { searchUsers, USER_SEARCH_LIMIT } = await import("@/server/github");
+const { searchUsers, USER_SEARCH_LIMIT, USER_SEARCH_LIMITED_LOG_INTERVAL_MS } = await import("@/server/github");
 const { GET } = await import("./route");
 
 type Body = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; error?: string };
@@ -111,18 +111,57 @@ describe("GET /api/github/users", () => {
 
 describe("searchUsers()", () => {
   const octokitWith = (users: (q: string) => Promise<unknown>) => ({ search: { users: (params: { q: string }) => users(params.q) } }) as unknown as import("@octokit/rest").Octokit;
+  /** GitHub refusing the search the way Octokit reports it: `status` plus, when there was a response, its headers. */
+  const throttled = (status: number, headers?: Record<string, string>) =>
+    octokitWith(() => Promise.reject(Object.assign(new Error("API rate limit exceeded for user ID 1"), { status, response: headers ? { headers } : undefined })));
 
   it("reports a rate-limited search (403 / 429) as `limited` with no users instead of failing", async () => {
     process.env.GITHUB_MOCK = "0";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       for (const status of [403, 429]) {
-        const octokit = octokitWith(() => Promise.reject(Object.assign(new Error("API rate limit exceeded"), { status })));
-        expect(await searchUsers(octokit, "oct")).toEqual({ users: [], limited: true });
+        expect(await searchUsers(throttled(status), "oct")).toEqual({ users: [], limited: true });
       }
+      // Two throttled searches within the same minute leave one log line (task #988).
+      expect(warn).toHaveBeenCalledTimes(1);
       // Any other failure is still an error for the route's handler to report.
       const broken = octokitWith(() => Promise.reject(Object.assign(new Error("Service Unavailable"), { status: 503 })));
       await expect(searchUsers(broken, "oct")).rejects.toThrow("Service Unavailable");
+      expect(warn).toHaveBeenCalledTimes(1);
     } finally {
+      warn.mockRestore();
+      process.env.GITHUB_MOCK = "1";
+    }
+  });
+
+  it("logs the throttling once a minute per process with GitHub's reset time, never the query (task #988)", async () => {
+    process.env.GITHUB_MOCK = "0";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // Well past whatever an earlier test in this process logged.
+      const start = new Date("2030-01-01T00:00:00.000Z");
+      vi.setSystemTime(start);
+      const resetSeconds = Math.floor(start.getTime() / 1000) + 42;
+
+      expect(await searchUsers(throttled(403, { "x-ratelimit-reset": String(resetSeconds) }), "secretprefix")).toEqual({ users: [], limited: true });
+      expect(await searchUsers(throttled(429), "secretprefix")).toEqual({ users: [], limited: true });
+      vi.setSystemTime(start.getTime() + USER_SEARCH_LIMITED_LOG_INTERVAL_MS - 1);
+      expect(await searchUsers(throttled(429), "secretprefix")).toEqual({ users: [], limited: true });
+      expect(warn.mock.calls).toEqual([["[github] user search rate-limited (HTTP 403), resets at 2030-01-01T00:00:42.000Z"]]);
+
+      // The window has passed: one more line, this time without a reset header (and without a fake one).
+      vi.setSystemTime(start.getTime() + USER_SEARCH_LIMITED_LOG_INTERVAL_MS);
+      expect(await searchUsers(throttled(429, { "x-ratelimit-remaining": "0" }), "secretprefix")).toEqual({ users: [], limited: true });
+      expect(await searchUsers(throttled(429, { "x-ratelimit-reset": "not-a-time" }), "secretprefix")).toEqual({ users: [], limited: true });
+      expect(warn.mock.calls).toEqual([
+        ["[github] user search rate-limited (HTTP 403), resets at 2030-01-01T00:00:42.000Z"],
+        ["[github] user search rate-limited (HTTP 429)"],
+      ]);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("secretprefix");
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
       process.env.GITHUB_MOCK = "1";
     }
   });

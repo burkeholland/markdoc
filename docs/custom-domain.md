@@ -152,6 +152,7 @@ curl -sSI "https://markdoc.delightfulbay-4d29ba6f.eastus2.azurecontainerapps.io/
 curl -sSI https://markdoc.delightfulbay-4d29ba6f.eastus2.azurecontainerapps.io/api/health   # HTTP/2 200 (no redirect)
 
 # Sign-in is built for the new host: the Location host must equal <host>
+# (the server logs one line for this: `[auth] MissingCSRF during signin (expected from the post-release check)`)
 curl -sS -o /dev/null -D - -X POST https://<host>/api/auth/signin/github                 # 302, location: https://<host>/login?error=MissingCSRF
 CSRF=$(curl -sS -c cj.txt https://<host>/api/auth/csrf | sed -E 's/.*"csrfToken":"([^"]+)".*/\1/')
 curl -sS -o /dev/null -D - -b cj.txt -X POST -d "csrfToken=$CSRF" https://<host>/api/auth/signin/github

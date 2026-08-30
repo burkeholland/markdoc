@@ -250,8 +250,10 @@ describe("session-cookie helpers", () => {
 });
 
 describe("logAuthError", () => {
-  // Shaped like @auth/core's AuthError: the class name travels in `type`, the original error in `cause.err`.
-  const authError = (type: string, message: string, err?: Error) => Object.assign(new Error(message), { name: type, type, cause: err ? { err } : undefined });
+  // Shaped like @auth/core's AuthError: the class name travels in `type`, the original error in `cause.err`,
+  // and every message ends in Auth.js's "Read more" pointer.
+  const authError = (type: string, message: string, err?: Error) =>
+    Object.assign(new Error(`${message}. Read more at https://errors.authjs.dev#${type.toLowerCase()}`), { name: type, type, cause: err ? { err } : undefined });
 
   it("downgrades JWTSessionError to the one warn line and keeps other errors on console.error", () => {
     logAuthError(authError("JWTSessionError", "no matching decryption secret", new Error("no matching decryption secret")));
@@ -262,5 +264,53 @@ describe("logAuthError", () => {
     logAuthError(authError("OAuthCallbackError", "bad state", new Error("bad state")));
     expect(error.mock.calls[0][0]).toContain("[auth][error] OAuthCallbackError: bad state");
     expect(error.mock.calls[1][0]).toContain("[auth][cause]");
+  });
+
+  // Task #988: the three expected events are one line each — no stack, no "Read more" pointer.
+  it.each([
+    ["JWTSessionError", "no matching decryption secret", `[auth][warn] ${STALE_SESSION_MESSAGE}`],
+    ["MissingCSRF", "CSRF token was missing during an action signin", "[auth] MissingCSRF during signin (expected from the post-release check)"],
+    ["UnknownAction", "Cannot parse action at /api/auth/wp-login.php", "[auth] UnknownAction: wp-login.php"],
+  ])("%s is exactly one warn line and no stack", (type, message, line) => {
+    logAuthError(authError(type, message, new Error(message)));
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]).toEqual([line]);
+    expect(line).not.toMatch(/\n|Read more/);
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("names the action only: MissingCSRF on other actions, every UnknownAction wording, long scanner paths cut short", () => {
+    logAuthError(authError("MissingCSRF", "CSRF token was missing during an action signout"));
+    logAuthError(authError("UnknownAction", "Cannot handle action: providers"));
+    logAuthError(authError("UnknownAction", "Cannot parse action at /api/auth/signin/github/extra"));
+    logAuthError(authError("UnknownAction", "Cannot parse action at /api/auth"));
+    logAuthError(authError("UnknownAction", `Cannot parse action at /api/auth/${"x".repeat(200)}`));
+    logAuthError(authError("UnknownAction", "Unsupported action"));
+    expect(warn.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+      "[auth] MissingCSRF during signout",
+      "[auth] UnknownAction: providers",
+      "[auth] UnknownAction: signin/github/extra",
+      "[auth] UnknownAction: /",
+      `[auth] UnknownAction: ${"x".repeat(80)}…`,
+      "[auth] UnknownAction: Unsupported action",
+    ]);
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("an error class outside the quiet set still prints the stack, with or without an Auth.js cause", () => {
+    logAuthError(authError("OAuthCallbackError", "bad state", new Error("bad state")));
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(3);
+    expect(error.mock.calls[0][0]).toContain("[auth][error] OAuthCallbackError: bad state");
+    expect(error.mock.calls[1][0]).toBe("[auth][cause]:");
+    expect(String(error.mock.calls[1][1])).toMatch(/\n\s+at /);
+    expect(error.mock.calls[2][0]).toBe("[auth][details]:");
+
+    error.mockClear();
+    logAuthError(Object.assign(new Error("something new"), { type: "SomethingNew" }));
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(error.mock.calls[0][0]).toBe("[auth][error] SomethingNew: something new");
+    expect(String(error.mock.calls[1][0])).toMatch(/^\s+at /);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
