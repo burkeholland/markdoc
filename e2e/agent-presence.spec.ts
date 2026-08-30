@@ -221,11 +221,10 @@ test.describe("agent presence and watch", () => {
     await expect(page.getByTestId("presence-waiting")).toHaveCount(0);
     await expect(busy).toHaveCount(0);
 
-    const claimed = Date.now();
     const claim = await page.request.post(`/api/documents/${busyDocId}/requests/${requestId}/claim`, { headers });
     expect(claim.ok(), await claim.text()).toBeTruthy();
-    await expect(busy).toHaveCount(1, { timeout: 3000 });
-    expect(Date.now() - claimed).toBeLessThan(2000);
+    // Within 2 s of the claim landing, the badge is on.
+    await expect(busy).toHaveCount(1, { timeout: 2000 });
     await expect(busy).toHaveAttribute("aria-label", "Copilot is working");
     await expect(avatar).toHaveAttribute("data-busy", "");
     await expect(requests.getByTestId("presence-request")).toHaveAttribute("data-status", "claimed");
