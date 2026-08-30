@@ -16,6 +16,18 @@ curl -fsS https://www.postgresql.org/media/keys/ACCC4CF8.asc |
 . /etc/os-release
 echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
   >/etc/apt/sources.list.d/pgdg.list
+# PGDG stays a pgbackrest-only source: Ubuntu's postgresql-16 keeps taking its minors from noble-security/noble-updates,
+# and nothing else from apt.postgresql.org (its postgresql/postgresql-client metapackages point at a newer major) becomes
+# an apt candidate, so neither the monthly OS patch nor a rerun of this script can change the PostgreSQL major.
+cat >/etc/apt/preferences.d/markdoc-pgdg <<'EOF'
+Package: *
+Pin: origin apt.postgresql.org
+Pin-Priority: 100
+
+Package: pgbackrest
+Pin: origin apt.postgresql.org
+Pin-Priority: 500
+EOF
 apt-get update
 apt-get install -y --no-install-recommends pgbackrest
 pgbackrest_version="$(pgbackrest version | awk '{print $2}')"
