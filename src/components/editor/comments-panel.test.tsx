@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 
@@ -23,6 +23,11 @@ vi.mock("@/lib/api", () => ({
     documents: {
       collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
       reviews: vi.fn().mockResolvedValue({ reviews: [] }),
+      comment: vi.fn().mockResolvedValue({ id: "via-api" }),
+      createRequest: vi.fn().mockResolvedValue({ request: { id: "req" } }),
+    },
+    tokens: {
+      list: vi.fn().mockResolvedValue({ tokens: [] }),
     },
   },
 }));
@@ -35,9 +40,11 @@ vi.mock("@/lib/notifications-store", () => ({
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
+import type { AgentRequestMirror } from "@/server/agent-requests";
 import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
-import { CommentsPanel, isReviewOpen, type CommentsPanelProps } from "./comments-panel";
+import { requestInstruction, waitForSynced } from "./agent-requests";
+import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps } from "./comments-panel";
 
 function reviewDto(id: string, threadIds: string[]): ReviewDto {
   return {
@@ -445,6 +452,389 @@ describe("CommentsPanel", () => {
       expect(message).toMatch(/removed/i);
       expect(message.length).toBeLessThanOrEqual(60);
       expect(kind).toBe("info");
+    });
+  });
+  describe("agent requests from comments (#1024)", () => {
+    const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", present: false };
+    const TEXT = "Intro text. The quick brown fox jumps.";
+
+    type Role = "owner" | "editor" | "commenter";
+    const mount = (opts: { role?: Role; viewing?: boolean; me?: { id: string; name: string; login: string }; onCancelRequest?: (id: string) => void } = {}) => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const me = opts.me ?? { id: "alice", name: "Alice", login: "alice" };
+      const user = makeCollabUser(me.id, me.name, null, me.login);
+      session = new CollabSession({ docId: "doc", user, role: opts.role ?? "owner", getToken: async () => "token", autoConnect: false });
+      session.keepAlive();
+      // The provider is mocked: nothing is ever unsynced, and a synced session lets waitForSynced resolve at once.
+      session.synced = true;
+      if (opts.viewing) session.setMode("viewing");
+      session.ytext.insert(0, TEXT);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [{ login: "bob", name: "Bob", image: null }],
+        agents: [AGENT],
+      } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(
+        <TooltipProvider>
+          <CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} onToast={onToast} onCancelRequest={opts.onCancelRequest} />
+        </TooltipProvider>,
+      );
+      return { onToast, user };
+    };
+    /** Opens the new-comment composer on "quick brown" and waits for the picker to know the agent. */
+    const openComposer = async () => {
+      act(() => session!.setPendingComment({ from: 16, to: 27 }));
+      const box = await screen.findByPlaceholderText(/Add a comment/);
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+      return box as HTMLTextAreaElement;
+    };
+    const type = async (box: HTMLTextAreaElement, text: string) => {
+      box.focus();
+      await userEvent.setup().paste(text);
+    };
+    const mirror = (over: Partial<AgentRequestMirror> & { id: string }): AgentRequestMirror => ({
+      status: "open",
+      mode: "suggest",
+      instruction: "Tighten this",
+      claimedBy: null,
+      result: null,
+      userId: "alice",
+      threadId: null,
+      updatedAt: Date.now(),
+      ...over,
+    });
+    const setMirrors = (list: AgentRequestMirror[]) => {
+      act(() => session!.meta.set("agentRequests", Object.fromEntries(list.map((r) => [r.id, r]))));
+    };
+
+    afterEach(() => {
+      vi.mocked(api.documents.createRequest).mockClear();
+      vi.mocked(api.documents.comment).mockClear();
+      vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [] } as never);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
+    });
+
+    it("shows the mode row only while the body mentions an agent the picker knows", async () => {
+      mount();
+      const box = await openComposer();
+      expect(screen.queryByTestId("composer-agent-row")).toBeNull();
+      await type(box, "@alice/Copilot-CLI tighten this");
+      const row = await screen.findByTestId("composer-agent-row");
+      // Controls only: nothing under the box reads as hint text.
+      expect(Array.from(row.querySelectorAll("*")).filter((el) => el.childElementCount === 0 && !el.closest("button"))).toEqual([]);
+      const group = screen.getByRole("radiogroup", { name: "How should Copilot CLI answer?" });
+      const radios = within(group).getAllByRole("radio");
+      expect(radios.map((r) => r.textContent)).toEqual(["Tracked changes", "Comment only", "Rewrite directly"]);
+      expect(radios.map((r) => r.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+      expect(radios.map((r) => r.getAttribute("tabindex"))).toEqual(["0", "-1", "-1"]);
+      expect(screen.getAllByTestId("composer-chip").length).toBeGreaterThan(0);
+      // A human mention alone is just a comment.
+      fireEvent.change(box, { target: { value: "@bob what do you think?" } });
+      await waitFor(() => expect(screen.queryByTestId("composer-agent-row")).toBeNull());
+      // An agent the document does not know is not a request either (the row must never guess).
+      fireEvent.change(box, { target: { value: "@carol/Some-Bot help" } });
+      expect(screen.queryByTestId("composer-agent-row")).toBeNull();
+    });
+
+    it("radios: click and arrow keys choose a mode; the choice is what the request is posted with", async () => {
+      mount();
+      const box = await openComposer();
+      await type(box, "@alice/Copilot-CLI shorter please");
+      await screen.findByTestId("composer-agent-row");
+      expect(box).toHaveFocus();
+      fireEvent.click(screen.getByTestId("composer-mode-comment"));
+      expect(screen.getByTestId("composer-mode-comment")).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByTestId("composer-mode-suggest")).toHaveAttribute("aria-checked", "false");
+      screen.getByTestId("composer-mode-comment").focus();
+      await userEvent.setup().keyboard("{ArrowRight}");
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveFocus();
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
+      await userEvent.setup().keyboard("{ArrowRight}");
+      expect(screen.getByTestId("composer-mode-suggest")).toHaveAttribute("aria-checked", "true");
+      await userEvent.setup().keyboard("{ArrowLeft}");
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(api.documents.createRequest).mock.calls[0][1].mode).toBe("rewrite");
+    });
+
+    it("a commenter can only ask for comments: the other modes are disabled with a tooltip and Comment only is preselected", async () => {
+      mount({ role: "commenter", me: { id: "carol", name: "Carol", login: "carol" } });
+      const box = await openComposer();
+      await type(box, "@alice/Copilot-CLI is this right?");
+      await screen.findByTestId("composer-agent-row");
+      const suggest = screen.getByTestId("composer-mode-suggest");
+      const rewrite = screen.getByTestId("composer-mode-rewrite");
+      const comment = screen.getByTestId("composer-mode-comment");
+      expect(suggest).toHaveAttribute("aria-disabled", "true");
+      expect(rewrite).toHaveAttribute("aria-disabled", "true");
+      expect(comment).not.toHaveAttribute("aria-disabled");
+      expect(comment).toHaveAttribute("aria-checked", "true");
+      // Disabled radios are not `disabled`: they can take focus, and then say why.
+      fireEvent.click(suggest);
+      expect(comment).toHaveAttribute("aria-checked", "true");
+      act(() => suggest.focus());
+      expect(await screen.findByRole("tooltip")).toHaveTextContent("Needs edit access");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      const [, payload] = vi.mocked(api.documents.createRequest).mock.calls[0];
+      expect(payload.mode).toBe("comment");
+      expect(payload.threadId).toBe("via-api");
+    });
+
+    it("an editor in viewing mode is treated like a commenter (session.canEdit is mode-aware)", async () => {
+      mount({ role: "editor", viewing: true });
+      const box = await openComposer();
+      await type(box, "@alice/Copilot-CLI ok?");
+      await screen.findByTestId("composer-agent-row");
+      expect(screen.getByTestId("composer-mode-suggest")).toHaveAttribute("aria-disabled", "true");
+      expect(screen.getByTestId("composer-mode-comment")).toHaveAttribute("aria-checked", "true");
+    });
+
+    it("posting a comment that mentions an agent creates exactly one request with the thread, quote, range and cleaned instruction — and no 'Sent to agents' toast", async () => {
+      const { onToast } = mount();
+      const box = await openComposer();
+      await type(box, "@alice/Copilot-CLI   @bob  tighten this\nplease  ");
+      await screen.findByTestId("composer-agent-row");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      const threads = session!.comments.list();
+      expect(threads).toHaveLength(1);
+      expect(threads[0].body).toBe("@alice/Copilot-CLI   @bob  tighten this\nplease");
+      expect(api.documents.createRequest).toHaveBeenCalledWith("doc", {
+        mode: "suggest",
+        instruction: "@bob tighten this please",
+        selection: { from: 16, to: 27, quote: "quick brown" },
+        threadId: threads[0].id,
+      });
+      expect(onToast).not.toHaveBeenCalled();
+      // The composer closed as it always does.
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("a mention that is nothing but the mention still carries an instruction", () => {
+      expect(requestInstruction("@alice/Copilot-CLI")).toBe("Please take a look at this.");
+      expect(requestInstruction("  @alice/Copilot-CLI \n ")).toBe("Please take a look at this.");
+      expect(requestInstruction("@bob and @alice/Copilot-CLI: check  the  numbers")).toBe("@bob and : check the numbers");
+    });
+
+    it("a comment without an agent mention never posts a request", async () => {
+      mount();
+      const box = await openComposer();
+      await type(box, "@bob looks fine to me");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(session!.comments.list()).toHaveLength(1));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(api.documents.createRequest).not.toHaveBeenCalled();
+    });
+
+    it("retries a 404 while the server catches up, and says so (comment kept) when the request never lands", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { onToast } = mount();
+        const box = await openComposer();
+        await type(box, "@alice/Copilot-CLI hi");
+        await screen.findByTestId("composer-agent-row");
+        const notFound = Object.assign(new Error("Comment not found"), { status: 404 });
+        vi.mocked(api.documents.createRequest).mockRejectedValueOnce(notFound).mockRejectedValueOnce(notFound).mockResolvedValueOnce({ request: { id: "r" } } as never);
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+        await act(() => vi.advanceTimersByTimeAsync(300));
+        expect(api.documents.createRequest).toHaveBeenCalledTimes(2);
+        await act(() => vi.advanceTimersByTimeAsync(600));
+        expect(api.documents.createRequest).toHaveBeenCalledTimes(3);
+        await act(() => vi.advanceTimersByTimeAsync(1500));
+        expect(api.documents.createRequest).toHaveBeenCalledTimes(3);
+        expect(onToast).not.toHaveBeenCalled();
+        expect(session!.comments.list()).toHaveLength(1);
+
+        // Four 404s in a row: give up, keep the comment, tell the user.
+        vi.mocked(api.documents.createRequest).mockClear().mockRejectedValue(notFound);
+        act(() => session!.setPendingComment({ from: 0, to: 5 }));
+        const again = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+        await type(again, "@alice/Copilot-CLI again");
+        await screen.findByTestId("composer-agent-row");
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+        await act(() => vi.advanceTimersByTimeAsync(2000));
+        expect(api.documents.createRequest).toHaveBeenCalledTimes(4);
+        expect(onToast).toHaveBeenCalledWith("The comment is posted, but the request did not reach the agent — mention them again.", "error");
+        expect(session!.comments.list()).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not post before the session is synced", async () => {
+      mount();
+      session!.synced = false;
+      const waited = waitForSynced(session!, 200);
+      let settled = false;
+      void waited.then(() => (settled = true));
+      await new Promise((r) => setTimeout(r, 30));
+      expect(settled).toBe(false);
+      session!.synced = true;
+      act(() => session!.setMode("editing"));
+      await waited;
+      expect(settled).toBe(true);
+    });
+
+    it("shows the thread's latest request as a chip: waiting → working → done (with detail), and nothing once cancelled", async () => {
+      const { user } = mount();
+      const threadId = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: user });
+      expect(screen.queryByTestId("comment-request-chip")).toBeNull();
+      setMirrors([mirror({ id: "r1", threadId, status: "open" })]);
+      const chip = await screen.findByTestId("comment-request-chip");
+      expect(chip).toHaveAttribute("data-status", "open");
+      expect(chip).toHaveTextContent("Waiting for an agent");
+      // The chip is in the header row, before the ⋯ actions.
+      const card = screen.getByTestId("comment-thread");
+      const order = Array.from(card.querySelectorAll("[data-testid]")).map((el) => el.getAttribute("data-testid"));
+      expect(order.indexOf("comment-timestamp")).toBeLessThan(order.indexOf("comment-request-chip"));
+      expect(order.indexOf("comment-request-chip")).toBeLessThan(order.indexOf("comment-resolve"));
+      setMirrors([mirror({ id: "r1", threadId, status: "claimed", claimedBy: "Copilot CLI" })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent("Copilot CLI is working…"));
+      // A newer request on the same thread wins.
+      setMirrors([
+        mirror({ id: "r1", threadId, status: "done", result: { suggestions: 2, comments: 0 }, updatedAt: Date.now() - 1000 }),
+        mirror({ id: "r2", threadId, status: "claimed", claimedBy: "Copilot CLI", updatedAt: Date.now() }),
+      ]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveAttribute("data-request-id", "r2"));
+      setMirrors([mirror({ id: "r2", threadId, status: "done", result: { suggestions: 2, comments: 1 } })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent("Done: 2 suggestions, 1 comment"));
+      // Detail is for the first minute; older done requests collapse to a plain Done.
+      setMirrors([mirror({ id: "r2", threadId, status: "done", result: { suggestions: 2, comments: 1 }, updatedAt: Date.now() - 120_000 })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent(/^Done$/));
+      setMirrors([mirror({ id: "r2", threadId, status: "cancelled" })]);
+      await waitFor(() => expect(screen.queryByTestId("comment-request-chip")).toBeNull());
+    });
+
+    it("falls back to the requestId the server stamped on the thread when the mirror has no threadId", async () => {
+      const { user } = mount();
+      const threadId = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: user });
+      act(() => session!.comments.ymap.get(threadId)!.set("requestId", "legacy"));
+      setMirrors([mirror({ id: "legacy", status: "claimed", claimedBy: "Copilot CLI", threadId: undefined })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveAttribute("data-request-id", "legacy"));
+    });
+
+    it.each([
+      ["the requester", { id: "carol", name: "Carol", login: "carol" }, "commenter" as Role, true],
+      ["the document owner", { id: "alice", name: "Alice", login: "alice" }, "owner" as Role, true],
+      ["another collaborator", { id: "bob", name: "Bob", login: "bob" }, "editor" as Role, false],
+    ])("the × cancels for %s", async (_who, me, role, canCancel) => {
+      const onCancelRequest = vi.fn();
+      const { user } = mount({ role, me, onCancelRequest });
+      const threadId = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: user });
+      setMirrors([mirror({ id: "r1", threadId, status: "open", userId: "carol" })]);
+      await screen.findByTestId("comment-request-chip");
+      const cancel = screen.queryByTestId("comment-request-cancel");
+      if (!canCancel) {
+        expect(cancel).toBeNull();
+        return;
+      }
+      expect(cancel).toHaveAccessibleName("Cancel request");
+      fireEvent.click(cancel!);
+      expect(onCancelRequest).toHaveBeenCalledWith("r1");
+      // Optimistic: the chip is gone at once and the card was not "revealed" by the click.
+      expect(screen.queryByTestId("comment-request-chip")).toBeNull();
+      setMirrors([mirror({ id: "r1", threadId, status: "cancelled", userId: "carol" })]);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(screen.queryByTestId("comment-request-chip")).toBeNull();
+    });
+
+    it("no × once the request is done", async () => {
+      const { user } = mount({ onCancelRequest: vi.fn() });
+      const threadId = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: user });
+      setMirrors([mirror({ id: "r1", threadId, status: "done", result: { suggestions: 1, comments: 0 } })]);
+      await screen.findByTestId("comment-request-chip");
+      expect(screen.queryByTestId("comment-request-cancel")).toBeNull();
+    });
+
+    it("a reply that mentions an agent asks on the thread, preselecting the thread's last mode", async () => {
+      const { user } = mount();
+      const threadId = session!.comments.add({ from: 16, to: 27, body: "First thoughts", author: user });
+      setMirrors([mirror({ id: "r1", threadId, status: "done", mode: "comment", result: { suggestions: 0, comments: 1 } })]);
+      await screen.findByTestId("comment-request-chip");
+      fireEvent.click(screen.getByTestId("comment-reply"));
+      const box = (await screen.findByPlaceholderText("Reply…")) as HTMLTextAreaElement;
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+      await type(box, "@alice/Copilot-CLI and the numbers?");
+      await screen.findByTestId("composer-agent-row");
+      expect(screen.getByTestId("composer-mode-comment")).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      expect(api.documents.createRequest).toHaveBeenCalledWith("doc", {
+        mode: "comment",
+        instruction: "and the numbers?",
+        selection: { from: 16, to: 27, quote: "quick brown" },
+        threadId,
+      });
+      expect(session!.comments.list()[0].replies).toHaveLength(1);
+    });
+
+    it("quick-instruction chips insert after the mention and keep the caret in the box", async () => {
+      mount();
+      const box = await openComposer();
+      await type(box, "@alice/Copilot-CLI");
+      await screen.findByTestId("composer-agent-row");
+      const chips = screen.getAllByTestId("composer-chip");
+      const first = chips[0].textContent!;
+      fireEvent.click(chips[0]);
+      await waitFor(() => expect(box.value).toBe(`@alice/Copilot-CLI ${first}`));
+      await waitFor(() => expect(box).toHaveFocus());
+      expect(box.selectionStart).toBe(box.value.length);
+      // With text past the mention the chip goes at the caret, spaced.
+      box.setSelectionRange(box.value.length, box.value.length);
+      const second = chips[1].textContent!;
+      fireEvent.click(chips[1]);
+      await waitFor(() => expect(box.value).toBe(`@alice/Copilot-CLI ${first} ${second}`));
+      expect(screen.getByTestId("composer-agent-row")).toBeInTheDocument();
+    });
+
+    it("the edit composer never offers the row", async () => {
+      const { user } = mount();
+      session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: user });
+      // The lazily mounted menu arms and opens on pointer down.
+      fireEvent.pointerDown(await screen.findByRole("button", { name: "Comment actions" }), { button: 0 });
+      fireEvent.click(await screen.findByText("Edit"));
+      const box = (await screen.findByDisplayValue("@alice/Copilot-CLI shorter")) as HTMLTextAreaElement;
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+      fireEvent.change(box, { target: { value: "@alice/Copilot-CLI shorter still" } });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.queryByTestId("composer-agent-row")).toBeNull();
+    });
+
+    it("mentionedAgents matches the picker's agents case-insensitively, once each, in order", () => {
+      const candidates = [
+        { login: "bob", name: "Bob", image: null },
+        { login: "alice/Copilot-CLI", name: "Copilot CLI", image: null, agent: { ownerLogin: "alice" } },
+        { login: "bob/Reviewer", name: "Reviewer", image: null, agent: { ownerLogin: "bob" } },
+      ];
+      expect(mentionedAgents("@bob/reviewer then @ALICE/copilot-cli and @bob/Reviewer again", candidates).map((c) => c.name)).toEqual(["Reviewer", "Copilot CLI"]);
+      expect(mentionedAgents("@bob only, and @alice/Other-Bot", candidates)).toEqual([]);
+    });
+
+    it("the picker lists the user's own tokens once it opens, marked as not here yet", async () => {
+      vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [{ id: "t1", name: "Copilot CLI" }, { id: "t2", name: "Night Shift" }] } as never);
+      mount();
+      const box = await openComposer();
+      await new Promise((r) => setTimeout(r, 20));
+      // Not on panel mount, nor on opening a composer: only once a picker opens.
+      expect(api.tokens.list).not.toHaveBeenCalled();
+      await type(box, "@");
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+      const options = await screen.findAllByTestId("mention-option");
+      const logins = options.map((o) => o.getAttribute("data-login"));
+      expect(logins).toEqual(["bob", "alice/Copilot-CLI", "alice/Night-Shift"]);
+      // The document already knows Copilot CLI (activity): its entry is the ordinary one, not the own-token hint.
+      expect(options[1]).not.toHaveAttribute("data-own");
+      expect(options[2]).toHaveAttribute("data-own");
+      expect(options[2]).toHaveTextContent("your agent · not here yet");
+      // Choosing the own token makes the row appear: it is a request too.
+      fireEvent.click(options[2]);
+      await screen.findByTestId("composer-agent-row");
+      expect(screen.getByRole("radiogroup", { name: "How should Night Shift answer?" })).toBeInTheDocument();
     });
   });
 });

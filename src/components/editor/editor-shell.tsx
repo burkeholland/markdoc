@@ -1000,6 +1000,7 @@ export function EditorShell({
         onReveal={reveal}
         onPendingDone={() => actions.focusCollapsed()}
         onAskAgent={openAskAgent}
+        onCancelRequest={cancelAgentRequest}
         focusTab={commentsFocus}
         focusOnMount={focusCommentsOnOpen}
         onToast={toast}

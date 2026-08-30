@@ -173,3 +173,117 @@
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
   padding: 0.625rem 0.75rem;
 }
+
+/* Composer mode row: appears under the box while the comment mentions an agent (a comment that names an agent is a
+   request). Controls only, no hint text. The chosen mode is a soft filled pill with an even border, never a
+   coloured edge (docs/agents.md, UI conventions). */
+.composer-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.composer-modes,
+.composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.composer-mode,
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 1.5rem;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-line, #e5e7eb);
+  background: var(--color-surface, #fff);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-ink-3, #6b7280);
+  cursor: pointer;
+  transition:
+    border-color 120ms,
+    background-color 120ms,
+    color 120ms;
+}
+
+.composer-mode:hover,
+.composer-chip:hover {
+  border-color: var(--color-line-2, #d1d5db);
+  color: var(--color-ink-2, inherit);
+}
+
+.composer-mode[aria-checked="true"] {
+  border-color: var(--color-accent-soft, rgba(37, 99, 235, 0.1));
+  background: var(--color-accent-soft, rgba(37, 99, 235, 0.1));
+  color: var(--color-ink-2, inherit);
+  font-weight: 600;
+}
+
+.composer-mode[aria-disabled="true"] {
+  color: var(--color-ink-4, #9ca3af);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.composer-mode[aria-disabled="true"]:hover {
+  border-color: var(--color-line, #e5e7eb);
+  color: var(--color-ink-4, #9ca3af);
+}
+
+.composer-chip {
+  border-style: dashed;
+}
+
+.composer-chip:hover {
+  border-style: solid;
+}
+
+/* The request a thread carries: a small soft pill in the card header (waiting → working → done). Text wraps rather
+   than pushing the card wider than the 280 px panel. */
+.request-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  min-height: 1.25rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-accent-soft, rgba(37, 99, 235, 0.1));
+  background: var(--color-accent-soft, rgba(37, 99, 235, 0.1));
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--color-ink-2, inherit);
+  align-self: center;
+}
+
+.request-chip[data-status="done"] {
+  border-color: var(--color-line, #e5e7eb);
+  background: var(--color-surface-2, transparent);
+  color: var(--color-ink-3, #6b7280);
+}
+
+.request-chip-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.request-chip-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  margin-right: -0.25rem;
+  border-radius: 999px;
+  color: var(--color-ink-4, #9ca3af);
+}
+
+.request-chip-cancel:hover {
+  color: var(--color-ink, inherit);
+  background: rgb(0 0 0 / 0.06);
+}
