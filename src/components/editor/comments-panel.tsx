@@ -17,8 +17,7 @@ import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
 import { AGENT_CONNECT_DISMISSED_KEY } from "@/components/settings/agent-connect-card";
 import { jsonEqual, useSessionValue } from "./use-session";
-import { QUICK_INSTRUCTIONS } from "./ask-agent-dialog";
-import { describeResult, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
+import { describeResult, QUICK_INSTRUCTIONS, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
 import "./comments.css";
 
 type Tab = "open" | "resolved" | "suggestions";
@@ -442,8 +441,6 @@ export interface CommentsPanelProps {
   onCreateToken?: () => void;
   /** Move focus to the selected tab when this panel mounts. */
   focusOnMount?: boolean;
-  /** The Ask-an-agent dialog. Nothing in the panel opens it any more (#1025 — the empty state mentions an agent in a comment instead); T4 deletes the prop. */
-  onAskAgent?: () => void;
   /** Shell toast (Accept suggestion offers Undo). */
   onToast?: (message: string, kind?: "info" | "success" | "error", action?: { label: string; onClick?: () => void }) => void;
   /** Cancels an open or claimed agent request (the × on a thread card's request chip); the × is hidden when omitted. */

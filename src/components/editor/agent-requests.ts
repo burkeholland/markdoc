@@ -48,6 +48,9 @@ export function useThreadRequests(session: CollabSession): Record<string, AgentR
 /** What the composer sends when the body is nothing but the mention. */
 export const DEFAULT_INSTRUCTION = "Please take a look at this.";
 
+/** The composer's quick chips once an agent is mentioned: one click fills in a common instruction. */
+export const QUICK_INSTRUCTIONS = ["Tighten this", "Fix grammar and tone", "Turn into a checklist"];
+
 /** The API's `QUOTE_MAX` (src/server/agent-requests.ts): a longer anchor is clipped before it is sent. */
 export const REQUEST_QUOTE_MAX = 2000;
 

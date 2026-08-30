@@ -15,10 +15,11 @@ describe("slash items", () => {
     expect(SLASH_ITEMS.map((i) => i.id)).toEqual(expect.arrayContaining(["text", "heading1", "heading2", "heading3", "bullet", "numbered", "task", "quote", "code", "divider", "table", "image", "link", "comment", "date", "agent"]));
   });
 
-  it("'ag' finds 'Keep an agent here' (the /agent item) and nothing else", () => {
-    expect(ids("ag")).toEqual(["agent"]);
-    expect(ids("agent")).toEqual(["agent"]);
-    expect(ids("copilot")).toEqual(["agent"]);
+  it("'ag' finds Comment (mention an agent there) and then 'Keep an agent here' (the /agent item); 'keep' finds the /agent item alone", () => {
+    expect(ids("ag")).toEqual(["comment", "agent"]);
+    expect(ids("agent")).toEqual(["comment", "agent"]);
+    expect(ids("copilot")).toEqual(["comment", "agent"]);
+    expect(ids("keep")).toEqual(["agent"]);
     const agent = SLASH_ITEMS.find((i) => i.id === "agent")!;
     expect(agent.title).toBe("Keep an agent here");
     expect(agent.description).toBe("Get the exact sentence that keeps an agent in this document");
@@ -50,6 +51,15 @@ describe("slash items", () => {
   it("'todo' and 'check' find the task list via keywords", () => {
     expect(ids("todo")).toEqual(["task"]);
     expect(ids("check")).toEqual(["task"]);
+  });
+
+  it("'ask' and 'ai' land on Comment: mentioning an agent in a comment is the one way to ask one (#1075)", () => {
+    expect(ids("ask")).toEqual(["comment"]);
+    expect(ids("ai")).toEqual(["comment"]);
+    const comment = SLASH_ITEMS.find((i) => i.id === "comment")!;
+    expect(comment.keywords).toEqual(expect.arrayContaining(["agent", "ask", "copilot", "ai"]));
+    // Commenting off: none of the agent words surface it.
+    expect(ids("ask", { inTable: false, canComment: false })).toEqual([]);
   });
 
   it("matches any word of the title, case-insensitively", () => {

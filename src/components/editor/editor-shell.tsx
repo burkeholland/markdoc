@@ -55,7 +55,6 @@ export async function pollDocumentSync(documentId: string, fresh: boolean): Prom
 
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
-import { AskAgentDialog, type AskAgentMode, type AskAgentSelection } from "./ask-agent-dialog";
 import { describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests";
 import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
@@ -640,9 +639,8 @@ export function EditorShell({
     [sidePanel],
   );
 
-  // "Ask an agent": the dialog captures the selection when it opens; results come back through the
+  // Agent requests are made from comments (mention an agent, T2 #379); results come back through the
   // shared document (meta.agentRequests, mirrored by the server) so the presence stack and toast are realtime.
-  const [askAgent, setAskAgent] = useState<{ selection: AskAgentSelection | null } | null>(null);
   const [commentsFocus, setCommentsFocus] = useState<{ tab: "open" | "resolved" | "suggestions"; nonce: number } | null>(null);
   // A focus request only applies to the panel it opened; once the panel closes, a later reopen picks
   // its own landing tab (Suggestions in Suggesting mode, #117) instead of replaying the stale request.
@@ -656,19 +654,6 @@ export function EditorShell({
       document.querySelector<HTMLElement>('[data-testid="comments-toggle"]')?.focus({ preventScroll: true });
     }
   }, [sidePanel]);
-  const openAskAgent = useCallback(() => {
-    if (!session.canComment) return;
-    const range = actions.selectionSourceRange();
-    const quote = range ? session.ytext.toString().slice(range.from, range.to) : "";
-    setAskAgent({ selection: range && quote.trim() ? { from: range.from, to: range.to, quote: quote.slice(0, 2000) } : null });
-  }, [actions, session]);
-  const sendAskAgent = useCallback(
-    async (input: { instruction: string; mode: AskAgentMode; selection: AskAgentSelection | null }) => {
-      await api.documents.createRequest(doc.id, { instruction: input.instruction, mode: input.mode, selection: input.selection });
-      toast(input.mode === "comment" ? "Sent to agents — feedback will appear in Comments" : "Sent to agents — changes will appear as suggestions", "success");
-    },
-    [doc.id, toast],
-  );
   const cancelAgentRequest = useCallback(
     (requestId: string) => {
       api.documents
@@ -691,8 +676,6 @@ export function EditorShell({
   // "Keep an agent here" from the command palette or the `/agent` slash item: the header opens its dialog.
   const [keepAgentNonce, setKeepAgentNonce] = useState(0);
   const openKeepAgent = useCallback(() => setKeepAgentNonce((n) => n + 1), []);
-  const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
-  const askAgentDoc = useMemo(() => ({ id: doc.id, title: liveTitle }), [doc.id, liveTitle]);
   // Hint (b) and the empty state: a comment on the whole document with `@` already typed, so the
   // agent picker is up before the user types anything (#1025).
   const startMentionComment = useCallback(() => startDocumentComment({ mention: true }), [startDocumentComment]);
@@ -845,7 +828,6 @@ export function EditorShell({
     openImage,
     startComment,
     commentDocument: startDocumentComment,
-    askAgent: openAskAgent,
     keepAgent: openKeepAgent,
     toggleComments,
     toggleHistory,
@@ -976,11 +958,7 @@ export function EditorShell({
     },
     [doc.id, toast],
   );
-  const onAskAgentOpenChange = useCallback((o: boolean) => {
-    if (!o) setAskAgent(null);
-  }, []);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
-  const canComment = useSessionValue(session, (s) => s.canComment);
   const onOutlinePick = useCallback(
     (h: HeadingInfo) => {
       setOutlineDrawerOpen(false);
@@ -996,7 +974,6 @@ export function EditorShell({
         onClose={closeSidePanel}
         onReveal={reveal}
         onPendingDone={() => actions.focusCollapsed()}
-        onAskAgent={openAskAgent}
         onCancelRequest={cancelAgentRequest}
         onCreateToken={goCreateToken}
         focusTab={commentsFocus}
@@ -1061,7 +1038,7 @@ export function EditorShell({
           keepAgentNonce={keepAgentNonce}
           embed={embed}
         />
-        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onAskAgent={openAskAgent} onImage={openImage} onTable={openTable} />
+        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
         {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onComment={startMentionComment} />}
         {findOpen && (
           <FindBar
@@ -1157,7 +1134,7 @@ export function EditorShell({
                       // Read-only stand-in until the live text is in; `inert` keeps its links and headings out of focus and a11y order.
                       <div className="rich-placeholder reader-body" data-testid="rich-placeholder" aria-hidden="true" inert dangerouslySetInnerHTML={{ __html: initialHtml }} />
                     )}
-                    <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onAskAgent={openAskAgent} onLink={openLink} />
+                    <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
                     <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} onKeepAgent={openKeepAgent} />
                     <RichPane
@@ -1233,16 +1210,6 @@ export function EditorShell({
         <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />
         <NameVersionDialog open={dialog === "versionName"} onOpenChange={dialogOpenChange.versionName} onSubmit={saveNamedVersion} />
         <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />
-        <AskAgentDialog
-          open={askAgent !== null}
-          onOpenChange={onAskAgentOpenChange}
-          selection={askAgent?.selection ?? null}
-          canEdit={canEdit}
-          canComment={canComment}
-          onSend={sendAskAgent}
-          onCreateToken={goCreateToken}
-          doc={askAgentDoc}
-        />
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
 
         <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">

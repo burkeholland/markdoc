@@ -4,9 +4,9 @@
  * given the document state and what the user has dismissed, plus the codec for the `localStorage`
  * record. No DOM, no React — unit-tested in hints.test.ts.
  *
- * There used to be a third hint, `ask-agent` (selection ≥ 20 characters → the Ask-agent dialog);
- * #1025 folded it into `mention-copilot`, now that a comment is the way to ask an agent for anything.
- * A stored dismissal of the old id is dropped by `parseHintsRecord` (unknown ids are filtered).
+ * There used to be a third hint (selection ≥ 20 characters → the old agent request dialog); #1025 folded it
+ * into `mention-copilot`, and #1075 removed the dialog: a comment is the way to ask an agent for anything.
+ * A stored dismissal of the retired id is dropped by `parseHintsRecord` (unknown ids are filtered).
  */
 
 export type HintId = "collab-agent" | "mention-copilot";
