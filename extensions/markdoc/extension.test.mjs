@@ -82,6 +82,10 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
       if (req.method === "GET" && url.pathname === "/api/agent/documents/doc-1/events") {
         eventReads += 1;
         await delay(5);
+        // Like the server: a `wait` poll returns as soon as something is queued, else after the (shortened) wait.
+        const waitS = Number(url.searchParams.get("wait") ?? 0);
+        const deadline = Date.now() + Math.min(waitS, 1) * 300;
+        while (eventReads > 3 && waitS > 0 && queuedEvents.length === 0 && Date.now() < deadline) await delay(5);
         const page = eventReads === 1
           ? { cursor: "cursor-1", events: [] }
           : eventReads <= 3
@@ -257,6 +261,98 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
     await until(() => sends.length === 3);
     assert.match(sends[2].prompt, /other-agent-thread/);
 
+    // One comment that mentions the agent = one push (#1075). The editor posts the comment first and creates the
+    // request one round trip later, so `comment.added` + `mention` land in one page and `request.created` in the
+    // next: the extension peeks once for it and pushes the request (claimable), not the mention.
+    const readsBeforeThread9 = eventReads;
+    queuedEvents.push(
+      {
+        type: "comment.added",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        threadId: "thread-9",
+        body: "@burke/Copilot-app Tighten this",
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:03.000Z",
+      },
+      {
+        type: "mention",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        refId: "thread-9",
+        snippet: "@burke/Copilot-app Tighten this",
+        agent: "Copilot-app",
+        agents: ["Copilot-app"],
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:03.000Z",
+      },
+    );
+    await until(() => eventReads > readsBeforeThread9 && queuedEvents.length === 0);
+    queuedEvents.push({
+      type: "request.created",
+      documentId: "doc-1",
+      documentTitle: "Launch plan",
+      requestId: "req-9",
+      threadId: "thread-9",
+      by: "Burke",
+      mode: "suggest",
+      instruction: "Tighten this",
+      quote: "A sentence that needs work.",
+      actor: { id: "user-1", name: "Burke", kind: "user" },
+      at: "2026-08-28T00:00:03.500Z",
+    });
+    await until(() => sends.length === 4);
+    await delay(400);
+    assert.equal(sends.length, 4, "comment.added + mention + request.created for one thread push once");
+    assert.match(sends[3].prompt, /requestId: req-9/);
+    assert.match(sends[3].prompt, /threadId: thread-9/);
+    assert.match(sends[3].prompt, /markdoc_claim_request/);
+    assert.match(sends[3].prompt, /asked you for work in a Markdoc comment/);
+    assert.doesNotMatch(sends[3].prompt, /Ask an agent/);
+    assert.match(sends[3].displayPrompt, /^Markdoc: Burke asked: Tighten this in Launch plan$/);
+
+    // All three in one page: still one push, and the request's.
+    queuedEvents.push(
+      {
+        type: "comment.added",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        threadId: "thread-10",
+        body: "@burke/Copilot-app is this paragraph needed?",
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:04.000Z",
+      },
+      {
+        type: "mention",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        refId: "thread-10",
+        snippet: "@burke/Copilot-app is this paragraph needed?",
+        agent: "Copilot-app",
+        agents: ["Copilot-app"],
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:04.000Z",
+      },
+      {
+        type: "request.created",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        requestId: "req-10",
+        threadId: "thread-10",
+        by: "Burke",
+        mode: "comment",
+        instruction: "is this paragraph needed?",
+        quote: null,
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:04.000Z",
+      },
+    );
+    await until(() => sends.length === 5);
+    await delay(400);
+    assert.equal(sends.length, 5);
+    assert.match(sends[4].prompt, /requestId: req-10/);
+    assert.match(sends[4].prompt, /threadId: thread-10/);
+
     await assert.rejects(
       canvasOptions.open({ instanceId: "instance-2", input: { id: "doc-1" } }),
       /Only one Markdoc canvas/,
@@ -288,13 +384,13 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
         at: "2026-08-28T00:00:03.000Z",
       },
     );
-    await until(() => sends.length === 4);
+    await until(() => sends.length === 6);
     const closing = canvasOptions.onClose({ instanceId: "instance-1" });
     await delay(20);
     releaseSend();
     await closing;
     await delay(20);
-    assert.equal(sends.length, 4);
+    assert.equal(sends.length, 6);
     assert.equal(runtime.instances.size, 0);
     assert.deepEqual(presence.map((item) => item.state), ["idle", "left"]);
   } finally {

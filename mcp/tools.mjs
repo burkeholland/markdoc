@@ -327,7 +327,7 @@ export function registerTools(server, client) {
         id: z.string(),
         content: z.string().optional().describe("Full revised Markdown"),
         edits: z.array(z.object({ find: z.string(), replace: z.string(), all: z.boolean().optional() })).optional(),
-        requestId: z.string().optional().describe("Link to an \"Ask an agent\" request you are working on (from markdoc_list_requests)"),
+        requestId: z.string().optional().describe("Link the suggestions to a request you are working on (a person asked by mentioning you in a comment; from markdoc_list_requests)"),
         ifContentHash: IF_HASH,
       },
       annotations: ADDITIVE,
@@ -405,7 +405,7 @@ export function registerTools(server, client) {
         replyId: z.string().optional().describe("With `react`: react to this reply instead of the thread body"),
         body: z.string().optional().describe("Comment text"),
         emoji: z.string().optional().describe("With `react`: the emoji to toggle, e.g. 👍 ❤️ 🎉 👀 😄 🚀"),
-        requestId: z.string().optional().describe("With `add`: link the comment to an \"Ask an agent\" request you are working on"),
+        requestId: z.string().optional().describe("With `add` or `reply`: link the comment to a request you are working on (a person asked by mentioning you in a comment; from markdoc_list_requests). Prefer `reply` into the request's own comment thread (its `threadId`)"),
       },
       annotations: ADDITIVE,
     },
@@ -418,7 +418,7 @@ export function registerTools(server, client) {
       if (!threadId) throw new Error("`threadId` is required.");
       if (action === "reply") {
         if (!body) throw new Error("`body` is required to reply.");
-        const res = await api("POST", `/api/documents/${id}/comments`, { action: "reply", threadId, body });
+        const res = await api("POST", `/api/documents/${id}/comments`, { action: "reply", threadId, body, ...(requestId ? { requestId } : {}) });
         return ok(`Replied to thread ${threadId}.`, res);
       }
       if (action === "react") {
@@ -579,7 +579,7 @@ export function registerTools(server, client) {
     {
       title: "List requests for me",
       description:
-        "Check Markdoc for work humans asked for from inside the editor (\"Ask an agent\"): open requests across every document the user can see, each with the document, the selected text (if any), the instruction and the mode — suggest (propose tracked changes with markdoc_suggest), comment (reply with markdoc_comment) or rewrite (edit directly with markdoc_replace_content). Claim one with markdoc_claim_request, do the work passing its requestId, then markdoc_complete_request.",
+        "Check Markdoc for work people asked for from inside the editor by mentioning an agent in a comment: open requests across every document the user can see, each with the document, the selected text (if any), the instruction and the mode — suggest (propose tracked changes with markdoc_suggest), comment (reply with markdoc_comment) or rewrite (edit directly with markdoc_replace_content). Each request carries `threadId` when it came from a comment — answer in that thread (markdoc_comment { action: \"reply\", threadId, requestId }) rather than opening a new one. Claim one with markdoc_claim_request, do the work passing its requestId, then markdoc_complete_request.",
       inputSchema: {
         status: z.enum(["open", "claimed", "done", "cancelled"]).optional().describe("Default: open"),
         limit: z.number().int().min(1).max(200).optional(),
@@ -594,7 +594,7 @@ export function registerTools(server, client) {
       const { requests } = await api("GET", `/api/agent/requests${qs ? `?${qs}` : ""}`);
       const lines = requests.map(
         (r) =>
-          `- [${r.id}] ${r.status}${r.claimedBy ? ` (${r.claimedBy})` : ""} · ${r.mode} · "${r.documentTitle}" (document ${r.documentId}) · from ${r.userName ?? r.userLogin ?? "someone"} · ${r.createdAt}\n    instruction: ${r.instruction}${r.selection ? `\n    selection: ${JSON.stringify(r.selection.quote)}` : "\n    selection: whole document"}`,
+          `- [${r.id}] ${r.status}${r.claimedBy ? ` (${r.claimedBy})` : ""} · ${r.mode} · "${r.documentTitle}" (document ${r.documentId}) · from ${r.userName ?? r.userLogin ?? "someone"} · ${r.createdAt}${r.threadId ? ` · thread ${r.threadId}` : ""}\n    instruction: ${r.instruction}${r.selection ? `\n    selection: ${JSON.stringify(r.selection.quote)}` : "\n    selection: whole document"}`,
       );
       return ok(lines.length ? lines.join("\n") : `No ${status ?? "open"} requests. Nothing to do right now.`, { requests });
     },
@@ -667,7 +667,7 @@ export function registerTools(server, client) {
     {
       title: "Wait for humans",
       description:
-        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment or reply; reply decisions include `replyId`), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (Ask an agent), activity. Without `id`, mentions, reviews and requests across every document you own or collaborate on. Every event carries `actor` ({ name, login, kind: user|agent, agent, self }); your own writes (append, suggest, comment, review) are not delivered, so the call keeps waiting after your own actions — pass includeSelf: true to see them, marked (you). The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
+        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment or reply; reply decisions include `replyId`), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set), request.created (a person mentioned an agent in a comment: `requestId`, `mode`, `instruction` and the request's comment thread as `threadId`), activity. Without `id`, mentions, reviews and requests across every document you own or collaborate on. Every event carries `actor` ({ name, login, kind: user|agent, agent, self }); your own writes (append, suggest, comment, review) are not delivered, so the call keeps waiting after your own actions — pass includeSelf: true to see them, marked (you). The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
       inputSchema: {
         id: z.string().optional().describe("Document id; omit for the cross-document inbox"),
         since: z.string().optional().describe("Cursor from the previous call"),
@@ -696,7 +696,7 @@ export function registerTools(server, client) {
           case "mention":
             return `- mention${doc} by ${e.by ?? "someone"}${who(e)}${e.agent ? ` (addressed to you as @…/${e.agent})` : ""}: ${e.snippet}`;
           case "request.created":
-            return `- request.created${doc} [${e.requestId}] ${e.mode} from ${e.by ?? "someone"}: ${e.instruction}${e.quote ? ` — selection: ${JSON.stringify(e.quote)}` : ""}`;
+            return `- request.created${doc} [${e.requestId}] ${e.mode} from ${e.by ?? "someone"}${e.threadId ? ` [thread ${e.threadId}]` : ""}: ${e.instruction}${e.quote ? ` — selection: ${JSON.stringify(e.quote)}` : ""}`;
           default:
             return `- ${e.action ?? e.type}${doc} by ${e.actor?.name ?? e.by ?? "someone"}${who(e)}`;
         }
