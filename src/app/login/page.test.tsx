@@ -12,7 +12,7 @@ vi.mock("@/auth", () => ({
   devLoginEnabled: true,
   githubConfigured: true,
 }));
-vi.mock("@/components/editor/header", () => ({ Logo: () => null }));
+vi.mock("@/components/ui/logo", () => ({ Logo: () => null }));
 vi.mock("@/components/ui/primitives", () => ({ GitHubIcon: () => null }));
 // The page is rendered outside a Next request scope here; `embeddedDocumentPath` reads request
 // headers to look for a canvas session cookie, so give it an empty request like the API tests do.
