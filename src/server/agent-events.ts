@@ -445,7 +445,8 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
 
 /**
  * Cross-document inbox: @mentions on every document the token's user can open, plus reviews and new
- * "Ask an agent" requests on documents they own or collaborate on. Content changes are not included.
+ * agent requests (from the Ask-an-agent dialog or a comment thread: `threadId`) on documents they own or
+ * collaborate on. Content changes are not included.
  */
 export async function collectUserEvents(user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: null }), events: [] };

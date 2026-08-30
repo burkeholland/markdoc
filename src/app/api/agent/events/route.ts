@@ -3,9 +3,10 @@ import { clampWait, pollEvents, parseIncludeSelf, InvalidCursorError, WAIT_MAX_S
 import { isAgentMentionUnique } from "@/server/tokens";
 
 /**
- * Cross-document long-poll for an idle agent: @mentions of the token's user, reviews and new "Ask an
- * agent" requests on every document they own or collaborate on. `?since=<cursor>&wait=<seconds, max 55>`;
- * no `since` returns the current cursor only. Self events are skipped unless `includeSelf=1`. Token-only.
+ * Cross-document long-poll for an idle agent: @mentions of the token's user, reviews and new agent
+ * requests (`request.created`, with `threadId` when asked from a comment thread) on every document they
+ * own or collaborate on. `?since=<cursor>&wait=<seconds, max 55>`; no `since` returns the current cursor
+ * only. Self events are skipped unless `includeSelf=1`. Token-only.
  */
 export const GET = handler(async (req: Request) => {
   const user = await requireUser();
