@@ -266,6 +266,31 @@ export interface UserSearchResult {
 /** How many suggestions a login prefix search returns (one autocomplete list). */
 export const USER_SEARCH_LIMIT = 8;
 
+/** Minimum gap between two `[github] user search rate-limited` lines from one process. */
+export const USER_SEARCH_LIMITED_LOG_INTERVAL_MS = 60_000;
+let userSearchLimitedLoggedAt = -Infinity;
+
+/** GitHub's `x-ratelimit-reset` (epoch seconds) from a failed Octokit request, as ISO time, when the response carried it. */
+function rateLimitResetIso(err: unknown): string | null {
+  const raw = (err as { response?: { headers?: Record<string, unknown> } } | null)?.response?.headers?.["x-ratelimit-reset"];
+  if (raw === undefined || raw === null || raw === "") return null;
+  const reset = new Date(Number(raw) * 1000);
+  return Number.isNaN(reset.getTime()) ? null : reset.toISOString();
+}
+
+/**
+ * One warn line per minute per process when GitHub throttles the user search: the route answers
+ * `limited: true` without logging (by design) and the Share dialog's autocomplete simply goes quiet,
+ * so nothing else says so. No query text, login or token.
+ */
+function logUserSearchLimited(status: number, err: unknown): void {
+  const now = Date.now();
+  if (now - userSearchLimitedLoggedAt < USER_SEARCH_LIMITED_LOG_INTERVAL_MS) return;
+  userSearchLimitedLoggedAt = now;
+  const reset = rateLimitResetIso(err);
+  console.warn(`[github] user search rate-limited (HTTP ${status})${reset ? `, resets at ${reset}` : ""}`);
+}
+
 /**
  * GitHub accounts whose login matches `prefix`, for the Share dialog's handle autocomplete. Only
  * user accounts (an organization cannot sign in, so it can never be a collaborator). A rate-limited
@@ -281,7 +306,10 @@ export async function searchUsers(octokit: Octokit, prefix: string): Promise<Use
     };
   } catch (err) {
     const status = (err as { status?: number }).status;
-    if (status === 403 || status === 429) return { users: [], limited: true };
+    if (status === 403 || status === 429) {
+      logUserSearchLimited(status, err);
+      return { users: [], limited: true };
+    }
     throw err;
   }
 }
