@@ -44,8 +44,8 @@ export interface AgentRequestMirror {
   claimedBy: string | null;
   result: AgentRequestResult | null;
   userId: string;
-  /** Comment thread the request belongs to, when it was made from a comment. */
-  threadId: string | null;
+  /** Comment thread the request belongs to, when it was made from a comment. Absent on mirrors written before #997. */
+  threadId?: string | null;
   updatedAt: number;
 }
 
