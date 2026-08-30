@@ -1,6 +1,6 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { codeText, createDocument, mintToken, openDocument, selectTextInRich, type MintedToken } from "./helpers";
+import { codeText, createDocument, mintToken, openDocument, type MintedToken } from "./helpers";
 
 /**
  * "Keep an agent here" (#1970, #981): the sentence that puts a person's agent into the watch loop for this
@@ -105,34 +105,15 @@ test.describe("keep an agent here", () => {
     await expect(dialog).toHaveCount(0);
   });
 
-  test("the Ask-an-agent dialog footer opens the popover with the same sentence", async () => {
-    await selectTextInRich(page, "agent could tighten");
-    await page.getByTestId("ask-agent-button").click();
-    await expect(page.getByTestId("ask-agent-dialog")).toBeVisible();
-    await page.getByTestId("ask-agent-keep").click();
-    const popover = page.getByTestId("keep-agent-popover");
-    await expect(popover).toBeVisible();
-    const text = (await popover.getByTestId("keep-agent-prompt").innerText()).trim();
-    expect(text).toContain(`"${title}" (id ${docId})`);
-    expect(text).toContain("markdoc_presence");
-    expect(text).toContain("markdoc_watch");
-    await popover.getByTestId("keep-agent-copy").click();
-    expect(await readClipboard(page)).toBe(text);
-    await page.keyboard.press("Escape");
-    await expect(popover).toHaveCount(0);
-    // The dialog itself is still open; Escape again closes it.
-    await expect(page.getByTestId("ask-agent-dialog")).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(page.getByTestId("ask-agent-dialog")).toHaveCount(0);
-  });
-
-  test("the command palette lists it under 'agent' and opens the same dialog", async () => {
+  test("the command palette lists it under 'agent' next to Comment (no separate ask entry) and opens the same dialog", async () => {
     await page.locator(".md-rich p").first().click();
     await page.keyboard.press(`${mod}+Shift+P`);
     const palette = page.getByTestId("command-palette");
     await expect(palette).toBeVisible();
     await page.keyboard.type("agent");
-    await expect(page.getByTestId("palette-item-doc:ask-agent")).toBeVisible();
+    // #1075: the dialog and its palette command are gone; asking an agent is the Comment command.
+    await expect(palette.locator('[data-testid^="palette-item-doc:ask"]')).toHaveCount(0);
+    await expect(page.getByTestId("palette-item-block:comment")).toBeVisible();
     const item = page.getByTestId("palette-item-doc:keep-agent");
     await expect(item).toBeVisible();
     await expect(item).toContainText("Keep an agent here");
@@ -145,9 +126,17 @@ test.describe("keep an agent here", () => {
     await expect(dialog.getByTestId("keep-agent-prompt")).toContainText(docId);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
+
+    // "ask an agent" in the palette lands on Comment, first.
+    await page.keyboard.press(`${mod}+Shift+P`);
+    await expect(palette).toBeVisible();
+    await page.keyboard.type("ask an agent");
+    await expect(palette.getByRole("option").first()).toHaveAttribute("data-testid", "palette-item-block:comment");
+    await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
   });
 
-  test("typing /ag in the rich editor offers 'Keep an agent here'; Enter opens the dialog and removes the typed text", async () => {
+  test("typing /ag in the rich editor offers Comment then 'Keep an agent here'; ArrowDown + Enter opens the dialog and removes the typed text", async () => {
     await page.locator(".md-rich p").last().click();
     await page.keyboard.press("End");
     await page.keyboard.press("Enter");
@@ -155,14 +144,17 @@ test.describe("keep an agent here", () => {
     await page.keyboard.type("/ag");
     const menu = page.getByTestId("slash-menu");
     await expect(menu).toBeVisible();
+    // #1075: Comment took the `agent` keyword, so it is offered first; the Keep item is still one row away.
+    await expect(menu.getByRole("option")).toHaveCount(2);
+    await expect(page.getByTestId("slash-item-comment")).toHaveAttribute("aria-selected", "true");
     const item = page.getByTestId("slash-item-agent");
     await expect(item).toBeVisible();
     await expect(item).toContainText("Keep an agent here");
     await expect(item).toContainText("Get the exact sentence that keeps an agent in this document");
     // The taller row is fully shown, not clipped by the menu's computed height.
     await expect(item.getByText("Get the exact sentence that keeps an agent in this document")).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press("ArrowDown");
     await expect(item).toHaveAttribute("aria-selected", "true");
-    await expect(menu.getByRole("option")).toHaveCount(1);
     await page.screenshot({ path: "test-results/keep-agent-here-slash.png" });
     if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/keep-agent-here-slash.png` });
     expect(await codeText(page)).toContain("/ag");
@@ -175,6 +167,16 @@ test.describe("keep an agent here", () => {
     await expect.poll(() => codeText(page)).not.toContain("/ag");
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
+
+    // `/ask` is Comment alone: the retired dialog has no slash item either.
+    await page.keyboard.type("/ask");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("option")).toHaveCount(1);
+    await expect(page.getByTestId("slash-item-comment")).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    for (let i = 0; i < 4; i++) await page.keyboard.press("Backspace");
+    await expect.poll(() => codeText(page)).not.toContain("/ask");
     // Clean the empty paragraph up so the presence test below sees the original document.
     await page.keyboard.press("Backspace");
   });

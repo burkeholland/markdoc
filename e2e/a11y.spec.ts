@@ -576,7 +576,7 @@ test.describe("axe: editor", () => {
   });
 
   test("popovers and dialogs: stats, presence, notifications, share, image, shortcuts", async ({ browser }) => {
-    const { page, context } = await openEditorFixture(browser, "a11y-editor-dialogs");
+    const { page, context, id } = await openEditorFixture(browser, "a11y-editor-dialogs");
 
     // Stats popover.
     await page.getByTestId("stats-button").click();
@@ -607,16 +607,22 @@ test.describe("axe: editor", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: /share/i })).not.toBeVisible();
 
-    // Ask an agent dialog (with the first-run connect card when the user has no token), then the request in the
-    // presence popover (waiting placeholder in the stack, Requests section with Cancel) and the Keep-an-agent dialog.
+    // A request is a comment that mentions an agent (#1075). This user has no token, so the `@` picker ends in the
+    // connect row instead of an agent; then a request (posted the way the composer does) shows in the presence
+    // popover (waiting placeholder in the stack, Requests section with Cancel) and the Keep-an-agent dialog.
     await page.evaluate(() => window.localStorage.removeItem("markdoc:agent-connect-dismissed"));
-    await page.getByTestId("ask-agent-button").click();
-    await expect(page.getByTestId("ask-agent-dialog")).toBeVisible();
-    await expect(page.getByRole("dialog", { name: /ask an agent/i }).getByRole("button", { name: "Close" })).not.toBeFocused();
-    await page.getByTestId("ask-agent-instruction").fill("Tighten this");
-    await scan(page, "editor + ask-agent dialog");
-    await page.getByTestId("ask-agent-send").click();
-    await expect(page.getByTestId("ask-agent-dialog")).toHaveCount(0);
+    await page.getByTestId("comments-panel").getByTestId("comment-document").click();
+    const composer = page.getByTestId("pending-comment").getByTestId("comment-composer");
+    await expect(composer).toBeFocused();
+    await page.keyboard.type("@");
+    await expect(page.getByTestId("mention-suggestions")).toBeVisible();
+    await expect(page.getByTestId("mention-connect-row")).toBeVisible();
+    await scan(page, "editor + mention picker with the connect row");
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("mention-suggestions")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("pending-comment")).toHaveCount(0);
+    expect((await page.request.post(`/api/documents/${id}/requests`, { data: { instruction: "Tighten this", mode: "suggest" } })).status()).toBe(201);
     await expect(page.getByTestId("presence").getByTestId("presence-waiting")).toBeVisible();
     await scan(page, "editor + presence waiting placeholder");
     await page.getByTestId("presence").click();
@@ -1125,11 +1131,9 @@ test.describe("keyboard-only walkthrough", () => {
     await expect(page.getByTestId("tb-undo")).toBeDisabled();
     await expect(page.getByTestId("tb-redo")).toBeDisabled();
     await page.keyboard.press("End");
-    await expect(page.getByTestId("ask-agent-button")).toBeFocused();
+    await expect(page.getByTestId("tb-comment")).toBeFocused();
     await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("heading-menu")).toBeFocused();
-    await page.keyboard.press("ArrowLeft");
-    await expect(page.getByTestId("ask-agent-button")).toBeFocused();
     await page.keyboard.press("ArrowLeft");
     await expect(page.getByTestId("tb-comment")).toBeFocused();
     // Undo/Redo sit between Horizontal rule and Comment; disabled, they are skipped.
@@ -1249,7 +1253,7 @@ test.describe("keyboard-only walkthrough", () => {
 });
 
 test.describe("dialog focus return (#161)", () => {
-  test("Image, Link, Shortcuts, GitHub, Name version and Ask an agent hand focus back to their opener, never <body>", async ({ browser }) => {
+  test("Image, Link, Shortcuts, GitHub and Name version hand focus back to their opener, never <body>", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-return");
     const id = await createDocument(page, "# Return\n\nAlpha bravo charlie.\n", "Return fixture");
     await openDocument(page, id);
@@ -1316,13 +1320,6 @@ test.describe("dialog focus return (#161)", () => {
     await page.keyboard.press("Control+/");
     await closedWith("Keyboard shortcuts", "Escape");
     await expect.poll(active).toBe("rich");
-
-    // 6. Ask an agent from its toolbar button with Enter: the button is the opener.
-    await page.getByTestId("ask-agent-button").focus();
-    await page.keyboard.press("Enter");
-    await expect(page.getByTestId("ask-agent-instruction")).toBeFocused();
-    await closedWith("Ask an agent", "Escape");
-    await expect.poll(active).toBe("ask-agent-button");
 
     // Toolbar button activated with Enter: the dialog takes focus (it did not, #161) and Esc returns to the button.
     await page.getByTestId("tb-image").focus();

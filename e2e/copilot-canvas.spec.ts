@@ -50,7 +50,9 @@ test("the loopback canvas spends a token handoff and frames the editor without d
     await expect(header).toHaveAttribute("data-embed", "true");
     await expect(editor.getByTestId("embed-logo")).toBeVisible();
     await expect(editor.getByTestId("toolbar")).toBeVisible();
-    await expect(editor.getByTestId("ask-agent-button")).toBeVisible();
+    // #1075: no separate ask button; the toolbar ends with Comment, and a comment that mentions an agent is the request.
+    await expect(editor.getByTestId("tb-comment")).toBeVisible();
+    await expect(editor.locator(`[data-testid^="${["ask", "agent"].join("-")}"]`)).toHaveCount(0);
     await expect(editor.getByTestId("comments-toggle")).toBeVisible();
     await expect(editor.getByTestId("mode-switcher")).toBeVisible();
     await expect(editor.getByTestId("presence")).toBeVisible();
@@ -83,15 +85,24 @@ test("the loopback canvas spends a token handoff and frames the editor without d
 
     await editor.getByTestId("comments-toggle").click();
     await expect(editor.getByTestId("comments-panel")).toBeVisible();
-    await editor.getByTestId("ask-agent-button").click();
-    await expect(editor.getByTestId("ask-agent-dialog")).toBeVisible();
-    // The Copilot app sits in presence as an agent, so a request sent from the embed shows up in the popover's
-    // Requests section (Cancel included) — no waiting placeholder and no "Keep an agent here" while it is here.
+    // The Copilot app sits in presence as an agent, so the `@` picker offers it as one that is here; the request made
+    // from the embed shows up as a chip on the thread and in the popover's Requests section (Cancel included) — no
+    // waiting placeholder and no "Keep an agent here" while it is here.
     const stack = editor.getByTestId("presence");
     await expect(stack.locator('[data-testid="presence-avatar"][data-agent]')).toHaveCount(1);
-    await editor.getByTestId("ask-agent-instruction").fill("Tighten this");
-    await editor.getByTestId("ask-agent-send").click();
-    await expect(editor.getByTestId("ask-agent-dialog")).toHaveCount(0);
+    await editor.getByTestId("comment-document").click();
+    const composer = editor.getByTestId("pending-comment").getByTestId("comment-composer");
+    await expect(composer).toBeFocused();
+    await composer.pressSequentially("@Cop");
+    const option = editor.getByTestId("mention-suggestions").locator(`[data-testid="mention-option"][data-login="${owner.login}/Copilot-app"]`);
+    await expect(option).toHaveCount(1);
+    await option.click();
+    await expect(composer).toHaveValue(`@${owner.login}/Copilot-app `);
+    await expect(editor.getByTestId("composer-agent-row")).toBeVisible();
+    await composer.pressSequentially("Tighten this");
+    await editor.getByTestId("comment-submit").click();
+    const thread = editor.getByTestId("comment-thread").filter({ hasText: "Tighten this" });
+    await expect(thread.getByTestId("comment-request-chip")).toHaveAttribute("data-status", "open");
     await stack.click();
     const popover = editor.getByTestId("presence-popover");
     await expect(popover.getByTestId("presence-request")).toHaveCount(1);

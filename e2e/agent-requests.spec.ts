@@ -65,6 +65,10 @@ function countRequestNotFound(page: Page) {
   return () => count;
 }
 
+/** Pull the notifications store now instead of waiting for the 30 s poll. */
+const refreshNotifications = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh?.());
+
 const DOC = "# Requests doc\n\nThe quick brown fox jumps over the lazy dog in the garden.\n\nA second paragraph to keep.\n\nA third paragraph for later.\n";
 
 test.describe("agent requests from comments", () => {
@@ -198,6 +202,22 @@ test.describe("agent requests from comments", () => {
     await expect(doneChip).toHaveAttribute("data-status", "done");
     await expect(doneChip).toContainText(`Done: ${suggested.suggestions} suggestion${suggested.suggestions === 1 ? "" : "s"}`);
     await expect(doneChip.getByTestId("comment-request-cancel")).toHaveCount(0);
+
+    // Activity has the ask and the completion; the bell has request.done for the requester (#1075: this used to be
+    // asserted for the dialog, which is gone — a comment is the request now).
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-activity").click();
+    const rows = page.getByTestId("activity-panel").getByTestId("activity-row");
+    await expect(rows.filter({ hasText: "asked an agent" })).toHaveCount(1);
+    await expect(rows.filter({ hasText: "finished a request" })).toHaveCount(1);
+    await expect(rows.filter({ hasText: "finished a request" })).toContainText("Tightened the opener.");
+    await refreshNotifications(page);
+    await page.getByTestId("notifications-bell").click();
+    const item = page.getByTestId("notifications-popover").locator('[data-testid=notification-item][data-kind="request.done"]').first();
+    await expect(item).toBeVisible();
+    await expect(item).toContainText("finished your request");
+    await page.keyboard.press("Escape");
+    await ensureCommentsOpen(page);
   });
 
   test("b) a reply that mentions the agent asks again (mode preselected from the thread), and the × cancels the request", async () => {
@@ -368,7 +388,6 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     const page = alice.page;
     const panel = page.getByTestId("comments-panel");
     await expect(panel.getByTestId("comments-empty-agent-line")).toContainText("Comment and mention an agent");
-    await expect(page.getByTestId("comments-empty-ask-agent-button")).toHaveCount(0);
     await expect(panel.getByText("Ask an agent")).toHaveCount(0);
     if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/comments-empty-state.png` });
 
@@ -491,5 +510,42 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     await expect(picker.getByTestId("mention-option")).toHaveCount(1);
     await page.waitForTimeout(500);
     await expect(picker.getByTestId("mention-connect-row")).toHaveCount(0);
+  });
+
+  test("h) Connect an agent in that row goes to /settings#tokens, where the connect card carries this origin's MCP config", async () => {
+    const page = bob.page;
+    await page.evaluate((k) => localStorage.removeItem(k), CONNECT_DISMISSED_KEY);
+    await openDocument(page, docId);
+    await ensureCommentsOpen(page);
+    const panel = page.getByTestId("comments-panel");
+    await panel.getByTestId("comment-document").click();
+    await expect(panel.getByTestId("pending-comment").getByTestId("comment-composer")).toBeFocused();
+    await page.keyboard.type("@");
+    const row = page.getByTestId("mention-suggestions").getByTestId("mention-connect-row");
+    await expect(row).toBeVisible();
+    await row.getByTestId("mention-connect-agent").click();
+    await page.waitForURL((u) => u.pathname === "/settings");
+    expect(new URL(page.url()).hash).toBe("#tokens");
+    await expect(page.getByTestId("token-name")).toBeVisible();
+    const card = page.getByTestId("agent-connect-card");
+    await expect(card).toBeVisible();
+    const origin = await page.evaluate(() => window.location.origin);
+    await expect(page.getByTestId("agent-connect-config")).toContainText(`"url": "${origin}/api/mcp"`);
+    await expect(page.getByTestId("agent-connect-config")).toContainText('"type": "http"');
+    await expect(page.getByTestId("agent-connect-config")).toContainText(["Bearer", "MARKDOC_TOKEN"].join(" "));
+    // The stdio config is still there, one click away.
+    await page.getByTestId("agent-connect-stdio-toggle").click();
+    await expect(page.getByTestId("agent-connect-config-stdio")).toContainText(`"MARKDOC_URL": "${origin}"`);
+    await expect(card).toContainText("Check Markdoc for requests");
+    // The same "Stop the permission prompts" block as the Share card, with the allow line for the `markdoc` server key.
+    await expect(card).toContainText("Stop the permission prompts");
+    await expect(page.getByTestId("agent-connect-allow-line")).toContainText("copilot --allow-tool 'markdoc(markdoc_suggest)");
+    await expect(page.getByRole("tab", { name: "Copilot CLI" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "VS Code / other MCP clients" })).toBeVisible();
+    await page.getByRole("tab", { name: "Copilot app" }).click();
+    await expect(page.getByTestId("agent-connect-app-install")).toContainText("~/.copilot/extensions/markdoc");
+    await expect(page.getByRole("link", { name: "Inside the Copilot app setup and limits" })).toHaveAttribute("href", /agents\.md#inside-the-copilot-app$/);
+    await page.getByTestId("settings-back-to-document").click();
+    await page.waitForURL((u) => u.pathname === `/d/${docId}`);
   });
 });
