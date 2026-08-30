@@ -214,6 +214,73 @@ describe("activity feed", () => {
     doc.destroy();
   });
 
+  it("counts inserted and deleted characters gross, per actor, including edits merged from another client", async () => {
+    const docId = await newDoc(ownerId);
+    const doc = new Y.Doc();
+    hydrateDoc(doc, null, "Hello brave new world.", "Feed");
+    const stop = watchDocumentActivity(doc, docId);
+    const origin = (userId: string, name: string) => ({ source: "connection", connection: { context: { userId, docId, role: "editor", name, login: name.toLowerCase(), avatar: null } } });
+    const ytext = doc.getText(TEXT_KEY);
+
+    // Delete 3 and insert 7 in one transaction: 10, not the net 4.
+    doc.transact(() => {
+      ytext.delete(0, 3);
+      ytext.insert(0, "abcdefg");
+    }, origin(alice.id, "Alice"));
+    // Text inserted and deleted again inside one transaction never existed for the feed.
+    doc.transact(() => {
+      ytext.insert(ytext.length, "gone");
+      ytext.delete(ytext.length - 4, 4);
+    }, origin(alice.id, "Alice"));
+    // Bob's editor holds its own Y.Doc; its update reaches the server as one transaction with Bob's connection as origin.
+    const other = new Y.Doc();
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(doc));
+    other.getText(TEXT_KEY).insert(0, "twelve chars");
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(other, Y.encodeStateVector(doc)), origin(bob.id, "Bob"));
+    // Comment threads and the title share the document but are not typing.
+    doc.transact(() => {
+      doc.getMap(META_KEY).set("title", "Other");
+      const thread = new Y.Map<unknown>();
+      thread.set("id", "t9");
+      thread.set("body", "not text");
+      doc.getMap<Y.Map<unknown>>("comments").set("t9", thread);
+    }, origin(bob.id, "Bob"));
+
+    await sleep(150);
+    await stop();
+
+    const { items } = await listActivity(docId);
+    const edits = items.filter((i) => i.action === "edit");
+    expect(edits.find((e) => e.actorName === "Alice")?.detail.chars).toBe(10);
+    expect(edits.find((e) => e.actorName === "Bob")?.detail.chars).toBe(12);
+    expect(edits).toHaveLength(2);
+    other.destroy();
+    doc.destroy();
+  });
+
+  it("costs the same per keystroke whatever the document size (no O(document) walk per transaction)", async () => {
+    const docId = await newDoc(ownerId);
+    const doc = new Y.Doc();
+    const ytext = doc.getText(TEXT_KEY);
+    // 20 000 one-character items: inserting at the front keeps every character its own item.
+    for (let i = 0; i < 20_000; i++) ytext.insert(0, "x");
+    const stop = watchDocumentActivity(doc, docId);
+    const origin = { source: "connection", connection: { context: { userId: alice.id, docId, role: "editor", name: "Alice", login: "alice", avatar: null } } };
+
+    const t0 = performance.now();
+    for (let i = 0; i < 2_000; i++) doc.transact(() => ytext.insert(0, "y"), origin);
+    const elapsed = performance.now() - t0;
+    // Reading `event.delta` here took seconds (each keystroke walked all 20 000+ items); the clock-based
+    // count is a few milliseconds. The bound leaves a wide margin for a loaded CI machine.
+    expect(elapsed).toBeLessThan(200);
+
+    await sleep(150);
+    await stop();
+    const { items } = await listActivity(docId);
+    expect(items.filter((i) => i.action === "edit").map((i) => i.detail.chars)).toEqual([2_000]);
+    doc.destroy();
+  });
+
   it("records a reply suggestion decision once with the exact reply target", async () => {
     const docId = await newDoc(ownerId);
     const doc = new Y.Doc();

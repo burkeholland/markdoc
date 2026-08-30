@@ -164,6 +164,56 @@ interface PendingEdit {
 const log = (what: string) => (err: unknown) => console.error(`[activity] ${what} failed`, err);
 
 /**
+ * Characters a transaction inserted into or deleted from `ytext`, summed (gross), exactly as
+ * `event.delta` reports them: string inserts count their length, deletes their length, an item
+ * inserted and deleted in the same transaction counts nothing, formatting marks count nothing.
+ *
+ * It deliberately never reads `event.delta`/`event.changes`: yjs computes those by walking every
+ * item of the text from `_start` (and inside a nested transaction), so one keystroke costs
+ * O(document items) and a typing session O(ops²) — with 20 writers that walk was ~40 % of the
+ * server's busy time. Instead, the items this transaction added are the tail of each client's
+ * struct list between its before/after clocks, and the items it deleted are its delete set; both
+ * are O(items touched). Observers run before the transaction's structs are merged or GC'd, so
+ * the structs seen here are the ones the transaction created and deleted.
+ */
+export function countTextChars(ytext: Y.Text, txn: Y.Transaction): number {
+  const store = txn.doc.store;
+  const ownedBy = (s: Y.GC | Y.Item): s is Y.Item => s instanceof Y.Item && s.parent === ytext && s.parentSub === null;
+  let chars = 0;
+  txn.afterState.forEach((after, client) => {
+    const before = txn.beforeState.get(client) ?? 0;
+    if (after <= before) return;
+    const structs = store.clients.get(client);
+    if (!structs) return;
+    // Structs are sorted by clock: the ones this transaction added form a suffix (anything past
+    // `after` was added by an observer that ran before this one, in a nested transaction).
+    for (let i = structs.length - 1; i >= 0; i--) {
+      const s = structs[i];
+      if (s.id.clock < before) break;
+      if (s.id.clock >= after) continue;
+      if (ownedBy(s) && s.content instanceof Y.ContentString && !Y.isDeleted(txn.deleteSet, s.id)) chars += s.length;
+    }
+  });
+  txn.deleteSet.clients.forEach((deletes, client) => {
+    const structs = store.clients.get(client);
+    if (!structs) return;
+    const before = txn.beforeState.get(client) ?? 0;
+    for (const del of deletes) {
+      // Only items that existed before the transaction count; a merged range may run on into
+      // items added (and deleted) by this same transaction, which the delta reports as nothing.
+      const end = Math.min(del.clock + del.len, before);
+      if (del.clock >= end) continue;
+      for (let i = Y.findIndexSS(structs, del.clock); i < structs.length; i++) {
+        const s = structs[i];
+        if (s.id.clock >= end) break;
+        if (ownedBy(s) && !(s.content instanceof Y.ContentFormat)) chars += Math.min(end, s.id.clock + s.length) - Math.max(del.clock, s.id.clock);
+      }
+    }
+  });
+  return chars;
+}
+
+/**
  * Watch a live document for in-editor activity: typing (coalesced per user), title
  * changes, and comments added or resolved in the UI. Everything is fire-and-forget
  * so the editing path is never slowed down. Returns an unsubscribe that also flushes
@@ -189,17 +239,14 @@ export function watchDocumentActivity(doc: Y.Doc, docId: string): () => Promise<
     return writes;
   };
 
-  const onText = (event: Y.YTextEvent, txn: Y.Transaction) => {
+  const onText = (_event: Y.YTextEvent, txn: Y.Transaction) => {
     // Agents long-polling the document are woken on every text change, whoever made it.
     wakeDocument(docId);
     const actor = actorFromOrigin(txn.origin);
     if (!actor) return;
     noteTypist(docId, actor);
-    let chars = 0;
-    for (const d of event.delta) {
-      if (typeof d.insert === "string") chars += d.insert.length;
-      if (typeof d.delete === "number") chars += d.delete;
-    }
+    // Never `event.delta` here: see countTextChars.
+    const chars = countTextChars(ytext, txn);
     if (chars === 0) return;
     const key = actor.id ?? actor.name;
     const entry = pending.get(key);
