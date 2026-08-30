@@ -207,7 +207,7 @@ describe("CommentsPanel", () => {
       autoConnect: false,
     });
     session.keepAlive();
-    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} onAskAgent={() => {}} />);
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
 
     const tabs = screen.getAllByRole("tab");
     const open = screen.getByRole("tab", { name: "Open" });
@@ -236,8 +236,13 @@ describe("CommentsPanel", () => {
     fireEvent.keyDown(suggestions, { key: "Home" });
     expect(open).toHaveFocus();
 
-    await userEvent.setup().tab();
-    expect(screen.getByTestId("comments-empty-ask-agent-button")).toHaveFocus();
+    // Tab leaves the tablist for the "Comment on the document" button beside it, then the empty state's agent line.
+    const keyboard = userEvent.setup();
+    await keyboard.tab();
+    expect(screen.getByTestId("comment-document")).toHaveFocus();
+    expect(screen.getByRole("tablist").contains(screen.getByTestId("comment-document"))).toBe(false);
+    await keyboard.tab();
+    expect(screen.getByTestId("comments-empty-agent")).toHaveFocus();
   });
 
   it("tones resolved card backgrounds without dimming their metadata", () => {
@@ -835,6 +840,231 @@ describe("CommentsPanel", () => {
       fireEvent.click(options[2]);
       await screen.findByTestId("composer-agent-row");
       expect(screen.getByRole("radiogroup", { name: "How should Night Shift answer?" })).toBeInTheDocument();
+    });
+  });
+
+  describe("document comments, empty state and the connect row (#1025)", () => {
+    const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", present: false };
+    const TEXT = "Intro text. The quick brown fox jumps.";
+    const DISMISSED_KEY = "markdoc:agent-connect-dismissed";
+
+    const mount = (opts: { role?: "owner" | "editor" | "commenter"; documentComposer?: CommentsPanelProps["documentComposer"]; onCreateToken?: () => void; collaborators?: boolean } = {}) => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      session = new CollabSession({ docId: "doc", user, role: opts.role ?? "owner", getToken: async () => "token", autoConnect: false });
+      session.keepAlive();
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      vi.mocked(api.documents.collaborators).mockResolvedValue(
+        (opts.collaborators === false
+          ? { owner: null, collaborators: [], agents: [] }
+          : { owner: { login: "alice", name: "Alice", image: null }, collaborators: [{ login: "bob", name: "Bob", image: null }], agents: [AGENT] }) as unknown as Awaited<
+          ReturnType<typeof api.documents.collaborators>
+        >,
+      );
+      const onReveal = vi.fn<(offset: number) => void>();
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const props = (documentComposer: CommentsPanelProps["documentComposer"]) => (
+        <TooltipProvider>
+          <CommentsPanel session={session!} onClose={() => {}} onReveal={onReveal} onToast={onToast} onCreateToken={opts.onCreateToken} documentComposer={documentComposer} />
+        </TooltipProvider>
+      );
+      const view = render(props(opts.documentComposer ?? null));
+      return { onReveal, onToast, user, setDocumentComposer: (next: CommentsPanelProps["documentComposer"]) => view.rerender(props(next)) };
+    };
+    const composer = async () => (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+    const paste = async (box: HTMLTextAreaElement, text: string) => {
+      box.focus();
+      await userEvent.setup().paste(text);
+    };
+
+    afterEach(() => {
+      window.localStorage.removeItem(DISMISSED_KEY);
+      vi.mocked(api.documents.createRequest).mockClear();
+      vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [] } as never);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
+    });
+
+    it("the header button opens a composer on the whole document; the posted card says Whole document, anchors at {0,0} and reveals offset 0", async () => {
+      const { onReveal } = mount();
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+      fireEvent.click(screen.getByTestId("comment-document"));
+      const pending = await screen.findByTestId("pending-comment");
+      expect(session!.pendingComment).toEqual({ from: 0, to: 0 });
+      expect(within(pending).getByTestId("comment-quote-document")).toHaveTextContent("Whole document");
+      expect(within(pending).queryByTestId("comment-quote")).toBeNull();
+      // No anchored text: nothing to turn into a ```suggestion block.
+      expect(within(pending).queryByTestId("comment-suggest-change")).toBeNull();
+      const box = await composer();
+      await waitFor(() => expect(box).toHaveFocus());
+      expect(box.value).toBe("");
+      await paste(box, "Overall: reads well, but the intro is long.");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(session!.comments.list()).toHaveLength(1));
+      const [thread] = session!.comments.list();
+      expect(thread.range).toEqual({ from: 0, to: 0 });
+      expect(thread.quote).toBe("");
+      const card = await screen.findByTestId("comment-thread");
+      expect(within(card).getByTestId("comment-quote-document")).toHaveTextContent("Whole document");
+      expect(within(card).queryByTestId("comment-quote")).toBeNull();
+      // Typing at the start of the document does not move it: the anchor is the document, not its first character.
+      act(() => session!.ytext.insert(0, "x".repeat(200)));
+      expect(session!.comments.list()[0].range).toEqual({ from: 0, to: 0 });
+      fireEvent.click(card);
+      expect(onReveal).toHaveBeenCalledWith(0);
+      // No agent was mentioned: no request.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(api.documents.createRequest).not.toHaveBeenCalled();
+    });
+
+    it("the empty state's 'Comment and mention an agent' seeds `@`, opens the picker at once and posts a request with selection: null", async () => {
+      mount();
+      expect(screen.queryByText(/Ask an agent/)).toBeNull();
+      fireEvent.click(screen.getByTestId("comments-empty-agent"));
+      const box = await composer();
+      await waitFor(() => expect(box).toHaveFocus());
+      expect(box.value).toBe("@");
+      expect(box.selectionStart).toBe(1);
+      expect(box.selectionEnd).toBe(1);
+      // The picker is up before anything else is typed, and it fetched the user's own tokens.
+      await screen.findByTestId("mention-suggestions", {}, { timeout: 300 });
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+      const options = await screen.findAllByTestId("mention-option");
+      fireEvent.click(options.find((o) => o.getAttribute("data-login") === AGENT.login)!);
+      await screen.findByTestId("composer-agent-row");
+      await paste(box, "review the whole thing");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      const [thread] = session!.comments.list();
+      expect(thread.range).toEqual({ from: 0, to: 0 });
+      expect(api.documents.createRequest).toHaveBeenCalledWith("doc", {
+        mode: "suggest",
+        instruction: "review the whole thing",
+        selection: null,
+        threadId: thread.id,
+      });
+    });
+
+    it("a reply that mentions an agent on a document thread also asks with selection: null", async () => {
+      mount();
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const id = session!.comments.add({ from: 0, to: 0, body: "Overall thoughts?", author: user });
+      const card = await screen.findByTestId("comment-thread");
+      fireEvent.click(within(card).getByTestId("comment-reply"));
+      const box = (await screen.findByPlaceholderText(/Reply/)) as HTMLTextAreaElement;
+      // No "Suggest a change" on a document thread's reply composer either.
+      expect(screen.queryByTestId("comment-suggest-change")).toBeNull();
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+      await paste(box, `@${AGENT.login} what do you think?`);
+      await screen.findByTestId("composer-agent-row");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(api.documents.createRequest).mock.calls[0][1]).toMatchObject({ selection: null, threadId: id });
+    });
+
+    it("the shell's documentComposer request opens the composer (seeded when asked), and a later plain one starts empty", async () => {
+      const { setDocumentComposer } = mount();
+      setDocumentComposer({ mention: true, nonce: 1 });
+      let box = await composer();
+      await waitFor(() => expect(box.value).toBe("@"));
+      await screen.findByTestId("mention-suggestions");
+      // Esc with the picker open closes the picker; a second Esc cancels the composer.
+      fireEvent.keyDown(box, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("mention-suggestions")).toBeNull());
+      fireEvent.keyDown(box, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("pending-comment")).toBeNull());
+      expect(session!.pendingComment).toBeNull();
+      setDocumentComposer({ mention: false, nonce: 2 });
+      box = await composer();
+      expect(box.value).toBe("");
+      expect(screen.getByTestId("comment-quote-document")).toHaveTextContent("Whole document");
+    });
+
+    it("a suggestion on a document thread can be rejected but never accepted", async () => {
+      mount({ role: "owner" });
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      session!.comments.add({ from: 0, to: 0, body: "Try this.\n\n```suggestion\nA whole new intro\n```", author: user });
+      const card = await screen.findByTestId("comment-thread");
+      expect(within(card).getByTestId("suggestion-box")).toHaveAttribute("data-state", "pending");
+      expect(within(card).queryByTestId("suggestion-accept-comment")).toBeNull();
+      expect(within(card).getByTestId("suggestion-reject-comment")).toBeVisible();
+      fireEvent.click(within(card).getByTestId("suggestion-reject-comment"));
+      await waitFor(() => expect(session!.comments.list()[0].suggestionState).toBe("rejected"));
+      expect(session!.ytext.toString()).toBe(TEXT);
+    });
+
+    it("the `@` picker shows 'Connect an agent' for a user with no token, once, until dismissed — and never with a token", async () => {
+      const onCreateToken = vi.fn();
+      mount({ onCreateToken });
+      act(() => session!.setPendingComment({ from: 16, to: 27 }));
+      let box = await composer();
+      await paste(box, "@");
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+      const row = await screen.findByTestId("mention-connect-row");
+      expect(row).toHaveTextContent("No agent connected yet");
+      // The options are still listed above it.
+      expect(screen.getAllByTestId("mention-option").length).toBeGreaterThan(0);
+      expect(screen.getByTestId("mention-connect-docs")).toHaveAttribute("href", "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md");
+      expect(screen.getByTestId("mention-connect-docs")).toHaveAttribute("target", "_blank");
+      fireEvent.click(screen.getByTestId("mention-connect-agent"));
+      expect(onCreateToken).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByTestId("mention-connect-dismiss"));
+      await waitFor(() => expect(screen.queryByTestId("mention-connect-row")).toBeNull());
+      expect(window.localStorage.getItem(DISMISSED_KEY)).toBe("1");
+      // The list is still there; only the footer went.
+      expect(screen.getAllByTestId("mention-option").length).toBeGreaterThan(0);
+
+      // A fresh panel remembers the dismissal.
+      cleanup();
+      session!.destroy();
+      mount({ onCreateToken });
+      act(() => session!.setPendingComment({ from: 16, to: 27 }));
+      box = await composer();
+      await paste(box, "@");
+      await screen.findAllByTestId("mention-option");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+
+      // With a token the row is never due.
+      cleanup();
+      session!.destroy();
+      window.localStorage.removeItem(DISMISSED_KEY);
+      vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [{ id: "t1", name: "Copilot CLI" }] } as never);
+      mount({ onCreateToken });
+      act(() => session!.setPendingComment({ from: 16, to: 27 }));
+      box = await composer();
+      await paste(box, "@");
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+      await screen.findAllByTestId("mention-option");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+    });
+
+    it("with nobody to mention, `@` still opens the picker for the connect row alone; without onCreateToken only the docs link is offered", async () => {
+      mount({ collaborators: false });
+      act(() => session!.setPendingComment({ from: 16, to: 27 }));
+      const box = await composer();
+      await paste(box, "@");
+      const popover = await screen.findByTestId("mention-suggestions");
+      expect(within(popover).queryByRole("listbox")).toBeNull();
+      expect(within(popover).getByTestId("mention-connect-row")).toBeVisible();
+      expect(within(popover).queryByTestId("mention-connect-agent")).toBeNull();
+      expect(within(popover).getByTestId("mention-connect-docs")).toBeVisible();
+      // Arrow keys and Enter with no options do nothing odd: Enter sends the comment as usual.
+      fireEvent.keyDown(box, { key: "ArrowDown" });
+      fireEvent.keyDown(box, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("mention-suggestions")).toBeNull());
+      expect(box.value).toBe("@");
+    });
+
+    it("a viewer sees neither the header button nor the empty-state line", () => {
+      const user = makeCollabUser("vic", "Vic", null, "vic");
+      session = new CollabSession({ docId: "doc", user, role: "viewer", getToken: async () => "token", autoConnect: false });
+      session.keepAlive();
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      expect(screen.queryByTestId("comment-document")).toBeNull();
+      expect(screen.queryByTestId("comments-empty-agent")).toBeNull();
+      expect(screen.getByText("No open comments")).toBeInTheDocument();
     });
   });
 });

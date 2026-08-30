@@ -165,6 +165,18 @@ describe("buildCommands", () => {
     cmds.find((c) => c.id === "doc:keep-agent")!.run();
     expect(calls).toEqual(["keep-agent"]);
   });
+
+  it("offers 'Comment on the document' when the shell wires it and the user can comment (#1025)", () => {
+    expect(ids(visible(buildCommands(stubCtx())))).not.toContain("doc:comment-document");
+    const calls: string[] = [];
+    const cmds = buildCommands(stubCtx({ commentDocument: () => calls.push("comment-document") }));
+    expect(ids(visible(cmds))).toContain("doc:comment-document");
+    expect(ids(filterCommands("whole document", cmds))).toContain("doc:comment-document");
+    cmds.find((c) => c.id === "doc:comment-document")!.run();
+    expect(calls).toEqual(["comment-document"]);
+    const viewer = buildCommands(stubCtx({ commentDocument: () => calls.push("nope") }, { canComment: false }));
+    expect(ids(visible(viewer))).not.toContain("doc:comment-document");
+  });
 });
 
 describe("filterCommands", () => {

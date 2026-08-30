@@ -60,6 +60,8 @@ export interface EditorCommandContext {
   openLink: () => void;
   openImage: () => void;
   startComment: () => void;
+  /** Opens a comment on the whole document (no selection needed, #1025). */
+  commentDocument?: () => void;
   /** Opens the "Ask an agent" dialog for the current selection (or the whole document). */
   askAgent?: () => void;
   /** Opens "Keep an agent here": the sentence that puts an agent into this document's watch loop. */
@@ -250,6 +252,15 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
     { id: "doc:name-version", title: "Name this version", keywords: ["save", "snapshot", "tag"], group: "Document", icon: "Pencil", when: canEdit, run: () => ctx.setDialog("versionName") },
     { id: "doc:activity", title: "Activity", keywords: ["log", "changes", "who", "feed"], group: "Document", icon: "Activity", run: () => ctx.toggleActivity() },
     { id: "doc:comments", title: "Comments", keywords: ["discussion", "review", "suggestions", "panel"], group: "Document", icon: "MessageSquare", shortcut: "Mod-Alt-M", run: () => ctx.toggleComments() },
+    {
+      id: "doc:comment-document",
+      title: "Comment on the document",
+      keywords: ["comment", "whole", "document", "overall", "feedback", "agent", "mention", "review"],
+      group: "Document",
+      icon: "MessageSquarePlus",
+      when: () => ctx.session.canComment && !!ctx.commentDocument,
+      run: () => ctx.commentDocument?.(),
+    },
     {
       id: "doc:ask-agent",
       title: "Ask an agent",

@@ -1,25 +1,28 @@
 /**
- * Once-only hints for the three agent/collaboration features, shown in a slim bar under the
- * editor toolbar (src/components/editor/hint-bar.tsx). This module is the pure part: which hint
- * is due given the document state and what the user has dismissed, plus the codec for the
- * `localStorage` record. No DOM, no React — unit-tested in hints.test.ts.
+ * Once-only hints for the agent/collaboration features, shown in a slim bar under the editor
+ * toolbar (src/components/editor/hint-bar.tsx). This module is the pure part: which hint is due
+ * given the document state and what the user has dismissed, plus the codec for the `localStorage`
+ * record. No DOM, no React — unit-tested in hints.test.ts.
+ *
+ * There used to be a third hint, `ask-agent` (selection ≥ 20 characters → the Ask-agent dialog);
+ * #1025 folded it into `mention-copilot`, now that a comment is the way to ask an agent for anything.
+ * A stored dismissal of the old id is dropped by `parseHintsRecord` (unknown ids are filtered).
  */
 
-export type HintId = "collab-agent" | "ask-agent" | "mention-copilot";
+export type HintId = "collab-agent" | "mention-copilot";
 
 /** Display order doubles as priority: the first due, undismissed hint wins. */
-export const HINT_ORDER: readonly HintId[] = ["collab-agent", "ask-agent", "mention-copilot"];
+export const HINT_ORDER: readonly HintId[] = ["collab-agent", "mention-copilot"];
 
 export interface HintCopy {
   message: string;
-  /** Label of the action button (opens Share / the Ask-agent dialog / the comment composer). */
+  /** Label of the action button (opens Share / a document comment with `@` typed). */
   action: string;
 }
 
 export const HINTS: Record<HintId, HintCopy> = {
   "collab-agent": { message: "Copilot can work in this doc with you — Share → Collaborate with an agent", action: "Open Share" },
-  "ask-agent": { message: "Ask an agent to rewrite a selection: toolbar → Ask an agent", action: "Ask an agent" },
-  "mention-copilot": { message: "@-mention Copilot in a comment and a waiting Copilot session gets it", action: "Write a comment" },
+  "mention-copilot": { message: "Mention an agent in a comment and it answers in the thread", action: "Write a comment" },
 };
 
 /** `localStorage` key for the record below. */
@@ -28,17 +31,12 @@ export const HINTS_STORAGE_KEY = "markdoc:hints";
 /** Viewports narrower than this (phones) never show the bar: there is no room under the toolbar. */
 export const HINTS_MIN_WIDTH = 768;
 
-/** Hint (b) fires once the local selection covers at least this many characters. */
-export const HINT_SELECTION_MIN = 20;
-
 /** What the bar knows about the open document and the user; every gate is derived from this. */
 export interface HintState {
   /** People (not agents) with access besides the local user — collaborators on the share list or present now. */
   collaborators: number;
   /** An agent (API token) has ever been seen by this user: in presence here, or a token that was used. */
   agentEverConnected: boolean;
-  /** Length of the local selection in source characters (0 when collapsed). */
-  selectionLength: number;
   /** Comment threads in the document (open or resolved). */
   commentThreads: number;
 }
@@ -60,8 +58,6 @@ export function hintRelevant(id: HintId, state: HintState): boolean {
   switch (id) {
     case "collab-agent":
       return state.collaborators >= 1 && !state.agentEverConnected;
-    case "ask-agent":
-      return state.selectionLength >= HINT_SELECTION_MIN;
     case "mention-copilot":
       return state.commentThreads >= 1;
   }
