@@ -143,6 +143,24 @@ export class DecidedSuggestionEditError extends Error {
 
 export const COMMENTS_ORIGIN = { name: "comments" };
 
+/**
+ * A thread at `{ from: 0, to: 0 }` is a comment on the whole document (#1025): it has no quote and
+ * paints no highlight, and its anchor (see `createDocumentAnchor`) stays at 0 whatever is typed.
+ */
+export function isDocumentRange(range: { from: number; to: number } | null | undefined): boolean {
+  return !!range && range.from === 0 && range.to === 0;
+}
+
+/**
+ * Anchor of a document comment: both ends left-associated at index 0 (`item: null, assoc: -1`), which
+ * Yjs resolves to 0 whatever is inserted or deleted at the start of the text. `createAnchor(ytext, 0, 0)`
+ * would instead attach its start to the first character (or, in an empty text, to the end) and follow it.
+ */
+function createDocumentAnchor(ytext: Y.Text): TextAnchor {
+  const at = () => Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(ytext, 0, -1));
+  return { start: at(), end: at() };
+}
+
 type ThreadMap = Y.Map<unknown>;
 
 /** Reply as stored in the Y.Array; older entries may lack `mentions`. Reactions live in the thread's `reactions` map. */
@@ -392,11 +410,12 @@ export class CommentsModel {
 
   add(input: { from: number; to: number; body: string; author: CollabUser }): string {
     const id = newId();
-    const quote = this.ytext.toString().slice(input.from, input.to);
+    const document = isDocumentRange(input);
+    const quote = document ? "" : this.ytext.toString().slice(input.from, input.to);
     this.ydoc.transact(() => {
       const map = new Y.Map<unknown>();
       map.set("id", id);
-      map.set("anchor", createAnchor(this.ytext, input.from, input.to));
+      map.set("anchor", document ? createDocumentAnchor(this.ytext) : createAnchor(this.ytext, input.from, input.to));
       map.set("quote", quote);
       map.set("authorId", input.author.id);
       map.set("authorName", input.author.name);
@@ -528,13 +547,14 @@ export class CommentsModel {
   /**
    * Accept the thread's ```suggestion block: replace the anchored range with `proposed`, record the
    * decision and resolve the thread — all in one transaction (one undo step, one broadcast).
-   * Returns false when the thread is missing, already decided, outdated, or proposes no text change.
+   * Returns false when the thread is missing, already decided, outdated, proposes no text change, or
+   * is a document comment (there is no anchored text to replace).
    */
   acceptSuggestion(id: string, proposed: string, by: CollabUser, origin: object = COMMENTS_ORIGIN): boolean {
     const map = this.ymap.get(id);
     if (!map) return false;
     const thread = this.read(map);
-    if (thread.suggestionState || !thread.range) return false;
+    if (thread.suggestionState || !thread.range || isDocumentRange(thread.range)) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
     if (proposed === thread.quote) return false;
@@ -580,7 +600,7 @@ export class CommentsModel {
     const reply = thread.replies.find((item) => item.id === replyId);
     if (!reply) return false;
     const block = parseSuggestionBlock(reply.body);
-    if (!block || reply.suggestionState || !thread.range) return false;
+    if (!block || reply.suggestionState || !thread.range || isDocumentRange(thread.range)) return false;
     const { from, to } = thread.range;
     if (this.ytext.toString().slice(from, to) !== thread.quote) return false;
     if (block.text === thread.quote) return false;

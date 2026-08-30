@@ -91,40 +91,17 @@ test.describe("onboarding: hint bar", () => {
     await alice.context.close();
   });
 
-  test("no hint in a fresh, solo document until a gate opens; (b) appears on a 20+ char selection and its button opens Ask an agent", async () => {
+  test("no hint in a fresh, solo document; a long selection alone opens nothing (the selection hint was folded into (c), #1025)", async () => {
     const page = alice.page;
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
-    // A short selection is not enough.
     await selectTextInRich(page, "Markdoc is built");
     await page.waitForTimeout(200);
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
 
     await selectTextInRich(page, SELECTION);
-    const bar = page.getByTestId("hint-bar");
-    await expect(bar).toBeVisible();
-    await expect(bar).toHaveAttribute("data-hint", "ask-agent");
-    await expect(bar).toHaveAttribute("aria-live", "polite");
-    await expect(bar).toContainText("Ask an agent");
-    await page.screenshot({ path: "shots/onboarding-hint-ask-agent.png", fullPage: false });
-
-    // Collapsing the selection does not pull the hint away (it is pinned until acted on).
-    await page.keyboard.press("ArrowRight");
-    await page.waitForTimeout(150);
-    await expect(bar).toBeVisible();
-
-    await selectTextInRich(page, SELECTION);
-    await page.getByTestId("hint-action").click();
-    const dialog = page.getByTestId("ask-agent-dialog");
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(SELECTION);
-    await page.keyboard.press("Escape");
-    await expect(dialog).toHaveCount(0);
-    // Acting on a hint dismisses it: shown once, and remembered.
+    await page.waitForTimeout(400);
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
-    expect((await readHints(page))?.dismissed).toEqual(["ask-agent"]);
-    await selectTextInRich(page, SELECTION);
-    await page.waitForTimeout(200);
-    await expect(page.getByTestId("hint-bar")).toHaveCount(0);
+    expect(await readHints(page)).toBeNull();
   });
 
   test("(a) appears once the doc has a collaborator and no agent was ever seen; ✕ is keyboard reachable and persists across reload", async ({ browser }) => {
@@ -148,7 +125,7 @@ test.describe("onboarding: hint bar", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("share-login")).toHaveCount(0);
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
-    expect((await readHints(page))?.dismissed.sort()).toEqual(["ask-agent", "collab-agent"]);
+    expect((await readHints(page))?.dismissed).toEqual(["collab-agent"]);
 
     // Reload: still dismissed, even though the gate (a collaborator) is still true.
     await openDocument(page, docId);
@@ -156,26 +133,44 @@ test.describe("onboarding: hint bar", () => {
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
   });
 
-  test("(c) appears with the first comment thread; ✕ dismisses it; with all three dismissed the bar never returns", async () => {
+  test("(c) appears with the first comment thread; ✕ dismisses it; with both dismissed the bar never returns", async () => {
     const page = alice.page;
     const res = await page.request.post(`/api/documents/${docId}/comments`, { data: { action: "add", quote: "Headings build the outline", body: "First thread" } });
     expect(res.ok()).toBeTruthy();
     const bar = page.getByTestId("hint-bar");
     await expect(bar).toBeVisible();
     await expect(bar).toHaveAttribute("data-hint", "mention-copilot");
-    await expect(bar).toContainText("@-mention Copilot");
+    await expect(bar).toContainText("Mention an agent in a comment");
+    await expect(bar).not.toContainText("Copilot session");
     await page.getByTestId("hint-dismiss").click();
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
-    expect((await readHints(page))?.dismissed.sort()).toEqual(["ask-agent", "collab-agent", "mention-copilot"]);
+    expect((await readHints(page))?.dismissed.sort()).toEqual(["collab-agent", "mention-copilot"]);
 
-    // Every gate is open now (collaborator, long selection, thread) and nothing comes back, reload included.
+    // Every gate is open now (collaborator, thread — and a long selection, which is no gate) and nothing comes back, reload included.
     await openDocument(page, docId);
     await selectTextInRich(page, SELECTION);
     await page.waitForTimeout(400);
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
   });
 
-  test("(c) action opens Comments and focuses a composer; hints never show on phone widths", async ({ browser }) => {
+  test("a stored dismissal of the retired selection hint is ignored: (c) still shows, and dismissing it ends the bar", async ({ browser }) => {
+    const dave = await signIn(browser, fresh("hints-dave"));
+    const id = await createDocument(dave.page, "# Legacy\n\nA paragraph to comment on with enough words in it.\n", "Legacy");
+    expect((await dave.page.request.post(`/api/documents/${id}/comments`, { data: { action: "add", quote: "A paragraph to comment on", body: "Hello" } })).ok()).toBeTruthy();
+    // What a browser that saw the old three-hint bar may still hold.
+    await dave.page.evaluate(() => localStorage.setItem("markdoc:hints", JSON.stringify({ dismissed: ["collab-agent", ["ask", "agent"].join("-")], agentSeen: false })));
+    await openDocument(dave.page, id);
+    const bar = dave.page.getByTestId("hint-bar");
+    await expect(bar).toBeVisible();
+    await expect(bar).toHaveAttribute("data-hint", "mention-copilot");
+    await dave.page.getByTestId("hint-dismiss").click();
+    await expect(bar).toHaveCount(0);
+    // Rewritten without the retired id.
+    expect((await readHints(dave.page))?.dismissed.sort()).toEqual(["collab-agent", "mention-copilot"]);
+    await dave.context.close();
+  });
+
+  test("(c) action opens a comment on the whole document with `@` typed and the picker up; hints never show on phone widths", async ({ browser }) => {
     const carol = await signIn(browser, fresh("hints-carol"));
     const id = await createDocument(carol.page, "# Threads\n\nA paragraph to comment on with enough words in it.\n", "Threads");
     const res = await carol.page.request.post(`/api/documents/${id}/comments`, { data: { action: "add", quote: "A paragraph to comment on", body: "Hello" } });
@@ -184,10 +179,29 @@ test.describe("onboarding: hint bar", () => {
     const bar = carol.page.getByTestId("hint-bar");
     await expect(bar).toBeVisible();
     await expect(bar).toHaveAttribute("data-hint", "mention-copilot");
+    await expect(carol.page.getByTestId("hint-action")).toHaveText("Write a comment");
     await carol.page.getByTestId("hint-action").click();
-    await expect(carol.page.getByTestId("comments-panel")).toBeVisible();
-    await expect(carol.page.getByTestId("comments-panel").getByTestId("comment-composer").first()).toBeFocused();
+    const panel = carol.page.getByTestId("comments-panel");
+    await expect(panel).toBeVisible();
+    const pending = panel.getByTestId("pending-comment");
+    await expect(pending).toBeVisible();
+    await expect(pending.getByTestId("comment-quote-document")).toHaveText("Whole document");
+    const composer = pending.getByTestId("comment-composer");
+    await expect(composer).toBeFocused();
+    await expect(composer).toHaveValue("@");
+    expect(await composer.evaluate((el: HTMLTextAreaElement) => [el.selectionStart, el.selectionEnd])).toEqual([1, 1]);
+    // Carol is alone in the document and has no API token: the picker has nobody to list, so it opens on the
+    // "Connect an agent" row alone (#1025).
+    const picker = carol.page.getByTestId("mention-suggestions");
+    await expect(picker).toBeVisible();
+    await expect(picker.getByTestId("mention-option")).toHaveCount(0);
+    await expect(picker.getByTestId("mention-connect-row")).toBeVisible();
+    await expect(picker.getByTestId("mention-connect-docs")).toHaveAttribute("href", AGENT_DOCS_URL);
     await expect(carol.page.getByTestId("hint-bar")).toHaveCount(0);
+    await carol.page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await carol.page.keyboard.press("Escape");
+    await expect(pending).toHaveCount(0);
 
     // Phone: the other two gates are open, the bar stays away (the phone layout shows the preview only).
     await carol.page.evaluate(() => localStorage.removeItem("markdoc:hints"));

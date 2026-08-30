@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { CommentsModel } from "./comments";
+import { CommentsModel, isDocumentRange } from "./comments";
 import { createAnchor, makeCollabUser } from "./shared";
 
 const alice = makeCollabUser("a", "Alice");
@@ -114,5 +114,72 @@ describe("CommentsModel editedAt", () => {
     expect(thread.mentions).toEqual(["bob"]);
     expect(thread.replies[0].editedAt).toBeGreaterThanOrEqual(before);
     expect(thread.replies[0].body).toBe("I love it");
+  });
+});
+
+describe("CommentsModel document comments (#1025)", () => {
+  const suggestion = "Tighten the opening.\n\n```suggestion\nHello bold new world\n```";
+
+  it("a {0,0} thread stays at {0,0} with an empty quote after inserting 200 characters at 0", () => {
+    const { model, ytext } = setup();
+    const id = model.add({ from: 0, to: 0, body: "Overall: looks good", author: alice });
+    let thread = model.get(id)!;
+    expect(thread.range).toEqual({ from: 0, to: 0 });
+    expect(thread.quote).toBe("");
+    expect(isDocumentRange(thread.range)).toBe(true);
+
+    ytext.insert(0, "x".repeat(200));
+    thread = model.get(id)!;
+    expect(thread.range).toEqual({ from: 0, to: 0 });
+    // The anchor never moves for typing anywhere else, nor for deleting the whole text.
+    ytext.insert(ytext.length, " and more");
+    ytext.delete(0, ytext.length);
+    expect(model.get(id)!.range).toEqual({ from: 0, to: 0 });
+    // A selection comment created after the fact is unaffected by the document thread's anchor rule.
+    ytext.insert(0, "Hello brave new world");
+    const other = model.add({ from: 6, to: 11, body: "still anchored", author: bob });
+    ytext.insert(0, "__");
+    expect(model.get(other)!.range).toEqual({ from: 8, to: 13 });
+    expect(model.get(id)!.range).toEqual({ from: 0, to: 0 });
+  });
+
+  it("stays {0,0} in an empty document and after a full sync to a second Y.Doc", () => {
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("content");
+    const model = new CommentsModel(ydoc, ytext);
+    const id = model.add({ from: 0, to: 0, body: "First!", author: alice });
+    expect(model.get(id)!.range).toEqual({ from: 0, to: 0 });
+    ytext.insert(0, "# Title\n\nBody.\n");
+    expect(model.get(id)!.range).toEqual({ from: 0, to: 0 });
+    // With createAnchor the start would have followed the first character to the end of the text.
+    expect(createAnchor(ytext, 0, 0).start).not.toEqual(model.get(id)!.anchor.start);
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const mirror = new CommentsModel(remote, remote.getText("content"));
+    expect(mirror.get(id)!.range).toEqual({ from: 0, to: 0 });
+    expect(mirror.get(id)!.quote).toBe("");
+  });
+
+  it("refuses to accept a suggestion on a document thread (root and reply) but still rejects it", () => {
+    const { model, ytext } = setup();
+    const id = model.add({ from: 0, to: 0, body: suggestion, author: alice });
+    expect(model.acceptSuggestion(id, "Hello bold new world", bob)).toBe(false);
+    expect(ytext.toString()).toBe("Hello brave new world");
+    expect(model.get(id)!.suggestionState).toBeNull();
+    const replyId = model.reply(id, suggestion, bob)!;
+    expect(model.acceptReplySuggestion(id, replyId, alice)).toBe(false);
+    expect(ytext.toString()).toBe("Hello brave new world");
+    expect(model.rejectReplySuggestion(id, replyId, alice)).toBe(true);
+    expect(model.rejectSuggestion(id, bob)).toBe(true);
+    expect(model.get(id)!.suggestionState).toBe("rejected");
+  });
+
+  it("isDocumentRange is only true for exactly {0,0}", () => {
+    expect(isDocumentRange(null)).toBe(false);
+    expect(isDocumentRange(undefined)).toBe(false);
+    expect(isDocumentRange({ from: 0, to: 1 })).toBe(false);
+    expect(isDocumentRange({ from: 3, to: 3 })).toBe(false);
+    expect(isDocumentRange({ from: 0, to: 0 })).toBe(true);
   });
 });

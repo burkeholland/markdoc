@@ -287,3 +287,39 @@
   color: var(--color-ink, inherit);
   background: rgb(0 0 0 / 0.06);
 }
+
+/* Where a quote bar would sit on a comment on the whole document (#1025): a neutral soft pill, not the amber
+   quote, so the card reads as "about everything" rather than "about this text". */
+.comment-quote-document {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.375rem;
+  background: var(--color-surface-2, transparent);
+  border: 1px solid var(--color-line, #e5e7eb);
+  font-size: 12px;
+  line-height: 1.25rem;
+  color: var(--color-ink-3, #6b7280);
+}
+
+/* Footer of the `@` picker for a user with no agent yet: one line, soft, dismissable. Sits under the option list
+   when there is one (a hairline above it), alone in the popover otherwise. */
+.mention-connect-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.375rem;
+  padding: 0.375rem 0.5rem;
+  line-height: 1.25rem;
+}
+
+.mention-connect-row-under {
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-line, #e5e7eb);
+}
+
+.mention-connect-row > svg {
+  margin-top: 0.1875rem;
+}

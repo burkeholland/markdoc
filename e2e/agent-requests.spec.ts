@@ -90,10 +90,6 @@ test.describe("agent requests from comments", () => {
     docId = await createDocument(alice.page, DOC, "Requests doc");
     await shareWith(alice.page, docId, "bob", "commenter");
     await shareWith(alice.page, docId, "carol", "editor");
-    // Next dev compiles the requests route on its first hit (the shared warm-up does not cover it); take
-    // that hit here so the UI posts below are measured against the 15 s expect budget, not the compile.
-    const warm = await alice.page.request.get(`/api/documents/${docId}/requests`, { timeout: 120_000 });
-    expect(warm.ok()).toBeTruthy();
     await openDocument(alice.page, docId);
     await ensureCommentsOpen(alice.page);
   });
@@ -320,5 +316,180 @@ test.describe("agent requests from comments", () => {
     console.log(`[agent-requests] 404s=${notFound()} sync-wait p95=${p95.toFixed(1)}ms max=${max.toFixed(1)}ms n=${waits.length}`);
     expect(notFound()).toBe(0);
     expect(p95).toBeLessThan(2000);
+  });
+});
+
+/**
+ * Document comments (task #1025): a comment started with nothing selected anchors to the whole document ({0,0}),
+ * the empty state and the hint bar start one with `@` already typed, and the `@` picker of a user without an
+ * API token ends in a "Connect an agent" row that goes away once per browser.
+ */
+const LONG_DOC =
+  "# Whole document fixture\n\n" +
+  Array.from({ length: 80 }, (_, i) => `Paragraph ${i + 1} of the fixture, long enough that the preview scrolls well past the fold.`).join("\n\n") +
+  "\n";
+const RICH_SCROLLER = '[data-testid="rich-column"] .overflow-y-auto';
+const CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
+const fresh = (prefix: string) => `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+
+const richScrollTop = (page: Page) => page.evaluate((sel) => document.querySelector<HTMLElement>(sel)?.scrollTop ?? -1, RICH_SCROLLER);
+/** The thread's live range as the client model resolves it (`{0,0}` for a document comment). */
+const threadRange = (page: Page, threadId: string) =>
+  page.evaluate(
+    (id) => (window as unknown as { __markdocSession: { comments: { get(id: string): { range: { from: number; to: number } | null; quote: string } | null } } }).__markdocSession.comments.get(id),
+    threadId,
+  );
+
+test.describe("document comments, the empty state and the connect row (#1025)", () => {
+  test.describe.configure({ mode: "serial" });
+  let alice: User;
+  let bob: User;
+  let docId: string;
+  let minted: MintedToken;
+  const agentName = "Reviewer";
+
+  test.beforeAll(async ({ browser }) => {
+    alice = await signIn(browser, fresh("dc-alice"));
+    bob = await signIn(browser, fresh("dc-bob"));
+    minted = await mintToken(alice.page, agentName, { expiresInDays: 1 });
+    docId = await createDocument(alice.page, LONG_DOC, "Whole document fixture");
+    await shareWith(alice.page, docId, bob.login, "commenter");
+    await openDocument(alice.page, docId);
+    await ensureCommentsOpen(alice.page);
+  });
+
+  test.afterAll(async () => {
+    await minted?.revoke();
+    await alice.context.close();
+    await bob.context.close();
+  });
+
+  test("e) the empty state starts a comment on the whole document with `@` typed; the thread anchors to {0,0}, highlights nothing and reveals the top", async () => {
+    const page = alice.page;
+    const panel = page.getByTestId("comments-panel");
+    await expect(panel.getByTestId("comments-empty-agent-line")).toContainText("Comment and mention an agent");
+    await expect(page.getByTestId("comments-empty-ask-agent-button")).toHaveCount(0);
+    await expect(panel.getByText("Ask an agent")).toHaveCount(0);
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/comments-empty-state.png` });
+
+    const t0 = Date.now();
+    await panel.getByTestId("comments-empty-agent").click();
+    const pending = panel.getByTestId("pending-comment");
+    await expect(pending).toBeVisible();
+    await expect(pending.getByTestId("comment-quote-document")).toHaveText("Whole document");
+    const composer = pending.getByTestId("comment-composer");
+    await expect(composer).toBeFocused();
+    await expect(composer).toHaveValue("@");
+    expect(await composer.evaluate((el: HTMLTextAreaElement) => [el.selectionStart, el.selectionEnd])).toEqual([1, 1]);
+    const picker = page.getByTestId("mention-suggestions");
+    await expect(picker).toBeVisible();
+    const pickerMs = Date.now() - t0;
+    test.info().annotations.push({ type: "measurement", description: `empty state → composer with "@" and the picker open: ${pickerMs} ms` });
+    console.log(`[document-comment] empty state → "@" + picker in ${pickerMs}ms`);
+    expect(pickerMs).toBeLessThan(2_000);
+    // Alice has a token: her own agent is offered and the connect row stays away.
+    const own = picker.locator('[data-testid="mention-option"][data-own]');
+    await expect(own).toHaveCount(1);
+    await expect(picker.getByTestId("mention-connect-row")).toHaveCount(0);
+    await own.click();
+    await expect(composer).toHaveValue(new RegExp(`^@${alice.login}/${agentName} $`));
+    await expect(pending.getByTestId("composer-agent-row")).toBeVisible();
+    await page.keyboard.type("tighten the whole thing");
+    const highlightsBefore = await page.locator(".md-rich .md-comment").count();
+    await pending.getByTestId("comment-submit").click();
+
+    const card = panel.getByTestId("comment-thread").filter({ hasText: "tighten the whole thing" });
+    await expect(card).toBeVisible();
+    await expect(card.getByTestId("comment-quote-document")).toHaveText("Whole document");
+    await expect(card.getByTestId("comment-request-chip")).toHaveAttribute("data-status", "open");
+    await expect(card.getByRole("button", { name: /^Accept/ })).toHaveCount(0);
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/document-comment-card.png` });
+    // No text is highlighted for a document comment, before or after typing at the very start of the document.
+    expect(await page.locator(".md-rich .md-comment").count()).toBe(highlightsBefore);
+    const threadId = (await card.getAttribute("data-thread-id")) ?? "";
+    expect(threadId).not.toBe("");
+    expect(await threadRange(page, threadId)).toMatchObject({ range: { from: 0, to: 0 }, quote: "" });
+    await page.evaluate(() => (window as unknown as { __markdocSession: { ytext: { insert(i: number, s: string): void } } }).__markdocSession.ytext.insert(0, "x".repeat(200)));
+    await expect.poll(() => threadRange(page, threadId).then((t) => t?.range)).toEqual({ from: 0, to: 0 });
+    expect(await page.locator(".md-rich .md-comment").count()).toBe(highlightsBefore);
+    await page.evaluate(() => (window as unknown as { __markdocSession: { ytext: { delete(i: number, n: number): void } } }).__markdocSession.ytext.delete(0, 200));
+
+    // The request carries no selection and points at the thread.
+    const open = await listRequests(page, docId, "open");
+    const req = open.find((r) => r.threadId === threadId);
+    expect(req, JSON.stringify(open)).toBeTruthy();
+    expect(req!.selection).toBeNull();
+    expect(req!.instruction).toContain("tighten the whole thing");
+
+    // Clicking the card reveals the top of the document.
+    await page.evaluate((sel) => document.querySelector<HTMLElement>(sel)!.scrollTo({ top: 1e6, behavior: "auto" }), RICH_SCROLLER);
+    await expect.poll(() => richScrollTop(page)).toBeGreaterThan(1_000);
+    await card.getByTestId("comment-body").first().click();
+    await expect.poll(() => richScrollTop(page), { timeout: 5_000 }).toBeLessThan(2);
+  });
+
+  test("f) Comment with nothing selected (toolbar and Ctrl+Alt+M) opens a whole-document composer instead of a toast", async () => {
+    const page = alice.page;
+    const panel = page.getByTestId("comments-panel");
+    await page.locator(".md-rich h1").click();
+    await page.getByTestId("tb-comment").click();
+    const pending = panel.getByTestId("pending-comment");
+    await expect(pending).toBeVisible();
+    await expect(pending.getByTestId("comment-quote-document")).toHaveText("Whole document");
+    await expect(pending.getByTestId("comment-composer")).toHaveValue("");
+    await expect(page.getByTestId("toast")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(pending).toHaveCount(0);
+
+    await page.locator(".md-rich h1").click();
+    await page.keyboard.press("Control+Alt+m");
+    await expect(pending).toBeVisible();
+    await expect(pending.getByTestId("comment-quote-document")).toHaveText("Whole document");
+    await expect(page.getByTestId("toast")).toHaveCount(0);
+    // The header button of the panel does the same.
+    await page.keyboard.press("Escape");
+    await expect(pending).toHaveCount(0);
+    await panel.getByTestId("comment-document").click();
+    await expect(pending).toBeVisible();
+    await expect(pending.getByTestId("comment-quote-document")).toHaveText("Whole document");
+    await page.keyboard.press("Escape");
+    await expect(pending).toHaveCount(0);
+  });
+
+  test("g) a commenter without an API token gets the connect row under the picker; ✕ hides it for good on this browser", async () => {
+    const page = bob.page;
+    await openDocument(page, docId);
+    await ensureCommentsOpen(page);
+    const panel = page.getByTestId("comments-panel");
+    await panel.getByTestId("comment-document").click();
+    const composer = panel.getByTestId("pending-comment").getByTestId("comment-composer");
+    await expect(composer).toBeFocused();
+    await page.keyboard.type("@");
+    const picker = page.getByTestId("mention-suggestions");
+    await expect(picker).toBeVisible();
+    // The document's owner is offered (her agent has not been in the document yet); the row sits under the list.
+    await expect(picker.getByTestId("mention-option")).toHaveCount(1);
+    const row = picker.getByTestId("mention-connect-row");
+    await expect(row).toBeVisible();
+    await expect(row).toContainText("No agent connected yet");
+    await expect(row.getByTestId("mention-connect-agent")).toHaveText("Connect an agent");
+    await expect(row.getByTestId("mention-connect-docs")).toHaveAttribute("href", /docs\/agents\.md$/);
+    await expect(row.getByTestId("mention-connect-docs")).toHaveAttribute("target", "_blank");
+    await row.getByTestId("mention-connect-dismiss").click();
+    await expect(picker.getByTestId("mention-connect-row")).toHaveCount(0);
+    await expect(picker.getByTestId("mention-option")).toHaveCount(1);
+    await expect(composer).toBeFocused();
+    expect(await page.evaluate((k) => localStorage.getItem(k), CONNECT_DISMISSED_KEY)).toBe("1");
+
+    // Remembered across a reload.
+    await openDocument(page, docId);
+    await ensureCommentsOpen(page);
+    await panel.getByTestId("comment-document").click();
+    await expect(panel.getByTestId("pending-comment").getByTestId("comment-composer")).toBeFocused();
+    await page.keyboard.type("@");
+    await expect(picker).toBeVisible();
+    await expect(picker.getByTestId("mention-option")).toHaveCount(1);
+    await page.waitForTimeout(500);
+    await expect(picker.getByTestId("mention-connect-row")).toHaveCount(0);
   });
 });

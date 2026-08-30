@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Bot, MessageSquare, Sparkles, X } from "lucide-react";
+import { Bot, MessageSquare, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api } from "@/lib/api";
 import {
@@ -24,21 +24,21 @@ export interface HintBarProps {
   session: CollabSession;
   actions: EditorActions;
   onShare: () => void;
-  onAskAgent: () => void;
+  /** Hint (b): opens a comment on the whole document with `@` already typed, so the agent picker is up. */
   onComment: () => void;
 }
 
-const ICONS: Record<HintId, typeof Bot> = { "collab-agent": Bot, "ask-agent": Sparkles, "mention-copilot": MessageSquare };
+const ICONS: Record<HintId, typeof Bot> = { "collab-agent": Bot, "mention-copilot": MessageSquare };
 
 const noopSubscribe = () => () => {};
 
 /**
- * One-line, once-only hints under the toolbar for the three agent/collaboration features. Reads
- * session state itself (the shell does not re-render for it) and remembers dismissals in
- * `localStorage` (`markdoc:hints`). A hint that has appeared stays until ✕ or its action; once all
- * three are dismissed the bar never mounts again. Never shown on phone widths.
+ * One-line, once-only hints under the toolbar for the agent/collaboration features. Reads session
+ * state itself (the shell does not re-render for it) and remembers dismissals in `localStorage`
+ * (`markdoc:hints`). A hint that has appeared stays until ✕ or its action; once both are dismissed
+ * the bar never mounts again. Never shown on phone widths.
  */
-export function HintBar({ session, actions, onShare, onAskAgent, onComment }: HintBarProps) {
+export function HintBar({ session, actions, onShare, onComment }: HintBarProps) {
   // Storage is read after hydration so the server markup (no bar) matches the first client render.
   const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const [record, setRecord] = useState<HintsRecord>(EMPTY_HINTS_RECORD);
@@ -77,15 +77,11 @@ export function HintBar({ session, actions, onShare, onAskAgent, onComment }: Hi
   const live = useSessionValue(
     session,
     (s) => {
-      if (!active) return { people: 0, agentHere: false, selection: 0, threads: 0 };
+      if (!active) return { people: 0, agentHere: false, threads: 0 };
       const presence = s.presence();
       return {
         people: presence.filter((p) => !p.isLocal && !p.isAgent).length,
         agentHere: presence.some((p) => p.isAgent),
-        selection: (() => {
-          const r = actions.selectionSourceRange();
-          return r ? r.to - r.from : 0;
-        })(),
         threads: s.comments.list().length,
       };
     },
@@ -102,14 +98,11 @@ export function HintBar({ session, actions, onShare, onAskAgent, onComment }: Hi
 
   const agentEverConnected = record.agentSeen || live.agentHere || (shared?.agentUsed ?? false);
   const due = active
-    ? dueHint(
-        { collaborators: Math.max(live.people, shared?.collaborators ?? 0), agentEverConnected, selectionLength: live.selection, commentThreads: live.threads },
-        record.dismissed,
-      )
+    ? dueHint({ collaborators: Math.max(live.people, shared?.collaborators ?? 0), agentEverConnected, commentThreads: live.threads }, record.dismissed)
     : null;
 
   // A hint that appeared is pinned until the user acts on it, even if its gate turns false again
-  // (the selection collapses when the button takes focus) or another hint becomes due.
+  // or another hint becomes due.
   const [pinned, setPinned] = useState<HintId | null>(null);
   useEffect(() => {
     if (!pinned && due) setPinned(due);
@@ -131,10 +124,9 @@ export function HintBar({ session, actions, onShare, onAskAgent, onComment }: Hi
     (id: HintId) => {
       dismiss(id, false);
       if (id === "collab-agent") onShare();
-      else if (id === "ask-agent") onAskAgent();
       else onComment();
     },
-    [dismiss, onShare, onAskAgent, onComment],
+    [dismiss, onShare, onComment],
   );
 
   if (!shown) return null;

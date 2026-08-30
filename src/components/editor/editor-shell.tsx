@@ -133,6 +133,9 @@ export function EditorShell({
   const [sidePanel, setSidePanel] = useState<SidePanel>(null);
   const [focusCommentsOnOpen, setFocusCommentsOnOpen] = useState(false);
   const restoreCommentsToggleRef = useRef(false);
+  // A request for the comments panel to open a composer on the whole document (#1025): from the
+  // toolbar/shortcut with no selection, the palette, the empty state and hint (b) (`mention` pre-types `@`).
+  const [documentComposer, setDocumentComposer] = useState<{ mention: boolean; nonce: number } | null>(null);
   const breakpoint = useBreakpoint();
   const isPhone = breakpoint === "phone";
   const isTablet = breakpoint === "tablet";
@@ -335,16 +338,27 @@ export function EditorShell({
     [session],
   );
 
+  /** Comment on the whole document: opens Comments with a zero-width composer at {0,0}; `mention` types `@` for the agent picker. */
+  const startDocumentComment = useCallback(
+    (opts?: { mention?: boolean }) => {
+      if (!session.canComment) return;
+      setSidePanel("comments");
+      setDocumentComposer((prev) => ({ mention: !!opts?.mention, nonce: (prev?.nonce ?? 0) + 1 }));
+    },
+    [session],
+  );
+
   const startComment = useCallback(() => {
     if (!session.canComment) return;
     const range = actions.selectionSourceRange();
+    // No selection is no longer an error: the comment is about the document (#1025).
     if (!range) {
-      toast("Select some text to comment on.", "info");
+      startDocumentComment();
       return;
     }
     session.setPendingComment(range);
     setSidePanel("comments");
-  }, [actions, session, toast]);
+  }, [actions, session, startDocumentComment]);
 
   const openLink = useCallback(() => {
     setLinkInitial(actions.currentLink());
@@ -635,6 +649,7 @@ export function EditorShell({
   useEffect(() => {
     if (sidePanel === "comments") return;
     setCommentsFocus(null);
+    setDocumentComposer(null);
     setFocusCommentsOnOpen(false);
     if (sidePanel === null && restoreCommentsToggleRef.current) {
       restoreCommentsToggleRef.current = false;
@@ -678,28 +693,9 @@ export function EditorShell({
   const openKeepAgent = useCallback(() => setKeepAgentNonce((n) => n + 1), []);
   const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
   const askAgentDoc = useMemo(() => ({ id: doc.id, title: liveTitle }), [doc.id, liveTitle]);
-  // Hint (c): open Comments on the open threads and put the caret in a composer — the reply box of the
-  // first thread (it autofocuses once opened) or any composer already showing.
-  const focusCommentComposer = useCallback(() => {
-    setSidePanel("comments");
-    setCommentsFocus({ tab: "open", nonce: Date.now() });
-    let tries = 0;
-    const tick = () => {
-      const panel = document.querySelector('[data-testid="comments-panel"]');
-      const composer = panel?.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
-      if (composer) {
-        composer.focus();
-        return;
-      }
-      const reply = panel?.querySelector<HTMLButtonElement>('[data-testid="comment-reply"]');
-      if (reply) {
-        reply.click();
-        return;
-      }
-      if (++tries < 10) requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }, []);
+  // Hint (b) and the empty state: a comment on the whole document with `@` already typed, so the
+  // agent picker is up before the user types anything (#1025).
+  const startMentionComment = useCallback(() => startDocumentComment({ mention: true }), [startDocumentComment]);
 
   /** Open the comments panel on a thread (by thread or reply id) or suggestion. Returns false when nothing matches. */
   const activateRef = useCallback(
@@ -848,6 +844,7 @@ export function EditorShell({
     openLink,
     openImage,
     startComment,
+    commentDocument: startDocumentComment,
     askAgent: openAskAgent,
     keepAgent: openKeepAgent,
     toggleComments,
@@ -1001,7 +998,9 @@ export function EditorShell({
         onPendingDone={() => actions.focusCollapsed()}
         onAskAgent={openAskAgent}
         onCancelRequest={cancelAgentRequest}
+        onCreateToken={goCreateToken}
         focusTab={commentsFocus}
+        documentComposer={documentComposer}
         focusOnMount={focusCommentsOnOpen}
         onToast={toast}
       />
@@ -1063,7 +1062,7 @@ export function EditorShell({
           embed={embed}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onAskAgent={openAskAgent} onImage={openImage} onTable={openTable} />
-        {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onAskAgent={openAskAgent} onComment={focusCommentComposer} />}
+        {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onComment={startMentionComment} />}
         {findOpen && (
           <FindBar
             session={session}

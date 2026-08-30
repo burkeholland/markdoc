@@ -2,9 +2,9 @@
 
 import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
-import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, Hourglass, Loader2, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
+import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import { QUICK_REACTIONS, type CommentReply, type CommentThread, type Reactions } from "@/editor/collab/comments";
+import { QUICK_REACTIONS, isDocumentRange, type CommentReply, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
 import { agentMentionLogin, mentionTriggerAt, parseAgentMentions, splitMentions } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
@@ -12,8 +12,10 @@ import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewV
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
+import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
+import { AGENT_CONNECT_DISMISSED_KEY } from "@/components/settings/agent-connect-card";
 import { jsonEqual, useSessionValue } from "./use-session";
 import { QUICK_INSTRUCTIONS } from "./ask-agent-dialog";
 import { describeResult, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
@@ -306,12 +308,13 @@ function ReactionRow({
  * Collaborators and recently active agents of the document, fetched once while the panel is open, merged with who
  * is present. With `withOwnTokens` (set the first time a composer's `@` picker opens) the user's own API tokens join
  * the list too, so an agent that has never been in this document can still be asked; one already known through
- * presence or activity is listed once, as that entry.
+ * presence or activity is listed once, as that entry. `tokenCount` is how many tokens that fetch returned — null
+ * until it has, or when it failed — so the picker can offer "Connect an agent" to a user who has none (#1025).
  */
-function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): MentionCandidate[] {
+function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): { candidates: MentionCandidate[]; tokenCount: number | null } {
   const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
   const [knownAgents, setKnownAgents] = useState<MentionCandidate[]>([]);
-  const [ownTokens, setOwnTokens] = useState<MentionCandidate[]>([]);
+  const [ownTokens, setOwnTokens] = useState<MentionCandidate[] | null>(null);
   useEffect(() => {
     let cancelled = false;
     api.documents
@@ -366,22 +369,32 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): M
     const me = session.user.login?.toLowerCase();
     // Your own agent stays in the list even though you are not: it is the agent that needs the mention.
     // Own tokens come last so one that is present or recently active keeps its ordinary entry.
-    for (const c of [...present, ...collaborators, ...knownAgents, ...ownTokens]) {
+    for (const c of [...present, ...collaborators, ...knownAgents, ...(ownTokens ?? [])]) {
       const key = c.login.toLowerCase();
       if (key === me || seen.has(key)) continue;
       seen.add(key);
       out.push(c);
     }
-    return out;
+    return { candidates: out, tokenCount: ownTokens ? ownTokens.length : null };
   }, [present, collaborators, knownAgents, ownTokens, session.user.login]);
 }
 
 const MAX_SUGGESTIONS = 6;
 
+/** The "Connect an agent" row under the `@` picker, for a user whose token list came back empty (#1025). */
+interface MentionConnectValue {
+  /** Show the row: the user has no API token and has not dismissed the row on this browser. */
+  due: boolean;
+  /** Settings → tokens (the row's button is hidden without it). */
+  onCreateToken?: () => void;
+  onDismiss: () => void;
+}
+
 interface MentionCandidatesValue {
   candidates: MentionCandidate[];
   /** A composer's `@` picker opened: the panel fetches the user's own tokens once (see useMentionCandidates). */
   onPickerOpen: () => void;
+  connect: MentionConnectValue;
 }
 
 /**
@@ -389,7 +402,16 @@ interface MentionCandidatesValue {
  * arrives a moment after the panel opens (collaborators fetch) and would otherwise re-render every
  * memoised card for a value only an open composer reads.
  */
-const MentionCandidatesContext = createContext<MentionCandidatesValue>({ candidates: [], onPickerOpen: () => {} });
+const MentionCandidatesContext = createContext<MentionCandidatesValue>({ candidates: [], onPickerOpen: () => {}, connect: { due: false, onDismiss: () => {} } });
+
+/** The picker's "Connect an agent" row shares the settings card's `localStorage` flag: dismissed once, gone everywhere. */
+function readConnectDismissed(): boolean {
+  try {
+    return typeof window !== "undefined" && window.localStorage.getItem(AGENT_CONNECT_DISMISSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 /** Avatar for a comment/suggestion author; agents (API tokens) get a bot badge. */
 function AuthorAvatar({ id, name, src, size }: { id: string; name: string; src?: string | null; size: number }) {
@@ -409,12 +431,19 @@ export interface CommentsPanelProps {
   onReveal: (offset: number) => void;
   /** Called when the pending (new-comment) composer is posted or cancelled, so focus can return to the editor. */
   onPendingDone?: () => void;
-  /** Opens the "Ask an agent" dialog (empty-state hint). */
-  onAskAgent?: () => void;
   /** Switch to a tab from outside; bump `nonce` to switch again to the same tab. */
   focusTab?: { tab: "open" | "resolved" | "suggestions"; nonce: number } | null;
+  /**
+   * Open a composer on the whole document (a zero-width thread at {0,0}, #1025); bump `nonce` to do it again.
+   * With `mention` the composer starts with `@` typed, so the agent picker is up at once.
+   */
+  documentComposer?: { mention: boolean; nonce: number } | null;
+  /** Settings → API tokens, for the picker's "Connect an agent" row (a user with no token); the button is hidden without it. */
+  onCreateToken?: () => void;
   /** Move focus to the selected tab when this panel mounts. */
   focusOnMount?: boolean;
+  /** The Ask-an-agent dialog. Nothing in the panel opens it any more (#1025 — the empty state mentions an agent in a comment instead); T4 deletes the prop. */
+  onAskAgent?: () => void;
   /** Shell toast (Accept suggestion offers Undo). */
   onToast?: (message: string, kind?: "info" | "success" | "error", action?: { label: string; onClick?: () => void }) => void;
   /** Cancels an open or claimed agent request (the × on a thread card's request chip); the × is hidden when omitted. */
@@ -531,18 +560,39 @@ function Composer({
   /** Offer the "How should the agent answer?" row when an agent is mentioned; absent on the edit composer. */
   request?: ComposerRequestOptions;
 }) {
-  const { candidates, onPickerOpen } = useContext(MentionCandidatesContext);
+  const { candidates, onPickerOpen, connect } = useContext(MentionCandidatesContext);
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [mode, setMode] = useState<AgentRequestMode>(request?.defaultMode ?? "suggest");
   const ref = useRef<HTMLTextAreaElement>(null);
+  /** Re-evaluate whether the caret is in an `@` token. */
+  const syncTrigger = useCallback((el: HTMLTextAreaElement) => {
+    setHighlight(0);
+    if (el.selectionStart !== el.selectionEnd) {
+      setTrigger(null);
+      return;
+    }
+    setTrigger(mentionTriggerAt(el.value, el.selectionStart));
+  }, []);
   useEffect(() => {
     if (!autoFocus) return;
     // A frame later: a closing menu (Edit…) hands focus back to its trigger first.
-    const raf = requestAnimationFrame(() => ref.current?.focus());
+    const raf = requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.focus();
+      // A seeded new comment ("@" from the empty state or the hint bar, #1025) starts with the caret after the seed, so
+      // the `@` picker is open before the user types; an edit keeps the browser's caret placement.
+      if (initial && !editing) {
+        el.setSelectionRange(initial.length, initial.length);
+        syncTrigger(el);
+      }
+    });
     return () => cancelAnimationFrame(raf);
+    // `initial` is read once, on mount, like useState(initial) above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFocus]);
   // The user's own tokens join the picker the first time an `@` is typed in any composer (not on panel mount);
   // a pasted `@login/agent` counts too, so the row can appear for an agent the document has not seen yet.
@@ -616,7 +666,10 @@ function Composer({
   };
 
   const matches = useMemo(() => (trigger ? filterMentionCandidates(candidates, trigger.query, MAX_SUGGESTIONS) : []), [trigger, candidates]);
-  const open = trigger !== null && matches.length > 0;
+  // The popover also opens with no match for a user who has no agent yet: the "Connect an agent" row is the answer to
+  // an `@` that finds nothing (#1025). It never opens for an edit, which cannot become a request.
+  const connectDue = connect.due && request !== undefined;
+  const open = trigger !== null && (matches.length > 0 || connectDue);
 
   // The mode row: only while the body names an agent the picker knows, and only on composers that can post a request.
   const agents = useMemo(() => (request ? mentionedAgents(value, candidates) : []), [request, value, candidates]);
@@ -666,16 +719,6 @@ function Composer({
     const id = REQUEST_MODES[next]?.id;
     if (id && !modeDisabled(id)) setMode(id);
   };
-
-  /** Re-evaluate whether the caret is in an `@` token. */
-  const syncTrigger = useCallback((el: HTMLTextAreaElement) => {
-    setHighlight(0);
-    if (el.selectionStart !== el.selectionEnd) {
-      setTrigger(null);
-      return;
-    }
-    setTrigger(mentionTriggerAt(el.value, el.selectionStart));
-  }, []);
 
   const pick = (c: MentionCandidate) => {
     const el = ref.current;
@@ -739,20 +782,22 @@ function Composer({
                 }
               }
               if (open) {
-                if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  setHighlight((h) => (h + 1) % matches.length);
-                  return;
-                }
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setHighlight((h) => (h - 1 + matches.length) % matches.length);
-                  return;
-                }
-                if ((e.key === "Enter" && !e.metaKey && !e.ctrlKey) || e.key === "Tab") {
-                  e.preventDefault();
-                  pick(matches[highlight] ?? matches[0]);
-                  return;
+                if (matches.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setHighlight((h) => (h + 1) % matches.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setHighlight((h) => (h - 1 + matches.length) % matches.length);
+                    return;
+                  }
+                  if ((e.key === "Enter" && !e.metaKey && !e.ctrlKey) || e.key === "Tab") {
+                    e.preventDefault();
+                    pick(matches[highlight] ?? matches[0]);
+                    return;
+                  }
                 }
                 if (e.key === "Escape") {
                   e.preventDefault();
@@ -789,33 +834,58 @@ function Composer({
           }}
           data-testid="mention-suggestions"
         >
-          <ul role="listbox" aria-label="Mention someone">
-            {matches.map((c, i) => (
-              <li
-                key={c.login}
-                role="option"
-                aria-selected={i === highlight}
-                className={cn("menu-item py-1.5", i === highlight && "bg-surface-3")}
-                onMouseDown={(e) => e.preventDefault()}
-                onMouseEnter={() => setHighlight(i)}
-                onClick={() => pick(c)}
-                data-testid="mention-option"
-                data-login={c.login}
-                data-agent={c.agent ? "" : undefined}
-                data-own={c.own ? "" : undefined}
-              >
-                {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
-                <span className="min-w-0 flex-1 truncate text-[13px]">{c.name}</span>
-                {c.agent ? (
-                  <span className="truncate text-xs text-ink-4" title={c.own ? "One of your API tokens; it has not been in this document yet" : `Agent of @${c.agent.ownerLogin}`}>
-                    {c.own ? "your agent · not here yet" : "agent"}
-                  </span>
-                ) : (
-                  <span className="truncate text-xs text-ink-3">@{c.login}</span>
+          {matches.length > 0 && (
+            <ul role="listbox" aria-label="Mention someone">
+              {matches.map((c, i) => (
+                <li
+                  key={c.login}
+                  role="option"
+                  aria-selected={i === highlight}
+                  className={cn("menu-item py-1.5", i === highlight && "bg-surface-3")}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setHighlight(i)}
+                  onClick={() => pick(c)}
+                  data-testid="mention-option"
+                  data-login={c.login}
+                  data-agent={c.agent ? "" : undefined}
+                  data-own={c.own ? "" : undefined}
+                >
+                  {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
+                  <span className="min-w-0 flex-1 truncate text-[13px]">{c.name}</span>
+                  {c.agent ? (
+                    <span className="truncate text-xs text-ink-4" title={c.own ? "One of your API tokens; it has not been in this document yet" : `Agent of @${c.agent.ownerLogin}`}>
+                      {c.own ? "your agent · not here yet" : "agent"}
+                    </span>
+                  ) : (
+                    <span className="truncate text-xs text-ink-3">@{c.login}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {/* No agent to mention yet: a footer that leads to Settings → API tokens, once per browser (#1025). Pointer
+              actions keep the caret in the box (mousedown is swallowed) so the picker does not close under the click. */}
+          {connectDue && (
+            <div className={cn("mention-connect-row", matches.length > 0 && "mention-connect-row-under")} data-testid="mention-connect-row">
+              <Bot size={14} className="shrink-0 text-ink-4" aria-hidden />
+              <span className="min-w-0 flex-1 text-xs text-ink-3">
+                No agent connected yet —{" "}
+                {connect.onCreateToken && (
+                  <button type="button" className="font-medium text-accent hover:underline" onMouseDown={(e) => e.preventDefault()} onClick={connect.onCreateToken} data-testid="mention-connect-agent">
+                    Connect an agent
+                  </button>
                 )}
-              </li>
-            ))}
-          </ul>
+                {connect.onCreateToken && " · "}
+                <a href={AGENT_DOCS_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 font-medium text-accent hover:underline" onMouseDown={(e) => e.preventDefault()} data-testid="mention-connect-docs">
+                  Agent docs
+                  <ExternalLink size={11} aria-hidden />
+                </a>
+              </span>
+              <button type="button" className="icon-btn h-5 w-5 shrink-0 text-ink-4 hover:text-ink" onMouseDown={(e) => e.preventDefault()} onClick={connect.onDismiss} aria-label="Dismiss" data-testid="mention-connect-dismiss">
+                <X size={12} />
+              </button>
+            </div>
+          )}
         </PopoverContent>
       </Popover>
       {/* Mentioning an agent turns the comment into a request: this row chooses how it answers. Controls only — no
@@ -1028,6 +1098,10 @@ const ThreadCard = memo(function ThreadCard({
   const suggestion = useMemo(() => parseSuggestionBlock(thread.body), [thread.body]);
   const suggestionState = suggestion ? commentSuggestionState(thread, thread.suggestionState, text) : null;
   const editingRoot = editing === "root" && !thread.suggestionState;
+  // A comment on the whole document (#1025): "Whole document" where the quote would be, no Accept on its
+  // suggestions (there is no anchored text to replace; the model refuses too), no "Suggest a change" in its replies.
+  const isDocument = isDocumentRange(thread.range);
+  const canAcceptHere = canEdit && !isDocument;
 
   const accept = async (block: SuggestionBlock, reply: CommentReply | null = null) => {
     const ok = await ops.acceptSuggestion(thread.id, block.text, reply?.id);
@@ -1075,10 +1149,17 @@ const ThreadCard = memo(function ThreadCard({
       data-thread-id={thread.id}
     >
       {unread && <span className="absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-accent" aria-label="Unread activity" data-testid="thread-unread-dot" />}
-      {thread.quote && (
-        <div className={QUOTE_CLASS} title={thread.quote} data-testid="comment-quote">
-          {thread.range ? thread.quote : <span className="italic">(original text removed) </span>}
+      {isDocument ? (
+        <div className="comment-quote-document" title="A comment on the whole document" data-testid="comment-quote-document">
+          <FileText size={12} aria-hidden />
+          Whole document
         </div>
+      ) : (
+        thread.quote && (
+          <div className={QUOTE_CLASS} title={thread.quote} data-testid="comment-quote">
+            {thread.range ? thread.quote : <span className="italic">(original text removed) </span>}
+          </div>
+        )
       )}
       <div className="flex items-start gap-2.5">
         <AuthorAvatar id={thread.authorId} name={thread.authorName} src={thread.authorAvatar} size={28} />
@@ -1112,7 +1193,7 @@ const ThreadCard = memo(function ThreadCard({
                   <SuggestionText text={suggestion.text} />
                   <SuggestionActions
                     state={suggestionState}
-                    canAccept={canEdit}
+                    canAccept={canAcceptHere}
                     canReject={canComment}
                     onAccept={() => accept(suggestion)}
                     onReject={() => ops.rejectSuggestion(thread.id)}
@@ -1213,7 +1294,7 @@ const ThreadCard = memo(function ThreadCard({
                             <SuggestionText text={block.text} />
                             <SuggestionActions
                               state={state}
-                              canAccept={canEdit}
+                              canAccept={canAcceptHere}
                               canReject={canComment}
                               onAccept={() => accept(block, r)}
                               onReject={() => ops.rejectSuggestion(thread.id, r.id)}
@@ -1276,7 +1357,7 @@ const ThreadCard = memo(function ThreadCard({
               placeholder="Reply…"
               autoFocus
               submitLabel="Reply"
-              quote={thread.range ? thread.quote : undefined}
+              quote={thread.range && !isDocument ? thread.quote : undefined}
               request={onRequest ? { canEdit: canRequestEdits, defaultMode: request?.mode ?? "suggest" } : undefined}
               onSubmit={async (body, req) => {
                 await ops.reply(thread.id, body);
@@ -1541,7 +1622,18 @@ function useReviews(session: CollabSession): ReviewDto[] {
   return reviews;
 }
 
-export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, onCancelRequest, focusTab, focusOnMount = false, onToast }: CommentsPanelProps) {
+export function CommentsPanel({
+  session,
+  onClose,
+  onReveal,
+  onPendingDone,
+  onCancelRequest,
+  onCreateToken,
+  focusTab,
+  documentComposer,
+  focusOnMount = false,
+  onToast,
+}: CommentsPanelProps) {
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
@@ -1562,8 +1654,25 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   const ops = useCommentOps(session);
   // The user's own tokens join the picker once a picker has opened; most panels never mention anyone.
   const [withOwnTokens, setWithOwnTokens] = useState(false);
-  const candidates = useMentionCandidates(session, withOwnTokens);
-  const mentionValue = useMemo<MentionCandidatesValue>(() => ({ candidates, onPickerOpen: () => setWithOwnTokens(true) }), [candidates]);
+  const { candidates, tokenCount } = useMentionCandidates(session, withOwnTokens);
+  // "Connect an agent" under the picker for a user whose token list came back empty, until dismissed (#1025).
+  const [connectDismissed, setConnectDismissed] = useState(readConnectDismissed);
+  const dismissConnect = useCallback(() => {
+    setConnectDismissed(true);
+    try {
+      window.localStorage.setItem(AGENT_CONNECT_DISMISSED_KEY, "1");
+    } catch {
+      // Storage unavailable: the row still goes away for this panel.
+    }
+  }, []);
+  const mentionValue = useMemo<MentionCandidatesValue>(
+    () => ({
+      candidates,
+      onPickerOpen: () => setWithOwnTokens(true),
+      connect: { due: tokenCount === 0 && !connectDismissed, onCreateToken, onDismiss: dismissConnect },
+    }),
+    [candidates, tokenCount, connectDismissed, onCreateToken, dismissConnect],
+  );
   const requests = useThreadRequests(session);
   /**
    * A comment that mentions an agent is also a request. The comment goes through the shared doc as usual and the
@@ -1600,7 +1709,8 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   const requestFromThread = useCallback(
     (threadId: string, body: string, mode: AgentRequestMode) => {
       const thread = session.comments.list().find((t) => t.id === threadId);
-      const selection = thread?.range ? { from: thread.range.from, to: thread.range.to, quote: thread.quote } : null;
+      // A document thread asks about the whole document: selection: null, like the pending composer below.
+      const selection = thread?.range && !isDocumentRange(thread.range) ? { from: thread.range.from, to: thread.range.to, quote: thread.quote } : null;
       void postAgentRequest(threadId, body, mode, selection);
     },
     [session, postAgentRequest],
@@ -1673,6 +1783,36 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
     if (focusTab) setTab(focusTab.tab);
   }, [focusTab]);
 
+  // A comment on the whole document (#1025): the pending composer at {0,0}, seeded with `@` when the caller wants
+  // the agent picker up at once. The seed is keyed so the composer remounts and reads it; it is cleared when the
+  // composer goes (posted or cancelled) so a later plain "comment" starts empty.
+  const [seed, setSeed] = useState<{ initial: string; nonce: number } | null>(null);
+  const startDocumentComment = useCallback(
+    (opts: { mention: boolean; nonce: number }) => {
+      if (!session.canComment) return;
+      setSeed({ initial: opts.mention ? "@" : "", nonce: opts.nonce });
+      session.setPendingComment({ from: 0, to: 0 });
+      setTab("open");
+    },
+    [session],
+  );
+  useEffect(() => {
+    if (documentComposer) startDocumentComment(documentComposer);
+  }, [documentComposer, startDocumentComment]);
+  // Cleared when a pending composer goes, not on mount: the panel may open with `documentComposer` already set (the
+  // hint bar), and the seed and the pending range land in the same commit.
+  const hadPending = useRef(false);
+  useEffect(() => {
+    if (pending) hadPending.current = true;
+    else if (hadPending.current) {
+      hadPending.current = false;
+      setSeed(null);
+    }
+  }, [pending]);
+  // The panel's own entry points: the header button and the empty state (the shell's nonce space is not reused).
+  const localNonce = useRef(0);
+  const commentOnDocument = useCallback((mention: boolean) => startDocumentComment({ mention, nonce: -++localNonce.current }), [startDocumentComment]);
+
   const tabs: { id: Tab; label: string; count: number }[] = [
     { id: "open", label: "Open", count: open.length },
     { id: "resolved", label: "Resolved", count: resolved.length },
@@ -1718,32 +1858,33 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           <X size={16} />
         </button>
       </div>
-      <div
-        ref={tablistRef}
-        className="flex gap-1 border-b border-line px-3 py-2"
-        role="tablist"
-        aria-label="Comment lists"
-        aria-orientation="horizontal"
-        onKeyDown={onTablistKeyDown}
-      >
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            id={`comments-tab-${t.id}`}
-            aria-selected={tab === t.id}
-            aria-controls="comments-tabpanel"
-            tabIndex={tab === t.id ? 0 : -1}
-            className={cn("rounded-md px-2.5 py-1 text-xs font-medium", tab === t.id ? "bg-surface text-ink shadow-sm ring-1 ring-line" : "text-ink-3 hover:text-ink")}
-            onClick={() => setTab(t.id)}
-            onFocus={() => setTab(t.id)}
-            data-testid={`comments-tab-${t.id}`}
-          >
-            {t.label}
-            {t.count > 0 && <span className="ml-1 text-ink-4">{t.count}</span>}
+      <div className="flex items-center gap-1 border-b border-line px-3 py-2">
+        <div ref={tablistRef} className="flex min-w-0 flex-1 gap-1" role="tablist" aria-label="Comment lists" aria-orientation="horizontal" onKeyDown={onTablistKeyDown}>
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              id={`comments-tab-${t.id}`}
+              aria-selected={tab === t.id}
+              aria-controls="comments-tabpanel"
+              tabIndex={tab === t.id ? 0 : -1}
+              className={cn("rounded-md px-2.5 py-1 text-xs font-medium", tab === t.id ? "bg-surface text-ink shadow-sm ring-1 ring-line" : "text-ink-3 hover:text-ink")}
+              onClick={() => setTab(t.id)}
+              onFocus={() => setTab(t.id)}
+              data-testid={`comments-tab-${t.id}`}
+            >
+              {t.label}
+              {t.count > 0 && <span className="ml-1 text-ink-4">{t.count}</span>}
+            </button>
+          ))}
+        </div>
+        {/* Outside the tablist (which holds only tabs): a comment on the whole document, no selection needed (#1025). */}
+        {session.canComment && (
+          <button type="button" className="icon-btn h-7 w-7 shrink-0" title="Comment on the document" aria-label="Comment on the document" onClick={() => commentOnDocument(false)} data-testid="comment-document">
+            <MessageSquarePlus size={15} />
           </button>
-        ))}
+        )}
       </div>
       <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
         {tab === "open" && openReviews.length > 0 && (
@@ -1755,12 +1896,21 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
         )}
         {pending && tab === "open" && (
           <div className="rounded-xl border border-accent bg-surface p-3 shadow-md shadow-accent/10" data-testid="pending-comment">
-            <div className={QUOTE_CLASS} data-testid="comment-quote">
-              {session.ytext.toString().slice(pending.from, pending.to) || "Selected text"}
-            </div>
+            {isDocumentRange(pending) ? (
+              <div className="comment-quote-document" data-testid="comment-quote-document">
+                <FileText size={12} aria-hidden />
+                Whole document
+              </div>
+            ) : (
+              <div className={QUOTE_CLASS} data-testid="comment-quote">
+                {session.ytext.toString().slice(pending.from, pending.to) || "Selected text"}
+              </div>
+            )}
             <Composer
+              key={seed ? `seed-${seed.nonce}` : "pending"}
               placeholder="Add a comment… (⌘/Ctrl+Enter to post)"
               autoFocus
+              initial={seed?.initial ?? ""}
               quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
               request={{ canEdit, defaultMode: "suggest" }}
               onSubmit={async (body, req) => {
@@ -1769,7 +1919,9 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
                 session.setPendingComment(null);
                 if (typeof id === "string") session.setActiveComment(id);
                 onPendingDone?.();
-                if (req && typeof id === "string") void postAgentRequest(id, body, req.mode, { from: pending.from, to: pending.to, quote });
+                // A document comment asks about the whole document: the request carries selection: null (#1025).
+                const selection = isDocumentRange(pending) ? null : { from: pending.from, to: pending.to, quote };
+                if (req && typeof id === "string") void postAgentRequest(id, body, req.mode, selection);
               }}
               onCancel={() => {
                 session.setPendingComment(null);
@@ -1789,11 +1941,11 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
                 </span>
               )}
               Select some text and press <kbd className="kbd">⌘/Ctrl</kbd>+<kbd className="kbd">Alt</kbd>+<kbd className="kbd">M</kbd> or use the Comment button.
-              {onAskAgent && session.canComment && (
-                <span className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-ink-3" data-testid="comments-empty-ask-agent">
+              {session.canComment && (
+                <span className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-ink-3" data-testid="comments-empty-agent-line">
                   Agents can review this document too —
-                  <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={onAskAgent} data-testid="comments-empty-ask-agent-button">
-                    <Bot size={13} /> Ask an agent
+                  <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={() => commentOnDocument(true)} data-testid="comments-empty-agent">
+                    <Bot size={13} /> Comment and mention an agent
                   </button>
                 </span>
               )}
