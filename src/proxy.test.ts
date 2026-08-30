@@ -286,7 +286,7 @@ describe("logAuthError", () => {
     logAuthError(authError("UnknownAction", "Cannot parse action at /api/auth"));
     logAuthError(authError("UnknownAction", `Cannot parse action at /api/auth/${"x".repeat(200)}`));
     logAuthError(authError("UnknownAction", "Unsupported action"));
-    expect(warn.mock.calls.map((call) => call[0])).toEqual([
+    expect(warn.mock.calls.map((call: unknown[]) => call[0])).toEqual([
       "[auth] MissingCSRF during signout",
       "[auth] UnknownAction: providers",
       "[auth] UnknownAction: signin/github/extra",
