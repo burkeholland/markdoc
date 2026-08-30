@@ -36,6 +36,7 @@ import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
 import type { ReviewDto } from "@/server/reviews";
+import { TooltipProvider } from "@/components/ui/primitives";
 import { CommentsPanel, isReviewOpen, type CommentsPanelProps } from "./comments-panel";
 
 function reviewDto(id: string, threadIds: string[]): ReviewDto {
@@ -383,7 +384,12 @@ describe("CommentsPanel", () => {
       if (opts.removed) session.comments.ymap.get(threadId)!.delete("anchor");
       const onReveal = vi.fn<CommentsPanelProps["onReveal"]>();
       const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
-      render(<CommentsPanel session={session} onClose={() => {}} onReveal={onReveal} onToast={onToast} />);
+      // The panel lives inside the editor shell's TooltipProvider; the composer's Save / send button carries a tooltip.
+      render(
+        <TooltipProvider>
+          <CommentsPanel session={session} onClose={() => {}} onReveal={onReveal} onToast={onToast} />
+        </TooltipProvider>,
+      );
       return { threadId, onReveal, onToast, card: screen.getByTestId("comment-thread") };
     };
 
