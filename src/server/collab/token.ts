@@ -1,4 +1,4 @@
-import { SignJWT, jwtVerify } from "jose";
+import { SignJWT, errors as joseErrors, jwtVerify } from "jose";
 import type { Role, TokenScope } from "@/server/db/schema";
 
 export interface CollabClaims {
@@ -57,4 +57,18 @@ export async function verifyCollabToken(token: string): Promise<VerifiedCollabCl
     throw new Error("Invalid collaboration token");
   }
   return claims;
+}
+
+/**
+ * The server-log line for a `verifyCollabToken` failure, by cause: an expired JWT (a tab reconnecting
+ * after a release — the common case), a claim mismatch such as the audience, a signature the current
+ * secret does not verify (a token minted elsewhere — the case worth noticing), or anything else.
+ * Never the token, login or document. `JWTExpired` is checked first: in older jose versions it is a
+ * subclass of `JWTClaimValidationFailed`.
+ */
+export function collabTokenFailureMessage(err: unknown): string {
+  if (err instanceof joseErrors.JWTExpired) return "Invalid token (expired)";
+  if (err instanceof joseErrors.JWTClaimValidationFailed) return "Invalid token (claims)";
+  if (err instanceof joseErrors.JWSSignatureVerificationFailed) return "Invalid token (signature)";
+  return "Invalid token";
 }

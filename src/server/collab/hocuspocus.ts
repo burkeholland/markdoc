@@ -9,7 +9,7 @@ import {
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
-import { isVerifiedCollabClaims, verifyCollabToken, type CollabClaims, type VerifiedCollabClaims } from "./token";
+import { collabTokenFailureMessage, isVerifiedCollabClaims, verifyCollabToken, type CollabClaims, type VerifiedCollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
 import { boundTitle } from "@/server/document-title";
@@ -77,8 +77,10 @@ export function createCollabServer() {
       let claims: VerifiedCollabClaims;
       try {
         claims = await verifyCollabToken(token);
-      } catch {
-        throw new Error("Invalid token");
+      } catch (err) {
+        // Hocuspocus logs this message as `[onAuthenticate] …`; the client only ever receives
+        // `permission-denied` (it then fetches a fresh token), so the reason is for the server log alone.
+        throw new Error(collabTokenFailureMessage(err));
       }
       if (claims.docId !== documentName) throw new Error("Token does not match document");
       const current = await resolveStableCollabAccess(claims);

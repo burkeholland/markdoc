@@ -1,9 +1,10 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
+import { SignJWT } from "jose";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import { MarkdocProvider } from "@/editor/collab/provider";
 
@@ -14,7 +15,7 @@ delete process.env.DATABASE_URL;
 const { getDb, schema } = await import("./db");
 const { createCollabServer, hydrateDoc, shutdownCollab, TEXT_KEY } = await import("./collab/hocuspocus");
 const { attachCollab, protectUpgradePath } = await import("./collab/ws");
-const { signCollabToken } = await import("./collab/token");
+const { collabTokenFailureMessage, signCollabToken, verifyCollabToken } = await import("./collab/token");
 const { registerCollab } = await import("./collab/registry");
 const { createDocument, removeCollaborator, updateDocument, upsertCollaborator } = await import("./documents");
 const { changeCollaboratorAccess, changeLinkAccess, collabAccessChangeBlocks } = await import("./collab/authorization");
@@ -158,6 +159,60 @@ describe("collaboration server", () => {
     await waitFor(() => failed2);
     mismatch.provider.destroy();
     mismatch.socket.destroy();
+  });
+
+  describe("token failure reasons in the server log (task #988)", () => {
+    const claims = () => ({ userId, docId, role: "owner" as const, name: "Alice", login: "alice", avatar: null });
+    /** A token shaped like `signCollabToken`'s but signed with `secret` for `audience`. */
+    const mint = (secret: string, audience: string) =>
+      new SignJWT({ ...claims(), version: 2, principal: "user" })
+        .setProtectedHeader({ alg: "HS256" })
+        .setIssuedAt()
+        .setSubject(userId)
+        .setAudience(audience)
+        .setExpirationTime("1h")
+        .sign(new TextEncoder().encode(secret));
+
+    const cases: [kind: string, token: () => Promise<string>, logged: string][] = [
+      ["expired (a tab reconnecting after a release)", () => signCollabToken(claims(), -60), "Invalid token (expired)"],
+      ["claims (wrong audience)", () => mint(process.env.AUTH_SECRET!, "not-markdoc-collab"), "Invalid token (claims)"],
+      ["signature (minted with another secret)", () => mint("another-secret-another-secret-another", "markdoc-collab-v2"), "Invalid token (signature)"],
+      ["other (not a JWT at all)", async () => "not-a-token", "Invalid token"],
+    ];
+
+    it.each(cases)("%s: the log says why, the client still only sees permission-denied", async (_kind, mintToken, logged) => {
+      const token = await mintToken();
+      const failure = await verifyCollabToken(token).then(() => null, (err: unknown) => err);
+      expect(failure).not.toBeNull();
+      expect(collabTokenFailureMessage(failure)).toBe(logged);
+
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const client = connect(token);
+        let reason: string | null = null;
+        client.provider.on("authenticationFailed", ({ reason: r }: { reason: string }) => (reason = r));
+        await waitFor(() => reason !== null);
+        client.provider.destroy();
+        client.socket.destroy();
+        expect(reason).toBe("permission-denied");
+        // Exactly one `[onAuthenticate] …` line (Hocuspocus's own format), carrying the reason and nothing else.
+        expect(error.mock.calls.filter((call) => call[0] === "[onAuthenticate]")).toEqual([["[onAuthenticate]", logged]]);
+        const everything = JSON.stringify(error.mock.calls);
+        expect(everything).not.toContain(token);
+        expect(everything).not.toContain("alice");
+        expect(everything).not.toContain(docId);
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it("a well-signed token that is not a collaboration token is the plain fallback", async () => {
+      const notCollab = await new SignJWT({ userId, role: "owner" }).setProtectedHeader({ alg: "HS256" }).setAudience("markdoc-collab-v2").setExpirationTime("1h").sign(new TextEncoder().encode(process.env.AUTH_SECRET!));
+      const failure = await verifyCollabToken(notCollab).then(() => null, (err: unknown) => err);
+      expect(failure).toBeInstanceOf(Error);
+      expect(collabTokenFailureMessage(failure)).toBe("Invalid token");
+      expect(collabTokenFailureMessage(undefined)).toBe("Invalid token");
+    });
   });
 
   it("owns upgrade routing so collaboration is handled once and HMR reaches Next", async () => {
