@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { ArrowRight, MessageSquare, Sparkles, Users, GitBranch, History, Columns2 } from "lucide-react";
 import { cookies } from "next/headers";
 import { auth, githubConfigured } from "@/auth";
-import { Wordmark } from "@/components/editor/header";
+import { Wordmark } from "@/components/ui/logo";
 import { GitHubIcon } from "@/components/ui/primitives";
 import { Dashboard } from "@/components/dashboard/dashboard";
 import { getGitHubToken, listDocumentsForUser } from "@/server/documents";
