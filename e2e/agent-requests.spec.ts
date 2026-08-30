@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
 
 /**
  * Agent requests from comments (task #1024): mentioning an agent in a comment or reply makes the comment a request.
@@ -75,8 +75,7 @@ test.describe("agent requests from comments", () => {
   let bob: User;
   let carol: User;
   let docId: string;
-  let token: string;
-  let tokenId: string;
+  let minted: MintedToken;
   /** Unique per run so the mention and `claimedBy` are unambiguous even when other suites minted "Copilot CLI" for alice. */
   const agentName = `Copilot CLI ${Date.now().toString(36).slice(-4)}`;
   const slug = agentName.replace(/[^A-Za-z0-9-]+/g, "-");
@@ -86,11 +85,8 @@ test.describe("agent requests from comments", () => {
     alice = await signIn(browser, "alice");
     bob = await signIn(browser, "bob");
     carol = await signIn(browser, "carol");
-    const res = await alice.page.request.post("/api/tokens", { data: { name: agentName, expiresInDays: 1 } });
-    expect(res.ok()).toBeTruthy();
-    const minted = ((await res.json()) as { token: { id: string; token: string } }).token;
-    token = minted.token;
-    tokenId = minted.id;
+    minted = await mintToken(alice.page, agentName, { expiresInDays: 1 });
+    expect(minted.name).toBe(agentName);
     docId = await createDocument(alice.page, DOC, "Requests doc");
     await shareWith(alice.page, docId, "bob", "commenter");
     await shareWith(alice.page, docId, "carol", "editor");
@@ -103,7 +99,8 @@ test.describe("agent requests from comments", () => {
   });
 
   test.afterAll(async () => {
-    if (tokenId) await alice.page.request.delete(`/api/tokens/${tokenId}`);
+    // Before the contexts close, so a worker restart can mint the name again (see mintToken).
+    await minted?.revoke();
     await alice.context.close();
     await bob.context.close();
     await carol.context.close();
@@ -190,7 +187,7 @@ test.describe("agent requests from comments", () => {
     await expect(page.getByTestId("toast").filter({ hasText: "Sent to agents" })).toHaveCount(0);
     expect(notFound()).toBe(0);
 
-    const cli = agent(page, token);
+    const cli = agent(page, minted.token);
     await cli.claim(docId, request.id);
     await expect(chip).toHaveAttribute("data-status", "claimed");
     await expect(chip).toContainText(`${agentName} is working…`);
@@ -295,7 +292,7 @@ test.describe("agent requests from comments", () => {
     const panelWidth = (await carol.page.getByTestId("comments-panel").boundingBox())!.width;
     const cardWidth = (await carolThread.boundingBox())!.width;
     expect(cardWidth).toBeLessThanOrEqual(panelWidth);
-    const cli = agent(alice.page, token);
+    const cli = agent(alice.page, minted.token);
     await cli.claim(docId, open[0].id);
     await cli.complete(docId, open[0].id, "Kept it.");
     await expect(chip).toContainText("Done");

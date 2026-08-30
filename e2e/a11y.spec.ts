@@ -684,30 +684,34 @@ test.describe("axe: editor", () => {
   test("comment composer with the agent mode row, then a thread card carrying the request chip (#1024)", async ({ browser }) => {
     const { page, context, id } = await openEditorFixture(browser, "a11y-editor-requests");
     // One of the user's own tokens: the picker offers it even though it has never been in this document.
-    const tok = await page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 1 } });
-    expect(tok.ok()).toBeTruthy();
-    // Next dev compiles the requests route on its first hit (the shared warm-up does not cover it); take
-    // that hit here so posting the comment below is measured against the 15 s expect budget, not the compile.
-    const warm = await page.request.get(`/api/documents/${id}/requests`, { timeout: 120_000 });
-    expect(warm.ok()).toBeTruthy();
-    await selectTextInRich(page, "Closing words");
-    await page.getByTestId("tb-comment").click();
-    const composer = page.getByTestId("comment-composer");
-    await expect(composer).toBeFocused();
-    await page.keyboard.type("@cop");
-    await expect(page.getByTestId("mention-suggestions").getByTestId("mention-option")).toHaveCount(1);
-    await page.keyboard.press("Enter");
-    await expect(composer).toHaveValue("@a11y-editor-requests/Copilot ");
-    await expect(page.getByTestId("composer-agent-row")).toBeVisible();
-    await expect(page.getByRole("radiogroup", { name: "How should Copilot answer?" })).toBeVisible();
-    await scan(page, "editor + comment composer with the agent mode row");
-    await page.keyboard.type("tighten this");
-    await page.getByTestId("comment-submit").click();
-    const chip = page.getByTestId("comment-thread").getByTestId("comment-request-chip");
-    await expect(chip).toHaveAttribute("data-status", "open");
-    await expect(chip.getByTestId("comment-request-cancel")).toBeVisible();
-    await scan(page, "editor + thread card with a request chip");
-    await context.close();
+    // Revoked in `finally`: a CI retry signs in as the same user again and the name must be free (409 otherwise).
+    const minted = await mintToken(page, "Copilot", { expiresInDays: 1 });
+    try {
+      // Next dev compiles the requests route on its first hit (the shared warm-up does not cover it); take
+      // that hit here so posting the comment below is measured against the 15 s expect budget, not the compile.
+      const warm = await page.request.get(`/api/documents/${id}/requests`, { timeout: 120_000 });
+      expect(warm.ok()).toBeTruthy();
+      await selectTextInRich(page, "Closing words");
+      await page.getByTestId("tb-comment").click();
+      const composer = page.getByTestId("comment-composer");
+      await expect(composer).toBeFocused();
+      await page.keyboard.type("@cop");
+      await expect(page.getByTestId("mention-suggestions").getByTestId("mention-option")).toHaveCount(1);
+      await page.keyboard.press("Enter");
+      await expect(composer).toHaveValue(`@a11y-editor-requests/${minted.name} `);
+      await expect(page.getByTestId("composer-agent-row")).toBeVisible();
+      await expect(page.getByRole("radiogroup", { name: `How should ${minted.name} answer?` })).toBeVisible();
+      await scan(page, "editor + comment composer with the agent mode row");
+      await page.keyboard.type("tighten this");
+      await page.getByTestId("comment-submit").click();
+      const chip = page.getByTestId("comment-thread").getByTestId("comment-request-chip");
+      await expect(chip).toHaveAttribute("data-status", "open");
+      await expect(chip.getByTestId("comment-request-cancel")).toBeVisible();
+      await scan(page, "editor + thread card with a request chip");
+    } finally {
+      await minted.revoke();
+      await context.close();
+    }
   });
 
   test("versions panel in compare mode, activity panel", async ({ browser }) => {
