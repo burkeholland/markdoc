@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -10,10 +10,10 @@ import { agentMentionLogin, mentionTriggerAt } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { ReviewDto } from "@/server/reviews";
-import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
+import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { rovingIndex } from "@/lib/a11y";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, isMac, relativeTime } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
 import "./comments.css";
 
@@ -411,6 +411,18 @@ function useCommentOps(session: CollabSession) {
   );
 }
 
+/** Tallest the composer grows before it scrolls inside: about 16 lines, or 40 % of a short viewport. */
+const COMPOSER_MAX_HEIGHT = 320;
+
+/** Nearest ancestor that scrolls vertically (the comments list). */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const { overflowY } = getComputedStyle(p);
+    if (overflowY === "auto" || overflowY === "scroll") return p;
+  }
+  return null;
+}
+
 function Composer({
   placeholder,
   autoFocus,
@@ -419,6 +431,7 @@ function Composer({
   submitLabel = "Comment",
   initial = "",
   quote,
+  editing = false,
 }: {
   placeholder: string;
   autoFocus?: boolean;
@@ -428,11 +441,12 @@ function Composer({
   initial?: string;
   /** Anchored text; when set, "Suggest a change" (Ctrl+Shift+S) inserts a ```suggestion block pre-filled with it. */
   quote?: string;
+  /** Replacing an existing comment's body (Enter saves, Esc cancels) rather than writing a new one. */
+  editing?: boolean;
 }) {
   const candidates = useContext(MentionCandidatesContext);
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
-  const [focused, setFocused] = useState(false);
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -442,6 +456,39 @@ function Composer({
     const raf = requestAnimationFrame(() => ref.current?.focus());
     return () => cancelAnimationFrame(raf);
   }, [autoFocus]);
+
+  // The box follows its content: from 3 lines (min-h-[64px]) up to the cap, beyond which it scrolls. Measured
+  // from height:auto so it shrinks too, before paint so nothing flashes; the list's scroll position is pinned
+  // because the momentary collapse would otherwise let the scroller clamp it. (`field-sizing: content` would do
+  // this in CSS alone, but Firefox and Safari lack it.)
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const scroller = scrollParent(el);
+    const scrollTop = scroller?.scrollTop ?? 0;
+    const cap = Math.min(COMPOSER_MAX_HEIGHT, window.innerHeight * 0.4);
+    el.style.height = "auto";
+    // scrollHeight leaves out the borders that the border-box height includes; add them so the text fits exactly.
+    const borders = el.offsetHeight - el.clientHeight;
+    el.style.height = `${Math.min(el.scrollHeight + borders, cap)}px`;
+    if (scroller) scroller.scrollTop = scrollTop;
+  }, [value]);
+
+  // The keyboard reference lives in the Save / send button's tooltip (and its accessible description), not under the box.
+  // Each item is held together with no-break spaces so the wrapped tooltip breaks between shortcuts, never inside one.
+  const mod = isMac ? "⌘" : "Ctrl";
+  const shortcuts = [
+    editing ? "Enter saves" : "Enter sends",
+    "Shift+Enter newline",
+    ...(editing ? ["Esc cancels"] : []),
+    `${mod}+B bold`,
+    `${mod}+I italic`,
+    `${mod}+E code`,
+    `${mod}+K link`,
+    "@ mentions",
+  ]
+    .map((item) => item.replaceAll(" ", "\u00a0"))
+    .join(" · ");
 
   /** Insert a suggestion block for the quoted text and select its contents so typing replaces them. */
   const insertSuggestion = () => {
@@ -528,11 +575,7 @@ function Composer({
               syncTrigger(e.target);
             }}
             onSelect={(e) => syncTrigger(e.currentTarget)}
-            onFocus={() => setFocused(true)}
-            onBlur={() => {
-              setFocused(false);
-              setTimeout(() => setTrigger(null), 120);
-            }}
+            onBlur={() => setTimeout(() => setTrigger(null), 120)}
             onKeyDown={(e) => {
               const mod = e.metaKey || e.ctrlKey;
               if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "s" && quote !== undefined) {
@@ -580,8 +623,14 @@ function Composer({
                 e.preventDefault();
                 e.stopPropagation();
                 void submit();
+                return;
               }
-              if (e.key === "Escape" && onCancel) onCancel();
+              // Esc cancels (an edit restores the original body); with the mention popover open it only closed that, above.
+              if (e.key === "Escape" && onCancel) {
+                e.preventDefault();
+                e.stopPropagation();
+                onCancel();
+              }
             }}
             data-testid="comment-composer"
           />
@@ -625,23 +674,8 @@ function Composer({
           </ul>
         </PopoverContent>
       </Popover>
-      {/* Always laid out, so the buttons do not move while focus leaves the textarea (a moving button swallows the click). */}
-      <div className="comment-format-hint" data-visible={focused ? "true" : "false"} aria-hidden data-testid="comment-format-hint">
-        <span>
-          <kbd>Ctrl/⌘ B</kbd> **bold**
-        </span>
-        <span>
-          <kbd>I</kbd> *italic*
-        </span>
-        <span>
-          <kbd>E</kbd> `code`
-        </span>
-        <span>
-          <kbd>K</kbd> [link](url)
-        </span>
-        <span>@mention · Enter sends · Shift+Enter newline</span>
-      </div>
-      {/* One row, single-line labels: below ~21rem of composer width (the 340 px panel) "Suggest a change"
+      {/* Nothing sits between the box and its buttons (Burke, #4138): the shortcuts are in the Save / send button's tooltip.
+          One row, single-line labels: below ~21rem of composer width (the 340 px panel) "Suggest a change"
           is icon-only — the tooltip and aria-label carry the name — so the three buttons never wrap. */}
       <div className="flex flex-wrap items-center justify-end gap-2">
         {quote !== undefined && (
@@ -662,9 +696,22 @@ function Composer({
             Cancel
           </button>
         )}
-        <button type="button" className="btn btn-primary btn-sm whitespace-nowrap" disabled={!value.trim() || busy} onClick={() => void submit()} data-testid="comment-submit">
-          {submitLabel}
-        </button>
+        <Tip label={shortcuts} side="top" wrap testId="composer-shortcuts">
+          {/* aria-description is ARIA 1.3: Chrome, Firefox 119+, Safari 16.4+ and axe-core know it, jsx-a11y's ARIA 1.2 table does not yet. */}
+          {/* eslint-disable-next-line jsx-a11y/role-supports-aria-props */}
+          <button
+            type="button"
+            className="btn btn-primary btn-sm whitespace-nowrap"
+            disabled={!value.trim() || busy}
+            onClick={() => void submit()}
+            // Read after the button's name by screen readers, so keyboard users get the shortcuts without hovering.
+            // (Not aria-label, which would replace "Save"; not title, which would add a second, native tooltip.)
+            aria-description={shortcuts}
+            data-testid="comment-submit"
+          >
+            {submitLabel}
+          </button>
+        </Tip>
       </div>
     </div>
   );
@@ -708,6 +755,7 @@ const ThreadCard = memo(function ThreadCard({
 
   const suggestion = useMemo(() => parseSuggestionBlock(thread.body), [thread.body]);
   const suggestionState = suggestion ? commentSuggestionState(thread, thread.suggestionState, text) : null;
+  const editingRoot = editing === "root" && !thread.suggestionState;
 
   const accept = async (block: SuggestionBlock, reply: CommentReply | null = null) => {
     const ok = await ops.acceptSuggestion(thread.id, block.text, reply?.id);
@@ -770,21 +818,8 @@ const ThreadCard = memo(function ThreadCard({
             </span>
             <EditedMarker at={thread.editedAt} />
           </div>
-          {editing === "root" && !thread.suggestionState ? (
-            <div className="mt-1">
-              <Composer
-                placeholder="Edit comment"
-                initial={thread.body}
-                autoFocus
-                submitLabel="Save"
-                onSubmit={async (body) => {
-                  await ops.edit(thread.id, body);
-                  setEditing(null);
-                }}
-                onCancel={() => setEditing(null)}
-              />
-            </div>
-          ) : (
+          {/* While editing, the composer takes the full card width below this row (see after the row). */}
+          {!editingRoot && (
             <>
               <MentionBody body={thread.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
               {suggestion && suggestionState && (
@@ -850,88 +885,109 @@ const ThreadCard = memo(function ThreadCard({
           )}
         </div>
       </div>
+      {editingRoot && (
+        <div className="mt-1" data-testid="comment-edit">
+          <Composer
+            placeholder="Edit comment"
+            initial={thread.body}
+            autoFocus
+            editing
+            submitLabel="Save"
+            onSubmit={async (body) => {
+              await ops.edit(thread.id, body);
+              setEditing(null);
+            }}
+            onCancel={() => setEditing(null)}
+          />
+        </div>
+      )}
 
       {thread.replies.length > 0 && (
         <div className="mt-3 flex flex-col gap-3 border-l border-line pl-3">
           {thread.replies.map((r) => {
             const block = parseSuggestionBlock(r.body);
             const state = block ? commentSuggestionState(thread, r.suggestionState, text) : null;
+            const editingReply = editing === r.id && !r.suggestionState;
             return (
-              <div key={r.id} className="flex items-start gap-2.5" data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
-                <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-2">
-                    <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
-                    <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
-                      {relativeTime(r.createdAt)}
-                    </span>
-                    <EditedMarker at={r.editedAt} />
-                  </div>
-                  {editing === r.id && !r.suggestionState ? (
-                    <div className="mt-1">
-                      <Composer
-                        placeholder="Edit reply"
-                        initial={r.body}
-                        autoFocus
-                        submitLabel="Save"
-                        onSubmit={async (body) => {
-                          await ops.edit(thread.id, body, r.id);
-                          setEditing(null);
-                        }}
-                        onCancel={() => setEditing(null)}
-                      />
+              <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
+                <div className="flex items-start gap-2.5">
+                  <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-baseline gap-2">
+                      <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
+                      <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
+                        {relativeTime(r.createdAt)}
+                      </span>
+                      <EditedMarker at={r.editedAt} />
                     </div>
-                  ) : (
-                    <>
-                      <MentionBody body={r.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
-                      {block && state && (
-                        <div className="suggestion-box mt-1.5" onClick={(event) => event.stopPropagation()} data-testid="suggestion-box" data-state={state}>
-                          <div className="suggestion-box-head">
-                            <Wand2 size={12} aria-hidden />
-                            <span>Suggested change</span>
-                            {state === "outdated" && (
-                              <span className="suggestion-badge" data-testid="suggestion-outdated" title="The quoted text changed since this was suggested">
-                                Outdated
-                              </span>
-                            )}
-                            {state === "accepted" && <span className="suggestion-badge suggestion-badge-ok">Accepted</span>}
-                            {state === "rejected" && <span className="suggestion-badge">Rejected</span>}
-                            {block.warning && <span className="ml-auto text-[11px] text-ink-4">{block.warning}</span>}
+                    {!editingReply && (
+                      <>
+                        <MentionBody body={r.body} className="mt-0.5 text-[13px] leading-5 text-ink-2" />
+                        {block && state && (
+                          <div className="suggestion-box mt-1.5" onClick={(event) => event.stopPropagation()} data-testid="suggestion-box" data-state={state}>
+                            <div className="suggestion-box-head">
+                              <Wand2 size={12} aria-hidden />
+                              <span>Suggested change</span>
+                              {state === "outdated" && (
+                                <span className="suggestion-badge" data-testid="suggestion-outdated" title="The quoted text changed since this was suggested">
+                                  Outdated
+                                </span>
+                              )}
+                              {state === "accepted" && <span className="suggestion-badge suggestion-badge-ok">Accepted</span>}
+                              {state === "rejected" && <span className="suggestion-badge">Rejected</span>}
+                              {block.warning && <span className="ml-auto text-[11px] text-ink-4">{block.warning}</span>}
+                            </div>
+                            <SuggestionText text={block.text} />
+                            <SuggestionActions
+                              state={state}
+                              canAccept={canEdit}
+                              canReject={canComment}
+                              onAccept={() => accept(block, r)}
+                              onReject={() => ops.rejectSuggestion(thread.id, r.id)}
+                            />
                           </div>
-                          <SuggestionText text={block.text} />
-                          <SuggestionActions
-                            state={state}
-                            canAccept={canEdit}
-                            canReject={canComment}
-                            onAccept={() => accept(block, r)}
-                            onReject={() => ops.rejectSuggestion(thread.id, r.id)}
-                          />
-                        </div>
-                      )}
-                      <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
-                    </>
+                        )}
+                        <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
+                      </>
+                    )}
+                  </div>
+                  {(r.authorId === me || canModerate) && (
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <LazyMenu
+                        align="end"
+                        className="w-36"
+                        trigger={
+                          <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
+                            <MoreHorizontal size={14} />
+                          </button>
+                        }
+                      >
+                        {r.authorId === me && !r.suggestionState && (
+                          <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
+                            Edit
+                          </MenuItem>
+                        )}
+                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
+                          Delete
+                        </MenuItem>
+                      </LazyMenu>
+                    </div>
                   )}
                 </div>
-                {(r.authorId === me || canModerate) && (
-                  <div onClick={(e) => e.stopPropagation()}>
-                    <LazyMenu
-                      align="end"
-                      className="w-36"
-                      trigger={
-                        <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
-                          <MoreHorizontal size={14} />
-                        </button>
-                      }
-                    >
-                      {r.authorId === me && !r.suggestionState && (
-                        <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
-                          Edit
-                        </MenuItem>
-                      )}
-                      <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
-                        Delete
-                      </MenuItem>
-                    </LazyMenu>
+                {editingReply && (
+                  <div className="mt-1" data-testid="comment-edit">
+                    <Composer
+                      placeholder="Edit reply"
+                      initial={r.body}
+                      autoFocus
+                      editing
+                      submitLabel="Save"
+                      onSubmit={async (body) => {
+                        await ops.edit(thread.id, body, r.id);
+                        setEditing(null);
+                      }}
+                      onCancel={() => setEditing(null)}
+                    />
                   </div>
                 )}
               </div>
