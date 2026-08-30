@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, type User } from "./helpers";
+import { signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
 
 /**
  * Comments panel polish (task #994, Burke): no coloured left bars anywhere in the UI, Accept all / Reject all
@@ -91,13 +91,6 @@ async function setPanelWidth(page: Page, width: number) {
   await expect.poll(async () => Math.round((await page.getByTestId("comments-panel").boundingBox())!.width), { message: `panel width ${width}` }).toBe(width);
 }
 
-async function apiToken(page: Page): Promise<string> {
-  // Token names double as @mention names and must be unique per user; a worker restart re-runs beforeAll on the same server.
-  const res = await page.request.post("/api/tokens", { data: { name: `Copilot ${Math.random().toString(36).slice(2, 8)}`, expiresInDays: 1 } });
-  expect(res.status(), await res.text()).toBe(201);
-  return ((await res.json()) as { token: { token: string } }).token.token;
-}
-
 /** Posts an agent review over REST (the same route the MCP server uses). */
 async function postReview(page: Page, token: string, docId: string, review: { summary: string; verdict: "approve" | "request_changes" | "comment"; comments: { quote: string; body: string }[] }) {
   const res = await page.request.post(`/api/documents/${docId}/reviews`, {
@@ -139,13 +132,18 @@ test.describe("comments panel polish: no left bars, one-line buttons, decided re
   test.use({ viewport: { width: 1280, height: 800 } });
   let alice: User;
   let token: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
-    token = await apiToken(alice.page);
+    // Token names double as @mention names and must be unique per user. The toasts only check the "Copilot" prefix,
+    // so a random suffix keeps this file clear of the other alice specs even in a parallel worker; afterAll revokes it.
+    minted = await mintToken(alice.page, `Copilot ${Math.random().toString(36).slice(2, 8)}`, { expiresInDays: 1 });
+    token = minted.token;
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await alice.context.close();
   });
 

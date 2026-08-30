@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { signIn, createDocument, openDocument, selectTextInRich, ensureCommentsOpen, type User } from "./helpers";
+import { signIn, createDocument, openDocument, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
 
 /** Pull the notifications store now instead of waiting for the 30 s poll. */
 const refresh = (page: Page) =>
@@ -39,18 +39,19 @@ test.describe("ask an agent", () => {
   let alice: User;
   let docId: string;
   let token: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
     await alice.page.request.post("/api/notifications/read-all");
-    const res = await alice.page.request.post("/api/tokens", { data: { name: "Copilot CLI", expiresInDays: 30 } });
-    expect(res.ok()).toBeTruthy();
-    token = ((await res.json()) as { token: { token: string } }).token.token;
+    minted = await mintToken(alice.page, "Copilot CLI", { expiresInDays: 30 });
+    token = minted.token;
     docId = await createDocument(alice.page, "# Ask doc\n\nThe quick brown fox jumps over the lazy dog in the garden.\n\nA second paragraph to keep.\n", "Ask doc");
     await openDocument(alice.page, docId);
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await alice.context.close();
   });
 

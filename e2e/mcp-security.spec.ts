@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { expect, test } from "@playwright/test";
-import { signIn, type User } from "./helpers";
+import { mintToken, signIn, type MintedToken, type User } from "./helpers";
 
 const listen = (server: Server) =>
   new Promise<number>((resolve, reject) => {
@@ -16,15 +16,16 @@ const listen = (server: Server) =>
 test.describe("remote MCP callback origin", () => {
   let user: User;
   let token: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     user = await signIn(browser, "mcp-security");
-    const minted = await user.page.request.post("/api/tokens", { data: { name: "MCP security test", expiresInDays: 1 } });
-    expect(minted.ok()).toBeTruthy();
-    token = ((await minted.json()) as { token: { token: string } }).token.token;
+    minted = await mintToken(user.page, "MCP security test", { expiresInDays: 1 });
+    token = minted.token;
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await user.context.close();
   });
 

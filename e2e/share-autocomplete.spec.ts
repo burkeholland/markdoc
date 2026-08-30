@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, budgetMs } from "./helpers";
+import { signIn, createDocument, openDocument, budgetMs, mintToken } from "./helpers";
 
 /**
  * Share dialog · GitHub handle autocomplete (task #920). GitHub is the in-memory fake (GITHUB_MOCK=1),
@@ -59,12 +59,11 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     await anon.close();
 
     // A full-access API token is still not a browser session: 403, and the message says so.
-    const minted = await page.request.post("/api/tokens", { data: { name: "autocomplete probe", scope: "full" } });
-    expect(minted.status()).toBe(201);
-    const { token } = ((await minted.json()) as { token: { token: string } });
-    const asToken = await page.request.get(`${USERS}?q=oc`, { headers: { Authorization: ["Bearer", token.token].join(" ") } });
+    const minted = await mintToken(page, "autocomplete probe", { scope: "full" });
+    const asToken = await page.request.get(`${USERS}?q=oc`, { headers: { Authorization: ["Bearer", minted.token].join(" ") } });
     expect(asToken.status()).toBe(403);
     expect(((await asToken.json()) as { error: string }).error).toContain("browser session");
+    await minted.revoke();
     await owner.context.close();
   });
 

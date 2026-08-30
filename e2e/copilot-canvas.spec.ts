@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createDocument, signIn } from "./helpers";
+import { createDocument, mintToken, signIn, type MintedToken } from "./helpers";
 
 const extensionModule = "../extensions/markdoc/extension-core.mjs";
 
@@ -12,14 +12,12 @@ test("the loopback canvas spends a token handoff and frames the editor without d
   const owner = await signIn(browser, "copilot-canvas-owner");
   const canvasContext = await browser.newContext();
   let canvas: TestCanvas | undefined;
+  let minted: MintedToken | undefined;
   try {
     const { startMarkdocExtension } = await import(extensionModule);
     const documentId = await createDocument(owner.page, "# Canvas\n\nEdit this document with Copilot.\n", "Canvas document");
-    const tokenResponse = await owner.page.request.post("/api/tokens", {
-      data: { name: "Copilot app", scope: "full", documentIds: [documentId] },
-    });
-    expect(tokenResponse.ok()).toBeTruthy();
-    const token = ((await tokenResponse.json()) as { token: { token: string } }).token.token;
+    minted = await mintToken(owner.page, "Copilot app", { scope: "full", documentIds: [documentId] });
+    const token = minted.token;
     const handlers = new Map<string, () => void>();
     await startMarkdocExtension({
       createCanvas: (options: TestCanvas) => {
@@ -103,6 +101,8 @@ test("the loopback canvas spends a token handoff and frames the editor without d
     await expect(popover.getByTestId("keep-agent-here")).toHaveCount(0);
   } finally {
     await canvas?.onClose({ instanceId: "e2e-canvas" });
+    // After the extension has let go of the document: revoking disconnects the token's collab sessions.
+    await minted?.revoke();
     await canvasContext.close();
     await owner.context.close();
   }

@@ -1,6 +1,6 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { codeText, createDocument, openDocument, selectTextInRich } from "./helpers";
+import { codeText, createDocument, mintToken, openDocument, selectTextInRich, type MintedToken } from "./helpers";
 
 /**
  * "Keep an agent here" (#1970, #981): the sentence that puts a person's agent into the watch loop for this
@@ -30,19 +30,20 @@ test.describe("keep an agent here", () => {
   let page: Page;
   let docId: string;
   let token: string;
+  let minted: MintedToken | undefined;
   const title = "Keep-agent doc";
 
   test.beforeAll(async ({ browser }) => {
     context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"], viewport: { width: 1280, height: 800 } });
     page = await signInWithin(context, "keeper");
-    const res = await page.request.post("/api/tokens", { data: { name: "Copilot CLI", expiresInDays: 30 } });
-    expect(res.ok()).toBeTruthy();
-    token = ((await res.json()) as { token: { token: string } }).token.token;
+    minted = await mintToken(page, "Copilot CLI", { expiresInDays: 30 });
+    token = minted.token;
     docId = await createDocument(page, "# Keep-agent doc\n\nA paragraph the agent could tighten.\n", title);
     await openDocument(page, docId);
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await context.close();
   });
 

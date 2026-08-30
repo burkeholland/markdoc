@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, focusRichEnd, selectTextInRich, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, focusRichEnd, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
 
 async function openActivity(page: User["page"]) {
   await page.getByTestId("more-menu").click();
@@ -16,6 +16,7 @@ test.describe("activity panel", () => {
   let alice: User;
   let bob: User;
   let docId: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
@@ -25,6 +26,7 @@ test.describe("activity panel", () => {
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await alice.context.close();
     await bob.context.close();
   });
@@ -89,12 +91,10 @@ test.describe("activity panel", () => {
     await expect.poll(() => bobRows.count()).toBeGreaterThanOrEqual(4);
     await closeActivity(bob.page);
 
-    // An agent acts for Alice through a personal access token.
-    const created = await alice.page.request.post("/api/tokens", { data: { name: "Review Bot" } });
-    expect(created.ok()).toBeTruthy();
-    const { token } = (await created.json()) as { token: { token: string } };
+    // An agent acts for Alice through a personal access token (revoked in afterAll).
+    minted = await mintToken(alice.page, "Review Bot");
     const commented = await alice.page.request.post(`/api/documents/${docId}/comments`, {
-      headers: { Authorization: `Bearer ${token.token}` },
+      headers: { Authorization: ["Bearer", minted.token].join(" ") },
       data: { action: "add", quote: "Activity doc", body: "Consider a more specific title." },
       timeout: 60_000,
     });

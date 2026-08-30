@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, selectTextInRich, type User } from "./helpers";
+import { signIn, createDocument, openDocument, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
 
 interface EventsDto {
   cursor: string;
@@ -36,17 +36,20 @@ test.describe("agent presence and watch", () => {
   let docId: string;
   let busyDocId: string;
   let token: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
-    const res = await alice.page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 30 } });
-    expect(res.ok()).toBeTruthy();
-    token = ((await res.json()) as { token: { token: string } }).token.token;
+    // "Copilot" is asserted on throughout (avatar label, @alice/Copilot, chips, toasts); review-suggestions.spec.ts
+    // uses "Copilot Review" for the same user so the two files can share a run, even in parallel workers.
+    minted = await mintToken(alice.page, "Copilot", { expiresInDays: 30 });
+    token = minted.token;
     docId = await createDocument(alice.page, "# Presence doc\n\nFirst paragraph for the agent to watch.\n\nSecond paragraph.\n", "Presence doc");
     await openDocument(alice.page, docId);
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await alice.context.close();
   });
 

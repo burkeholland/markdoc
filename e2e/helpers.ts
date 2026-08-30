@@ -58,6 +58,46 @@ export async function shareWith(page: Page, docId: string, login: string, role: 
   expect(res.ok()).toBeTruthy();
 }
 
+export interface MintedToken {
+  /** The bearer secret (`mdk_…`); the server shows it once. */
+  token: string;
+  id: string;
+  /** The stored name, as the UI renders it (presence avatar, review card author, `@<login>/<slug>` mention). */
+  name: string;
+  /** `DELETE /api/tokens/<id>`; a 404 (already revoked by the test) is fine. Call it before the context closes. */
+  revoke: () => Promise<void>;
+}
+
+/**
+ * Mints an API token for the signed-in user and revokes it when the caller's group ends. Names are unique
+ * per user (409 otherwise), so every spec gets its own: call `revoke()` from the group's `afterAll` (or at the
+ * end of the test that minted) before `context.close()`, so the next spec that signs in as the same user can
+ * mint the same name again. Playwright runs `afterAll` on a failure-induced worker restart too, so the
+ * re-run `beforeAll` does not 409 either. Two spec files that share a user and a name still collide when
+ * they run in parallel workers (CI runs two): give them distinct names.
+ */
+export async function mintToken(
+  page: Page,
+  name: string,
+  opts: { expiresInDays?: number; scope?: "read" | "comment" | "full"; documentIds?: string[] } = {},
+): Promise<MintedToken> {
+  const res = await page.request.post("/api/tokens", { data: { name, ...opts } });
+  const detail = res.ok() ? "" : ` ${await res.text()}`;
+  expect(res.ok(), `POST /api/tokens name="${name}" -> ${res.status()}${detail}`).toBeTruthy();
+  const { token } = (await res.json()) as { token: { id: string; name: string; token: string } };
+  return {
+    token: token.token,
+    id: token.id,
+    name: token.name,
+    revoke: async () => {
+      const del = await page.request.delete(`/api/tokens/${token.id}`);
+      if (del.status() === 404) return;
+      const why = del.ok() ? "" : ` ${await del.text()}`;
+      expect(del.ok(), `DELETE /api/tokens/${token.id} (${name}) -> ${del.status()}${why}`).toBeTruthy();
+    },
+  };
+}
+
 /** The shared Markdown text (what both panes render), read from the live session. */
 export const codeText = (page: Page) =>
   page.evaluate(() => (window as unknown as { __markdocSession: { ytext: { toString(): string } } }).__markdocSession.ytext.toString());
