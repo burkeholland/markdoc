@@ -2,11 +2,11 @@
 
 import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
-import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
+import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, Hourglass, Loader2, MessageSquare, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { QUICK_REACTIONS, type CommentReply, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
-import { agentMentionLogin, mentionTriggerAt } from "@/editor/collab/mentions";
+import { agentMentionLogin, mentionTriggerAt, parseAgentMentions, splitMentions } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { ReviewDto } from "@/server/reviews";
@@ -15,6 +15,8 @@ import { api } from "@/lib/api";
 import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
+import { QUICK_INSTRUCTIONS } from "./ask-agent-dialog";
+import { describeResult, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
 import "./comments.css";
 
 type Tab = "open" | "resolved" | "suggestions";
@@ -33,6 +35,8 @@ export interface MentionCandidate {
   image: string | null;
   /** Set for agents (API tokens): the login of the user the token acts for. */
   agent?: { ownerLogin: string } | null;
+  /** One of the current user's own tokens that has not been in this document yet (listed so it can still be asked). */
+  own?: boolean;
 }
 
 /** Candidates matching a picker query: login or name prefix; agents also by their slug. Humans first, then agents. */
@@ -47,6 +51,31 @@ export function filterMentionCandidates(candidates: MentionCandidate[], query: s
   const humans = candidates.filter((c) => !c.agent && hit(c));
   const agents = candidates.filter((c) => c.agent && hit(c));
   return [...humans, ...agents].slice(0, max);
+}
+
+/** The agents a body mentions that the picker knows (`@owner/slug` matched case-insensitively), in order of first mention. */
+export function mentionedAgents(body: string, candidates: MentionCandidate[]): MentionCandidate[] {
+  const agents = candidates.filter((c) => c.agent);
+  if (agents.length === 0) return [];
+  const out: MentionCandidate[] = [];
+  for (const m of parseAgentMentions(body)) {
+    const login = `${m.login}/${m.agent}`.toLowerCase();
+    const hit = agents.find((c) => c.login.toLowerCase() === login);
+    if (hit && !out.includes(hit)) out.push(hit);
+  }
+  return out;
+}
+
+/** Offset just past the last `@owner/agent` mention in a body, or -1 when there is none. */
+function lastAgentMentionEnd(body: string): number {
+  let offset = 0;
+  let end = -1;
+  for (const part of splitMentions(body)) {
+    const length = part.type === "mention" ? 1 + part.value.length + (part.agent ? 1 + part.agent.length : 0) : part.value.length;
+    offset += length;
+    if (part.type === "mention" && part.agent) end = offset;
+  }
+  return end;
 }
 
 /** Renders a comment body: inline Markdown plus `@login` chips. A ```suggestion block is lifted out (see SuggestionBox). */
@@ -273,10 +302,16 @@ function ReactionRow({
   );
 }
 
-/** Collaborators and recently active agents of the document, fetched once while the panel is open, merged with who is present. */
-function useMentionCandidates(session: CollabSession): MentionCandidate[] {
+/**
+ * Collaborators and recently active agents of the document, fetched once while the panel is open, merged with who
+ * is present. With `withOwnTokens` (set the first time a composer's `@` picker opens) the user's own API tokens join
+ * the list too, so an agent that has never been in this document can still be asked; one already known through
+ * presence or activity is listed once, as that entry.
+ */
+function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): MentionCandidate[] {
   const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
   const [knownAgents, setKnownAgents] = useState<MentionCandidate[]>([]);
+  const [ownTokens, setOwnTokens] = useState<MentionCandidate[]>([]);
   useEffect(() => {
     let cancelled = false;
     api.documents
@@ -294,6 +329,24 @@ function useMentionCandidates(session: CollabSession): MentionCandidate[] {
       cancelled = true;
     };
   }, [session.docId]);
+  const ownerLogin = session.user.login ?? null;
+  useEffect(() => {
+    if (!withOwnTokens || !ownerLogin) return;
+    let cancelled = false;
+    api.tokens
+      .list()
+      .then((res) => {
+        if (cancelled) return;
+        setOwnTokens(res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin }, own: true })));
+      })
+      .catch((err: unknown) => {
+        // Agents' sessions cannot list tokens (403); the picker simply offers what the document knows.
+        if (!cancelled) console.debug("[comments] own tokens not listed for the mention picker", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [withOwnTokens, ownerLogin]);
   const present = useSessionValue(
     session,
     (s) =>
@@ -312,24 +365,31 @@ function useMentionCandidates(session: CollabSession): MentionCandidate[] {
     const out: MentionCandidate[] = [];
     const me = session.user.login?.toLowerCase();
     // Your own agent stays in the list even though you are not: it is the agent that needs the mention.
-    for (const c of [...present, ...collaborators, ...knownAgents]) {
+    // Own tokens come last so one that is present or recently active keeps its ordinary entry.
+    for (const c of [...present, ...collaborators, ...knownAgents, ...ownTokens]) {
       const key = c.login.toLowerCase();
       if (key === me || seen.has(key)) continue;
       seen.add(key);
       out.push(c);
     }
     return out;
-  }, [present, collaborators, knownAgents, session.user.login]);
+  }, [present, collaborators, knownAgents, ownTokens, session.user.login]);
 }
 
 const MAX_SUGGESTIONS = 6;
+
+interface MentionCandidatesValue {
+  candidates: MentionCandidate[];
+  /** A composer's `@` picker opened: the panel fetches the user's own tokens once (see useMentionCandidates). */
+  onPickerOpen: () => void;
+}
 
 /**
  * Mention candidates reach the composers through context rather than as a ThreadCard prop: the list
  * arrives a moment after the panel opens (collaborators fetch) and would otherwise re-render every
  * memoised card for a value only an open composer reads.
  */
-const MentionCandidatesContext = createContext<MentionCandidate[]>([]);
+const MentionCandidatesContext = createContext<MentionCandidatesValue>({ candidates: [], onPickerOpen: () => {} });
 
 /** Avatar for a comment/suggestion author; agents (API tokens) get a bot badge. */
 function AuthorAvatar({ id, name, src, size }: { id: string; name: string; src?: string | null; size: number }) {
@@ -357,6 +417,8 @@ export interface CommentsPanelProps {
   focusOnMount?: boolean;
   /** Shell toast (Accept suggestion offers Undo). */
   onToast?: (message: string, kind?: "info" | "success" | "error", action?: { label: string; onClick?: () => void }) => void;
+  /** Cancels an open or claimed agent request (the × on a thread card's request chip); the × is hidden when omitted. */
+  onCancelRequest?: (requestId: string) => void;
 }
 
 /** Writes comment changes either to the shared doc (editors) or through the API (commenters). */
@@ -423,6 +485,27 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
   return null;
 }
 
+/** The answer modes an agent can be asked for, in the order the composer row shows them. */
+const REQUEST_MODES: { id: AgentRequestMode; label: string }[] = [
+  { id: "suggest", label: "Tracked changes" },
+  { id: "comment", label: "Comment only" },
+  { id: "rewrite", label: "Rewrite directly" },
+];
+
+/** What a composer that can turn a mention into an agent request needs to know (new-comment and reply composers; not edit). */
+export interface ComposerRequestOptions {
+  /** `session.canEdit`: without it only "Comment only" can be chosen (the server refuses the other modes too). */
+  canEdit: boolean;
+  /** Preselected mode: the thread's latest request mode for a reply, else tracked changes. */
+  defaultMode: AgentRequestMode;
+}
+
+/** A submitted body that mentions a known agent becomes a request in this mode. */
+export interface ComposerRequest {
+  mode: AgentRequestMode;
+  agents: MentionCandidate[];
+}
+
 function Composer({
   placeholder,
   autoFocus,
@@ -432,10 +515,12 @@ function Composer({
   initial = "",
   quote,
   editing = false,
+  request,
 }: {
   placeholder: string;
   autoFocus?: boolean;
-  onSubmit: (body: string) => void | Promise<unknown>;
+  /** `request` is set when the body mentions an agent the picker knows and this composer offers the mode row. */
+  onSubmit: (body: string, request: ComposerRequest | null) => void | Promise<unknown>;
   onCancel?: () => void;
   submitLabel?: string;
   initial?: string;
@@ -443,12 +528,15 @@ function Composer({
   quote?: string;
   /** Replacing an existing comment's body (Enter saves, Esc cancels) rather than writing a new one. */
   editing?: boolean;
+  /** Offer the "How should the agent answer?" row when an agent is mentioned; absent on the edit composer. */
+  request?: ComposerRequestOptions;
 }) {
-  const candidates = useContext(MentionCandidatesContext);
+  const { candidates, onPickerOpen } = useContext(MentionCandidatesContext);
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
+  const [mode, setMode] = useState<AgentRequestMode>(request?.defaultMode ?? "suggest");
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (!autoFocus) return;
@@ -456,6 +544,12 @@ function Composer({
     const raf = requestAnimationFrame(() => ref.current?.focus());
     return () => cancelAnimationFrame(raf);
   }, [autoFocus]);
+  // The user's own tokens join the picker the first time an `@` is typed in any composer (not on panel mount);
+  // a pasted `@login/agent` counts too, so the row can appear for an agent the document has not seen yet.
+  const namesAgent = request !== undefined && parseAgentMentions(value).length > 0;
+  useEffect(() => {
+    if (trigger || namesAgent) onPickerOpen();
+  }, [trigger, namesAgent, onPickerOpen]);
 
   // The box follows its content: from 3 lines (min-h-[64px]) up to the cap, beyond which it scrolls. Measured
   // from height:auto so it shrinks too, before paint so nothing flashes; the list's scroll position is pinned
@@ -524,6 +618,55 @@ function Composer({
   const matches = useMemo(() => (trigger ? filterMentionCandidates(candidates, trigger.query, MAX_SUGGESTIONS) : []), [trigger, candidates]);
   const open = trigger !== null && matches.length > 0;
 
+  // The mode row: only while the body names an agent the picker knows, and only on composers that can post a request.
+  const agents = useMemo(() => (request ? mentionedAgents(value, candidates) : []), [request, value, candidates]);
+  const showRow = request !== undefined && agents.length > 0;
+  const effectiveMode: AgentRequestMode = request && !request.canEdit ? "comment" : mode;
+  const modeDisabled = (id: AgentRequestMode) => id !== "comment" && request !== undefined && !request.canEdit;
+  const rowLabel = agents.length === 1 ? `How should ${agents[0].name} answer?` : "How should the agents answer?";
+
+  /** A quick instruction goes right after the mention; once the body has text past it, at the caret instead. Focus stays in the box. */
+  const insertInstruction = (text: string) => {
+    const el = ref.current;
+    if (!el) return;
+    const mentionEnd = lastAgentMentionEnd(value);
+    let next: string;
+    let pos: number;
+    if (mentionEnd >= 0 && value.slice(mentionEnd).trim() === "") {
+      const head = value.slice(0, mentionEnd).replace(/\s+$/, "");
+      next = `${head} ${text}`;
+      pos = next.length;
+    } else {
+      const caret = el.selectionStart ?? value.length;
+      const before = value.slice(0, caret);
+      const after = value.slice(caret);
+      const lead = before && !/\s$/.test(before) ? " " : "";
+      const trail = after && !/^\s/.test(after) ? " " : "";
+      next = before + lead + text + trail + after;
+      pos = (before + lead + text).length;
+    }
+    setValue(next);
+    setTrigger(null);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
+  };
+
+  /** Arrow keys move through the modes; a disabled mode takes focus (so its tooltip can say why) without being chosen. */
+  const onModeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = event.key === "ArrowUp" ? "ArrowLeft" : event.key === "ArrowDown" ? "ArrowRight" : event.key;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = rovingIndex(key, current, items.length, { orientation: "horizontal", wrap: true });
+    if (next < 0) return;
+    event.preventDefault();
+    items[next]?.focus();
+    const id = REQUEST_MODES[next]?.id;
+    if (id && !modeDisabled(id)) setMode(id);
+  };
+
   /** Re-evaluate whether the caret is in an `@` token. */
   const syncTrigger = useCallback((el: HTMLTextAreaElement) => {
     setHighlight(0);
@@ -554,7 +697,7 @@ function Composer({
     if (!body) return;
     setBusy(true);
     try {
-      await onSubmit(body);
+      await onSubmit(body, showRow ? { mode: effectiveMode, agents } : null);
       setValue("");
       setTrigger(null);
     } finally {
@@ -659,12 +802,13 @@ function Composer({
                 data-testid="mention-option"
                 data-login={c.login}
                 data-agent={c.agent ? "" : undefined}
+                data-own={c.own ? "" : undefined}
               >
                 {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
                 <span className="min-w-0 flex-1 truncate text-[13px]">{c.name}</span>
                 {c.agent ? (
-                  <span className="truncate text-xs text-ink-4" title={`Agent of @${c.agent.ownerLogin}`}>
-                    agent
+                  <span className="truncate text-xs text-ink-4" title={c.own ? "One of your API tokens; it has not been in this document yet" : `Agent of @${c.agent.ownerLogin}`}>
+                    {c.own ? "your agent · not here yet" : "agent"}
                   </span>
                 ) : (
                   <span className="truncate text-xs text-ink-3">@{c.login}</span>
@@ -674,6 +818,52 @@ function Composer({
           </ul>
         </PopoverContent>
       </Popover>
+      {/* Mentioning an agent turns the comment into a request: this row chooses how it answers. Controls only — no
+          hint text under the box (Burke); the question is the group's accessible name. It appears and goes with the
+          mention and never takes focus: typing carries on in the box. */}
+      {showRow && (
+        <div className="composer-agent-row" data-testid="composer-agent-row">
+          <div className="composer-modes" role="radiogroup" aria-label={rowLabel} onKeyDown={onModeKeyDown}>
+            {REQUEST_MODES.map((m) => {
+              const disabled = modeDisabled(m.id);
+              const checked = effectiveMode === m.id;
+              const radio = (
+                <button
+                  key={m.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={checked}
+                  aria-disabled={disabled || undefined}
+                  tabIndex={checked ? 0 : -1}
+                  className="composer-mode"
+                  // Choosing a mode with the pointer must not pull focus out of the textarea (Enter still posts).
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    if (!disabled) setMode(m.id);
+                  }}
+                  data-testid={`composer-mode-${m.id}`}
+                >
+                  {m.label}
+                </button>
+              );
+              return disabled ? (
+                <Tip key={m.id} label="Needs edit access" side="top">
+                  {radio}
+                </Tip>
+              ) : (
+                radio
+              );
+            })}
+          </div>
+          <div className="composer-chips" role="group" aria-label="Quick instructions">
+            {QUICK_INSTRUCTIONS.map((q) => (
+              <button key={q} type="button" className="composer-chip" onMouseDown={(e) => e.preventDefault()} onClick={() => insertInstruction(q)} data-testid="composer-chip">
+                {q}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Nothing sits between the box and its buttons (Burke, #4138): the shortcuts are in the Save / send button's tooltip.
           One row, single-line labels: below ~21rem of composer width (the 340 px panel) "Suggest a change"
           is icon-only — the tooltip and aria-label carry the name — so the three buttons never wrap. */}
@@ -717,6 +907,75 @@ function Composer({
   );
 }
 
+/** How long a "Done: 2 suggestions" chip keeps its detail before collapsing to a plain Done check. */
+const DONE_DETAIL_MS = 60_000;
+
+/** How long an optimistically cancelled request stays hidden before it may come back (the server refused), as the header does (#981). */
+const CANCEL_GRACE_MS = 8_000;
+
+/**
+ * The request a thread carries, as a soft pill in the card header: Waiting for an agent → <agent> is working… →
+ * Done: 2 suggestions (then a plain Done once the detail is a minute old). A cancelled request shows nothing.
+ * The × cancels for the requester or the document owner; it hides at once and comes back only if the server refuses.
+ */
+function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMirror; canCancel: boolean; onCancel?: (requestId: string) => void }) {
+  const [cancelling, setCancelling] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const pending = request.status === "open" || request.status === "claimed";
+  useEffect(() => {
+    if (!cancelling) return;
+    if (!pending) {
+      setCancelling(false);
+      return;
+    }
+    const t = setTimeout(() => setCancelling(false), CANCEL_GRACE_MS);
+    return () => clearTimeout(t);
+  }, [cancelling, pending]);
+  const detailUntil = request.updatedAt + DONE_DETAIL_MS;
+  const showDetail = request.status === "done" && now < detailUntil;
+  useEffect(() => {
+    if (!showDetail) return;
+    const t = setTimeout(() => setNow(Date.now()), Math.max(0, detailUntil - Date.now()) + 50);
+    return () => clearTimeout(t);
+  }, [showDetail, detailUntil]);
+  if (request.status === "cancelled" || cancelling) return null;
+  const label =
+    request.status === "open"
+      ? "Waiting for an agent"
+      : request.status === "claimed"
+        ? `${request.claimedBy ?? "An agent"} is working…`
+        : showDetail
+          ? `Done: ${describeResult(request.result)}`
+          : "Done";
+  return (
+    <span className="request-chip" data-testid="comment-request-chip" data-status={request.status} data-request-id={request.id} onClick={(e) => e.stopPropagation()}>
+      {request.status === "open" ? (
+        <Hourglass size={11} aria-hidden="true" className="shrink-0" />
+      ) : request.status === "claimed" ? (
+        <Loader2 size={11} aria-hidden="true" className="shrink-0 animate-spin" />
+      ) : (
+        <Check size={11} aria-hidden="true" className="shrink-0" />
+      )}
+      <span className="request-chip-label">{label}</span>
+      {pending && canCancel && onCancel && (
+        <button
+          type="button"
+          className="request-chip-cancel"
+          aria-label="Cancel request"
+          title="Cancel request"
+          onClick={() => {
+            setCancelling(true);
+            onCancel(request.id);
+          }}
+          data-testid="comment-request-cancel"
+        >
+          <X size={11} aria-hidden="true" />
+        </button>
+      )}
+    </span>
+  );
+}
+
 const ThreadCard = memo(function ThreadCard({
   thread,
   session,
@@ -726,6 +985,10 @@ const ThreadCard = memo(function ThreadCard({
   ops,
   unread,
   onToast,
+  request,
+  canRequestEdits,
+  onCancelRequest,
+  onRequest,
 }: {
   thread: CommentThread;
   session: CollabSession;
@@ -736,6 +999,13 @@ const ThreadCard = memo(function ThreadCard({
   /** The current user has unread notifications about this thread. */
   unread?: boolean;
   onToast?: CommentsPanelProps["onToast"];
+  /** The latest agent request made from this thread, if any (see useThreadRequests). */
+  request?: AgentRequestMirror | null;
+  /** `session.canEdit`: whether a reply that mentions an agent may ask for tracked changes / a rewrite. */
+  canRequestEdits: boolean;
+  onCancelRequest?: (requestId: string) => void;
+  /** Posts an agent request for a reply that mentioned one (after the reply itself landed). */
+  onRequest?: (threadId: string, body: string, mode: AgentRequestMode) => void;
 }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<string | null>(null); // "root" or reply id
@@ -743,6 +1013,8 @@ const ThreadCard = memo(function ThreadCard({
   const canModerate = session.role === "owner";
   const canComment = session.canComment;
   const canEdit = session.role === "owner" || session.role === "editor";
+  // Same rule as the header's Requests section (#981): the requester or the document owner may cancel.
+  const canCancelRequest = !!onCancelRequest && !!request && (request.userId === me || canModerate);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (active) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -811,12 +1083,13 @@ const ThreadCard = memo(function ThreadCard({
       <div className="flex items-start gap-2.5">
         <AuthorAvatar id={thread.authorId} name={thread.authorName} src={thread.authorAvatar} size={28} />
         <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
             <span className="truncate text-[13px] font-semibold text-ink">{thread.authorName}</span>
             <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
               {relativeTime(thread.createdAt)}
             </span>
             <EditedMarker at={thread.editedAt} />
+            {request && <RequestChip request={request} canCancel={canCancelRequest} onCancel={onCancelRequest} />}
           </div>
           {/* While editing, the composer takes the full card width below this row (see after the row). */}
           {!editingRoot && (
@@ -1004,9 +1277,11 @@ const ThreadCard = memo(function ThreadCard({
               autoFocus
               submitLabel="Reply"
               quote={thread.range ? thread.quote : undefined}
-              onSubmit={async (body) => {
+              request={onRequest ? { canEdit: canRequestEdits, defaultMode: request?.mode ?? "suggest" } : undefined}
+              onSubmit={async (body, req) => {
                 await ops.reply(thread.id, body);
                 setReplying(false);
+                if (req && onRequest) onRequest(thread.id, body, req.mode);
               }}
               onCancel={() => setReplying(false)}
             />
@@ -1266,12 +1541,12 @@ function useReviews(session: CollabSession): ReviewDto[] {
   return reviews;
 }
 
-export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, focusTab, focusOnMount = false, onToast }: CommentsPanelProps) {
+export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAskAgent, onCancelRequest, focusTab, focusOnMount = false, onToast }: CommentsPanelProps) {
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
   const text = useSessionValue(session, (s) => s.ytext.toString());
-  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode } = useSessionValue(
+  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode, canEdit } = useSessionValue(
     session,
     (s) => ({
       suggestions: s.suggestions.list(),
@@ -1280,11 +1555,56 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
       revealSeq: s.revealSeq,
       pending: s.pendingComment,
       mode: s.mode,
+      canEdit: s.canEdit,
     }),
     jsonEqual,
   );
   const ops = useCommentOps(session);
-  const candidates = useMentionCandidates(session);
+  // The user's own tokens join the picker once a picker has opened; most panels never mention anyone.
+  const [withOwnTokens, setWithOwnTokens] = useState(false);
+  const candidates = useMentionCandidates(session, withOwnTokens);
+  const mentionValue = useMemo<MentionCandidatesValue>(() => ({ candidates, onPickerOpen: () => setWithOwnTokens(true) }), [candidates]);
+  const requests = useThreadRequests(session);
+  /**
+   * A comment that mentions an agent is also a request. The comment goes through the shared doc as usual and the
+   * request follows over REST, after the server has that thread: `createRequest` checks `threadId` against the live
+   * doc and answers 404 otherwise, so this waits for the sync ack and retries briefly. A failed request never loses
+   * the comment; the toast says to mention the agent again.
+   */
+  const postAgentRequest = useCallback(
+    async (threadId: string, body: string, mode: AgentRequestMode, selection: { from: number; to: number; quote: string } | null) => {
+      await waitForSynced(session);
+      const payload = {
+        mode,
+        instruction: requestInstruction(body),
+        selection: selection ? { ...selection, quote: selection.quote.slice(0, REQUEST_QUOTE_MAX) } : null,
+        threadId,
+      };
+      const delays = [0, 250, 500, 1000];
+      for (let i = 0; i < delays.length; i++) {
+        if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]));
+        try {
+          await api.documents.createRequest(session.docId, payload);
+          return;
+        } catch (err) {
+          const status = (err as { status?: unknown }).status;
+          if (status === 404 && i < delays.length - 1) continue;
+          console.debug("[comments] agent request not posted", err);
+          onToast?.("The comment is posted, but the request did not reach the agent — mention them again.", "error");
+          return;
+        }
+      }
+    },
+    [session, onToast],
+  );
+  const requestFromThread = useCallback(
+    (threadId: string, body: string, mode: AgentRequestMode) => {
+      const thread = session.comments.list().find((t) => t.id === threadId);
+      const selection = thread?.range ? { from: thread.range.from, to: thread.range.to, quote: thread.quote } : null;
+      void postAgentRequest(threadId, body, mode, selection);
+    },
+    [session, postAgentRequest],
+  );
   const reviews = useReviews(session);
   const unreadRefs = useUnreadRefs(session.docId);
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
@@ -1390,7 +1710,7 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
   };
 
   return (
-    <MentionCandidatesContext.Provider value={candidates}>
+    <MentionCandidatesContext.Provider value={mentionValue}>
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="comments-panel">
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Comments</span>
@@ -1442,11 +1762,14 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
               placeholder="Add a comment… (⌘/Ctrl+Enter to post)"
               autoFocus
               quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
-              onSubmit={async (body) => {
+              request={{ canEdit, defaultMode: "suggest" }}
+              onSubmit={async (body, req) => {
+                const quote = session.ytext.toString().slice(pending.from, pending.to);
                 const id = await ops.add(pending.from, pending.to, body);
                 session.setPendingComment(null);
                 if (typeof id === "string") session.setActiveComment(id);
                 onPendingDone?.();
+                if (req && typeof id === "string") void postAgentRequest(id, body, req.mode, { from: pending.from, to: pending.to, quote });
               }}
               onCancel={() => {
                 session.setPendingComment(null);
@@ -1476,7 +1799,23 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
               )}
             </EmptyState>
           ) : (
-            open.map((t) => <ThreadCard key={t.id} thread={t} session={session} text={text} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
+            open.map((t) => (
+              <ThreadCard
+                key={t.id}
+                thread={t}
+                session={session}
+                text={text}
+                active={t.id === activeCommentId}
+                unread={hasUnread(t)}
+                onReveal={onReveal}
+                ops={ops}
+                onToast={onToast}
+                request={requests[t.id] ?? null}
+                canRequestEdits={canEdit}
+                onCancelRequest={onCancelRequest}
+                onRequest={requestFromThread}
+              />
+            ))
           ))}
         {tab === "resolved" && resolvedReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
@@ -1489,7 +1828,23 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
           (resolved.length === 0 && resolvedReviews.length === 0 ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
-            resolved.map((t) => <ThreadCard key={t.id} thread={t} session={session} text={text} active={t.id === activeCommentId} unread={hasUnread(t)} onReveal={onReveal} ops={ops} onToast={onToast} />)
+            resolved.map((t) => (
+              <ThreadCard
+                key={t.id}
+                thread={t}
+                session={session}
+                text={text}
+                active={t.id === activeCommentId}
+                unread={hasUnread(t)}
+                onReveal={onReveal}
+                ops={ops}
+                onToast={onToast}
+                request={requests[t.id] ?? null}
+                canRequestEdits={canEdit}
+                onCancelRequest={onCancelRequest}
+                onRequest={requestFromThread}
+              />
+            ))
           ))}
         {tab === "suggestions" &&
           (suggestionCount === 0 ? (
@@ -1528,6 +1883,10 @@ export function CommentsPanel({ session, onClose, onReveal, onPendingDone, onAsk
                   onReveal={onReveal}
                   ops={ops}
                   onToast={onToast}
+                  request={requests[thread.id] ?? null}
+                  canRequestEdits={canEdit}
+                  onCancelRequest={onCancelRequest}
+                  onRequest={requestFromThread}
                 />
               ))}
             </>
