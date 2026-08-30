@@ -101,7 +101,7 @@ export interface AgentConnectCardProps {
 
 /**
  * "Connect an agent" in three steps: a token, the MCP config for this host, and the sentence to say to
- * Copilot. Used by the Ask-an-agent dialog (first run) and the Settings › Agents section.
+ * Copilot. Used by the Keep-an-agent-here dialog (first run) and the Settings › Agents section.
  */
 export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
   const base = origin || "http://localhost:3000";

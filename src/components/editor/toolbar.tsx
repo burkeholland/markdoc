@@ -20,7 +20,6 @@ import {
   Strikethrough,
   SquareCode,
   MessageSquarePlus,
-  Bot,
 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
@@ -89,7 +88,6 @@ export const Toolbar = memo(function Toolbar({
   actions,
   format,
   onComment,
-  onAskAgent,
   onImage,
   onTable,
 }: {
@@ -97,7 +95,6 @@ export const Toolbar = memo(function Toolbar({
   actions: EditorActions;
   format: FormatState;
   onComment: () => void;
-  onAskAgent?: () => void;
   onImage: () => void;
   onTable: () => void;
 }) {
@@ -265,20 +262,6 @@ export const Toolbar = memo(function Toolbar({
           >
             <MessageSquarePlus size={16} />
             Comment
-          </button>
-        </Tip>
-      )}
-      {canComment && onAskAgent && (
-        <Tip label="Ask an agent to work on the selection or the whole document">
-          <button
-            type="button"
-            className={cn("btn btn-sm gap-1.5", format.hasSelection ? "btn-outline text-ink" : "btn-ghost text-ink-3")}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={onAskAgent}
-            data-testid="ask-agent-button"
-          >
-            <Bot size={16} />
-            Ask an agent
           </button>
         </Tip>
       )}

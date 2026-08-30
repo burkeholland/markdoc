@@ -58,7 +58,7 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs 
     {
       id: "try",
       label: "Try “read my doc”",
-      detail: <>Ask Copilot to read one of your documents, or send a request from the editor (Ask an agent). Turns green after the first tool call or request.</>,
+      detail: <>Ask Copilot to read one of your documents, or send a request from the editor (mention it in a comment). Turns green after the first tool call or request.</>,
       done: state.mcpCalled || hasAgentRequests,
     },
   ];

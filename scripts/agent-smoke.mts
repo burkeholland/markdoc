@@ -14,6 +14,8 @@ await page.goto(`${base}/settings`);
 await page.waitForResponse((r) => r.url().endsWith("/api/tokens") && r.request().method() === "GET");
 await page.waitForTimeout(300);
 await page.getByTestId("token-name").fill("Smoke agent");
+// Tokens default to the comment scope; the smoke creates documents, so it needs a full-access token.
+await page.getByTestId("token-scope-full").check();
 await page.getByTestId("token-create").click();
 await page.getByTestId("token-created").waitFor();
 const token = (await page.getByTestId("copy-token").innerText()).trim();
@@ -39,8 +41,13 @@ await page.goto(`${base}/d/${id}`);
 await page.waitForSelector('[data-testid="save-state"][data-state="saved"]', { timeout: 30000 });
 await call("PUT", `/api/documents/${id}/content`, { content: "# Draft\n\nSecond version by the agent.\n\n## Next steps\n\n- Review\n", message: "Agent revision" });
 await expect(page.locator(".md-rich")).toContainText("Second version by the agent.");
-await expect(page.getByTestId("agent-activity")).toContainText("Smoke agent");
-console.log("live replace visible in the browser, bot chip shown");
+// The header chip became presence: an agent that announces itself is an avatar in the stack, busy while its
+// last edit is fresh.
+await call("POST", `/api/agent/documents/${id}/presence`, { state: "active", status: "editing" });
+const agentAvatar = page.getByTestId("presence").locator('[data-testid="presence-avatar"][data-agent]');
+await expect(agentAvatar).toHaveCount(1);
+await expect(agentAvatar.getByTestId("presence-avatar-busy")).toHaveAttribute("aria-label", "Smoke agent is working");
+console.log("live replace visible in the browser, agent avatar in the presence stack (busy)");
 
 console.log("== append");
 await call("PATCH", `/api/documents/${id}/content`, { append: "- Ship" });
@@ -77,27 +84,43 @@ const versions = await call("GET", `/api/documents/${id}/versions`);
 console.log("versions:", versions.versions.map((v: { kind: string; title: string | null; createdByName: string | null }) => `${v.kind}:${v.title} (${v.createdByName})`));
 expect(versions.versions.some((v: { title: string | null }) => v.title === "Agent revision")).toBe(true);
 
-console.log("== ask an agent: request loop (UI route → token inbox → claim → suggest with requestId → complete)");
-// The human asks from the document (session cookie); the agent answers through the token.
+console.log("== request from a comment (mention → request with threadId → token inbox → claim → suggest with requestId → complete)");
+// The human asks from the document (session cookie) the way the editor does: a comment that @-mentions the agent,
+// then the request bound to that thread. The agent answers through the token.
+const handle = `@${me.user.login}/${me.agentMention.slug}`;
+const askComment = await page.request.post(`${base}/api/documents/${id}/comments`, {
+  data: { action: "add", quote: "# Draft", body: `${handle} Tighten this` },
+});
+expect(askComment.status()).toBe(200);
+const askThread = ((await askComment.json()) as { id: string }).id;
 const askRes = await page.request.post(`${base}/api/documents/${id}/requests`, {
-  data: { instruction: "Tighten this", mode: "suggest", selection: { from: 0, to: 7, quote: "# Draft" } },
+  data: { instruction: "Tighten this", mode: "suggest", selection: { from: 0, to: 7, quote: "# Draft" }, threadId: askThread },
 });
 expect(askRes.status()).toBe(201);
-const ask = ((await askRes.json()) as { request: { id: string; status: string } }).request;
+const ask = ((await askRes.json()) as { request: { id: string; status: string; threadId: string | null } }).request;
 expect(ask.status).toBe("open");
-await expect(page.getByTestId("agent-requests-pill")).toContainText("1 request waiting");
+expect(ask.threadId).toBe(askThread);
+// The request lives on the comment: the thread's chip is the only status surface (the header pill is gone).
+await page.getByTestId("comments-tab-open").click();
+const chip = page.getByTestId("comment-thread").filter({ hasText: "Tighten this" }).getByTestId("comment-request-chip");
+await expect(chip).toHaveAttribute("data-status", "open");
+await expect(chip).toContainText("Waiting for an agent");
 const inbox = await call("GET", "/api/agent/requests?status=open");
 expect(inbox.agent).toBe("Smoke agent");
-expect(inbox.requests.some((r: { id: string }) => r.id === ask.id)).toBe(true);
+const inboxItem = inbox.requests.find((r: { id: string }) => r.id === ask.id) as { threadId: string | null } | undefined;
+expect(inboxItem?.threadId).toBe(askThread);
 await call("POST", `/api/documents/${id}/requests/${ask.id}/claim`);
-await expect(page.getByTestId("agent-requests-pill")).toContainText("Smoke agent is working");
+await expect(chip).toHaveAttribute("data-status", "claimed");
+await expect(chip).toContainText("Smoke agent is working");
 const linked = await call("POST", `/api/documents/${id}/suggest`, { edits: [{ find: "# Draft", replace: "# Launch draft" }], requestId: ask.id });
 expect(linked.suggestions).toBeGreaterThan(0);
 const doneReq = await call("POST", `/api/documents/${id}/requests/${ask.id}/complete`, { summary: "Sharper title." });
 expect(doneReq.request.status).toBe("done");
 expect(doneReq.request.result.suggestions).toBe(linked.suggestions);
-await expect(page.getByTestId("agent-requests-pill")).toHaveCount(0);
 await expect(page.getByTestId("toast").filter({ hasText: "Smoke agent finished" })).toBeVisible();
+// The done toast moves the panel to Suggestions; the thread keeps a done chip on the Open tab.
+await page.getByTestId("comments-tab-open").click();
+await expect(chip).toHaveAttribute("data-status", "done");
 const notes = await page.request.get(`${base}/api/notifications?unread=1`);
 const noteItems = ((await notes.json()) as { items: { kind: string; refId: string }[] }).items;
 expect(noteItems.some((n) => n.kind === "request.done" && n.refId === ask.id)).toBe(true);

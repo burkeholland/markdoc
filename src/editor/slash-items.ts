@@ -83,7 +83,8 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
   {
     id: "comment",
     title: "Comment",
-    keywords: ["note", "review", "annotate"],
+    // `agent`, `ask`, `copilot`, `ai`: mentioning an agent in a comment is how you ask one for work (#1075).
+    keywords: ["note", "review", "annotate", "agent", "ask", "copilot", "ai"],
     icon: "MessageSquarePlus",
     group: "Insert",
     available: (w) => w.canComment,

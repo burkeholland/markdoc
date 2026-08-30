@@ -132,7 +132,7 @@ export interface AgentRequestDto {
   userId: string;
   instruction: string;
   selection: { from: number; to: number; quote: string } | null;
-  /** Comment thread the request was made from; null for requests from the Ask-an-agent dialog. */
+  /** Comment thread the request was made from (the composer always sets it); null for requests posted through the API without one. */
   threadId: string | null;
   mode: "suggest" | "comment" | "rewrite";
   status: "open" | "claimed" | "done" | "cancelled";

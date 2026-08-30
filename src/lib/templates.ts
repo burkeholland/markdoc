@@ -382,7 +382,7 @@ Markdoc is built so people *and* agents can work on the same document. GitHub Co
 
 **Try it:** Open **Share → Collaborate with an agent** to let Copilot CLI join.
 
-Once it is connected, select a sentence and use **Ask an agent** in the toolbar, or @-mention Copilot in a comment.
+Once it is connected, select a sentence, press **Comment** and @-mention Copilot in the comment: that is the request, and the answer lands in the thread.
 
 ## Your first three tasks
 

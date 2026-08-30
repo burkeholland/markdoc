@@ -153,7 +153,7 @@ export const DialogPrimitiveContent = RadixDialog.Content;
  * committed yet at that point: the element that opened the dialog still exists and still has focus — the
  * ⋮ menu item about to unmount (resolved to its trigger), the toolbar button, the editor pane. Capturing it
  * in `onOpenAutoFocus` does not work: Radix skips that event when a child's `autoFocus` already put focus
- * inside the content (Image, Link, Name this version, Ask an agent), and by the time any effect runs a menu
+ * inside the content (Image, Link, Name this version), and by the time any effect runs a menu
  * that opened the dialog is gone and `document.activeElement` is <body> (issue #161).
  */
 function RememberOpener({ targetRef }: { targetRef: React.RefObject<HTMLElement | null> }) {

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, ExternalLink, Radio } from "lucide-react";
-import { Dialog, DialogContent, Popover, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
+import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
@@ -31,7 +31,7 @@ function readDismissed(): boolean {
   }
 }
 
-/** The user has at least one API token (null while unknown). Same gate as the Ask-an-agent dialog. */
+/** The user has at least one API token (null while unknown). Same gate as the comment composer's agent row. */
 function useHasTokens(active: boolean): boolean | null {
   const [hasTokens, setHasTokens] = useState<boolean | null>(null);
   useEffect(() => {
@@ -128,26 +128,6 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, 
         Agent docs <span aria-hidden="true">·</span> Sit in a document <ExternalLink size={13} aria-hidden="true" />
       </a>
     </div>
-  );
-}
-
-export interface KeepAgentHerePopoverProps {
-  doc: { id: string; title: string };
-  onCreateToken?: () => void;
-  /** The trigger (rendered with `asChild`). */
-  children: React.ReactNode;
-}
-
-/** A popover anchored to its trigger with the {@link KeepAgentHerePanel} inside (the Ask-an-agent dialog footer). */
-export function KeepAgentHerePopover({ doc, onCreateToken, children }: KeepAgentHerePopoverProps) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent align="start" side="top" className="w-[min(94vw,440px)]" aria-label="Keep an agent here" data-testid="keep-agent-popover">
-        <KeepAgentHerePanel doc={doc} onCreateToken={onCreateToken} active={open} />
-      </PopoverContent>
-    </Popover>
   );
 }
 
