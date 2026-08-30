@@ -158,6 +158,8 @@ test.describe("keep an agent here", () => {
     await expect(item).toBeVisible();
     await expect(item).toContainText("Keep an agent here");
     await expect(item).toContainText("Get the exact sentence that keeps an agent in this document");
+    // The taller row is fully shown, not clipped by the menu's computed height.
+    await expect(item.getByText("Get the exact sentence that keeps an agent in this document")).toBeInViewport({ ratio: 1 });
     await expect(item).toHaveAttribute("aria-selected", "true");
     await expect(menu.getByRole("option")).toHaveCount(1);
     await page.screenshot({ path: "test-results/keep-agent-here-slash.png" });

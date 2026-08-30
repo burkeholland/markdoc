@@ -18,6 +18,8 @@ const MENU_WIDTH = 288;
 const ROW_HEIGHT = 36;
 /** Rows with a description line (the `/agent` item). */
 const ROW_HEIGHT_TALL = 52;
+/** The "Insert" / "Blocks" group caption above each group's rows (pt-1.5 + 16 px line + pb-0.5). */
+const GROUP_HEADER_HEIGHT = 24;
 const MAX_VISIBLE = 8;
 const MENU_MAX_HEIGHT = ROW_HEIGHT * MAX_VISIBLE + 8;
 
@@ -169,7 +171,9 @@ export function SlashMenu({
       return;
     }
     const host = container.getBoundingClientRect();
-    const listHeight = items.reduce((h, item) => h + rowHeight(item), 0);
+    // Rows plus one caption per group shown; short lists used to be cut off because the captions were not counted.
+    const groupsShown = new Set(items.map((item) => item.group)).size;
+    const listHeight = groupsShown * GROUP_HEADER_HEIGHT + items.reduce((h, item) => h + rowHeight(item), 0);
     const height = Math.min(MENU_MAX_HEIGHT, Math.max(ROW_HEIGHT, listHeight) + 8);
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     const below = state.coords.bottom + 6 + height <= viewport.height - 8;
