@@ -369,4 +369,76 @@ describe("CommentsPanel", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Resolved/ }));
     await waitFor(() => expect(screen.getAllByTestId("review-card")).toHaveLength(1));
   });
+
+  describe("card reveal (#992)", () => {
+    const mount = (opts: { removed?: boolean } = {}) => {
+      // jsdom has no scrollIntoView; the active card scrolls itself into view with it.
+      Element.prototype.scrollIntoView ??= () => {};
+      const user = makeCollabUser("alice", "Alice");
+      session = new CollabSession({ docId: "doc", user, role: "owner", getToken: async () => "token", autoConnect: false });
+      session.keepAlive();
+      session.ytext.insert(0, "Intro text. The quick brown fox jumps.");
+      const threadId = session.comments.add({ from: 16, to: 27, body: "See [the docs](https://example.com) first.", author: user });
+      // A thread whose Y.Map lost its anchor is what the UI renders as "(original text removed)".
+      if (opts.removed) session.comments.ymap.get(threadId)!.delete("anchor");
+      const onReveal = vi.fn<CommentsPanelProps["onReveal"]>();
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={onReveal} onToast={onToast} />);
+      return { threadId, onReveal, onToast, card: screen.getByTestId("comment-thread") };
+    };
+
+    it("reveals the commented text and activates the thread when the card is clicked", () => {
+      const { threadId, onReveal, onToast, card } = mount();
+      expect(card).toHaveAttribute("tabindex", "0");
+      expect(card).toHaveAccessibleName("Comment by Alice");
+      fireEvent.click(card);
+      expect(onReveal).toHaveBeenCalledWith(16);
+      expect(session!.activeCommentId).toBe(threadId);
+      expect(onToast).not.toHaveBeenCalled();
+    });
+
+    it("reveals from the quote line and the body, but not from controls inside the card", () => {
+      const { onReveal, card } = mount();
+      fireEvent.click(screen.getByTitle("quick brown"));
+      expect(onReveal).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByText("See", { exact: false }));
+      expect(onReveal).toHaveBeenCalledTimes(2);
+      const link = card.querySelector("a")!;
+      expect(link).toHaveAttribute("href", "https://example.com");
+      fireEvent.click(link);
+      fireEvent.click(screen.getByTestId("comment-reply"));
+      expect(onReveal).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(["{Enter}", " "])("reveals when %j is pressed on a focused card", async (key) => {
+      const { threadId, onReveal, card } = mount();
+      card.focus();
+      expect(card).toHaveFocus();
+      await userEvent.setup().keyboard(key);
+      expect(onReveal).toHaveBeenCalledWith(16);
+      expect(session!.activeCommentId).toBe(threadId);
+    });
+
+    it("keeps Enter and Space for controls inside the card", async () => {
+      const { onReveal } = mount();
+      const reply = screen.getByTestId("comment-reply");
+      reply.focus();
+      await userEvent.setup().keyboard("{Enter}");
+      expect(screen.getByTestId("comment-submit")).toBeInTheDocument();
+      expect(onReveal).not.toHaveBeenCalled();
+    });
+
+    it("activates a thread whose text was removed and says why nothing moved", () => {
+      const { threadId, onReveal, onToast, card } = mount({ removed: true });
+      expect(card).toHaveTextContent("(original text removed)");
+      fireEvent.click(card);
+      expect(onReveal).not.toHaveBeenCalled();
+      expect(session!.activeCommentId).toBe(threadId);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      const [message, kind] = onToast.mock.calls[0];
+      expect(message).toMatch(/removed/i);
+      expect(message.length).toBeLessThanOrEqual(60);
+      expect(kind).toBe("info");
+    });
+  });
 });

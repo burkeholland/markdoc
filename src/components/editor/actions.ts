@@ -350,6 +350,13 @@ export class EditorActions {
     this.richScroller = el;
   }
 
+  /** Whether scroll sync is mirroring the two panes onto each other (both shown, toggle on). */
+  private scrollSynced = false;
+
+  setScrollSynced(on: boolean) {
+    this.scrollSynced = on;
+  }
+
   /** Scroll a source range into view in every mounted pane without changing the selection. */
   revealSourceRange(range: { from: number; to: number }) {
     if (this.code) {
@@ -432,39 +439,46 @@ export class EditorActions {
       const pos = Math.min(view.state.doc.content.size, Math.max(0, map.srcToPm(offset)));
       const scroller = this.richScroller ?? view.dom.parentElement?.parentElement ?? null;
       if (!scroller) return;
-      let coords: { top: number; bottom: number };
-      try {
-        coords = view.coordsAtPos(pos);
-      } catch {
-        return;
-      }
-      const box = scroller.getBoundingClientRect();
-      if (box.height === 0) return;
-      const top = coords.top - box.top;
-      const height = coords.bottom - coords.top;
-      if (!withinMiddle(top, height, box.height)) {
-        scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + top + height / 2 - box.height / 2), behavior });
-      }
+      const top = this.richCentreTop(view, scroller, pos);
+      if (top !== null) scroller.scrollTo({ top, behavior });
     }
   }
 
   /**
-   * Scroll both panes to a source offset and place the caret there in the active surface. Both panes
-   * centre the target: with scroll sync on, each pane's programmatic scroll is mirrored onto the other
-   * (cancelling any smooth scroll in flight), so the two must agree on where the target ends up or the
-   * caret lands on the edge of whichever pane the last sync step mirrored.
+   * Scroll the visible pane(s) to a source offset so it sits in the middle of the viewport, and place
+   * the caret there in the active surface (comment cards, outline, lint issues). The rich pane is
+   * scrolled by measuring the target and moving its own scroller: with scroll sync on and both panes
+   * shown only the active surface scrolls itself (the sync mirrors the other), so the sync's mirror
+   * can no longer cancel the glide and strand the target at the pane's edge. The glide is capped to
+   * one viewport and verified once it settles, so a long document still lands in well under a second.
    */
   revealSource(offset: number, opts: { focus?: boolean } = {}) {
+    this.cancelRevealWatch();
+    const code = this.code;
+    const rich = this.rich && this.rich.dom.isConnected ? this.rich : null;
+    const richScroller = rich ? this.richScroller ?? rich.dom.parentElement?.parentElement ?? null : null;
+    const codeVisible = !!code && code.scrollDOM.getBoundingClientRect().height > 0;
+    // An unknown scroller cannot be measured; treat the pane as visible and fall back to scrollIntoView.
+    const richVisible = !!rich && (!richScroller || richScroller.getBoundingClientRect().height > 0);
+    let scrollCode = codeVisible;
+    let scrollRich = richVisible;
+    if (this.scrollSynced && codeVisible && richVisible) {
+      if (this.surface === "code") scrollRich = false;
+      else scrollCode = false;
+    }
+    // Focus the active surface when shown, otherwise whichever pane is; a hidden pane cannot take focus.
+    const focusCode = !!opts.focus && codeVisible && (this.surface === "code" || !richVisible);
+    const focusRich = !!opts.focus && !focusCode && richVisible;
     // Focus before dispatching: both panes only report selection changes while focused, and the
     // outline's active heading follows that report.
-    if (this.code) {
-      const pos = Math.min(offset, this.code.state.doc.length);
-      if (opts.focus && this.surface === "code") this.code.focus();
-      this.code.dispatch({ selection: { anchor: pos }, effects: CMView.scrollIntoView(pos, { y: "center" }) });
+    if (code) {
+      const pos = Math.min(offset, code.state.doc.length);
+      if (focusCode) code.focus();
+      code.dispatch({ selection: { anchor: pos }, effects: scrollCode ? CMView.scrollIntoView(pos, { y: "center" }) : [] });
     }
-    if (this.rich) {
+    if (rich) {
       const map = this.session.binding.getSourceMap();
-      const doc = this.rich.state.doc;
+      const doc = rich.state.doc;
       // Offsets at a block start (outline headings, lint issues) sit in Markdown syntax, where
       // srcToPm snaps to the previous block's end; resolve them to the block itself instead.
       const blockIdx = map.blocks.findIndex((b) => b.from === offset && !b.phantom);
@@ -476,16 +490,103 @@ export class EditorActions {
         pos = Math.min(doc.content.size, Math.max(0, map.srcToPm(offset)));
       }
       const sel = TextSelection.near(doc.resolve(pos), 1);
-      if (opts.focus && this.surface === "rich") this.rich.focus();
-      // No tr.scrollIntoView(): its "nearest" scroll would leave the caret on the pane's edge, and
-      // the centring below is what should win when scroll sync mirrors the panes onto each other.
-      this.rich.dispatch(this.rich.state.tr.setSelection(sel));
-      const dom = this.rich.domAtPos(sel.head);
-      const el = (dom.node instanceof HTMLElement ? dom.node : dom.node.parentElement) as HTMLElement | null;
-      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+      if (focusRich) rich.focus();
+      // No tr.scrollIntoView(): its "nearest" scroll would leave the caret on the pane's edge.
+      rich.dispatch(rich.state.tr.setSelection(sel));
+      if (!scrollRich) return;
+      if (richScroller) {
+        this.centreRich(rich, richScroller, sel.head);
+      } else {
+        const dom = rich.domAtPos(sel.head);
+        const el = (dom.node instanceof HTMLElement ? dom.node : dom.node.parentElement) as HTMLElement | null;
+        el?.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
     }
   }
+
+  /**
+   * scrollTop that puts a rich position in the middle of its scroller, or null when the position
+   * already sits in the middle 60 % of the viewport (or cannot be measured, e.g. the pane is hidden).
+   */
+  private richCentreTop(view: PMView, scroller: HTMLElement, pos: number): number | null {
+    let coords: { top: number; bottom: number };
+    try {
+      coords = view.coordsAtPos(Math.min(pos, view.state.doc.content.size));
+    } catch {
+      return null;
+    }
+    const box = scroller.getBoundingClientRect();
+    if (box.height === 0) return null;
+    const top = coords.top - box.top;
+    const height = coords.bottom - coords.top;
+    if (withinMiddle(top, height, box.height)) return null;
+    return Math.max(0, scroller.scrollTop + top + height / 2 - box.height / 2);
+  }
+
+  /** Smooth-scroll the rich pane so `pos` is centred, jumping first when it is more than a viewport away. */
+  private centreRich(view: PMView, scroller: HTMLElement, pos: number) {
+    const top = this.richCentreTop(view, scroller, pos);
+    if (top === null) return;
+    // Chromium's smooth scroll takes ~sqrt(px)/60 s with a slow ease-in (1.6 s for 9 000 px, of which
+    // the first 200 ms barely move), which reads as "nothing happened" on a long document. Jump to
+    // within one viewport of the target and glide the rest: the eye still sees the direction.
+    const cap = scroller.clientHeight;
+    const from = scroller.scrollTop;
+    if (Math.abs(top - from) > cap) scroller.scrollTop = top + (from < top ? -cap : cap);
+    scroller.scrollTo({ top, behavior: "smooth" });
+    this.watchRichReveal(view, scroller, pos);
+  }
+
+  private revealWatch: (() => void) | null = null;
+
+  private cancelRevealWatch() {
+    this.revealWatch?.();
+    this.revealWatch = null;
+  }
+
+  /**
+   * Once the smooth scroll settles (scrollTop unchanged for two frames, checked only after the glide has
+   * had 250 ms to start; 2 s at most), re-measure the target and correct once, instantly, if something (a
+   * scroll-sync mirror, a late layout shift) moved the pane off it. Any user scroll or key on the pane
+   * cancels the watch so it never fights the user.
+   */
+  private watchRichReveal(view: PMView, scroller: HTMLElement, pos: number) {
+    const started = performance.now();
+    let last = scroller.scrollTop;
+    let still = 0;
+    let frame = 0;
+    const stop = () => {
+      cancelAnimationFrame(frame);
+      for (const type of REVEAL_CANCEL_EVENTS) scroller.removeEventListener(type, stop);
+      if (this.revealWatch === stop) this.revealWatch = null;
+    };
+    const tick = () => {
+      const top = scroller.scrollTop;
+      if (top === last) still++;
+      else {
+        still = 0;
+        last = top;
+      }
+      const elapsed = performance.now() - started;
+      if ((elapsed >= REVEAL_SETTLE_MIN_MS && still >= 2) || elapsed >= REVEAL_SETTLE_MAX_MS) {
+        stop();
+        if (view.isDestroyed || !scroller.isConnected) return;
+        const target = this.richCentreTop(view, scroller, pos);
+        if (target !== null) scroller.scrollTo({ top: target, behavior: "auto" });
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    for (const type of REVEAL_CANCEL_EVENTS) scroller.addEventListener(type, stop, { passive: true });
+    frame = requestAnimationFrame(tick);
+    this.revealWatch = stop;
+  }
 }
+
+const REVEAL_CANCEL_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
+/** Chromium's smooth scroll may not move a full pixel in its first ~100 ms; do not mistake that for "settled". */
+const REVEAL_SETTLE_MIN_MS = 250;
+const REVEAL_SETTLE_MAX_MS = 2_000;
 
 /** Whether a box at `top` (viewport-relative) with `height` lies inside the middle 60 % of a viewport. */
 function withinMiddle(top: number, height: number, viewport: number): boolean {
