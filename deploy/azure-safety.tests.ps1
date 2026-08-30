@@ -33,6 +33,41 @@ Assert-Equal $false (& $temporaryPublicIpDecision) 'Ordinary redeployments must 
 Assert-True ($deploymentSource -match '(?ms)if \(\$temporaryPublicIp\) \{\s*\$initialCleanup \+= @\{ Action = \{ Remove-BootstrapPublicIp "\$Name-pg-bootstrap-ip" \} \}\s*\}') 'Attaching the temporary bootstrap public IP must register its guaranteed cleanup.'
 Assert-True ($deploymentSource -match '-BootstrapPublicIp \$temporaryPublicIp `') 'The initial deployment must attach the bootstrap public IP from the shared decision.'
 Assert-True ($deploymentSource -match '(?m)^Remove-BootstrapPublicIp \$outputs\.bootstrapPublicIpName\.value\s*$') 'Every deployment path must detach and delete the bootstrap public IP after the final rollout.'
+$parameterGuards = [regex]::Matches(
+  $deploymentSource,
+  '(?m)^if \((?<condition>[^\r\n]+)\) \{\r?\n\s*throw ''(?<message>[^'']+)''\r?\n\}'
+)
+$rotationRecoveryGuard = @($parameterGuards | Where-Object {
+  $_.Groups['condition'].Value -match '\$RotateDatabasePassword' -and $_.Groups['condition'].Value -match '\$ConfigureRecovery'
+})
+Assert-Equal 1 $rotationRecoveryGuard.Count 'Parameter validation must refuse -RotateDatabasePassword combined with -ConfigureRecovery: the rotation paths deploy without the bootstrap public IP.'
+$rotationRecoveryRefusal = [scriptblock]::Create(
+  "param([switch]`$RotateDatabasePassword, [switch]`$ConfigureRecovery) $($rotationRecoveryGuard[0].Groups['condition'].Value)"
+)
+Assert-Equal $true (& $rotationRecoveryRefusal -RotateDatabasePassword -ConfigureRecovery) 'Password rotation combined with recovery configuration must be refused.'
+Assert-Equal $false (& $rotationRecoveryRefusal -RotateDatabasePassword) 'Password rotation on its own must not trip the recovery guard.'
+Assert-Equal $false (& $rotationRecoveryRefusal -ConfigureRecovery) 'Recovery configuration on its own must not trip the rotation guard.'
+Assert-Equal $false (& $rotationRecoveryRefusal) 'Ordinary redeployments must not trip the rotation/recovery guard.'
+Assert-True (
+  $rotationRecoveryGuard[0].Groups['message'].Value -match '-RotateDatabasePassword' -and
+  $rotationRecoveryGuard[0].Groups['message'].Value -match '-ConfigureRecovery'
+) 'The rotation/recovery refusal must name both switches so the operator knows to run them separately.'
+Assert-True ($rotationRecoveryGuard[0].Index -lt $deploymentSource.IndexOf('$databaseReadiness = Resolve-DatabaseDeploymentReadiness')) 'The rotation/recovery refusal must run during parameter validation, before any deployment decision.'
+$infrastructureDeployments = @([regex]::Matches(
+  $deploymentSource,
+  '(?s)Deploy-Infra `\s*(?<arguments>.+?)-RecoveryConfigurationVersion [^\r\n]+'
+))
+Assert-Equal 7 $infrastructureDeployments.Count 'All seven Deploy-Infra invocations must remain structurally identifiable (update this count when adding one and keep the egress invariants below).'
+$switchDrivenRecoveryDeployments = @($infrastructureDeployments | Where-Object {
+  $_.Groups['arguments'].Value -match '-ConfigurePostgresRecovery \(\[bool\]\$ConfigureRecovery\)'
+})
+Assert-Equal 1 $switchDrivenRecoveryDeployments.Count 'Exactly one deployment (the initial one, which attaches the bootstrap public IP) may configure PostgreSQL recovery from the -ConfigureRecovery switch.'
+Assert-True ($switchDrivenRecoveryDeployments[0].Groups['arguments'].Value -match '-BootstrapPublicIp \$temporaryPublicIp `') 'The switch-driven recovery deployment must attach the temporary bootstrap public IP.'
+$publicIpFreeRecoveryDeployments = @($infrastructureDeployments | Where-Object {
+  $_.Groups['arguments'].Value -match '-BootstrapPublicIp \$false `' -and
+  $_.Groups['arguments'].Value -notmatch '-ConfigurePostgresRecovery \$false `\s+-SimulatePostgresRecoveryFailure \$false `'
+})
+Assert-Equal 0 $publicIpFreeRecoveryDeployments.Count 'A deployment without the bootstrap public IP must never configure PostgreSQL recovery: its apt installs would ride default outbound access once the NAT gateway is gone.'
 Assert-True ($deploymentSource -match 'Restore-PostgresSteadyStateEgress') 'The deployment path must invoke restrictive-egress restoration.'
 Assert-True ($deploymentSource -match "nsg rule delete[\s\S]+?AllowApprovedPackageSetup") 'Egress cleanup must modify only the temporary package rule.'
 Assert-True ($deploymentSource -match "DenyOtherInternetEgress[\s\S]+?destinationAddressPrefix -ne 'Internet'") 'Egress cleanup must verify the steady-state Internet deny rule.'
@@ -69,7 +104,7 @@ $candidateOnlyBody = $candidateOnlyRecovery.Groups['body'].Value
 Assert-True ($candidateOnlyBody -match '-RestorePostgresPassword \$true') 'Candidate-only recovery must restore the retained current credential to Key Vault.'
 Assert-True ($candidateOnlyBody -match '-ReconcilePostgresPassword \$true') 'Candidate-only recovery must reconcile PostgreSQL to the retained current credential.'
 Assert-True ($candidateOnlyBody -match '-CommitPostgresPassword \$false') 'Candidate-only recovery must not promote the candidate credential.'
-Assert-True ($candidateOnlyBody -match '-ConfigurePostgresRecovery \(\[bool\]\$ConfigureRecovery\)') 'Candidate-only recovery must not drop a requested recovery configuration update.'
+Assert-True ($candidateOnlyBody -match '-ConfigurePostgresRecovery \$false `') 'Candidate-only recovery must not configure PostgreSQL recovery: it deploys without the bootstrap public IP, and -ConfigureRecovery is refused alongside -RotateDatabasePassword.'
 Assert-True ($candidateOnlyBody -notmatch 'Restore-ContainerAppRevision') 'Candidate-only recovery must not guess or restore a prior revision.'
 $candidateOnlyHealth = $candidateOnlyBody.IndexOf('Wait-AppHealth')
 $candidateOnlyClearInfra = $candidateOnlyBody.IndexOf('Clear-RotationCandidateInfrastructure')
@@ -87,6 +122,12 @@ $rotationCommit = [regex]::Match(
 Assert-True $rotationCommit.Success 'The rotation finalization commit block must remain structurally identifiable.'
 Assert-True ($rotationCommit.Groups['body'].Value -match '-RotatePostgresPassword \$true') 'The database-changing rotation deployment must be inside compensated finalization.'
 Assert-True ($rotationCommit.Groups['body'].Value -match '-CommitPostgresPassword \$true') 'The active secret and app rollout must share the same compensated finalization.'
+$rotationCommitRecoveryArguments = @(
+  [regex]::Matches($rotationCommit.Groups['body'].Value, '-ConfigurePostgresRecovery (?<value>[^`\r\n]+) `') |
+    ForEach-Object { $_.Groups['value'].Value }
+)
+Assert-Equal 2 $rotationCommitRecoveryArguments.Count 'Both rotation deployments must remain structurally identifiable.'
+Assert-Equal 0 @($rotationCommitRecoveryArguments | Where-Object { $_ -ne '$false' }).Count 'Rotation deployments must not configure PostgreSQL recovery: they run without the bootstrap public IP, and -ConfigureRecovery is refused alongside -RotateDatabasePassword.'
 Assert-True ($deploymentSource -match '\$rotationCleanup \+= @\{ Action = \{ Restore-PostgresSteadyStateEgress \} \}') 'Combined recovery and rotation must retain guaranteed temporary-egress cleanup.'
 
 $aclPath = [IO.Path]::GetTempFileName()
