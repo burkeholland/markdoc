@@ -137,7 +137,7 @@ export async function focusRichEnd(page: Page) {
       .toBe(true)
       .then(() => true, () => false);
     if (atEnd) return;
-    if (attempt >= 2) throw new Error(`focusRichEnd: caret never reached the document end: ${await pmCaretAtDocEnd(page)}`);
+    if (attempt >= 2) throw new Error(`caret never reached the end of the rich document after Control+End (twice): ${await pmCaretAtDocEnd(page)}`);
   }
 }
 
