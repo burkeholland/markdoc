@@ -132,6 +132,8 @@ export interface AgentRequestDto {
   userId: string;
   instruction: string;
   selection: { from: number; to: number; quote: string } | null;
+  /** Comment thread the request was made from; null for requests from the Ask-an-agent dialog. */
+  threadId: string | null;
   mode: "suggest" | "comment" | "rewrite";
   status: "open" | "claimed" | "done" | "cancelled";
   claimedBy: string | null;
@@ -248,7 +250,7 @@ export const api = {
     reviews: (id: string) => request<{ reviews: ReviewDto[] }>(`/api/documents/${id}/reviews`),
     requests: (id: string, opts: { status?: string[] } = {}) =>
       request<{ requests: AgentRequestDto[] }>(`/api/documents/${id}/requests${opts.status?.length ? `?status=${opts.status.join(",")}` : ""}`),
-    createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"] }) =>
+    createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"]; threadId?: string | null }) =>
       request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests`, { method: "POST", body: JSON.stringify(body) }),
     cancelRequest: (id: string, rid: string) => request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests/${rid}/cancel`, { method: "POST" }),
   },

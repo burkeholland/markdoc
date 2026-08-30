@@ -8,7 +8,7 @@ import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { notifyReply, notifyResolved, readThread, recordMentions } from "@/server/notifications";
 import { activityActor, clip, recordActivity } from "@/server/activity";
 import { recordSuggestionDecision } from "@/server/reviews";
-import { attachWork } from "@/server/agent-requests";
+import { attachWork, requestThreadId } from "@/server/agent-requests";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -20,10 +20,21 @@ const schema = z.discriminatedUnion("action", [
     /** Alternative to from/to: anchor the comment on the first occurrence of this text. */
     quote: z.string().min(1).max(2000).optional(),
     body: z.string().trim().min(1).max(5000),
-    /** Link the comment to an "Ask an agent" request. */
+    /**
+     * Link the comment to an agent request (it counts against the request). Fold rule: when that request
+     * was made from a comment thread (`threadId` on the request), the comment is stored as a reply on that
+     * thread instead of a twin thread — `quote` / `from` / `to` are ignored and the response is
+     * `{ id: <replyId>, threadId, folded: true }`. Otherwise a new thread as usual: `{ id: <threadId> }`.
+     */
     requestId: z.string().min(1).optional(),
   }),
-  z.object({ action: z.literal("reply"), threadId: z.string().min(1), body: z.string().trim().min(1).max(5000) }),
+  z.object({
+    action: z.literal("reply"),
+    threadId: z.string().min(1),
+    body: z.string().trim().min(1).max(5000),
+    /** Link the reply to an agent request: counted against it like `add`; the thread's participants get no `reply` notification (the requester gets `request.done`). */
+    requestId: z.string().min(1).optional(),
+  }),
   z.object({ action: z.literal("resolve"), threadId: z.string().min(1), resolved: z.boolean() }),
   z.object({ action: z.literal("edit"), threadId: z.string().min(1), replyId: z.string().optional(), body: z.string().trim().min(1).max(5000) }),
   z.object({ action: z.literal("delete"), threadId: z.string().min(1), replyId: z.string().optional() }),
@@ -56,12 +67,25 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // The text the action concerns (new comment's quote, replied thread's range): an agent's caret moves there.
   let at: { from: number; to: number } | undefined;
   let decided: { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null = null;
+  // A linked request must exist before anything is written (404 with nothing to undo). For `add`, a request
+  // made from a comment thread folds the new comment into that thread (see the schema); `folded` is that thread.
+  const requestId = body.action === "add" || body.action === "reply" ? body.requestId : undefined;
+  const requestThread = requestId ? await requestThreadId(id, requestId) : null;
+  let folded: string | null = null;
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
     const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
     try {
       switch (body.action) {
         case "add": {
+          // Fold rule; when the thread has since been deleted, fall back to a new thread exactly as without `threadId`.
+          const replyId = body.requestId && requestThread ? model.reply(requestThread, body.body, author, { requestId: body.requestId }) : null;
+          if (replyId && requestThread) {
+            folded = requestThread;
+            result = { id: replyId, threadId: requestThread, folded: true };
+            at = model.get(requestThread)?.range ?? undefined;
+            break;
+          }
           const text = doc.getText(TEXT_KEY).toString();
           let from: number;
           let to: number;
@@ -79,14 +103,15 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           break;
         }
         case "reply": {
-          const replyId = model.reply(body.threadId, body.body, author);
+          const replyId = model.reply(body.threadId, body.body, author, { requestId: body.requestId });
           if (!replyId) throw new HttpError(404, "Comment not found");
           result = { id: replyId };
           at = model.get(body.threadId)?.range ?? undefined;
           const map = model.ymap.get(body.threadId);
           const thread = map ? readThread(map) : null;
           const reply = thread?.replies.find((r) => r.id === replyId);
-          if (thread && reply) after.push(() => notifyReply(id, thread, reply));
+          // A request-linked reply notifies nobody (`notifyReply` enforces this for the live watcher too): the requester gets `request.done`.
+          if (thread && reply && !body.requestId) after.push(() => notifyReply(id, thread, reply));
           break;
         }
         case "resolve": {
@@ -174,14 +199,17 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       if (target) await recordMentions(id, target, user.login, body.body, author.name);
     }
     for (const fn of after) await fn();
-    if (body.action === "add") {
-      await recordActivity(id, activityActor(user), "comment.add", { threadId: (result as { id?: string }).id ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
-      if (body.requestId) {
-        const threadId = (result as { id?: string }).id;
-        await attachWork(id, body.requestId, user, { comments: 1, commentIds: threadId ? [threadId] : [] });
-      }
+    const createdId = (result as { id?: string }).id;
+    if (body.action === "add" && folded) {
+      // Folded into the request's thread: it is a reply in every respect (activity, work count).
+      await recordActivity(id, activityActor(user), "comment.reply", { threadId: folded, replyId: createdId ?? null, quote: clip(body.body), requestId: body.requestId });
+      await attachWork(id, body.requestId!, user, { comments: 1, commentIds: createdId ? [createdId] : [] });
+    } else if (body.action === "add") {
+      await recordActivity(id, activityActor(user), "comment.add", { threadId: createdId ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
+      if (body.requestId) await attachWork(id, body.requestId, user, { comments: 1, commentIds: createdId ? [createdId] : [] });
     } else if (body.action === "reply") {
-      await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: (result as { id?: string }).id ?? null, quote: clip(body.body) });
+      await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: createdId ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
+      if (body.requestId) await attachWork(id, body.requestId, user, { comments: 1, commentIds: createdId ? [createdId] : [] });
     } else if (body.action === "resolve" && body.resolved) {
       await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
     } else if (body.action === "suggestion") {
@@ -197,8 +225,9 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
       const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
       try {
-        if (action.action === "add") model.remove(createdId);
-        else model.deleteReply(action.threadId, createdId);
+        if (action.action === "reply") model.deleteReply(action.threadId, createdId);
+        else if (folded) model.deleteReply(folded, createdId);
+        else model.remove(createdId);
       } finally {
         model.destroy();
       }

@@ -350,6 +350,8 @@ export const agentRequests = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     instruction: text("instruction").notNull(),
     selection: jsonb("selection").$type<AgentRequestSelection | null>(),
+    /** Comment thread (in the shared Y.Doc) the request was made from, when it came from a comment. */
+    threadId: text("thread_id"),
     mode: text("mode").$type<AgentRequestMode>().notNull().default("suggest"),
     status: text("status").$type<AgentRequestStatus>().notNull().default("open"),
     /** Token (agent) name that claimed the request. */
@@ -358,7 +360,11 @@ export const agentRequests = pgTable(
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("agent_request_document_status_idx").on(t.documentId, t.status), index("agent_request_status_created_idx").on(t.status, t.createdAt.desc())],
+  (t) => [
+    index("agent_request_document_status_idx").on(t.documentId, t.status),
+    index("agent_request_status_created_idx").on(t.status, t.createdAt.desc()),
+    index("agent_request_document_thread_idx").on(t.documentId, t.threadId),
+  ],
 );
 
 export type AgentRequest = typeof agentRequests.$inferSelect;

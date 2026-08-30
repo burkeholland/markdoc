@@ -127,6 +127,13 @@
       "when": 1787964039572,
       "tag": "0017_ownership_transfer",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1788050213330,
+      "tag": "0018_agent_request_thread",
+      "breakpoints": true
     }
   ]
 }

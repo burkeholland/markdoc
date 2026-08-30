@@ -12,6 +12,8 @@ const createSchema = z.object({
     .nullable()
     .optional(),
   mode: z.enum(["suggest", "comment", "rewrite"]).default("suggest"),
+  /** The comment thread the request is made from (must exist: `404 Comment not found`); the thread's Y.Map gets `requestId`. */
+  threadId: z.string().trim().min(1).nullable().optional(),
 });
 
 const STATUSES = ["open", "claimed", "done", "cancelled"] as const satisfies readonly AgentRequestStatus[];

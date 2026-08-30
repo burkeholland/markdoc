@@ -25,6 +25,8 @@ export interface CommentReply {
   suggestionAt?: number | null;
   /** Anchored text at decision time, so decided diffs remain stable after the thread advances. */
   suggestionQuote?: string | null;
+  /** Agent request this reply answers (posted with a `requestId`): the requester hears `request.done`, not `reply`. */
+  requestId?: string | null;
 }
 
 /** Durable per-reply decision. The containing Y.Map key is the reply id. */
@@ -412,7 +414,7 @@ export class CommentsModel {
     return id;
   }
 
-  reply(id: string, body: string, author: CollabUser): string | null {
+  reply(id: string, body: string, author: CollabUser, opts: { requestId?: string | null } = {}): string | null {
     const map = this.ymap.get(id);
     if (!map) return null;
     const replyId = newId();
@@ -432,6 +434,7 @@ export class CommentsModel {
           body,
           createdAt: Date.now(),
           mentions: parseMentions(body),
+          ...(opts.requestId ? { requestId: opts.requestId } : {}),
         },
       ]);
     }, COMMENTS_ORIGIN);

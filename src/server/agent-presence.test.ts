@@ -25,6 +25,7 @@ const { signCollabToken } = await import("@/server/collab/token");
 const { recordActivity, activityActor } = await import("@/server/activity");
 const { notify } = await import("@/server/notifications");
 const { createRequest } = await import("@/server/agent-requests");
+const { readLiveDoc } = await import("@/server/livedoc");
 const presence = await import("@/server/agent-presence");
 const events = await import("@/server/agent-events");
 const { recordAgentActivity } = await import("@/server/agents");
@@ -403,11 +404,23 @@ describe("agent events (watch)", () => {
     const waiting = asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events?since=${cursor}&wait=20`)));
     await sleep(100);
     const request = await createRequest(otherDocId, owner, "editor", { instruction: "Summarize", mode: "comment" });
-    const page = (await (await waiting).json()) as { cursor: string; events: { type: string; requestId?: string; documentId?: string; documentTitle?: string }[] };
-    expect(page.events).toEqual([expect.objectContaining({ type: "request.created", requestId: request.id, documentId: otherDocId, documentTitle: "Cam's" })]);
+    const page = (await (await waiting).json()) as { cursor: string; events: { type: string; requestId?: string; documentId?: string; documentTitle?: string; threadId?: string | null }[] };
+    expect(page.events).toEqual([expect.objectContaining({ type: "request.created", requestId: request.id, documentId: otherDocId, documentTitle: "Cam's", threadId: null })]);
     // Activity on a document is ignored by the inbox (it only carries mentions and requests).
     await recordActivity(docId, activityActor(owner), "version.save", { number: 1 });
-    const quiet = (await (await asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events?since=${page.cursor}`)))).json()) as { events: unknown[] };
+    const quiet = (await (await asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events?since=${page.cursor}`)))).json()) as { cursor: string; events: unknown[] };
     expect(quiet.events).toEqual([]);
+
+    // A request made from a comment thread names it, in the inbox (from the request row) and in the document watch (from the activity row).
+    const add = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "Second paragraph", body: "Shorter?" }), params(docId)));
+    const { id: threadId } = (await add.json()) as { id: string };
+    const { cursor: docCursor } = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events`), params(docId)))).json()) as { cursor: string };
+    const threaded = await createRequest(docId, owner, "owner", { instruction: "Shorter?", mode: "comment", threadId });
+    const inbox = (await (await asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events?since=${quiet.cursor}`)))).json()) as { events: { type: string; requestId?: string; threadId?: string | null }[] };
+    expect(inbox.events).toEqual([expect.objectContaining({ type: "request.created", requestId: threaded.id, documentId: docId, threadId })]);
+    const inDoc = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${docCursor}`), params(docId)))).json()) as { events: { type: string; requestId?: string; threadId?: string | null }[] };
+    expect(inDoc.events.find((e) => e.type === "request.created")).toMatchObject({ requestId: threaded.id, threadId });
+    // The thread in the live document now points at its request.
+    expect(await readLiveDoc(docId, (doc) => (doc.getMap("comments").get(threadId) as Y.Map<unknown>).get("requestId"))).toBe(threaded.id);
   });
 });

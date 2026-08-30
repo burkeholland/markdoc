@@ -120,6 +120,8 @@ export async function setMigrationFixtureSchemaToVersion15(source: PGlite): Prom
   await source.query(`DROP TABLE ownership_transfer`);
   await source.query(`ALTER TABLE api_token DROP COLUMN mention_slug`);
   await source.query(`ALTER TABLE notification DROP COLUMN agent_targets`);
+  // 0018: dropping the column also drops agent_request_document_thread_idx.
+  await source.query(`ALTER TABLE agent_request DROP COLUMN thread_id`);
   await source.query(
     `DELETE FROM drizzle.__drizzle_migrations
       WHERE created_at > $1`,

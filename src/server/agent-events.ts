@@ -42,7 +42,7 @@ export type AgentEvent =
   | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; replyId?: string; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
   | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; actor: EventActor; at: string }
   | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; agents: string[]; actor: EventActor; at: string }
-  | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; actor: EventActor; at: string }
+  | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; threadId: string | null; actor: EventActor; at: string }
   | { type: "activity"; documentId: string; action: string; actor: EventActor; actorName: string; actorKind: string; detail: Record<string, unknown>; at: string };
 
 export interface WatchOptions {
@@ -352,6 +352,8 @@ function activityToEvent(row: typeof schema.activity.$inferSelect, selfId: strin
         mode: typeof d.mode === "string" ? d.mode : "suggest",
         instruction: typeof d.instruction === "string" ? d.instruction : "",
         quote: typeof d.quote === "string" ? d.quote : null,
+        // The comment thread the request was made from; null for dialog requests and rows from before 0018.
+        threadId: typeof d.threadId === "string" ? d.threadId : null,
       };
     default:
       return { type: "activity", ...base, action: row.action, actorName: row.actorName, actorKind: row.actorKind, detail: d };
@@ -443,7 +445,8 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
 
 /**
  * Cross-document inbox: @mentions on every document the token's user can open, plus reviews and new
- * "Ask an agent" requests on documents they own or collaborate on. Content changes are not included.
+ * agent requests (from the Ask-an-agent dialog or a comment thread: `threadId`) on documents they own or
+ * collaborate on. Content changes are not included.
  */
 export async function collectUserEvents(user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: null }), events: [] };
@@ -530,6 +533,7 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       mode: request.mode,
       instruction: request.instruction,
       quote: request.selection?.quote ?? null,
+      threadId: request.threadId ?? null,
       // Requests are asked by people in the editor; a token never asks itself.
       actor: { id: request.userId ?? null, name: userName ?? userLogin ?? "someone", login: userLogin ?? null, kind: "user", agent: null, self: false },
       at: request.createdAt.toISOString(),

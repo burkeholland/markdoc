@@ -20,6 +20,7 @@ const {
   markRefsRead,
   notify,
   notifyShare,
+  notifyReply,
   watchDocumentNotifications,
 } = await import("./notifications");
 const { deleteDocument, restoreDocument } = await import("./documents");
@@ -248,6 +249,47 @@ describe("notifications", () => {
     await settle();
     expect(await unread("jon")).toHaveLength(0);
     model.destroy();
+  });
+
+  it("skips `reply` for a reply posted against an agent request, and still notifies without one", async () => {
+    const thread = { id: "req-thread", body: "Is this right?", authorLogin: "alice", replies: [] as never[] };
+    const base = { authorId: `agent:${bobId}:Copilot`, authorName: "Copilot", authorLogin: "bob", createdAt: Date.now(), mentions: [], reactions: {} };
+    expect(await notifyReply("n-doc1", thread, { ...base, id: "req-reply-1", body: "Yes.", requestId: "req-1" })).toBe(0);
+    expect((await unread("alice")).some((n) => n.refId === "req-reply-1")).toBe(false);
+    expect(await notifyReply("n-doc1", thread, { ...base, id: "req-reply-2", body: "Also yes." })).toBe(1);
+    expect((await unread("alice")).find((n) => n.refId === "req-reply-2")).toMatchObject({ kind: "reply", actorLogin: "bob", actorName: "Copilot" });
+    // Idempotent, and an empty requestId is not a link.
+    expect(await notifyReply("n-doc1", thread, { ...base, id: "req-reply-2", body: "Also yes." })).toBe(0);
+    expect(await notifyReply("n-doc1", thread, { ...base, id: "req-reply-3", body: "Third.", requestId: null })).toBe(1);
+  });
+
+  it("watches a live document: a request-linked reply notifies nobody, a plain reply notifies the starter, mentions in either still notify", async () => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, "Some text an agent was asked about");
+    const stop = watchDocumentNotifications(doc, "n-doc1");
+    const model = new CommentsModel(doc, ytext);
+    const alice = makeCollabUser(aliceId, "Alice", null, "alice");
+    const agent = makeCollabUser(`agent:${bobId}:Copilot`, "Copilot", null, "bob");
+    const replyRefs = async (login: string) => (await unread(login)).filter((n) => n.kind === "reply").map((n) => n.refId);
+    const aliceBefore = await replyRefs("alice");
+
+    const threadId = model.add({ from: 0, to: 4, body: "@bob/Copilot is this right?", author: alice });
+    const answered = model.reply(threadId, "Yes, and @kim should confirm.", agent, { requestId: "req-42" })!;
+    const plain = model.reply(threadId, "One more thought.", agent)!;
+    await until(async () => (await unread("kim")).length === 1);
+    await until(async () => (await replyRefs("alice")).includes(plain));
+    await settle();
+
+    // The answer to the request rings no bell for Alice (she gets `request.done` when the agent completes)…
+    expect((await replyRefs("alice")).filter((ref) => !aliceBefore.includes(ref))).toEqual([plain]);
+    // …but the mention inside it does reach Kim, and Alice's own mention of the agent is stored read for Bob's watch.
+    expect((await unread("kim")).map((n) => [n.kind, n.refId])).toEqual([["mention", answered]]);
+    expect((await listNotifications("bob", { kind: "mention" })).items.find((n) => n.refId === threadId)).toMatchObject({ agentTargets: ["Copilot"] });
+
+    stop();
+    model.destroy();
+    doc.destroy();
   });
 
   it("notifies the exact reply author when their suggestion is accepted", async () => {
