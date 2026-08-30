@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tsx server/index.ts",
     "dev:port": "tsx scripts/dev-port.mts",
-    "build": "next build && node scripts/build-server.mjs",
+    "build": "next build && node scripts/precompress-static.mjs && node scripts/build-server.mjs",
     "start": "cross-env NODE_ENV=production node dist/server.mjs",
     "start:local": "cross-env NODE_ENV=production PORT=3900 PGLITE_DATA_DIR=.data/pglite-prod-smoke AUTH_SECRET=local-production-smoke-secret-not-for-real-use AUTH_DEV_LOGIN=force node dist/server.mjs",
     "smoke": "tsx scripts/smoke.mts",

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import path from "node:path";
 import type { Duplex } from "node:stream";
 import nextEnv from "@next/env";
 import next from "next";
@@ -27,9 +28,14 @@ import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
+import { serveStaticBrotli } from "./static-brotli";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+// Where `next build` put the client assets (same rule as next.config.ts). Production serves the
+// precompressed `.br` siblings from here; `next dev` writes no `.br` files and the branch stays off.
+const staticRoot = path.resolve(process.cwd(), process.env.NEXT_DIST_DIR || ".next", "static");
 
 // Bind address. Only a concrete HOST is handed to Next as its hostname: for the default 0.0.0.0
 // Next would stamp "http://0.0.0.0:<port>" into every absolute URL it builds (Auth.js redirects
@@ -200,6 +206,9 @@ async function main() {
     const remote = req.socket.remoteAddress;
     if (remote) req.headers[REMOTE_ADDR_HEADER] = remote;
     else delete req.headers[REMOTE_ADDR_HEADER];
+    // Immutable client assets for brotli-capable clients come from the build's `.br` files; everything
+    // else (gzip, identity, Range, dev) is Next's as before.
+    if (!dev && serveStaticBrotli(req, res, { staticRoot })) return;
     handle(req, res).catch((err: unknown) => {
       console.error("[http] request failed", err);
       if (!res.headersSent) res.statusCode = 500;

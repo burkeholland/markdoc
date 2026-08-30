@@ -210,7 +210,7 @@ Stop Markdoc and take a backup first, as for the repair. The rollback record is 
 
 ### Run the production build locally
 
-The production server is `next build` plus the custom server bundled to `dist/server.mjs` (esbuild, see `scripts/build-server.mjs`). Exercise it before a deploy:
+The production server is `next build` plus the custom server bundled to `dist/server.mjs` (esbuild, see `scripts/build-server.mjs`). Between the two, `scripts/precompress-static.mjs` writes a brotli (q11) `.br` sibling for every `.js`/`.css` of 1 kB or more under `<distDir>/static`; in production the custom server streams those for `/_next/static/**` requests whose `Accept-Encoding` lists `br` (`server/static-brotli.ts`: GET/HEAD only, no `Range`, path confined to the static root, same `Content-Type`/`Cache-Control` as Next), and every other request — gzip, identity, `Range`, development mode — still goes to Next's handler unchanged. Exercise it before a deploy:
 
 ```bash
 npm run build
@@ -265,7 +265,7 @@ Production is the one Container App `markdoc` in `markdoc-rg` (East US 2), and i
 
 1. Pick the exact accepted `main` commit (full 40-character SHA) and build from a clean checkout of it in ACR (`az acr build`), tagging the image with the full SHA and its 12-character prefix and passing `--build-arg APP_VERSION=<sha>` so `/api/health` reports it. (`deploy/azure.ps1 -SourceCommit <sha>` builds the same way from a clean deployment checkout and refuses when that checkout differs from the commit in application files, but as a full-template run it is not the release path for the existing app.) `hadolint` is not available through npm on this machine (the wrapper's binary download 404s); lint the Dockerfile with the official `hadolint/hadolint` image or GitHub Action when one is available.
 2. Resolve the tag's immutable digest (`az acr manifest list-metadata -r <acr> -n markdoc`) and update the existing app by digest: `az containerapp update -n markdoc -g markdoc-rg --image <loginServer>/markdoc@sha256:… --set-env-vars APP_VERSION=<sha>`. Change nothing else: the Key Vault-backed `database-url` secret reference, the `auth-secret` and `github-client-secret` secrets, `AUTH_URL`, ingress (HTTPS only), 0.5 vCPU / 1 GiB, and `minReplicas`/`maxReplicas` of 1/1 stay as they are, and `AUTH_DEV_LOGIN` stays unset.
-3. The app runs in single-revision mode, so Container Apps moves 100% of traffic once the new revision's startup probe passes. Wait for it to be Healthy with one replica, then probe `https://<fqdn>/api/health` until it returns `ok=true`, `db=true` and `version=<sha>` (the workflow asserts the same); also check that HTTP redirects to HTTPS, `/login` returns 200, and an unauthenticated `/collab` WebSocket reaches the custom server's `authenticationFailed` rejection rather than a timeout or 404.
+3. The app runs in single-revision mode, so Container Apps moves 100% of traffic once the new revision's startup probe passes. Wait for it to be Healthy with one replica, then probe `https://<fqdn>/api/health` until it returns `ok=true`, `db=true` and `version=<sha>` (the workflow asserts the same); also check that HTTP redirects to HTTPS, `/login` returns 200, an unauthenticated `/collab` WebSocket reaches the custom server's `authenticationFailed` rejection rather than a timeout or 404, and that `curl -sI -H "Accept-Encoding: br" https://<fqdn>/_next/static/chunks/<a chunk named in the /login HTML>.js` answers `content-encoding: br` (the precompressed assets; if the ingress ever normalised `br` out of the request's `Accept-Encoding`, the origin would fall through to Next — identity for a br-only request, gzip for a browser, which never sends `br` alone).
 4. Keep the previous revision, now inactive at its own digest, as the rollback. Reactivate it (`az containerapp revision activate --revision <previous>`), or run `az containerapp update --image` with the previous digest and `APP_VERSION`; either way only the application changes and the database is untouched. Never reverse the database because an app image failed: if the new revision may have accepted writes, PostgreSQL still holds them and the previous image keeps serving them.
 5. Record the source SHA, image digest, and the new and previous revision names.
 
@@ -385,6 +385,7 @@ The collaboration server keeps open documents in memory, so the app runs as a si
 
 ```text
 server/index.ts              custom server: Next.js + collaboration WebSocket on one port
+server/static-brotli.ts      production only: serves the build's precompressed .br for /_next/static/** when the client accepts br
 src/app                      pages: dashboard, /login, /d/[id] editor, /p/[id] reader, /settings
 src/app/api                  REST routes (documents, content, suggest, comments, versions, activity,
                              assets, export, share, star, trash, templates, notifications, tokens, GitHub)
@@ -426,6 +427,7 @@ e2e/                         Playwright specs; global-setup.ts health-probes and
 scripts/smoke.mts            API smoke against a running (production) server
 scripts/dev-port.mts         dev server on a private port/cache/db
 scripts/build-server.mjs     esbuild bundles: server/index.ts -> dist/server.mjs, the Markdown render worker -> dist/render-worker.mjs
+scripts/precompress-static.mjs  build step after `next build`: brotli q11 `.br` next to every .js/.css >= 1 kB under <distDir>/static
 scripts/live/                PowerShell ops for Burke's live :3000 server (start, promote, autostart, snapshot/restore, resume-check)
 infra, deploy                Bicep and deployment script
 ```
