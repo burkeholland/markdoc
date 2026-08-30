@@ -121,14 +121,38 @@ export const richText = (page: Page) =>
  * Place the caret at the end of the rich editor's document. Clicks near the top-left of the first text
  * block, not the pane centre: on a fixture whose vertical middle is an image the centre click selects the
  * image node, `Control+End` stays on it and the caret never reaches text (a11y dark slash-menu flake).
+ * Chromium handles `Control+End` natively and fires `selectionchange` in a later task (see clickEdgeOf),
+ * so a key pressed right behind it is judged against ProseMirror's stale selection (`I` / paste /
+ * `ntro paragraph.` in paste.spec); the state is polled until it holds a caret at the document end.
  */
 export async function focusRichEnd(page: Page) {
   const rich = page.locator(".md-rich");
   const block = rich.locator("p, h1, h2, h3, h4, li, blockquote, pre").first();
   if ((await block.count()) === 0) await rich.click();
   else await block.click({ position: { x: 8, y: 8 } });
-  await page.keyboard.press("Control+End");
+  for (let attempt = 1; ; attempt++) {
+    await page.keyboard.press("Control+End");
+    const atEnd = await expect
+      .poll(() => pmCaretAtDocEnd(page), { timeout: 3_000 })
+      .toBe(true)
+      .then(() => true, () => false);
+    if (atEnd) return;
+    if (attempt >= 2) throw new Error(`focusRichEnd: caret never reached the document end: ${await pmCaretAtDocEnd(page)}`);
+  }
 }
+
+/** Is ProseMirror's *state* selection a focused caret at the very end of the document? (true, or why not) */
+const pmCaretAtDocEnd = (page: Page) =>
+  page.evaluate(() => {
+    type View = { hasFocus(): boolean; state: { doc: { content: { size: number } }; selection: { empty: boolean; $head: { pos: number; depth: number } } } };
+    const view = (window as unknown as { __markdocRichView?: View }).__markdocRichView;
+    if (!view) return "no view";
+    if (!view.hasFocus()) return "editor not focused";
+    const { doc, selection } = view.state;
+    const { pos, depth } = selection.$head;
+    // At the end of the last textblock every ancestor's closing token follows the caret: one per level of depth.
+    return selection.empty && pos === doc.content.size - depth ? true : `selection ${pos} (depth ${depth}, empty ${selection.empty}) vs doc size ${doc.content.size}`;
+  });
 
 export async function focusCodeEnd(page: Page) {
   await page.locator(".cm-content").click();
