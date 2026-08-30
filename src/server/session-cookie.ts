@@ -192,9 +192,31 @@ export async function decodeEmbedSession(cookieHeader: string | null | undefined
   return null;
 }
 
+/** Auth.js appends `Read more at https://errors.authjs.dev#…` to every message; a one-line log entry does without it. */
+function authMessage(error: Error): string {
+  return error.message.replace(/\.?\s*Read more at https:\/\/errors\.authjs\.dev\S*$/, "");
+}
+
+/** Longest action name an `UnknownAction` line carries: scanners send arbitrary paths, the log gets a prefix of them. */
+const MAX_ACTION_LENGTH = 80;
+
 /**
- * Auth.js `logger.error`: a session token the current secret cannot read is one quiet warn line
- * (the proxy clears the cookie; this only fires on a path the proxy does not cover, e.g. `/api/auth/*`).
+ * The action name only from an `UnknownAction` message: `Cannot parse action at /api/auth/wp-login.php` →
+ * `wp-login.php`, `Cannot handle action: providers` → `providers`; any other wording is kept as is.
+ */
+function unknownActionName(message: string): string {
+  const path = /^Cannot parse action at (\S+)/.exec(message)?.[1];
+  const name = path !== undefined ? path.replace(/^\/api\/auth\/?/, "") || "/" : (/^Cannot handle action: (\S+)/.exec(message)?.[1] ?? message);
+  return name.length > MAX_ACTION_LENGTH ? `${name.slice(0, MAX_ACTION_LENGTH)}…` : name;
+}
+
+/**
+ * Auth.js `logger.error`. Expected events are one quiet warn line each, without a stack:
+ * - `JWTSessionError`: a session token the current secret cannot read (the proxy clears the cookie;
+ *   this only fires on a path the proxy does not cover, e.g. `/api/auth/*`);
+ * - `MissingCSRF`: a `POST /api/auth/signin/github` without the CSRF cookie — the documented post-release
+ *   check (`docs/custom-domain.md`), and what any cookie-less client gets;
+ * - `UnknownAction`: an unsupported `/api/auth/*` action, typically a scanner.
  * Every other error keeps the default `[auth][error]` format with its cause and stack. Auth.js
  * errors carry their class name in `type` (`AuthError`); duck-typed so this module stays free of
  * `next-auth` imports (which need `next/server`) for the proxy and for tests.
@@ -203,6 +225,15 @@ export function logAuthError(error: Error): void {
   const type = (error as { type?: string }).type;
   if (type === "JWTSessionError") {
     console.warn(`[auth][warn] ${STALE_SESSION_MESSAGE}`);
+    return;
+  }
+  if (type === "MissingCSRF") {
+    const action = /during an action (\S+)/.exec(authMessage(error))?.[1] ?? "an action";
+    console.warn(`[auth] MissingCSRF during ${action}${action === "signin" ? " (expected from the post-release check)" : ""}`);
+    return;
+  }
+  if (type === "UnknownAction") {
+    console.warn(`[auth] UnknownAction: ${unknownActionName(authMessage(error))}`);
     return;
   }
   console.error(`[auth][error] ${type ?? error.name}: ${error.message}`);
