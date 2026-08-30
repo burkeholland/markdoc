@@ -1058,7 +1058,7 @@ resource backupFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' 
   location: location
   properties: {
     displayName: 'Markdoc PostgreSQL backup failure'
-    description: 'Fires when the VM backup monitor reports an archive, repository, or freshness failure.'
+    description: 'Fires when the VM backup monitor reports an archive, repository, or freshness failure, or when the monthly OS patch (infra/patch-os.sh) reports os-patch=failed.'
     enabled: true
     severity: 1
     evaluationFrequency: 'PT5M'
@@ -1072,7 +1072,7 @@ resource backupFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' 
     criteria: {
       allOf: [
         {
-          query: 'Syslog | where Facility == "local0" and (SyslogMessage contains "backup-health=failed" or SyslogMessage contains "logical-backup=failed" or SyslogMessage contains "restore-check=failed")'
+          query: 'Syslog | where Facility == "local0" and (SyslogMessage contains "backup-health=failed" or SyslogMessage contains "logical-backup=failed" or SyslogMessage contains "restore-check=failed" or SyslogMessage contains "os-patch=failed")'
           timeAggregation: 'Count'
           operator: 'GreaterThan'
           threshold: 0
@@ -1087,6 +1087,33 @@ resource backupFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' 
     actions: {
       actionGroups: [
         postgresAlertActionGroup.id
+      ]
+    }
+  }
+}
+
+// Free tripwire for an egress window opened outside deploy/azure.ps1 -ConfigureRecovery or deploy/patch-postgres-vm.ps1:
+// both write the temporary rule 250 exactly once per window, so any other write to a rule of the PostgreSQL NSG
+// (Activity Log, no ingestion cost) means somebody opened an egress path by hand and the steady state needs checking.
+resource postgresNsgRuleWriteAlert 'Microsoft.Insights/activityLogAlerts@2020-10-01' = {
+  name: '${name}-postgres-nsg-rule-write'
+  location: 'Global'
+  properties: {
+    description: 'Fires on every successful write to a security rule of the PostgreSQL NSG. Expected once per recovery or OS patch window; anything else means an egress path was opened by hand.'
+    enabled: true
+    scopes: [
+      postgresNsg.id
+    ]
+    condition: {
+      allOf: [
+        { field: 'category', equals: 'Administrative' }
+        { field: 'operationName', equals: 'Microsoft.Network/networkSecurityGroups/securityRules/write' }
+        { field: 'status', equals: 'Succeeded' }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        { actionGroupId: postgresAlertActionGroup.id }
       ]
     }
   }
