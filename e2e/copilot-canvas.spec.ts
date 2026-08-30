@@ -79,6 +79,9 @@ test("the loopback canvas spends a token handoff and frames the editor without d
     expect(documentResponse?.headers()["content-security-policy"]).toBe(`frame-ancestors ${new URL(opened.url).origin}`);
     await expect(editor.getByTestId("header")).toHaveAttribute("data-embed", "true");
     await expect(editor.getByTestId("storage-indicator")).toBeDisabled();
+    // The editors mount on the client, so once they are visible the freshly navigated frame is hydrated and clicks land.
+    await expect(editor.locator(".md-rich")).toBeVisible();
+    await expect(editor.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
 
     await editor.getByTestId("comments-toggle").click();
     await expect(editor.getByTestId("comments-panel")).toBeVisible();
