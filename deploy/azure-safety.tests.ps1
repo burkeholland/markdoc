@@ -17,6 +17,22 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 $deploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure.ps1') -Raw
 Assert-True ($deploymentSource -match '\$temporaryPackageEgress = \[bool\]\(\$InitializeDatabase -or \$ConfigureRecovery\)') 'Initialization and recovery must both register temporary-egress cleanup.'
+$temporaryPublicIpAssignment = [regex]::Match(
+  $deploymentSource,
+  '(?m)^\s*\$temporaryPublicIp = (?<expression>.+?)\s*$'
+)
+Assert-True $temporaryPublicIpAssignment.Success 'The temporary bootstrap public IP decision must remain structurally identifiable.'
+Assert-Equal '[bool]($InitializeDatabase -or $ConfigureRecovery)' $temporaryPublicIpAssignment.Groups['expression'].Value 'Recovery configuration must attach the temporary bootstrap public IP so package installs keep an explicit egress path without the NAT gateway.'
+$temporaryPublicIpDecision = [scriptblock]::Create(
+  "param([switch]`$InitializeDatabase, [switch]`$ConfigureRecovery) $($temporaryPublicIpAssignment.Groups['expression'].Value)"
+)
+Assert-Equal $true (& $temporaryPublicIpDecision -ConfigureRecovery) 'Recovery configuration alone must attach the temporary bootstrap public IP.'
+Assert-Equal $true (& $temporaryPublicIpDecision -InitializeDatabase) 'Database initialization must attach the temporary bootstrap public IP.'
+Assert-Equal $true (& $temporaryPublicIpDecision -InitializeDatabase -ConfigureRecovery) 'Combined initialization and recovery must attach the temporary bootstrap public IP.'
+Assert-Equal $false (& $temporaryPublicIpDecision) 'Ordinary redeployments must not attach a public IP to the database VM.'
+Assert-True ($deploymentSource -match '(?ms)if \(\$temporaryPublicIp\) \{\s*\$initialCleanup \+= @\{ Action = \{ Remove-BootstrapPublicIp "\$Name-pg-bootstrap-ip" \} \}\s*\}') 'Attaching the temporary bootstrap public IP must register its guaranteed cleanup.'
+Assert-True ($deploymentSource -match '-BootstrapPublicIp \$temporaryPublicIp `') 'The initial deployment must attach the bootstrap public IP from the shared decision.'
+Assert-True ($deploymentSource -match '(?m)^Remove-BootstrapPublicIp \$outputs\.bootstrapPublicIpName\.value\s*$') 'Every deployment path must detach and delete the bootstrap public IP after the final rollout.'
 Assert-True ($deploymentSource -match 'Restore-PostgresSteadyStateEgress') 'The deployment path must invoke restrictive-egress restoration.'
 Assert-True ($deploymentSource -match "nsg rule delete[\s\S]+?AllowApprovedPackageSetup") 'Egress cleanup must modify only the temporary package rule.'
 Assert-True ($deploymentSource -match "DenyOtherInternetEgress[\s\S]+?destinationAddressPrefix -ne 'Internet'") 'Egress cleanup must verify the steady-state Internet deny rule.'
