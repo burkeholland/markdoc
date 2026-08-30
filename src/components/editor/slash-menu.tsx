@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { EditorView } from "prosemirror-view";
 import { TextSelection } from "prosemirror-state";
-import { Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, Table, Type, type LucideIcon } from "lucide-react";
+import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, Table, Type, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
 import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
@@ -12,12 +12,18 @@ import { cn } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
 
-const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, SquareCode, Minus, Table, Image, Link, MessageSquarePlus, Calendar };
+const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, SquareCode, Minus, Table, Image, Link, MessageSquarePlus, Calendar, Bot };
 
 const MENU_WIDTH = 288;
 const ROW_HEIGHT = 36;
+/** Rows with a description line (the `/agent` item). */
+const ROW_HEIGHT_TALL = 52;
+/** The "Insert" / "Blocks" group caption above each group's rows (pt-1.5 + 16 px line + pb-0.5). */
+const GROUP_HEADER_HEIGHT = 24;
 const MAX_VISIBLE = 8;
 const MENU_MAX_HEIGHT = ROW_HEIGHT * MAX_VISIBLE + 8;
+
+const rowHeight = (item: SlashItem) => (item.description ? ROW_HEIGHT_TALL : ROW_HEIGHT);
 
 /**
  * Glue between the ProseMirror plugin (which owns the `/query` range and
@@ -75,6 +81,7 @@ export function SlashMenu({
   onImage,
   onLink,
   onComment,
+  onKeepAgent,
 }: {
   view: EditorView | null;
   session: CollabSession;
@@ -83,6 +90,8 @@ export function SlashMenu({
   onImage: () => void;
   onLink: () => void;
   onComment: () => void;
+  /** `/agent`: opens the "Keep an agent here" dialog. */
+  onKeepAgent: () => void;
 }) {
   const [state, setState] = useState<SlashState | null>(() => controller.getState());
   const [index, setIndex] = useState(0);
@@ -125,13 +134,14 @@ export function SlashMenu({
               selectCurrentBlock(view);
               onComment();
             },
+            keepAgent: onKeepAgent,
           };
           item.run(ctx, arg);
         },
         session.undoManager,
       );
     },
-    [view, controller, where, onImage, onLink, onComment, session],
+    [view, controller, where, onImage, onLink, onComment, onKeepAgent, session],
   );
 
   useEffect(() => {
@@ -161,14 +171,17 @@ export function SlashMenu({
       return;
     }
     const host = container.getBoundingClientRect();
-    const height = Math.min(MENU_MAX_HEIGHT, Math.max(1, items.length) * ROW_HEIGHT + 8);
+    // Rows plus one caption per group shown; short lists used to be cut off because the captions were not counted.
+    const groupsShown = new Set(items.map((item) => item.group)).size;
+    const listHeight = groupsShown * GROUP_HEADER_HEIGHT + items.reduce((h, item) => h + rowHeight(item), 0);
+    const height = Math.min(MENU_MAX_HEIGHT, Math.max(ROW_HEIGHT, listHeight) + 8);
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     const below = state.coords.bottom + 6 + height <= viewport.height - 8;
     const box = clampToViewport({ left: state.coords.left, top: below ? state.coords.bottom + 6 : state.coords.top - 6 - height, width: MENU_WIDTH, height }, viewport);
     const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
     const top = box.top - host.top + container.scrollTop;
     setPos({ left, top, width: box.width, maxHeight: box.height });
-  }, [open, state, items.length, containerRef]);
+  }, [open, state, items, containerRef]);
 
   if (!open || !pos) return null;
 
@@ -206,12 +219,15 @@ export function SlashMenu({
                 data-index={i}
                 data-testid={`slash-item-${item.id}`}
                 className={cn("flex w-full items-center gap-3 px-3 text-left text-sm text-ink-2", active && "bg-accent-soft text-ink")}
-                style={{ height: ROW_HEIGHT }}
+                style={{ height: rowHeight(item) }}
                 onMouseEnter={() => setIndex(i)}
                 onClick={() => apply(item)}
               >
                 <Icon size={16} className="shrink-0 text-ink-3" />
-                <span className="flex-1 truncate">{item.title}</span>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{item.title}</span>
+                  {item.description && <span className="truncate text-xs text-ink-3">{item.description}</span>}
+                </span>
                 {item.hint && <span className="text-xs text-ink-3">{item.hint}</span>}
               </button>
             );

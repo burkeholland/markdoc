@@ -32,7 +32,7 @@ export interface AgentRequestItem {
   updatedAt: string;
 }
 
-/** What the editor mirrors from `meta.agentRequests` so the pill updates in real time. */
+/** What the editor mirrors from `meta.agentRequests` so the presence stack updates in real time. */
 export interface AgentRequestMirror {
   id: string;
   status: AgentRequestStatus;
@@ -211,7 +211,7 @@ export async function claimRequest(docId: string, requestId: string, actor: Acto
 
 /**
  * Count work done against a request (called by the suggest/comment routes when `requestId` is given).
- * Also claims an open request implicitly so the pill shows who is working on it.
+ * Also claims an open request implicitly so the presence stack shows who is working on it.
  */
 export async function attachWork(docId: string, requestId: string, actor: Actor, work: { suggestions?: number; comments?: number; suggestionIds?: string[]; commentIds?: string[] }): Promise<AgentRequestItem> {
   const row = await getRequest(docId, requestId);

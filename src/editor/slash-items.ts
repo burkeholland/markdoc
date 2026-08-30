@@ -13,6 +13,8 @@ export interface SlashContext {
   openLink: () => void;
   /** Starts a comment on the current selection (see EditorShell.startComment). */
   startComment: () => void;
+  /** Opens the "Keep an agent here" dialog with the sentence that keeps an agent in this document. */
+  keepAgent: () => void;
   /** Insertion targets the caret is in; used to hide items that do not fit. */
   where: SlashWhere;
 }
@@ -29,6 +31,8 @@ export const SLASH_GROUPS: readonly SlashGroup[] = ["Basic", "Lists", "Blocks", 
 interface SlashItemBase {
   id: string;
   title: string;
+  /** One line under the title, for items whose title alone does not say what happens. */
+  description?: string;
   keywords: string[];
   /** lucide icon name, resolved to a component by the menu. */
   icon: string;
@@ -86,6 +90,15 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
     run: (ctx) => ctx.startComment(),
   },
   { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", command: () => insertText(todayIso()) },
+  {
+    id: "agent",
+    title: "Keep an agent here",
+    description: "Get the exact sentence that keeps an agent in this document",
+    keywords: ["copilot", "bot", "mcp", "watch", "keep"],
+    icon: "Bot",
+    group: "Insert",
+    run: (ctx) => ctx.keepAgent(),
+  },
 ];
 
 export function todayIso(now = new Date()): string {

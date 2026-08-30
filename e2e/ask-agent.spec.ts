@@ -6,6 +6,9 @@ import { signIn, createDocument, openDocument, selectTextInRich, ensureCommentsO
 const refresh = (page: Page) =>
   page.evaluate(() => (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh?.());
 
+/** The three purple header pills that used to carry agent state; none may come back. */
+const PILL_SELECTOR = '[data-testid="agent-pill"], [data-testid="agent-requests-pill"], [data-testid="agent-activity"]';
+
 interface RequestDto {
   id: string;
   documentId: string;
@@ -51,7 +54,7 @@ test.describe("ask an agent", () => {
     await alice.context.close();
   });
 
-  test("selection → Ask an agent → Tighten this → pill; the agent claims, suggests and completes → toast, suggestions, activity, bell", async () => {
+  test("selection → Ask an agent → Tighten this → presence placeholder; the agent claims, suggests and completes → toast, suggestions, activity, bell", async () => {
     const page = alice.page;
     await selectTextInRich(page, "quick brown fox jumps over the lazy dog");
     await page.getByTestId("ask-agent-button").click();
@@ -73,10 +76,30 @@ test.describe("ask an agent", () => {
     await expect(dialog).toHaveCount(0);
     await expect(page.getByTestId("toast").filter({ hasText: "Sent to agents" })).toBeVisible();
 
-    const pill = page.getByTestId("agent-requests-pill");
-    await expect(pill).toBeVisible();
-    await expect(pill).toContainText("1 request waiting");
-    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/ask-agent-pill.png` });
+    // No header pill any more: the presence stack grows a dashed "waiting" placeholder while no agent is here,
+    // and its popover lists the request with a Cancel button and the Keep-an-agent-here call to action.
+    await expect(page.getByTestId("header").locator(PILL_SELECTOR)).toHaveCount(0);
+    const stack = page.getByTestId("presence");
+    const waiting = stack.getByTestId("presence-waiting");
+    await expect(waiting).toBeVisible();
+    await expect(waiting).toHaveAttribute("aria-label", "1 request waiting for an agent");
+    await expect(waiting).toHaveAttribute("data-state", "waiting");
+    await expect(stack).toHaveAttribute("aria-label", /; 1 request waiting for an agent$/);
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/ask-agent-waiting.png` });
+    await stack.click();
+    const popover = page.getByTestId("presence-popover");
+    await expect(popover).toBeVisible();
+    const requests = popover.getByTestId("presence-requests");
+    await expect(requests.getByTestId("presence-request")).toHaveCount(1);
+    await expect(requests.getByTestId("presence-request")).toHaveAttribute("data-status", "open");
+    await expect(requests.getByTestId("presence-request")).toContainText("Tighten this");
+    await expect(requests.getByTestId("presence-request-state")).toHaveText("Waiting for an agent · tracked changes · asked by you");
+    await expect(requests.getByTestId("presence-request-cancel")).toBeVisible();
+    await expect(popover.getByTestId("presence-waiting-note")).toContainText("1 request waiting for an agent");
+    await expect(popover.getByTestId("keep-agent-here")).toBeVisible();
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/ask-agent-popover-requests.png` });
+    await page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
 
     // The agent side.
     const bot = agent(page, token);
@@ -87,16 +110,31 @@ test.describe("ask an agent", () => {
     expect(mine!.instruction).toBe("Tighten this");
     expect(mine!.selection?.quote).toBe("quick brown fox jumps over the lazy dog");
 
+    // Claiming over the API does not announce presence, so the placeholder stands in for the agent and shows it busy.
     await bot.claim(docId, mine!.id);
-    await expect(pill).toContainText("Copilot CLI is working");
+    await expect(waiting).toHaveAttribute("data-state", "working", { timeout: 2_000 });
+    await expect(waiting).toHaveAttribute("aria-label", "Copilot CLI is working");
+    await expect(waiting.getByTestId("presence-avatar-busy")).toBeVisible();
+    await stack.click();
+    await expect(requests.getByTestId("presence-request")).toHaveAttribute("data-status", "claimed");
+    await expect(requests.getByTestId("presence-request-state")).toHaveText("Copilot CLI is on it · tracked changes · asked by you");
+    await page.keyboard.press("Escape");
+    // Its first write puts it in presence: the placeholder yields to the agent avatar, badge still on.
     const suggested = await bot.suggest(docId, mine!.id, [{ find: "jumps over the lazy dog in the garden", replace: "clears the dog" }]);
     expect(suggested.suggestions).toBeGreaterThan(0);
+    const agentAvatar = stack.locator('[data-testid="presence-avatar"][data-agent]');
+    await expect(agentAvatar).toHaveCount(1);
+    await expect(waiting).toHaveCount(0);
+    await expect(agentAvatar).toHaveAttribute("data-busy", "");
+    await expect(agentAvatar.getByTestId("presence-avatar-busy")).toHaveAttribute("aria-label", "Copilot CLI is working");
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/ask-agent-working.png` });
     const done = await bot.complete(docId, mine!.id, "Shortened the sentence.");
     expect(done.request.status).toBe("done");
     expect(done.request.result?.suggestions).toBe(suggested.suggestions);
 
-    // Human side: pill gone, toast, Comments panel on Suggestions with the agent's proposals.
-    await expect(pill).toHaveCount(0);
+    // Human side: badge gone within 5 s, toast, Comments panel on Suggestions with the agent's proposals.
+    await expect(stack.getByTestId("presence-avatar-busy")).toHaveCount(0, { timeout: 5_000 });
+    await expect(agentAvatar).toHaveCount(1);
     await expect(page.getByTestId("toast").filter({ hasText: /Copilot CLI finished/ })).toBeVisible();
     await expect(page.getByTestId("comments-panel")).toBeVisible();
     await expect(page.getByTestId("comments-tab-suggestions")).toContainText(String(suggested.suggestions));
@@ -119,7 +157,7 @@ test.describe("ask an agent", () => {
     await page.keyboard.press("Escape");
   });
 
-  test("cancel from the pill's menu; the empty Comments panel offers Ask an agent", async () => {
+  test("cancel from the presence popover; the empty Comments panel offers Ask an agent", async () => {
     const page = alice.page;
     const fresh = await createDocument(page, "# Cancel doc\n\nNothing here yet.\n", "Cancel doc");
     await openDocument(page, fresh);
@@ -132,14 +170,20 @@ test.describe("ask an agent", () => {
     await page.getByTestId("ask-agent-instruction").fill("Review the whole thing");
     await page.getByTestId("ask-agent-mode-comment").check();
     await page.getByTestId("ask-agent-send").click();
-    const pill = page.getByTestId("agent-requests-pill");
-    await expect(pill).toContainText("1 request waiting");
-    await pill.click();
-    await expect(page.getByTestId("agent-request-item")).toHaveCount(1);
-    await page.getByTestId("agent-request-cancel").click();
-    await expect(pill).toHaveCount(0);
-    const list = (await (await page.request.get(`/api/documents/${fresh}/requests`)).json()) as { requests: RequestDto[] };
-    expect(list.requests[0].status).toBe("cancelled");
+    const stack = page.getByTestId("presence");
+    await expect(stack.getByTestId("presence-waiting")).toHaveAttribute("data-count", "1");
+    await stack.click();
+    const requests = page.getByTestId("presence-popover").getByTestId("presence-requests");
+    await expect(requests.getByTestId("presence-request")).toHaveCount(1);
+    await expect(requests.getByTestId("presence-request-state")).toHaveText("Waiting for an agent · comments · asked by you");
+    await page.getByTestId("presence-request-cancel").click();
+    await expect(requests).toHaveCount(0, { timeout: 1_000 });
+    await expect(stack.getByTestId("presence-waiting")).toHaveCount(0);
+    await expect(page.getByTestId("presence-popover").getByTestId("keep-agent-here")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect
+      .poll(async () => ((await (await page.request.get(`/api/documents/${fresh}/requests`)).json()) as { requests: RequestDto[] }).requests[0].status, { timeout: 5_000 })
+      .toBe("cancelled");
   });
 
   test("first visit without a token shows the connect card with this origin; Create token goes to /settings#tokens", async ({ browser }) => {

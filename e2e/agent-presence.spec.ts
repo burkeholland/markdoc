@@ -34,6 +34,7 @@ function agent(page: Page, token: string) {
 test.describe("agent presence and watch", () => {
   let alice: User;
   let docId: string;
+  let busyDocId: string;
   let token: string;
 
   test.beforeAll(async ({ browser }) => {
@@ -53,11 +54,15 @@ test.describe("agent presence and watch", () => {
     const page = alice.page;
     const bot = agent(page, token);
     await expect(page.getByTestId("presence").getByTestId("presence-avatar")).toHaveCount(1);
+    // Agents are collaborators: no agent pills in the header, ever.
+    await expect(page.getByTestId("header").locator('[data-testid="agent-pill"], [data-testid="agent-requests-pill"], [data-testid="agent-activity"]')).toHaveCount(0);
 
     await bot.presence(docId, { state: "active", status: "drafting" });
     const avatar = page.getByTestId("presence").locator('[data-testid="presence-avatar"][data-agent]');
     await expect(avatar).toHaveCount(1, { timeout: 3000 });
     await expect(page.getByTestId("presence")).toHaveAttribute("aria-label", /Copilot \(agent: drafting\)/);
+    // Present but not working on anything: no busy badge.
+    await expect(page.getByTestId("presence-avatar-busy")).toHaveCount(0);
 
     await page.getByTestId("presence").click();
     const popover = page.getByTestId("presence-popover");
@@ -67,6 +72,9 @@ test.describe("agent presence and watch", () => {
     await expect(row).toContainText("Copilot");
     await expect(row).toContainText("Agent");
     await expect(row.getByTestId("presence-status")).toHaveText("drafting");
+    await expect(row.getByTestId("presence-activity")).toHaveCount(0);
+    // With an agent here, the popover does not offer "Keep an agent here".
+    await expect(popover.getByTestId("keep-agent-here")).toHaveCount(0);
     await page.screenshot({ path: "test-results/agent-presence-header.png", clip: { x: 0, y: 0, width: 1280, height: 420 } });
 
     // A status update is live too.
@@ -183,5 +191,83 @@ test.describe("agent presence and watch", () => {
 
     await bot.presence(docId, { state: "left" });
     await expect(caret).toHaveCount(0, { timeout: 3000 });
+  });
+
+  test("a request the agent is working on puts a busy badge on its avatar and a Requests row in the popover; completing clears both", async () => {
+    const page = alice.page;
+    const bot = agent(page, token);
+    const headers = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
+    // A fresh document: the suggestion above left a 45 s `agentActivity` on the first one, which counts as working.
+    busyDocId = await createDocument(page, "# Busy doc\n\nA paragraph to review.\n\nAnother one.\n", "Busy doc");
+    await openDocument(page, busyDocId);
+    await bot.presence(busyDocId, { state: "active", status: "watching" });
+    const avatar = page.getByTestId("presence").locator('[data-testid="presence-avatar"][data-agent]');
+    await expect(avatar).toHaveCount(1, { timeout: 3000 });
+    const busy = page.getByTestId("presence").getByTestId("presence-avatar-busy");
+    await expect(busy).toHaveCount(0);
+
+    // Alice asks for comments on the whole document (same REST call the Ask-an-agent dialog makes).
+    const created = await page.request.post(`/api/documents/${busyDocId}/requests`, { data: { instruction: "Review the second paragraph", mode: "comment", selection: null } });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const requestId = ((await created.json()) as { request: { id: string } }).request.id;
+    // Waiting, agent present: no placeholder, no badge yet (nobody is working on it).
+    await page.getByTestId("presence").click();
+    const popover = page.getByTestId("presence-popover");
+    const requests = popover.getByTestId("presence-requests");
+    await expect(requests).toBeVisible();
+    await expect(requests.getByTestId("presence-request")).toHaveCount(1);
+    await expect(requests.getByTestId("presence-request")).toHaveAttribute("data-status", "open");
+    await expect(requests.getByTestId("presence-request-state")).toContainText("Waiting for an agent · comments · asked by you");
+    await expect(page.getByTestId("presence-waiting")).toHaveCount(0);
+    await expect(busy).toHaveCount(0);
+
+    const claim = await page.request.post(`/api/documents/${busyDocId}/requests/${requestId}/claim`, { headers });
+    expect(claim.ok(), await claim.text()).toBeTruthy();
+    // Within 2 s of the claim landing, the badge is on.
+    await expect(busy).toHaveCount(1, { timeout: 2000 });
+    await expect(busy).toHaveAttribute("aria-label", "Copilot is working");
+    await expect(avatar).toHaveAttribute("data-busy", "");
+    await expect(requests.getByTestId("presence-request")).toHaveAttribute("data-status", "claimed");
+    await expect(requests.getByTestId("presence-request-state")).toContainText("Copilot is on it · comments");
+    // The row shows the agent's own busy badge too.
+    await expect(popover.locator('[data-testid="presence-row"][data-agent]').getByTestId("presence-avatar-busy")).toHaveCount(1);
+    await page.screenshot({ path: "test-results/agent-presence-busy.png", clip: { x: 0, y: 0, width: 1280, height: 480 } });
+    if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/agent-presence-busy.png`, clip: { x: 0, y: 0, width: 1280, height: 480 } });
+
+    const complete = await page.request.post(`/api/documents/${busyDocId}/requests/${requestId}/complete`, { headers, data: { summary: "Left one comment." } });
+    expect(complete.ok(), await complete.text()).toBeTruthy();
+    // Done: the Requests section is gone and, with no fresh activity, so is the badge — within 5 s.
+    await expect(requests).toHaveCount(0, { timeout: 5000 });
+    await expect(busy).toHaveCount(0, { timeout: 5000 });
+    await expect(page.getByTestId("toast").filter({ hasText: /Copilot finished/ })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(popover).not.toBeVisible();
+    await bot.presence(busyDocId, { state: "left" });
+    await expect(avatar).toHaveCount(0, { timeout: 3000 });
+  });
+
+  test("an agent edit sets agentActivity: the avatar is busy and the row appends the verb with its age", async () => {
+    const page = alice.page;
+    const bot = agent(page, token);
+    await bot.presence(busyDocId, { state: "active", status: "reading" });
+    const avatar = page.getByTestId("presence").locator('[data-testid="presence-avatar"][data-agent]');
+    await expect(avatar).toHaveCount(1, { timeout: 3000 });
+    const busy = page.getByTestId("presence").getByTestId("presence-avatar-busy");
+    await expect(busy).toHaveCount(0);
+
+    await bot.suggest(busyDocId, [{ find: "Another one.", replace: "Another one, revised." }]);
+    await expect(busy).toHaveCount(1, { timeout: 3000 });
+    await page.getByTestId("presence").click();
+    const row = page.getByTestId("presence-popover").locator('[data-testid="presence-row"][data-agent]');
+    const activity = row.getByTestId("presence-activity");
+    await expect(activity).toBeVisible();
+    await expect(activity).toHaveText(/^proposed changes · (just now|\d+ s ago)$/);
+    // The row ticks: after the first seconds the wording moves on to a count.
+    await expect(activity).toHaveText(/^proposed changes · \d+ s ago$/, { timeout: 12_000 });
+    await expect(row.getByTestId("presence-section")).toContainText("proposed changes");
+    await page.screenshot({ path: "test-results/agent-presence-activity.png", clip: { x: 0, y: 0, width: 1280, height: 480 } });
+    await page.keyboard.press("Escape");
+    await bot.presence(busyDocId, { state: "left" });
+    await expect(avatar).toHaveCount(0, { timeout: 3000 });
   });
 });

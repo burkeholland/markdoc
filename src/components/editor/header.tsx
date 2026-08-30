@@ -1,7 +1,7 @@
 "use client";
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -55,9 +55,9 @@ import { useHydrated } from "@/lib/hooks";
 import { jsonEqual, useOpenSettled, useSessionValue } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
-import { AgentActivityChip } from "./agent-activity";
-import { AgentRequestsPill } from "./agent-requests-pill";
-import { AgentPill } from "./keep-agent-here";
+import { pendingRequests, useAgentRequests } from "./agent-requests";
+import { KeepAgentHereDialog } from "./keep-agent-here";
+import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, useAgentActivity, waitingLabel } from "./presence-agents";
 import { signOutSafely } from "@/lib/sign-out";
 
 /** The Markdoc mark (public/brand/mark.svg): a document with a folded corner and the `#` heading glyph. Follows the accent token. */
@@ -237,19 +237,63 @@ function AgentAvatar({ name, color, size }: { name: string; color: string; size:
   );
 }
 
-export function PresenceStack({ session, onJump }: { session: CollabSession; onJump?: (user: PresenceUser) => void }) {
+/** How long an optimistically cancelled request stays hidden before it may come back (the server refused). */
+const CANCEL_GRACE_MS = 8_000;
+
+export interface PresenceStackProps {
+  session: CollabSession;
+  onJump?: (user: PresenceUser) => void;
+  /** Cancel an open request from the popover's Requests section; without it the rows show but not Cancel (embed / read-only). */
+  onCancelRequest?: (requestId: string) => void;
+  /** Opens the "Keep an agent here" dialog; the popover offers it while no agent is present. */
+  onKeepAgent?: () => void;
+}
+
+/**
+ * Everyone in the document, agents included: agents are bot avatars with a spinner badge while they work,
+ * and the popover carries their status, the open requests and the way to put an agent here (task #981).
+ */
+export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }: PresenceStackProps) {
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const followUserId = useSessionValue(session, (s) => s.followUserId);
+  const requests = useAgentRequests(session);
+  const activity = useAgentActivity(session);
   const [open, setOpen] = useState(false);
-  // Idle dimming is time-based; re-evaluate it every 15 s while the stack is mounted.
-  const [now, setNow] = useState(() => Date.now());
+  // Cancel is optimistic: the row and the placeholder go at once; the mirror catches up a moment later. If the
+  // server refuses (editor-shell toasts the error) the request is still pending after the grace period and returns.
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(() => new Set());
+  const pending = pendingRequests(requests).filter((r) => !cancelling.has(r.id));
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 15_000);
+    if (cancelling.size === 0) return;
+    const stillPending = new Set(pendingRequests(requests).map((r) => r.id));
+    if ([...cancelling].every((id) => stillPending.has(id))) return;
+    setCancelling(new Set([...cancelling].filter((id) => stillPending.has(id))));
+  }, [requests, cancelling]);
+  const cancelRequest = (id: string) => {
+    setCancelling((prev) => new Set(prev).add(id));
+    onCancelRequest?.(id);
+    setTimeout(() => setCancelling((prev) => (prev.has(id) ? new Set([...prev].filter((x) => x !== id)) : prev)), CANCEL_GRACE_MS);
+  };
+  // Idle dimming is time-based; re-evaluate it every 15 s while the stack is mounted. A fresh agent
+  // activity ("proposed changes · 12 s ago") ticks every 5 s for the 45 s it shows.
+  const [now, setNow] = useState(() => Date.now());
+  const activityFresh = isRecentActivity(activity, now);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), activityFresh ? 5_000 : 15_000);
     return () => clearInterval(t);
-  }, []);
+  }, [activityFresh, activity]);
   const shown = users.slice(0, 3);
   const extra = users.length - shown.length;
   const others = users.filter((u) => !u.isLocal);
+  const agents = users.filter((u) => u.isAgent);
+  const busy = busyAgentNames(requests, activity, now);
+  // No agent in presence but requests pending: the stack shows a dashed placeholder. It reads "waiting" until an
+  // agent claims one (agents may claim over REST/MCP before they ever announce themselves), then "working".
+  const noAgent = agents.length === 0 && pending.length > 0;
+  const unseenWorker = noAgent ? pendingWorker(pending) : null;
+  const waiting = noAgent && !unseenWorker;
+  const nameOf = (userId: string) => users.find((u) => !u.isAgent && u.id === userId)?.name ?? null;
   const jump = (u: PresenceUser) => {
     if (u.cursor === null) return;
     onJump?.(u);
@@ -258,6 +302,10 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
   const follow = (u: PresenceUser) => {
     session.follow(followUserId === u.id ? null : u.id);
     setOpen(false);
+  };
+  const keepAgent = () => {
+    setOpen(false);
+    onKeepAgent?.();
   };
   const roleLabel: Record<string, string> = { owner: "Owner", editor: "Editor", commenter: "Commenter", viewer: "Viewer" };
   const label = (u: PresenceUser) => (u.isLocal ? `${u.name} (you)` : u.isAgent ? `${u.name} (agent${u.status ? `: ${u.status}` : ""})` : u.name);
@@ -268,24 +316,33 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
           type="button"
           className="flex items-center -space-x-2 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           data-testid="presence"
-          aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here: ${users.map(label).join(", ")}`}
+          aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here: ${users.map(label).join(", ")}${waiting ? `; ${waitingLabel(pending.length)}` : ""}`}
         >
           {shown.map((u) => (
-            <Tip key={u.id} label={label(u)}>
+            <Tip key={u.id} label={u.isAgent && busy.has(u.name) ? `${label(u)} — working` : label(u)}>
               <span
                 className={cn("relative inline-flex transition-opacity", !u.isLocal && isIdle(u.idleSince, now) && "opacity-40")}
                 data-testid="presence-avatar"
                 data-user-id={u.id}
                 data-idle={!u.isLocal && isIdle(u.idleSince, now) ? "" : undefined}
                 data-agent={u.isAgent ? "" : undefined}
+                data-busy={u.isAgent && busy.has(u.name) ? "" : undefined}
               >
                 {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={36} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={36} />}
+                {u.isAgent && busy.has(u.name) && <AgentBusyBadge name={u.name} />}
               </span>
             </Tip>
           ))}
           {extra > 0 && (
             <Tip label={users.slice(3).map((u) => u.name).join(", ")}>
               <span className="avatar text-[13px]">+{extra}</span>
+            </Tip>
+          )}
+          {noAgent && (
+            <Tip label={unseenWorker ? `${unseenWorker} (agent) — working` : waitingLabel(pending.length)}>
+              <span className="relative inline-flex">
+                <WaitingPlaceholder count={pending.length} workingBy={unseenWorker} size={36} />
+              </span>
             </Tip>
           )}
         </button>
@@ -298,9 +355,13 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
           {users.map((u) => {
             const idle = !u.isLocal && isIdle(u.idleSince, now);
             const following = followUserId === u.id;
+            const working = u.isAgent && busy.has(u.name);
             return (
-              <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && "opacity-60")} data-testid="presence-row" data-user-id={u.id} data-agent={u.isAgent ? "" : undefined}>
-                {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={28} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={28} />}
+              <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && !working && "opacity-60")} data-testid="presence-row" data-user-id={u.id} data-agent={u.isAgent ? "" : undefined}>
+                <span className="relative inline-flex shrink-0">
+                  {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={28} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={28} />}
+                  {working && <AgentBusyBadge name={u.name} />}
+                </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 text-sm font-medium text-ink">
                     <span className="truncate">{u.isLocal ? `${u.name} (you)` : u.name}</span>
@@ -309,7 +370,15 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
                   </div>
                   <div className="truncate text-xs text-ink-3" data-testid="presence-section">
                     {u.isAgent ? (
-                      <span data-testid="presence-status">{idle ? "Idle" : u.status ?? "working"}</span>
+                      <>
+                        <span data-testid="presence-status">{idle && !working ? "Idle" : u.status ?? "working"}</span>
+                        {activityFresh && activity.name === u.name && (
+                          <>
+                            {" · "}
+                            <PresenceActivity activity={activity} now={now} />
+                          </>
+                        )}
+                      </>
                     ) : (
                       <>
                         {idle ? "Idle · " : ""}
@@ -338,7 +407,18 @@ export function PresenceStack({ session, onJump }: { session: CollabSession; onJ
             );
           })}
         </ul>
-        {others.length === 0 && <div className="px-2 pb-1 pt-1.5 text-xs text-ink-3">Share the document to work on it together.</div>}
+        {pending.length > 0 && <PresenceRequests session={session} pending={pending} nameOf={nameOf} onCancel={onCancelRequest ? cancelRequest : undefined} />}
+        {waiting && (
+          <p className="px-2 pb-1 pt-1.5 text-xs text-ink-3" data-testid="presence-waiting-note">
+            {waitingLabel(pending.length)} — none is sitting in this document.
+          </p>
+        )}
+        {agents.length === 0 && onKeepAgent && (
+          <div className={cn("px-1 pb-1", waiting ? "pt-1" : "pt-1.5")}>
+            <KeepAgentHereButton onClick={keepAgent} primary={waiting} />
+          </div>
+        )}
+        {others.length === 0 && pending.length === 0 && <div className="px-2 pb-1 pt-1.5 text-xs text-ink-3">Share the document to work on it together.</div>}
       </PopoverContent>
     </Popover>
   );
@@ -452,11 +532,11 @@ export interface HeaderProps {
   compact: boolean;
   /** "Jump" in the presence popover: scroll both panes to a collaborator's cursor. */
   onJumpToUser?: (user: PresenceUser) => void;
-  /** Cancel an "Ask an agent" request from the header pill; the pill is hidden when omitted. */
+  /** Cancel an open request from the presence popover's Requests section; the Cancel buttons are hidden when omitted. */
   onCancelRequest?: (requestId: string) => void;
   /** Where "Keep an agent here" sends people without a token (defaults to /settings#tokens). */
   onCreateToken?: () => void;
-  /** Bumped by the command palette's "Keep an agent here": opens the agent pill on that view. */
+  /** Bumped by the command palette's "Keep an agent here" (and the `/agent` slash item): opens the Keep-an-agent dialog. */
   keepAgentNonce?: number;
   /** Canvas mode: hide navigation, sharing, publishing, and account menus. */
   embed?: boolean;
@@ -550,13 +630,20 @@ export function PublishStatusButton({
 }
 
 export const Header = memo(function Header(props: HeaderProps) {
-  const { session, doc, compact, githubConfigured, embed = false } = props;
+  const { session, doc, compact, githubConfigured, embed = false, keepAgentNonce = 0 } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
   // Star state and the notifications poll wait for the first sync: the socket handshake and the
   // collab-token call get the server to themselves on open (#118).
   const settled = useOpenSettled(session);
+  // "Keep an agent here": one dialog, opened from the presence popover, the command palette and the slash menu.
+  const [keepAgentOpen, setKeepAgentOpen] = useState(false);
+  useEffect(() => {
+    if (keepAgentNonce > 0) setKeepAgentOpen(true);
+  }, [keepAgentNonce]);
+  const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
+  const openKeepAgent = useCallback(() => setKeepAgentOpen(true), []);
 
   return (
     <header className="app-header safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header" data-embed={embed || undefined}>
@@ -578,15 +665,13 @@ export const Header = memo(function Header(props: HeaderProps) {
         {!embed && !compact && <HeaderStar docId={doc.id} ready={settled} />}
         <SaveIndicator session={session} compact={compact} />
       </div>
-      <div className="flex shrink-0 items-center gap-1 md:gap-3">
+      <div className="flex shrink-0 items-center gap-1 md:gap-3" data-testid="header-right">
         <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
         <div className="hidden items-center gap-3 md:flex">
-          {props.onCancelRequest && <AgentRequestsPill session={session} onCancel={props.onCancelRequest} />}
-          <AgentActivityChip session={session} />
-          <AgentPill session={session} doc={doc} onCreateToken={props.onCreateToken} keepAgentNonce={props.keepAgentNonce} />
           <ModeSwitcher session={session} />
-          <PresenceStack session={session} onJump={props.onJumpToUser} />
+          <PresenceStack session={session} onJump={props.onJumpToUser} onCancelRequest={props.onCancelRequest} onKeepAgent={openKeepAgent} />
         </div>
+        <KeepAgentHereDialog doc={{ id: doc.id, title: liveTitle }} open={keepAgentOpen} onOpenChange={setKeepAgentOpen} onCreateToken={props.onCreateToken} />
         {!embed && session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
         {!embed && !compact && (
           <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">

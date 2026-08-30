@@ -56,7 +56,7 @@ export async function pollDocumentSync(documentId: string, fresh: boolean): Prom
 import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
 import { AskAgentDialog, type AskAgentMode, type AskAgentSelection } from "./ask-agent-dialog";
-import { describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests-pill";
+import { describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests";
 import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FindBar } from "./find-bar";
@@ -627,7 +627,7 @@ export function EditorShell({
   );
 
   // "Ask an agent": the dialog captures the selection when it opens; results come back through the
-  // shared document (meta.agentRequests, mirrored by the server) so the pill and toast are realtime.
+  // shared document (meta.agentRequests, mirrored by the server) so the presence stack and toast are realtime.
   const [askAgent, setAskAgent] = useState<{ selection: AskAgentSelection | null } | null>(null);
   const [commentsFocus, setCommentsFocus] = useState<{ tab: "open" | "resolved" | "suggestions"; nonce: number } | null>(null);
   // A focus request only applies to the panel it opened; once the panel closes, a later reopen picks
@@ -673,7 +673,7 @@ export function EditorShell({
   const goCreateToken = useCallback(() => {
     navigateTo(`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`);
   }, [doc.id]);
-  // "Keep an agent here" from the command palette: the header's agent pill opens on that view.
+  // "Keep an agent here" from the command palette or the `/agent` slash item: the header opens its dialog.
   const [keepAgentNonce, setKeepAgentNonce] = useState(0);
   const openKeepAgent = useCallback(() => setKeepAgentNonce((n) => n + 1), []);
   const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
@@ -1159,7 +1159,7 @@ export function EditorShell({
                     )}
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onAskAgent={openAskAgent} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
-                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} />
+                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} onKeepAgent={openKeepAgent} />
                     <RichPane
                       session={session}
                       hidden={showRichPlaceholder}

@@ -110,10 +110,10 @@ const SLASH_SHORTCUTS: Record<string, string> = {
 
 const SLASH_GROUP_SET = new Set<string>(SLASH_GROUPS);
 
-/** Block items reused from the slash menu (template items and other extensions are skipped). */
+/** Block items reused from the slash menu (template items, other extensions and `/agent` — the palette has `doc:keep-agent` — are skipped). */
 function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = SLASH_ITEMS): Command[] {
   return items
-    .filter((item) => SLASH_GROUP_SET.has(item.group) && (!item.available || item.available(ctx.slashWhere)))
+    .filter((item) => item.id !== "agent" && SLASH_GROUP_SET.has(item.group) && (!item.available || item.available(ctx.slashWhere)))
     .map((item) => ({
       id: `block:${item.id}`,
       title: item.title,
@@ -130,7 +130,7 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
           view.focus();
           return;
         }
-        item.run({ view, openImage: ctx.openImage, openLink: ctx.openLink, startComment: ctx.startComment, where: ctx.slashWhere }, "");
+        item.run({ view, openImage: ctx.openImage, openLink: ctx.openLink, startComment: ctx.startComment, keepAgent: () => ctx.keepAgent?.(), where: ctx.slashWhere }, "");
       },
     }));
 }

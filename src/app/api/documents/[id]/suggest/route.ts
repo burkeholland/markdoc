@@ -24,7 +24,7 @@ const targeted = z.object({
     .min(1)
     .max(200),
 });
-/** Link the suggestions to an "Ask an agent" request so its pill shows progress. */
+/** Link the suggestions to an "Ask an agent" request so the editor shows its progress. */
 const linked = z.object({
   requestId: z.string().min(1).optional(),
   /** `contentHash` from `GET /content`; refused with 409 when the document moved since (also as `If-Match`). */
