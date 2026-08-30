@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, vi } from "vitest";
+import type * as Y from "yjs";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -19,13 +20,15 @@ const { createApiToken } = await import("@/server/tokens");
 const { listNotifications } = await import("@/server/notifications");
 const { listActivity } = await import("@/server/activity");
 const { createRequest, listRequests, listRequestsForUser, claimRequest, completeRequest, cancelRequest, attachWork, readMirror } = await import("@/server/agent-requests");
+const { pollEvents } = await import("@/server/agent-events");
+const { readLiveDoc } = await import("@/server/livedoc");
 const { POST: POST_REQUESTS, GET: GET_REQUESTS } = await import("@/app/api/documents/[id]/requests/route");
 const { POST: POST_CLAIM } = await import("@/app/api/documents/[id]/requests/[rid]/claim/route");
 const { POST: POST_COMPLETE } = await import("@/app/api/documents/[id]/requests/[rid]/complete/route");
 const { POST: POST_CANCEL } = await import("@/app/api/documents/[id]/requests/[rid]/cancel/route");
 const { GET: GET_AGENT_REQUESTS } = await import("@/app/api/agent/requests/route");
 const { POST: POST_SUGGEST } = await import("@/app/api/documents/[id]/suggest/route");
-const { POST: POST_COMMENTS } = await import("@/app/api/documents/[id]/comments/route");
+const { POST: POST_COMMENTS, GET: GET_COMMENTS } = await import("@/app/api/documents/[id]/comments/route");
 
 let owner: Actor;
 let commenter: Actor;
@@ -230,6 +233,157 @@ describe("agent request routes", () => {
     const activity = await listActivity(docId);
     expect(activity.items.some((i) => i.action === "suggestion.add" && i.detail.requestId === request.id)).toBe(true);
     expect(activity.items.some((i) => i.action === "agent.request.done" && i.detail.requestId === request.id)).toBe(true);
+  });
+});
+
+describe("requests made from a comment thread (#997)", () => {
+  type Thread = { id: string; replies: { id: string; body: string; author: string }[] };
+  const threads = async () => (await (await as(owner, () => GET_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, undefined, "GET"), params(docId)))).json()) as { comments: Thread[] };
+  const replyNotifications = async (login: string) => (await listNotifications(login, { kind: "reply" })).items;
+  const stampedRequestId = (threadId: string) => readLiveDoc(docId, (doc) => (doc.getMap("comments").get(threadId) as Y.Map<unknown> | undefined)?.get("requestId"));
+
+  it("stores threadId, stamps requestId on the thread map, mirrors it and carries it on request.created; null without", async () => {
+    const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "brown fox", body: "Is this the right animal?" }), params(docId)));
+    expect(add.status).toBe(200);
+    const { id: threadId } = (await add.json()) as { id: string };
+    const { cursor } = await pollEvents(docId, agentActor(), null, 0);
+    const { cursor: inboxCursor } = await pollEvents(null, agentActor(), null, 0);
+
+    const fromThread = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Check the animal", mode: "comment", threadId });
+    expect(fromThread.threadId).toBe(threadId);
+    expect((await listRequests(docId)).find((r) => r.id === fromThread.id)?.threadId).toBe(threadId);
+    expect((await listRequestsForUser(owner)).find((r) => r.id === fromThread.id)?.threadId).toBe(threadId);
+    expect((await readMirror(docId))[fromThread.id]).toMatchObject({ status: "open", threadId });
+    expect(await stampedRequestId(threadId)).toBe(fromThread.id);
+    const asked = (await listActivity(docId)).items.find((i) => i.action === "agent.request" && i.detail.requestId === fromThread.id);
+    expect(asked?.detail.threadId).toBe(threadId);
+
+    const fromDialog = await createRequest(docId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    expect(fromDialog.threadId).toBeNull();
+    expect((await readMirror(docId))[fromDialog.id]).toMatchObject({ threadId: null });
+
+    // Both watches (per document from the activity row, inbox from the request row) carry the field.
+    const page = await pollEvents(docId, agentActor(), cursor, 0);
+    const created = page.events.filter((e) => e.type === "request.created") as { requestId: string; threadId: string | null }[];
+    expect(created.find((e) => e.requestId === fromThread.id)?.threadId).toBe(threadId);
+    expect(created.find((e) => e.requestId === fromDialog.id)?.threadId).toBeNull();
+    const inbox = await pollEvents(null, agentActor(), inboxCursor, 0);
+    const inboxCreated = inbox.events.filter((e) => e.type === "request.created") as { requestId: string; threadId: string | null }[];
+    expect(inboxCreated.find((e) => e.requestId === fromThread.id)?.threadId).toBe(threadId);
+    expect(inboxCreated.find((e) => e.requestId === fromDialog.id)?.threadId).toBeNull();
+
+    // A later request on the same thread takes over the stamp (the card shows the latest).
+    const again = await createRequest(docId, ownerActor(), "owner", { instruction: "And the colour?", mode: "comment", threadId });
+    expect(await stampedRequestId(threadId)).toBe(again.id);
+
+    await cancelRequest(docId, fromThread.id, ownerActor(), "owner");
+    await cancelRequest(docId, fromDialog.id, ownerActor(), "owner");
+    await cancelRequest(docId, again.id, ownerActor(), "owner");
+  });
+
+  it("refuses a threadId that is not a thread of the document (nothing stored)", async () => {
+    const before = (await listRequests(docId)).length;
+    await expect(createRequest(docId, ownerActor(), "owner", { instruction: "Hi", mode: "comment", threadId: "no-such-thread" })).rejects.toMatchObject({ status: 404 });
+    expect((await listRequests(docId)).length).toBe(before);
+    const res = await as(owner, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Hi", mode: "comment", threadId: "no-such-thread" }), params(docId)));
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe("Comment not found");
+  });
+
+  it("counts a reply with requestId as work and records the reply id; the thread starter gets no reply notification", async () => {
+    // Cam starts the thread and asks; Olive's agent answers in it. Cam would normally hear `reply` from Olive.
+    const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "lazy dog", body: "Too lazy?" }), params(docId)));
+    const { id: threadId } = (await add.json()) as { id: string };
+    const res = await as(commenter, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Is the dog too lazy?", mode: "comment", threadId }), params(docId)));
+    expect(res.status).toBe(201);
+    const { request } = (await res.json()) as { request: { id: string; threadId: string | null } };
+    expect(request.threadId).toBe(threadId);
+    const camBefore = (await replyNotifications("cam")).length;
+
+    expect((await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "It is fine.", requestId: "nope" }), params(docId)), ownerToken)).status).toBe(404);
+    const reply = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "The dog is fine, @cam.", requestId: request.id }), params(docId)), ownerToken);
+    expect(reply.status).toBe(200);
+    const { id: replyId } = (await reply.json()) as { id: string };
+    const thread = (await threads()).comments.find((t) => t.id === threadId)!;
+    expect(thread.replies.map((r) => r.id)).toEqual([replyId]);
+    // The 404 above wrote nothing.
+    expect(thread.replies).toHaveLength(1);
+
+    const worked = (await listRequests(docId)).find((r) => r.id === request.id)!;
+    expect(worked).toMatchObject({ status: "claimed", claimedBy: "Copilot CLI", result: { suggestions: 0, comments: 1, commentIds: [replyId] } });
+    expect((await listActivity(docId)).items.find((i) => i.action === "comment.reply" && i.detail.replyId === replyId)?.detail.requestId).toBe(request.id);
+
+    // No `reply` for the request-linked answer; the mention inside it still reaches Cam.
+    expect((await replyNotifications("cam")).length).toBe(camBefore);
+    expect((await listNotifications("cam", { kind: "mention" })).items.find((n) => n.refId === replyId)).toMatchObject({ actorName: "Copilot CLI" });
+
+    // A plain reply (no requestId) notifies as today.
+    const plain = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "Also: nice fox." }), params(docId)), ownerToken);
+    const { id: plainId } = (await plain.json()) as { id: string };
+    const camAfter = await replyNotifications("cam");
+    expect(camAfter.length).toBe(camBefore + 1);
+    expect(camAfter.find((n) => n.refId === plainId)).toBeTruthy();
+    expect((await listRequests(docId)).find((r) => r.id === request.id)?.result).toMatchObject({ comments: 1 });
+
+    const done = await as(null, () => POST_COMPLETE(jsonReq(`/api/documents/${docId}/requests/${request.id}/complete`, { summary: "Answered in the thread." }), params(docId, request.id)), ownerToken);
+    expect(((await done.json()) as { request: { result: { comments: number } } }).request.result.comments).toBe(1);
+  });
+
+  it("folds `add` + requestId into the request's thread as a reply (quote ignored, no new thread, no reply notification)", async () => {
+    const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "quick", body: "Quick enough?" }), params(docId)));
+    const { id: threadId } = (await add.json()) as { id: string };
+    const fromThread = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Quick enough?", mode: "comment", threadId });
+    const before = (await threads()).comments.length;
+    const camBefore = (await replyNotifications("cam")).length;
+
+    // Legacy agent: `add` with a quote, but the request came from Cam's thread → a reply there, quote ignored.
+    const folded = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "quick", body: "Yes, quick is right.", requestId: fromThread.id }), params(docId)), ownerToken);
+    expect(folded.status).toBe(200);
+    const foldedBody = (await folded.json()) as { id: string; threadId?: string; folded?: boolean };
+    expect(foldedBody).toEqual({ id: expect.any(String), threadId, folded: true });
+    const after = await threads();
+    expect(after.comments).toHaveLength(before);
+    expect(after.comments.find((t) => t.id === threadId)?.replies.map((r) => [r.id, r.body, r.author])).toEqual([[foldedBody.id, "Yes, quick is right.", "Copilot CLI"]]);
+    expect((await listRequests(docId)).find((r) => r.id === fromThread.id)).toMatchObject({ status: "claimed", result: { comments: 1, commentIds: [foldedBody.id] } });
+    const activity = await listActivity(docId);
+    expect(activity.items.find((i) => i.action === "comment.reply" && i.detail.replyId === foldedBody.id)?.detail).toMatchObject({ threadId, requestId: fromThread.id });
+    expect(activity.items.some((i) => i.action === "comment.add" && i.detail.requestId === fromThread.id)).toBe(false);
+    expect((await replyNotifications("cam")).length).toBe(camBefore);
+
+    // A done request refuses more work and the folded reply is taken back out (nothing changed on a non-2xx).
+    await completeRequest(docId, fromThread.id, agentActor());
+    const refused = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", body: "Late answer.", requestId: fromThread.id }), params(docId)), ownerToken);
+    expect(refused.status).toBe(409);
+    expect((await threads()).comments.find((t) => t.id === threadId)?.replies).toHaveLength(1);
+  });
+
+  it("leaves `add` + requestId unchanged for a request without threadId: a new thread on the quote, `{ id }` only", async () => {
+    const fromDialog = await createRequest(docId, ownerActor(), "owner", { instruction: "Comment on the dog", mode: "comment", selection: { from: 40, to: 48, quote: "lazy dog" } });
+    const before = (await threads()).comments.length;
+    const twin = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "lazy dog", body: "Consider a livelier dog.", requestId: fromDialog.id }), params(docId)), ownerToken);
+    expect(twin.status).toBe(200);
+    const twinBody = (await twin.json()) as { id: string; folded?: boolean };
+    expect(twinBody).toEqual({ id: expect.any(String) });
+    const now = await threads();
+    expect(now.comments).toHaveLength(before + 1);
+    expect(now.comments.find((t) => t.id === twinBody.id)?.replies).toEqual([]);
+    expect((await listRequests(docId)).find((r) => r.id === fromDialog.id)?.result).toMatchObject({ comments: 1, commentIds: [twinBody.id] });
+    expect((await listActivity(docId)).items.some((i) => i.action === "comment.add" && i.detail.requestId === fromDialog.id && i.detail.threadId === twinBody.id)).toBe(true);
+    await completeRequest(docId, fromDialog.id, agentActor());
+  });
+
+  it("GET /api/agent/requests serialises threadId (null for dialog requests)", async () => {
+    const add = await as(owner, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "jumps", body: "Or leaps?" }), params(docId)));
+    const { id: threadId } = (await add.json()) as { id: string };
+    const fromThread = await createRequest(docId, ownerActor(), "owner", { instruction: "Or leaps?", mode: "comment", threadId });
+    const fromDialog = await createRequest(docId, ownerActor(), "owner", { instruction: "Whole document", mode: "comment" });
+    const inbox = (await (await as(null, () => GET_AGENT_REQUESTS(jsonReq("/api/agent/requests?status=open", undefined, "GET")), ownerToken)).json()) as { requests: { id: string; threadId: string | null }[] };
+    expect(inbox.requests.find((r) => r.id === fromThread.id)).toMatchObject({ threadId });
+    const dialogItem = inbox.requests.find((r) => r.id === fromDialog.id)!;
+    expect("threadId" in dialogItem).toBe(true);
+    expect(dialogItem.threadId).toBeNull();
+    await cancelRequest(docId, fromThread.id, ownerActor(), "owner");
+    await cancelRequest(docId, fromDialog.id, ownerActor(), "owner");
   });
 });
 
