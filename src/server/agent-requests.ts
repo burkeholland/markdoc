@@ -1,3 +1,4 @@
+import type * as Y from "yjs";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
@@ -24,6 +25,8 @@ export interface AgentRequestItem {
   userLogin?: string | null;
   instruction: string;
   selection: AgentRequestSelection | null;
+  /** Comment thread the request was made from; null for requests from the Ask-an-agent dialog. */
+  threadId: string | null;
   mode: AgentRequestMode;
   status: AgentRequestStatus;
   claimedBy: string | null;
@@ -41,6 +44,8 @@ export interface AgentRequestMirror {
   claimedBy: string | null;
   result: AgentRequestResult | null;
   userId: string;
+  /** Comment thread the request belongs to, when it was made from a comment. */
+  threadId: string | null;
   updatedAt: number;
 }
 
@@ -51,6 +56,7 @@ export function toRequestItem(row: AgentRequest, extra: Partial<AgentRequestItem
     userId: row.userId,
     instruction: row.instruction,
     selection: row.selection ?? null,
+    threadId: row.threadId ?? null,
     mode: row.mode,
     status: row.status,
     claimedBy: row.claimedBy ?? null,
@@ -65,6 +71,8 @@ export interface CreateRequestInput {
   instruction: string;
   selection?: AgentRequestSelection | null;
   mode?: AgentRequestMode;
+  /** Comment thread this request comes from: must exist in the document; its Y.Map gets `requestId` stamped. */
+  threadId?: string | null;
 }
 
 /** The minimum role a mode needs: commenting is enough to ask for comments; anything that changes text needs edit. */
@@ -87,8 +95,22 @@ async function getRequest(docId: string, requestId: string): Promise<AgentReques
   return row;
 }
 
-/** Mirror the request's status into the shared document so connected editors update without polling. */
-async function mirrorRequest(row: AgentRequest, actor: Actor | null) {
+/** The comment thread a request was made from (null for dialog requests); 404 when the request is unknown. */
+export async function requestThreadId(docId: string, requestId: string): Promise<string | null> {
+  return (await getRequest(docId, requestId)).threadId ?? null;
+}
+
+/** The shared comments map: thread id → thread Y.Map (same shape CommentsModel reads). */
+function commentsMap(doc: Y.Doc): Y.Map<Y.Map<unknown>> {
+  return doc.getMap<Y.Map<unknown>>("comments");
+}
+
+/**
+ * Mirror the request's status into the shared document so connected editors update without polling.
+ * With `stampThread`, the thread the request came from gets `requestId` in the same transaction (the
+ * latest request on a thread wins), so the thread card can find its request without polling either.
+ */
+async function mirrorRequest(row: AgentRequest, actor: Actor | null, opts: { stampThread?: boolean } = {}) {
   const ctx = {
     userId: actor?.id ?? row.userId,
     docId: row.documentId,
@@ -116,9 +138,11 @@ async function mirrorRequest(row: AgentRequest, actor: Actor | null) {
         claimedBy: row.claimedBy ?? null,
         result: row.result ?? null,
         userId: row.userId,
+        threadId: row.threadId ?? null,
         updatedAt: row.updatedAt.getTime(),
       };
       meta.set("agentRequests", next);
+      if (opts.stampThread && row.threadId) commentsMap(doc).get(row.threadId)?.set("requestId", row.id);
     });
   } catch (err) {
     console.error("[agent-requests] mirror failed", err);
@@ -140,14 +164,17 @@ export async function createRequest(docId: string, actor: Actor, role: Role, inp
     const to = Math.max(from, Math.floor(input.selection.to));
     selection = { from, to, quote: input.selection.quote.slice(0, QUOTE_MAX) };
   }
+  const threadId = input.threadId?.trim() || null;
+  // Same resolution as the comments route (`CommentsModel.ymap.get`): the thread must be in the live document.
+  if (threadId && !(await readLiveDoc(docId, (doc) => commentsMap(doc).has(threadId)))) throw new HttpError(404, "Comment not found");
   const db = await getDb();
   const now = new Date();
   const [row] = await db
     .insert(schema.agentRequests)
-    .values({ id: newId(), documentId: docId, userId: actor.id, instruction, selection, mode, status: "open", createdAt: now, updatedAt: now })
+    .values({ id: newId(), documentId: docId, userId: actor.id, instruction, selection, threadId, mode, status: "open", createdAt: now, updatedAt: now })
     .returning();
-  await recordActivity(docId, activityActor(actor), "agent.request", { requestId: row.id, mode, instruction: clip(instruction), quote: selection ? clip(selection.quote) : null });
-  await mirrorRequest(row, actor);
+  await recordActivity(docId, activityActor(actor), "agent.request", { requestId: row.id, mode, instruction: clip(instruction), quote: selection ? clip(selection.quote) : null, threadId });
+  await mirrorRequest(row, actor, { stampThread: true });
   return toRequestItem(row);
 }
 

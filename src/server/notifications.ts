@@ -331,8 +331,13 @@ interface Actor {
 
 const log = (what: string) => (err: unknown) => console.error(`[notifications] ${what} failed`, err);
 
-/** `reply`: thread author and everyone who replied before, except the replier. */
+/**
+ * `reply`: thread author and everyone who replied before, except the replier. A reply posted against an
+ * agent request (`requestId` on the reply) notifies nobody here: the requester hears `request.done` when
+ * the agent completes, and a second bell for the same answer would be noise. Mentions in it still notify.
+ */
 export async function notifyReply(docId: string, thread: ThreadInfo, reply: CommentReply): Promise<number> {
+  if (reply.requestId) return 0;
   const earlier = thread.replies.filter((r) => r.id !== reply.id && r.createdAt <= reply.createdAt);
   const recipients = [thread.authorLogin, ...earlier.map((r) => r.authorLogin)];
   const actor = reply.authorLogin ?? null;
