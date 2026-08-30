@@ -661,6 +661,9 @@ if ($SimulateRecoveryConfigurationFailure -and -not $ConfigureRecovery) {
 if ($RotateDatabasePassword -and $InfraOnly) {
   throw 'Password rotation must roll and verify the Container App; do not combine -RotateDatabasePassword with -InfraOnly.'
 }
+if ($RotateDatabasePassword -and $ConfigureRecovery) {
+  throw 'Run -ConfigureRecovery on its own: recovery configuration installs packages and needs the temporary bootstrap public IP, which the -RotateDatabasePassword flow does not attach (docs/postgres-egress.md). Rotate first, then configure recovery.'
+}
 if ($RotateDatabasePassword -and -not $SecretsPath) {
   throw 'Password rotation requires -SecretsPath so current and candidate credentials remain DPAPI-encrypted and recoverable.'
 }
@@ -865,6 +868,7 @@ function Clear-UnchangedRotationCandidate {
 }
 
 function Restore-CandidateOnlyDatabaseCredential($CurrentApplication) {
+  # Deploys without the bootstrap public IP, so it never configures recovery: validation refuses -RotateDatabasePassword with -ConfigureRecovery.
   $reconciliationOutputs = Deploy-Infra `
     -Image $CurrentApplication.PreviousImage `
     -AppVersion $CurrentApplication.PreviousAppVersion `
@@ -877,8 +881,8 @@ function Restore-CandidateOnlyDatabaseCredential($CurrentApplication) {
     -ClearPendingPostgresPassword $false `
     -ReconcilePostgresPassword $true `
     -SimulatePostgresRotationFailure $false `
-    -ConfigurePostgresRecovery ([bool]$ConfigureRecovery) `
-    -SimulatePostgresRecoveryFailure ([bool]$SimulateRecoveryConfigurationFailure) `
+    -ConfigurePostgresRecovery $false `
+    -SimulatePostgresRecoveryFailure $false `
     -DatabaseConfigurationToken $databaseConfigurationToken `
     -RecoveryConfigurationVersion $recoveryConfigurationVersion
 
@@ -1025,6 +1029,7 @@ if ($candidateOnlyRotationRecovery) {
     -Operation {
       Invoke-RotationFinalization `
         -Commit {
+          # Deploys without the bootstrap public IP, so it never configures recovery: validation refuses -RotateDatabasePassword with -ConfigureRecovery.
           $stageOutputs = Deploy-Infra `
             -Image '' `
             -AppVersion '' `
@@ -1037,8 +1042,8 @@ if ($candidateOnlyRotationRecovery) {
             -ClearPendingPostgresPassword $false `
             -ReconcilePostgresPassword $false `
             -SimulatePostgresRotationFailure ([bool]$SimulateDatabaseRotationFailure) `
-            -ConfigurePostgresRecovery ([bool]$ConfigureRecovery) `
-            -SimulatePostgresRecoveryFailure ([bool]$SimulateRecoveryConfigurationFailure) `
+            -ConfigurePostgresRecovery $false `
+            -SimulatePostgresRecoveryFailure $false `
             -DatabaseConfigurationToken $databaseConfigurationToken `
             -RecoveryConfigurationVersion $recoveryConfigurationVersion
 
