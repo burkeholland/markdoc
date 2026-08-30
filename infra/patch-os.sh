@@ -58,7 +58,7 @@ case "$MODE" in
     ;;
   full)
     # Plain upgrade never installs new packages, so the PGDG postgresql metapackage cannot pull a new major
-    # in; a new major would need dist-upgrade/full-upgrade, which this script never runs.
+    # in; only the distribution upgrade verbs could, and this script never runs them (the apt pin adds a second lock).
     apt-get -y -q upgrade >>"$LOG" 2>&1
     ;;
   rollback)

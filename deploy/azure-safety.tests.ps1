@@ -16,6 +16,7 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 $deploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure.ps1') -Raw
+$sharedSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure-postgres-network.ps1') -Raw
 Assert-True ($deploymentSource -match '\$temporaryPackageEgress = \[bool\]\(\$InitializeDatabase -or \$ConfigureRecovery\)') 'Initialization and recovery must both register temporary-egress cleanup.'
 $temporaryPublicIpAssignment = [regex]::Match(
   $deploymentSource,
@@ -69,8 +70,8 @@ $publicIpFreeRecoveryDeployments = @($infrastructureDeployments | Where-Object {
 })
 Assert-Equal 0 $publicIpFreeRecoveryDeployments.Count 'A deployment without the bootstrap public IP must never configure PostgreSQL recovery: its apt installs would ride default outbound access once the NAT gateway is gone.'
 Assert-True ($deploymentSource -match 'Restore-PostgresSteadyStateEgress') 'The deployment path must invoke restrictive-egress restoration.'
-Assert-True ($deploymentSource -match "nsg rule delete[\s\S]+?AllowApprovedPackageSetup") 'Egress cleanup must modify only the temporary package rule.'
-Assert-True ($deploymentSource -match "DenyOtherInternetEgress[\s\S]+?destinationAddressPrefix -ne 'Internet'") 'Egress cleanup must verify the steady-state Internet deny rule.'
+Assert-True ($sharedSource -match "nsg rule delete[\s\S]+?AllowApprovedPackageSetup") 'Egress cleanup must modify only the temporary package rule.'
+Assert-True ($sharedSource -match "DenyOtherInternetEgress[\s\S]+?destinationAddressPrefix -ne 'Internet'") 'Egress cleanup must verify the steady-state Internet deny rule.'
 Assert-True ($deploymentSource -match 'Invoke-RotationFinalization') 'The deployment path must use compensated rotation finalization.'
 Assert-True ($deploymentSource -match 'PostgresRotationPreviousRevision') 'Rotation state must retain the exact previous revision.'
 Assert-True ($deploymentSource -match 'Resolve-RotationPreparation') 'Rotation must distinguish retained recovery state from a fresh candidate.'
@@ -1303,5 +1304,74 @@ try {
   Assert-Equal 'cleanup failed' $_.Exception.Message 'Terminal cleanup failure must remain explicit.'
 }
 Assert-Equal 'commit,verify,clear-candidate' ($events -join ',') 'A terminal cleanup failure must not roll back a healthy revision.'
+
+# Monthly OS security patch window: deploy/patch-postgres-vm.ps1 + infra/patch-os.sh (docs/postgres-patching.md).
+$patchSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'patch-postgres-vm.ps1') -Raw
+$guestSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'patch-os.sh')) -Raw
+$templateSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'main.bicep')) -Raw
+foreach ($helper in 'Remove-BootstrapPublicIp', 'Get-PostgresNetworkRuleNames', 'Restore-PostgresSteadyStateEgress', 'Get-ManagedRunCommandResult') {
+  $definitions = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | Where-Object {
+    (Get-Content -LiteralPath $_.FullName -Raw) -match "(?m)^function $([regex]::Escape($helper))\b"
+  })
+  Assert-Equal 'azure-postgres-network.ps1' (@($definitions | ForEach-Object { $_.Name }) -join ',') "The helper $helper must be defined exactly once across deploy/*.ps1, in the shared azure-postgres-network.ps1, so deployment and patch windows share one definition of the steady state."
+}
+foreach ($consumer in @(@{ Name = 'azure.ps1'; Source = $deploymentSource }, @{ Name = 'patch-postgres-vm.ps1'; Source = $patchSource })) {
+  $safetyImport = $consumer.Source.IndexOf(". (Join-Path `$PSScriptRoot 'azure-safety.ps1')")
+  $helperImport = $consumer.Source.IndexOf(". (Join-Path `$PSScriptRoot 'azure-postgres-network.ps1')")
+  Assert-True ($safetyImport -ge 0 -and $helperImport -gt $safetyImport) "$($consumer.Name) must dot-source azure-postgres-network.ps1 right after azure-safety.ps1 so the shared helpers resolve `$Name and `$ResourceGroup from its param block."
+}
+$patchGuards = [regex]::Matches(
+  $patchSource,
+  '(?m)^if \((?<condition>[^\r\n]+)\) \{\r?\n\s*throw ''(?<message>[^'']+)''\r?\n\}'
+)
+$rollbackFullGuard = @($patchGuards | Where-Object {
+  $_.Groups['condition'].Value -match '\$Rollback' -and $_.Groups['condition'].Value -match '\$Full'
+})
+Assert-Equal 1 $rollbackFullGuard.Count 'The patch script must refuse -Rollback combined with -Full: a rollback window reinstalls one package version and nothing else.'
+$rollbackFullRefusal = [scriptblock]::Create(
+  "param([string]`$Rollback, [switch]`$Full) $($rollbackFullGuard[0].Groups['condition'].Value)"
+)
+Assert-Equal $true (& $rollbackFullRefusal -Rollback 'postgresql-16=16.10-1.pgdg24.04+1' -Full) 'A rollback combined with a full upgrade must be refused.'
+Assert-Equal $false (& $rollbackFullRefusal -Rollback 'postgresql-16=16.10-1.pgdg24.04+1') 'A rollback on its own must not trip the rollback/full guard.'
+Assert-Equal $false (& $rollbackFullRefusal -Full) 'A full upgrade on its own must not trip the rollback/full guard.'
+$rollbackFormatGuard = @($patchGuards | Where-Object { $_.Groups['condition'].Value -match '\$Rollback -notmatch' })
+Assert-Equal 1 $rollbackFormatGuard.Count 'The patch script must validate the -Rollback package=version shape before it reaches the guest.'
+$rollbackFormatRefusal = [scriptblock]::Create(
+  "param([string]`$Rollback) $($rollbackFormatGuard[0].Groups['condition'].Value)"
+)
+Assert-Equal $false (& $rollbackFormatRefusal -Rollback 'postgresql-16=16.10-1.pgdg24.04+1') 'A Debian package=version rollback target must pass validation.'
+Assert-Equal $false (& $rollbackFormatRefusal -Rollback 'vim=2:9.1.0016-1ubuntu7.7') 'A rollback version with an epoch must pass validation.'
+Assert-Equal $true (& $rollbackFormatRefusal -Rollback 'postgresql-16') 'A rollback target without a version must be refused.'
+Assert-Equal $true (& $rollbackFormatRefusal -Rollback 'postgresql-16=16.10; rm -rf /') 'A rollback target carrying shell metacharacters must be refused.'
+Assert-Equal $false (& $rollbackFormatRefusal) 'No -Rollback must not trip the rollback format guard.'
+Assert-True ($rollbackFullGuard[0].Index -lt $patchSource.IndexOf('$windowCleanup = @(')) 'Patch parameter validation must run before the egress window is even described.'
+$cleanupRegistration = $patchSource.IndexOf('$windowCleanup = @(')
+$operationStart = $patchSource.IndexOf('-Operation {')
+$operationEnd = $patchSource.IndexOf('$windowSettled = $true')
+$vmRestart = $patchSource.IndexOf("'vm', 'restart'")
+Assert-True ($cleanupRegistration -ge 0 -and $operationStart -gt $cleanupRegistration -and $operationEnd -gt $operationStart) 'The patch window must register its cleanup actions before the guarded operation opens.'
+foreach ($mutation in "'public-ip', 'create'", "'ip-config', 'update'", "'rule', 'create'", "'run-command', 'create'", "'snapshot', 'create'") {
+  $index = $patchSource.IndexOf($mutation)
+  Assert-True ($index -gt $operationStart -and $index -lt $operationEnd) "The patch window mutation $mutation must sit inside the guarded operation so the registered cleanup always closes egress."
+}
+$windowCleanupBlock = [regex]::Match($patchSource, '(?s)\$windowCleanup = @\((?<actions>.+?)\r?\n\)\r?\n')
+Assert-True ($windowCleanupBlock.Success -and $windowCleanupBlock.Groups['actions'].Value -match 'Restore-PostgresSteadyStateEgress' -and $windowCleanupBlock.Groups['actions'].Value -match 'Remove-BootstrapPublicIp \$publicIpName') 'The patch window cleanup must run both shared helpers: restore restrictive egress and remove the bootstrap public IP.'
+Assert-True ($patchSource -match '-CleanupActions \$windowCleanup') 'The patch window must hand its cleanup actions to Invoke-OperationWithGuaranteedCleanup.'
+Assert-True ($vmRestart -gt $operationEnd) 'The VM restart must happen after the guarded window closed egress, so the VM never boots with Internet reachable.'
+Assert-True ($patchSource -match '(?s)elseif \(\$rebootRequired\) \{.+?''vm'', ''restart''') 'The VM restart must be conditional on the guest reporting reboot=required.'
+Assert-True ($patchSource -notmatch '\bredeploy\b') 'The patch window must restart in place, never move the VM to another host.'
+$distributionUpgradeVerbs = @('dist', 'full') | ForEach-Object { "$_-upgrade" }
+foreach ($verb in $distributionUpgradeVerbs) {
+  Assert-True ($guestSource -notmatch [regex]::Escape($verb) -and $patchSource -notmatch [regex]::Escape($verb)) "Neither patch half may run apt-get ${verb}: only that verb could pull a new PostgreSQL major."
+}
+Assert-True ($guestSource -match '(?m)^set -euo pipefail' -and $guestSource -match 'trap fail ERR') 'infra/patch-os.sh must stop at the first failing stage and report it through the ERR trap.'
+Assert-True ($guestSource -match 'unattended-upgrade' -and $guestSource -match 'apt-get -y -q upgrade') 'infra/patch-os.sh must patch security-only by default and use plain apt-get upgrade for -Full.'
+Assert-True ($guestSource -notmatch '(?m)^\s*(sudo )?(reboot|shutdown|systemctl (reboot|poweroff|kexec))(\s|$)') 'infra/patch-os.sh must never reboot on its own: the orchestrator restarts only after egress is closed.'
+Assert-True ($guestSource -match 'logger -p local0\.err -t markdoc-os-patch "os-patch=failed' -and $templateSource -match 'SyslogMessage contains "os-patch=failed"') 'A failed guest patch must reach the existing backup-failure alert through Syslog facility local0.'
+Assert-True ($patchSource -match '\[IO\.File\]::ReadAllText\(\$patchScriptPath\)' -and $patchSource -match "'infra', 'patch-os\.sh'") 'The orchestrator must send infra/patch-os.sh itself, never an inline copy that could drift.'
+foreach ($parameter in @([regex]::Matches($patchSource, 'MARKDOC_[A-Z_]+') | ForEach-Object { $_.Value } | Sort-Object -Unique)) {
+  Assert-True ($guestSource -match "\`$\{$parameter") "The run command parameter $parameter passed by the orchestrator must be read by infra/patch-os.sh."
+}
+Assert-True ($templateSource -match '(?s)activityLogAlerts@[0-9-]+'' = \{.+?scopes: \[\s*postgresNsg\.id\s*\].+?Microsoft\.Network/networkSecurityGroups/securityRules/write') 'The Activity Log tripwire must watch security-rule writes on the PostgreSQL NSG only.'
 
 Write-Host "azure safety tests: ok (PowerShell $($PSVersionTable.PSVersion))"
