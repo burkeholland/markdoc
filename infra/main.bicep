@@ -381,6 +381,9 @@ resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' =
           location
         ]
       }
+      {
+        service: 'Microsoft.KeyVault'
+      }
     ]
     networkSecurityGroup: {
       id: postgresNsg.id
@@ -1017,6 +1020,21 @@ resource postgresMonitorAgent 'Microsoft.Compute/virtualMachines/extensions@2024
     postgresRecovery
     postgresMonitorAssociation
   ]
+}
+
+// Private Azure Monitor path for the VM agent (AMPLS + private endpoint + private DNS zones,
+// and the configurationAccessEndpoint association next to the rule association above).
+// Additive: the NAT gateway above stays until docs/postgres-egress.md has retired it.
+module postgresPrivateEgress './postgres-private-egress.bicep' = {
+  name: '${name}-postgres-private-egress'
+  params: {
+    name: name
+    location: location
+    vnetName: vnet.name
+    subnetName: postgresSubnet.name
+    logAnalyticsWorkspaceName: logs.name
+    postgresVmName: postgresVm.name
+  }
 }
 
 resource postgresAlertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {

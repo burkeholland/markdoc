@@ -1126,9 +1126,11 @@ if ($candidateOnlyRotationRecovery) {
     Step 'Explicit first provision: temporarily enabling bootstrap networking and creating the database login.'
   }
   if ($ConfigureRecovery) {
-    Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
+    Step 'Explicit recovery update: temporarily enabling bootstrap networking and configuring off-VM WAL archiving and backup verification.'
   }
-  $temporaryPublicIp = [bool]$InitializeDatabase
+  # Recovery installs packages with apt, so it needs an explicit egress path that does not depend
+  # on the NAT gateway being attached (docs/postgres-egress.md); the cleanup below always detaches the IP.
+  $temporaryPublicIp = [bool]($InitializeDatabase -or $ConfigureRecovery)
   $temporaryPackageEgress = [bool]($InitializeDatabase -or $ConfigureRecovery)
   $initialCleanup = @()
   if ($temporaryPackageEgress) {
