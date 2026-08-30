@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # In-guest half of the monthly OS security patch for the PostgreSQL VM (docs/postgres-patching.md).
-# deploy/patch-postgres-vm.ps1 sends it as the managed run command `patch-os` once the temporary egress
-# window is open, prepending MARKDOC_PATCH_MODE (security | full | rollback) and MARKDOC_ROLLBACK; run by
-# hand it patches security-only. Output stays far below the run command's 4 KB cap: one summary line per
-# stage, the apt chatter goes to /var/log/markdoc-os-patch.log (and /var/log/apt/history.log as always). Last line:
-# `os-patch=ok upgraded=<n> reboot=<required|none> running=<kernel> installed=<kernel>` or `os-patch=failed ... stage=<s>`;
-# both also reach syslog facility local0 with tag markdoc-os-patch, which the backup-failure alert watches.
+# deploy/patch-postgres-vm.ps1 sends this file verbatim as the managed run command `patch-os` once the temporary
+# egress window is open; the run command's named parameters MARKDOC_PATCH_MODE (security | full | rollback),
+# MARKDOC_ROLLBACK_PACKAGE and MARKDOC_ROLLBACK_VERSION arrive as environment variables. Run by hand it patches
+# security-only. Output stays far below the run command's 4 KB cap: one line per stage, the apt chatter goes to
+# /var/log/markdoc-os-patch.log (and /var/log/apt/history.log as always). Last line: `os-patch=ok upgraded=<n>
+# reboot=<required|none> running=<kernel> installed=<kernel>` or `os-patch=failed ... stage=<s>`; both also reach
+# syslog facility local0 with tag markdoc-os-patch, which the backup-failure alert watches.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 MODE="${MARKDOC_PATCH_MODE:-security}"
-ROLLBACK="${MARKDOC_ROLLBACK:-}"
+ROLLBACK_PACKAGE="${MARKDOC_ROLLBACK_PACKAGE:-}"; ROLLBACK_VERSION="${MARKDOC_ROLLBACK_VERSION:-}"
 LOG="${MARKDOC_PATCH_LOG:-/var/log/markdoc-os-patch.log}"
 stage=start
 
@@ -22,11 +23,7 @@ fail() {
   echo "os-patch=failed mode=$MODE stage=$stage exit=$status"
   exit "$status"
 }
-die() {
-  logger -p local0.err -t markdoc-os-patch "os-patch=failed mode=$MODE stage=arguments"
-  echo "os-patch=failed mode=$MODE stage=arguments $*" >&2
-  exit 2
-}
+die() { logger -p local0.err -t markdoc-os-patch "os-patch=failed mode=$MODE stage=arguments"; echo "os-patch=failed mode=$MODE stage=arguments $*" >&2; exit 2; }
 trap fail ERR
 
 installed_packages() { dpkg-query -W -f='${binary:Package}\t${Version}\n' | sort; }
@@ -35,13 +32,14 @@ newest_kernel() { ls -1 /boot/vmlinuz-* 2>/dev/null | sed 's#.*/vmlinuz-##' | so
 case "$MODE" in
   security|full) ;;
   rollback)
-    [[ "$ROLLBACK" =~ ^[a-z0-9][a-z0-9.+-]*=[A-Za-z0-9][A-Za-z0-9.:~+-]*$ ]] || die 'MARKDOC_ROLLBACK must be <package>=<version>'
+    [[ "$ROLLBACK_PACKAGE" =~ ^[a-z0-9][a-z0-9.+-]*$ && "$ROLLBACK_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9.:~+-]*$ ]] ||
+      die 'MARKDOC_ROLLBACK_PACKAGE=<package> and MARKDOC_ROLLBACK_VERSION=<version> are required'
     ;;
   *) die "unknown MARKDOC_PATCH_MODE '$MODE'" ;;
 esac
 
 logger -p local0.info -t markdoc-os-patch "os-patch=start mode=$MODE"
-{ echo; echo "=== os-patch $(date -u +%FT%TZ) mode=$MODE rollback=$ROLLBACK"; } >>"$LOG"
+{ echo; echo "=== os-patch $(date -u +%FT%TZ) mode=$MODE rollback=$ROLLBACK_PACKAGE=$ROLLBACK_VERSION"; } >>"$LOG"
 echo "os-patch=start mode=$MODE at=$(date -u +%FT%TZ) host=$(hostname) log=$LOG"
 
 kernel_before="$(uname -r)"
@@ -64,7 +62,7 @@ case "$MODE" in
     apt-get -y -q upgrade >>"$LOG" 2>&1
     ;;
   rollback)
-    pkg="${ROLLBACK%%=*}"; ver="${ROLLBACK#*=}"
+    pkg="$ROLLBACK_PACKAGE"; ver="$ROLLBACK_VERSION"
     if ! apt-get -y -q install --allow-downgrades "$pkg=$ver" >>"$LOG" 2>&1; then
       # Superseded versions leave the Ubuntu pockets; Launchpad's librarian keeps every published .deb.
       arch="$(dpkg --print-architecture)"; file="${pkg}_${ver#*:}_${arch}.deb"
