@@ -117,10 +117,16 @@ export const richText = (page: Page) =>
     return text;
   });
 
-/** Place the caret at the end of the rich editor's document. */
+/**
+ * Place the caret at the end of the rich editor's document. Clicks near the top-left of the first text
+ * block, not the pane centre: on a fixture whose vertical middle is an image the centre click selects the
+ * image node, `Control+End` stays on it and the caret never reaches text (a11y dark slash-menu flake).
+ */
 export async function focusRichEnd(page: Page) {
   const rich = page.locator(".md-rich");
-  await rich.click();
+  const block = rich.locator("p, h1, h2, h3, h4, li, blockquote, pre").first();
+  if ((await block.count()) === 0) await rich.click();
+  else await block.click({ position: { x: 8, y: 8 } });
   await page.keyboard.press("Control+End");
 }
 
