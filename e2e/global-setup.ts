@@ -130,6 +130,8 @@ export default async function globalSetup(config: FullConfig) {
       // A plain GET answers the liveness card (200) and compiles the route: scale.spec.ts test 8 measured
       // 14,504 ms for its first timed `markdoc_suggest` on CI (Turbopack's cold compile) vs 1,204 ms on retry.
       "/api/mcp",
+      // Agent requests from comments (#1024/#1025): the first hit compiles the route the comment composer posts to.
+      `/api/documents/${docId}/requests`,
     ];
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {

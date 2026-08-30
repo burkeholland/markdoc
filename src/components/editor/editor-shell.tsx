@@ -996,6 +996,7 @@ export function EditorShell({
         onClose={closeSidePanel}
         onReveal={reveal}
         onPendingDone={() => actions.focusCollapsed()}
+        onAskAgent={openAskAgent}
         onCancelRequest={cancelAgentRequest}
         onCreateToken={goCreateToken}
         focusTab={commentsFocus}

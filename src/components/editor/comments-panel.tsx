@@ -442,6 +442,8 @@ export interface CommentsPanelProps {
   onCreateToken?: () => void;
   /** Move focus to the selected tab when this panel mounts. */
   focusOnMount?: boolean;
+  /** The Ask-an-agent dialog. Nothing in the panel opens it any more (#1025 — the empty state mentions an agent in a comment instead); T4 deletes the prop. */
+  onAskAgent?: () => void;
   /** Shell toast (Accept suggestion offers Undo). */
   onToast?: (message: string, kind?: "info" | "success" | "error", action?: { label: string; onClick?: () => void }) => void;
   /** Cancels an open or claimed agent request (the × on a thread card's request chip); the × is hidden when omitted. */
@@ -581,7 +583,7 @@ function Composer({
       const el = ref.current;
       if (!el) return;
       el.focus();
-      // A seeded new comment ("@" from the empty state or hint (b), #1025) starts with the caret after the seed, so
+      // A seeded new comment ("@" from the empty state or the hint bar, #1025) starts with the caret after the seed, so
       // the `@` picker is open before the user types; an edit keeps the browser's caret placement.
       if (initial && !editing) {
         el.setSelectionRange(initial.length, initial.length);
@@ -1797,8 +1799,15 @@ export function CommentsPanel({
   useEffect(() => {
     if (documentComposer) startDocumentComment(documentComposer);
   }, [documentComposer, startDocumentComment]);
+  // Cleared when a pending composer goes, not on mount: the panel may open with `documentComposer` already set (the
+  // hint bar), and the seed and the pending range land in the same commit.
+  const hadPending = useRef(false);
   useEffect(() => {
-    if (!pending) setSeed(null);
+    if (pending) hadPending.current = true;
+    else if (hadPending.current) {
+      hadPending.current = false;
+      setSeed(null);
+    }
   }, [pending]);
   // The panel's own entry points: the header button and the empty state (the shell's nonce space is not reused).
   const localNonce = useRef(0);

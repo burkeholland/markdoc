@@ -980,6 +980,15 @@ describe("CommentsPanel", () => {
       expect(screen.getByTestId("comment-quote-document")).toHaveTextContent("Whole document");
     });
 
+    it("a panel that mounts with documentComposer already set (the hint bar opens the panel and asks at once) is seeded too", async () => {
+      mount({ documentComposer: { mention: true, nonce: 7 } });
+      const box = await composer();
+      await waitFor(() => expect(box.value).toBe("@"));
+      expect(session!.pendingComment).toEqual({ from: 0, to: 0 });
+      await screen.findByTestId("mention-suggestions");
+      expect(screen.getByTestId("comment-quote-document")).toHaveTextContent("Whole document");
+    });
+
     it("a suggestion on a document thread can be rejected but never accepted", async () => {
       mount({ role: "owner" });
       const user = makeCollabUser("alice", "Alice", null, "alice");
