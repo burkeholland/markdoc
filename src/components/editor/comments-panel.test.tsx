@@ -514,7 +514,8 @@ describe("CommentsPanel", () => {
     };
 
     afterEach(() => {
-      vi.mocked(api.documents.createRequest).mockClear();
+      // Reset, not clear: a rejecting implementation must never outlive the test that set it (#1082).
+      vi.mocked(api.documents.createRequest).mockReset().mockResolvedValue({ request: { id: "req" } } as never);
       vi.mocked(api.documents.comment).mockClear();
       vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [] } as never);
       vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
@@ -654,8 +655,9 @@ describe("CommentsPanel", () => {
         expect(onToast).not.toHaveBeenCalled();
         expect(session!.comments.list()).toHaveLength(1);
 
-        // Four 404s in a row: give up, keep the comment, tell the user.
-        vi.mocked(api.documents.createRequest).mockClear().mockRejectedValue(notFound);
+        // Four 404s in a row: give up, keep the comment, tell the user. Exactly four (one per attempt) so nothing
+        // rejecting is left on the mock for later tests; the fake clock runs every retry inside this test.
+        vi.mocked(api.documents.createRequest).mockClear().mockRejectedValueOnce(notFound).mockRejectedValueOnce(notFound).mockRejectedValueOnce(notFound).mockRejectedValueOnce(notFound);
         act(() => session!.setPendingComment({ from: 0, to: 5 }));
         const again = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
         await type(again, "@alice/Copilot-CLI again");
@@ -880,7 +882,7 @@ describe("CommentsPanel", () => {
 
     afterEach(() => {
       window.localStorage.removeItem(DISMISSED_KEY);
-      vi.mocked(api.documents.createRequest).mockClear();
+      vi.mocked(api.documents.createRequest).mockReset().mockResolvedValue({ request: { id: "req" } } as never);
       vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [] } as never);
       vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
     });
