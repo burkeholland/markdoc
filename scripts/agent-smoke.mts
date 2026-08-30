@@ -77,20 +77,32 @@ const versions = await call("GET", `/api/documents/${id}/versions`);
 console.log("versions:", versions.versions.map((v: { kind: string; title: string | null; createdByName: string | null }) => `${v.kind}:${v.title} (${v.createdByName})`));
 expect(versions.versions.some((v: { title: string | null }) => v.title === "Agent revision")).toBe(true);
 
-console.log("== ask an agent: request loop (UI route → token inbox → claim → suggest with requestId → complete)");
-// The human asks from the document (session cookie); the agent answers through the token.
+console.log("== request from a comment (mention → request with threadId → token inbox → claim → suggest with requestId → complete)");
+// The human asks from the document (session cookie) the way the editor does: a comment that @-mentions the agent,
+// then the request bound to that thread. The agent answers through the token.
+const handle = `@${me.user.login}/${me.agentMention.slug}`;
+const askComment = await page.request.post(`${base}/api/documents/${id}/comments`, {
+  data: { action: "add", quote: "# Draft", body: `${handle} Tighten this` },
+});
+expect(askComment.status()).toBe(201);
+const askThread = ((await askComment.json()) as { id: string }).id;
 const askRes = await page.request.post(`${base}/api/documents/${id}/requests`, {
-  data: { instruction: "Tighten this", mode: "suggest", selection: { from: 0, to: 7, quote: "# Draft" } },
+  data: { instruction: "Tighten this", mode: "suggest", selection: { from: 0, to: 7, quote: "# Draft" }, threadId: askThread },
 });
 expect(askRes.status()).toBe(201);
-const ask = ((await askRes.json()) as { request: { id: string; status: string } }).request;
+const ask = ((await askRes.json()) as { request: { id: string; status: string; threadId: string | null } }).request;
 expect(ask.status).toBe("open");
+expect(ask.threadId).toBe(askThread);
 await expect(page.getByTestId("agent-requests-pill")).toContainText("1 request waiting");
+await page.getByTestId("comments-tab-open").click();
+await expect(page.getByTestId("comment-request-chip")).toContainText("Waiting for an agent");
 const inbox = await call("GET", "/api/agent/requests?status=open");
 expect(inbox.agent).toBe("Smoke agent");
-expect(inbox.requests.some((r: { id: string }) => r.id === ask.id)).toBe(true);
+const inboxItem = inbox.requests.find((r: { id: string }) => r.id === ask.id) as { threadId: string | null } | undefined;
+expect(inboxItem?.threadId).toBe(askThread);
 await call("POST", `/api/documents/${id}/requests/${ask.id}/claim`);
 await expect(page.getByTestId("agent-requests-pill")).toContainText("Smoke agent is working");
+await expect(page.getByTestId("comment-request-chip")).toContainText("Smoke agent is working");
 const linked = await call("POST", `/api/documents/${id}/suggest`, { edits: [{ find: "# Draft", replace: "# Launch draft" }], requestId: ask.id });
 expect(linked.suggestions).toBeGreaterThan(0);
 const doneReq = await call("POST", `/api/documents/${id}/requests/${ask.id}/complete`, { summary: "Sharper title." });

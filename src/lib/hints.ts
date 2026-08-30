@@ -5,7 +5,7 @@
  * record. No DOM, no React — unit-tested in hints.test.ts.
  *
  * There used to be a third hint (selection ≥ 20 characters → the old agent request dialog); #1025 folded it
- * into `mention-copilot`, and #1075 removed the dialog: a comment is the way to ask an agent for anything.
+ * into `mention-copilot`, and #1075 removed the dialog: a comment that @-mentions an agent is the request.
  * A stored dismissal of the retired id is dropped by `parseHintsRecord` (unknown ids are filtered).
  */
 

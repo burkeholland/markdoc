@@ -308,7 +308,7 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
     assert.match(sends[3].prompt, /threadId: thread-9/);
     assert.match(sends[3].prompt, /markdoc_claim_request/);
     assert.match(sends[3].prompt, /asked you for work in a Markdoc comment/);
-    assert.doesNotMatch(sends[3].prompt, /Ask an agent/);
+    assert.doesNotMatch(sends[3].prompt, new RegExp(["Ask an", "agent"].join(" ")));
     assert.match(sends[3].displayPrompt, /^Markdoc: Burke asked: Tighten this in Launch plan$/);
 
     // All three in one page: still one push, and the request's.
