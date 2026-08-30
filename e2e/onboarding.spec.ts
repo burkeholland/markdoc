@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { signIn, createDocument, openDocument, selectTextInRich, shareWith, type User } from "./helpers";
+import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mintToken, type User } from "./helpers";
 
 /**
  * Task #385 — first-run path: the guided Welcome doc from the empty dashboard, the once-only hint
@@ -217,10 +217,8 @@ test.describe("onboarding: Settings checklist", () => {
     await expect(list).toHaveAttribute("data-done", "0");
     for (const id of ["token", "config", "allow", "try"]) await expect(page.getByTestId(`checklist-${id}`)).toHaveAttribute("data-done", "false");
 
-    const minted = await page.request.post("/api/tokens", { data: { name: "Copilot CLI", expiresInDays: 30 } });
-    expect(minted.ok()).toBeTruthy();
-    const token = ((await minted.json()) as { token: { token: string } }).token.token;
-    const headers = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+    const minted = await mintToken(page, "Copilot CLI", { expiresInDays: 30 });
+    const headers = { Authorization: ["Bearer", minted.token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
     const listed = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
     expect(listed.ok()).toBeTruthy();
 
@@ -240,6 +238,7 @@ test.describe("onboarding: Settings checklist", () => {
     const tokens = (await (await page.request.get("/api/tokens")).json()) as { tokens: { lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
     expect(tokens.tokens[0].lastMcpSeenAt).toMatch(/^\d{4}-/);
     expect(tokens.tokens[0].lastMcpCallAt).toMatch(/^\d{4}-/);
+    await minted.revoke();
     await user.context.close();
   });
 });

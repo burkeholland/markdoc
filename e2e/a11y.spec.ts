@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape } from "./helpers";
+import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -654,28 +654,31 @@ test.describe("axe: editor", () => {
   test("review card and a comment with a suggestion (Accept / Reject, Outdated)", async ({ browser }) => {
     const { page, context, id } = await openEditorFixture(browser, "a11y-editor-review");
     // An agent review with one suggestion and one plain comment, posted over REST with a token (task #397).
-    const tok = await page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 1 } });
-    expect(tok.ok()).toBeTruthy();
-    const token = ((await tok.json()) as { token: { token: string } }).token.token;
-    const res = await page.request.post(`/api/documents/${id}/reviews`, {
-      headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" },
-      data: {
-        summary: "Two small things.",
-        verdict: "request_changes",
-        comments: [
-          { quote: "Intro paragraph with a", body: "Tighter opener.\n\n```suggestion\nAn intro paragraph with a\n```" },
-          { quote: "## Table", body: "Good table." },
-        ],
-      },
-    });
-    expect(res.status(), await res.text()).toBe(201);
-    await expect(page.getByTestId("review-card")).toBeVisible();
-    await page.getByTestId("review-toggle").click();
-    await expect(page.getByTestId("review-thread-link")).toHaveCount(2);
-    await expect(page.getByTestId("suggestion-text").first()).toHaveText("An intro paragraph with a");
-    await expect(page.getByTestId("suggestion-accept-comment")).toBeEnabled();
-    await scan(page, "editor + review card + suggestion");
-    await context.close();
+    // Revoked in `finally`: a CI retry signs in as the same user again and the name must be free (409 otherwise).
+    const minted = await mintToken(page, "Copilot", { expiresInDays: 1 });
+    try {
+      const res = await page.request.post(`/api/documents/${id}/reviews`, {
+        headers: { Authorization: ["Bearer", minted.token].join(" "), "Content-Type": "application/json" },
+        data: {
+          summary: "Two small things.",
+          verdict: "request_changes",
+          comments: [
+            { quote: "Intro paragraph with a", body: "Tighter opener.\n\n```suggestion\nAn intro paragraph with a\n```" },
+            { quote: "## Table", body: "Good table." },
+          ],
+        },
+      });
+      expect(res.status(), await res.text()).toBe(201);
+      await expect(page.getByTestId("review-card")).toBeVisible();
+      await page.getByTestId("review-toggle").click();
+      await expect(page.getByTestId("review-thread-link")).toHaveCount(2);
+      await expect(page.getByTestId("suggestion-text").first()).toHaveText("An intro paragraph with a");
+      await expect(page.getByTestId("suggestion-accept-comment")).toBeEnabled();
+      await scan(page, "editor + review card + suggestion");
+    } finally {
+      await minted.revoke();
+      await context.close();
+    }
   });
 
   test("versions panel in compare mode, activity panel", async ({ browser }) => {

@@ -1,10 +1,11 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
 
 test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", () => {
   let alice: User;
   let bob: User;
   let docId: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
@@ -17,6 +18,7 @@ test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", ()
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await alice.context.close();
     await bob.context.close();
   });
@@ -119,9 +121,8 @@ test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", ()
   });
 
   test("an agent token can react through the API and the chip appears live", async () => {
-    const created = await bob.page.request.post("/api/tokens", { data: { name: "Review Bot" } });
-    expect(created.ok()).toBeTruthy();
-    const { token } = (await created.json()) as { token: { token: string } };
+    minted = await mintToken(bob.page, "Review Bot");
+    const headers = { Authorization: ["Bearer", minted.token].join(" ") };
     const list = await bob.page.request.get(`/api/documents/${docId}/comments`);
     type Listed = { comments: { id: string; reactions: Record<string, string[]> }[] };
     let { comments } = (await list.json()) as Listed;
@@ -136,7 +137,7 @@ test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", ()
     expect(comments[0].reactions["👍"]).toHaveLength(1);
 
     const reacted = await bob.page.request.post(`/api/documents/${docId}/comments`, {
-      headers: { Authorization: `Bearer ${token.token}` },
+      headers,
       data: { action: "react", threadId: comments[0].id, emoji: "🚀" },
       timeout: 60_000,
     });
@@ -154,7 +155,7 @@ test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", ()
 
     // Toggling again through the API removes it.
     const undone = await bob.page.request.post(`/api/documents/${docId}/comments`, {
-      headers: { Authorization: `Bearer ${token.token}` },
+      headers,
       data: { action: "react", threadId: comments[0].id, emoji: "🚀" },
     });
     expect(await undone.json()).toEqual({ ok: true, reacted: false });

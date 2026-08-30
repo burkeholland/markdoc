@@ -1,7 +1,13 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, mintToken, type MintedToken, type User } from "./helpers";
 
 const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
+/**
+ * The agent's token name (its display name on review cards and toasts). Not "Copilot": agent-presence.spec.ts
+ * mints that for alice too, and @mention names are unique per user (409), so the two files could not share a
+ * run when they land in parallel workers. Same "Copilot" prefix, distinct slug (`@alice/copilot-review`).
+ */
+const AGENT = "Copilot Review";
 
 /** JSON-RPC over /api/mcp, the way Copilot CLI calls the HTTP server. */
 async function mcp<T>(page: Page, token: string, name: string, args: Record<string, unknown>): Promise<T> {
@@ -69,16 +75,17 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
   let alice: User;
   let bob: User;
   let token: string;
+  let minted: MintedToken | undefined;
 
   test.beforeAll(async ({ browser }) => {
     alice = await signIn(browser, "alice");
     bob = await signIn(browser, "bob");
-    const res = await alice.page.request.post("/api/tokens", { data: { name: "Copilot", expiresInDays: 30 } });
-    expect(res.ok()).toBeTruthy();
-    token = ((await res.json()) as { token: { token: string } }).token.token;
+    minted = await mintToken(alice.page, AGENT, { expiresInDays: 30 });
+    token = minted.token;
   });
 
   test.afterAll(async () => {
+    await minted?.revoke();
     await alice.context.close();
     await bob.context.close();
   });
@@ -270,7 +277,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     expect(Date.now() - started).toBeLessThan(1_000);
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionText(reply().getByTestId("suggestion-text"), "sales are strong");
-    await expect(page.getByTestId("toast")).toContainText("Accepted suggestion from Copilot");
+    await expect(page.getByTestId("toast")).toContainText(`Accepted suggestion from ${AGENT}`);
     await expect(page.getByTestId("toast-action")).toHaveText("Undo");
     await expectReplyEditHidden();
 
@@ -491,7 +498,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
 
     const card = page.getByTestId("review-card").first();
     await expect(card).toBeVisible();
-    await expect(card.getByTestId("review-verdict")).toHaveText("Copilot requested changes");
+    await expect(card.getByTestId("review-verdict")).toHaveText(`${AGENT} requested changes`);
     await expect(card.getByTestId("review-counts")).toContainText("2 comments · 1 suggestion");
     await card.getByTestId("review-toggle").click();
     await expect(card.getByTestId("review-thread-link")).toHaveCount(2);
@@ -499,7 +506,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await card.getByTestId("review-accept-all").click();
     await expect.poll(() => codeText(page)).toContain("That is all for now.");
     expect(await codeText(page)).not.toContain("The end is near.");
-    await expect(page.getByTestId("toast")).toContainText("Accepted 1 suggestion from Copilot");
+    await expect(page.getByTestId("toast")).toContainText(`Accepted 1 suggestion from ${AGENT}`);
     await expect(card.getByTestId("review-accept-all")).toHaveCount(0);
 
     // The agent hears about it.
