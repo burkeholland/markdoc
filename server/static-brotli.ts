@@ -87,7 +87,7 @@ export function resolveStaticAsset(url: string, staticRoot: string): string | nu
   const relative = decoded.slice(STATIC_URL_PREFIX.length);
   if (relative === "" || relative.startsWith("/")) return null;
   const extension = path.posix.extname(relative);
-  if (!(extension in BROTLI_CONTENT_TYPES)) return null;
+  if (!Object.hasOwn(BROTLI_CONTENT_TYPES, extension)) return null;
   const root = path.resolve(staticRoot);
   const resolved = path.resolve(root, relative);
   if (!resolved.startsWith(root + path.sep)) return null;

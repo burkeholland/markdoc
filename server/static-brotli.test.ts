@@ -228,7 +228,7 @@ function fakeResponse() {
   return { res: res as unknown as ServerResponse, body, written };
 }
 
-function fakeRequest(method: string, headers: Record<string, string>): IncomingMessage {
+function fakeRequest(method: string, headers: Record<string, string | undefined>): IncomingMessage {
   return { method, url: "/_next/static/chunks/app.js", headers } as unknown as IncomingMessage;
 }
 
