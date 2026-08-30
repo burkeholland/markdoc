@@ -272,7 +272,55 @@ Facts about the current deployment, recorded here rather than proposed for chang
 
 ### One-off maintenance inside the VNet
 
-The production database VM accepts connections only from the Container Apps subnet, so the maintenance CLIs (`npm run repair:github-identity` and the ownership-transfer tool, `transfer:legacy-ownership`) run from the manual Container Apps Job `markdoc-maint` in `markdoc-prod-env`, built from the Dockerfile's `build` stage (`--target build`) at the same SHA as the running app. A pristine export of that SHA carries both CLIs: `.dockerignore` keeps `scripts/repair-github-identity.mts` and `scripts/transfer-legacy-ownership.mts` while dropping the other `scripts/*.mts`. When a tool depends on a new Drizzle migration, release the app first (its startup runs the migrations) and only then run the job at that SHA. The job's `DATABASE_URL` is the same Key Vault reference the app uses. A job execution's Succeeded/Failed status reflects the container's exit code, so a dry-run refusal (exit 1) shows as Failed and the classification line in the log is the real result. Task #870's report will supply the exact commands; none are recorded here yet.
+The production database VM accepts connections only from the Container Apps subnet, so the maintenance CLIs (`npm run repair:github-identity` and the ownership-transfer tool, `transfer:legacy-ownership`) run from the manual Container Apps Job `markdoc-maint` in `markdoc-prod-env`, built from the Dockerfile's `build` stage (`--target build`) at the same SHA as the running app. A pristine export of that SHA carries both CLIs: `.dockerignore` keeps `scripts/repair-github-identity.mts` and `scripts/transfer-legacy-ownership.mts` while dropping the other `scripts/*.mts`. When a tool depends on a new Drizzle migration, release the app first (its startup runs the migrations) and only then run the job at that SHA. The job's `DATABASE_URL` is the same Key Vault reference the app uses. A job execution's Succeeded/Failed status reflects the container's exit code, so a dry-run refusal (exit 1) shows as Failed and the classification line in the log is the real result.
+
+```bash
+# 0. Once per release the job must follow: build the tools image from the accepted SHA and point the job at it
+git archive --format=tar <sha> | tar -x -C <export dir>        # pristine export; .dockerignore keeps the two maintenance CLIs, so nothing in it needs editing
+az acr build -r markdocacrmnd542unepl56 --target build -t markdoc-tools:<sha> -t markdoc-tools:<12-char> --file Dockerfile <export dir>
+az acr repository show -n markdocacrmnd542unepl56 --image markdoc-tools:<12-char> --query digest -o tsv     # manifest list-metadata refuses repo:tag on this CLI
+az containerapp job update -n markdoc-maint -g markdoc-rg --image markdocacrmnd542unepl56.azurecr.io/markdoc-tools@sha256:<digest>
+
+# 1. Backups first when the tool writes (--apply, --rollback; not needed for probes, dry runs or --verify). <file> holds these six lines:
+#      sudo -u postgres pgbackrest --stanza=markdoc --type=diff backup
+#      sudo -u postgres pgbackrest --stanza=markdoc info | head -n 40
+#      sudo -u postgres /usr/local/sbin/markdoc-logical-backup
+#      umask 077; F=/var/backups/markdoc/pre-transfer-$(date -u +%Y%m%dT%H%M%SZ).dump
+#      sudo -u postgres pg_dump --format=custom --compress=9 markdoc > "$F"; chmod 0600 "$F"
+#      stat -c 'size=%s mode=%a' "$F"; sha256sum "$F"; pg_restore --list "$F" | wc -l
+#    (dash is the interpreter: no `set -o pipefail`; output is tail-truncated at ~4 KB, keep it short)
+az vm run-command invoke -g markdoc-rg -n markdoc-pg --command-id RunShellScript --scripts @<file>
+
+# 2. Start one execution. An override replaces the whole container spec: the template's env is not inherited, re-pass every variable.
+#    (bash: --command npm --args run <script> -- <flags> --env-vars "DATABASE_URL=secretref:database-url" … also works; Windows: az is a .cmd, cmd.exe mangles quotes inside --args, use --yaml)
+cat > <exec.yaml> <<'EOF'
+containers:
+  - name: markdoc-maint
+    image: markdocacrmnd542unepl56.azurecr.io/markdoc-tools@sha256:<digest>
+    command: ["sh"]
+    args: ["-c", "npm run <script> -- <flags>; echo exit=$?"]     # the wrapper keeps the execution Succeeded; the exit= line and the classification line are the result
+    env:
+      - { name: DATABASE_URL, secretRef: database-url }
+      - { name: DATABASE_SSL, value: "1" }
+      - { name: NODE_ENV, value: production }
+      - { name: MARKDOC_TRANSFER_SOURCE_LOGIN, value: <value> }              # the tool's own variables, by name; fill in, do not commit
+      - { name: MARKDOC_TRANSFER_TARGET_GITHUB_ACCOUNT_ID, value: <value> }
+    resources: { cpu: 0.5, memory: 1Gi }
+EOF
+az containerapp job start -n markdoc-maint -g markdoc-rg --yaml <exec.yaml> --query name -o tsv     # → <exec>
+
+# 3. Wait until status leaves Running (30–40 s incl. image pull; replica timeout 1800 s; retry limit 0, so Failed is terminal). Succeeded ⇔ exit 0, Failed ⇔ non-zero: see the exit-1 note above
+az containerapp job execution show -n markdoc-maint -g markdoc-rg --job-execution-name <exec> --query "{status:properties.status,start:properties.startTime,end:properties.endTime}" -o json
+
+# 4. Logs and exit code from Log Analytics (~60–150 s ingestion); the system row reads "terminated with exit code 'N'", for N see "One-time legacy ownership transfer"
+#    (while the pod still exists: az containerapp job logs show -n markdoc-maint -g markdoc-rg --execution <exec> --container markdoc-maint)
+az monitor log-analytics query -w 38faa130-4081-42a2-b43b-6ee128652871 --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(2h)
+  | where ContainerJobName_s == 'markdoc-maint' and ContainerGroupName_s startswith '<exec>' | project TimeGenerated, Stream_s, Log_s | order by TimeGenerated asc" -o table
+az monitor log-analytics query -w 38faa130-4081-42a2-b43b-6ee128652871 --analytics-query "ContainerAppSystemLogs_CL | where TimeGenerated > ago(2h)
+  | where JobName_s == 'markdoc-maint' and ExecutionName_s == '<exec>' and Reason_s == 'ContainerTerminated' | project TimeGenerated, Log_s" -o table
+```
+
+After a release that carries a migration, prove that the migration ran before starting any tool that depends on it: a read-only probe execution (`node -e` over the `pg` package already in the tools image) counting `information_schema.tables` for `table_schema = 'public'` went from `tables=17` to `tables=18` when the app applied `0017_ownership_transfer`, and the app's `/api/health` answering `db=true` at the new `version` is the same proof from outside, because `getDb()` resolves only after `migrate()` has completed. The job accrues $0 between executions (a manual job bills only while a replica runs), so `markdoc-maint`, its `markdoc-tools` tags and the execution YAML files stay in place between exercises. Delete the job only when the whole exercise is over: `az containerapp job delete -n markdoc-maint -g markdoc-rg -y`.
 
 ### Provisioning a new environment
 
