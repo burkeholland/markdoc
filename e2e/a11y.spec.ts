@@ -827,6 +827,9 @@ test.describe("axe: contrast", () => {
       const block = page.locator('.md-rich pre[data-language="ts"]');
       await block.scrollIntoViewIfNeeded();
       await expect(block).toBeVisible();
+      // The highlight.js grammars load from their own chunk after the editor mounts; the scan and the
+      // token readings below must see the coloured block, so wait for the first token to render.
+      await expect(block.locator(".hljs-keyword").first()).toBeVisible();
 
       const axe = await new AxeBuilder({ page }).include('.md-rich pre[data-language="ts"]').withRules(["color-contrast"]).analyze();
       expect(
