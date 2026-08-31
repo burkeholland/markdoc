@@ -61,9 +61,15 @@ function postJson(fetchImpl, config, path, body, signal) {
   });
 }
 
+// A mention's conversation is its thread; a reply's `refId` is the reply itself, so `threadId` (servers since #1103)
+// wins when present. Older servers send no `threadId`, and a top-level comment's `refId` is already its thread.
+function mentionThread(event) {
+  return event.threadId ?? event.refId ?? null;
+}
+
 function eventKey(event) {
   if (event.type === "request.created") return `request:${event.documentId}:${event.requestId}`;
-  if (event.type === "mention") return `conversation:${event.documentId}:${event.refId}`;
+  if (event.type === "mention") return `conversation:${event.documentId}:${mentionThread(event)}`;
   if (event.type === "review.created") return `review:${event.documentId}:${event.reviewId}`;
   if (event.type === "comment.added" && event.threadId) return `conversation:${event.documentId}:${event.threadId}`;
   return `${event.type}:${event.documentId}:${event.threadId ?? ""}:${event.at}:${event.actor?.id ?? ""}`;
@@ -99,7 +105,7 @@ function pushable(event, entry) {
 
 function conversationThread(event) {
   if (event.type === "request.created") return event.threadId ?? null;
-  if (event.type === "mention") return event.refId ?? null;
+  if (event.type === "mention") return mentionThread(event);
   if (event.type === "comment.added") return event.threadId ?? null;
   return null;
 }
@@ -181,6 +187,8 @@ export function instructionForEvent(event, title) {
       `documentId: ${event.documentId}`,
       "requestId: (none)",
       `refId: ${event.refId ?? "(unknown)"}`,
+      // The thread to answer in; a reply's refId is the reply itself. Absent from older servers (#1103).
+      ...(event.threadId ? [`threadId: ${event.threadId}`] : []),
       `quote: ${quote}`,
       `documentTitle: ${title}`,
       "Use markdoc_comments to read the thread, then markdoc_comment to reply. Use markdoc_read_document and markdoc_suggest if the person asked for a document change. If a request for this thread arrives afterwards, claim it and complete it rather than answering twice.",

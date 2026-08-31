@@ -41,7 +41,7 @@ export type AgentEvent =
   | { type: "comment.added" | "comment.replied" | "comment.resolved"; documentId: string; threadId: string | null; author: string; authorKind: string; body: string; quote: string | null; actor: EventActor; at: string }
   | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; replyId?: string; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
   | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; actor: EventActor; at: string }
-  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; by: string | null; byLogin: string | null; snippet: string; agent: string | null; agents: string[]; actor: EventActor; at: string }
+  | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; threadId: string | null; by: string | null; byLogin: string | null; snippet: string; agent: string | null; agents: string[]; actor: EventActor; at: string }
   | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; threadId: string | null; actor: EventActor; at: string }
   | { type: "activity"; documentId: string; action: string; actor: EventActor; actorName: string; actorKind: string; detail: Record<string, unknown>; at: string };
 
@@ -369,6 +369,31 @@ function mentionActor(n: { actorLogin: string | null; actorName: string | null }
   return { id: self ? selfActorId(user) : null, name: n.actorName ?? n.actorLogin ?? "someone", login: n.actorLogin, kind: self ? "agent" : "user", agent: self ? user.agent! : null, self };
 }
 
+type MentionRow = typeof schema.notifications.$inferSelect;
+
+/**
+ * A `mention` event from its notification row. `refId` is the mentioned comment or reply; `threadId` is the
+ * thread that conversation belongs to (the ref itself for a top-level comment, the containing thread for a
+ * reply), resolved from the live document by the caller — null when the thread is gone or the ref is unknown.
+ */
+function mentionEvent(n: MentionRow, documentTitle: string | null, threadId: string | null, login: string, user: SessionUser & { agent?: string }): AgentEvent {
+  const agents = n.agentTargets ?? parseAgentMentions(n.snippet).filter((mention) => mention.login === login).map((mention) => mention.agent);
+  return {
+    type: "mention",
+    documentId: n.documentId,
+    documentTitle,
+    refId: n.refId,
+    threadId,
+    by: n.actorName,
+    byLogin: n.actorLogin,
+    snippet: n.snippet,
+    agent: agents[0] ?? mentionedAgent(n.snippet, login),
+    agents,
+    actor: mentionActor(n, user),
+    at: n.createdAt.toISOString(),
+  };
+}
+
 function keep(events: AgentEvent[], opts: WatchOptions): AgentEvent[] {
   return opts.includeSelf ? events : events.filter((e) => !e.actor.self);
 }
@@ -385,16 +410,18 @@ export interface EventsPage {
  */
 export async function collectDocumentEvents(docId: string, user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   // Lazy: livedoc pulls in http.ts (next/headers), which must not load in the custom server's module graph.
-  const { readLiveText } = await import("@/server/livedoc");
-  const live = await readLiveText(docId);
-  const hash = contentHash(live.clean);
-  rememberText(docId, hash, live.clean);
-  if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: hash }), events: [] };
+  const { readLiveText, readLiveTextWithThreads } = await import("@/server/livedoc");
+  if (!cursor) {
+    const live = await readLiveText(docId);
+    const hash = contentHash(live.clean);
+    rememberText(docId, hash, live.clean);
+    return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: hash }), events: [] };
+  }
 
   const db = await getDb();
   const selfId = selfActorId(user);
   const events: AgentEvent[] = [];
-  const next: CursorState = { ...cursor, ids: [...cursor.ids], h: hash };
+  const next: CursorState = { ...cursor, ids: [...cursor.ids] };
 
   const rows = await db
     .select()
@@ -414,18 +441,24 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
   }
 
   const login = user.login?.toLowerCase();
-  if (login) {
-    const mentions = await db
-      .select()
-      .from(schema.notifications)
-      .where(and(eq(schema.notifications.userLogin, login), eq(schema.notifications.documentId, docId), eq(schema.notifications.kind, "mention"), gt(schema.notifications.createdAt, new Date(cursor.n))))
-      .orderBy(asc(schema.notifications.createdAt))
-      .limit(200);
-    for (const m of mentions) {
-      next.n = Math.max(next.n, m.createdAt.getTime());
-      const agents = m.agentTargets ?? parseAgentMentions(m.snippet).filter((mention) => mention.login === login).map((mention) => mention.agent);
-      events.push({ type: "mention", documentId: docId, documentTitle: live.title || null, refId: m.refId, by: m.actorName, byLogin: m.actorLogin, snippet: m.snippet, agent: agents[0] ?? mentionedAgent(m.snippet, login), agents, actor: mentionActor(m, user), at: m.createdAt.toISOString() });
-    }
+  const mentions = login
+    ? await db
+        .select()
+        .from(schema.notifications)
+        .where(and(eq(schema.notifications.userLogin, login), eq(schema.notifications.documentId, docId), eq(schema.notifications.kind, "mention"), gt(schema.notifications.createdAt, new Date(cursor.n))))
+        .orderBy(asc(schema.notifications.createdAt))
+        .limit(200)
+    : [];
+
+  // One read of the document: the clean text for `content.changed` and, when the page has mentions, the thread
+  // each mentioned comment or reply sits in (a reply's `refId` alone does not name its conversation).
+  const live = await readLiveTextWithThreads(docId, mentions.map((m) => m.refId));
+  const hash = contentHash(live.clean);
+  rememberText(docId, hash, live.clean);
+  next.h = hash;
+  for (const m of mentions) {
+    next.n = Math.max(next.n, m.createdAt.getTime());
+    events.push(mentionEvent(m, live.title || null, live.threads.get(m.refId) ?? null, login!, user));
   }
 
   if (cursor.h !== null && cursor.h !== hash) {
@@ -445,8 +478,8 @@ export async function collectDocumentEvents(docId: string, user: SessionUser & {
 
 /**
  * Cross-document inbox: @mentions on every document the token's user can open, plus reviews and new
- * agent requests (from the Ask-an-agent dialog or a comment thread: `threadId`) on documents they own or
- * collaborate on. Content changes are not included.
+ * agent requests (made by mentioning an agent in a comment thread, `threadId`, or over the API without one)
+ * on documents they own or collaborate on. Content changes are not included.
  */
 export async function collectUserEvents(user: SessionUser & { agent?: string }, cursor: CursorState | null, opts: WatchOptions = {}, now = new Date()): Promise<EventsPage> {
   if (!cursor) return { cursor: encodeCursor({ a: now.getTime(), ids: [], n: now.getTime(), r: now.getTime(), h: null }), events: [] };
@@ -472,10 +505,18 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       )
       .orderBy(asc(schema.notifications.createdAt))
       .limit(200);
+    // The thread behind each mentioned comment or reply: one read per distinct document on the page, nothing cached.
+    const refsByDoc = new Map<string, string[]>();
+    for (const { n } of mentions) refsByDoc.set(n.documentId, [...(refsByDoc.get(n.documentId) ?? []), n.refId]);
+    const threads = new Map<string, Map<string, string | null>>();
+    if (refsByDoc.size > 0) {
+      // Lazy for the same reason as in collectDocumentEvents.
+      const { resolveCommentThreads } = await import("@/server/livedoc");
+      for (const [documentId, refIds] of refsByDoc) threads.set(documentId, await resolveCommentThreads(documentId, refIds));
+    }
     for (const { n, title } of mentions) {
       next.n = Math.max(next.n, n.createdAt.getTime());
-      const agents = n.agentTargets ?? parseAgentMentions(n.snippet).filter((mention) => mention.login === login).map((mention) => mention.agent);
-      events.push({ type: "mention", documentId: n.documentId, documentTitle: title, refId: n.refId, by: n.actorName, byLogin: n.actorLogin, snippet: n.snippet, agent: agents[0] ?? mentionedAgent(n.snippet, login), agents, actor: mentionActor(n, user), at: n.createdAt.toISOString() });
+      events.push(mentionEvent(n, title, threads.get(n.documentId)?.get(n.refId) ?? null, login, user));
     }
   }
 

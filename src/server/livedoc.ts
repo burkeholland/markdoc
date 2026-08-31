@@ -58,6 +58,54 @@ export async function readLiveText(docId: string): Promise<LiveText> {
   return readLiveDoc(docId, summarize);
 }
 
+/**
+ * The thread each comment ref belongs to: a thread id maps to itself, a reply id to the thread holding it,
+ * anything else (deleted thread, foreign id) to null. Thread ids are answered from the comments map's keys;
+ * the reply index is built once, and only when some ref is not a thread id.
+ */
+export function commentThreadIds(doc: Y.Doc, refIds: Iterable<string>): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  const ids = [...new Set(refIds)];
+  if (ids.length === 0) return out;
+  const comments = doc.getMap<Y.Map<unknown>>("comments");
+  let byReply: Map<string, string> | null = null;
+  for (const refId of ids) {
+    if (comments.has(refId)) {
+      out.set(refId, refId);
+      continue;
+    }
+    if (!byReply) {
+      const index = new Map<string, string>();
+      comments.forEach((thread, threadId) => {
+        const replies = thread.get("replies");
+        if (!(replies instanceof Y.Array)) return;
+        for (const reply of replies.toArray() as { id?: unknown }[]) {
+          if (reply && typeof reply.id === "string") index.set(reply.id, threadId);
+        }
+      });
+      byReply = index;
+    }
+    out.set(refId, byReply.get(refId) ?? null);
+  }
+  return out;
+}
+
+/** `readLiveText` plus `commentThreadIds` for `refIds`, from the same read of the document. */
+export async function readLiveTextWithThreads(docId: string, refIds: Iterable<string>): Promise<LiveText & { threads: Map<string, string | null> }> {
+  return readLiveDoc(docId, (doc) => ({ ...summarize(doc), threads: commentThreadIds(doc, refIds) }));
+}
+
+/** `commentThreadIds` against the live document; every ref is null when the document cannot be read (gone). */
+export async function resolveCommentThreads(docId: string, refIds: Iterable<string>): Promise<Map<string, string | null>> {
+  const ids = [...new Set(refIds)];
+  if (ids.length === 0) return new Map();
+  try {
+    return await readLiveDoc(docId, (doc) => commentThreadIds(doc, ids));
+  } catch {
+    return new Map(ids.map((id) => [id, null]));
+  }
+}
+
 /** Run a read-only function against the live document (or a copy loaded from the database). */
 export async function readLiveDoc<T>(docId: string, fn: (doc: Y.Doc) => T): Promise<T> {
   const collab = getCollab();

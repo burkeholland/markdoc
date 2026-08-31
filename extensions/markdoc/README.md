@@ -33,9 +33,10 @@ The app opens the editor in its right-side panel. In Copilot CLI, start with `co
 The extension starts a random local shell for the panel. The shell obtains a one-time, 60-second Markdoc handoff bound to its exact origin and frames the editor; the token never appears in the panel URL or HTML. Markdoc uses a short-lived, document-scoped embed cookie without replacing the user's normal login, renews it while the editor stays open, and prevents any other origin from framing the session. The shell obtains a fresh handoff before expiry if in-frame renewal is interrupted. For plain HTTP, `MARKDOC_URL` must resolve to this machine so the shell can use the same hostname and keep the cookie same-site. Remote Markdoc servers must use HTTPS. One Markdoc canvas is active per Copilot session; a second panel is refused so document-scoped sessions cannot collide. Reuse the existing panel with `open_document`, or close it before opening another.
 
 The extension sends each request, mention, comment, and review event once. A
-comment that @-mentions the agent produces a comment, a mention and a request
-for the same thread; the extension waits briefly for the request and pushes
-only that one, so one ask is one prompt. An
+comment or reply that @-mentions the agent produces a mention and a request
+(and, for a new comment, a comment event) for the same thread; the extension
+waits briefly for the request and pushes only that one, so one ask is one
+prompt. An
 event arriving during a Copilot turn is queued; an event arriving while the
 session is idle starts a turn immediately. Closing the canvas aborts the event
 poll and removes the Copilot app presence from the document. Event-driven turns
