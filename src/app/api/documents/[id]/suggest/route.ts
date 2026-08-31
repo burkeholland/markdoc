@@ -5,7 +5,7 @@ import { diffOpsWords } from "@/editor/sync/text-diff";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { activityActor, recordActivity } from "@/server/activity";
-import { attachWork } from "@/server/agent-requests";
+import { attachWork, requireAttachableRequest } from "@/server/agent-requests";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { contentHash } from "@/server/export/html";
 
@@ -56,6 +56,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   let count = 0;
   const created: string[] = [];
   let hashAfter = "";
+  // A linked request must exist and be open/claimed before anything is written (404/409 with nothing to undo).
+  if (body.requestId) await requireAttachableRequest(id, body.requestId);
 
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     hashAfter = assertContentUnchanged(id, doc, expected);
@@ -107,6 +109,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   });
 
   if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(body.requestId ? { requestId: body.requestId } : {}) });
+  // Still validates: a request cancelled/completed between the pre-check and the write is the residual race and 409s here.
   if (body.requestId) await attachWork(id, body.requestId, user!, { suggestions: count, suggestionIds: created });
   return json({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter });
 });
