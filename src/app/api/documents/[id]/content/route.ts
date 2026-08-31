@@ -71,17 +71,27 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
     hashAfter = contentHash(cleanTextOf(doc));
   });
   if (changed) void recordEdit(id, activityActor(user!), chars).catch((err) => console.error("[activity] edit failed", err));
+  const warnings: string[] = [];
   if (changed && (body.message || user!.agent)) {
-    await addVersion({
-      documentId: id,
-      content: body.content,
-      kind: body.message ? "named" : "auto",
-      title: body.message ?? (user!.agent ? `Edited by ${user!.agent}` : null),
-      createdBy: user!.id,
-      createdByName: actorName(user),
-    });
+    // The text is already live (broadcast to every editor, irrevocable) and its hash known, so a version that
+    // cannot be saved — e.g. `(document_id, number)` colliding with the collab auto-version or another agent's
+    // write — is logged and reported as a warning on the 200; a 500 would hide the hash and make the agent's
+    // same-content retry answer 409.
+    try {
+      await addVersion({
+        documentId: id,
+        content: body.content,
+        kind: body.message ? "named" : "auto",
+        title: body.message ?? (user!.agent ? `Edited by ${user!.agent}` : null),
+        createdBy: user!.id,
+        createdByName: actorName(user),
+      });
+    } catch (err) {
+      console.error("[content] version-not-saved", err);
+      warnings.push("version-not-saved");
+    }
   }
-  return json({ ok: true, changed, contentHash: hashAfter });
+  return json({ ok: true, changed, contentHash: hashAfter, ...(warnings.length ? { warnings } : {}) });
 });
 
 const patchSchema = z.object({

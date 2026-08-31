@@ -108,9 +108,25 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     hashAfter = contentHash(cleanTextOf(doc));
   });
 
-  if (count > 0) await recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(body.requestId ? { requestId: body.requestId } : {}) });
-  // Still validates: a request cancelled/completed between the pre-check and the write is the residual race and 409s here.
-  if (body.requestId) await attachWork(id, body.requestId, user!, { suggestions: count, suggestionIds: created });
-  return json({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter });
+  // The suggestions are in the shared document (broadcast to every editor, irrevocable): an activity row or request
+  // link that fails here is logged and reported as a warning code on the 200, never as a non-2xx claiming nothing
+  // changed. `attachWork` still validates the request — one cancelled/completed between the pre-check and the write
+  // is the residual race and surfaces as `request-not-attached` with the suggestions kept. It runs before the
+  // activity row so that a row never claims work for a request that refused to count it (same order as comments).
+  const warnings: string[] = [];
+  const tail = async (code: string, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[suggest] ${code}`, err);
+      warnings.push(code);
+      return false;
+    }
+  };
+  const linkedRequest = body.requestId;
+  const attached = linkedRequest ? await tail("request-not-attached", () => attachWork(id, linkedRequest, user!, { suggestions: count, suggestionIds: created })) : false;
+  if (count > 0) await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(attached ? { requestId: linkedRequest } : {}) }));
+  return json({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter, ...(warnings.length ? { warnings } : {}) });
 });
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, afterEach, vi } from "vitest";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -9,10 +9,20 @@ delete process.env.DATABASE_URL;
 let actor: { id: string; login: string; name: string; image: null } | null = null;
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+// Wrapped so a test can make the activity insert or the request link fail after the suggestions are written.
+vi.mock("@/server/activity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/activity")>();
+  return { ...actual, recordActivity: vi.fn(actual.recordActivity) };
+});
+vi.mock("@/server/agent-requests", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/agent-requests")>();
+  return { ...actual, attachWork: vi.fn(actual.attachWork) };
+});
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument } = await import("@/server/documents");
-const { createRequest, cancelRequest, completeRequest } = await import("@/server/agent-requests");
+const { recordActivity } = await import("@/server/activity");
+const { createRequest, cancelRequest, completeRequest, attachWork } = await import("@/server/agent-requests");
 const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const content = await import("@/app/api/documents/[id]/content/route");
 const activity = await import("@/app/api/documents/[id]/activity/route");
@@ -21,10 +31,21 @@ const requests = await import("@/app/api/documents/[id]/requests/route");
 type ContentBody = { content: string; clean: string; contentHash: string; pendingSuggestions: number };
 type ActivityItem = { action: string; detail: Record<string, unknown> };
 type RequestItem = { id: string; status: string; claimedBy: string | null; result: { suggestions: number; comments: number; suggestionIds?: string[] } | null };
-type SuggestBody = { ok: boolean; suggestions: number; suggestionIds: string[]; contentHash: string };
+type SuggestBody = { ok: boolean; suggestions: number; suggestionIds: string[]; contentHash: string; warnings?: string[] };
 
 const TEXT = "# shape\n\nAlpha.\n";
 const EDITS = [{ find: "Alpha", replace: "Beta" }];
+
+/** Runs `fn` with console.error silenced; returns its result and the `[suggest]`-prefixed lines it logged. */
+const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: unknown[][] }> => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = await fn();
+    return { result, logged: errors.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("[suggest]")) };
+  } finally {
+    errors.mockRestore();
+  }
+};
 
 /**
  * `docs/agents.md` promises that a non-2xx status from a write route means nothing changed. With a
@@ -133,8 +154,85 @@ describe("POST /api/documents/[id]/suggest validates requestId before writing", 
     await freshDoc();
     const res = await postSuggest({ edits: EDITS });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, suggestions: 2 });
+    expect(await res.json()).toEqual({ ok: true, suggestions: 2, suggestionIds: [expect.any(String), expect.any(String)], contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect((await read()).pendingSuggestions).toBe(2);
     expect((await activityItems()).map((i) => i.action)).toEqual(["suggestion.add"]);
+  });
+
+  /**
+   * Once the suggestions are in the shared document they are on every editor's screen, so a side effect that
+   * fails after that (activity row, request link) is reported as `warnings` on the 200 — a 500 would claim nothing
+   * changed while the tracked changes stay, and the agent's retry could not be idempotent (`edits` no longer match).
+   */
+  describe("keeps the write and reports a failed tail as warnings", () => {
+    afterEach(() => {
+      // A failure armed with `...Once` and never consumed must not leak into the next test.
+      vi.mocked(recordActivity).mockReset();
+      vi.mocked(attachWork).mockReset();
+    });
+
+    it("attachWork failing: 200 with the suggestions in the document, warnings: [request-not-attached], the request untouched", async () => {
+      const before = await freshDoc();
+      const request = await createRequest(docId, actor!, "owner", { instruction: "Tighten this", mode: "suggest" });
+      vi.mocked(attachWork).mockRejectedValueOnce(new Error("Connection terminated unexpectedly"));
+      const { result: res, logged } = await quietly(() => postSuggest({ edits: EDITS, requestId: request.id }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as SuggestBody;
+      expect(body).toMatchObject({ ok: true, suggestions: 2, warnings: ["request-not-attached"] });
+      expect(body.suggestionIds).toHaveLength(2);
+      expect(logged).toEqual([["[suggest] request-not-attached", expect.any(Error)]]);
+
+      const after = await read();
+      expect(after.content).toContain("Beta");
+      expect(after.pendingSuggestions).toBe(2);
+      // Pending suggestions do not move the clean-text hash; the response carries the current one.
+      expect(after.contentHash).toBe(body.contentHash);
+      expect(after.contentHash).toBe(before.contentHash);
+      // The link is attempted before the activity row; the row is still written, but without `requestId`, since the
+      // request did not count the work. The request itself was not touched.
+      const added = (await activityItems()).filter((i) => i.action === "suggestion.add");
+      expect(added).toHaveLength(1);
+      expect(added[0].detail).toEqual({ count: 2 });
+      expect((await listed()).find((r) => r.id === request.id)).toMatchObject({ status: "open", claimedBy: null, result: null });
+    });
+
+    it("recordActivity failing: 200 with the suggestions in the document, warnings: [activity-not-recorded], counted against the request", async () => {
+      await freshDoc();
+      const request = await createRequest(docId, actor!, "owner", { instruction: "Tighten this", mode: "suggest" });
+      vi.mocked(recordActivity).mockRejectedValueOnce(new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid'));
+      const { result: res, logged } = await quietly(() => postSuggest({ edits: EDITS, requestId: request.id }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as SuggestBody;
+      expect(body).toMatchObject({ ok: true, suggestions: 2, warnings: ["activity-not-recorded"] });
+      // The driver's message (statement + parameters) stays in the log, logged once under the route's code.
+      expect(JSON.stringify(body)).not.toContain("Failed query");
+      expect(logged).toEqual([["[suggest] activity-not-recorded", expect.any(Error)]]);
+
+      expect((await read()).pendingSuggestions).toBe(2);
+      expect((await activityItems()).map((i) => i.action)).not.toContain("suggestion.add");
+      const row = (await listed()).find((r) => r.id === request.id);
+      expect(row).toMatchObject({ status: "claimed", claimedBy: "Eve" });
+      expect(row?.result).toMatchObject({ suggestions: 2, comments: 0, suggestionIds: body.suggestionIds });
+    });
+
+    it("the residual race — request completed between the pre-check and the write — is request-not-attached on a 200, not a 409 with the suggestions kept", async () => {
+      await freshDoc();
+      const request = await createRequest(docId, actor!, "owner", { instruction: "Tighten this", mode: "suggest" });
+      vi.mocked(attachWork).mockImplementationOnce(async (...args) => {
+        await completeRequest(docId, request.id, actor!, { summary: "Closed meanwhile." });
+        const actual = (await vi.importActual<typeof import("@/server/agent-requests")>("@/server/agent-requests")).attachWork;
+        return actual(...args);
+      });
+      const { result: res, logged } = await quietly(() => postSuggest({ edits: EDITS, requestId: request.id }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, suggestions: 2, warnings: ["request-not-attached"] });
+      expect(logged).toEqual([["[suggest] request-not-attached", expect.any(Error)]]);
+      expect((await read()).pendingSuggestions).toBe(2);
+      expect((await listed()).find((r) => r.id === request.id)).toMatchObject({ status: "done", result: { suggestions: 0 } });
+      // The row is written for the feed and the event stream, but claims nothing for the request that refused the work.
+      const added = (await activityItems()).filter((i) => i.action === "suggestion.add");
+      expect(added).toHaveLength(1);
+      expect(added[0].detail).toEqual({ count: 2 });
+    });
   });
 });
