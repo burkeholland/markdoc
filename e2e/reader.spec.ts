@@ -52,6 +52,89 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 
+  test("download menu lists Markdown, HTML and PDF links, is keyboard-operable and closes on Escape and outside click", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-owner");
+    const id = await createDocument(owner.page, CONTENT, "Reader Title");
+    await setLinkAccess(owner.page, id, "view");
+
+    const anon = await browser.newContext();
+    const page = await anon.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-title")).toHaveText("Reader Title");
+    // The header is server-rendered; the toggle only answers clicks once React has hydrated the page.
+    await page.waitForLoadState("networkidle");
+
+    const toggle = page.getByTestId("reader-download-menu");
+    const list = page.getByTestId("reader-download-list");
+    const md = page.getByTestId("reader-download-md");
+    const html = page.getByTestId("reader-download-html");
+    const pdf = page.getByTestId("reader-download-pdf");
+
+    // Closed by default; the disclosure is a button with a list of links, not a menu.
+    await expect(list).toBeHidden();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle).not.toHaveAttribute("aria-haspopup");
+
+    // Click opens: three plain links to the export route, focus on the first one.
+    await toggle.click();
+    await expect(list).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(md).toBeVisible();
+    await expect(html).toBeVisible();
+    await expect(pdf).toBeVisible();
+    await expect(md).toHaveAttribute("href", `/api/documents/${id}/export?format=md&download=1`);
+    await expect(html).toHaveAttribute("href", `/api/documents/${id}/export?format=html&download=1`);
+    await expect(pdf).toHaveAttribute("href", `/api/documents/${id}/export?format=pdf&download=1`);
+    await expect(md).toBeFocused();
+
+    // Arrow keys move and wrap; End jumps to the last link.
+    await page.keyboard.press("ArrowDown");
+    await expect(html).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect(md).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(pdf).toBeFocused();
+
+    // Escape closes and returns focus to the toggle.
+    await page.keyboard.press("Escape");
+    await expect(list).toBeHidden();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle).toBeFocused();
+
+    // A click outside closes.
+    await toggle.click();
+    await expect(list).toBeVisible();
+    await page.getByTestId("reader-body").click();
+    await expect(list).toBeHidden();
+
+    // Enter on the toggle opens; Tab past the last link leaves the component and closes the list.
+    await toggle.focus();
+    await page.keyboard.press("Enter");
+    await expect(list).toBeVisible();
+    await expect(md).toBeFocused();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await expect(list).toBeHidden();
+
+    // Activating a link downloads through the export route (an attachment, so the page stays),
+    // closes the list and returns focus to the toggle. HTML rather than PDF: PDF rendering is slow under load.
+    await toggle.click();
+    await expect(html).toBeVisible();
+    const downloadPromise = page.waitForEvent("download");
+    await html.click();
+    const download = await downloadPromise;
+    expect(download.url()).toContain("format=html&download=1");
+    expect(download.suggestedFilename()).toMatch(/\.html$/);
+    await expect(list).toBeHidden();
+    await expect(toggle).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/p/${id}$`));
+
+    await anon.close();
+    await owner.context.close();
+  });
+
   test("anonymous /d on a view-only link redirects to the reader; comment links keep the editor", async ({ browser }) => {
     const owner = await signIn(browser, "reader-owner");
     const id = await createDocument(owner.page, CONTENT, "Reader Title");

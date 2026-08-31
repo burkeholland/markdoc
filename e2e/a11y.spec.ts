@@ -1065,6 +1065,45 @@ test.describe("axe: phone (iPhone 13)", () => {
     await context.close();
     await owner.context.close();
   });
+
+  test("reader download list opens inside the viewport and scans clean at 320 px and 1280 px", async ({ browser }) => {
+    const owner = await signIn(browser, "a11y-phone-reader-list");
+    const id = await createDocument(owner.page, DOC, "Phone reader list fixture");
+    expect((await owner.page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-body")).toBeVisible();
+    // The header is server-rendered; the toggle only answers clicks once React has hydrated the page.
+    await page.waitForLoadState("networkidle");
+
+    const toggle = page.getByTestId("reader-download-menu");
+    const list = page.getByTestId("reader-download-list");
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 1280, height: 800 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(list).toBeHidden();
+      await toggle.click();
+      await expect(list).toBeVisible();
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(page.getByTestId("reader-download-md")).toBeFocused();
+      // No portal and no collision maths: right-aligned under the toggle, the 192 px list must still fit a 320 px phone.
+      const box = await list.boundingBox();
+      expect(box, `reader-download-list bounding box at ${viewport.width}px`).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      await scan(page, `reader download open (${viewport.width}x${viewport.height})`);
+      await page.keyboard.press("Escape");
+      await expect(list).toBeHidden();
+      await expect(toggle).toBeFocused();
+    }
+
+    await context.close();
+    await owner.context.close();
+  });
 });
 
 test.describe("manual checks", () => {
