@@ -30,7 +30,7 @@ Read-only release checks (README "Production runbook: app-only releases", step 3
   css:rules        with --dist: the Tailwind stylesheet rule by rule (<= 5 local-only utility rules warn)
   brotli           Accept-Encoding: br on every chunk >= 1 KiB: br, content-length = .br sibling, decompresses to identity
   gzip             one referenced .js with Accept-Encoding: gzip decompresses to the identity bytes
-  leak:localhost   "localhost" occurs 0 times in the /login chunks
+  leak:localhost   no origin-like "localhost" (//localhost, localhost:<port>) in the /login chunks; a bare token warns
   collab:reject    an unauthenticated wss://<host>/collab connection reaches authenticationFailed
 
 Only GETs and one WebSocket connection are issued; nothing is written to production and no az call is made.
