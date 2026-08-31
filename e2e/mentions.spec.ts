@@ -56,8 +56,8 @@ test.describe("@mentions in comments", () => {
     await expect
       .poll(async () => {
         const res = await bob.page.request.get("/api/mentions");
-        const { mentions } = (await res.json()) as { mentions: { documentTitle: string }[] };
-        return mentions.map((m) => m.documentTitle);
+        const { mentions } = (await res.json()) as { mentions: { documentId: string; documentTitle: string }[] };
+        return mentions.filter((m) => m.documentId === docId).map((m) => m.documentTitle);
       })
       .toEqual(["Mentions doc"]);
 
@@ -76,7 +76,7 @@ test.describe("@mentions in comments", () => {
     await expect
       .poll(async () => {
         const res = await bob.page.request.get("/api/mentions");
-        return ((await res.json()) as { mentions: unknown[] }).mentions.length;
+        return ((await res.json()) as { mentions: { documentId: string }[] }).mentions.filter((m) => m.documentId === docId).length;
       })
       .toBe(0);
 
@@ -93,7 +93,7 @@ test.describe("@mentions in comments", () => {
     await expect
       .poll(async () => {
         const r = await bob.page.request.get("/api/mentions");
-        return ((await r.json()) as { mentions: { snippet: string }[] }).mentions.map((m) => m.snippet);
+        return ((await r.json()) as { mentions: { documentId: string; snippet: string }[] }).mentions.filter((m) => m.documentId === docId).map((m) => m.snippet);
       })
       .toEqual(["@bob ping, and not mail@bob.example"]);
     // Nobody called "bob.example" was mentioned: alice (the author) has no mention in this document.

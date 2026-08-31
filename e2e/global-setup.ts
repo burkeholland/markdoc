@@ -141,7 +141,7 @@ export default async function globalSetup(config: FullConfig) {
     }
 
     // First-hit compiles of these write routes also exceeded the 15 s expect timeout in
-    // history.spec.ts and images.spec.ts on a loaded box, so take those hits here as well.
+    // history.spec.ts, images.spec.ts and mentions.spec.ts on a loaded box, so take those hits here as well.
     await timed("POST /api/documents/<id>/versions", async () => {
       const res = await page.request.post(`/api/documents/${docId}/versions`, { data: { title: "warm-up" }, timeout: WARMUP_STEP_TIMEOUT_MS });
       if (!res.ok()) throw new Error(`[e2e warm-up] versions -> ${res.status()}`);
@@ -161,6 +161,15 @@ export default async function globalSetup(config: FullConfig) {
     await timed("GET /api/documents/<id>/comments", async () => {
       const res = await page.request.get(`/api/documents/${docId}/comments`, { timeout: WARMUP_STEP_TIMEOUT_MS });
       if (!res.ok()) throw new Error(`[e2e warm-up] comments -> ${res.status()}`);
+    });
+    await timed("GET /api/notifications?unread=1", async () => {
+      const res = await page.request.get("/api/notifications?unread=1", { timeout: WARMUP_STEP_TIMEOUT_MS });
+      if (!res.ok()) throw new Error(`[e2e warm-up] notifications -> ${res.status()}`);
+    });
+    // The dashboard strip fires this fire-and-forget on click; once compiled the route answers 404 for an unknown id.
+    await timed("POST /api/notifications/<id>/read", async () => {
+      const res = await page.request.post("/api/notifications/warmup/read", { data: {}, timeout: WARMUP_STEP_TIMEOUT_MS });
+      if (res.status() !== 200 && res.status() !== 404) throw new Error(`[e2e warm-up] notification read -> ${res.status()}`);
     });
   } finally {
     // Drop the collaboration socket before deleting so the server is not mid-save on this doc.
