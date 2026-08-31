@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, Download, FileCode2, FileText } from "lucide-react";
-import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/primitives";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/menu";
 import { navigateTo } from "@/lib/nav";
 
 /** "Download" split button: Markdown, HTML or PDF through the existing export route. */

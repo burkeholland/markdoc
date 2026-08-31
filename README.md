@@ -396,7 +396,7 @@ src/components/notifications notifications bell in the editor header, open-threa
 src/components/reader        /p/[id] reader view: page, table of contents, update pill, download menu
 src/components/settings      API tokens
 src/components/ui            shared primitives (menus, popovers, tips, icons), theme toggle, relative time,
-                             logo.tsx (Logo/Wordmark, no "use client": server pages import it, not the editor header) and github-icon.tsx (GitHubIcon, no "use client" either, so /login and / ship none of primitives.tsx)
+                             logo.tsx (Logo/Wordmark, no "use client": server pages import it, not the editor header) and github-icon.tsx (GitHubIcon, no "use client" either, so /login and / ship none of primitives.tsx); primitives.tsx is a barrel over tooltip.tsx/menu.tsx/popover.tsx/dialog.tsx/display.tsx, and routes that need one family import the module directly (the public reader does)
 src/editor/markdown          GFM schema, parser with source map, incremental parser, serializer, linter;
                              to-markdown.ts is prosemirror-markdown's serializer core, vendored (MIT header in the file)
 src/editor/sync              ProseMirror <-> Y.Text binding, text diff
