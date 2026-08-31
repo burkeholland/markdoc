@@ -1,11 +1,11 @@
 "use client";
 
-import { EditorView as CMView } from "@codemirror/view";
+import type { EditorView as CMView } from "@codemirror/view";
 import type { EditorView as PMView } from "prosemirror-view";
 import { TextSelection } from "prosemirror-state";
 import type { CollabSession, Surface } from "@/editor/collab/session";
+import type { CodeApi } from "@/editor/codemirror/api";
 import { schema } from "@/editor/markdown/schema";
-import * as cm from "@/editor/codemirror/commands";
 import * as pm from "@/editor/prosemirror/commands";
 import { findParentNode } from "@/editor/prosemirror/utils";
 
@@ -55,10 +55,17 @@ export type DialogKind = "link" | "image" | "table" | "share" | "publish" | "sho
  */
 export class EditorActions {
   code: CMView | null = null;
+  /**
+   * CodeMirror values handed up by the code pane with its view (`EditorView.scrollIntoView`, the source
+   * commands). This module imports `@codemirror/*` as types only, so the code pane's chunk stays out of
+   * the editor's first load (#1121); null exactly when `code` is.
+   */
+  codeApi: CodeApi | null = null;
   rich: PMView | null = null;
 
-  setCodeView(view: CMView | null) {
+  setCodeView(view: CMView | null, api: CodeApi | null) {
     this.code = view;
+    this.codeApi = view ? api : null;
   }
 
   setRichView(view: PMView | null) {
@@ -74,11 +81,11 @@ export class EditorActions {
     return this.session.activeSurface;
   }
 
-  private get active(): { kind: "code"; view: CMView } | { kind: "rich"; view: PMView } | null {
-    if (this.surface === "code" && this.code) return { kind: "code", view: this.code };
+  private get active(): { kind: "code"; view: CMView; api: CodeApi } | { kind: "rich"; view: PMView } | null {
+    const code = this.code && this.codeApi ? { kind: "code" as const, view: this.code, api: this.codeApi } : null;
+    if (this.surface === "code" && code) return code;
     if (this.rich) return { kind: "rich", view: this.rich };
-    if (this.code) return { kind: "code", view: this.code };
-    return null;
+    return code;
   }
 
   focus() {
@@ -129,7 +136,7 @@ export class EditorActions {
     const a = this.active;
     if (!a) return EMPTY_FORMAT;
     if (a.kind === "code") {
-      const s = cm.formatStateAt(a.view.state);
+      const s = a.api.commands.formatStateAt(a.view.state);
       return { ...s, hasSelection: !a.view.state.selection.main.empty, tablePos: -1, tableAlign: null };
     }
     const state = a.view.state;
@@ -157,7 +164,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.toggleInlineMark(cm.markerFor(kind))(a.view);
+    if (a.kind === "code") return void a.api.commands.toggleInlineMark(a.api.commands.markerFor(kind))(a.view);
     const type = kind === "strike" ? schema.marks.strikethrough : schema.marks[kind];
     this.runPm(pm.toggleMark(type));
   }
@@ -166,7 +173,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.setHeading(level)(a.view);
+    if (a.kind === "code") return void a.api.commands.setHeading(level)(a.view);
     this.runPm(pm.setHeadingLevel(level));
   }
 
@@ -174,7 +181,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.toggleLinePrefix(kind)(a.view);
+    if (a.kind === "code") return void a.api.commands.toggleLinePrefix(kind)(a.view);
     this.runPm(pm.toggleList(kind));
   }
 
@@ -182,7 +189,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.toggleLinePrefix("quote")(a.view);
+    if (a.kind === "code") return void a.api.commands.toggleLinePrefix("quote")(a.view);
     this.runPm(pm.toggleBlockquote());
   }
 
@@ -190,7 +197,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.insertCodeBlock(a.view);
+    if (a.kind === "code") return void a.api.commands.insertCodeBlock(a.view);
     this.runPm(pm.toggleCodeBlock());
   }
 
@@ -198,7 +205,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.insertHorizontalRule(a.view);
+    if (a.kind === "code") return void a.api.commands.insertHorizontalRule(a.view);
     this.runPm(pm.insertHorizontalRule());
   }
 
@@ -225,7 +232,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.insertLink(a.view, href, text || undefined);
+    if (a.kind === "code") return void a.api.commands.insertLink(a.view, href, text || undefined);
     const state = a.view.state;
     if (state.selection.empty && text) {
       this.discrete();
@@ -250,7 +257,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.insertImage(a.view, src, alt);
+    if (a.kind === "code") return void a.api.commands.insertImage(a.view, src, alt);
     this.runPm(pm.insertImage(src, alt));
   }
 
@@ -258,7 +265,7 @@ export class EditorActions {
     if (!this.guard()) return;
     const a = this.active;
     if (!a) return;
-    if (a.kind === "code") return void cm.insertTable(a.view, rows, cols);
+    if (a.kind === "code") return void a.api.commands.insertTable(a.view, rows, cols);
     this.runPm(pm.insertTable(rows, cols));
   }
 
@@ -359,9 +366,9 @@ export class EditorActions {
 
   /** Scroll a source range into view in every mounted pane without changing the selection. */
   revealSourceRange(range: { from: number; to: number }) {
-    if (this.code) {
+    if (this.code && this.codeApi) {
       const pos = Math.min(range.from, this.code.state.doc.length);
-      this.code.dispatch({ effects: CMView.scrollIntoView(pos, { y: "center" }) });
+      this.code.dispatch({ effects: this.codeApi.scrollIntoView(pos, { y: "center" }) });
     }
     if (this.rich && this.rich.dom.isConnected) {
       const map = this.session.binding.getSourceMap();
@@ -454,10 +461,10 @@ export class EditorActions {
    */
   revealSource(offset: number, opts: { focus?: boolean } = {}) {
     this.cancelRevealWatch();
-    const code = this.code;
+    const code = this.code && this.codeApi ? { view: this.code, api: this.codeApi } : null;
     const rich = this.rich && this.rich.dom.isConnected ? this.rich : null;
     const richScroller = rich ? this.richScroller ?? rich.dom.parentElement?.parentElement ?? null : null;
-    const codeVisible = !!code && code.scrollDOM.getBoundingClientRect().height > 0;
+    const codeVisible = !!code && code.view.scrollDOM.getBoundingClientRect().height > 0;
     // An unknown scroller cannot be measured; treat the pane as visible and fall back to scrollIntoView.
     const richVisible = !!rich && (!richScroller || richScroller.getBoundingClientRect().height > 0);
     let scrollCode = codeVisible;
@@ -472,9 +479,9 @@ export class EditorActions {
     // Focus before dispatching: both panes only report selection changes while focused, and the
     // outline's active heading follows that report.
     if (code) {
-      const pos = Math.min(offset, code.state.doc.length);
-      if (focusCode) code.focus();
-      code.dispatch({ selection: { anchor: pos }, effects: scrollCode ? CMView.scrollIntoView(pos, { y: "center" }) : [] });
+      const pos = Math.min(offset, code.view.state.doc.length);
+      if (focusCode) code.view.focus();
+      code.view.dispatch({ selection: { anchor: pos }, effects: scrollCode ? code.api.scrollIntoView(pos, { y: "center" }) : [] });
     }
     if (rich) {
       const map = this.session.binding.getSourceMap();

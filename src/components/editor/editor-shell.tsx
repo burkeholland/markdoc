@@ -2,12 +2,14 @@
 import { navigateTo } from "@/lib/nav";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import type { EditorView as CMView } from "@codemirror/view";
 import type { EditorView as PMView } from "prosemirror-view";
 import { Eye, PenLine, X } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
+import type { CodeApi } from "@/editor/codemirror/api";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
@@ -25,7 +27,6 @@ import { FileDropDialog, type PendingFileDrop } from "./file-drop-dialog";
 import { Header, type ExportFormat } from "./header";
 import { Toolbar } from "./toolbar";
 import { OutlinePanel } from "./outline";
-import { CodePane } from "./code-pane";
 import { RichPane } from "./rich-pane";
 import { StatusBar, type Layout } from "./status-bar";
 import { CommentsPanel } from "./comments-panel";
@@ -37,6 +38,18 @@ import { GitHubDialog, CommitDialog } from "./github-dialog";
 import { SyncDialog, type SyncActions } from "./sync-dialog";
 
 const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
+
+/** Same box as the pane's root while its chunk loads, so the split layout does not shift when the pane arrives. */
+function CodePanePlaceholder() {
+  return <div className="h-full min-h-0 w-full" aria-busy="true" data-testid="code-pane-loading" />;
+}
+
+// Loaded on demand: CodeMirror and its Markdown grammar (~650 kB of JavaScript) are fetched only when a
+// code or split layout shows the pane, so the rich layout — the phone default — never downloads them and
+// the desktop paints the rich pane before the request completes (#1121). `actions.ts` and `scroll-sync.ts`
+// get their CodeMirror values from the pane through `onReady(view, api)`, so nothing else in this graph
+// imports `@codemirror/*` as a value.
+const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { ssr: false, loading: () => <CodePanePlaceholder /> });
 
 export async function pollDocumentSync(documentId: string, fresh: boolean): Promise<SyncStatusDto> {
   try {
@@ -174,6 +187,7 @@ export function EditorShell({
   const [viewsReady, setViewsReady] = useState(0);
   const [richView, setRichView] = useState<PMView | null>(null);
   const [codeView, setCodeView] = useState<CMView | null>(null);
+  const [codeApi, setCodeApi] = useState<CodeApi | null>(null);
   const [richScroller, setRichScroller] = useState<HTMLDivElement | null>(null);
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
@@ -302,9 +316,10 @@ export function EditorShell({
   const format: FormatState = useSessionValue(session, () => (viewsReady ? actions.formatState() : EMPTY_FORMAT), shallowEqual);
 
   const onCodeReady = useCallback(
-    (view: CMView | null) => {
-      actions.setCodeView(view);
+    (view: CMView | null, api: CodeApi | null) => {
+      actions.setCodeView(view, api);
       setCodeView(view);
+      setCodeApi(api);
       setViewsReady((n) => n + 1);
     },
     [actions],
@@ -887,8 +902,16 @@ export function EditorShell({
   const showLoading = hydrated && !contentReady;
   const showCode = shownLayout !== "rich" && !versionPreview;
   const showRich = shownLayout !== "code" && !versionPreview;
+  // The code pane mounts the first time a code/split layout shows it and stays mounted (the column hides
+  // it) afterwards, exactly as before its chunk was split off; a layout that never shows it — the phone
+  // default — never downloads CodeMirror. Not during hydration: that render assumes a desktop viewport
+  // (useBreakpoint), so a phone would fetch the chunk for a pane it hides a moment later (#1121).
+  const [codePaneMounted, setCodePaneMounted] = useState(false);
+  useEffect(() => {
+    if (hydrated && showCode) setCodePaneMounted(true);
+  }, [hydrated, showCode]);
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
-  useScrollSync({ session, code: codeView, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
+  useScrollSync({ session, code: codeView, codeApi, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
   // revealSource scrolls only the active surface while the sync mirrors the panes onto each other.
   useEffect(() => {
     actions.setScrollSynced(syncScroll && showCode && showRich);
@@ -1100,17 +1123,19 @@ export function EditorShell({
                     </div>
                   )}
                   <div className="min-h-0 flex-1">
-                    <CodePane
-                      session={session}
-                      onReady={onCodeReady}
-                      onSelection={onCodeSelection}
-                      onHighlightClick={onHighlightClick}
-                      uploadImage={uploadImage}
-                      onImageError={onImageError}
-                      onNotice={onNotice}
-                      onMarkdownFileDrop={onCodeFileDrop}
-                      lineWrapping={lineWrapping}
-                    />
+                    {codePaneMounted && (
+                      <CodePane
+                        session={session}
+                        onReady={onCodeReady}
+                        onSelection={onCodeSelection}
+                        onHighlightClick={onHighlightClick}
+                        uploadImage={uploadImage}
+                        onImageError={onImageError}
+                        onNotice={onNotice}
+                        onMarkdownFileDrop={onCodeFileDrop}
+                        lineWrapping={lineWrapping}
+                      />
+                    )}
                   </div>
                 </div>
                 <div className={cn("rich-column flex min-w-0 flex-col", showCode ? "flex-1 basis-0" : "flex-1", !showRich && "hidden")} data-testid="rich-column">

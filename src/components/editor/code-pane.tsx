@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { CollabSession } from "@/editor/collab/session";
+import { createCodeApi, type CodeApi } from "@/editor/codemirror/api";
 import { createCodeEditorSetup, type CodeEditorSetup } from "@/editor/codemirror/setup";
 import type { ImageUploader } from "@/editor/prosemirror/images";
 import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlights";
@@ -21,9 +22,13 @@ function sameHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
   return true;
 }
 
+/** Built once: the same object for every pane, so a consumer can hold it as a stable dependency. */
+const codeApi = createCodeApi();
+
 export interface CodePaneProps {
   session: CollabSession;
-  onReady: (view: EditorView | null) => void;
+  /** The mounted view and the CodeMirror values the shell needs with it; both null again on unmount. */
+  onReady: (view: EditorView | null, api: CodeApi | null) => void;
   onSelection: (head: number, anchor: number) => void;
   onHighlightClick: (kind: string, id: string | null) => void;
   /** Uploads a pasted or dropped image and returns its URL. */
@@ -66,9 +71,9 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
     viewRef.current = view;
     setupRef.current = setup;
     lastHighlights.current = null;
-    onReady(view);
+    onReady(view, codeApi);
     return () => {
-      onReady(null);
+      onReady(null, null);
       view.destroy();
       viewRef.current = null;
     };

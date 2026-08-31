@@ -4,6 +4,7 @@ import type { EditorView as CMView } from "@codemirror/view";
 import { EditorState } from "prosemirror-state";
 import type { EditorView as PMView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
+import { createCodeApi } from "@/editor/codemirror/api";
 import { schema } from "@/editor/markdown/schema";
 import { EditorActions } from "./actions";
 
@@ -63,7 +64,8 @@ function setup(opts: { surface?: "code" | "rich"; lineTop?: number; codeVisible?
     binding: { getSourceMap: () => ({ blocks: [{ from: 0, to: 35 }], segments: [], srcToPm: (n: number) => n + 1, pmToSrc: (n: number) => n - 1, blockIndexAt: () => 0 }) },
   } as unknown as CollabSession;
   const actions = new EditorActions(session, () => {});
-  actions.setCodeView(code);
+  // The real API: the scroll effects asserted below come from CodeMirror itself (tests are not bundled).
+  actions.setCodeView(code, createCodeApi());
   actions.setRichView(rich);
   actions.setRichScroller(scroller);
   return { actions, code, rich, scroller: scroller as unknown as Fixture["scroller"], scrollTopsAtScrollTo, lineTop };
