@@ -7,8 +7,6 @@ import { useCopy } from "@/lib/hooks";
 import { AGENT_DOCS_URL, MCP_PATH, type TokenScopeName } from "@/lib/mcp";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
-export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
-
 /** Placeholder shown where the user's token goes until one is inlined. */
 export const TOKEN_PLACEHOLDER = "MARKDOC_TOKEN";
 export const COPILOT_APP_INSTALL = "mkdir -p ~/.copilot/extensions/markdoc && cp -R extensions/markdoc/. ~/.copilot/extensions/markdoc/";

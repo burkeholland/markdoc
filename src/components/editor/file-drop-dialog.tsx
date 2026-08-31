@@ -3,7 +3,7 @@ import { memo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { FilePlus2, Loader2, Replace, TextCursorInput } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
-import { uploadImportFiles } from "@/components/dashboard/import-dialog";
+import { uploadImportFiles } from "@/lib/import-upload";
 
 export interface PendingFileDrop {
   file: File;
