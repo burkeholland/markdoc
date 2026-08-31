@@ -2,6 +2,13 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
 
+const bannedEverywhere = [
+  {
+    group: ["prosemirror-markdown", "prosemirror-markdown/*"],
+    message: "vendored in src/editor/markdown/to-markdown.ts — the package drags markdown-it into the client",
+  },
+];
+
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
@@ -17,9 +24,28 @@ const eslintConfig = defineConfig([
         "error",
         {
           patterns: [
+            ...bannedEverywhere,
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // CodeMirror loads on demand with the code pane (task #1121): only src/editor/codemirror/** and code-pane.tsx
+    // import its values, everything else on the editor's first-load path imports types — one stray value import
+    // puts ~640 kB back into the /d/[id] entry JS and the build still succeeds. Values arrive via onReady(view, api).
+    files: ["src/**/*.{ts,tsx,mts,js,jsx,mjs}"],
+    ignores: ["src/editor/codemirror/**", "src/components/editor/code-pane.tsx", "src/**/*.test.{ts,tsx,mts,js,mjs}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            ...bannedEverywhere, // this entry replaces the global options for the files it matches; keep the ban
             {
-              group: ["prosemirror-markdown", "prosemirror-markdown/*"],
-              message: "vendored in src/editor/markdown/to-markdown.ts — the package drags markdown-it into the client",
+              group: ["@codemirror/*", "@lezer/*", "y-codemirror.next", "@/editor/codemirror/*", "**/editor/codemirror/*", "**/editor/codemirror/**", "../codemirror/*", "./codemirror/*"],
+              allowTypeImports: true,
+              message: "CodeMirror loads on demand with the code pane (task #1121): import only types here and take values from the CodeApi the pane hands up through onReady(view, api)",
             },
           ],
         },
