@@ -88,12 +88,18 @@ test.describe("security response headers", () => {
       const forwarded = await request.get(path, { headers: { "x-forwarded-proto": "https" } });
       expect(forwarded.status(), path).toBe(200);
       expect(forwarded.headers()["strict-transport-security"], `${path} over forwarded https`).toBe(HSTS);
-      // Anything else than https stays plain: a list led by http, or the header missing.
-      const plain = await request.get(path, { headers: { "x-forwarded-proto": "http, https" } });
+      // Anything else than https stays plain: an explicit http, or the header missing.
+      const plain = await request.get(path, { headers: { "x-forwarded-proto": "http" } });
+      expect(plain.status(), path).toBe(200);
       expect(plain.headers()["strict-transport-security"], `${path} over forwarded http`).toBeUndefined();
       const none = await request.get(path);
       expect(none.headers()["strict-transport-security"], `${path} without the header`).toBeUndefined();
     }
+    // A comma-separated list (several proxies) is read by its first, client-facing hop. Checked on an API
+    // route only: Auth.js builds a URL from the raw header value on pages and would log an Invalid URL error.
+    const list = await request.get("/api/health", { headers: { "x-forwarded-proto": "http, https" } });
+    expect(list.status()).toBe(200);
+    expect(list.headers()["strict-transport-security"], "list led by http").toBeUndefined();
   });
 
   test("signed in: the dashboard, the editor and the reader refuse to be framed; the embed URL without its cookie does too", async ({ browser }) => {
@@ -110,6 +116,15 @@ test.describe("security response headers", () => {
       const embedWithoutCookie = await user.page.request.get(`/d/${id}?embed=1`);
       expect(embedWithoutCookie.status()).toBe(200);
       expectPage(embedWithoutCookie, `/d/${id}?embed=1 without the embed cookie`);
+      // /api/assets sets nosniff itself and a sandboxing CSP on SVGs: the server's nosniff must not become a
+      // second value (Playwright joins duplicates with ", ") and the proxy must not replace the route's CSP.
+      const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
+      const uploaded = await user.page.request.post(`/api/documents/${id}/assets?name=dot.svg`, { headers: { "Content-Type": "image/svg+xml" }, data: svg });
+      expect(uploaded.status(), await uploaded.text()).toBe(201);
+      const asset = await user.page.request.get(((await uploaded.json()) as { url: string }).url);
+      expect(asset.status()).toBe(200);
+      expectBaseline(asset, "/api/assets/<id>");
+      expect(asset.headers()["content-security-policy"]).toBe("sandbox; script-src 'none'");
       // Signed-out, the same URL redirects to /login; both the 307 and the login page refuse framing, so the
       // frame shows the browser's blocked-frame placeholder instead of a login form inside a third-party frame.
       const signedOut = await browser.newContext();
