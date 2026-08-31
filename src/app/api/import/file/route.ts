@@ -24,7 +24,10 @@ function blobs(form: FormData, field: string): File[] {
 
 /**
  * Import local files as new documents: multipart `files` (.md/.markdown/.txt/.html/.htm, ≤ 2 MB each, ≤ 20)
- * plus optional `images` that the Markdown references by relative path. Returns `{ documents: [{ id, title, warnings }] }`.
+ * plus optional `images` that the Markdown references by relative path.
+ * Returns `{ documents: [{ id, title, warnings }], failed: [{ index, name, error }] }`: `documents` are the files
+ * that became documents, `failed` (empty when all did) the ones that did not — a failed file leaves nothing behind
+ * and can simply be sent again. When no file could be imported the response is the error (500 for an unexpected one).
  * A JSON body `{ title?, content, format: "markdown" | "text" | "html" }` imports one string instead (used by the MCP tool).
  */
 export const POST = handler(async (req: Request) => {
@@ -35,7 +38,7 @@ export const POST = handler(async (req: Request) => {
     if (contentType === "application/json") {
       const body = await readJson(req, (d) => textSchema.parse(d));
       const document = await importText({ ownerId: user.id, title: body.title, content: body.content, format: body.format });
-      return json({ documents: [document] }, { status: 201 });
+      return json({ documents: [document], failed: [] }, { status: 201 });
     }
     if (contentType !== "multipart/form-data") {
       throw new HttpError(415, "Send multipart/form-data with one or more `files` fields (and optional `images`), or JSON { title?, content, format }");
@@ -59,8 +62,8 @@ export const POST = handler(async (req: Request) => {
       images.push({ name: img.name, mime: normalizeMime(img.type), bytes: new Uint8Array(await img.arrayBuffer()) });
     }
 
-    const documents = await importFiles({ ownerId: user.id, files, images });
-    return json({ documents }, { status: 201 });
+    const { documents, failed } = await importFiles({ ownerId: user.id, files, images });
+    return json({ documents, failed }, { status: 201 });
   } catch (err) {
     if (err instanceof ImportError) throw new HttpError(err.status, err.message);
     throw err;

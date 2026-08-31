@@ -1,6 +1,6 @@
 import { and, desc, eq, getTableColumns, ilike, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
-import { getDb, schema } from "@/server/db";
+import { getDb, schema, type Db } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
 import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
@@ -9,6 +9,17 @@ import { excerptOf, excerptOfPrefix } from "@/editor/stats";
 export { DOCUMENT_TITLE_MAX, boundTitle } from "@/server/document-title";
 
 const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
+
+/**
+ * A transaction on the shared connection (`db.transaction(async (tx) => …)`), PGlite or PostgreSQL alike.
+ * The create paths take one so a document, its assets and its first version land together or not at all;
+ * everything inside the callback must run on `tx` — a `getDb()` statement there would not see the
+ * uncommitted rows on PostgreSQL and, on PGlite, would wait for the transaction's lock forever.
+ */
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Whatever a statement can run on: the shared connection or a transaction on it. */
+type Executor = Db | Tx;
 
 export interface SessionUser {
   id: string;
@@ -402,37 +413,45 @@ export function titleFromContent(content: string, fallback = "Untitled"): string
   return boundTitle(m ? m[1].trim().replace(/[*_`]/g, "") : fallback);
 }
 
-export async function createDocument(input: CreateDocumentInput): Promise<Document> {
-  const db = await getDb();
+/**
+ * Insert a new document. A document linked to GitHub (`storage` ≠ `local`) also records its
+ * "Imported from GitHub" version, in one transaction with the row: a failure between the two used to
+ * leave a linked document without its version that the retry then duplicated (audit #1202 F11). The
+ * local path (`POST /api/documents`) is a single insert. Pass `tx` to run inside a caller's transaction.
+ */
+export async function createDocument(input: CreateDocumentInput, tx?: Tx): Promise<Document> {
   const content = input.content ?? DEFAULT_CONTENT;
   const id = nanoid();
   // Every path that mints a title (API, file/text/HTML import, GitHub import) ends here, so the bound is enforced once.
   const title = boundTitle(input.title ?? titleFromContent(content));
-  const [doc] = await db
-    .insert(schema.documents)
-    .values({
-      id,
-      title,
-      ownerId: input.ownerId,
-      content,
-      // Mint the CRDT state once, here, so no load ever has to seed it (see collab/seed.ts).
-      ystate: encodeSeedState(content, title),
-      storage: input.storage ?? "local",
-      gistId: input.gistId ?? null,
-      gistFile: input.gistFile ?? null,
-      repoOwner: input.repoOwner ?? null,
-      repoName: input.repoName ?? null,
-      repoBranch: input.repoBranch ?? null,
-      repoPath: input.repoPath ?? null,
-      githubSha: input.githubSha ?? null,
-      publishedContent: input.storage && input.storage !== "local" ? content : null,
-      publishedAt: input.storage && input.storage !== "local" ? new Date() : null,
-    })
-    .returning();
-  if (input.storage && input.storage !== "local") {
-    await addVersion({ documentId: id, content, kind: "import", createdBy: input.ownerId, title: "Imported from GitHub" });
-  }
-  return doc;
+  const linked = !!input.storage && input.storage !== "local";
+  const row = {
+    id,
+    title,
+    ownerId: input.ownerId,
+    content,
+    // Mint the CRDT state once, here, so no load ever has to seed it (see collab/seed.ts).
+    ystate: encodeSeedState(content, title),
+    storage: input.storage ?? "local",
+    gistId: input.gistId ?? null,
+    gistFile: input.gistFile ?? null,
+    repoOwner: input.repoOwner ?? null,
+    repoName: input.repoName ?? null,
+    repoBranch: input.repoBranch ?? null,
+    repoPath: input.repoPath ?? null,
+    githubSha: input.githubSha ?? null,
+    publishedContent: linked ? content : null,
+    publishedAt: linked ? new Date() : null,
+  };
+  const insert = async (on: Executor) => (await on.insert(schema.documents).values(row).returning())[0];
+  const create = async (on: Tx) => {
+    const doc = await insert(on);
+    if (linked) await addVersion({ documentId: id, content, kind: "import", createdBy: input.ownerId, title: "Imported from GitHub" }, on);
+    return doc;
+  };
+  if (tx) return create(tx);
+  const db = await getDb();
+  return linked ? db.transaction(create) : insert(db);
 }
 
 /**
@@ -459,10 +478,10 @@ export async function updateDocument(docId: string, patch: Partial<Document>): P
  * Replace a document's text, writing `content` and a freshly minted `ystate` seed together.
  * Only for documents nobody can have open yet (e.g. mid-import): a fresh seed discards the
  * CRDT history, so a connected editor holding the old state would see the text doubled.
- * For live documents use `replaceLiveText` in livedoc.ts instead.
+ * For live documents use `replaceLiveText` in livedoc.ts instead. Pass `tx` to run inside a transaction.
  */
-export async function setDocumentText(docId: string, content: string): Promise<Document | null> {
-  const db = await getDb();
+export async function setDocumentText(docId: string, content: string, tx?: Tx): Promise<Document | null> {
+  const db: Executor = tx ?? (await getDb());
   const [current] = await db.select({ title: schema.documents.title }).from(schema.documents).where(eq(schema.documents.id, docId));
   if (!current) return null;
   const [doc] = await db
@@ -546,17 +565,21 @@ export async function duplicateDocument(docId: string, userId: string, options: 
   const idMap = new Map(assets.map((a) => [a.id, assetNanoid()]));
   const content = text.replace(ASSET_URL_RE, (m, id: string) => (idMap.has(id) ? `/api/assets/${idMap.get(id)}` : m));
 
-  const [doc] = await db
-    .insert(schema.documents)
-    .values({ id: newId, title, ownerId: userId, content, ystate: encodeSeedState(content, title), storage: "local", lastEditedBy: userId })
-    .returning();
-  if (assets.length > 0) {
-    await db
-      .insert(schema.assets)
-      .values(assets.map((a) => ({ id: idMap.get(a.id)!, documentId: newId, userId, name: a.name, mime: a.mime, size: a.size, sha256: a.sha256, data: a.data })));
-  }
-  await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: options.versionTitle ?? `Copied from ${sourceTitle}` });
-  return doc;
+  // Row, copied assets and first version land together or not at all (audit #1202 F9): a failure after
+  // the row insert used to leave "Copy of …" on the dashboard with asset URLs that 404, and the retry made a second copy.
+  return db.transaction(async (tx) => {
+    const [doc] = await tx
+      .insert(schema.documents)
+      .values({ id: newId, title, ownerId: userId, content, ystate: encodeSeedState(content, title), storage: "local", lastEditedBy: userId })
+      .returning();
+    if (assets.length > 0) {
+      await tx
+        .insert(schema.assets)
+        .values(assets.map((a) => ({ id: idMap.get(a.id)!, documentId: newId, userId, name: a.name, mime: a.mime, size: a.size, sha256: a.sha256, data: a.data })));
+    }
+    await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: options.versionTitle ?? `Copied from ${sourceTitle}` }, tx);
+    return doc;
+  });
 }
 
 const assetNanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
@@ -571,13 +594,30 @@ export interface AddVersionInput {
   commitSha?: string | null;
 }
 
-export async function addVersion(input: AddVersionInput) {
-  const db = await getDb();
-  const [{ max }] = await db
+/** The unique index on `(document_id, number)` (schema.ts) that the loser of the version-number race trips. */
+const VERSION_NUMBER_INDEX = "version_doc_number_idx";
+
+/**
+ * True for a unique violation (SQLSTATE `23505`) on {@link VERSION_NUMBER_INDEX}, however it arrives:
+ * drizzle wraps the driver's error as the `cause` of a `DrizzleQueryError`, and both PGlite and `pg`
+ * put `code` and `constraint` on theirs, so the chain is walked. A driver that names no constraint
+ * still counts — `version` has no other unique index a re-run with a fresh number would not cure.
+ */
+export function isVersionNumberCollision(err: unknown): boolean {
+  for (let e = err, depth = 0; e && typeof e === "object" && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const { code, constraint } = e as { code?: unknown; constraint?: unknown };
+    if (code === "23505") return constraint === undefined || constraint === VERSION_NUMBER_INDEX;
+  }
+  return false;
+}
+
+/** One attempt: `max(number)` for the document, then the insert at `max + 1`. */
+async function insertNextVersion(on: Executor, input: AddVersionInput) {
+  const [{ max }] = await on
     .select({ max: sql<number>`coalesce(max(${schema.versions.number}), 0)` })
     .from(schema.versions)
     .where(eq(schema.versions.documentId, input.documentId));
-  const [version] = await db
+  const [version] = await on
     .insert(schema.versions)
     .values({
       id: nanoid(),
@@ -592,6 +632,24 @@ export async function addVersion(input: AddVersionInput) {
     })
     .returning();
   return version;
+}
+
+/**
+ * Record the document's next version. Two version-producing calls on one document at the same time
+ * (an agent's `PUT /content` and the collaboration server's auto-version, two agents, publish + restore)
+ * both read the same `max` and the second insert trips {@link VERSION_NUMBER_INDEX}; that call re-reads
+ * and inserts once more, so both get distinct consecutive numbers. A second collision throws as before
+ * (audit #1202 G4). Pass `tx` to record the version inside a transaction: each attempt then runs in a
+ * savepoint, because on PostgreSQL the violation would otherwise abort the whole transaction (25P02).
+ */
+export async function addVersion(input: AddVersionInput, tx?: Tx) {
+  const attempt = tx ? () => tx.transaction((savepoint: Tx) => insertNextVersion(savepoint, input)) : async () => insertNextVersion(await getDb(), input);
+  try {
+    return await attempt();
+  } catch (err) {
+    if (!isVersionNumberCollision(err)) throw err;
+    return attempt();
+  }
 }
 
 export async function listVersions(docId: string) {
