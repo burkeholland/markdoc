@@ -54,6 +54,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/public ./public
+# The social card (src/server/og) reads its fonts from the source tree at request time.
+COPY --from=build /app/src/server/og/fonts ./src/server/og/fonts
 # Drizzle migrations run on startup from ./drizzle (DRIZZLE_MIGRATIONS_DIR overrides).
 COPY --from=build /app/drizzle ./drizzle
 COPY --from=build /app/next.config.ts ./next.config.ts

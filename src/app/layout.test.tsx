@@ -32,6 +32,12 @@ describe("root metadata", () => {
     const image = typeof first === "string" || first instanceof URL ? first : first!.url;
     expect(new URL(image, metadataBase()).href).toBe("https://example.test/brand/og.png");
   });
+
+  // Every page inherits these, so a document card only has to add what is its own.
+  it("names the site and asks for the large card everywhere", () => {
+    expect(metadata.openGraph?.siteName).toBe("Markdoc");
+    expect(metadata.twitter).toMatchObject({ card: "summary_large_image" });
+  });
 });
 
 // The not-found route is prerendered at build time, when the public origin is unknown, so any
