@@ -85,7 +85,7 @@ describe("computeStats", () => {
     expect(computeStats(FIXTURE)).toEqual(a);
   });
 
-  it("stays fast on a 3,000-line document: median cold run within budget, memoised call under 0.5 ms", () => {
+  it("stays fast on a 3,000-line document: fastest cold run within budget, fastest memoised call under 0.5 ms", { retry: 1 }, () => {
     // Same shape as scripts/perf-typing.mts builds.
     const section = (i: number) =>
       `## Section ${i}\n\nParagraph ${i} with **bold**, *emphasis*, a [link](https://example.com/${i}) and \`code\`. The quick brown fox jumps over the lazy dog again and again.\n\n- item one\n- item two\n- [ ] task ${i}\n\n\`\`\`js\nconst x${i} = ${i};\n\`\`\`\n\n`;
@@ -96,13 +96,18 @@ describe("computeStats", () => {
     computeStats(big + " ");
     computeStats(big + "  ");
 
-    // Wall-clock bounds on a shared machine are noisy, so take the median of 5 iterations. Idle, a cold
-    // run is 2–4 ms; with another suite saturating the box the median has reached 5.6 ms locally and
-    // 5.4 ms on the 2-vCPU CI runner, so the budgets below leave headroom while still catching a
-    // regression to tens of milliseconds.
+    // Wall-clock bounds on a shared machine are noisy: with a dozen builds and suites saturating the box a
+    // run is CPU-starved, not slow, and the median of 5 runs crossed the 10 ms budget in release preflights.
+    // Load can only add time, so the assertions use the minimum of 9 runs — what the code costs when it
+    // gets the CPU — which still catches a regression to tens of milliseconds. Measured (task #1143): idle
+    // a cold run is 1.3–2 ms; with a busy thread per core the fastest of 9 was 2.9–5.5 ms while the median
+    // of 5 reached 9.5 ms; with two busy threads per core on an already saturated box the median of 5
+    // failed every time (12–28 ms) and the fastest of 9 stayed within budget in 19 of 20 runs. `retry: 1`
+    // covers the pass in which not one of the 9 runs got the CPU.
+    const RUNS = 9;
     const cold: number[] = [];
     const memoised: number[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < RUNS; i++) {
       const input = big + "!".repeat(i + 3);
       const t0 = performance.now();
       computeStats(input);
@@ -111,11 +116,11 @@ describe("computeStats", () => {
       computeStats(input);
       memoised.push(performance.now() - t1);
     }
-    const median = (runs: number[]) => [...runs].sort((a, b) => a - b)[Math.floor(runs.length / 2)];
+    const fastest = (runs: number[]) => Math.min(...runs);
     const budgetMs = process.env.CI ? 25 : 10;
-    expect(median(cold), `cold runs (ms): ${cold.map((r) => r.toFixed(2)).join(", ")}`).toBeLessThan(budgetMs);
+    expect(fastest(cold), `cold runs (ms): ${cold.map((r) => r.toFixed(2)).join(", ")}`).toBeLessThan(budgetMs);
     // The status bar re-reads stats on every render; the memo hit is the guarantee it relies on.
-    expect(median(memoised), `memoised runs (ms): ${memoised.map((r) => r.toFixed(3)).join(", ")}`).toBeLessThan(0.5);
+    expect(fastest(memoised), `memoised runs (ms): ${memoised.map((r) => r.toFixed(3)).join(", ")}`).toBeLessThan(0.5);
   });
 });
 
