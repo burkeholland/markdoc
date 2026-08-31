@@ -5,7 +5,7 @@ import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lu
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
 import { api, type DocumentSummaryDto } from "@/lib/api";
-import { TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
+import { SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { AgentConnectCard, mcpHttpConfigFor, useOrigin } from "@/components/settings/agent-connect-card";
 import { CopilotChecklist } from "@/components/settings/copilot-checklist";
 
@@ -60,9 +60,6 @@ export function ScopeChip({ scope, className }: { scope: TokenScopeName; classNa
     </span>
   );
 }
-
-/** The scope radio order (narrowest first), shared with the Share dialog's agent card. */
-export const SCOPES: TokenScopeName[] = ["read", "comment", "full"];
 
 export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false }: { origin: string; userLogin: string; next?: string | null; hasAgentRequests?: boolean }) {
   const [tokens, setTokens] = useState<TokenRow[] | null>(null);

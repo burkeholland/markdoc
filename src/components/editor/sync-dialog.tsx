@@ -6,14 +6,6 @@ import type { DocumentDto } from "@/server/dto";
 import type { SyncStatusDto } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
 
-export const SYNC_LABELS: Record<SyncStatusDto["status"], string> = {
-  "in-sync": "Up to date",
-  "local-ahead": "Unpublished changes",
-  "remote-ahead": "GitHub has changes",
-  diverged: "Both changed",
-  "remote-unreadable": "GitHub file too large",
-};
-
 export interface SyncActions {
   /** pull?merge=1 — resolves to the number of conflicts left in the document (0 = clean merge). */
   merge: () => Promise<number>;

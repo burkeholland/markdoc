@@ -5,7 +5,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 const signIn = vi.fn(() => new Promise<void>(() => {}));
 vi.mock("next-auth/react", () => ({ signIn: (...args: unknown[]) => signIn(...(args as [])) }));
 
-import { GITHUB_NOT_CONFIGURED, GitHubPicker } from "./github-dialog";
+import { GitHubPicker } from "./github-dialog";
+import { GITHUB_NOT_CONFIGURED } from "./labels";
 
 // The empty state of the GitHub picker for an account without a GitHub token (#162): it used to be a
 // sentence with no control, so every non-GitHub account dead-ended on Close.

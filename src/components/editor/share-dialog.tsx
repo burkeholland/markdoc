@@ -10,8 +10,7 @@ import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CollaboratorLoginInput } from "@/components/editor/collaborator-login-input";
 import { CopyBlock, mcpConfigFor, mcpHttpConfigFor, TOKEN_PLACEHOLDER } from "@/components/settings/agent-connect-card";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
-import { SCOPES } from "@/components/settings/tokens-panel";
-import { TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
+import { SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
 
 const LINK_OPTIONS: { value: DocumentDto["linkAccess"]; label: string; description: string }[] = [

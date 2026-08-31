@@ -15,7 +15,8 @@ import { PICKER_TEMPLATES, TEMPLATES, WELCOME_TEMPLATE_ID, getTemplate, type Tem
 import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, SORT_COOKIE_MAX_AGE, SORT_OPTIONS, SORT_STORAGE_KEY, isDashboardSort, type DashboardSort } from "@/lib/dashboard-sort";
 
 import { Logo } from "@/components/ui/logo";
-import { GITHUB_NOT_CONFIGURED, GitHubPicker } from "@/components/editor/github-dialog";
+import { GitHubPicker } from "@/components/editor/github-dialog";
+import { GITHUB_NOT_CONFIGURED } from "@/components/editor/labels";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";

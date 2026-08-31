@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { PenLine } from "lucide-react";
 import { Logo } from "@/components/ui/logo";
-import { Avatar } from "@/components/ui/primitives";
+import { Avatar } from "@/components/ui/display";
 import { RelativeTime } from "@/components/ui/relative-time";
 import type { RenderedHeading } from "@/server/export/html";
 import { ReaderToc } from "./toc";
