@@ -299,6 +299,11 @@ describe("requests made from a comment thread (#997)", () => {
     const { request } = (await res.json()) as { request: { id: string; threadId: string | null } };
     expect(request.threadId).toBe(threadId);
     const camBefore = (await replyNotifications("cam")).length;
+    // Cam's own agent watches the document and the inbox; the mention in the agent's reply reaches both.
+    const cam = { id: commenter.id, login: commenter.login, name: commenter.name, image: null };
+    const { cursor: camDocCursor } = await pollEvents(docId, cam, null, 0);
+    const { cursor: camInboxCursor } = await pollEvents(null, cam, null, 0);
+    await new Promise((r) => setTimeout(r, 20));
 
     expect((await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "It is fine.", requestId: "nope" }), params(docId)), ownerToken)).status).toBe(404);
     const reply = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "The dog is fine, @cam.", requestId: request.id }), params(docId)), ownerToken);
@@ -316,6 +321,11 @@ describe("requests made from a comment thread (#997)", () => {
     // No `reply` for the request-linked answer; the mention inside it still reaches Cam.
     expect((await replyNotifications("cam")).length).toBe(camBefore);
     expect((await listNotifications("cam", { kind: "mention" })).items.find((n) => n.refId === replyId)).toMatchObject({ actorName: "Copilot CLI" });
+    // As an event, the reply mention names the thread it sits in (`refId` is the reply), on the document watch and in the inbox.
+    const camDocPage = await pollEvents(docId, cam, camDocCursor, 0);
+    expect(camDocPage.events.filter((e) => e.type === "mention")).toEqual([expect.objectContaining({ refId: replyId, threadId, by: "Copilot CLI", byLogin: "olive", snippet: "The dog is fine, @cam." })]);
+    const camInboxPage = await pollEvents(null, cam, camInboxCursor, 0);
+    expect(camInboxPage.events.filter((e) => e.type === "mention")).toEqual([expect.objectContaining({ documentId: docId, refId: replyId, threadId })]);
 
     // A plain reply (no requestId) notifies as today.
     const plain = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "Also: nice fox." }), params(docId)), ownerToken);

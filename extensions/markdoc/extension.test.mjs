@@ -353,6 +353,132 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
     assert.match(sends[4].prompt, /requestId: req-10/);
     assert.match(sends[4].prompt, /threadId: thread-10/);
 
+    // A reply that mentions the agent: the mention's refId is the reply, its threadId the thread the request names
+    // (#1103). One page with both → one push, the request's.
+    queuedEvents.push(
+      {
+        type: "mention",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        refId: "reply-11",
+        threadId: "thread-11",
+        snippet: "@burke/Copilot-app and the second paragraph?",
+        agent: "Copilot-app",
+        agents: ["Copilot-app"],
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:05.000Z",
+      },
+      {
+        type: "request.created",
+        documentId: "doc-1",
+        documentTitle: "Launch plan",
+        requestId: "req-11",
+        threadId: "thread-11",
+        by: "Burke",
+        mode: "comment",
+        instruction: "and the second paragraph?",
+        quote: null,
+        actor: { id: "user-1", name: "Burke", kind: "user" },
+        at: "2026-08-28T00:00:05.000Z",
+      },
+    );
+    await until(() => sends.length >= 6);
+    await delay(400);
+    assert.equal(sends.length, 6, "a reply mention and its request are one conversation: one push");
+    assert.match(sends[5].prompt, /requestId: req-11/);
+    assert.match(sends[5].prompt, /threadId: thread-11/);
+    assert.match(sends[5].prompt, /markdoc_claim_request/);
+
+    // Same reply-mention flow across two pages (the request arrives one round trip later): the peek waits for it.
+    const readsBeforeReply12 = eventReads;
+    queuedEvents.push({
+      type: "mention",
+      documentId: "doc-1",
+      documentTitle: "Launch plan",
+      refId: "reply-12",
+      threadId: "thread-12",
+      snippet: "@burke/Copilot-app one more pass?",
+      agent: "Copilot-app",
+      agents: ["Copilot-app"],
+      actor: { id: "user-1", name: "Burke", kind: "user" },
+      at: "2026-08-28T00:00:06.000Z",
+    });
+    await until(() => eventReads > readsBeforeReply12 && queuedEvents.length === 0);
+    queuedEvents.push({
+      type: "request.created",
+      documentId: "doc-1",
+      documentTitle: "Launch plan",
+      requestId: "req-12",
+      threadId: "thread-12",
+      by: "Burke",
+      mode: "suggest",
+      instruction: "one more pass?",
+      quote: "A sentence that needs work.",
+      actor: { id: "user-1", name: "Burke", kind: "user" },
+      at: "2026-08-28T00:00:06.500Z",
+    });
+    await until(() => sends.length >= 7);
+    await delay(400);
+    assert.equal(sends.length, 7, "reply mention, then its request one page later: one push");
+    assert.match(sends[6].prompt, /requestId: req-12/);
+    assert.match(sends[6].prompt, /threadId: thread-12/);
+
+    // A reply mention with no request behind it is pushed on its own and names the thread to answer in.
+    queuedEvents.push({
+      type: "mention",
+      documentId: "doc-1",
+      documentTitle: "Launch plan",
+      refId: "reply-13",
+      threadId: "thread-13",
+      snippet: "@burke/Copilot-app thanks!",
+      agent: "Copilot-app",
+      agents: ["Copilot-app"],
+      actor: { id: "user-1", name: "Burke", kind: "user" },
+      at: "2026-08-28T00:00:07.000Z",
+    });
+    await until(() => sends.length >= 8);
+    assert.match(sends[7].prompt, /refId: reply-13/);
+    assert.match(sends[7].prompt, /threadId: thread-13/);
+    assert.match(sends[7].prompt, /markdoc_comment/);
+
+    // Legacy server (no threadId on mentions): a reply mention is still keyed by its refId, so it and its request
+    // push separately exactly as before, and a repeat of the same mention is still deduplicated.
+    const legacyMention = {
+      type: "mention",
+      documentId: "doc-1",
+      documentTitle: "Launch plan",
+      refId: "reply-legacy",
+      snippet: "@burke/Copilot-app legacy reply",
+      agent: "Copilot-app",
+      agents: ["Copilot-app"],
+      actor: { id: "user-1", name: "Burke", kind: "user" },
+      at: "2026-08-28T00:00:08.000Z",
+    };
+    queuedEvents.push(legacyMention, {
+      type: "request.created",
+      documentId: "doc-1",
+      documentTitle: "Launch plan",
+      requestId: "req-legacy",
+      threadId: "thread-legacy",
+      by: "Burke",
+      mode: "comment",
+      instruction: "legacy reply",
+      quote: null,
+      actor: { id: "user-1", name: "Burke", kind: "user" },
+      at: "2026-08-28T00:00:08.000Z",
+    });
+    await until(() => sends.length >= 10);
+    await delay(400);
+    assert.equal(sends.length, 10, "without threadId the extension cannot relate a reply mention to its request: two pushes, as before");
+    assert.match(sends[8].prompt, /requestId: req-legacy/);
+    assert.match(sends[9].prompt, /refId: reply-legacy/);
+    assert.doesNotMatch(sends[9].prompt, /threadId:/);
+    const readsBeforeRepeat = eventReads;
+    queuedEvents.push({ ...legacyMention, snippet: "@burke/Copilot-app legacy reply (edited)", at: "2026-08-28T00:00:09.000Z" });
+    await until(() => eventReads > readsBeforeRepeat + 1 && queuedEvents.length === 0);
+    await delay(400);
+    assert.equal(sends.length, 10, "a legacy mention is keyed by refId: the same ref does not push twice");
+
     await assert.rejects(
       canvasOptions.open({ instanceId: "instance-2", input: { id: "doc-1" } }),
       /Only one Markdoc canvas/,
@@ -384,13 +510,13 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
         at: "2026-08-28T00:00:03.000Z",
       },
     );
-    await until(() => sends.length === 6);
+    await until(() => sends.length === 11);
     const closing = canvasOptions.onClose({ instanceId: "instance-1" });
     await delay(20);
     releaseSend();
     await closing;
     await delay(20);
-    assert.equal(sends.length, 6);
+    assert.equal(sends.length, 11);
     assert.equal(runtime.instances.size, 0);
     assert.deepEqual(presence.map((item) => item.state), ["idle", "left"]);
   } finally {

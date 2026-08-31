@@ -293,11 +293,14 @@ describe("agents in the @-mention picker", () => {
     const body = `@olive/Other-agent ${"context ".repeat(20)}@olive/Copilot tighten this`;
     const add = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "Second paragraph", body }), params(docId)));
     expect(add.status).toBe(200);
+    const { id: threadId } = (await add.json()) as { id: string };
     const started = Date.now();
-    const page = (await (await waiting).json()) as { events: { type: string; snippet?: string; agent?: string | null; agents?: string[]; byLogin?: string | null }[] };
+    const page = (await (await waiting).json()) as { events: { type: string; refId?: string; threadId?: string | null; snippet?: string; agent?: string | null; agents?: string[]; byLogin?: string | null }[] };
     expect(Date.now() - started).toBeLessThan(2000);
     const mention = page.events.find((e) => e.type === "mention");
     expect(mention).toMatchObject({ agent: "Other-agent", agents: ["Other-agent", "Copilot"], byLogin: "olive" });
+    // A mention in a top-level comment names its own thread.
+    expect(mention).toMatchObject({ refId: threadId, threadId });
     expect(mention?.snippet).not.toContain("@olive/Copilot");
     // Pre-read for the owner: no new unread notification.
     const after = (await (await asHuman(() => GET_NOTIFICATIONS(req(`/api/notifications?unread=1`)))).json()) as { unreadCount: number };
@@ -344,20 +347,39 @@ describe("agent events (watch)", () => {
     // The mention from the human to the token's user is not a self-mention: olive commented, so no row.
     expect(page.events.filter((e) => e.type === "mention")).toHaveLength(0);
 
-    // Reply (REST) + resolve + a mention by someone else + an Ask-an-agent request.
-    await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "Yes." }), params(docId)));
+    // Reply (REST) + resolve + mentions by someone else (on a reply, and on a ref that no longer exists) + a request.
+    const replied = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "reply", threadId, body: "Yes." }), params(docId)));
+    const { id: replyId } = (await replied.json()) as { id: string };
     await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "resolve", threadId, resolved: true }), params(docId)));
+    const { cursor: inboxCursor } = (await (await asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events`)))).json()) as { cursor: string };
+    await sleep(20);
     await notify({ userLogin: "olive", documentId: docId, kind: "mention", actorLogin: "cam", actorName: "Cam", refId: "reply-x", snippet: "@olive take a look" });
+    await notify({ userLogin: "olive", documentId: docId, kind: "mention", actorLogin: "cam", actorName: "Cam", refId: replyId, snippet: "@olive see my reply" });
     const request = await createRequest(docId, owner, "owner", { instruction: "Tighten the intro", mode: "suggest" });
 
     const next = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${page.cursor}`), params(docId)))).json()) as {
       cursor: string;
-      events: { type: string; requestId?: string; snippet?: string; threadId?: string }[];
+      events: { type: string; requestId?: string; refId?: string; snippet?: string; threadId?: string | null }[];
     };
     const types = next.events.map((e) => e.type);
     expect(types).toEqual(expect.arrayContaining(["comment.replied", "comment.resolved", "mention", "request.created"]));
     expect(next.events.find((e) => e.type === "request.created")).toMatchObject({ requestId: request.id });
-    expect(next.events.find((e) => e.type === "mention")).toMatchObject({ snippet: "@olive take a look" });
+    // A mention on a reply carries the thread that holds the reply; one on an unknown ref (a deleted thread, say) is null.
+    const mentionsOf = (list: { type: string; refId?: string; snippet?: string; threadId?: string | null }[]) =>
+      list
+        .filter((e) => e.type === "mention")
+        .map((e) => ({ refId: e.refId, threadId: e.threadId, snippet: e.snippet }))
+        .sort((a, b) => a.snippet!.localeCompare(b.snippet!));
+    expect(mentionsOf(next.events)).toEqual([
+      { refId: replyId, threadId, snippet: "@olive see my reply" },
+      { refId: "reply-x", threadId: null, snippet: "@olive take a look" },
+    ]);
+    // The cross-document inbox resolves the thread the same way.
+    const inbox = (await (await asAgent(() => GET_ALL_EVENTS(req(`/api/agent/events?since=${inboxCursor}`)))).json()) as { events: { type: string; refId?: string; snippet?: string; threadId?: string | null }[] };
+    expect(mentionsOf(inbox.events)).toEqual([
+      { refId: replyId, threadId, snippet: "@olive see my reply" },
+      { refId: "reply-x", threadId: null, snippet: "@olive take a look" },
+    ]);
     // Nothing is returned twice.
     const again = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${next.cursor}`), params(docId)))).json()) as { events: unknown[] };
     expect(again.events).toEqual([]);
