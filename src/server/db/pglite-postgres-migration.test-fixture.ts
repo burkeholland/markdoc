@@ -117,6 +117,9 @@ export async function seedMigrationFixture(source: PGlite): Promise<void> {
 }
 
 export async function setMigrationFixtureSchemaToVersion15(source: PGlite): Promise<void> {
+  // 0019: dropping agent_login also drops agent_request_agent_status_idx.
+  await source.query(`ALTER TABLE agent_request DROP COLUMN agent_login, DROP COLUMN agent_slug, DROP COLUMN claimed_by_login`);
+  await source.query(`ALTER TABLE api_token DROP COLUMN collaborators_may_ask`);
   await source.query(`DROP TABLE ownership_transfer`);
   await source.query(`ALTER TABLE api_token DROP COLUMN mention_slug`);
   await source.query(`ALTER TABLE notification DROP COLUMN agent_targets`);
