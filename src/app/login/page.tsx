@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { GitHubIcon } from "@/components/ui/primitives";
+import { GitHubIcon } from "@/components/ui/github-icon";
 import { signIn, auth, devLoginEnabled, githubConfigured } from "@/auth";
 import { Logo } from "@/components/ui/logo";
 import { loginReturnPath } from "./return-path";

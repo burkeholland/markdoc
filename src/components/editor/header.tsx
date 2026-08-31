@@ -1,5 +1,6 @@
 "use client";
-import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip, GitHubIcon } from "@/components/ui/primitives";
+import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
+import { GitHubIcon } from "@/components/ui/github-icon";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";

@@ -4,7 +4,7 @@ import { ArrowRight, MessageSquare, Sparkles, Users, GitBranch, History, Columns
 import { cookies } from "next/headers";
 import { auth, githubConfigured } from "@/auth";
 import { Wordmark } from "@/components/ui/logo";
-import { GitHubIcon } from "@/components/ui/primitives";
+import { GitHubIcon } from "@/components/ui/github-icon";
 import { Dashboard } from "@/components/dashboard/dashboard";
 import { getGitHubToken, listDocumentsForUser } from "@/server/documents";
 import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, isDashboardSort } from "@/lib/dashboard-sort";
