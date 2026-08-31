@@ -13,6 +13,7 @@ import {
   type DashboardCommandContext,
   type EditorCommandContext,
 } from "./commands";
+import { findReplaceShortcut } from "@/lib/utils";
 
 function stubCtx(overrides: Partial<EditorCommandContext> = {}, session: Partial<EditorCommandContext["session"]> = {}): EditorCommandContext {
   const calls: string[] = [];
@@ -83,6 +84,7 @@ describe("buildCommands", () => {
     expect(byId.get("block:heading1")?.shortcut).toBe("Mod-Alt-1");
     expect(byId.get("format:bold")?.shortcut).toBe("Mod-B");
     expect(byId.get("doc:find")?.shortcut).toBe("Mod-F");
+    expect(byId.get("doc:find-replace")?.shortcut).toBe(findReplaceShortcut());
     expect(byId.get("help:shortcuts")?.shortcut).toBe("Mod-/");
   });
 

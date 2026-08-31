@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CaseSensitive, ChevronDown, ChevronUp, Regex, WholeWord, X } from "lucide-react";
+import { CaseSensitive, ChevronDown, ChevronUp, Regex, Replace, WholeWord, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { FindMatch, FindOptions } from "@/editor/find";
 import { Tip } from "@/components/ui/primitives";
-import { cn, shortcut } from "@/lib/utils";
+import { cn, findReplaceShortcut, shortcut } from "@/lib/utils";
 import { shallowEqual, useSessionValue } from "./use-session";
 
 export interface FindBarProps {
@@ -168,19 +168,24 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
           </button>
         </Tip>
         {canEdit && (
-          <button
-            type="button"
-            className={cn("btn btn-ghost h-8 shrink-0 px-2 text-[13px]", replaceVisible && "bg-surface-3 text-ink")}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              onReplaceVisible(!replaceVisible);
-              if (!replaceVisible) requestAnimationFrame(() => replaceRef.current?.focus());
-            }}
-            aria-expanded={replaceVisible}
-            data-testid="find-toggle-replace"
-          >
-            Replace
-          </button>
+          <Tip label={replaceVisible ? "Hide replace" : "Replace"} shortcut={replaceVisible ? undefined : shortcut(findReplaceShortcut())}>
+            <button
+              type="button"
+              className={cn("btn btn-ghost h-8 shrink-0 gap-1.5 px-2 text-[13px]", replaceVisible && "bg-surface-3 text-ink")}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onReplaceVisible(!replaceVisible);
+                if (!replaceVisible) requestAnimationFrame(() => replaceRef.current?.focus());
+              }}
+              aria-expanded={replaceVisible}
+              aria-controls="find-replace-row"
+              data-testid="find-toggle-replace"
+            >
+              <Replace size={15} aria-hidden="true" />
+              {/* Icon only below 640 px so the row keeps its one-line shape on phones. */}
+              <span className="sr-only sm:not-sr-only">{replaceVisible ? "Hide replace" : "Replace"}</span>
+            </button>
+          </Tip>
         )}
         <div className="flex-1" />
         </div>
@@ -192,7 +197,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
         </Tip>
       </div>
       {showReplace && (
-        <div className="flex flex-wrap items-center gap-1.5" data-testid="find-replace-row">
+        <div id="find-replace-row" className="flex flex-wrap items-center gap-1.5" data-testid="find-replace-row">
           <div className="min-w-[9rem] flex-1 md:w-[min(420px,40vw)] md:flex-none">
             <input
               ref={replaceRef}

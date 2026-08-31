@@ -63,6 +63,44 @@ export function shortcut(keys: string): string {
   return keys.replace(/Mod/g, isMac ? "⌘" : "Ctrl").replace(/Alt/g, isMac ? "⌥" : "Alt").replace(/Shift/g, isMac ? "⇧" : "Shift");
 }
 
+/**
+ * The keymap-style shortcut that opens find *and replace*: `Mod-H` on Windows/Linux, `Mod-Alt-F` on a
+ * Mac, where ⌘H hides the application before the browser ever sees the key.
+ */
+export function findReplaceShortcut(mac: boolean = isMac): string {
+  return mac ? "Mod-Alt-F" : "Mod-H";
+}
+
+export interface FindShortcutKey {
+  key: string;
+  code: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}
+
+export type FindShortcutAction = "find" | "replace" | null;
+
+/**
+ * What a keydown means for the find bar: `Mod-F` finds; `Ctrl-H` (Windows/Linux) or `⌥⌘F` (Mac) finds
+ * and replaces. With Option held macOS reports a symbol in `key` (`⌥F` is "ƒ"), so the physical `code`
+ * decides there; `Ctrl+Alt` on Windows/Linux is AltGr on many layouts and is left alone, and `⌘H` is
+ * never bound on a Mac.
+ */
+export function findShortcutAction(e: FindShortcutKey, mac: boolean = isMac): FindShortcutAction {
+  if (!(e.metaKey || e.ctrlKey) || e.shiftKey) return null;
+  const key = e.key.toLowerCase();
+  if (mac) {
+    if (e.altKey) return e.code === "KeyF" || key === "f" ? "replace" : null;
+    return key === "f" ? "find" : null;
+  }
+  if (e.altKey) return null;
+  if (key === "f") return "find";
+  if (key === "h") return "replace";
+  return null;
+}
+
 export function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }

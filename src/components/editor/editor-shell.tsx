@@ -125,7 +125,7 @@ import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
 import type { PresenceUser } from "@/editor/collab/session";
 import type { NoticeAction } from "@/editor/markdown/tsv";
-import { isMac } from "@/lib/utils";
+import { findShortcutAction, isMac } from "@/lib/utils";
 
 export interface EditorShellProps {
   doc: DocumentDto;
@@ -167,6 +167,24 @@ const serverPanelMax = () => PANEL_MAX;
 
 const EMBED_RENEW_MARGIN_MS = 90_000;
 const EMBED_RENEW_RETRY_MS = 15_000;
+
+/** The user's choice to keep the find bar's replace row collapsed; absent = shown for editors. */
+const FIND_REPLACE_STORAGE_KEY = "markdoc:find-replace";
+const readFindReplaceHidden = (): boolean => {
+  try {
+    return localStorage.getItem(FIND_REPLACE_STORAGE_KEY) === "hidden";
+  } catch {
+    return false;
+  }
+};
+const storeFindReplaceHidden = (hidden: boolean) => {
+  try {
+    if (hidden) localStorage.setItem(FIND_REPLACE_STORAGE_KEY, "hidden");
+    else localStorage.removeItem(FIND_REPLACE_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable (private mode); the choice still applies while the bar is open.
+  }
+};
 
 export function EditorShell({
   doc: initialDoc,
@@ -816,12 +834,15 @@ export function EditorShell({
   const goHome = useCallback(() => router.push("/"), [router]);
 
   // Find & replace. The model lives on the session (shared with the highlight pipeline);
-  // the shell owns focus handling and the replace-row toggle.
+  // the shell owns focus handling and the replace-row toggle. Editors get the replace row by
+  // default (the bar gates it on canEdit); hiding it is remembered until Mod-H / ⌥⌘F asks for it again.
   const openFind = useCallback(
     (replace: boolean) => {
       const seed = actions.selectionText();
       session.setFind(seed || session.find?.query || "");
-      setFindUi((ui) => ({ replace: replace || (ui?.replace ?? false), nonce: (ui?.nonce ?? 0) + 1 }));
+      if (replace) storeFindReplaceHidden(false);
+      const preferred = replace || !readFindReplaceHidden();
+      setFindUi((ui) => ({ replace: replace || (ui?.replace ?? preferred), nonce: (ui?.nonce ?? 0) + 1 }));
       const m = session.find?.matches[session.find.active];
       if (m) actions.revealSourceRange(m);
     },
@@ -835,7 +856,10 @@ export function EditorShell({
     if (m) actions.selectSourceRange(m, { focus: true });
     else actions.focus();
   }, [actions, session]);
-  const setFindReplaceVisible = useCallback((replace: boolean) => setFindUi((ui) => (ui ? { ...ui, replace } : ui)), []);
+  const setFindReplaceVisible = useCallback((replace: boolean) => {
+    storeFindReplaceHidden(!replace);
+    setFindUi((ui) => (ui ? { ...ui, replace } : ui));
+  }, []);
   const revealMatch = useCallback((m: FindMatch) => actions.revealSourceRange(m), [actions]);
 
   // Global shortcuts that are not editor-specific.
@@ -853,12 +877,10 @@ export function EditorShell({
         setDialog("shortcuts");
       }
       // Mod-F must win over the browser and both editors' default search bindings.
-      if (mod && !e.shiftKey && key === "f" && (!e.altKey || isMac)) {
+      const findAction = findShortcutAction(e, isMac);
+      if (findAction) {
         e.preventDefault();
-        openFind(e.altKey);
-      } else if (mod && !e.shiftKey && !e.altKey && key === "h") {
-        e.preventDefault();
-        openFind(true);
+        openFind(findAction === "replace");
       }
     };
     window.addEventListener("keydown", onKey);
