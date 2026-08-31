@@ -8,9 +8,10 @@ import { ImageResponse } from "next/og";
  * exist there, and every element with more than one child needs an explicit `display: flex`.
  *
  * Nothing here touches the network: the two faces are vendored TTF subsets under ./fonts (Satori reads
- * TTF/OTF/WOFF, not the woff2 `next/font/google` emits), read once per process; the brand mark is the
- * JSX below (Satori cannot fetch a relative URL). Access is the caller's business: the routes in
- * `src/app/{d,p}/[id]/opengraph-image.tsx` run the page's access check and 404 before rendering.
+ * TTF/OTF/WOFF, not the woff2 `next/font/google` emits), read once per process; the text is reduced to
+ * their repertoire first ({@link cardText}), so `next/og` never reaches for a remote fallback glyph; the
+ * brand mark is the JSX below (Satori cannot fetch a relative URL). Access is the caller's business: the
+ * routes in `src/app/{d,p}/[id]/opengraph-image.tsx` run the page's access check and 404 before rendering.
  */
 
 /** 1200×630, the size unfurlers render edge to edge; `og:image:width/height` are derived from it. */
@@ -77,11 +78,28 @@ async function readFonts(files: FontFiles): Promise<CardFonts | undefined> {
  */
 export async function renderDocumentCard(input: DocumentCardInput, fonts?: CardFonts | null): Promise<ImageResponse> {
   const loaded = fonts === undefined ? await loadCardFonts() : (fonts ?? undefined);
-  return new ImageResponse(<Card input={input} />, {
+  // A title made only of glyphs the card cannot draw leaves the headline out; a blank one reads "Untitled".
+  const headline = cardText(input.title) || (input.title.trim() ? "" : "Untitled");
+  const drawn = { ...input, ownerName: input.ownerName === null ? null : cardText(input.ownerName) || null };
+  return new ImageResponse(<Card headline={headline} input={drawn} />, {
     ...CARD_SIZE,
     fonts: loaded,
     headers: { "cache-control": CARD_CACHE_CONTROL },
   });
+}
+
+// The repertoire of the vendored subsets: Basic Latin, Latin-1, Latin Extended-A, general punctuation
+// (dashes, quotes, bullet, ellipsis, per mille, ‹›), €, ™, arrows. Composed first, so "i" + U+0308 is "ï".
+const UNDRAWABLE = /[^\u0020-\u007e\u00a0-\u017f\u2010-\u2027\u2030-\u203a\u20ac\u2122\u2190-\u2193]+/gu;
+
+/**
+ * `text` reduced to what the vendored fonts can draw, whitespace collapsed. For any other glyph — emoji,
+ * another script, a lone combining mark — `next/og` would fetch a fallback at request time (Google Fonts
+ * for scripts, jsdelivr for emoji; the emoji fetch is unguarded, so a blocked egress would fail the whole
+ * card), and the card must never touch the network. The page's `og:title` text still carries the full title.
+ */
+export function cardText(text: string): string {
+  return text.normalize("NFC").replace(UNDRAWABLE, " ").replace(/\s+/g, " ").trim();
 }
 
 /** "by Alice · 3 min read · Updated Aug 31" — each part only when known; the year only when it is not this one. */
@@ -112,30 +130,31 @@ const INK = "#1c1917";
 const INK_3 = "#57534e";
 const ACCENT_LINE = "#c4ebe4";
 
-function Card({ input }: { input: DocumentCardInput }) {
-  const title = input.title.trim() || "Untitled";
+function Card({ headline, input }: { headline: string; input: DocumentCardInput }) {
   return (
     <div style={{ width: "100%", height: "100%", display: "flex", background: PAPER, fontFamily: TEXT_FAMILY, color: INK }}>
       <div style={{ width: 16, height: "100%", background: ACCENT }} />
       <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "60px 80px 52px 72px", minWidth: 0 }}>
         <Mark size={72} />
         <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-          <div
-            style={{
-              display: "block",
-              lineClamp: 3,
-              wordBreak: "break-word",
-              fontFamily: DISPLAY_FAMILY,
-              fontWeight: 600,
-              fontSize: titleFontSize(title),
-              lineHeight: 1.1,
-              letterSpacing: -1.5,
-              color: INK,
-            }}
-          >
-            {title}
-          </div>
-          <div style={{ display: "flex", marginTop: 26, fontSize: 28, lineHeight: 1.3, color: INK_3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {headline ? (
+            <div
+              style={{
+                display: "block",
+                lineClamp: 3,
+                wordBreak: "break-word",
+                fontFamily: DISPLAY_FAMILY,
+                fontWeight: 600,
+                fontSize: titleFontSize(headline),
+                lineHeight: 1.1,
+                letterSpacing: -1.5,
+                color: INK,
+              }}
+            >
+              {headline}
+            </div>
+          ) : null}
+          <div style={{ display: "flex", marginTop: headline ? 26 : 0, fontSize: 28, lineHeight: 1.3, color: INK_3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {cardMetaLine(input)}
           </div>
         </div>

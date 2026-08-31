@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CARD_CACHE_CONTROL, CARD_SIZE, cardMetaLine, loadCardFonts, renderDocumentCard, titleFontSize, type DocumentCardInput } from "./document-card";
+import { CARD_CACHE_CONTROL, CARD_SIZE, cardMetaLine, cardText, loadCardFonts, renderDocumentCard, titleFontSize, type DocumentCardInput } from "./document-card";
 
 const INPUT: DocumentCardInput = {
   title: "Release notes for the evening build",
@@ -56,6 +56,40 @@ describe("renderDocumentCard", () => {
     expect(bytes.length).toBeGreaterThanOrEqual(10_000);
     expect(pngSize(bytes)).toEqual({ width: 1200, height: 630 });
   }, 30_000);
+
+  // An emoji or another script would make next/og fetch a fallback glyph from jsdelivr / Google Fonts at
+  // request time; the card draws only what the vendored fonts cover, so the network is never touched.
+  it("renders emoji, CJK and combining marks without a single fetch", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    try {
+      for (const input of [
+        { ...INPUT, title: "Launch 🚀 plan — Ünïcödé & “quotes”", ownerName: "Ольга 👩‍💻" },
+        { ...INPUT, title: "日本語のタイトル" },
+        { ...INPUT, title: "nai\u0308ve" },
+      ]) {
+        const { res, bytes } = await render(input);
+        expect(res.status, input.title).toBe(200);
+        expect(pngSize(bytes)).toEqual({ width: 1200, height: 630 });
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  }, 60_000);
+});
+
+describe("cardText", () => {
+  it("keeps the vendored repertoire and drops the rest, collapsing the gaps", () => {
+    expect(cardText("Launch 🚀 plan — Ünïcödé & “quotes”")).toBe("Launch plan — Ünïcödé & “quotes”");
+    expect(cardText("Café☕time → done… 100 % · €5 ™")).toBe("Café time → done… 100 % · €5 ™");
+    expect(cardText("👩‍💻 dev")).toBe("dev");
+    expect(cardText("日本語のタイトル")).toBe("");
+    expect(cardText("  spaced \n out  ")).toBe("spaced out");
+  });
+
+  it("composes decomposed accents before deciding", () => {
+    expect(cardText("nai\u0308ve")).toBe("naïve");
+  });
 });
 
 describe("loadCardFonts", () => {
