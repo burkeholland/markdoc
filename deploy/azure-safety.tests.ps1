@@ -115,7 +115,8 @@ Assert-True (
   $candidateOnlyClearInfra -gt $candidateOnlyHealth -and
   $candidateOnlyClearStore -gt $candidateOnlyClearInfra
 ) 'Candidate-only recovery must verify public database health before clearing infrastructure or local recovery state.'
-Assert-True ($deploymentSource -match '\$candidateOnlyCleanup \+= @\{ Action = \{ Restore-PostgresSteadyStateEgress \} \}') 'Candidate-only recovery configuration must retain guaranteed temporary-egress cleanup.'
+Assert-True ($candidateOnlyBody -notmatch '\$ConfigureRecovery') 'Candidate-only recovery is unreachable with -ConfigureRecovery (refused with -RotateDatabasePassword) and must not carry recovery-only code.'
+Assert-True ($candidateOnlyBody -notmatch 'configure-postgresql-recovery') 'Candidate-only recovery is unreachable with -ConfigureRecovery (refused with -RotateDatabasePassword) and must not read the recovery configuration run command.'
 $rotationCommit = [regex]::Match(
   $deploymentSource,
   'Invoke-RotationFinalization\s+`\s+-Commit \{(?<body>[\s\S]+?)\}\s+`\s+-Verify'
@@ -129,7 +130,13 @@ $rotationCommitRecoveryArguments = @(
 )
 Assert-Equal 2 $rotationCommitRecoveryArguments.Count 'Both rotation deployments must remain structurally identifiable.'
 Assert-Equal 0 @($rotationCommitRecoveryArguments | Where-Object { $_ -ne '$false' }).Count 'Rotation deployments must not configure PostgreSQL recovery: they run without the bootstrap public IP, and -ConfigureRecovery is refused alongside -RotateDatabasePassword.'
-Assert-True ($deploymentSource -match '\$rotationCleanup \+= @\{ Action = \{ Restore-PostgresSteadyStateEgress \} \}') 'Combined recovery and rotation must retain guaranteed temporary-egress cleanup.'
+$rotationBranches = [regex]::Match(
+  $deploymentSource,
+  '(?s)if \(\$candidateOnlyRotationRecovery\) \{(?<body>.+?)\} else \{\s*Step ''Deploying private infrastructure'
+)
+Assert-True $rotationBranches.Success 'The rotation branches (candidate-only recovery and explicit rotation) must remain structurally identifiable ahead of the initial deployment path.'
+Assert-True ($rotationBranches.Groups['body'].Value -notmatch '\$ConfigureRecovery') 'The rotation branches deploy without the bootstrap public IP; only the initial deployment may reference recovery configuration.'
+Assert-True ($rotationBranches.Groups['body'].Value -notmatch 'configure-postgresql-recovery') 'The rotation branches deploy without the bootstrap public IP; only the initial deployment may read the recovery configuration run command.'
 
 $aclPath = [IO.Path]::GetTempFileName()
 try {
