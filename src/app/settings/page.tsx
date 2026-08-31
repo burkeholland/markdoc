@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { auth } from "@/auth";
-import { Logo } from "@/components/editor/header";
+import { Logo } from "@/components/ui/logo";
 import { TokensPanel } from "@/components/settings/tokens-panel";
 import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";

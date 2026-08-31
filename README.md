@@ -395,6 +395,8 @@ src/components/dashboard     document list, search, stars/recents/sort, template
 src/components/notifications notifications bell in the editor header, open-thread helper
 src/components/reader        /p/[id] reader view: page, table of contents, update pill, download menu
 src/components/settings      API tokens
+src/components/ui            shared primitives (menus, popovers, tips, icons), theme toggle, relative time,
+                             logo.tsx (Logo/Wordmark, no "use client": server pages import it, not the editor header)
 src/editor/markdown          GFM schema, parser with source map, incremental parser, serializer, linter
 src/editor/sync              ProseMirror <-> Y.Text binding, text diff
 src/editor/collab            session, comments, suggestions, offline (IndexedDB) models
