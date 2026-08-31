@@ -294,7 +294,6 @@ export type ActivityAction =
   | "share.add"
   | "share.remove"
   | "asset.upload"
-  | "mention"
   | "title.change"
   | "agent.request"
   | "agent.request.done";

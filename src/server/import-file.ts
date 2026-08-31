@@ -26,6 +26,14 @@ const FORMAT_BY_EXTENSION: Record<string, ImportFormat> = {
 
 export const IMPORT_EXTENSIONS = Object.keys(FORMAT_BY_EXTENSION);
 
+/** `a, b and c` (no Oxford comma), the shape the import messages have always used. */
+function listInProse(items: string[]): string {
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** The `415` sentence, derived from {@link IMPORT_EXTENSIONS} so it cannot drift from what is accepted. */
+export const IMPORT_EXTENSIONS_LIST = `only ${listInProse(IMPORT_EXTENSIONS)} files can be imported`;
+
 /** Validation failure the caller should report to the client (`status` is an HTTP status code). */
 export class ImportError extends Error {
   constructor(
@@ -234,7 +242,7 @@ export function validateImportFiles(files: { name: string; size: number }[]): vo
   if (files.length === 0) throw new ImportError(400, "No files to import");
   if (files.length > MAX_IMPORT_FILES) throw new ImportError(400, `Import at most ${MAX_IMPORT_FILES} files at a time`);
   for (const f of files) {
-    if (!importFormatFor(f.name)) throw new ImportError(415, `“${f.name}”: only .md, .markdown, .txt, .html and .htm files can be imported`);
+    if (!importFormatFor(f.name)) throw new ImportError(415, `“${f.name}”: ${IMPORT_EXTENSIONS_LIST}`);
     if (f.size > MAX_IMPORT_BYTES) throw new ImportError(413, `“${f.name}” is larger than 2 MB`);
   }
 }
