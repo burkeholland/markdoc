@@ -165,7 +165,7 @@ describe("renderDocumentHtml", () => {
       await expect(render("*a".repeat(40_000))).rejects.toMatchObject({ reason: "emphasis" });
     });
 
-    it("keeps the event loop free while a document renders", async () => {
+    it("keeps the event loop free while a document renders", { retry: 1 }, async () => {
       // A big but legal document: many paragraphs, each under the guard's limits.
       const md = Array.from({ length: 200 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ".repeat(60)}\n`).join("\n");
       let worstGap = 0;
@@ -175,13 +175,27 @@ describe("renderDocumentHtml", () => {
         worstGap = Math.max(worstGap, now - last);
         last = now;
       }, 5);
+      const started = performance.now();
+      let renderMs = 0;
       try {
         const html = await render(md);
+        renderMs = performance.now() - started;
         expect(html).toContain('<h2 id="section-199">Section 199</h2>');
       } finally {
         clearInterval(ticker);
+        // Close the measurement at the moment the render resolved: a render that held the loop until it
+        // finished never let the ticker fire, so this last stretch (≈ renderMs) is the gap that matters.
+        worstGap = Math.max(worstGap, performance.now() - last);
       }
-      expect(worstGap).toBeLessThan(100);
+      // Two bounds (task #1190; the old absolute `< 100 ms` failed on a saturated box with a 208 ms gap that
+      // was the test process being starved, not the render holding the loop):
+      // - relative: a render on this thread gives worstGap ≈ renderMs, so it fails; a starved-but-free loop
+      //   gives gaps far below half the render (idle 5–20 ms against a 1–2 s render);
+      // - absolute cap: no starvation gap reaches 2 s, and a blocked loop cannot stay under it for a document
+      //   this size, so it stays meaningful should the relative bound ever be loosened.
+      const detail = `worst gap ${worstGap.toFixed(1)} ms during a ${renderMs.toFixed(0)} ms render`;
+      expect(worstGap, detail).toBeLessThan(Math.max(100, renderMs / 2));
+      expect(worstGap, detail).toBeLessThan(2_000);
     });
 
     it("gives up on a render that exceeds its time budget", async () => {

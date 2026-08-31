@@ -71,7 +71,11 @@ describe("lintMarkdown", () => {
     expect(lintMarkdown(LONG_DOC)).toEqual([]);
   });
 
-  it("gives the same issues from an incrementally re-parsed tree after typing at the end and in the middle", () => {
+  // 60 s (task #1190): the slowest test here — 2.2 s alone on a box already at 100 % CPU, 9.8 s with four files
+  // in parallel — hit the global 20 s timeout in a saturated release preflight (#1145). Its four edits are
+  // independent, but each already pays a full parse of LONG_DOC, so `it.each` rows would split the time, not
+  // reduce it; the keystroke chain below depends on the previous incremental result and cannot be split.
+  it("gives the same issues from an incrementally re-parsed tree after typing at the end and in the middle", { timeout: 60_000 }, () => {
     const mid = LONG_DOC.indexOf("## 20.");
     const edits = [
       { at: LONG_DOC.length, insert: " zqxa" },
