@@ -96,8 +96,10 @@ test.describe("@mentions in comments", () => {
         return ((await r.json()) as { mentions: { snippet: string }[] }).mentions.map((m) => m.snippet);
       })
       .toEqual(["@bob ping, and not mail@bob.example"]);
-    // Nobody called "bob.example" was mentioned.
+    // Nobody called "bob.example" was mentioned: alice (the author) has no mention in this document.
+    // Per document, not "alice has none anywhere": other specs mention `@alice/<agent>` on the same server.
     const alicesMentions = await alice.page.request.get("/api/mentions");
-    expect(((await alicesMentions.json()) as { mentions: unknown[] }).mentions).toEqual([]);
+    const { mentions } = (await alicesMentions.json()) as { mentions: { documentId: string }[] };
+    expect(mentions.filter((m) => m.documentId === docId)).toEqual([]);
   });
 });

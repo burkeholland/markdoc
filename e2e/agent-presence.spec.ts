@@ -209,7 +209,7 @@ test.describe("agent presence and watch", () => {
     const busy = page.getByTestId("presence").getByTestId("presence-avatar-busy");
     await expect(busy).toHaveCount(0);
 
-    // Alice asks for comments on the whole document (same REST call the Ask-an-agent dialog makes).
+    // Alice asks for comments on the whole document (same REST call the comment composer makes when a comment mentions an agent).
     const created = await page.request.post(`/api/documents/${busyDocId}/requests`, { data: { instruction: "Review the second paragraph", mode: "comment", selection: null } });
     expect(created.ok(), await created.text()).toBeTruthy();
     const requestId = ((await created.json()) as { request: { id: string } }).request.id;
