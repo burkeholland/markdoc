@@ -10,6 +10,7 @@ import {
   resolveStaticBrotli,
   serveStaticBrotli,
   STATIC_CACHE_CONTROL,
+  STATIC_CONTENT_TYPE_OPTIONS,
   type BrotliFileSystem,
 } from "./static-brotli";
 
@@ -92,6 +93,7 @@ describe("resolveStaticBrotli", () => {
         Vary: "Accept-Encoding",
         "Content-Type": "application/javascript; charset=UTF-8",
         "Cache-Control": "public, max-age=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
       },
     });
     expect(existsSync).toHaveBeenCalledWith(APP_JS_BR);
@@ -263,10 +265,26 @@ describe("serveStaticBrotli", () => {
       Vary: "Accept-Encoding",
       "Content-Type": "application/javascript; charset=UTF-8",
       "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
       "Content-Length": content.length,
     });
     expect(Buffer.concat(body).equals(content)).toBe(true);
     expect(fs.opened).toEqual([APP_JS_BR]);
+  });
+
+  // Task #1224: nosniff on every response includes the chunks this branch answers without Next.
+  it("a served chunk carries X-Content-Type-Options: nosniff on GET and HEAD, .js and .css alike", async () => {
+    const fs = fakeFs(content);
+    for (const method of ["GET", "HEAD"]) {
+      const { res, written } = fakeResponse();
+      expect(serveStaticBrotli(fakeRequest(method, { "accept-encoding": "br" }), res, { staticRoot, fs })).toBe(true);
+      await finished(res);
+      expect(written.headers?.["X-Content-Type-Options"], method).toBe("nosniff");
+    }
+    const { existsSync } = fakeExists([APP_CSS_BR]);
+    const css = resolveStaticBrotli(candidate({ url: "/_next/static/chunks/app.css" }), { staticRoot, existsSync });
+    expect(css?.headers["X-Content-Type-Options"]).toBe("nosniff");
+    expect(STATIC_CONTENT_TYPE_OPTIONS).toBe("nosniff");
   });
 
   it("answers HEAD with the same headers and no body", async () => {

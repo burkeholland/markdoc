@@ -6,7 +6,7 @@ process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.AUTH_SECRET_1;
 
-const { proxy } = await import("@/proxy");
+const { proxy, framePolicyApplies, FRAME_ANCESTORS_NONE } = await import("@/proxy");
 const { EMBED_SESSION_COOKIE, SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
 
 const OLD_SECRET = "old-secret-old-secret-old-secret-old";
@@ -121,6 +121,113 @@ describe("proxy: stale session cookie", () => {
 
     const asset = await proxy(request(cookie, {}, "/api/assets/asset-1"));
     expect(asset.headers.get("content-security-policy")).toBeNull();
+  });
+});
+
+// Task #1224. The proxy owns exactly one baseline header, the frame policy: it needs the embed cookie and
+// must stay off /api/*. nosniff, Referrer-Policy, Permissions-Policy and HSTS are set for every response
+// in server/index.ts (the proxy matcher never sees /api/auth, /_next/static, /_next/image, favicon.ico),
+// so they are deliberately absent here and checked end to end in e2e/security-headers.spec.ts.
+describe("proxy: frame policy (Content-Security-Policy)", () => {
+  const PARENT = "http://127.0.0.1:4749";
+  const embedCookie = async (documentId = "doc-1") => {
+    const token = await encode({
+      token: { sub: "u1", embedTokenId: "token-1", embedDocumentId: documentId, embedParentOrigin: PARENT },
+      secret: process.env.AUTH_SECRET!,
+      salt: EMBED_SESSION_COOKIE,
+      maxAge: 300,
+    });
+    return `${EMBED_SESSION_COOKIE}=${token}`;
+  };
+  /** Headers the proxy added itself (Next's x-middleware-* bookkeeping excluded). */
+  const ownHeaders = (res: Response) => [...res.headers.keys()].filter((k) => !k.startsWith("x-middleware-")).sort();
+
+  it.each(["/", "/login", "/p/doc-1", "/d/doc-1", "/settings", "/d/doc-1?mode=focus"])("a plain page %s refuses to be framed", async (path) => {
+    const res = await proxy(request(undefined, {}, path));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+    expect(FRAME_ANCESTORS_NONE).toBe("frame-ancestors 'none'");
+    expect(ownHeaders(res)).toEqual(["content-security-policy"]);
+  });
+
+  it("sets none of the server's four headers, with or without x-forwarded-proto: https (one owner each)", async () => {
+    for (const extra of [{}, { "x-forwarded-proto": "https" }]) {
+      const res = await proxy(request(undefined, extra, "/login"));
+      expect(res.headers.get("strict-transport-security")).toBeNull();
+      expect(res.headers.get("x-content-type-options")).toBeNull();
+      expect(res.headers.get("referrer-policy")).toBeNull();
+      expect(res.headers.get("permissions-policy")).toBeNull();
+      expect(ownHeaders(res)).toEqual(["content-security-policy"]);
+    }
+  });
+
+  it("the embedded document keeps exactly frame-ancestors <parentOrigin>", async () => {
+    const res = await proxy(request(await embedCookie(), {}, "/d/doc-1?embed=1"));
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors ${PARENT}`);
+    expect(res.headers.get("content-security-policy")).not.toContain("'none'");
+    expect(ownHeaders(res)).toEqual(["content-security-policy"]);
+  });
+
+  it("the embed cookie does not open other pages: another document, the same document without ?embed=1, or no cookie at all", async () => {
+    const cookie = await embedCookie();
+    for (const [path, withCookie] of [
+      ["/d/doc-2?embed=1", true],
+      ["/d/doc-1", true],
+      ["/d/doc-1?embed=0", true],
+      ["/", true],
+      // The frame after the 5-minute cookie expired (or was never set): the page, and the /login it
+      // redirects to, are blocked inside the canvas frame instead of rendering a login form there.
+      ["/d/doc-1?embed=1", false],
+      ["/login?next=%2Fd%2Fdoc-1", false],
+    ] as const) {
+      const res = await proxy(request(withCookie ? cookie : undefined, {}, path));
+      expect(res.headers.get("content-security-policy"), path).toBe("frame-ancestors 'none'");
+    }
+  });
+
+  it("an expired embed cookie counts as missing", async () => {
+    const token = await encode({
+      token: { sub: "u1", embedTokenId: "token-1", embedDocumentId: "doc-1", embedParentOrigin: PARENT },
+      secret: process.env.AUTH_SECRET!,
+      salt: EMBED_SESSION_COOKIE,
+      maxAge: -60,
+    });
+    const res = await proxy(request(`${EMBED_SESSION_COOKIE}=${token}`, {}, "/d/doc-1?embed=1"));
+    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+  });
+
+  it.each(["/api/health", "/api/assets/asset-1", "/api/documents/abc", "/api/mcp", "/embed/some-nonce"])(
+    "%s gets no Content-Security-Policy from the proxy (API routes keep their own; the handoff answers inside the frame)",
+    async (path) => {
+      for (const cookie of [undefined, await embedCookie()]) {
+        const res = await proxy(request(cookie, {}, path));
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-security-policy"), path).toBeNull();
+        expect(ownHeaders(res), path).toEqual([]);
+      }
+    },
+  );
+
+  it("framePolicyApplies: pages yes, /api/* and /embed/* no", () => {
+    for (const page of ["/", "/login", "/p/x", "/d/x", "/settings", "/apis", "/embedded", "/api"]) expect(framePolicyApplies(page), page).toBe(true);
+    for (const skipped of ["/api/health", "/api/assets/a", "/api/auth/session", "/embed/nonce"]) expect(framePolicyApplies(skipped), skipped).toBe(false);
+  });
+
+  it("the response that clears a stale session cookie is a page response too", async () => {
+    const res = await proxy(request(`${SESSION_COOKIE}=not-a-jwt`, {}, "/d/doc-1"));
+    expect(setCookies(res)).toHaveLength(1);
+    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+  });
+
+  it("the canonical-host 308 carries no frame policy (a redirect has no document to frame)", async () => {
+    process.env.MARKDOC_CANONICAL_HOST = "markdoc.example.com";
+    try {
+      const res = await proxy(request(undefined, { host: "old.example" }, "/d/doc-1"));
+      expect(res.status).toBe(308);
+      expect(res.headers.get("content-security-policy")).toBeNull();
+    } finally {
+      delete process.env.MARKDOC_CANONICAL_HOST;
+    }
   });
 });
 

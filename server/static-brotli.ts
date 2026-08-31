@@ -19,6 +19,13 @@ export const BROTLI_CONTENT_TYPES: Readonly<Record<string, string>> = {
 /** What Next sends for every /_next/static/ asset (hashed file names, so immutable). */
 export const STATIC_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
+/**
+ * Baseline header the custom server puts on every response (server/index.ts). Repeated here so a
+ * chunk answered from the `.br` branch carries it even when this module is used on its own; the
+ * value is identical, and writeHead merges same-named headers into one.
+ */
+export const STATIC_CONTENT_TYPE_OPTIONS = "nosniff";
+
 export type BrotliCandidate = {
   method: string | undefined;
   url: string | undefined;
@@ -31,6 +38,7 @@ export type BrotliResponseHeaders = {
   Vary: "Accept-Encoding";
   "Content-Type": string;
   "Cache-Control": string;
+  "X-Content-Type-Options": "nosniff";
 };
 
 export type BrotliMatch = {
@@ -119,6 +127,7 @@ export function resolveStaticBrotli(
       Vary: "Accept-Encoding",
       "Content-Type": contentType,
       "Cache-Control": STATIC_CACHE_CONTROL,
+      "X-Content-Type-Options": STATIC_CONTENT_TYPE_OPTIONS,
     },
   };
 }
