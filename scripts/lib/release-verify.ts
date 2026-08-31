@@ -201,14 +201,16 @@ function findBlockEnd(text: string, openIndex: number, end: number): number {
 
 /**
  * Canonical spelling of one rule so two minifiers' output compares equal: whitespace collapsed and dropped
- * around `{ } ; ,`, no `;` before `}`, and decimal numbers without a leading `.` or trailing zeros (`.5` →
- * `0.5`, `1.0` → `1`, `1.50` → `1.5`). Numbers glued to an identifier, escape or hash are left alone.
+ * around `{ } ; ,` and after `:`, no `;` before `}`, and decimal numbers without a leading `.` or trailing zeros
+ * (`.5` → `0.5`, `1.0` → `1`, `1.50` → `1.5`). Whitespace before `:` stays (`a :is(b)` is not `a:is(b)`), and
+ * numbers glued to an identifier, escape or hash are left alone.
  */
 export function normalizeCssRule(rule: string): string {
   return rule
     .replace(/\s+/g, " ")
     .trim()
     .replace(/\s*([{};,])\s*/g, "$1")
+    .replace(/:\s+/g, ":")
     .replace(/;}/g, "}")
     .replace(/(?<![\w.\\#-])(-?)(\d*)\.(\d+)(?![\d.])/g, (_match, sign: string, whole: string, fraction: string) => {
       const digits = fraction.replace(/0+$/, "");
