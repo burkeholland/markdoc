@@ -1,14 +1,15 @@
 import { Plugin, PluginKey, type PluginView, type Transaction } from "prosemirror-state";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
-import { createLowlight } from "lowlight";
 import type { Root, RootContent } from "hast";
+// Type-only, erased at build time: the runtime chunk arrives through the import() in ensureGrammars().
+import type { Lowlight } from "./code-highlight-languages";
 import { schema } from "../markdown/schema";
 
-// Starts empty: the grammars are ~149 kB of the editor's first load and only matter once a document
-// shows a code block with a recognised language, so ensureGrammars() fetches them from their own
-// chunk (code-highlight-languages.ts) on demand and the plugin redecorates when they arrive.
-const lowlight = createLowlight();
+// Nothing here constructs highlight.js: its core and the 37 `common` grammars (≈ 171 kB together) only
+// matter once a document shows a code block with a recognised language, so ensureGrammars() fetches
+// them as one chunk (code-highlight-languages.ts, which owns the lowlight instance) on demand and the
+// plugin redecorates when they arrive.
 
 /** The 37 grammars of highlight.js' `common` set (= `Object.keys(common)` from lowlight); pinned by code-highlight.test.ts. */
 export const COMMON_LANGUAGES: ReadonlySet<string> = new Set([
@@ -126,19 +127,22 @@ const GRAMMARS_LOADED = "grammars-loaded";
 const RETRY_DELAY_MS = 10_000;
 
 let grammars: Promise<void> | null = null;
+/** The chunk's instance once it has arrived; null until then, so nothing here ever constructs highlight.js. */
+let lowlight: Lowlight | null = null;
 let loaded = false;
 const onLoaded = new Set<() => void>();
 
 /**
- * Starts (once) the import of the grammar chunk and registers it; resolves when highlightTokens can
- * work. Safe to call from every highlight pass: calls after the first return the same promise, and
- * the promise never rejects (a failed load is retried on a later call after RETRY_DELAY_MS).
+ * Starts (once) the import of the highlighter chunk (highlight.js core + grammars) and keeps its
+ * instance; resolves when highlightTokens can work. Safe to call from every highlight pass: calls after
+ * the first return the same promise, and the promise never rejects (a failed load is retried on a later
+ * call after RETRY_DELAY_MS).
  */
 export function ensureGrammars(): Promise<void> {
   if (!grammars) {
     grammars = import("./code-highlight-languages")
-      .then(({ common }) => {
-        lowlight.register(common);
+      .then((chunk) => {
+        lowlight = chunk.lowlight;
         loaded = true;
         for (const notify of [...onLoaded]) {
           try {
@@ -158,7 +162,7 @@ export function ensureGrammars(): Promise<void> {
   return grammars;
 }
 
-/** True once the grammar chunk has been registered (highlighting is possible). */
+/** True once the highlighter chunk has arrived (highlighting is possible). */
 export function grammarsLoaded(): boolean {
   return loaded;
 }
@@ -184,7 +188,7 @@ function collect(nodes: RootContent[], offset: number, classes: string[], out: T
 
 /** Tokens of `code` in `language`; `[]` until ensureGrammars() has resolved. */
 export function highlightTokens(code: string, language: string): Token[] {
-  if (!loaded) return [];
+  if (!loaded || !lowlight) return [];
   const root: Root = lowlight.highlight(language, code);
   const tokens: Token[] = [];
   collect(root.children, 0, [], tokens);
@@ -261,7 +265,7 @@ function redecorateWhenLoaded(view: EditorView): PluginView {
   };
 }
 
-/** Syntax highlighting inside rich-editor code blocks (highlight.js grammars via lowlight, loaded lazily). */
+/** Syntax highlighting inside rich-editor code blocks (highlight.js core + grammars via lowlight, loaded lazily). */
 export function codeHighlightPlugin(): Plugin<DecorationSet> {
   return new Plugin<DecorationSet>({
     key,

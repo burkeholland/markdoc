@@ -15,7 +15,7 @@ interface Harness {
   release: () => void;
   /** How often the chunk module was evaluated: 1 per `import()` that reached the module registry. */
   factoryCalls: () => number;
-  /** How often the loader registered `common` into lowlight: 1 per resolved `import()` handler. */
+  /** How often the chunk registered `common` into a fresh highlight.js instance: 1 per evaluation past the gate. */
   registerCalls: () => number;
   /** Waits for the import() machinery, which resolves mocks asynchronously. */
   tick: () => Promise<void>;
@@ -23,7 +23,8 @@ interface Harness {
 
 /**
  * Fresh module-under-test per test (its loader state is module-level) with `./code-highlight-languages`
- * replaced by a gated mock. The schema and parser are re-imported alongside it so node types match.
+ * replaced by a gated mock that builds the lowlight instance the way the real chunk does. The schema and
+ * parser are re-imported alongside it so node types match.
  */
 async function load(options: { fail?: boolean } = {}): Promise<Harness> {
   let factoryCalls = 0;
@@ -36,16 +37,15 @@ async function load(options: { fail?: boolean } = {}): Promise<Harness> {
     factoryCalls += 1;
     await gate;
     if (options.fail) throw new Error("simulated chunk load failure");
-    const actual = await vi.importActual<typeof import("./code-highlight-languages")>("./code-highlight-languages");
-    // lowlight.register() enumerates the grammar object once per call; count that instead of the
-    // factory, which the module registry would run only once even if import() were called twice.
-    const counted = new Proxy(actual.common, {
+    // createLowlight(common) enumerates the grammar object once; count that instead of the factory,
+    // which the module registry would run only once even if import() were called twice.
+    const counted = new Proxy(common, {
       ownKeys(target) {
         registerCalls += 1;
         return Reflect.ownKeys(target);
       },
     });
-    return { common: counted };
+    return { lowlight: createLowlight(counted) };
   });
   vi.resetModules();
   const mod = await import("./code-highlight");
@@ -298,6 +298,27 @@ describe("highlightTokens and ensureGrammars", () => {
     const tokens = h.mod.highlightTokens("const a = 1;", "javascript");
     expect(tokens[0]).toEqual({ from: 0, to: 5, classes: "hljs-keyword" });
     expect(h.mod.highlightTokens("{ \"a\": 1 }", "jsonc").length).toBeGreaterThan(0);
+  });
+
+  it("does not construct highlight.js before the grammar chunk resolves", async () => {
+    // createLowlight() builds its instance with highlight.js' newInstance(); lowlight and this file share
+    // the one highlight.js/lib/core module, so the spy sees every construction wherever it happens.
+    const newInstance = vi.spyOn(hljs, "newInstance");
+    const h = await load();
+    expect(newInstance).not.toHaveBeenCalled();
+    expect(h.mod.highlightTokens("const a = 1", "javascript")).toEqual([]);
+
+    const pending = h.mod.ensureGrammars();
+    await h.tick();
+    expect(h.factoryCalls()).toBe(1);
+    expect(newInstance).not.toHaveBeenCalled();
+    expect(h.mod.highlightTokens("const a = 1", "javascript")).toEqual([]);
+
+    h.release();
+    await pending;
+    expect(newInstance).toHaveBeenCalledTimes(1);
+    expect(h.mod.grammarsLoaded()).toBe(true);
+    expect(h.mod.highlightTokens("const a = 1", "javascript").length).toBeGreaterThanOrEqual(1);
   });
 
   it("a failed chunk load leaves the block plain, never rejects, and retries only after the delay", async () => {
