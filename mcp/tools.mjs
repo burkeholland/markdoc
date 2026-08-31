@@ -426,8 +426,8 @@ export function registerTools(server, client) {
         const res = await api("POST", `/api/documents/${id}/comments`, { action: "react", threadId, replyId, emoji });
         return ok(`${res.reacted ? "Reacted" : "Removed reaction"} ${emoji} on ${replyId ? `reply ${replyId}` : `thread ${threadId}`}.`, res);
       }
-      await api("POST", `/api/documents/${id}/comments`, { action: "resolve", threadId, resolved: action === "resolve" });
-      return ok(`Thread ${threadId} ${action === "resolve" ? "resolved" : "reopened"}.`);
+      const res = await api("POST", `/api/documents/${id}/comments`, { action: "resolve", threadId, resolved: action === "resolve" });
+      return ok(`Thread ${threadId} ${action === "resolve" ? "resolved" : "reopened"}.`, res);
     },
   );
 
@@ -630,9 +630,19 @@ export function registerTools(server, client) {
       annotations: ADDITIVE,
     },
     async ({ documentId, requestId, summary }) => {
-      const { request } = await api("POST", `/api/documents/${documentId}/requests/${requestId}/complete`, summary ? { summary } : {});
+      const res = await api("POST", `/api/documents/${documentId}/requests/${requestId}/complete`, summary ? { summary } : {});
+      const { request, notified, alreadyDone, warnings } = res;
       const r = request.result ?? { suggestions: 0, comments: 0 };
-      return ok(`Request ${request.id} is done: ${r.suggestions} suggestion(s), ${r.comments} comment(s). The requester has been notified. ${docUrl(documentId)}`, { request });
+      // Say only what the server did: the already-done no-op and a requester without a login notify nobody.
+      const warned = Array.isArray(warnings) && warnings.length ? warnings : [];
+      const reason = warned.includes("notification-not-sent") ? "the notification could not be written" : "no account to notify";
+      const notNotified = `The requester was not notified (${reason}).`;
+      const notice = alreadyDone
+        ? `Already completed earlier; notification re-sent if it was missing.${notified ? "" : ` ${notNotified}`}`
+        : notified
+          ? "The requester has been notified."
+          : notNotified;
+      return ok(`Request ${request.id} is done: ${r.suggestions} suggestion(s), ${r.comments} comment(s). ${notice}${warned.length ? ` Warnings: ${warned.join(", ")}.` : ""} ${docUrl(documentId)}`, res);
     },
   );
 

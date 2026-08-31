@@ -1,8 +1,11 @@
-import { describe, expect, it, beforeAll, vi } from "vitest";
+import { afterEach, describe, expect, it, beforeAll, vi } from "vitest";
 import type * as Y from "yjs";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
+// The routes are called with no socket address, so the file's 31 POSTs share one `write:ip:unknown` bucket
+// (burst 30, refill 2/s): whether the last one is a 429 depends on elapsed time. Off, as in comments-api.test.ts.
+process.env.RATE_LIMIT = "off";
 delete process.env.DATABASE_URL;
 
 // Same stand-ins as star.test.ts: routes resolve the caller through next-auth and `next/headers`.
@@ -12,13 +15,29 @@ let actor: Actor | null = null;
 let requestHeaders = new Headers();
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
+// Wrapped so a test can make the activity step or the requester's notification fail at the right moment. The
+// request functions write their activity row on their own transaction (not through `recordActivity`, which
+// opens its own connection), so the activity step is failed at the row's actor mapping, `activityActor`.
+vi.mock("@/server/activity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/activity")>();
+  return { ...actual, activityActor: vi.fn(actual.activityActor) };
+});
+vi.mock("@/server/notifications", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/notifications")>();
+  return { ...actual, notify: vi.fn(actual.notify) };
+});
+// `attachWork` fetches the connection between its pre-check and its update: the seam for the cancel race.
+vi.mock("@/server/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/db")>();
+  return { ...actual, getDb: vi.fn(actual.getDb) };
+});
 
 const { getDb, schema } = await import("@/server/db");
 const { eq } = await import("drizzle-orm");
 const { createDocument, upsertCollaborator } = await import("@/server/documents");
 const { createApiToken } = await import("@/server/tokens");
-const { listNotifications } = await import("@/server/notifications");
-const { listActivity } = await import("@/server/activity");
+const { listNotifications, notify } = await import("@/server/notifications");
+const { listActivity, activityActor } = await import("@/server/activity");
 const { createRequest, listRequests, listRequestsForUser, claimRequest, completeRequest, cancelRequest, attachWork, readMirror } = await import("@/server/agent-requests");
 const { pollEvents } = await import("@/server/agent-events");
 const { readLiveDoc } = await import("@/server/livedoc");
@@ -91,9 +110,11 @@ describe("agent requests (server module)", () => {
     const worked = await attachWork(docId, created.id, agentActor(), { suggestions: 2, suggestionIds: ["s1", "s2"] });
     expect(worked.result).toMatchObject({ suggestions: 2, comments: 0, suggestionIds: ["s1", "s2"] });
 
-    const done = await completeRequest(docId, created.id, agentActor(), { summary: "Shortened the sentence." });
+    const { request: done, ...completion } = await completeRequest(docId, created.id, agentActor(), { summary: "Shortened the sentence." });
     expect(done).toMatchObject({ status: "done", claimedBy: "Copilot CLI" });
     expect(done.result).toMatchObject({ suggestions: 2, comments: 0, summary: "Shortened the sentence.", suggestionIds: ["s1", "s2"] });
+    // The success shape carries no `warnings` key.
+    expect(completion).toEqual({ notified: true, alreadyDone: false });
     expect((await readMirror(docId))[created.id]).toMatchObject({ status: "done", result: { suggestions: 2 } });
 
     const activity = await listActivity(docId);
@@ -106,8 +127,9 @@ describe("agent requests (server module)", () => {
     const page = await listNotifications("olive", { kind: "request.done" });
     expect(page.items.find((n) => n.refId === created.id)).toMatchObject({ kind: "request.done", actorName: "Copilot CLI", snippet: "Shortened the sentence." });
 
-    // Completing twice is a no-op; cancelling a done request is a 409.
-    expect((await completeRequest(docId, created.id, agentActor())).status).toBe("done");
+    // Completing twice writes nothing (`alreadyDone`), the notification is still there once; cancelling a done request is a 409.
+    expect(await completeRequest(docId, created.id, agentActor())).toEqual({ request: expect.objectContaining({ status: "done" }), notified: true, alreadyDone: true });
+    expect((await listNotifications("olive", { kind: "request.done" })).items.filter((n) => n.refId === created.id)).toHaveLength(1);
     await expect(cancelRequest(docId, created.id, ownerActor(), "owner")).rejects.toMatchObject({ status: 409 });
   });
 
@@ -216,14 +238,17 @@ describe("agent request routes", () => {
 
     const complete = await as(null, () => POST_COMPLETE(jsonReq(`/api/documents/${docId}/requests/${request.id}/complete`, { summary: "Tightened." }), params(docId, request.id)), ownerToken);
     expect(complete.status).toBe(200);
-    const doneBody = (await complete.json()) as { request: { status: string; result: { suggestions: number; comments: number; summary: string; suggestionIds: string[]; commentIds: string[] } } };
+    const doneBody = (await complete.json()) as { request: { status: string; result: { suggestions: number; comments: number; summary: string; suggestionIds: string[]; commentIds: string[] } }; notified: boolean; alreadyDone: boolean; warnings?: string[] };
     expect(doneBody.request.status).toBe("done");
     expect(doneBody.request.result).toMatchObject({ suggestions: suggested.suggestions, comments: 1, summary: "Tightened.", commentIds: [threadId] });
     expect(doneBody.request.result.suggestionIds).toEqual(suggested.suggestionIds);
+    expect(doneBody).toEqual({ request: expect.any(Object), notified: true, alreadyDone: false });
 
     expect((await as(null, () => POST_SUGGEST(jsonReq(`/api/documents/${docId}/suggest`, { edits: [{ find: "quick", replace: "fast" }], requestId: request.id }), params(docId)), ownerToken)).status).toBe(409);
-    // Empty body completes too (idempotent).
-    expect((await as(null, () => POST_COMPLETE(new Request(`http://localhost:3700/api/documents/${docId}/requests/${request.id}/complete`, { method: "POST" }), params(docId, request.id)), ownerToken)).status).toBe(200);
+    // Empty body completes too (idempotent): nothing is written, the body says so.
+    const again = await as(null, () => POST_COMPLETE(new Request(`http://localhost:3700/api/documents/${docId}/requests/${request.id}/complete`, { method: "POST" }), params(docId, request.id)), ownerToken);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ request: expect.objectContaining({ status: "done" }), notified: true, alreadyDone: true });
 
     const db = await getDb();
     const [row] = await db.select().from(schema.agentRequests).where(eq(schema.agentRequests.id, request.id));
@@ -360,7 +385,8 @@ describe("requests made from a comment thread (#997)", () => {
     expect(activity.items.some((i) => i.action === "comment.add" && i.detail.requestId === fromThread.id)).toBe(false);
     expect((await replyNotifications("cam")).length).toBe(camBefore);
 
-    // A done request refuses more work and the folded reply is taken back out (nothing changed on a non-2xx).
+    // A done request refuses more work: the pre-check answers 409 before anything is written, so the thread
+    // keeps its one reply (since #1229 nothing is written and then taken back out).
     await completeRequest(docId, fromThread.id, agentActor());
     const refused = await as(null, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", body: "Late answer.", requestId: fromThread.id }), params(docId)), ownerToken);
     expect(refused.status).toBe(409);
@@ -450,5 +476,147 @@ describe("query validation (#186)", () => {
     expect(some.requests.length).toBeGreaterThan(0);
     expect(some.requests.length).toBeLessThan(all.requests.length);
     for (const r of some.requests) expect(["open", "claimed"]).toContain(r.status);
+  });
+});
+
+/**
+ * `docs/agents.md` promises that a non-2xx status means nothing changed (audit #1202 F13 / F14 / Q5): the request's
+ * status and its activity row are one write, the requester's notification is a warning code when it fails and is
+ * attempted again on a retry, a request is never written back to `claimed` once it was cancelled or completed.
+ */
+describe("the non-2xx promise for requests (#1232)", () => {
+  let reqDocId: string;
+  const rowOf = async (id: string) => (await (await getDb()).select().from(schema.agentRequests).where(eq(schema.agentRequests.id, id)))[0];
+  const doneRows = async (id: string) => (await listActivity(reqDocId, { limit: 100 })).items.filter((a) => a.action === "agent.request.done" && a.detail.requestId === id);
+  const askedRows = async (id: string) => (await listActivity(reqDocId, { limit: 100 })).items.filter((a) => a.action === "agent.request" && a.detail.requestId === id);
+  const doneNotifications = async (id: string) => (await listNotifications("olive", { kind: "request.done" })).items.filter((n) => n.refId === id);
+  /** Runs `fn` with console.error silenced; returns its result and the `[requests]`-prefixed lines it logged. */
+  const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: unknown[][] }> => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await fn();
+      return { result, logged: errors.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("[requests]")) };
+    } finally {
+      errors.mockRestore();
+    }
+  };
+  const failActivityStep = () =>
+    vi.mocked(activityActor).mockImplementationOnce(() => {
+      throw new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid');
+    });
+
+  beforeAll(async () => {
+    const doc = await createDocument({ ownerId: owner.id, title: "Atomic", content: "# Atomic\n\nA sentence to tighten.\n" });
+    reqDocId = doc.id;
+  });
+  afterEach(() => {
+    // A failure armed with `...Once` and never consumed must not leak into the next test.
+    vi.mocked(activityActor).mockReset();
+    vi.mocked(notify).mockReset();
+    vi.mocked(getDb).mockReset();
+  });
+
+  it("completeRequest: the activity row failing rolls the status back — the request is still claimed, nothing was notified", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    failActivityStep();
+    await expect(completeRequest(reqDocId, created.id, agentActor(), { summary: "Tightened." })).rejects.toThrow(/Failed query/);
+    expect(await rowOf(created.id)).toMatchObject({ status: "claimed", claimedBy: "Copilot CLI", result: null });
+    expect(await doneRows(created.id)).toEqual([]);
+    expect(await doneNotifications(created.id)).toEqual([]);
+    // The retry an agent makes after the 500 completes it for real.
+    const retried = await completeRequest(reqDocId, created.id, agentActor(), { summary: "Tightened." });
+    expect(retried).toEqual({ request: expect.objectContaining({ status: "done", result: { suggestions: 0, comments: 0, summary: "Tightened." } }), notified: true, alreadyDone: false });
+    expect(await doneRows(created.id)).toHaveLength(1);
+    expect(await doneNotifications(created.id)).toHaveLength(1);
+  });
+
+  it("completeRequest: the notification failing is a warning on the completed request, notified: false, logged once", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    vi.mocked(notify).mockRejectedValueOnce(new Error("notifications table is away"));
+    const { result, logged } = await quietly(() => completeRequest(reqDocId, created.id, agentActor(), { summary: "Tightened." }));
+    expect(result).toEqual({ request: expect.objectContaining({ status: "done", claimedBy: "Copilot CLI" }), notified: false, alreadyDone: false, warnings: ["notification-not-sent"] });
+    expect(logged).toEqual([["[requests] notification-not-sent", expect.any(Error)]]);
+    expect(await rowOf(created.id)).toMatchObject({ status: "done" });
+    expect(await doneRows(created.id)).toHaveLength(1);
+    expect(await doneNotifications(created.id)).toEqual([]);
+    // The route carries the same body.
+    const res = await as(null, () => POST_COMPLETE(jsonReq(`/api/documents/${reqDocId}/requests/${created.id}/complete`), params(reqDocId, created.id)), ownerToken);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ request: expect.objectContaining({ status: "done" }), notified: true, alreadyDone: true });
+    expect(await doneNotifications(created.id)).toHaveLength(1);
+  });
+
+  it("completeRequest on a done request writes nothing but delivers the notification a crashed first call never sent — exactly once", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    // A crash right after the commit: the row says done, no notification exists.
+    const db = await getDb();
+    await db.update(schema.agentRequests).set({ status: "done", result: { suggestions: 1, comments: 0, summary: "Crashed after commit." }, updatedAt: new Date() }).where(eq(schema.agentRequests.id, created.id));
+    expect(await doneNotifications(created.id)).toEqual([]);
+
+    const first = await completeRequest(reqDocId, created.id, agentActor());
+    expect(first).toEqual({ request: expect.objectContaining({ status: "done", result: { suggestions: 1, comments: 0, summary: "Crashed after commit." } }), notified: true, alreadyDone: true });
+    expect(await doneNotifications(created.id)).toEqual([expect.objectContaining({ actorName: "Copilot CLI", snippet: "Crashed after commit." })]);
+    // Second retry: still one row, still notified: true (the row exists), nothing written.
+    const second = await completeRequest(reqDocId, created.id, agentActor(), { summary: "Ignored on a done request." });
+    expect(second).toEqual({ request: expect.objectContaining({ status: "done", result: { suggestions: 1, comments: 0, summary: "Crashed after commit." } }), notified: true, alreadyDone: true });
+    expect(await doneNotifications(created.id)).toHaveLength(1);
+    expect(await doneRows(created.id)).toEqual([]);
+  });
+
+  it("completeRequest: a requester without a login is notified: false without a warning", async () => {
+    const db = await getDb();
+    const [ghost] = await db.insert(schema.users).values({ name: "Ghost", login: null, email: "ghost-1232@example.com" }).returning();
+    const created = await createRequest(reqDocId, { id: ghost.id, login: null, name: "Ghost", image: null }, "owner", { instruction: "Tighten this", mode: "suggest" });
+    const { result, logged } = await quietly(() => completeRequest(reqDocId, created.id, agentActor()));
+    expect(result).toEqual({ request: expect.objectContaining({ status: "done" }), notified: false, alreadyDone: false });
+    expect(logged).toEqual([]);
+  });
+
+  it("createRequest: the activity row failing leaves no request row behind", async () => {
+    const before = (await listRequests(reqDocId)).length;
+    failActivityStep();
+    await expect(createRequest(reqDocId, ownerActor(), "owner", { instruction: "Never asked", mode: "suggest" })).rejects.toThrow(/Failed query/);
+    const after = await listRequests(reqDocId);
+    expect(after).toHaveLength(before);
+    expect(after.find((r) => r.instruction === "Never asked")).toBeUndefined();
+    expect((await listActivity(reqDocId, { limit: 100 })).items.filter((a) => a.action === "agent.request" && a.detail.instruction === "Never asked")).toEqual([]);
+    // The retry creates it once, with its row.
+    const retried = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Never asked", mode: "suggest" });
+    expect(retried.status).toBe("open");
+    expect(await askedRows(retried.id)).toHaveLength(1);
+    await cancelRequest(reqDocId, retried.id, ownerActor(), "owner");
+  });
+
+  /**
+   * Lands `race` between `attachWork`'s pre-check and its update: `getRequest` takes the first `getDb()` (the
+   * pre-check passes on the still-claimed row), `attachWork`'s own `getDb()` is the second and runs `race` first.
+   */
+  const betweenPreCheckAndUpdate = async (race: () => Promise<unknown>) => {
+    const actualGetDb = (await vi.importActual<typeof import("@/server/db")>("@/server/db")).getDb;
+    vi.mocked(getDb)
+      .mockImplementationOnce(actualGetDb)
+      .mockImplementationOnce(async () => {
+        await race();
+        return actualGetDb();
+      });
+  };
+
+  it("attachWork: a request cancelled between the pre-check and the update is not resurrected — 409, the row stays cancelled", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    await betweenPreCheckAndUpdate(() => cancelRequest(reqDocId, created.id, ownerActor(), "owner"));
+    await expect(attachWork(reqDocId, created.id, agentActor(), { suggestions: 1, suggestionIds: ["s-late"] })).rejects.toMatchObject({ status: 409, message: "Request is cancelled", details: { status: "cancelled" } });
+    expect(await rowOf(created.id)).toMatchObject({ status: "cancelled", result: null });
+    expect((await readMirror(reqDocId))[created.id]).toMatchObject({ status: "cancelled" });
+  });
+
+  it("attachWork: a request completed between the pre-check and the update answers 409 Request is done and keeps the result", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    await betweenPreCheckAndUpdate(() => completeRequest(reqDocId, created.id, agentActor(), { summary: "Closed meanwhile." }));
+    await expect(attachWork(reqDocId, created.id, agentActor(), { comments: 1, commentIds: ["c-late"] })).rejects.toMatchObject({ status: 409, message: "Request is done", details: { status: "done" } });
+    expect(await rowOf(created.id)).toMatchObject({ status: "done", result: { suggestions: 0, comments: 0, summary: "Closed meanwhile." } });
   });
 });

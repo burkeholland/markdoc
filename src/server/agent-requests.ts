@@ -1,11 +1,12 @@
 import type * as Y from "yjs";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
-import { getDb, schema } from "@/server/db";
-import type { AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
+import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { getDb, schema, type Db } from "@/server/db";
+import type { ActivityAction, AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
 import type { SessionUser } from "@/server/documents";
 import { canComment, canEdit } from "@/server/documents";
 import { HttpError, type Actor } from "@/server/http";
-import { activityActor, clip, recordActivity } from "@/server/activity";
+import { activityActor, clip, type ActivityActor, type ActivityDetail } from "@/server/activity";
+import { wakeDocument } from "@/server/agent-events";
 import { notify } from "@/server/notifications";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { META_KEY } from "@/server/collab/hocuspocus";
@@ -13,6 +14,20 @@ import { newId } from "@/editor/collab/shared";
 
 export const INSTRUCTION_MAX = 2000;
 export const QUOTE_MAX = 2000;
+
+/** Post-write side effects that can fail without taking the request's write back: reported as `warnings` on the 2xx (see docs/agents.md). */
+export type RequestWarning = "notification-not-sent";
+
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * The activity row `recordActivity` would write, on the caller's transaction: it commits — or rolls back —
+ * together with the request row it describes (`recordActivity` opens its own connection). The wake that
+ * `recordActivity` performs is the caller's, after the commit.
+ */
+async function recordActivityIn(tx: Tx, docId: string, actor: ActivityActor, action: ActivityAction, detail: ActivityDetail): Promise<void> {
+  await tx.insert(schema.activity).values({ id: newId(), documentId: docId, actorId: actor.id, actorName: actor.name, actorKind: actor.kind, action, detail, createdAt: new Date() });
+}
 
 export interface AgentRequestItem {
   id: string;
@@ -169,11 +184,17 @@ export async function createRequest(docId: string, actor: Actor, role: Role, inp
   if (threadId && !(await readLiveDoc(docId, (doc) => commentsMap(doc).has(threadId)))) throw new HttpError(404, "Comment not found");
   const db = await getDb();
   const now = new Date();
-  const [row] = await db
-    .insert(schema.agentRequests)
-    .values({ id: newId(), documentId: docId, userId: actor.id, instruction, selection, threadId, mode, status: "open", createdAt: now, updatedAt: now })
-    .returning();
-  await recordActivity(docId, activityActor(actor), "agent.request", { requestId: row.id, mode, instruction: clip(instruction), quote: selection ? clip(selection.quote) : null, threadId });
+  // One transaction: a request that exists without its `agent.request` row would be worked by agents while the
+  // person, seeing no feedback, asks again — so a failed activity row takes the request back with it.
+  const row = await db.transaction(async (tx) => {
+    const [inserted] = await tx
+      .insert(schema.agentRequests)
+      .values({ id: newId(), documentId: docId, userId: actor.id, instruction, selection, threadId, mode, status: "open", createdAt: now, updatedAt: now })
+      .returning();
+    await recordActivityIn(tx, docId, activityActor(actor), "agent.request", { requestId: inserted.id, mode, instruction: clip(instruction), quote: selection ? clip(selection.quote) : null, threadId });
+    return inserted;
+  });
+  wakeDocument(docId);
   await mirrorRequest(row, actor, { stampThread: true });
   return toRequestItem(row);
 }
@@ -245,7 +266,9 @@ export async function requireAttachableRequest(docId: string, requestId: string)
 
 /**
  * Count work done against a request (called by the suggest/comment routes when `requestId` is given).
- * Also claims an open request implicitly so the presence stack shows who is working on it.
+ * Also claims an open request implicitly so the presence stack shows who is working on it. A request
+ * completed or cancelled between the pre-check and the update is never written back to `claimed`: the
+ * update is conditional and answers the same 409 the pre-check would have.
  */
 export async function attachWork(docId: string, requestId: string, actor: Actor, work: { suggestions?: number; comments?: number; suggestionIds?: string[]; commentIds?: string[] }): Promise<AgentRequestItem> {
   const row = await requireAttachableRequest(docId, requestId);
@@ -262,8 +285,12 @@ export async function attachWork(docId: string, requestId: string, actor: Actor,
   const [updated] = await db
     .update(schema.agentRequests)
     .set({ result, status: "claimed", claimedBy: row.claimedBy ?? agentName(actor), updatedAt: new Date() })
-    .where(eq(schema.agentRequests.id, requestId))
+    .where(and(eq(schema.agentRequests.id, requestId), ne(schema.agentRequests.status, "cancelled"), ne(schema.agentRequests.status, "done")))
     .returning();
+  if (!updated) {
+    const now = await getRequest(docId, requestId);
+    throw new HttpError(409, `Request is ${now.status}`, { status: now.status });
+  }
   await mirrorRequest(updated, actor);
   return toRequestItem(updated);
 }
@@ -275,11 +302,81 @@ export interface CompleteInput {
   comments?: number;
 }
 
-/** Mark a request done: records `agent.request.done` activity and notifies the requester (`request.done`). */
-export async function completeRequest(docId: string, requestId: string, actor: Actor, input: CompleteInput = {}): Promise<AgentRequestItem> {
+export interface CompleteResult {
+  request: AgentRequestItem;
+  /**
+   * The requester holds a `request.done` notification for this request — written by this call or an earlier
+   * one. False when the requester has no login to notify, or when writing it failed (`warnings` says so).
+   */
+  notified: boolean;
+  /** The request was done before this call: nothing was written; the notification was attempted again (idempotent). */
+  alreadyDone: boolean;
+  warnings?: RequestWarning[];
+}
+
+/** A `request.done` row for this request exists for the requester (whoever wrote it). */
+async function hasDoneNotification(userLogin: string, requestId: string): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db
+    .select({ id: schema.notifications.id })
+    .from(schema.notifications)
+    .where(and(eq(schema.notifications.userLogin, userLogin.trim().toLowerCase()), eq(schema.notifications.kind, "request.done"), eq(schema.notifications.refId, requestId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
+ * Mark a request done: the status update and the `agent.request.done` activity row commit together (a
+ * retry after a failure finds the request still `claimed`), then the requester is notified
+ * (`request.done`) — a failure there is `warnings: ["notification-not-sent"]` on the completed request,
+ * never a non-2xx for a request that is done. Completing a done request writes nothing but attempts
+ * the notification again (`notify` dedupes), so a retry after a crash still delivers the toast.
+ */
+export async function completeRequest(docId: string, requestId: string, actor: Actor, input: CompleteInput = {}): Promise<CompleteResult> {
   const row = await getRequest(docId, requestId);
-  if (row.status === "done") return toRequestItem(row);
   if (row.status === "cancelled") throw new HttpError(409, "Request was cancelled", { status: row.status });
+  const failed: RequestWarning[] = [];
+  const tail = async (code: RequestWarning, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[requests] ${code}`, err);
+      failed.push(code);
+      return false;
+    }
+  };
+  const db = await getDb();
+  // Everything after the commit that can fail is a warning on the completed request, never a non-2xx.
+  const notifyRequester = async (done: AgentRequest): Promise<boolean> => {
+    let notified = false;
+    await tail("notification-not-sent", async () => {
+      const [requester] = await db.select({ login: schema.users.login }).from(schema.users).where(eq(schema.users.id, done.userId));
+      const login = requester?.login;
+      if (!login) return;
+      const result = done.result ?? { suggestions: 0, comments: 0 };
+      // The agent acts for a user: when that user is the requester the actor check in notify() would drop
+      // the row, so attribute the notification to the agent itself (no login) — the human still wants to hear.
+      const inserted = await notify({
+        userLogin: login,
+        documentId: docId,
+        kind: "request.done",
+        actorLogin: null,
+        actorName: done.claimedBy ?? agentName(actor),
+        refId: requestId,
+        snippet: result.summary ?? summarizeResult(result) ?? clip(done.instruction),
+      });
+      // `notify` answers false for a row that already exists (an earlier attempt got through): the truth is the row.
+      notified = inserted || (await hasDoneNotification(login, requestId));
+    });
+    return notified;
+  };
+  const respond = (done: AgentRequest, notified: boolean, alreadyDone: boolean): CompleteResult => {
+    const body: CompleteResult = { request: toRequestItem(done), notified, alreadyDone };
+    return failed.length ? { ...body, warnings: failed } : body;
+  };
+  if (row.status === "done") return respond(row, await notifyRequester(row), true);
+
   const prev = row.result ?? { suggestions: 0, comments: 0 };
   const result: AgentRequestResult = {
     ...prev,
@@ -289,36 +386,26 @@ export async function completeRequest(docId: string, requestId: string, actor: A
   const summary = input.summary?.trim();
   if (summary) result.summary = clip(summary, 500);
   const name = row.claimedBy ?? agentName(actor);
-  const db = await getDb();
-  const [updated] = await db
-    .update(schema.agentRequests)
-    .set({ status: "done", claimedBy: name, result, updatedAt: new Date() })
-    .where(eq(schema.agentRequests.id, requestId))
-    .returning();
-  await recordActivity(docId, activityActor(actor), "agent.request.done", {
-    requestId,
-    mode: row.mode,
-    suggestions: result.suggestions,
-    comments: result.comments,
-    summary: result.summary ?? null,
-    instruction: clip(row.instruction),
-  });
-  const [requester] = await db.select({ login: schema.users.login }).from(schema.users).where(eq(schema.users.id, row.userId));
-  if (requester?.login) {
-    // The agent acts for a user: when that user is the requester the actor check in notify() would drop
-    // the row, so attribute the notification to the agent itself (no login) — the human still wants to hear.
-    await notify({
-      userLogin: requester.login,
-      documentId: docId,
-      kind: "request.done",
-      actorLogin: null,
-      actorName: name,
-      refId: requestId,
-      snippet: result.summary ?? summarizeResult(result) ?? clip(row.instruction),
+  const updated = await db.transaction(async (tx) => {
+    const [done] = await tx
+      .update(schema.agentRequests)
+      .set({ status: "done", claimedBy: name, result, updatedAt: new Date() })
+      .where(eq(schema.agentRequests.id, requestId))
+      .returning();
+    await recordActivityIn(tx, docId, activityActor(actor), "agent.request.done", {
+      requestId,
+      mode: row.mode,
+      suggestions: result.suggestions,
+      comments: result.comments,
+      summary: result.summary ?? null,
+      instruction: clip(row.instruction),
     });
-  }
+    return done;
+  });
+  wakeDocument(docId);
+  const notified = await notifyRequester(updated);
   await mirrorRequest(updated, actor);
-  return toRequestItem(updated);
+  return respond(updated, notified, false);
 }
 
 export function summarizeResult(result: AgentRequestResult | null): string | null {

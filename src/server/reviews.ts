@@ -51,62 +51,111 @@ export function toReviewDto(r: Review): ReviewDto {
   };
 }
 
+/** Post-write side effects that can fail without taking the review back: reported as `warnings` on the 201 (see docs/agents.md). */
+export type ReviewWarning = "mentions-not-recorded" | "activity-not-recorded" | "notification-not-sent";
+
+export interface CreateReviewResult {
+  review: ReviewDto;
+  warnings?: ReviewWarning[];
+}
+
 /**
  * Post a review: every `quote` must anchor (first occurrence in the current text) or nothing is
  * created — the 400 lists the quotes that failed. Threads are created in one shared-document
- * transaction, then the review row, activity and the owner's notification are written.
+ * transaction, then the review row; a failure there takes the threads back out before it surfaces, so a
+ * non-2xx leaves neither threads nor a review card (and a retry cannot double the threads). The mentions,
+ * the `review.create` activity row and the owner's notification come last and are reported as `warnings`
+ * on the created review when they fail — the review is in the document, so a non-2xx would be a lie.
  */
-export async function createReview(docId: string, user: Actor, role: Role, input: ReviewInput): Promise<ReviewDto> {
+export async function createReview(docId: string, user: Actor, role: Role, input: ReviewInput): Promise<CreateReviewResult> {
   const author = collabIdentity(user);
+  const ctx = { userId: user.id, docId, role, name: author.name, login: user.login, avatar: user.image ?? null };
   const threadIds: string[] = [];
-  await mutateLiveDoc(docId, { userId: user.id, docId, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
-    const ytext = doc.getText(TEXT_KEY);
-    const text = ytext.toString();
-    const ranges: { from: number; to: number }[] = [];
-    const missing: string[] = [];
-    for (const c of input.comments) {
-      const idx = text.indexOf(c.quote);
-      if (idx === -1) missing.push(c.quote.slice(0, 80));
-      else ranges.push({ from: idx, to: idx + c.quote.length });
-    }
-    if (missing.length) throw new HttpError(400, `Text not found for ${missing.length} comment(s); nothing was created`, { notFound: missing });
-    const model = new CommentsModel(doc, ytext);
-    try {
-      doc.transact(() => {
-        input.comments.forEach((c, i) => {
-          threadIds.push(model.add({ ...ranges[i], body: c.body, author }));
+  const undoThreads = async () => {
+    if (!threadIds.length) return;
+    await mutateLiveDoc(docId, ctx, (doc) => {
+      const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
+      try {
+        doc.transact(() => {
+          for (const threadId of threadIds) model.remove(threadId);
         });
-      });
-    } finally {
-      model.destroy();
-    }
-    recordAgentActivity(doc, user, "commented", ranges[0]);
-  });
-
-  const db = await getDb();
-  const row: Review = {
-    id: newId(),
-    documentId: docId,
-    userId: user.id,
-    agentTokenId: user.tokenId ?? null,
-    authorName: user.agent ?? user.name ?? user.login ?? "User",
-    verdict: input.verdict,
-    summary: input.summary,
-    threadIds,
-    createdAt: new Date(),
+      } finally {
+        model.destroy();
+      }
+    });
   };
-  await db.insert(schema.reviews).values(row);
+  let row: Review;
+  try {
+    await mutateLiveDoc(docId, ctx, (doc) => {
+      const ytext = doc.getText(TEXT_KEY);
+      const text = ytext.toString();
+      const ranges: { from: number; to: number }[] = [];
+      const missing: string[] = [];
+      for (const c of input.comments) {
+        const idx = text.indexOf(c.quote);
+        if (idx === -1) missing.push(c.quote.slice(0, 80));
+        else ranges.push({ from: idx, to: idx + c.quote.length });
+      }
+      if (missing.length) throw new HttpError(400, `Text not found for ${missing.length} comment(s); nothing was created`, { notFound: missing });
+      const model = new CommentsModel(doc, ytext);
+      try {
+        doc.transact(() => {
+          input.comments.forEach((c, i) => {
+            threadIds.push(model.add({ ...ranges[i], body: c.body, author }));
+          });
+        });
+      } finally {
+        model.destroy();
+      }
+      recordAgentActivity(doc, user, "commented", ranges[0]);
+    });
 
-  for (let i = 0; i < threadIds.length; i++) await recordMentions(docId, threadIds[i], user.login, input.comments[i].body, author.name);
-  const suggestions = input.comments.filter((c) => hasSuggestionBlock(c.body)).length;
-  await recordActivity(docId, activityActor(user), "review.create", { reviewId: row.id, verdict: input.verdict, comments: threadIds.length, suggestions, threadIds, quote: clip(input.summary) });
-
-  const [doc] = await db.select({ ownerId: schema.documents.ownerId }).from(schema.documents).where(eq(schema.documents.id, docId));
-  const ownerLogin = doc ? await loginForUserId(doc.ownerId) : null;
-  if (ownerLogin && user.login) {
-    await notify({ userLogin: ownerLogin, documentId: docId, kind: "review", actorLogin: user.login, actorName: row.authorName, refId: row.id, snippet: `${verdictPhrase(input.verdict)}: ${input.summary}` });
+    const db = await getDb();
+    row = {
+      id: newId(),
+      documentId: docId,
+      userId: user.id,
+      agentTokenId: user.tokenId ?? null,
+      authorName: user.agent ?? user.name ?? user.login ?? "User",
+      verdict: input.verdict,
+      summary: input.summary,
+      threadIds,
+      createdAt: new Date(),
+    };
+    await db.insert(schema.reviews).values(row);
+  } catch (err) {
+    // The threads are in the shared document but the review card that explains them is not (or the document
+    // write itself failed part-way): take the threads back out so the non-2xx means nothing changed.
+    await undoThreads().catch((undoErr) => console.error("[reviews] could not undo the review's threads", undoErr));
+    throw err;
   }
-  return toReviewDto(row);
+
+  const failed: ReviewWarning[] = [];
+  const tail = async (code: ReviewWarning, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[reviews] ${code}`, err);
+      failed.push(code);
+      return false;
+    }
+  };
+  await tail("mentions-not-recorded", async () => {
+    for (let i = 0; i < threadIds.length; i++) await recordMentions(docId, threadIds[i], user.login, input.comments[i].body, author.name);
+  });
+  const suggestions = input.comments.filter((c) => hasSuggestionBlock(c.body)).length;
+  await tail("activity-not-recorded", () => recordActivity(docId, activityActor(user), "review.create", { reviewId: row.id, verdict: input.verdict, comments: threadIds.length, suggestions, threadIds, quote: clip(input.summary) }));
+  await tail("notification-not-sent", async () => {
+    const db = await getDb();
+    const [doc] = await db.select({ ownerId: schema.documents.ownerId }).from(schema.documents).where(eq(schema.documents.id, docId));
+    const ownerLogin = doc ? await loginForUserId(doc.ownerId) : null;
+    if (ownerLogin && user.login) {
+      await notify({ userLogin: ownerLogin, documentId: docId, kind: "review", actorLogin: user.login, actorName: row.authorName, refId: row.id, snippet: `${verdictPhrase(input.verdict)}: ${input.summary}` });
+    }
+  });
+  const body: CreateReviewResult = { review: toReviewDto(row) };
+  return failed.length ? { ...body, warnings: failed } : body;
 }
 
 function verdictPhrase(verdict: ReviewVerdict): string {
@@ -121,7 +170,9 @@ export async function listReviews(docId: string): Promise<ReviewDto[]> {
 
 /**
  * Activity + notification for a decision on a comment's suggestion block. The comment's author
- * hears about an acceptance (kind `suggestion.accepted`) unless they accepted it themselves.
+ * hears about an acceptance (kind `suggestion.accepted`) unless they accepted it themselves. The
+ * activity row is the fatal step (the caller reports it as `activity-not-recorded`); the notification
+ * is its own non-fatal step, logged as `[reviews] notification-not-sent`, so that code stays accurate.
  */
 export async function recordSuggestionDecision(
   docId: string,
@@ -138,7 +189,11 @@ export async function recordSuggestionDecision(
     quote: clip(thread.quote),
   });
   if (!accepted || !actor.login) return;
-  const login = await loginForUserId(target.authorId.startsWith("agent:") ? target.authorId.split(":")[1] : target.authorId);
-  if (!login || login === actor.login.toLowerCase()) return;
-  await notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: target.id, snippet: thread.quote });
+  try {
+    const login = await loginForUserId(target.authorId.startsWith("agent:") ? target.authorId.split(":")[1] : target.authorId);
+    if (!login || login === actor.login.toLowerCase()) return;
+    await notify({ userLogin: login, documentId: docId, kind: "suggestion.accepted", actorLogin: actor.login, actorName: actor.name, refId: target.id, snippet: thread.quote });
+  } catch (err) {
+    console.error("[reviews] notification-not-sent", err);
+  }
 }

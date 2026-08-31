@@ -12,13 +12,17 @@ const schema = z
   })
   .default({});
 
-/** Mark a request done. Records activity and notifies the requester. */
+/**
+ * Mark a request done. `{ request, notified, alreadyDone, warnings? }`: the status and the activity row are
+ * one write; the requester's `request.done` notification comes after it and, when it fails, is reported as
+ * `warnings: ["notification-not-sent"]` on the 200 — the request is done either way. `notified` is whether
+ * the requester holds the notification (false as well when they have no login to notify).
+ */
 export const POST = handler(async (req: Request, { params }: Params) => {
   const { id, rid } = await params;
   const { user } = await requireAccess(id, "comment");
   if (!user) throw new HttpError(401, "Sign in required");
   const text = await req.text();
   const body = text.trim() ? await readJson(new Request(req.url, { method: "POST", body: text, headers: req.headers }), (d) => schema.parse(d)) : {};
-  const request = await completeRequest(id, rid, user, body);
-  return json({ request });
+  return json(await completeRequest(id, rid, user, body));
 });
