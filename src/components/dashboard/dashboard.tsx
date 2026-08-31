@@ -378,11 +378,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
   const [paletteOpen, setPaletteOpen] = useState(false);
   // Local files dropped on the page or picked with "Open file…": one file opens straight away,
-  // several stay listed in the dialog while the list behind it refreshes.
+  // several stay listed in the dialog while the list behind it refreshes — as does a batch with a
+  // failure in it, so the failed file stays visible.
   const fileImport = useFileImport({
-    onDone: (created) => {
-      if (created.length === 1) router.push(`/d/${created[0].id}`);
-      else if (created.length > 1) router.refresh();
+    onDone: (created, failed) => {
+      if (created.length === 1 && failed.length === 0) router.push(`/d/${created[0].id}`);
+      else if (created.length > 0) router.refresh();
     },
     onError: (message) => setNotice({ message, kind: "error" }),
   });

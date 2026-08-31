@@ -4,9 +4,11 @@ import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from "r
 import rehypeRemark from "rehype-remark";
 import remarkGfm from "remark-gfm";
 import remarkStringify from "remark-stringify";
-import { addVersion, createDocument, setDocumentText } from "@/server/documents";
+import { customAlphabet } from "nanoid";
+import { getDb, schema } from "@/server/db";
+import { addVersion, createDocument, setDocumentText, type Tx } from "@/server/documents";
 import { boundTitle } from "@/server/document-title";
-import { AssetError, normalizeMime, putAsset } from "@/server/assets";
+import { AssetError, assetUrl, cleanAssetName, normalizeMime, sha256Hex, validateAsset, type PutAssetInput, type StoredAsset } from "@/server/assets";
 
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 export const MAX_IMPORT_FILES = 20;
@@ -237,6 +239,22 @@ export interface ImportedDocument {
   warnings: string[];
 }
 
+/** A file whose document could not be created. Nothing of it exists; sending it again is a clean start. */
+export interface FailedImport {
+  /** Position of the file in the request's `files` order — names can repeat within one batch. */
+  index: number;
+  name: string;
+  /** Client-safe message: a validation message, else "Unexpected error" (the cause is in the server log). */
+  error: string;
+}
+
+export interface ImportFilesResult {
+  /** The created documents, in the order of the files that succeeded. */
+  documents: ImportedDocument[];
+  /** Files that were not imported; empty when every file was. */
+  failed: FailedImport[];
+}
+
 /** Size/type/count checks shared by the route and the server function. Throws {@link ImportError}. */
 export function validateImportFiles(files: { name: string; size: number }[]): void {
   if (files.length === 0) throw new ImportError(400, "No files to import");
@@ -260,49 +278,91 @@ export function decodeImportBytes(name: string, bytes: Uint8Array): string {
   return text;
 }
 
+const assetNanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
+
+/**
+ * `putAsset` for a document that so far exists only inside `tx`: the store's validation, name cleaning
+ * and same-bytes dedupe, written on the transaction. `putAsset` itself runs on the shared connection,
+ * which cannot see the uncommitted document (`asset.document_id` is a foreign key) and, on PGlite,
+ * would wait for the transaction's lock forever. `seen` dedupes by digest within the new document.
+ */
+async function putImportedAsset(tx: Tx, input: PutAssetInput, seen: Map<string, StoredAsset>): Promise<StoredAsset> {
+  const mime = normalizeMime(input.mime);
+  validateAsset({ mime, bytes: input.bytes });
+  const hash = sha256Hex(input.bytes);
+  const existing = seen.get(hash);
+  if (existing) return existing;
+  const id = assetNanoid();
+  const name = cleanAssetName(input.name, mime);
+  await tx.insert(schema.assets).values({ id, documentId: input.documentId, userId: input.userId, name, mime, size: input.bytes.byteLength, sha256: hash, data: input.bytes });
+  const stored = { id, url: assetUrl(id), name, mime, size: input.bytes.byteLength };
+  seen.set(hash, stored);
+  return stored;
+}
+
 /**
  * Create one document from already-converted Markdown, attaching matching images as assets.
  * The row is created first because `asset.document_id` is a foreign key; once the asset URLs are
  * known the text is rewritten with {@link setDocumentText}, which writes `content` and `ystate`
- * together (the document cannot be open in an editor yet, so a fresh seed is safe).
+ * together (the document cannot be open in an editor yet, so a fresh seed is safe). Row, assets,
+ * rewritten text and version land in one transaction: a failure part-way used to leave a document
+ * without its version or its rewritten text, which a re-import then duplicated (audit #1202 F10).
  */
 async function createImported(ownerId: string, converted: ConvertedImport, images: ImportImageInput[], source: string): Promise<ImportedDocument> {
-  const warnings = [...converted.warnings];
-  const doc = await createDocument({ ownerId, title: converted.title, content: converted.content });
-  let content = converted.content;
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const warnings = [...converted.warnings];
+    const doc = await createDocument({ ownerId, title: converted.title, content: converted.content }, tx);
+    let content = converted.content;
 
-  const wanted = relativeImageNames(content);
-  if (wanted.length) {
-    const urls = new Map<string, string>();
-    const byName = new Map(images.map((i) => [i.name.split(/[\\/]/).pop() ?? i.name, i]));
-    const byLower = new Map(Array.from(byName, ([k, v]) => [k.toLowerCase(), v]));
-    for (const name of wanted) {
-      const image = byName.get(name) ?? byLower.get(name.toLowerCase());
-      if (!image) continue;
-      try {
-        const asset = await putAsset({ documentId: doc.id, userId: ownerId, name: image.name, mime: normalizeMime(image.mime), bytes: image.bytes });
-        urls.set(name, asset.url);
-      } catch (err) {
-        warnings.push(`“${name}”: ${err instanceof AssetError ? err.message : "could not be uploaded"}`);
+    const wanted = relativeImageNames(content);
+    if (wanted.length) {
+      const urls = new Map<string, string>();
+      const seen = new Map<string, StoredAsset>();
+      const byName = new Map(images.map((i) => [i.name.split(/[\\/]/).pop() ?? i.name, i]));
+      const byLower = new Map(Array.from(byName, ([k, v]) => [k.toLowerCase(), v]));
+      for (const name of wanted) {
+        const image = byName.get(name) ?? byLower.get(name.toLowerCase());
+        if (!image) continue;
+        try {
+          const asset = await putImportedAsset(tx, { documentId: doc.id, userId: ownerId, name: image.name, mime: image.mime, bytes: image.bytes }, seen);
+          urls.set(name, asset.url);
+        } catch (err) {
+          // An unusable image (type, size, empty, scripted SVG) is refused before any statement runs, so the
+          // transaction is intact and the image is a warning as before. A failed statement aborted it: rethrow.
+          if (!(err instanceof AssetError)) throw err;
+          warnings.push(`“${name}”: ${err.message}`);
+        }
+      }
+      const rewritten = rewriteRelativeImages(content, urls);
+      if (rewritten.missing.length) warnings.push(missingImagesWarning(rewritten.missing));
+      if (rewritten.content !== content) {
+        content = rewritten.content;
+        await setDocumentText(doc.id, content, tx);
       }
     }
-    const rewritten = rewriteRelativeImages(content, urls);
-    if (rewritten.missing.length) warnings.push(missingImagesWarning(rewritten.missing));
-    if (rewritten.content !== content) {
-      content = rewritten.content;
-      await setDocumentText(doc.id, content);
-    }
-  }
 
-  await addVersion({ documentId: doc.id, content, kind: "import", createdBy: ownerId, title: `Imported from ${source}` });
-  return { id: doc.id, title: doc.title, warnings };
+    await addVersion({ documentId: doc.id, content, kind: "import", createdBy: ownerId, title: `Imported from ${source}` }, tx);
+    return { id: doc.id, title: doc.title, warnings };
+  });
+}
+
+/** What the client may learn about a failed file: validation messages, never a driver's (it carries the SQL and its parameters). */
+function failureMessage(err: unknown): string {
+  return err instanceof ImportError || err instanceof AssetError ? err.message : "Unexpected error";
 }
 
 /**
  * Import uploaded files as new documents owned by `ownerId`. Images dropped alongside the files
  * become assets of whichever document references them by basename.
+ *
+ * Every file is validated and converted before any document is created, so a bad file rejects the
+ * whole batch. Creation is then attempted for every file, each in its own transaction, and the outcome
+ * reported per file: `documents` for the ones that exist, `failed` for the ones that do not — so the
+ * caller sees what was imported instead of importing all of it again. When nothing was created the
+ * first error propagates and the route answers non-2xx: nothing changed.
  */
-export async function importFiles(input: { ownerId: string; files: ImportFileInput[]; images?: ImportImageInput[] }): Promise<ImportedDocument[]> {
+export async function importFiles(input: { ownerId: string; files: ImportFileInput[]; images?: ImportImageInput[] }): Promise<ImportFilesResult> {
   validateImportFiles(input.files.map((f) => ({ name: f.name, size: f.bytes.byteLength })));
   const images = input.images ?? [];
   // Decode and convert every file before creating any document, so a binary third file does not leave the first two imported.
@@ -314,9 +374,20 @@ export async function importFiles(input: { ownerId: string; files: ImportFileInp
       source: file.name.split(/[\\/]/).pop() ?? file.name,
     });
   }
-  const out: ImportedDocument[] = [];
-  for (const c of converted) out.push(await createImported(input.ownerId, c.converted, images, c.source));
-  return out;
+  const documents: ImportedDocument[] = [];
+  const failed: FailedImport[] = [];
+  let firstError: unknown;
+  for (const [index, c] of converted.entries()) {
+    try {
+      documents.push(await createImported(input.ownerId, c.converted, images, c.source));
+    } catch (err) {
+      firstError ??= err;
+      failed.push({ index, name: input.files[index].name, error: failureMessage(err) });
+      console.error(`[import] creating the document for file ${index + 1} of ${converted.length} failed`, err);
+    }
+  }
+  if (documents.length === 0 && failed.length > 0) throw firstError;
+  return { documents, failed };
 }
 
 /** Import a string (Markdown, plain text or HTML) as one new document; used by the MCP tool. */

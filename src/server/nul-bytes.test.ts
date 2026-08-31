@@ -180,7 +180,9 @@ describe("POST /api/import/file with uploaded bytes", () => {
 
     const be = Buffer.from("\ufeff# Big endian\n", "utf16le").swap16();
     expect(decodeImportBytes("be.md", new Uint8Array(be))).toBe("# Big endian\n");
-    const [doc] = await importFiles({ ownerId: owner.id, files: [{ name: "be.md", bytes: new Uint8Array(be) }] });
+    const {
+      documents: [doc],
+    } = await importFiles({ ownerId: owner.id, files: [{ name: "be.md", bytes: new Uint8Array(be) }] });
     expect(doc.title).toBe("Big endian");
   });
 

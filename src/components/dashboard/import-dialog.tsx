@@ -5,7 +5,7 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, FileText, Loader2, XCircle } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
-import { uploadImportFiles, type ImportedDocument } from "@/lib/import-upload";
+import { uploadImportBatch, type FailedImport, type ImportedDocument } from "@/lib/import-upload";
 
 export const IMPORT_FILE_EXTENSIONS = [".md", ".markdown", ".mdown", ".mkd", ".txt", ".text", ".html", ".htm"];
 export const IMPORT_ACCEPT = [...IMPORT_FILE_EXTENSIONS, "image/*"].join(",");
@@ -107,8 +107,11 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
 }
 
 export interface UseFileImportOptions {
-  /** Called once every file finished; `documents` holds the created documents (empty on failure). */
-  onDone?: (documents: ImportedDocument[]) => void;
+  /**
+   * Called once every file finished; `documents` holds the created documents (empty on failure) and
+   * `failed` the files the server could not import (the request itself failing counts as none created).
+   */
+  onDone?: (documents: ImportedDocument[], failed: FailedImport[]) => void;
   onError?: (message: string) => void;
 }
 
@@ -140,14 +143,24 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     setItems(documents.map((f) => ({ name: f.name, status: "uploading", warnings: [] })));
     setOpen(true);
     try {
-      const created = await uploadImportFiles(documents, images);
-      setItems(documents.map((f, i) => ({ name: f.name, status: created[i] ? "done" : "error", id: created[i]?.id, title: created[i]?.title, warnings: created[i]?.warnings ?? [] })));
-      optionsRef.current.onDone?.(created);
+      const { documents: created, failed } = await uploadImportBatch(documents, images);
+      // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
+      const failedAt = new Map(failed.map((f) => [f.index, f.error]));
+      let next = 0;
+      setItems(
+        documents.map((f, i): ImportItem => {
+          const error = failedAt.get(i);
+          if (error !== undefined) return { name: f.name, status: "error", warnings: [], error };
+          const doc = created[next++];
+          return doc ? { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings } : { name: f.name, status: "error", warnings: [] };
+        }),
+      );
+      optionsRef.current.onDone?.(created, failed);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Import failed";
       setItems(documents.map((f) => ({ name: f.name, status: "error", warnings: [], error: message })));
       optionsRef.current.onError?.(message);
-      optionsRef.current.onDone?.([]);
+      optionsRef.current.onDone?.([], []);
     }
   }, []);
 

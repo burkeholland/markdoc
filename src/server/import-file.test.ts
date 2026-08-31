@@ -12,7 +12,7 @@ vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) })
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const { getDb, schema } = await import("@/server/db");
-const { eq } = await import("drizzle-orm");
+const { eq, inArray, sql } = await import("drizzle-orm");
 const { listVersions, updateDocument } = await import("@/server/documents");
 const { getAsset } = await import("@/server/assets");
 const { TEXT_KEY, hydrateDoc } = await import("@/server/collab/seed");
@@ -220,7 +220,9 @@ describe("importFiles", () => {
 
   it("uploads matching images as assets, rewrites them and warns about the rest", async () => {
     const md = "# Trip\n\n![Beach](./photos/beach.png)\n\n![Lost](missing.png) ![Also](other/gone.jpg)\n";
-    const [doc] = await importFiles({
+    const {
+      documents: [doc],
+    } = await importFiles({
       ownerId: owner.id,
       files: [{ name: "trip.md", bytes: bytes(md) }],
       images: [
@@ -367,6 +369,103 @@ describe("POST /api/import/file", () => {
         for (const d of listed.documents) expect(d.title.length).toBeLessThanOrEqual(DOCUMENT_TITLE_MAX);
       }
     } finally {
+      actor = null;
+    }
+  });
+});
+
+/**
+ * Make every `event` statement on `table` fail with a real database error (a trigger that raises), so the
+ * same test runs unchanged against the unfixed code and the fix. Returns the undo.
+ */
+async function failingStatements(table: string, event: "insert" | "update", when?: string): Promise<() => Promise<void>> {
+  const db = await getDb();
+  await db.execute(sql.raw(`create or replace function markdoc_test_fail() returns trigger language plpgsql as $$ begin raise exception 'markdoc_test_fail: % on %', tg_op, tg_table_name; end $$`));
+  const trigger = `markdoc_test_fail_${table}_${event}`;
+  await db.execute(sql.raw(`create trigger ${trigger} before ${event} on "${table}" for each row ${when ? `when (${when}) ` : ""}execute function markdoc_test_fail()`));
+  return async () => {
+    await db.execute(sql.raw(`drop trigger ${trigger} on "${table}"`));
+  };
+}
+
+describe("POST /api/import/file reports per-file failures and never leaves a half-made document (audit #1202 F10)", () => {
+  const post = (form: FormData) => POST(new Request("http://localhost:3700/api/import/file", { method: "POST", body: form }));
+  const file = (name: string, text: string) => new File([bytes(text)], name, { type: "text/markdown" });
+  type Body = { documents: { id: string; title: string; warnings: string[] }[]; failed: { index: number; name: string; error: string }[] };
+
+  async function rowsTitled(titles: string[]) {
+    const db = await getDb();
+    return db.select({ id: schema.documents.id, title: schema.documents.title }).from(schema.documents).where(inArray(schema.documents.title, titles));
+  }
+
+  it("creates the files it can, lists the one it could not in `failed`, and the retry of that file is a clean start", async () => {
+    actor = owner;
+    const titles = ["F10 one", "F10 two", "F10 three"];
+    // The second document's text rewrite (setDocumentText, after its asset was stored) fails.
+    const undo = await failingStatements("document", "update", "new.title = 'F10 two'");
+    try {
+      const form = new FormData();
+      for (const [i, title] of titles.entries()) form.append("files", file(`f10-${i + 1}.md`, `# ${title}\n\n![dot](dot.png)\n`));
+      form.append("images", new File([PNG], "dot.png", { type: "image/png" }));
+      const res = await post(form);
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as Body;
+      expect(body.documents.map((d) => d.title)).toEqual(["F10 one", "F10 three"]);
+      expect(body.failed).toEqual([{ index: 1, name: "f10-2.md", error: "Unexpected error" }]);
+
+      // Exactly the two reported documents exist, each with its rewritten text, asset and version; the failed one left nothing.
+      const rows = await rowsTitled(titles);
+      expect(rows.map((r) => r.title).sort()).toEqual(["F10 one", "F10 three"]);
+      const db = await getDb();
+      for (const d of body.documents) {
+        const [row] = await db.select().from(schema.documents).where(eq(schema.documents.id, d.id));
+        expect(row.content).toMatch(/!\[dot\]\(\/api\/assets\/[a-z0-9]+\)/);
+        expect(await db.select().from(schema.assets).where(eq(schema.assets.documentId, d.id))).toHaveLength(1);
+        expect((await listVersions(d.id)).map((v) => v.title)).toEqual([`Imported from ${d.title === "F10 one" ? "f10-1.md" : "f10-3.md"}`]);
+      }
+    } finally {
+      await undo();
+      actor = null;
+    }
+
+    actor = owner;
+    try {
+      const form = new FormData();
+      form.append("files", file("f10-2.md", "# F10 two\n\n![dot](dot.png)\n"));
+      form.append("images", new File([PNG], "dot.png", { type: "image/png" }));
+      const res = await post(form);
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as Body;
+      expect(body.failed).toEqual([]);
+      expect(body.documents.map((d) => d.title)).toEqual(["F10 two"]);
+      expect((await rowsTitled(["F10 two"])).map((r) => r.id)).toEqual([body.documents[0].id]);
+    } finally {
+      actor = null;
+    }
+  });
+
+  it("answers 500 and creates nothing when no file could be imported (multipart and JSON alike)", async () => {
+    actor = owner;
+    const undo = await failingStatements("version", "insert");
+    try {
+      const form = new FormData();
+      form.append("files", file("all-a.md", "# F10 all a\n"));
+      form.append("files", file("all-b.md", "# F10 all b\n"));
+      const res = await post(form);
+      expect(res.status).toBe(500);
+      expect(await rowsTitled(["F10 all a", "F10 all b"]), "documents left behind by an import that answered 500").toEqual([]);
+
+      const json = await POST(
+        new Request("http://localhost:3700/api/import/file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: "# F10 all json\n", format: "markdown" }),
+        }),
+      );
+      expect(json.status).toBe(500);
+      expect(await rowsTitled(["F10 all json"]), "document left behind by a JSON import that answered 500").toEqual([]);
+    } finally {
+      await undo();
       actor = null;
     }
   });
