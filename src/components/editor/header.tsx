@@ -3,6 +3,7 @@ import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRad
 import { GitHubIcon } from "@/components/ui/github-icon";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   Activity,
@@ -51,15 +52,18 @@ import { api } from "@/lib/api";
 import type { Layout } from "@/lib/viewport";
 
 import { cn, shortcut } from "@/lib/utils";
-import { useHydrated } from "@/lib/hooks";
 import { jsonEqual, useOpenSettled, useSessionValue } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { pendingRequests, useAgentRequests } from "./agent-requests";
-import { KeepAgentHereDialog } from "./keep-agent-here";
 import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, useAgentActivity, waitingLabel } from "./presence-agents";
 import { signOutSafely } from "@/lib/sign-out";
 import { Logo } from "@/components/ui/logo";
+import { useEverTrue, useHydrated } from "@/lib/hooks";
+
+// On demand (#1150): the dialog, with the agent-connect card and copy blocks behind it, is fetched on its first
+// open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
+const KeepAgentHereDialog = dynamic(() => import("./keep-agent-here").then((m) => m.KeepAgentHereDialog), { ssr: false });
 
 function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
@@ -622,6 +626,7 @@ export const Header = memo(function Header(props: HeaderProps) {
   useEffect(() => {
     if (keepAgentNonce > 0) setKeepAgentOpen(true);
   }, [keepAgentNonce]);
+  const keepAgentEverOpened = useEverTrue(keepAgentOpen);
   const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
   const openKeepAgent = useCallback(() => setKeepAgentOpen(true), []);
 
@@ -651,7 +656,7 @@ export const Header = memo(function Header(props: HeaderProps) {
           <ModeSwitcher session={session} />
           <PresenceStack session={session} onJump={props.onJumpToUser} onCancelRequest={props.onCancelRequest} onKeepAgent={openKeepAgent} />
         </div>
-        <KeepAgentHereDialog doc={{ id: doc.id, title: liveTitle }} open={keepAgentOpen} onOpenChange={setKeepAgentOpen} onCreateToken={props.onCreateToken} />
+        {keepAgentEverOpened && <KeepAgentHereDialog doc={{ id: doc.id, title: liveTitle }} open={keepAgentOpen} onOpenChange={setKeepAgentOpen} onCreateToken={props.onCreateToken} />}
         {!embed && session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
         {!embed && !compact && (
           <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
