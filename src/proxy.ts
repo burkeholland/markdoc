@@ -63,6 +63,26 @@ export function canonicalRedirect(request: NextRequest, canonical: string | null
 }
 
 /**
+ * Frame policy for every page that is not the embedded document (task #1224). Nothing but the Copilot
+ * canvas frames Markdoc, and that frame is the one `frame-ancestors <parentOrigin>` case below; every
+ * other page refuses to be framed. No X-Frame-Options: it cannot name the canvas origin, and every
+ * browser that matters honours frame-ancestors. The other baseline headers (nosniff, Referrer-Policy,
+ * Permissions-Policy, HSTS over HTTPS) are set for every response in server/index.ts, which also sees
+ * the paths the matcher below skips.
+ */
+export const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
+
+/**
+ * Only pages get the frame policy. `/api/*` responses keep their own headers — `/api/assets/[id]` sets
+ * a sandboxing CSP on SVGs that a header set here would replace — and the handoff route
+ * (`/embed/<nonce>`, `src/app/embed/[nonce]/route.ts`) is loaded inside the canvas frame by design: its
+ * `302` carries no document and its `403`/`410` bodies are the message the frame shows.
+ */
+export function framePolicyApplies(pathname: string): boolean {
+  return !pathname.startsWith("/api/") && !pathname.startsWith("/embed/");
+}
+
+/**
  * Clear a session cookie the current AUTH_SECRET cannot read (#1139). Auth.js's own `session` action
  * does answer a broken token with a clearing Set-Cookie, but the React Server Component form of
  * `auth()` only keeps the JSON body — and a page cannot set cookies anyway — so a browser carrying a
@@ -77,11 +97,13 @@ export async function proxy(request: NextRequest) {
 
   const cookieHeader = request.headers.get("cookie");
   const embed = await decodeEmbedSession(cookieHeader);
+  const pathname = request.nextUrl.pathname;
   const isEmbeddedDocument = embed
-    && request.nextUrl.pathname === `/d/${embed.documentId}`
+    && pathname === `/d/${embed.documentId}`
     && request.nextUrl.searchParams.get("embed") === "1";
   const withFramePolicy = (response: NextResponse) => {
     if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}`);
+    else if (framePolicyApplies(pathname)) response.headers.set("Content-Security-Policy", FRAME_ANCESTORS_NONE);
     return response;
   };
   if (!hasSessionCookie(cookieHeader)) return withFramePolicy(NextResponse.next());

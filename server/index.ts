@@ -33,6 +33,35 @@ import { serveStaticBrotli } from "./static-brotli";
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+// Baseline security headers on every response, set here rather than in the proxy because the proxy
+// matcher skips /api/auth, /_next/static, /_next/image and favicon.ico, and the brotli branch below
+// never reaches Next at all. Next keeps headers that are already on `res`: middleware headers land via
+// setHeader, a route's Response headers are only appended when absent (send-response.js), and nothing
+// on the app-router path removes them — so a route that sets the same header (nosniff on
+// /api/assets) keeps one value, not two. The frame policy stays in src/proxy.ts: it depends on the
+// embed cookie and must not touch /api/*.
+const SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  // Clipboard is deliberately not restricted: the Copilot canvas frame relies on it.
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+};
+// One year, no includeSubDomains/preload until the custom-domain question (docs/custom-domain.md) is
+// settled. Only for requests that arrived over HTTPS: the Container Apps ingress terminates TLS and
+// sets x-forwarded-proto, while local dev and the e2e server speak plain HTTP.
+const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
+
+function arrivedOverHttps(req: IncomingMessage): boolean {
+  const forwarded = req.headers["x-forwarded-proto"];
+  const proto = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",", 1)[0]?.trim().toLowerCase();
+  return proto === "https" || (req.socket as { encrypted?: boolean }).encrypted === true;
+}
+
+function setSecurityHeaders(req: IncomingMessage, res: ServerResponse) {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+  if (arrivedOverHttps(req)) res.setHeader("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY);
+}
+
 // Where `next build` put the client assets (same rule as next.config.ts). Production serves the
 // precompressed `.br` siblings from here; `next dev` writes no `.br` files and the branch stays off.
 const staticRoot = path.resolve(process.cwd(), process.env.NEXT_DIST_DIR || ".next", "static");
@@ -128,6 +157,7 @@ function setupNextWebSocketHandler(app: object, server: Server) {
 async function main() {
   let requestHandler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
   const server = createServer((req, res) => {
+    setSecurityHeaders(req, res);
     if (requestHandler) return requestHandler(req, res);
     res.statusCode = 503;
     res.end("starting");
