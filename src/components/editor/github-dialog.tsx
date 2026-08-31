@@ -9,11 +9,9 @@ import type { DocumentDto } from "@/server/dto";
 import { api, ApiError } from "@/lib/api";
 
 import { cn, relativeTime } from "@/lib/utils";
+import { GITHUB_NOT_CONFIGURED } from "./labels";
 
 type Tab = "gist" | "repo";
-
-/** Shown wherever a GitHub entry point is disabled because the server has no GitHub OAuth app (#162). */
-export const GITHUB_NOT_CONFIGURED = "GitHub storage is not set up on this server.";
 
 /**
  * Empty state of the GitHub picker for an account without a GitHub token (#162): the action the

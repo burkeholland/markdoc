@@ -12,10 +12,9 @@ import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewV
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
-import { AGENT_DOCS_URL } from "@/lib/mcp";
+import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
-import { AGENT_CONNECT_DISMISSED_KEY } from "@/components/settings/agent-connect-card";
 import { jsonEqual, useSessionValue } from "./use-session";
 import { describeResult, QUICK_INSTRUCTIONS, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
 import "./comments.css";
