@@ -10,6 +10,20 @@ const eslintConfig = defineConfig([
       // Loading data in effects (`useEffect(() => { void load() }, [...])`) sets state after an
       // await; the rule cannot see the async boundary and reports every such fetch.
       "react-hooks/set-state-in-effect": "off",
+      // The serializer core is vendored (src/editor/markdown/to-markdown.ts): the package's only entry point
+      // builds a markdown-it parser at module top level, which put ~100 kB of never-run code in the shared
+      // client chunk (task #1092). Importing it again would bring that back.
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["prosemirror-markdown", "prosemirror-markdown/*"],
+              message: "vendored in src/editor/markdown/to-markdown.ts — the package drags markdown-it into the client",
+            },
+          ],
+        },
+      ],
     },
   },
   {

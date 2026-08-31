@@ -1,4 +1,4 @@
-import { MarkdownSerializer, MarkdownSerializerState } from "prosemirror-markdown";
+import { MarkdownSerializer, MarkdownSerializerState } from "./to-markdown";
 import type { Node as PMNode } from "prosemirror-model";
 import { schema } from "./schema";
 
@@ -6,30 +6,12 @@ type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMN
 
 type SerializerOptions = { tightLists?: boolean; escapeExtraCharacters?: RegExp; hardBreakNodeName?: string; strict?: boolean };
 
-/** prosemirror-markdown marks these members @internal; we need them to build sub-states. */
-interface InternalState {
-  nodes: Record<string, NodeSerializer>;
-  marks: Record<string, unknown>;
-  options: SerializerOptions;
-  out: string;
-  delim: string;
-  closed: PMNode | null;
-  flushClose(size?: number): void;
-}
-
-const StateCtor = MarkdownSerializerState as unknown as new (
-  nodes: Record<string, NodeSerializer>,
-  marks: Record<string, unknown>,
-  options: SerializerOptions,
-) => MarkdownSerializerState;
-
 /**
- * Serializer state with a gentler escaping strategy than prosemirror-markdown's
- * default: it only escapes characters where they would otherwise change the
- * meaning of the Markdown, which keeps hand-written documents readable after a
- * round trip through the rich editor.
+ * Serializer state with a gentler escaping strategy than the upstream default in `to-markdown.ts`:
+ * it only escapes characters where they would otherwise change the meaning of the Markdown, which
+ * keeps hand-written documents readable after a round trip through the rich editor.
  */
-class State extends StateCtor {
+class State extends MarkdownSerializerState {
   inLink = false;
   inTable = false;
 
@@ -77,11 +59,10 @@ function fenceFor(text: string): string {
 }
 
 function renderCell(state: State, cell: PMNode): string {
-  const internal = state as unknown as InternalState;
-  const sub = new State(internal.nodes, internal.marks, internal.options);
+  const sub = new State(state.nodes, state.marks, state.options);
   sub.inTable = true;
   sub.renderInline(cell, false);
-  return (sub as unknown as InternalState).out.replace(/\n/g, "<br>").trim();
+  return sub.out.replace(/\n/g, "<br>").trim();
 }
 
 const isEmptyParagraph = (node: PMNode) => node.type === schema.nodes.paragraph && node.content.size === 0;
@@ -94,14 +75,13 @@ const nodes: Record<string, NodeSerializer> = {
    * exactly and the caret stays where the user put it.
    */
   blockquote(state, node) {
-    const internal = state as unknown as InternalState;
     state.write("> ");
-    const oldDelim = internal.delim;
-    internal.delim += "> ";
-    const marker = internal.delim.replace(/\s+$/, "");
+    const oldDelim = state.delim;
+    state.delim += "> ";
+    const marker = state.delim.replace(/\s+$/, "");
     if (node.childCount === 1 && isEmptyParagraph(node.firstChild!)) {
       // An empty quote is a single `>`.
-      internal.out = internal.out.replace(/[ \t]+$/, "");
+      state.out = state.out.replace(/[ \t]+$/, "");
     } else {
       let lastEmpty = false;
       node.forEach((child, _, i) => {
@@ -110,17 +90,17 @@ const nodes: Record<string, NodeSerializer> = {
           lastEmpty = false;
           return;
         }
-        if (i === 0) internal.out = internal.out.replace(/[ \t]+$/, "") + "\n" + marker + "\n";
+        if (i === 0) state.out = state.out.replace(/[ \t]+$/, "") + "\n" + marker + "\n";
         else {
-          internal.flushClose(2);
-          internal.out += marker + "\n";
+          state.flushClose(2);
+          state.out += marker + "\n";
         }
-        internal.closed = null;
+        state.closed = null;
         lastEmpty = true;
       });
-      if (lastEmpty) internal.out = internal.out.replace(/\n$/, "");
+      if (lastEmpty) state.out = state.out.replace(/\n$/, "");
     }
-    internal.delim = oldDelim;
+    state.delim = oldDelim;
     state.closeBlock(node);
   },
   /**
@@ -202,7 +182,7 @@ const nodes: Record<string, NodeSerializer> = {
     }
   },
   text(state, node) {
-    state.text(node.text!, !(state as State & { inAutolink?: boolean }).inAutolink);
+    state.text(node.text!, !state.inAutolink);
   },
   html_block(state, node) {
     state.text(node.textContent, false);
@@ -312,13 +292,13 @@ const marks = {
   strikethrough: { open: "~~", close: "~~", mixable: true, expelEnclosingWhitespace: true },
   link: {
     open(state: MarkdownSerializerState, mark: import("prosemirror-model").Mark, parent: PMNode, index: number) {
-      const s = state as State & { inAutolink?: boolean };
+      const s = state as State;
       s.inAutolink = isPlainURL(mark, parent, index);
       if (!s.inAutolink) s.inLink = true;
       return s.inAutolink ? "<" : "[";
     },
     close(state: MarkdownSerializerState, mark: import("prosemirror-model").Mark) {
-      const s = state as State & { inAutolink?: boolean };
+      const s = state as State;
       const { inAutolink } = s;
       s.inAutolink = undefined;
       s.inLink = false;
@@ -344,18 +324,16 @@ const marks = {
 
 class Serializer extends MarkdownSerializer {
   serialize(content: PMNode, options: SerializerOptions = {}): string {
-    const self = this as unknown as InternalState;
-    const opts = Object.assign({}, self.options, options);
-    const state = new State(self.nodes, self.marks, opts);
+    const opts = Object.assign({}, this.options, options);
+    const state = new State(this.nodes, this.marks, opts);
     state.renderContent(content);
-    return (state as unknown as InternalState).out;
+    return state.out;
   }
 }
 
-type SerializerMarks = ConstructorParameters<typeof MarkdownSerializer>[1];
 type SerializerCtorOptions = ConstructorParameters<typeof MarkdownSerializer>[2];
 
-export const markdownSerializer = new Serializer(nodes, marks as unknown as SerializerMarks, {
+export const markdownSerializer = new Serializer(nodes, marks, {
   tightLists: true,
 } as unknown as SerializerCtorOptions);
 

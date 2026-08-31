@@ -397,7 +397,8 @@ src/components/reader        /p/[id] reader view: page, table of contents, updat
 src/components/settings      API tokens
 src/components/ui            shared primitives (menus, popovers, tips, icons), theme toggle, relative time,
                              logo.tsx (Logo/Wordmark, no "use client": server pages import it, not the editor header)
-src/editor/markdown          GFM schema, parser with source map, incremental parser, serializer, linter
+src/editor/markdown          GFM schema, parser with source map, incremental parser, serializer, linter;
+                             to-markdown.ts is prosemirror-markdown's serializer core, vendored (MIT header in the file)
 src/editor/sync              ProseMirror <-> Y.Text binding, text diff
 src/editor/collab            session, comments, suggestions, offline (IndexedDB) models
 src/editor/codemirror        source pane setup, commands, suggesting filter
@@ -449,3 +450,5 @@ Burke's live test server runs `npm run dev` from a pinned sibling worktree `../m
 ## License
 
 MIT
+
+`src/editor/markdown/to-markdown.ts` is a copy of the serializer from [prosemirror-markdown](https://github.com/ProseMirror/prosemirror-markdown) 1.13.5 (MIT, Marijn Haverbeke and others); its licence text stays in the file header. It is vendored because the package's only entry point builds a markdown-it parser at load time, which put about 100 kB of never-run code in every page's shared script; upstream fixes to that file are copied by hand, and ESLint refuses a new import of the package.
