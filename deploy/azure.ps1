@@ -771,13 +771,6 @@ function Restore-CandidateOnlyDatabaseCredential($CurrentApplication) {
     -DatabaseConfigurationToken $databaseConfigurationToken `
     -RecoveryConfigurationVersion $recoveryConfigurationVersion
 
-  if ($ConfigureRecovery) {
-    $recoveryExecution = Get-ManagedRunCommandResult 'configure-postgresql-recovery'
-    if ($recoveryExecution.executionState -ne 'Succeeded' -or $recoveryExecution.exitCode -ne 0) {
-      throw 'The PostgreSQL recovery configuration failed during candidate-only credential recovery.'
-    }
-  }
-
   $reconciliation = Get-ManagedRunCommandResult 'reconcile-postgresql-password'
   $reconciliationResult = [string]$reconciliation.output
   if (
@@ -890,25 +883,16 @@ if ($candidateOnlyRotationRecovery) {
   $currentApplication = Get-CurrentApplicationContext
   $image = $currentApplication.PreviousImage
   $appVersion = $currentApplication.PreviousAppVersion
-  $candidateOnlyCleanup = @()
-  if ($ConfigureRecovery) {
-    $candidateOnlyCleanup += @{ Action = { Restore-PostgresSteadyStateEgress } }
-  }
+  # Rotation never opens egress (no bootstrap public IP; -ConfigureRecovery is refused with -RotateDatabasePassword), so there is nothing to restore.
   $outputs = Invoke-OperationWithGuaranteedCleanup `
     -Context 'Candidate-only PostgreSQL recovery' `
     -Operation { Restore-CandidateOnlyDatabaseCredential $currentApplication } `
-    -CleanupActions $candidateOnlyCleanup
+    -CleanupActions @()
 } elseif ($RotateDatabasePassword) {
   Step 'Explicit password rotation: staging a candidate secret and using the rollback-capable private run command.'
-  if ($ConfigureRecovery) {
-    Step 'Explicit recovery update: configuring off-VM WAL archiving and backup verification.'
-  }
   $image = $rotationImage
   $appVersion = $rotationAppVersion
-  $rotationCleanup = @()
-  if ($ConfigureRecovery) {
-    $rotationCleanup += @{ Action = { Restore-PostgresSteadyStateEgress } }
-  }
+  # Rotation never opens egress (no bootstrap public IP; -ConfigureRecovery is refused with -RotateDatabasePassword), so there is nothing to restore.
   $outputs = Invoke-OperationWithGuaranteedCleanup `
     -Context 'PostgreSQL password rotation' `
     -Operation {
@@ -931,13 +915,6 @@ if ($candidateOnlyRotationRecovery) {
             -SimulatePostgresRecoveryFailure $false `
             -DatabaseConfigurationToken $databaseConfigurationToken `
             -RecoveryConfigurationVersion $recoveryConfigurationVersion
-
-          if ($ConfigureRecovery) {
-            $recoveryExecution = Get-ManagedRunCommandResult 'configure-postgresql-recovery'
-            if ($recoveryExecution.executionState -ne 'Succeeded' -or $recoveryExecution.exitCode -ne 0) {
-              throw 'The PostgreSQL recovery configuration failed on the VM.'
-            }
-          }
 
           $rotationExecution = Get-ManagedRunCommandResult 'rotate-postgresql-password'
           $rotationResult = [string]$rotationExecution.output
@@ -1009,7 +986,7 @@ if ($candidateOnlyRotationRecovery) {
         } `
         -SimulatePostChangeFailure:$SimulatePostChangeDatabaseRotationFailure
     } `
-    -CleanupActions $rotationCleanup
+    -CleanupActions @()
 } else {
   Step 'Deploying private infrastructure without changing the existing PostgreSQL database.'
   if ($InitializeDatabase) {
