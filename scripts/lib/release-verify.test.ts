@@ -275,14 +275,17 @@ describe("runReleaseVerify against an in-process origin", () => {
 
   beforeAll(async () => {
     site = await startSite(new Map(chunks), html);
-    dist = writeDist(new Map([...chunks].filter(([name]) => name !== "tiny.js" || true)));
+    dist = writeDist(new Map(chunks));
     tempDirs.push(dist);
   });
 
   afterAll(async () => {
-    site.hocuspocus.closeConnections();
-    await new Promise<void>((resolve) => site.server.close(() => resolve()));
-    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    try {
+      site.hocuspocus.closeConnections();
+      await new Promise<void>((resolve) => site.server.close(() => resolve()));
+    } finally {
+      for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   const rejected: ReleaseVerifyIo["connectCollab"] = async () => ({ outcome: "rejected", reason: "permission-denied", ms: 12 });
