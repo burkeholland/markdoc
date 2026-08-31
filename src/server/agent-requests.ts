@@ -236,13 +236,19 @@ export async function claimRequest(docId: string, requestId: string, actor: Acto
   return toRequestItem(updated);
 }
 
+/** The request `attachWork` will accept, or the 404/409 it would throw — call it before writing anything. */
+export async function requireAttachableRequest(docId: string, requestId: string): Promise<AgentRequest> {
+  const row = await getRequest(docId, requestId);
+  if (row.status === "done" || row.status === "cancelled") throw new HttpError(409, `Request is ${row.status}`, { status: row.status });
+  return row;
+}
+
 /**
  * Count work done against a request (called by the suggest/comment routes when `requestId` is given).
  * Also claims an open request implicitly so the presence stack shows who is working on it.
  */
 export async function attachWork(docId: string, requestId: string, actor: Actor, work: { suggestions?: number; comments?: number; suggestionIds?: string[]; commentIds?: string[] }): Promise<AgentRequestItem> {
-  const row = await getRequest(docId, requestId);
-  if (row.status === "done" || row.status === "cancelled") throw new HttpError(409, `Request is ${row.status}`, { status: row.status });
+  const row = await requireAttachableRequest(docId, requestId);
   const prev = row.result ?? { suggestions: 0, comments: 0 };
   const prevIds = (prev as { suggestionIds?: string[]; commentIds?: string[] }) ?? {};
   const result: AgentRequestResult & { suggestionIds?: string[]; commentIds?: string[] } = {
