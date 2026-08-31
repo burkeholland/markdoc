@@ -51,7 +51,7 @@ import { api } from "@/lib/api";
 import type { Layout } from "@/lib/viewport";
 
 import { cn, shortcut } from "@/lib/utils";
-import { jsonEqual, useOpenSettled, useSessionValue } from "./use-session";
+import { jsonEqual, useOpenSettled, useSessionValue, useSettledSaveState } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { pendingRequests, useAgentRequests } from "./agent-requests";
@@ -65,7 +65,7 @@ import { lazyOnFirstUse } from "./lazy-on-first-use";
 // open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
 const KeepAgentHereDialog = lazyOnFirstUse(() => import("./keep-agent-here"), (m) => m.KeepAgentHereDialog);
 
-function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
+export function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
   const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
@@ -73,7 +73,10 @@ function SaveIndicator({ session, compact }: { session: CollabSession; compact?:
   // The server renders a fresh session ("Connecting…"); an offline client may already have
   // failed to connect by the time React hydrates. Match the server markup first, then switch.
   const hydrated = useHydrated();
-  const state: SaveState = hydrated ? liveState : "connecting";
+  const raw: SaveState = hydrated ? liveState : "connecting";
+  // The sync still runs per keystroke (`data-live-state`); the chip itself settles about a second
+  // after the last ack instead of flashing Saving…/Saved on every key (#1282).
+  const state = useSettledSaveState(raw);
   const unsynced = hydrated ? liveUnsynced : 0;
   const recovered = hydrated && liveRecovered;
   const prolonged = hydrated && liveProlonged;
@@ -93,6 +96,7 @@ function SaveIndicator({ session, compact }: { session: CollabSession; compact?:
       className={cn("inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors", m.className, flash && "save-state-recovered")}
       data-testid="save-state"
       data-state={state}
+      data-live-state={raw}
       data-unsynced={unsynced}
       data-recovered={flash || undefined}
       data-prolonged={prolonged || undefined}
