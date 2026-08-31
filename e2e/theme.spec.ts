@@ -77,8 +77,10 @@ test.describe("dark mode", () => {
     expect(isDark(await bg(page, ".cm-editor"))).toBe(true);
     const richBg = await bg(page, ".md-rich");
     expect(richBg === null || isDark(richBg)).toBe(true);
-    // Code block and hljs spans pick up the dark palette (not the light #7c3aed keyword).
+    // Code block and hljs spans pick up the dark palette (not the light #7c3aed keyword). The grammars
+    // arrive from their own chunk after the editor mounts, so wait for the first token before reading it.
     expect(isDark(await bg(page, ".md-rich pre"))).toBe(true);
+    await expect(page.locator(".md-rich pre .hljs-keyword").first()).toBeVisible();
     const keywordColor = await page.evaluate(() => getComputedStyle(document.querySelector(".md-rich pre .hljs-keyword")!).color);
     expect(keywordColor).not.toBe("rgb(124, 58, 237)");
 
