@@ -61,6 +61,8 @@ test.describe("reader view", () => {
     const page = await anon.newPage();
     await page.goto(`/p/${id}`);
     await expect(page.getByTestId("reader-title")).toHaveText("Reader Title");
+    // The header is server-rendered; the toggle only answers clicks once React has hydrated the page.
+    await page.waitForLoadState("networkidle");
 
     const toggle = page.getByTestId("reader-download-menu");
     const list = page.getByTestId("reader-download-list");
