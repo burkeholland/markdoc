@@ -3,6 +3,9 @@ import type * as Y from "yjs";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
+// The routes are called with no socket address, so the file's 31 POSTs share one `write:ip:unknown` bucket
+// (burst 30, refill 2/s): whether the last one is a 429 depends on elapsed time. Off, as in comments-api.test.ts.
+process.env.RATE_LIMIT = "off";
 delete process.env.DATABASE_URL;
 
 // Same stand-ins as star.test.ts: routes resolve the caller through next-auth and `next/headers`.
