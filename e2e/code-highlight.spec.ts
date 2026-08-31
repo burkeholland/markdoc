@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Response } from "@playwright/test";
 import { budgetMs, createDocument, focusRichEnd, openDocument, signIn } from "./helpers";
 
-// The 37 highlight.js `common` grammars live in their own chunk (src/editor/prosemirror/code-highlight-languages.ts)
+// highlight.js' core and its 37 `common` grammars live in their own chunk (src/editor/prosemirror/code-highlight-languages.ts)
 // that the rich pane imports only once a document shows a code block with a recognised language. A chunk
 // is recognised by its body, not its name: Turbopack names chunks differently in dev and production.
 const GRAMMAR_MARKER = "Visual Basic .NET"; // the `name` of the vbnet grammar; nothing else in the app carries it
@@ -99,9 +99,9 @@ test.describe("lazy code-block grammars", () => {
     });
     console.log(`[code-highlight] coloured after ${colouredAfterMs} ms; grammar chunk: ${grammarRequests[0]}`);
 
-    // Typing inside the block re-highlights it without fetching anything again.
-    await code.page.locator(".md-rich pre code").click();
-    await code.page.keyboard.press("End");
+    // Typing inside the block re-highlights it without fetching anything again. The block ends the document, so
+    // focusRichEnd lands the caret there and waits for the click's selection to settle before any key is pressed.
+    await focusRichEnd(code.page);
     await code.page.keyboard.press("Enter");
     await code.page.keyboard.type("let later = true;");
     await expect(code.page.locator(".md-rich pre .hljs-keyword")).toHaveCount(4);
