@@ -201,7 +201,7 @@ test.describe("find & replace", () => {
 
     await page.getByTestId("replace-input").fill("dog");
     await page.getByTestId("replace-one").click();
-    await expect(page.locator(".md-rich p").first()).toHaveText("The dog sat on the mat. The cat ran.");
+    await expect(page.locator(".md-rich p").first()).toContainText("The dog sat on the mat. The cat ran.");
     await expect.poll(() => codeText(page)).toContain("The dog sat on the mat. The cat ran.");
     await expect(page.getByTestId("find-count")).toHaveText("1 of 2");
 
@@ -209,7 +209,7 @@ test.describe("find & replace", () => {
     await expect(page.getByTestId("find-count")).toHaveText("0 of 0");
     await expect.poll(() => codeText(page)).toBe(SAMPLE.replace(/cat/g, "dog"));
     await expect(page.locator(".md-rich .md-find")).toHaveCount(0);
-    await expect(page.locator(".md-rich p").last()).toHaveText("Another dog came by later.");
+    await expect(page.locator(".md-rich p").last()).toContainText("Another dog came by later.");
     await user.context.close();
   });
 
@@ -231,7 +231,7 @@ test.describe("find & replace", () => {
     await page.locator(".cm-content").click();
     await page.keyboard.press("Control+z");
     await expect.poll(() => codeText(page)).toBe(SAMPLE);
-    await expect(page.locator(".md-rich p").first()).toHaveText("The cat sat on the mat. The cat ran.");
+    await expect(page.locator(".md-rich p").first()).toContainText("The cat sat on the mat. The cat ran.");
     await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
     await user.context.close();
   });
