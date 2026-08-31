@@ -1,10 +1,24 @@
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, vi } from "vitest";
+import { and, eq } from "drizzle-orm";
 
 process.env.PGLITE_DATA_DIR = "memory://";
+process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
 
+// Same stand-ins as the route tests: the upload route resolves the caller through next-auth and `next/headers`.
+let actor: { id: string; login: string; name: string; image: null } | null = null;
+vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+// Wrapped so a test can make the activity row fail after the asset is stored.
+vi.mock("@/server/activity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/activity")>();
+  return { ...actual, recordActivity: vi.fn(actual.recordActivity) };
+});
+
 const { getDb, schema } = await import("./db");
-const { putAsset, getAsset, AssetError, MAX_ASSET_BYTES, isUnsafeSvg, cleanAssetName } = await import("./assets");
+const { putAsset, getAsset, AssetError, MAX_ASSET_BYTES, isUnsafeSvg, cleanAssetName, sha256Hex } = await import("./assets");
+const { recordActivity } = await import("./activity");
+const { POST } = await import("@/app/api/documents/[id]/assets/route");
 
 // Smallest valid PNG (1x1 transparent pixel).
 const PNG = Uint8Array.from(
@@ -87,9 +101,112 @@ describe("assets", () => {
 
   it("removes assets when their document is deleted", async () => {
     const db = await getDb();
-    const { eq } = await import("drizzle-orm");
     const stored = await putAsset({ documentId: otherDocId, userId, name: "x.png", mime: "image/png", bytes: new Uint8Array([9, 9, 9]) });
     await db.delete(schema.documents).where(eq(schema.documents.id, otherDocId));
     expect(await getAsset(stored.id)).toBeNull();
+  });
+
+  /**
+   * Two uploads of the same bytes at once both pass the select (no row yet) and both insert; the loser used
+   * to trip `asset_document_sha_idx` and answer 500 although the asset was stored (audit #1202 F18). The
+   * insert is `on conflict do nothing` now and the loser re-reads the winner's row, so both callers get the
+   * one asset. PGlite runs one statement at a time, but the select→insert pair interleaves at the awaits.
+   */
+  it("two concurrent puts of the same bytes both resolve with one asset id and one row (race-free dedupe)", async () => {
+    const db = await getDb();
+    const rounds = 20;
+    const rejected: unknown[] = [];
+    let sameId = 0;
+    for (let i = 0; i < rounds; i++) {
+      const bytes = new Uint8Array([0x52, 0x41, 0x43, 0x45, i]);
+      const put = (name: string) => putAsset({ documentId: docId, userId, name, mime: "image/png", bytes });
+      const outcomes = await Promise.allSettled([put(`race-${i}-a.png`), put(`race-${i}-b.png`)]);
+      for (const o of outcomes) if (o.status === "rejected") rejected.push(o.reason);
+      const ids = outcomes.flatMap((o) => (o.status === "fulfilled" ? [o.value.id] : []));
+      if (ids.length === 2 && ids[0] === ids[1]) sameId++;
+      const rows = await db
+        .select({ id: schema.assets.id, name: schema.assets.name })
+        .from(schema.assets)
+        .where(and(eq(schema.assets.documentId, docId), eq(schema.assets.sha256, sha256Hex(bytes))));
+      expect(rows).toHaveLength(1);
+      if (ids.length) expect(ids[0]).toBe(rows[0].id);
+    }
+    const sqlState = (err: unknown): unknown => {
+      for (let e = err, depth = 0; e && typeof e === "object" && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+        if ("code" in e) return (e as { code: unknown }).code;
+      }
+      return undefined;
+    };
+    expect({ rounds, rejected: rejected.length, sameId, codes: [...new Set(rejected.map(sqlState))] }).toEqual({ rounds, rejected: 0, sameId: rounds, codes: [] });
+  });
+});
+
+/**
+ * The route stores the asset and then records `asset.upload`; a failure there used to answer 500 for an
+ * upload that had happened (the retry returned the same asset through the sha256 dedupe). Audit #1202 F18.
+ */
+describe("POST /api/documents/[id]/assets", () => {
+  const docId = "asset-route-doc";
+  const ctx = { params: Promise.resolve({ id: docId }) };
+  const upload = (name: string, bytes: Uint8Array) => POST(new Request(`http://localhost:3700/api/documents/${docId}/assets?name=${name}`, { method: "POST", headers: { "content-type": "image/png" }, body: bytes }), ctx);
+  /** Runs `fn` with console.error silenced; returns its result and the `[assets]`-prefixed lines it logged. */
+  const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: unknown[][] }> => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await fn();
+      return { result, logged: errors.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("[assets]")) };
+    } finally {
+      errors.mockRestore();
+    }
+  };
+  const uploads = async () => {
+    const db = await getDb();
+    return db
+      .select()
+      .from(schema.activity)
+      .where(and(eq(schema.activity.documentId, docId), eq(schema.activity.action, "asset.upload")));
+  };
+
+  beforeAll(async () => {
+    const db = await getDb();
+    const [user] = await db.insert(schema.users).values({ name: "Bea", login: "bea", email: "bea@example.com" }).returning();
+    actor = { id: user.id, login: "bea", name: "Bea", image: null };
+    await db.insert(schema.documents).values({ id: docId, title: "Uploads", ownerId: user.id, content: "" });
+  });
+
+  it("a normal upload answers exactly 201 { id, url, name, mime, size, alt } — no warnings key — and records asset.upload", async () => {
+    const res = await upload("plain.png", PNG);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body).toEqual({ id: expect.any(String), url: `/api/assets/${body.id}`, name: "plain.png", mime: "image/png", size: PNG.byteLength, alt: "plain" });
+    expect(await uploads()).toHaveLength(1);
+  });
+
+  it("recordActivity failing after the asset is stored: 201 with the asset and warnings: [activity-not-recorded]", async () => {
+    const bytes = new Uint8Array([0x57, 0x41, 0x52, 0x4e]);
+    vi.mocked(recordActivity).mockRejectedValueOnce(new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid'));
+    const { result: res, logged } = await quietly(() => upload("warn.png", bytes));
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body).toEqual({ id: expect.any(String), url: `/api/assets/${body.id}`, name: "warn.png", mime: "image/png", size: bytes.byteLength, alt: "warn", warnings: ["activity-not-recorded"] });
+    // The driver's message (statement + parameters) stays in the log, logged once under the route's code.
+    expect(JSON.stringify(body)).not.toContain("Failed query");
+    expect(logged).toEqual([["[assets] activity-not-recorded", expect.any(Error)]]);
+
+    expect(await getAsset(body.id)).toMatchObject({ documentId: docId, size: bytes.byteLength });
+    expect(await uploads()).toHaveLength(1);
+    // The retry an agent makes lands on the same asset through the dedupe, and records the activity this time.
+    const again = await upload("warn.png", bytes);
+    expect(again.status).toBe(201);
+    expect(((await again.json()) as { id: string }).id).toBe(body.id);
+    expect(await uploads()).toHaveLength(2);
+  });
+
+  it("a rejected image is still its 4xx with nothing stored and no activity", async () => {
+    const before = (await uploads()).length;
+    const res = await upload("empty.png", new Uint8Array());
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "The file is empty" });
+    expect(await uploads()).toHaveLength(before);
   });
 });

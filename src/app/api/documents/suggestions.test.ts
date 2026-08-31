@@ -9,14 +9,39 @@ delete process.env.DATABASE_URL;
 let actor: { id: string; login: string; name: string; image: null } | null = null;
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+// Wrapped so a test can make the activity row or an author's notification fail after the decision is in the document.
+vi.mock("@/server/activity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/activity")>();
+  return { ...actual, recordActivity: vi.fn(actual.recordActivity) };
+});
+vi.mock("@/server/notifications", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/notifications")>();
+  return { ...actual, notifySuggestionDecision: vi.fn(actual.notifySuggestionDecision) };
+});
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument } = await import("@/server/documents");
+const { recordActivity } = await import("@/server/activity");
+const { notifySuggestionDecision } = await import("@/server/notifications");
 const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const suggestions = await import("@/app/api/documents/[id]/suggestions/route");
 const activity = await import("@/app/api/documents/[id]/activity/route");
+const content = await import("@/app/api/documents/[id]/content/route");
 
 type Pending = { id: string; type: string; text: string };
+
+const DB_FAILURE = new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid');
+
+/** Runs `fn` with console.error silenced; returns its result and the `[suggestions]`-prefixed lines it logged. */
+const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: unknown[][] }> => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = await fn();
+    return { result, logged: errors.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("[suggestions]")) };
+  } finally {
+    errors.mockRestore();
+  }
+};
 
 describe("POST /api/documents/[id]/suggestions", () => {
   let docId: string;
@@ -101,5 +126,88 @@ describe("POST /api/documents/[id]/suggestions", () => {
   it("rejects an unknown action", async () => {
     await freshDoc();
     expect((await post(suggestions.POST, "suggestions", { action: "approve" })).status).toBe(400);
+  });
+
+  /**
+   * `docs/agents.md` promises that a non-2xx status means nothing changed. The decision is applied in the
+   * shared document (text changed on accept, suggestions cleared on reject) before the activity row and the
+   * authors' notifications; a failure there used to answer 500 for a decision that had happened, and the retry
+   * then answered `404 Suggestion not found` (single) or `decided: 0` (all). Audit #1202 F17.
+   */
+  describe("post-write failures are warnings on the 200", () => {
+    const clean = async () => ((await (await content.GET(new Request(`http://localhost:3700/api/documents/${docId}/content`), ctx())).json()) as { clean: string }).clean;
+
+    it("accept with recordActivity failing: 200 { ok, decided: 1, id, warnings: [activity-not-recorded] }, the text changed, the author notified", async () => {
+      await freshDoc();
+      const before = await pending();
+      const insertion = before.find((s) => s.type === "insert")!.id;
+      const deletion = before.find((s) => s.type === "delete")!.id;
+      expect(await clean()).toBe("# shape\n\nAlpha.\n");
+      vi.mocked(recordActivity).mockRejectedValueOnce(DB_FAILURE);
+      vi.mocked(notifySuggestionDecision).mockClear();
+      const { result: res, logged } = await quietly(() => post(suggestions.POST, "suggestions", { action: "accept", id: insertion }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ ok: true, decided: 1, id: insertion, warnings: ["activity-not-recorded"] });
+      // The driver's message (statement + parameters) stays in the log, logged once under the route's code.
+      expect(JSON.stringify(body)).not.toContain("Failed query");
+      expect(logged).toEqual([["[suggestions] activity-not-recorded", expect.any(Error)]]);
+
+      // The insertion is now plain text (it sits before the deleted word); only the deletion is still pending.
+      expect(await clean()).toBe("# shape\n\nBetaAlpha.\n");
+      expect((await pending()).map((s) => s.id)).toEqual([deletion]);
+      expect(await activityActions()).toEqual(["suggestion.add"]);
+      expect(vi.mocked(notifySuggestionDecision)).toHaveBeenCalledTimes(1);
+
+      // Deciding it again is the honest 404 — the caller already got its 200.
+      const again = await post(suggestions.POST, "suggestions", { action: "accept", id: insertion });
+      expect(again.status).toBe(404);
+      expect((await pending()).length).toBe(1);
+    });
+
+    it("acceptAll with an author's notification failing: 200 { ok, decided: 2, warnings: [notification-not-sent] }, the activity row stands", async () => {
+      await freshDoc();
+      vi.mocked(notifySuggestionDecision).mockRejectedValueOnce(DB_FAILURE);
+      const { result: res, logged } = await quietly(() => post(suggestions.POST, "suggestions", { action: "acceptAll" }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, decided: 2, warnings: ["notification-not-sent"] });
+      expect(logged).toEqual([["[suggestions] notification-not-sent", expect.any(Error)]]);
+
+      expect(await clean()).toBe("# shape\n\nBeta.\n");
+      expect((await pending()).length).toBe(0);
+      expect(await activityActions()).toEqual(["suggestion.accept", "suggestion.add"]);
+
+      // Nothing left to decide: `decided: 0` now describes the world correctly.
+      const nothing = await post(suggestions.POST, "suggestions", { action: "acceptAll" });
+      expect(await nothing.json()).toEqual({ ok: true, decided: 0 });
+    });
+
+    it("reject with both failing: 200 with both codes in write order, the suggestion is gone", async () => {
+      await freshDoc();
+      const deletion = (await pending()).find((s) => s.type === "delete")!.id;
+      vi.mocked(recordActivity).mockRejectedValueOnce(DB_FAILURE);
+      vi.mocked(notifySuggestionDecision).mockRejectedValueOnce(DB_FAILURE);
+      const { result: res, logged } = await quietly(() => post(suggestions.POST, "suggestions", { action: "reject", id: deletion }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, decided: 1, id: deletion, warnings: ["activity-not-recorded", "notification-not-sent"] });
+      expect(logged).toEqual([
+        ["[suggestions] activity-not-recorded", expect.any(Error)],
+        ["[suggestions] notification-not-sent", expect.any(Error)],
+      ]);
+      expect((await pending()).map((s) => s.id)).toHaveLength(1);
+      expect((await post(suggestions.POST, "suggestions", { action: "reject", id: deletion })).status).toBe(404);
+    });
+
+    it("a decision that changes nothing runs no tail and stays the plain shape", async () => {
+      await freshDoc();
+      await post(suggestions.POST, "suggestions", { action: "rejectAll" });
+      vi.mocked(recordActivity).mockClear();
+      vi.mocked(notifySuggestionDecision).mockClear();
+      const nothing = await post(suggestions.POST, "suggestions", { action: "rejectAll" });
+      expect(nothing.status).toBe(200);
+      expect(await nothing.json()).toEqual({ ok: true, decided: 0 });
+      expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
+      expect(vi.mocked(notifySuggestionDecision)).not.toHaveBeenCalled();
+    });
   });
 });

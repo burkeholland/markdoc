@@ -8,6 +8,9 @@ import { changeCollaboratorAccess } from "@/server/collab/authorization";
 
 type Params = { params: Promise<{ id: string }> };
 
+/** Post-write side effects that can fail without taking the share change back: reported as `warnings` on the 2xx (see docs/agents.md). */
+type Warning = "activity-not-recorded" | "notification-not-sent";
+
 /** Owner, collaborators and the agents that can be @-mentioned here (present now or active in the last 30 days). */
 export const GET = handler(async (_req: Request, { params }: Params) => {
   const { id } = await params;
@@ -47,9 +50,24 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   await changeCollaboratorAccess(id, login, body.role, async () => {
     await upsertCollaborator(id, login, body.role, user!.id);
   });
-  await recordActivity(id, activityActor(user!), "share.add", { login, role: body.role });
-  await notifyShare(id, login, body.role, { login: user!.login ?? null, name: user!.name ?? user!.login ?? null });
-  return json({ ok: true, login, role: body.role, pending: !known }, { status: known ? 200 : 202 });
+  // The access is granted (the row is written and live connections re-resolved, irrevocable): an activity row or
+  // share notification that fails here is logged and reported as a warning code on the 2xx — never a non-2xx that
+  // would claim nothing changed (the owner's UI showed an error for a share that had happened).
+  const failed: Warning[] = [];
+  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[collaborators] ${code}`, err);
+      failed.push(code);
+      return false;
+    }
+  };
+  await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "share.add", { login, role: body.role }));
+  await tail("notification-not-sent", () => notifyShare(id, login, body.role, { login: user!.login ?? null, name: user!.name ?? user!.login ?? null }));
+  const result = { ok: true, login, role: body.role, pending: !known };
+  return json(failed.length ? { ...result, warnings: failed } : result, { status: known ? 200 : 202 });
 });
 
 const removeSchema = z.object({ login: z.string().trim().min(1) });
@@ -57,7 +75,9 @@ const removeSchema = z.object({ login: z.string().trim().min(1) });
 /**
  * Remove a person. Not idempotent on purpose: a login that is not currently a collaborator is
  * `404 { error: "Collaborator not found" }` and records nothing, so a removal that "succeeded"
- * always means a share actually ended.
+ * always means a share actually ended. The 404 is decided before anything is written; once the row
+ * is gone the answer is a 2xx, with `warnings: ["activity-not-recorded"]` when the feed row failed
+ * (a 500 there made the retry answer 404 for a removal that had happened).
  */
 export const DELETE = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
@@ -69,6 +89,17 @@ export const DELETE = handler(async (req: Request, { params }: Params) => {
     removed = await removeCollaborator(id, login);
   });
   if (!removed) throw new HttpError(404, "Collaborator not found");
-  await recordActivity(id, activityActor(user!), "share.remove", { login });
-  return json({ ok: true });
+  const failed: Warning[] = [];
+  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[collaborators] ${code}`, err);
+      failed.push(code);
+      return false;
+    }
+  };
+  await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "share.remove", { login }));
+  return json(failed.length ? { ok: true, warnings: failed } : { ok: true });
 });
