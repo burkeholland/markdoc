@@ -5,15 +5,10 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, FileText, Loader2, XCircle } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
+import { uploadImportFiles, type ImportedDocument } from "@/lib/import-upload";
 
 export const IMPORT_FILE_EXTENSIONS = [".md", ".markdown", ".mdown", ".mkd", ".txt", ".text", ".html", ".htm"];
 export const IMPORT_ACCEPT = [...IMPORT_FILE_EXTENSIONS, "image/*"].join(",");
-
-export interface ImportedDocument {
-  id: string;
-  title: string;
-  warnings: string[];
-}
 
 export function isImportableFile(file: File): boolean {
   const name = file.name.toLowerCase();
@@ -36,18 +31,6 @@ export function splitImportFiles(files: Iterable<File>): { documents: File[]; im
 /** True when a drag carries files (not text or editor content). */
 export function dragHasFiles(dt: DataTransfer | null): boolean {
   return !!dt && Array.from(dt.types ?? []).includes("Files");
-}
-
-/** Upload files to `POST /api/import/file`; resolves with the created documents. */
-export async function uploadImportFiles(documents: File[], images: File[] = []): Promise<ImportedDocument[]> {
-  const form = new FormData();
-  for (const f of documents) form.append("files", f, f.name);
-  for (const f of images) form.append("images", f, f.name);
-  const res = await fetch("/api/import/file", { method: "POST", body: form, credentials: "same-origin" });
-  const text = await res.text();
-  const data = text ? (JSON.parse(text) as { documents?: ImportedDocument[]; error?: string }) : {};
-  if (!res.ok) throw new Error(data.error ?? `Import failed (${res.status})`);
-  return data.documents ?? [];
 }
 
 export type ImportItemStatus = "uploading" | "done" | "error";

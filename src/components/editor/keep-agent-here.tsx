@@ -5,8 +5,8 @@ import { ArrowLeft, Check, Copy, ExternalLink, Radio } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
-import { AGENT_DOCS_URL } from "@/lib/mcp";
-import { AgentConnectCard, AGENT_CONNECT_DISMISSED_KEY, useOrigin } from "@/components/settings/agent-connect-card";
+import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
+import { AgentConnectCard, useOrigin } from "@/components/settings/agent-connect-card";
 
 /**
  * The sentence a person pastes into Copilot CLI (or any MCP client connected to Markdoc) to put their

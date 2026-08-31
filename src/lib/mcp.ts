@@ -19,6 +19,12 @@ export const COPILOT_PREALLOW_TOOLS = ["markdoc_suggest", "markdoc_comment", "ma
 /** Token scopes, narrowest first (mirrors `TokenScope` in the schema without importing the server). */
 export type TokenScopeName = "read" | "comment" | "full";
 
+/** The scope radio order (narrowest first), shared with the Share dialog's agent card. */
+export const SCOPES: TokenScopeName[] = ["read", "comment", "full"];
+
+/** localStorage key set once the user dismisses the agent-connect card (Settings, comments panel, Keep an agent here). */
+export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
+
 /** The pre-allow tools a token of this scope can actually run: no point pre-allowing what the server refuses with 403. */
 const PREALLOW_BY_SCOPE: Record<TokenScopeName, readonly (typeof COPILOT_PREALLOW_TOOLS)[number][]> = {
   read: ["markdoc_presence"],

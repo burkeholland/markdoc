@@ -43,8 +43,7 @@ import {
 } from "lucide-react";
 import type { CollabSession, EditMode, PresenceUser, SaveState } from "@/editor/collab/session";
 import type { SyncStatusDto } from "@/lib/api";
-import { SYNC_LABELS } from "./sync-dialog";
-import { GITHUB_NOT_CONFIGURED } from "./github-dialog";
+import { GITHUB_NOT_CONFIGURED, SYNC_LABELS } from "./labels";
 import { isIdle } from "@/editor/collab/follow";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";

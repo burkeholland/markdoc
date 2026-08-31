@@ -5,7 +5,8 @@ import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { pollDocumentSync } from "./editor-shell";
 import { PublishStatusButton } from "./header";
-import { SyncDialog, SYNC_LABELS, type SyncActions } from "./sync-dialog";
+import { SyncDialog, type SyncActions } from "./sync-dialog";
+import { SYNC_LABELS } from "./labels";
 
 const REMOTE = {
   sha: "4ce1359b",
