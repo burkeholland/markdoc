@@ -8,9 +8,12 @@ import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { notifyReply, notifyResolved, readThread, recordMentions } from "@/server/notifications";
 import { activityActor, clip, recordActivity } from "@/server/activity";
 import { recordSuggestionDecision } from "@/server/reviews";
-import { attachWork, requestThreadId } from "@/server/agent-requests";
+import { attachWork, requireAttachableRequest } from "@/server/agent-requests";
 
 type Params = { params: Promise<{ id: string }> };
+
+/** Post-write side effects that can fail without taking the comment back: reported as `warnings` on the 2xx (see docs/agents.md). */
+type Warning = "mentions-not-recorded" | "notification-not-sent" | "request-not-attached" | "activity-not-recorded";
 
 const schema = z.discriminatedUnion("action", [
   z.object({
@@ -67,10 +70,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // The text the action concerns (new comment's quote, replied thread's range): an agent's caret moves there.
   let at: { from: number; to: number } | undefined;
   let decided: { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null = null;
-  // A linked request must exist before anything is written (404 with nothing to undo). For `add`, a request
-  // made from a comment thread folds the new comment into that thread (see the schema); `folded` is that thread.
+  // A linked request must exist and be open/claimed before anything is written (404/409 with nothing to undo,
+  // exactly as `suggest` does). For `add`, a request made from a comment thread folds the new comment into that
+  // thread (see the schema); `requestThread` is that thread.
   const requestId = body.action === "add" || body.action === "reply" ? body.requestId : undefined;
-  const requestThread = requestId ? await requestThreadId(id, requestId) : null;
+  const requestThread = requestId ? ((await requireAttachableRequest(id, requestId)).threadId ?? null) : null;
   let folded: string | null = null;
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
@@ -182,56 +186,49 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     recordAgentActivity(doc, user, body.action === "react" ? "reacted" : "commented", at);
   });
   // Editors' comments are picked up by the live-document watcher; this covers the no-collab path too (idempotent).
-  try {
-    await afterMutation();
-  } catch (err) {
-    // The thread/reply is already in the shared document; a failed mention, notification or activity row
-    // must not leave it half-written ("a non-2xx status means nothing changed"), so take it back out.
-    await undoWrite().catch((undoErr) => console.error("[comments] could not undo after a failed side effect", undoErr));
-    throw err;
-  }
-  return json(result);
+  // The thread/reply is already in the shared document (broadcast to every editor, irrevocable), so a mention,
+  // notification, request link or activity row that fails here is logged and reported as a warning code on the
+  // 2xx — never a non-2xx that would claim nothing changed, never a silent gap.
+  const warnings = await afterMutation();
+  return json(warnings.length ? { ...(result as Record<string, unknown>), warnings } : result);
 
-  async function afterMutation() {
+  async function afterMutation(): Promise<Warning[]> {
+    const failed: Warning[] = [];
+    const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
+      try {
+        await fn();
+        return true;
+      } catch (err) {
+        console.error(`[comments] ${code}`, err);
+        failed.push(code);
+        return false;
+      }
+    };
+    const createdId = (result as { id?: string | null }).id ?? null;
     if (body.action === "add" || body.action === "reply" || body.action === "edit") {
-      const created = result as { id?: string | null };
-      const target = body.action === "edit" ? body.replyId ?? body.threadId : created.id;
-      if (target) await recordMentions(id, target, user.login, body.body, author.name);
+      const target = body.action === "edit" ? body.replyId ?? body.threadId : createdId;
+      if (target) await tail("mentions-not-recorded", () => recordMentions(id, target, user.login, body.body, author.name));
     }
-    for (const fn of after) await fn();
-    const createdId = (result as { id?: string }).id;
-    if (body.action === "add" && folded) {
-      // Folded into the request's thread: it is a reply in every respect (activity, work count).
-      await recordActivity(id, activityActor(user), "comment.reply", { threadId: folded, replyId: createdId ?? null, quote: clip(body.body), requestId: body.requestId });
-      await attachWork(id, body.requestId!, user, { comments: 1, commentIds: createdId ? [createdId] : [] });
-    } else if (body.action === "add") {
-      await recordActivity(id, activityActor(user), "comment.add", { threadId: createdId ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
-      if (body.requestId) await attachWork(id, body.requestId, user, { comments: 1, commentIds: createdId ? [createdId] : [] });
-    } else if (body.action === "reply") {
-      await recordActivity(id, activityActor(user), "comment.reply", { threadId: body.threadId, replyId: createdId ?? null, quote: clip(body.body), ...(body.requestId ? { requestId: body.requestId } : {}) });
-      if (body.requestId) await attachWork(id, body.requestId, user, { comments: 1, commentIds: createdId ? [createdId] : [] });
+    for (const fn of after) await tail("notification-not-sent", fn);
+    if (body.action === "add" || body.action === "reply") {
+      // The request link before the activity row: `attachWork` still validates the request (one completed or
+      // cancelled between the pre-check and the write is the residual race), and a row must not claim work for
+      // a request that refused to count it — so the row is written after, and without `requestId`, when it did.
+      const linkedRequest = body.requestId;
+      const attached = linkedRequest ? await tail("request-not-attached", () => attachWork(id, linkedRequest, user, { comments: 1, commentIds: createdId ? [createdId] : [] })) : false;
+      const link = attached ? { requestId: linkedRequest } : {};
+      const quote = clip(body.body);
+      // A reply, or an `add` folded into the request's thread, is a reply in every respect (activity, work count).
+      const repliedTo = body.action === "reply" ? body.threadId : folded;
+      if (repliedTo) await tail("activity-not-recorded", () => recordActivity(id, activityActor(user), "comment.reply", { threadId: repliedTo, replyId: createdId, quote, ...link }));
+      else await tail("activity-not-recorded", () => recordActivity(id, activityActor(user), "comment.add", { threadId: createdId, quote, ...link }));
     } else if (body.action === "resolve" && body.resolved) {
-      await recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId });
+      await tail("activity-not-recorded", () => recordActivity(id, activityActor(user), "comment.resolve", { threadId: body.threadId }));
     } else if (body.action === "suggestion") {
       const d = decided as { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null;
-      if (d) await recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null }, d.reply);
+      if (d) await tail("activity-not-recorded", () => recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null }, d.reply));
     }
-  }
-
-  async function undoWrite() {
-    const createdId = (result as { id?: string | null }).id;
-    if (!createdId || (body.action !== "add" && body.action !== "reply")) return;
-    const action = body;
-    await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {
-      const model = new CommentsModel(doc, doc.getText(TEXT_KEY));
-      try {
-        if (action.action === "reply") model.deleteReply(action.threadId, createdId);
-        else if (folded) model.deleteReply(folded, createdId);
-        else model.remove(createdId);
-      } finally {
-        model.destroy();
-      }
-    });
+    return failed;
   }
 });
 

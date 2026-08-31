@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
@@ -17,6 +17,15 @@ type TestActor = { id: string; login: string; name: string; image: null };
 let actor: TestActor | null = null;
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+// Wrapped so a test can make the activity insert or the request link fail after the comment is written.
+vi.mock("@/server/activity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/activity")>();
+  return { ...actual, recordActivity: vi.fn(actual.recordActivity) };
+});
+vi.mock("@/server/agent-requests", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/agent-requests")>();
+  return { ...actual, attachWork: vi.fn(actual.attachWork) };
+});
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, upsertCollaborator } = await import("@/server/documents");
@@ -26,7 +35,8 @@ const { signCollabToken } = await import("@/server/collab/token");
 const { registerCollab } = await import("@/server/collab/registry");
 const { mutateLiveDoc } = await import("@/server/livedoc");
 const { listNotifications } = await import("@/server/notifications");
-const { listActivity } = await import("@/server/activity");
+const { listActivity, recordActivity } = await import("@/server/activity");
+const { attachWork, completeRequest, createRequest, listRequests } = await import("@/server/agent-requests");
 const { CommentsModel } = await import("@/editor/collab/comments");
 const { POST, GET } = await import("@/app/api/documents/[id]/comments/route");
 
@@ -424,6 +434,126 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     expect((await post(docId, { action: "react", threadId: id, emoji: "👍" })).status).toBe(403);
     actor = null;
     expect((await post(docId, { action: "react", threadId: id, emoji: "👍" })).status).toBe(401);
+  });
+
+  /**
+   * `docs/agents.md` promises that a non-2xx status means nothing changed, and a 2xx must not hide a gap: the
+   * comment is broadcast to every editor the moment it is written, so the request is checked before that and
+   * whatever fails after it (mention, activity row, request link) is reported as `warnings` on the 200.
+   */
+  describe("the non-2xx promise for request-linked comments", () => {
+    // Its own document: the tests above rewrite the shared one's text.
+    let reqDocId: string;
+    const commentAdds = async (threadId: string) => (await listActivity(reqDocId, { limit: 100 })).items.filter((a) => a.action === "comment.add" && (a.detail as { threadId?: string }).threadId === threadId);
+    /** Runs `fn` with console.error silenced; returns its result and the `[comments]`-prefixed lines it logged. */
+    const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: unknown[][] }> => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result = await fn();
+        return { result, logged: errors.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("[comments]")) };
+      } finally {
+        errors.mockRestore();
+      }
+    };
+
+    beforeAll(async () => {
+      const doc = await createDocument({ ownerId: alice.id, content: "# Linked doc\n\nFirst paragraph.\n" });
+      reqDocId = doc.id;
+      await upsertCollaborator(reqDocId, carol.login, "commenter", alice.id);
+    });
+    afterEach(() => {
+      // A failure armed with `...Once` and never consumed must not leak into the next test.
+      vi.mocked(recordActivity).mockReset();
+      vi.mocked(attachWork).mockReset();
+    });
+
+    it("refuses a done request before writing: 409 with no comment, no activity row and no mention notification", async () => {
+      actor = alice;
+      const request = await createRequest(reqDocId, alice, "owner", { instruction: "Comment on the first paragraph", mode: "comment" });
+      await completeRequest(reqDocId, request.id, alice, { summary: "Done elsewhere." });
+      const { comments: before } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
+      const activityBefore = (await listActivity(reqDocId, { limit: 100 })).items;
+      const mentionsBefore = (await listNotifications("alice", { kind: "mention" })).items;
+
+      actor = carol;
+      const res = await post(reqDocId, { action: "add", quote: "First paragraph", body: "Late answer, @alice.", requestId: request.id });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: "Request is done", status: "done" });
+
+      const { comments: after } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
+      expect(after).toEqual(before);
+      const activity = (await listActivity(reqDocId, { limit: 100 })).items;
+      expect(activity.filter((a) => a.action === "comment.add" && (a.detail as { requestId?: string }).requestId === request.id)).toEqual([]);
+      expect(activity).toHaveLength(activityBefore.length);
+      expect((await listNotifications("alice", { kind: "mention" })).items).toHaveLength(mentionsBefore.length);
+      expect((await listRequests(reqDocId)).find((r) => r.id === request.id)).toMatchObject({ status: "done" });
+    });
+
+    it("keeps the comment and answers 200 with warnings when the activity row fails after the write", async () => {
+      actor = alice;
+      const request = await createRequest(reqDocId, alice, "owner", { instruction: "Comment on the first paragraph", mode: "comment" });
+      const { comments: before } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
+
+      actor = carol;
+      vi.mocked(recordActivity).mockRejectedValueOnce(new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid'));
+      const { result: res, logged } = await quietly(() => post(reqDocId, { action: "add", quote: "First paragraph", body: "Recorded late, @alice.", requestId: request.id }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { id: string; warnings?: string[] };
+      expect(body).toEqual({ id: expect.any(String), warnings: ["activity-not-recorded"] });
+      // The driver's message (statement + parameters) stays in the log, logged once under the route's code.
+      expect(JSON.stringify(body)).not.toContain("Failed query");
+      expect(logged).toEqual([["[comments] activity-not-recorded", expect.any(Error)]]);
+
+      // The comment is in the shared document.
+      const { comments: after } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
+      expect(after).toHaveLength(before.length + 1);
+      expect(after.find((c) => c.id === body.id)).toMatchObject({ author: "Carol", mentions: ["alice"], currentText: "First paragraph" });
+      // Everything that did not fail happened: the mention, and the request link (which now runs before the row).
+      expect((await listNotifications("alice", { kind: "mention" })).items.find((n) => n.refId === body.id)).toBeTruthy();
+      expect((await listRequests(reqDocId)).find((r) => r.id === request.id)).toMatchObject({ status: "claimed", result: { comments: 1, commentIds: [body.id] } });
+      // And the one thing the warning names is really missing.
+      expect(await commentAdds(body.id)).toEqual([]);
+    });
+
+    it("a request closed between the pre-check and the write: 200 with request-not-attached, the comment stays, its activity row carries no requestId", async () => {
+      actor = alice;
+      const request = await createRequest(reqDocId, alice, "owner", { instruction: "Comment on the first paragraph", mode: "comment" });
+      // The residual race: the request is completed after `requireAttachableRequest` passed and the comment is written.
+      vi.mocked(attachWork).mockImplementationOnce(async (...args) => {
+        await completeRequest(reqDocId, request.id, alice, { summary: "Closed meanwhile." });
+        const actual = (await vi.importActual<typeof import("@/server/agent-requests")>("@/server/agent-requests")).attachWork;
+        return actual(...args);
+      });
+      actor = carol;
+      const { result: res, logged } = await quietly(() => post(reqDocId, { action: "add", quote: "First paragraph", body: "Just in time?", requestId: request.id }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { id: string; warnings?: string[] };
+      expect(body).toEqual({ id: expect.any(String), warnings: ["request-not-attached"] });
+      expect(logged).toEqual([["[comments] request-not-attached", expect.any(Error)]]);
+
+      const { comments } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
+      expect(comments.find((c) => c.id === body.id)).toMatchObject({ body: "Just in time?" });
+      // The request refused the work, so nothing claims it: not the request's result, not the activity row.
+      const row = (await listRequests(reqDocId)).find((r) => r.id === request.id);
+      expect(row).toMatchObject({ status: "done" });
+      expect((row?.result as { commentIds?: string[] } | null)?.commentIds ?? []).not.toContain(body.id);
+      const adds = await commentAdds(body.id);
+      expect(adds).toHaveLength(1);
+      expect(adds[0].detail).not.toHaveProperty("requestId");
+    });
+
+    it("a successful add, reply or resolve carries no warnings", async () => {
+      actor = alice;
+      const added = await post(reqDocId, { action: "add", quote: "First paragraph", body: "Plain add." });
+      expect(added.status).toBe(200);
+      const { id, ...rest } = (await added.json()) as { id: string };
+      expect(id).toEqual(expect.any(String));
+      expect(rest).toEqual({});
+      const replied = await post(reqDocId, { action: "reply", threadId: id, body: "Plain reply." });
+      expect(replied.status).toBe(200);
+      expect(await replied.json()).toEqual({ id: expect.any(String) });
+      expect(await (await post(reqDocId, { action: "resolve", threadId: id, resolved: true })).json()).toEqual({ ok: true });
+    });
   });
 });
 

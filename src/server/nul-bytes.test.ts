@@ -19,7 +19,7 @@ const { getDb, schema } = await import("@/server/db");
 const { eq } = await import("drizzle-orm");
 const { createDocument } = await import("@/server/documents");
 const { recordActivity } = await import("@/server/activity");
-const { nulPaths, NUL_MESSAGE } = await import("@/server/http");
+const { handler, nulPaths, NUL_MESSAGE } = await import("@/server/http");
 const { decodeImportBytes, importFiles } = await import("@/server/import-file");
 const documents = await import("@/app/api/documents/route");
 const document = await import("@/app/api/documents/[id]/route");
@@ -192,40 +192,68 @@ describe("POST /api/import/file with uploaded bytes", () => {
 });
 
 describe("an unexpected error", () => {
-  it("answers exactly { error: \"Unexpected error\" } and a failed comment leaves no thread behind", async () => {
-    vi.mocked(recordActivity).mockRejectedValueOnce(new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid'));
+  let threadId: string;
+
+  it("answers exactly { error: \"Unexpected error\" }: the driver's statement and parameters go to the log only", async () => {
+    const route = handler<[Request]>(async () => {
+      throw new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid');
+    });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const res = await sendJson(comments.POST, "POST", `/api/documents/${docId}/comments`, { action: "add", quote: "Hi", body: "looks fine" }, docId);
+      const res = await route(new Request(`${BASE}/api/documents/${docId}/comments`, { method: "POST" }));
       expect(res.status).toBe(500);
-      expect(await res.json()).toEqual({ error: "Unexpected error" });
-      expect(errors).toHaveBeenCalled();
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({ error: "Unexpected error" });
+      expect(text).not.toContain("secret-owner-uuid");
+      expect(errors).toHaveBeenCalledTimes(1);
+      expect(errors.mock.calls[0][0]).toBeInstanceOf(Error);
     } finally {
       errors.mockRestore();
     }
-    const list = await comments.GET(new Request(`${BASE}/api/documents/${docId}/comments`), params(docId));
-    expect(((await list.json()) as { comments: unknown[] }).comments).toEqual([]);
-    const live = await content.GET(new Request(`${BASE}/api/documents/${docId}/content`), params(docId));
-    expect(((await live.json()) as { openComments: number }).openComments).toBe(0);
   });
 
-  it("a failed reply is taken back out, the thread stays", async () => {
-    const added = await sendJson(comments.POST, "POST", `/api/documents/${docId}/comments`, { action: "add", quote: "Hi", body: "thread" }, docId);
-    expect(added.status).toBe(200);
-    const { id: threadId } = (await added.json()) as { id: string };
-    vi.mocked(recordActivity).mockRejectedValueOnce(new Error("boom"));
+  it("a comment whose activity row fails to insert stays, and the 200 carries a warning rather than the driver's message", async () => {
+    vi.mocked(recordActivity).mockRejectedValueOnce(new Error('Failed query: insert into "activity" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid'));
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let res: Response;
+    let logged: unknown[][];
     try {
-      const res = await sendJson(comments.POST, "POST", `/api/documents/${docId}/comments`, { action: "reply", threadId, body: "reply" }, docId);
-      expect(res.status).toBe(500);
-      expect(await res.json()).toEqual({ error: "Unexpected error" });
+      res = await sendJson(comments.POST, "POST", `/api/documents/${docId}/comments`, { action: "add", quote: "Hi", body: "looks fine" }, docId);
+      logged = errors.mock.calls;
     } finally {
       errors.mockRestore();
     }
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain("Failed query");
+    expect(text).not.toContain("secret-owner-uuid");
+    const body = JSON.parse(text) as { id: string; warnings: string[] };
+    expect(body).toEqual({ id: expect.any(String), warnings: ["activity-not-recorded"] });
+    expect(logged).toEqual([["[comments] activity-not-recorded", expect.any(Error)]]);
+    threadId = body.id;
+
     const list = await comments.GET(new Request(`${BASE}/api/documents/${docId}/comments`), params(docId));
-    const threads = ((await list.json()) as { comments: { id: string; replies: unknown[] }[] }).comments;
+    const threads = ((await list.json()) as { comments: { id: string; body: string }[] }).comments;
+    expect(threads.map((t) => [t.id, t.body])).toEqual([[threadId, "looks fine"]]);
+    const live = await content.GET(new Request(`${BASE}/api/documents/${docId}/content`), params(docId));
+    expect(((await live.json()) as { openComments: number }).openComments).toBe(1);
+  });
+
+  it("a reply whose activity row fails to insert stays too", async () => {
+    vi.mocked(recordActivity).mockRejectedValueOnce(new Error("boom"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let res: Response;
+    try {
+      res = await sendJson(comments.POST, "POST", `/api/documents/${docId}/comments`, { action: "reply", threadId, body: "reply" }, docId);
+    } finally {
+      errors.mockRestore();
+    }
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: expect.any(String), warnings: ["activity-not-recorded"] });
+    const list = await comments.GET(new Request(`${BASE}/api/documents/${docId}/comments`), params(docId));
+    const threads = ((await list.json()) as { comments: { id: string; replies: { body: string }[] }[] }).comments;
     expect(threads).toHaveLength(1);
     expect(threads[0].id).toBe(threadId);
-    expect(threads[0].replies).toEqual([]);
+    expect(threads[0].replies.map((r) => r.body)).toEqual(["reply"]);
   });
 });
