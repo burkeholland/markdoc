@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { CollabSession } from "@/editor/collab/session";
+import { CollabSession, type SaveState } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
 import type { Role } from "@/server/db/schema";
@@ -83,6 +83,44 @@ export function useSessionValue<T>(session: CollabSession, select: (s: CollabSes
     return next;
   };
   return useSyncExternalStore(session.subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * How long the raw save state must stay `saved` before the header chip shows it again after a run of
+ * edits. One second: long enough that natural pauses between words (200–600 ms) do not flip the chip,
+ * short enough that "Saved" still answers the question right after you stop (#1282).
+ */
+export const SAVED_HOLD_MS = 1000;
+
+/**
+ * The save state as the header chip should display it. Every change shows at once, except the edge
+ * `saving → saved` that ends a run of local edits: the provider counts one unsynced change per
+ * keystroke and the server acks each within tens of ms, so the raw state alternates `saving`/`saved`
+ * on every key (two DOM flips and two `role="status"` announcements). That edge is shown only once the
+ * raw state has stayed `saved` for `holdMs`; a flip back to `saving` inside the window cancels the timer
+ * and nothing is shown. The sync itself is untouched — this hook only changes what is rendered.
+ *
+ * A `saving` that is part of a connection handshake (entered from `connecting`, `reconnecting`, `offline`
+ * or `error` — the first sync of every open, `onStatus` fires before `onSynced`) is not a run of edits:
+ * its `saved` shows immediately, so open time and the "All changes saved" recovery flash are unchanged.
+ */
+export function useSettledSaveState(live: SaveState, holdMs = SAVED_HOLD_MS): SaveState {
+  const [shown, setShown] = useState(live);
+  const previous = useRef(live);
+  // Whether the current `saving` run began from `saved` (local edits on a live connection).
+  const holdArmed = useRef(live === "saving");
+  useEffect(() => {
+    const prev = previous.current;
+    previous.current = live;
+    if (live === "saving" && prev !== "saving") holdArmed.current = prev === "saved";
+    if (live !== "saved" || !holdArmed.current) {
+      setShown(live);
+      return;
+    }
+    const timer = setTimeout(() => setShown("saved"), holdMs);
+    return () => clearTimeout(timer);
+  }, [live, holdMs]);
+  return shown;
 }
 
 /**
