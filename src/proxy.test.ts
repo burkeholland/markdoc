@@ -151,7 +151,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
   });
 
   it("sets none of the server's four headers, with or without x-forwarded-proto: https (one owner each)", async () => {
-    for (const extra of [{}, { "x-forwarded-proto": "https" }]) {
+    for (const extra of [{}, { "x-forwarded-proto": "https" }] as Record<string, string>[]) {
       const res = await proxy(request(undefined, extra, "/login"));
       expect(res.headers.get("strict-transport-security")).toBeNull();
       expect(res.headers.get("x-content-type-options")).toBeNull();
