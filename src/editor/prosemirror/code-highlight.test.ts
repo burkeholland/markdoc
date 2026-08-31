@@ -187,7 +187,8 @@ describe("codeHighlightPlugin", () => {
     expect(made.dispatched[0].docChanged).toBe(false);
     const decorations = made.decorations();
     expect(decorations.length).toBeGreaterThan(0);
-    expect(decorations.every((d) => d.inline)).toBe(true);
+    const size = made.view.state.doc.content.size;
+    expect(decorations.every((d) => d.from >= 1 && d.to > d.from && d.to <= size)).toBe(true);
     expect(made.coloured()).toBeGreaterThan(0);
     expect(made.view.dom.querySelector("span.hljs-keyword")?.textContent).toBe("const");
   });
