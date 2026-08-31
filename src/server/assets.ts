@@ -104,25 +104,35 @@ const dbStore: AssetStore = {
     const db = await getDb();
     const hash = sha256Hex(input.bytes);
     const name = cleanAssetName(input.name, mime);
+    const sameBytes = () =>
+      db
+        .select({ id: schema.assets.id, name: schema.assets.name, mime: schema.assets.mime, size: schema.assets.size })
+        .from(schema.assets)
+        .where(and(eq(schema.assets.documentId, input.documentId), eq(schema.assets.sha256, hash)));
 
-    const [existing] = await db
-      .select({ id: schema.assets.id, name: schema.assets.name, mime: schema.assets.mime, size: schema.assets.size })
-      .from(schema.assets)
-      .where(and(eq(schema.assets.documentId, input.documentId), eq(schema.assets.sha256, hash)));
+    const [existing] = await sameBytes();
     if (existing) return { ...existing, url: assetUrl(existing.id) };
 
-    const id = nanoid();
-    await db.insert(schema.assets).values({
-      id,
-      documentId: input.documentId,
-      userId: input.userId,
-      name,
-      mime,
-      size: input.bytes.byteLength,
-      sha256: hash,
-      data: input.bytes,
-    });
-    return { id, url: assetUrl(id), name, mime, size: input.bytes.byteLength };
+    // Two uploads of the same bytes at once both pass the select above; the insert is `on conflict do nothing` on
+    // `asset_document_sha_idx` (document_id, sha256) so the loser gets no unique violation, and the row for these
+    // bytes — ours or the other upload's — is read back (four small columns; `returning` would echo the data too).
+    await db
+      .insert(schema.assets)
+      .values({
+        id: nanoid(),
+        documentId: input.documentId,
+        userId: input.userId,
+        name,
+        mime,
+        size: input.bytes.byteLength,
+        sha256: hash,
+        data: input.bytes,
+      })
+      .onConflictDoNothing({ target: [schema.assets.documentId, schema.assets.sha256] });
+    const [stored] = await sameBytes();
+    // Only if the row vanished in between (the document deleted, cascading): the caller's asset does not exist.
+    if (!stored) throw new Error(`asset ${hash} of document ${input.documentId} is gone right after its insert`);
+    return { ...stored, url: assetUrl(stored.id) };
   },
 
   async get(id) {
@@ -150,7 +160,7 @@ export function setAssetStore(next: AssetStore): void {
   store = next;
 }
 
-/** Store an image for a document. Identical bytes within one document share a single asset. */
+/** Store an image for a document. Identical bytes within one document share a single asset, also when uploaded at the same time. */
 export function putAsset(input: PutAssetInput): Promise<StoredAsset> {
   return store.put(input);
 }

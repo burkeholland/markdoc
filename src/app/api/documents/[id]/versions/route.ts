@@ -6,6 +6,9 @@ import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string }> };
 
+/** Post-write side effect that can fail without taking the version back: reported as `warnings` on the 201 (see docs/agents.md). */
+type Warning = "activity-not-recorded";
+
 export const GET = handler(async (_req: Request, { params }: Params) => {
   const { id } = await params;
   await requireAccess(id, "view");
@@ -29,7 +32,21 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     createdBy: user?.id,
     createdByName: actorName(user),
   });
-  await recordActivity(id, activityActor(user!), "version.save", { number: version.number, title: body.title });
-  return json({ version: { ...version, createdAt: version.createdAt.toISOString() } }, { status: 201 });
+  // The version row is saved: an activity row that fails here is logged and reported as a warning code on the 201,
+  // never a 500 that would make the caller save a second identical version on retry.
+  const failed: Warning[] = [];
+  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[versions] ${code}`, err);
+      failed.push(code);
+      return false;
+    }
+  };
+  await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "version.save", { number: version.number, title: body.title }));
+  const result = { version: { ...version, createdAt: version.createdAt.toISOString() } };
+  return json(failed.length ? { ...result, warnings: failed } : result, { status: 201 });
 });
 

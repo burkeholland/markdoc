@@ -8,6 +8,9 @@ import { activityActor, recordActivity } from "@/server/activity";
 
 type Params = { params: Promise<{ id: string; vid: string }> };
 
+/** Post-write side effects of a restore that can fail without taking the restored text back: reported as `warnings` on the 200 (see docs/agents.md). */
+type Warning = "version-not-saved" | "activity-not-recorded";
+
 export const GET = handler(async (_req: Request, { params }: Params) => {
   const { id, vid } = await params;
   await requireAccess(id, "view");
@@ -37,7 +40,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     return json({ ok: true });
   }
 
-  // Restore: snapshot the current text first so nothing is lost, then replace.
+  // Restore: snapshot the current text first so nothing is lost, then replace. Both stay fatal: until the
+  // replace lands nothing has changed, so a 500 here is honest.
   const live = await readLiveText(id);
   if (live.text !== version.content) {
     await addVersion({
@@ -61,16 +65,34 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     },
     version.content,
   );
-  const restored = await addVersion({
-    documentId: id,
-    content: version.content,
-    kind: "restore",
-    title: `Restored version ${version.number}`,
-    createdBy: user?.id,
-    createdByName: actorName(user),
+  // The restored text is live (broadcast to every editor, irrevocable): the "Restored version n" row or the activity
+  // row failing here is logged and reported as a warning code on the 200 — `version` is null when the row could not
+  // be saved — never a 500 while everyone already sees the restored text.
+  const failed: Warning[] = [];
+  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      console.error(`[version] ${code}`, err);
+      failed.push(code);
+      return false;
+    }
+  };
+  let restored: Awaited<ReturnType<typeof addVersion>> | undefined;
+  await tail("version-not-saved", async () => {
+    restored = await addVersion({
+      documentId: id,
+      content: version.content,
+      kind: "restore",
+      title: `Restored version ${version.number}`,
+      createdBy: user?.id,
+      createdByName: actorName(user),
+    });
   });
-  await recordActivity(id, activityActor(user!), "version.restore", { number: version.number, title: version.title });
-  return json({ ok: true, version: { ...restored, createdAt: restored.createdAt.toISOString() } });
+  await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "version.restore", { number: version.number, title: version.title }));
+  const result = { ok: true, version: restored ? { ...restored, createdAt: restored.createdAt.toISOString() } : null };
+  return json(failed.length ? { ...result, warnings: failed } : result);
 });
 
 export const DELETE = handler(async (_req: Request, { params }: Params) => {
