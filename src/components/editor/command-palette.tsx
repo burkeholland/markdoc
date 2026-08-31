@@ -242,19 +242,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   );
 });
 
-/**
- * Whether a keydown should open the palette. Mod-Shift-P always; Mod-K only with a
- * collapsed selection outside text inputs (Mod-K with a selection still means "Link").
- */
-export function isPaletteShortcut(e: KeyboardEvent): boolean {
-  const mod = e.metaKey || e.ctrlKey;
-  if (!mod || e.altKey) return false;
-  const key = e.key.toLowerCase();
-  if (e.shiftKey && key === "p") return true;
-  if (e.shiftKey || key !== "k") return false;
-  const target = e.target as HTMLElement | null;
-  const tag = target?.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return false;
-  const sel = typeof window !== "undefined" ? window.getSelection() : null;
-  return !sel || sel.isCollapsed;
-}
+// The dashboard imports the shortcut test together with the palette; the editor shell takes it from
+// `./palette-shortcut` directly so its keydown handler does not pin this module to the route's entry JS.
+export { isPaletteShortcut } from "./palette-shortcut";

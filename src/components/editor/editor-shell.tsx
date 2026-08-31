@@ -23,19 +23,17 @@ import { useBreakpoint } from "@/lib/viewport-hooks";
 import { defaultLayout, LAYOUT_STORAGE_KEY, TABLET_MAX } from "@/lib/viewport";
 import { shallowEqual, useCollabSession, useSessionValue, type EditorUser } from "./use-session";
 import { EditorActions, EMPTY_FORMAT, type DialogKind, type FormatState } from "./actions";
-import { FileDropDialog, type PendingFileDrop } from "./file-drop-dialog";
+import type { PendingFileDrop } from "./file-drop-dialog";
 import { Header, type ExportFormat } from "./header";
 import { Toolbar } from "./toolbar";
 import { OutlinePanel } from "./outline";
 import { RichPane } from "./rich-pane";
 import { StatusBar, type Layout } from "./status-bar";
-import { CommentsPanel } from "./comments-panel";
-import { VersionsPanel, VersionDiffView, prefetchVersions, type VersionPreview } from "./versions-panel";
-import { ActivityPanel } from "./activity-panel";
+import type { VersionPreview } from "./versions-panel";
 import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY, clampPanelWidth, panelMaxFor, parseStoredPanelWidth } from "./panel-resize-handle";
-import { ShareDialog } from "./share-dialog";
-import { GitHubDialog, CommitDialog } from "./github-dialog";
-import { SyncDialog, type SyncActions } from "./sync-dialog";
+import type { SyncActions } from "./sync-dialog";
+import { useEverTrue } from "@/lib/hooks";
+import { lazyOnFirstUse } from "./lazy-on-first-use";
 
 const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
 
@@ -44,12 +42,59 @@ function CodePanePlaceholder() {
   return <div className="h-full min-h-0 w-full" aria-busy="true" data-testid="code-pane-loading" />;
 }
 
+/** Fills the side-panel slot (the slot already has its width) with the panel's header row while its chunk loads, so nothing shifts. */
+function SidePanelPlaceholder({ title }: { title: string }) {
+  return (
+    <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" aria-busy="true" aria-label={title} data-testid="side-panel-loading">
+      <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
+        <span className="pane-label">{title}</span>
+      </div>
+    </aside>
+  );
+}
+
 // Loaded on demand: CodeMirror and its Markdown grammar (~650 kB of JavaScript) are fetched only when a
 // code or split layout shows the pane, so the rich layout — the phone default — never downloads them and
 // the desktop paints the rich pane before the request completes (#1121). `actions.ts` and `scroll-sync.ts`
 // get their CodeMirror values from the pane through `onReady(view, api)`, so nothing else in this graph
 // imports `@codemirror/*` as a value.
 const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { ssr: false, loading: () => <CodePanePlaceholder /> });
+
+// Also on demand (#1150): the side panels, the dialogs, the command palette, the find bar and the file-drop
+// dialog are UI nobody sees on a cold load, so each module is a `next/dynamic` boundary fetched on first use
+// (`lazyOnFirstUse` adds the one re-render that keeps React's 300 ms fallback throttle out of the first open).
+// Everything that takes an `open` prop sits behind a mount-once gate (`useEverTrue`): after the first open it
+// stays mounted exactly as a static import did, so Radix's close transition, `onOpenChange` and focus return
+// to the trigger are unchanged — the only new thing is one chunk request on the first open. Only types may be
+// imported from these modules; a value import puts the module back into the route's entry JS. Each module has
+// exactly one `import()` here, shared by its components and by any prefetch (`prefetchVersions`), so it gets
+// exactly one chunk.
+const loadCommentsPanel = () => import("./comments-panel");
+const loadVersionsPanel = () => import("./versions-panel");
+const loadActivityPanel = () => import("./activity-panel");
+const loadShareDialog = () => import("./share-dialog");
+const loadGitHubDialog = () => import("./github-dialog");
+const loadSyncDialog = () => import("./sync-dialog");
+const loadDialogs = () => import("./dialogs");
+const loadFileDropDialog = () => import("./file-drop-dialog");
+const loadFindBar = () => import("./find-bar");
+const loadCommandPalette = () => import("./command-palette");
+const CommentsPanel = lazyOnFirstUse(loadCommentsPanel, (m) => m.CommentsPanel, () => <SidePanelPlaceholder title="Comments" />);
+const VersionsPanel = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionsPanel, () => <SidePanelPlaceholder title="Version history" />);
+const ActivityPanel = lazyOnFirstUse(loadActivityPanel, (m) => m.ActivityPanel, () => <SidePanelPlaceholder title="Activity" />);
+const VersionDiffView = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionDiffView);
+const ShareDialog = lazyOnFirstUse(loadShareDialog, (m) => m.ShareDialog);
+const GitHubDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.GitHubDialog);
+const CommitDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.CommitDialog);
+const SyncDialog = lazyOnFirstUse(loadSyncDialog, (m) => m.SyncDialog);
+const LinkDialog = lazyOnFirstUse(loadDialogs, (m) => m.LinkDialog);
+const ImageDialog = lazyOnFirstUse(loadDialogs, (m) => m.ImageDialog);
+const TableDialog = lazyOnFirstUse(loadDialogs, (m) => m.TableDialog);
+const NameVersionDialog = lazyOnFirstUse(loadDialogs, (m) => m.NameVersionDialog);
+const ShortcutsDialog = lazyOnFirstUse(loadDialogs, (m) => m.ShortcutsDialog);
+const FileDropDialog = lazyOnFirstUse(loadFileDropDialog, (m) => m.FileDropDialog);
+const FindBar = lazyOnFirstUse(loadFindBar, (m) => m.FindBar);
+const CommandPalette = lazyOnFirstUse(loadCommandPalette, (m) => m.CommandPalette);
 
 export async function pollDocumentSync(documentId: string, fresh: boolean): Promise<SyncStatusDto> {
   try {
@@ -66,16 +111,14 @@ export async function pollDocumentSync(documentId: string, fresh: boolean): Prom
   }
 }
 
-import { LinkDialog, ImageDialog, TableDialog, NameVersionDialog, ShortcutsDialog } from "./dialogs";
 import { SelectionBubble } from "./selection-bubble";
 import { describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests";
 import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
-import { FindBar } from "./find-bar";
 import { FollowBanner } from "./follow-banner";
 import { HintBar } from "./hint-bar";
 import { useScrollSync } from "./scroll-sync";
-import { CommandPalette, isPaletteShortcut } from "./command-palette";
+import { isPaletteShortcut } from "./palette-shortcut";
 import { buildCommands, type EditorCommandContext } from "./commands";
 import type { NotificationDto } from "@/lib/api";
 import { notificationHref } from "@/components/notifications/open";
@@ -749,7 +792,12 @@ export function EditorShell({
     return () => clearTimeout(timer);
   }, [threadParamReady, activateRef]);
   const toggleHistory = useCallback(() => setSidePanel((p) => (p === "versions" ? null : "versions")), []);
-  const onMoreMenuOpen = useCallback(() => prefetchVersions(doc.id), [doc.id]);
+  // Opening the More menu warms both the versions list and, through the loader, the versions chunk itself.
+  const onMoreMenuOpen = useCallback(() => {
+    loadVersionsPanel()
+      .then((m) => m.prefetchVersions(doc.id))
+      .catch(() => undefined);
+  }, [doc.id]);
   const toggleActivity = useCallback(() => setSidePanel((p) => (p === "activity" ? null : "activity")), []);
   const openShare = useCallback(() => setDialog("share"), []);
   const openPublish = useCallback(() => setDialog("publish"), []);
@@ -990,6 +1038,22 @@ export function EditorShell({
     [onOutlineSelect],
   );
 
+  // Mount-once gates for the lazy dialogs (see the `dynamic` block at the top): each dialog mounts on its first
+  // open and stays mounted afterwards, so closing it still runs through Radix exactly as before.
+  const everOpened = {
+    share: useEverTrue(dialog === "share"),
+    publish: useEverTrue(dialog === "publish"),
+    commit: useEverTrue(commitOpen),
+    sync: useEverTrue(syncOpen),
+    link: useEverTrue(dialog === "link"),
+    image: useEverTrue(dialog === "image"),
+    table: useEverTrue(dialog === "table"),
+    versionName: useEverTrue(dialog === "versionName"),
+    shortcuts: useEverTrue(dialog === "shortcuts"),
+    palette: useEverTrue(paletteOpen),
+    fileDrop: useEverTrue(fileDrop !== null),
+  };
+
   const panel =
     sidePanel === "comments" ? (
       <CommentsPanel
@@ -1223,19 +1287,21 @@ export function EditorShell({
 
         {!embed && (
           <>
-            <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />
-            <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} />
-            <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />
-            <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />
+            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />}
+            {everOpened.publish && (
+              <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} />
+            )}
+            {everOpened.commit && <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />}
+            {everOpened.sync && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
           </>
         )}
-        <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />
-        <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />
-        <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />
-        <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />
-        <NameVersionDialog open={dialog === "versionName"} onOpenChange={dialogOpenChange.versionName} onSubmit={saveNamedVersion} />
-        <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />
-        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
+        {everOpened.link && <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />}
+        {everOpened.image && <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />}
+        {everOpened.fileDrop && <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />}
+        {everOpened.table && <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />}
+        {everOpened.versionName && <NameVersionDialog open={dialog === "versionName"} onOpenChange={dialogOpenChange.versionName} onSubmit={saveNamedVersion} />}
+        {everOpened.shortcuts && <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />}
+        {everOpened.palette && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />}
 
         <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
           {toasts.map((t) => (

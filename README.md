@@ -395,6 +395,8 @@ src/app/api                  REST routes (documents, content, suggest, comments,
                              assets, export, share, star, trash, templates, notifications, tokens, GitHub)
 src/components/editor        editor UI: header, toolbar, panes, panels (comments, versions, activity),
                              command palette, slash menu, find bar, table menu, stats popover, dialogs
+                             (like the CodeMirror pane, the side panels, dialogs, palette and find bar are
+                             next/dynamic boundaries loaded on first use, outside the route's entry JS)
 src/components/dashboard     document list, search, stars/recents/sort, templates gallery, notifications strip
 src/components/notifications notifications bell in the editor header, open-thread helper
 src/components/reader        /p/[id] reader view: page, table of contents, update pill, download menu
