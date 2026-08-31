@@ -8,6 +8,7 @@ import type { EditorView as PMView } from "prosemirror-view";
 import { Eye, PenLine, X } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
+import type { CodeApi } from "@/editor/codemirror/api";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
@@ -174,6 +175,7 @@ export function EditorShell({
   const [viewsReady, setViewsReady] = useState(0);
   const [richView, setRichView] = useState<PMView | null>(null);
   const [codeView, setCodeView] = useState<CMView | null>(null);
+  const [codeApi, setCodeApi] = useState<CodeApi | null>(null);
   const [richScroller, setRichScroller] = useState<HTMLDivElement | null>(null);
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
@@ -302,9 +304,10 @@ export function EditorShell({
   const format: FormatState = useSessionValue(session, () => (viewsReady ? actions.formatState() : EMPTY_FORMAT), shallowEqual);
 
   const onCodeReady = useCallback(
-    (view: CMView | null) => {
-      actions.setCodeView(view);
+    (view: CMView | null, api: CodeApi | null) => {
+      actions.setCodeView(view, api);
       setCodeView(view);
+      setCodeApi(api);
       setViewsReady((n) => n + 1);
     },
     [actions],
@@ -888,7 +891,7 @@ export function EditorShell({
   const showCode = shownLayout !== "rich" && !versionPreview;
   const showRich = shownLayout !== "code" && !versionPreview;
   const viewingOnly = useSessionValue(session, (s) => s.mode === "viewing");
-  useScrollSync({ session, code: codeView, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
+  useScrollSync({ session, code: codeView, codeApi, rich: richView, richScroller, enabled: syncScroll && showCode && showRich });
   // revealSource scrolls only the active surface while the sync mirrors the panes onto each other.
   useEffect(() => {
     actions.setScrollSynced(syncScroll && showCode && showRich);

@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect } from "react";
-import { EditorView, type EditorView as CMView } from "@codemirror/view";
+import type { EditorView as CMView } from "@codemirror/view";
 import type { EditorView as PMView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
+import type { CodeApi } from "@/editor/codemirror/api";
 
 type Pane = "code" | "rich";
 
@@ -75,11 +76,11 @@ export function scrollRichToSource(session: CollabSession, rich: PMView, scrolle
 }
 
 /** Scroll the code pane so the line holding `offset` sits at the top. */
-export function scrollCodeToSource(code: CMView, offset: number) {
+export function scrollCodeToSource(code: CMView, codeApi: CodeApi, offset: number) {
   const clamped = Math.min(code.state.doc.length, Math.max(0, offset));
   // CodeMirror's own scroll effect re-measures lines it has not rendered yet, so the
   // position ends up where it should even when line heights were only estimated.
-  code.dispatch({ effects: EditorView.scrollIntoView(clamped, { y: "start", yMargin: 0 }) });
+  code.dispatch({ effects: codeApi.scrollIntoView(clamped, { y: "start", yMargin: 0 }) });
 }
 
 /** Source offset that is currently at the top of the rich pane. */
@@ -95,6 +96,8 @@ export function richTopSource(session: CollabSession, rich: PMView, scroller: HT
 export interface ScrollSyncTargets {
   session: CollabSession;
   code: CMView | null;
+  /** Handed up by the code pane with its view (null whenever `code` is); this module never imports CodeMirror values. */
+  codeApi: CodeApi | null;
   rich: PMView | null;
   richScroller: HTMLElement | null;
   enabled: boolean;
@@ -105,9 +108,9 @@ export interface ScrollSyncTargets {
  * moves the other so the block at the top of the viewport matches. The pane the user
  * is scrolling drives; the other ignores its own programmatic scroll events briefly.
  */
-export function useScrollSync({ session, code, rich, richScroller, enabled }: ScrollSyncTargets) {
+export function useScrollSync({ session, code, codeApi, rich, richScroller, enabled }: ScrollSyncTargets) {
   useEffect(() => {
-    if (!enabled || !code || !rich || !richScroller) return;
+    if (!enabled || !code || !codeApi || !rich || !richScroller) return;
     const lock: { pane: Pane | null; until: number } = { pane: null, until: 0 };
     let frame = 0;
     let pending: Pane | null = null;
@@ -127,7 +130,7 @@ export function useScrollSync({ session, code, rich, richScroller, enabled }: Sc
           if (offset === null) return;
           lock.pane = "code";
           lock.until = performance.now() + LOCK_MS;
-          scrollCodeToSource(code, offset);
+          scrollCodeToSource(code, codeApi, offset);
         }
       } catch {
         // Layout may be mid-update (for example while a pane is hidden); skip this frame.
@@ -147,5 +150,5 @@ export function useScrollSync({ session, code, rich, richScroller, enabled }: Sc
       richScroller.removeEventListener("scroll", onRich);
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [session, code, rich, richScroller, enabled]);
+  }, [session, code, codeApi, rich, richScroller, enabled]);
 }
