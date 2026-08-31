@@ -1,5 +1,6 @@
 "use client";
-import { Dialog, DialogContent, Spinner, GitHubIcon } from "@/components/ui/primitives";
+import { Dialog, DialogContent, Spinner } from "@/components/ui/primitives";
+import { GitHubIcon } from "@/components/ui/github-icon";
 
 import { memo, useEffect, useMemo, useState } from "react";
 import { signIn } from "next-auth/react";
