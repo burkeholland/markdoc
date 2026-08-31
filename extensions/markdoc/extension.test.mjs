@@ -37,10 +37,10 @@ async function until(check, timeoutMs = 2_000) {
     if (result) return result;
     await delay(10);
   }
-  throw new Error("Timed out waiting for extension activity");
+  throw new Error(`Timed out after ${timeoutMs} ms waiting for extension activity`);
 }
 
-test("secures the shell, deduplicates pushes, selects active and idle delivery modes, and leaves on close", async () => {
+test("secures the shell, deduplicates pushes, selects active and idle delivery modes, and leaves on close", { timeout: 120_000 }, async () => {
   const presence = [];
   let handoffs = 0;
   let eventReads = 0;
@@ -520,6 +520,8 @@ test("secures the shell, deduplicates pushes, selects active and idle delivery m
     assert.equal(runtime.instances.size, 0);
     assert.deepEqual(presence.map((item) => item.state), ["idle", "left"]);
   } finally {
+    // A send still parked by blockSend would hang onClose's `await pollTask` and hide the assertion that failed.
+    blockSend = false; releaseSend?.(); releaseSend = undefined;
     for (const entry of runtime.instances.values()) await canvasOptions.onClose({ instanceId: entry.instanceId });
     await close(markdoc);
   }
