@@ -3,7 +3,6 @@ import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRad
 import { GitHubIcon } from "@/components/ui/github-icon";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   Activity,
@@ -60,10 +59,11 @@ import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests
 import { signOutSafely } from "@/lib/sign-out";
 import { Logo } from "@/components/ui/logo";
 import { useEverTrue, useHydrated } from "@/lib/hooks";
+import { lazyOnFirstUse } from "./lazy-on-first-use";
 
 // On demand (#1150): the dialog, with the agent-connect card and copy blocks behind it, is fetched on its first
 // open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
-const KeepAgentHereDialog = dynamic(() => import("./keep-agent-here").then((m) => m.KeepAgentHereDialog), { ssr: false });
+const KeepAgentHereDialog = lazyOnFirstUse(() => import("./keep-agent-here"), (m) => m.KeepAgentHereDialog);
 
 function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);

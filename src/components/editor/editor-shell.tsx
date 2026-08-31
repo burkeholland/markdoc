@@ -33,6 +33,7 @@ import type { VersionPreview } from "./versions-panel";
 import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY, clampPanelWidth, panelMaxFor, parseStoredPanelWidth } from "./panel-resize-handle";
 import type { SyncActions } from "./sync-dialog";
 import { useEverTrue } from "@/lib/hooks";
+import { lazyOnFirstUse } from "./lazy-on-first-use";
 
 const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
 
@@ -60,31 +61,40 @@ function SidePanelPlaceholder({ title }: { title: string }) {
 const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { ssr: false, loading: () => <CodePanePlaceholder /> });
 
 // Also on demand (#1150): the side panels, the dialogs, the command palette, the find bar and the file-drop
-// dialog are UI nobody sees on a cold load, so each module is a `next/dynamic` boundary fetched on first use.
+// dialog are UI nobody sees on a cold load, so each module is a `next/dynamic` boundary fetched on first use
+// (`lazyOnFirstUse` adds the one re-render that keeps React's 300 ms fallback throttle out of the first open).
 // Everything that takes an `open` prop sits behind a mount-once gate (`useEverTrue`): after the first open it
 // stays mounted exactly as a static import did, so Radix's close transition, `onOpenChange` and focus return
 // to the trigger are unchanged — the only new thing is one chunk request on the first open. Only types may be
-// imported from these modules; a value import puts the module back into the route's entry JS.
-const CommentsPanel = dynamic(() => import("./comments-panel").then((m) => m.CommentsPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Comments" /> });
-// One loader for the three users of the versions module (panel, diff view, `prefetchVersions` from the More menu):
-// an `import()` written inside `dynamic()` is rewritten by Next into its own `next-dynamic` facade module, so a
-// plain `import("./versions-panel")` elsewhere would get a second, duplicate chunk of the same code.
+// imported from these modules; a value import puts the module back into the route's entry JS. Each module has
+// exactly one `import()` here, shared by its components and by any prefetch (`prefetchVersions`), so it gets
+// exactly one chunk.
+const loadCommentsPanel = () => import("./comments-panel");
 const loadVersionsPanel = () => import("./versions-panel");
-const VersionsPanel = dynamic(() => loadVersionsPanel().then((m) => m.VersionsPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Version history" /> });
-const ActivityPanel = dynamic(() => import("./activity-panel").then((m) => m.ActivityPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Activity" /> });
-const VersionDiffView = dynamic(() => loadVersionsPanel().then((m) => m.VersionDiffView), { ssr: false });
-const ShareDialog = dynamic(() => import("./share-dialog").then((m) => m.ShareDialog), { ssr: false });
-const GitHubDialog = dynamic(() => import("./github-dialog").then((m) => m.GitHubDialog), { ssr: false });
-const CommitDialog = dynamic(() => import("./github-dialog").then((m) => m.CommitDialog), { ssr: false });
-const SyncDialog = dynamic(() => import("./sync-dialog").then((m) => m.SyncDialog), { ssr: false });
-const LinkDialog = dynamic(() => import("./dialogs").then((m) => m.LinkDialog), { ssr: false });
-const ImageDialog = dynamic(() => import("./dialogs").then((m) => m.ImageDialog), { ssr: false });
-const TableDialog = dynamic(() => import("./dialogs").then((m) => m.TableDialog), { ssr: false });
-const NameVersionDialog = dynamic(() => import("./dialogs").then((m) => m.NameVersionDialog), { ssr: false });
-const ShortcutsDialog = dynamic(() => import("./dialogs").then((m) => m.ShortcutsDialog), { ssr: false });
-const FileDropDialog = dynamic(() => import("./file-drop-dialog").then((m) => m.FileDropDialog), { ssr: false });
-const FindBar = dynamic(() => import("./find-bar").then((m) => m.FindBar), { ssr: false });
-const CommandPalette = dynamic(() => import("./command-palette").then((m) => m.CommandPalette), { ssr: false });
+const loadActivityPanel = () => import("./activity-panel");
+const loadShareDialog = () => import("./share-dialog");
+const loadGitHubDialog = () => import("./github-dialog");
+const loadSyncDialog = () => import("./sync-dialog");
+const loadDialogs = () => import("./dialogs");
+const loadFileDropDialog = () => import("./file-drop-dialog");
+const loadFindBar = () => import("./find-bar");
+const loadCommandPalette = () => import("./command-palette");
+const CommentsPanel = lazyOnFirstUse(loadCommentsPanel, (m) => m.CommentsPanel, () => <SidePanelPlaceholder title="Comments" />);
+const VersionsPanel = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionsPanel, () => <SidePanelPlaceholder title="Version history" />);
+const ActivityPanel = lazyOnFirstUse(loadActivityPanel, (m) => m.ActivityPanel, () => <SidePanelPlaceholder title="Activity" />);
+const VersionDiffView = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionDiffView);
+const ShareDialog = lazyOnFirstUse(loadShareDialog, (m) => m.ShareDialog);
+const GitHubDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.GitHubDialog);
+const CommitDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.CommitDialog);
+const SyncDialog = lazyOnFirstUse(loadSyncDialog, (m) => m.SyncDialog);
+const LinkDialog = lazyOnFirstUse(loadDialogs, (m) => m.LinkDialog);
+const ImageDialog = lazyOnFirstUse(loadDialogs, (m) => m.ImageDialog);
+const TableDialog = lazyOnFirstUse(loadDialogs, (m) => m.TableDialog);
+const NameVersionDialog = lazyOnFirstUse(loadDialogs, (m) => m.NameVersionDialog);
+const ShortcutsDialog = lazyOnFirstUse(loadDialogs, (m) => m.ShortcutsDialog);
+const FileDropDialog = lazyOnFirstUse(loadFileDropDialog, (m) => m.FileDropDialog);
+const FindBar = lazyOnFirstUse(loadFindBar, (m) => m.FindBar);
+const CommandPalette = lazyOnFirstUse(loadCommandPalette, (m) => m.CommandPalette);
 
 export async function pollDocumentSync(documentId: string, fresh: boolean): Promise<SyncStatusDto> {
   try {
