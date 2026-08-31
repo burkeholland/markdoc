@@ -3,6 +3,14 @@ import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
+// Render budget for this file (task #1190): `render-pool.ts` reads MARKDOWN_RENDER_TIMEOUT_MS once, at import,
+// so the override has to be in place before any import of it; hoisting keeps that true even if the dynamic
+// imports below ever become static. The 15 s default is right for production, but on a saturated shared box
+// the render worker of the large-export test below was starved past it and the export answered 422. No test
+// here depends on the default: the bracket test is refused by the guard before the worker is involved.
+vi.hoisted(() => {
+  process.env.MARKDOWN_RENDER_TIMEOUT_MS = "120000";
+});
 
 // The route resolves the caller through next-auth and `next/headers`, neither of which
 // runs outside a Next request. Stand in for them so the real access check still runs.
@@ -89,19 +97,47 @@ describe("GET /api/documents/[id]/export", () => {
       expect((await exportOf(doc.id, "")).status).toBe(200);
     });
 
-    it("keeps /api/health fast while a large export is rendering", async () => {
+    it("keeps /api/health fast while a large export is rendering", { retry: 1 }, async () => {
+      expect((await import("@/server/export/render-pool")).RENDER_TIMEOUT_MS).toBe(120_000);
       const content = Array.from({ length: 200 }, (_, i) => `## Section ${i}\n\n${"[a](b) **b** _c_ ~~d~~ ".repeat(60)}\n`).join("\n");
       const doc = await createDocument({ ownerId: actor!.id, title: "big", content });
+
+      // One health probe as the platform sees it: it arrives `afterMs` from now (a timer, since a request
+      // reaches the server through the event loop) and is measured from that arrival to its response. A probe
+      // that arrives while the loop is blocked cannot start until the block ends, so measured from the
+      // moment it *starts* every probe looks fast; measured from arrival it shows the wait the probe spent
+      // queued, which is what the liveness probe would have seen.
+      const probeHealth = (afterMs: number) =>
+        new Promise<number>((resolve, reject) => {
+          const arrival = performance.now() + afterMs;
+          setTimeout(async () => {
+            try {
+              const health = await healthGET(new Request("http://localhost/api/health"));
+              expect(health.status).toBe(200);
+              resolve(performance.now() - arrival);
+            } catch (err) {
+              reject(err);
+            }
+          }, afterMs);
+        });
+      const fmt = (samples: number[]) => samples.map((ms) => ms.toFixed(1)).join(", ");
+
+      // Baseline: what a health round trip costs on this machine right now, fastest of three.
+      const baseline = [await probeHealth(0), await probeHealth(0), await probeHealth(0)];
+      const baselineMs = Math.min(...baseline);
+
+      // Three probes spread over the export's render (≥ 0.8 s even on a fast idle machine; longer under load,
+      // since the worker is starved along with everything else). The assertion is on the *fastest* of them
+      // (task #1190): load can only slow a probe down, and three probes 150 ms apart give three chances for
+      // one to get the CPU, while a render on this thread delays all three by about the remaining render
+      // time — well over the bound. The old single sample `< 200 ms` failed on a saturated box.
       const exporting = exportOf(doc.id, "?format=html");
-      await new Promise((r) => setTimeout(r, 50));
-      const started = performance.now();
-      const health = await healthGET(new Request("http://localhost/api/health"));
-      const healthMs = performance.now() - started;
-      expect(health.status).toBe(200);
-      expect(healthMs).toBeLessThan(200);
+      const during = await Promise.all([probeHealth(50), probeHealth(200), probeHealth(350)]);
       const res = await exporting;
       expect(res.status).toBe(200);
       expect(await res.text()).toContain('<h2 id="section-199">Section 199</h2>');
+      const detail = `health during export ${fmt(during)} ms; baseline ${fmt(baseline)} ms`;
+      expect(Math.min(...during), detail).toBeLessThan(Math.max(200, 4 * baselineMs));
     });
   });
 

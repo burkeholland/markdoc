@@ -19,6 +19,17 @@ import {
   setMigrationFixtureSchemaToVersion15,
 } from "./pglite-postgres-migration.test-fixture";
 
+/**
+ * Timeout for the snapshot build (`beforeAll`) and each of the six migration tests (task #1190). Every test
+ * restores the snapshot into its own fresh in-memory PGlite, so the cost is the same order for all of them.
+ * Measured with the file alone on a shared box already at 70–100 % CPU: beforeAll ≈ 2 s, tests 4.2–7.9 s; with
+ * four test files in parallel on the same box 5.1–23.6 s. In the #1145 release preflight (47 other node
+ * processes, machine at 100 %) two of them ran past the old 120 s — more than 15× their alone time — so 5× the
+ * idle time (≈ 40 s) and the 120 s floor were both still reachable by load; this is the 600 s ceiling the task
+ * allows. A genuine hang still fails, ten minutes in instead of two.
+ */
+const MIGRATION_TEST_TIMEOUT_MS = 600_000;
+
 const expectedTables = [
   "account",
   "activity",
@@ -62,7 +73,7 @@ describe("PGlite to PostgreSQL migration", () => {
     await fs.writeFile(snapshot, new Uint8Array(await archive.arrayBuffer()));
     await source.close();
     snapshotHash = await fileHash(snapshot);
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   afterAll(async () => {
     await fs.rm(root, { recursive: true, force: true });
@@ -153,7 +164,7 @@ describe("PGlite to PostgreSQL migration", () => {
     } finally {
       await destination.close();
     }
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   it("refuses a non-empty destination without changing it", async () => {
     const destination = await createDestination(true);
@@ -174,7 +185,7 @@ describe("PGlite to PostgreSQL migration", () => {
     } finally {
       await destination.close();
     }
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   it("rolls replacement back to the previous state on failure", async () => {
     const destination = await createDestination(true);
@@ -203,7 +214,7 @@ describe("PGlite to PostgreSQL migration", () => {
     } finally {
       await destination.close();
     }
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   it("classifies manifest publication failure after the destination commit", async () => {
     const destination = await createDestination(true);
@@ -229,7 +240,7 @@ describe("PGlite to PostgreSQL migration", () => {
     } finally {
       await destination.close();
     }
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   it("verify-only rejects a hash mismatch", async () => {
     const destination = await createDestination(true);
@@ -251,7 +262,7 @@ describe("PGlite to PostgreSQL migration", () => {
     } finally {
       await destination.close();
     }
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   it("a second migration without --replace fails and preserves all rows", async () => {
     const destination = await createDestination(true);
@@ -274,7 +285,7 @@ describe("PGlite to PostgreSQL migration", () => {
     } finally {
       await destination.close();
     }
-  }, 120_000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 });
 
 async function createDestination(withIdentity = false): Promise<TransactionalConnection> {
