@@ -586,15 +586,24 @@ describe("the non-2xx promise for requests (#1232)", () => {
     await cancelRequest(reqDocId, retried.id, ownerActor(), "owner");
   });
 
+  /**
+   * Lands `race` between `attachWork`'s pre-check and its update: `getRequest` takes the first `getDb()` (the
+   * pre-check passes on the still-claimed row), `attachWork`'s own `getDb()` is the second and runs `race` first.
+   */
+  const betweenPreCheckAndUpdate = async (race: () => Promise<unknown>) => {
+    const actualGetDb = (await vi.importActual<typeof import("@/server/db")>("@/server/db")).getDb;
+    vi.mocked(getDb)
+      .mockImplementationOnce(actualGetDb)
+      .mockImplementationOnce(async () => {
+        await race();
+        return actualGetDb();
+      });
+  };
+
   it("attachWork: a request cancelled between the pre-check and the update is not resurrected — 409, the row stays cancelled", async () => {
     const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
     await claimRequest(reqDocId, created.id, agentActor());
-    const actualGetDb = (await vi.importActual<typeof import("@/server/db")>("@/server/db")).getDb;
-    // `attachWork` passed its pre-check (the row was claimed); the cancel lands before its update.
-    vi.mocked(getDb).mockImplementationOnce(async () => {
-      await cancelRequest(reqDocId, created.id, ownerActor(), "owner");
-      return actualGetDb();
-    });
+    await betweenPreCheckAndUpdate(() => cancelRequest(reqDocId, created.id, ownerActor(), "owner"));
     await expect(attachWork(reqDocId, created.id, agentActor(), { suggestions: 1, suggestionIds: ["s-late"] })).rejects.toMatchObject({ status: 409, message: "Request is cancelled", details: { status: "cancelled" } });
     expect(await rowOf(created.id)).toMatchObject({ status: "cancelled", result: null });
     expect((await readMirror(reqDocId))[created.id]).toMatchObject({ status: "cancelled" });
@@ -603,11 +612,7 @@ describe("the non-2xx promise for requests (#1232)", () => {
   it("attachWork: a request completed between the pre-check and the update answers 409 Request is done and keeps the result", async () => {
     const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
     await claimRequest(reqDocId, created.id, agentActor());
-    const actualGetDb = (await vi.importActual<typeof import("@/server/db")>("@/server/db")).getDb;
-    vi.mocked(getDb).mockImplementationOnce(async () => {
-      await completeRequest(reqDocId, created.id, agentActor(), { summary: "Closed meanwhile." });
-      return actualGetDb();
-    });
+    await betweenPreCheckAndUpdate(() => completeRequest(reqDocId, created.id, agentActor(), { summary: "Closed meanwhile." }));
     await expect(attachWork(reqDocId, created.id, agentActor(), { comments: 1, commentIds: ["c-late"] })).rejects.toMatchObject({ status: 409, message: "Request is done", details: { status: "done" } });
     expect(await rowOf(created.id)).toMatchObject({ status: "done", result: { suggestions: 0, comments: 0, summary: "Closed meanwhile." } });
   });
