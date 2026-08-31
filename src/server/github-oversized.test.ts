@@ -196,6 +196,28 @@ describe("linked document whose GitHub file grew past the bound", () => {
     expect(body.size).toBe(BIG_SIZE);
   });
 
+  it("GET /sync's 413 carries pollMs (SYNC_POLL_MS) like the 200 does, so the header keeps polling at that rate", async () => {
+    const previous = process.env.SYNC_POLL_MS;
+    process.env.SYNC_POLL_MS = "2000";
+    try {
+      const doc = await linkedDoc();
+      const res = await syncGet(new Request(`http://localhost:3700/api/documents/${doc.id}/sync?fresh=1`), params(doc.id));
+      expect(res.status).toBe(413);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.pollMs).toBe(2000);
+      expect(body).toMatchObject({ status: "remote-unreadable", size: BIG_SIZE, limit: GITHUB_FILE_MAX_BYTES, remote: { sha: BIG_SHA, revision: BIG_SHA } });
+
+      // The file shrinks back under the bound: the 200 has the same pollMs.
+      gh.repos.getContent.mockResolvedValue(contentsAnswer(BASE, undefined, "sha-base"));
+      const ok = await syncGet(new Request(`http://localhost:3700/api/documents/${doc.id}/sync?fresh=1`), params(doc.id));
+      expect(ok.status).toBe(200);
+      expect((await ok.json()) as Record<string, unknown>).toMatchObject({ status: "in-sync", pollMs: 2000 });
+    } finally {
+      if (previous === undefined) delete process.env.SYNC_POLL_MS;
+      else process.env.SYNC_POLL_MS = previous;
+    }
+  });
+
   it("POST /pull with and without force is a 413 and leaves the live text and versions alone", async () => {
     const doc = await linkedDoc(LOCAL);
     const versions = (await listVersions(doc.id)).length;

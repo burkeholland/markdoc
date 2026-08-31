@@ -84,6 +84,17 @@ describe("remote-unreadable sync status", () => {
     expect((await pollDocumentSync(DOC.id, false)).status).toBe("remote-unreadable");
   });
 
+  it("keeps the 413 body's pollMs, so the header polls again at SYNC_POLL_MS rather than in a minute", async () => {
+    const error = unreadableError();
+    error.body = { ...error.body, pollMs: 2000 };
+    vi.spyOn(api.documents, "sync").mockRejectedValue(error);
+
+    const sync = await pollDocumentSync(DOC.id, false);
+    expect(sync.status).toBe("remote-unreadable");
+    expect(sync.pollMs).toBe(2000);
+    expect(sync.size).toBe(3_800_000);
+  });
+
   it("explains the size limit and leaves only force-publish available", () => {
     const actions: SyncActions = {
       merge: vi.fn(),
