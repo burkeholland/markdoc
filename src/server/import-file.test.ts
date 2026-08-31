@@ -27,6 +27,8 @@ const {
   normalizeLineEndings,
   rewriteRelativeImages,
   titleForImport,
+  validateImportFiles,
+  IMPORT_EXTENSIONS,
   MAX_IMPORT_BYTES,
 } = await import("@/server/import-file");
 const { POST } = await import("@/app/api/import/file/route");
@@ -196,6 +198,24 @@ describe("importFiles", () => {
     await expect(importFiles({ ownerId: owner.id, files: [{ name: "doc.docx", bytes: bytes("x") }] })).rejects.toMatchObject({ status: 415 });
     await expect(importFiles({ ownerId: owner.id, files: [{ name: "big.md", bytes: new Uint8Array(MAX_IMPORT_BYTES + 1) }] })).rejects.toMatchObject({ status: 413 });
     await expect(importText({ ownerId: owner.id, content: "x".repeat(MAX_IMPORT_BYTES + 1), format: "text" })).rejects.toMatchObject({ status: 413 });
+  });
+
+  it("names every importable extension in the 415 message", async () => {
+    // Derived from IMPORT_EXTENSIONS, so an extension that is accepted can never be missing from the list.
+    expect(IMPORT_EXTENSIONS.length).toBeGreaterThan(0);
+    let error: unknown;
+    try {
+      validateImportFiles([{ name: "notes.rst", size: 1 }]);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toMatchObject({ status: 415 });
+    const message = (error as Error).message;
+    expect(message).toContain("“notes.rst”");
+    // Whole tokens, so ".md" is not satisfied by ".mdown" nor ".htm" by ".html".
+    const listed = message.split(/[\s,]+/);
+    for (const ext of IMPORT_EXTENSIONS) expect(listed, `415 message lists ${ext}`).toContain(ext);
+    await expect(importFiles({ ownerId: owner.id, files: [{ name: "notes.rst", bytes: bytes("x") }] })).rejects.toMatchObject({ status: 415, message });
   });
 
   it("uploads matching images as assets, rewrites them and warns about the rest", async () => {

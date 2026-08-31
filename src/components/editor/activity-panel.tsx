@@ -86,10 +86,6 @@ export function describeActivity(item: ActivityItemDto): string {
       const name = str(d.name);
       return name ? `uploaded ${name}` : "uploaded an image";
     }
-    case "mention": {
-      const login = str(d.login);
-      return login ? `mentioned @${login}` : "mentioned someone";
-    }
     case "title.change": {
       const title = str(d.title);
       return title ? `renamed the document to “${title}”` : "renamed the document";
