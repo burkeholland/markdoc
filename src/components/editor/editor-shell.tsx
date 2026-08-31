@@ -66,9 +66,13 @@ const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { 
 // to the trigger are unchanged — the only new thing is one chunk request on the first open. Only types may be
 // imported from these modules; a value import puts the module back into the route's entry JS.
 const CommentsPanel = dynamic(() => import("./comments-panel").then((m) => m.CommentsPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Comments" /> });
-const VersionsPanel = dynamic(() => import("./versions-panel").then((m) => m.VersionsPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Version history" /> });
+// One loader for the three users of the versions module (panel, diff view, `prefetchVersions` from the More menu):
+// an `import()` written inside `dynamic()` is rewritten by Next into its own `next-dynamic` facade module, so a
+// plain `import("./versions-panel")` elsewhere would get a second, duplicate chunk of the same code.
+const loadVersionsPanel = () => import("./versions-panel");
+const VersionsPanel = dynamic(() => loadVersionsPanel().then((m) => m.VersionsPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Version history" /> });
 const ActivityPanel = dynamic(() => import("./activity-panel").then((m) => m.ActivityPanel), { ssr: false, loading: () => <SidePanelPlaceholder title="Activity" /> });
-const VersionDiffView = dynamic(() => import("./versions-panel").then((m) => m.VersionDiffView), { ssr: false });
+const VersionDiffView = dynamic(() => loadVersionsPanel().then((m) => m.VersionDiffView), { ssr: false });
 const ShareDialog = dynamic(() => import("./share-dialog").then((m) => m.ShareDialog), { ssr: false });
 const GitHubDialog = dynamic(() => import("./github-dialog").then((m) => m.GitHubDialog), { ssr: false });
 const CommitDialog = dynamic(() => import("./github-dialog").then((m) => m.CommitDialog), { ssr: false });
@@ -778,9 +782,9 @@ export function EditorShell({
     return () => clearTimeout(timer);
   }, [threadParamReady, activateRef]);
   const toggleHistory = useCallback(() => setSidePanel((p) => (p === "versions" ? null : "versions")), []);
-  // Opening the More menu warms both the versions list and, through the import, the versions chunk itself.
+  // Opening the More menu warms both the versions list and, through the loader, the versions chunk itself.
   const onMoreMenuOpen = useCallback(() => {
-    import("./versions-panel")
+    loadVersionsPanel()
       .then((m) => m.prefetchVersions(doc.id))
       .catch(() => undefined);
   }, [doc.id]);
