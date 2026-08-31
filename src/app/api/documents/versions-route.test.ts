@@ -30,7 +30,6 @@ const activity = await import("@/app/api/documents/[id]/activity/route");
 type User = { id: string; login: string; name: string; image: null };
 type VersionDto = { id: string; number: number; title: string | null; kind: string; createdAt: string };
 type SaveBody = { version: VersionDto; warnings?: string[] };
-type RestoreBody = { ok: boolean; version: VersionDto | null; warnings?: string[] };
 
 const TEXT = "# Plan\n\nFirst paragraph here.\n\nSecond paragraph.\n";
 const OLD = "# Plan\n\nThe old text.\n";

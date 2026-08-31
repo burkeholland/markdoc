@@ -114,13 +114,12 @@ const dbStore: AssetStore = {
     if (existing) return { ...existing, url: assetUrl(existing.id) };
 
     // Two uploads of the same bytes at once both pass the select above; the insert is `on conflict do nothing` on
-    // `asset_document_sha_idx` (document_id, sha256) so the loser gets no row back instead of a unique violation,
-    // and answers with the winner's row: both callers get the one asset.
-    const id = nanoid();
-    const inserted = await db
+    // `asset_document_sha_idx` (document_id, sha256) so the loser gets no unique violation, and the row for these
+    // bytes — ours or the other upload's — is read back (four small columns; `returning` would echo the data too).
+    await db
       .insert(schema.assets)
       .values({
-        id,
+        id: nanoid(),
         documentId: input.documentId,
         userId: input.userId,
         name,
@@ -129,13 +128,11 @@ const dbStore: AssetStore = {
         sha256: hash,
         data: input.bytes,
       })
-      .onConflictDoNothing({ target: [schema.assets.documentId, schema.assets.sha256] })
-      .returning({ id: schema.assets.id });
-    if (inserted.length > 0) return { id, url: assetUrl(id), name, mime, size: input.bytes.byteLength };
-    const [winner] = await sameBytes();
-    // Only if the winner vanished in between (its document deleted): the caller's asset does not exist.
-    if (!winner) throw new Error(`asset ${hash} of document ${input.documentId} disappeared after a concurrent upload`);
-    return { ...winner, url: assetUrl(winner.id) };
+      .onConflictDoNothing({ target: [schema.assets.documentId, schema.assets.sha256] });
+    const [stored] = await sameBytes();
+    // Only if the row vanished in between (the document deleted, cascading): the caller's asset does not exist.
+    if (!stored) throw new Error(`asset ${hash} of document ${input.documentId} is gone right after its insert`);
+    return { ...stored, url: assetUrl(stored.id) };
   },
 
   async get(id) {

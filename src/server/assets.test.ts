@@ -148,7 +148,7 @@ describe("assets", () => {
 describe("POST /api/documents/[id]/assets", () => {
   const docId = "asset-route-doc";
   const ctx = { params: Promise.resolve({ id: docId }) };
-  const upload = (name: string, bytes: Uint8Array) => POST(new Request(`http://localhost:3700/api/documents/${docId}/assets?name=${name}`, { method: "POST", headers: { "content-type": "image/png" }, body: bytes }), ctx);
+  const upload = (name: string, bytes: Uint8Array<ArrayBuffer>) => POST(new Request(`http://localhost:3700/api/documents/${docId}/assets?name=${name}`, { method: "POST", headers: { "content-type": "image/png" }, body: bytes }), ctx);
   /** Runs `fn` with console.error silenced; returns its result and the `[assets]`-prefixed lines it logged. */
   const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: unknown[][] }> => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
