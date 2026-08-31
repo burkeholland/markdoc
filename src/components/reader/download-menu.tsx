@@ -5,13 +5,11 @@ import { ChevronDown, Download, FileCode2, FileText } from "lucide-react";
 import { navigateTo } from "@/lib/nav";
 
 type Format = "md" | "html" | "pdf";
-
 const ROWS: { format: Format; label: string; Icon: typeof Download }[] = [
   { format: "md", label: "Markdown", Icon: Download },
   { format: "html", label: "HTML", Icon: FileCode2 },
   { format: "pdf", label: "PDF", Icon: FileText },
 ];
-
 const LIST_ID = "reader-download-list";
 
 /**
