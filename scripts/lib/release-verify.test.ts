@@ -26,7 +26,7 @@ import {
   type Check,
   type ReleaseVerifyIo,
 } from "./release-verify";
-import { connectCollab, createIo, createLocalDist, runMain } from "../release-verify.mts";
+import { connectCollab, createIo, createLocalDist, runMain } from "../release-verify.mjs";
 
 const SHA = "5f9eb0daa9ea5ac35d3785a4f0aad6a465cb32b6";
 const OTHER_SHA = "0000000000000000000000000000000000000000";
