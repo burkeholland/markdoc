@@ -6,6 +6,7 @@ import path from "node:path";
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import WebSocket from "ws";
 import { e2eDistDir, removeDistDir } from "./dist-dir";
+import { reloadHydrated } from "./helpers";
 
 /**
  * A server restart while the user types (#190, the browser side of a zero-downtime promote, #577).
@@ -395,7 +396,8 @@ test.describe("server restart while typing", () => {
       expect(remote.present, `every typed token reached the server\n${await diagnostics()}`).toBe(ALL_TOKENS.length);
       expect(remote.doubled, "no token reached the server twice").toEqual([]);
 
-      await page.reload();
+      // The respawned server is healthy and saved by now, so this reload is a normal page load.
+      await reloadHydrated(page);
       await expect(page.locator(".cm-content")).toBeVisible();
       await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
       const reloaded = countTokens(await paneText(page));

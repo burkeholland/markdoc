@@ -1,7 +1,7 @@
 import { test, expect, devices, type Page } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { signIn, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, type User } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, reloadHydrated, type User } from "./helpers";
 import { seedBurkeScale, h2Texts, firstH3Of, UNIQUE_WORD, UNIQUE_WORD_DOC_INDEX, MANY_DOCS, type BurkeScaleSeed } from "./fixtures/burke-scale";
 
 /**
@@ -285,7 +285,7 @@ test.describe("Burke-scale", () => {
       await openDocument(page, id);
       lengths.push((await codeText(page)).length);
       for (let i = 0; i < 3; i++) {
-        await page.reload();
+        await reloadHydrated(page);
         await openDocument(page, id);
         lengths.push((await codeText(page)).length);
       }
@@ -542,7 +542,7 @@ test.describe("Burke-scale", () => {
     record(`comments resolved tab switch (${totals.resolved + 1} threads)`, tab.end - tab.start, budgetMs(100));
     await page.getByTestId("comments-tab-open").click();
 
-    await page.reload();
+    await reloadHydrated(page);
     await openDocument(page, longDocId);
     await ensureCommentsOpen(page);
     await expect(page.getByTestId("comment-thread")).toHaveCount(before - 1);

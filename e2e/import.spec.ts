@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, codeText } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, reloadHydrated } from "./helpers";
 
 // 1x1 transparent PNG.
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -117,7 +117,7 @@ test.describe("import local files", () => {
     expect(text).toContain("![Missing](lost.png)");
     await expect(page.locator(`.md-rich img[src="${m![1]}"]`)).toHaveCount(1);
     // The rewrite must live in ystate, not just the content column: a reload (re-hydration) still shows the asset.
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     await expect(page.locator(`.md-rich img[src="${m![1]}"]`)).toHaveCount(1);
     expect(await codeText(page)).not.toContain("beach.png");

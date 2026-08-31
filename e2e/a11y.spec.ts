@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken } from "./helpers";
+import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -108,12 +108,6 @@ async function scan(page: Page, state: string, { contrast = false, targetSize = 
   console.log(`[a11y] ${state}: ${violations.length} violation${violations.length === 1 ? "" : "s"}${lines.length ? `\n${lines.join("\n")}` : ""}`);
   const check = softMode ? expect.soft : expect;
   check(violations, `${state}\n${lines.join("\n")}`).toHaveLength(0);
-}
-
-async function setTheme(page: Page, theme: "light" | "dark") {
-  await page.evaluate((t) => localStorage.setItem("markdoc:theme", t), theme);
-  await page.reload();
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
 function computedContrast(foreground: string, background: string): number {

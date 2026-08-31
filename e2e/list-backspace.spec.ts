@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { caretPath, clickEdgeOf, codeText, createDocument, openDocument, selectTextInRich, shareWith, signIn } from "./helpers";
+import { caretPath, clickEdgeOf, codeText, createDocument, openDocument, reloadHydrated, selectTextInRich, shareWith, signIn } from "./helpers";
 
 const INITIAL = ["Paragraph above.", "", "- first bullet text", "- second bullet text", "", "Paragraph below.", ""].join("\n");
 
@@ -105,7 +105,7 @@ for (const [viewportName, viewport] of VIEWPORTS) {
         }
 
         await expect(owner.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
-        await owner.page.reload();
+        await reloadHydrated(owner.page);
         await expect(owner.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
         await expect.poll(() => codeText(owner.page)).toBe(states[2]);
         if (viewportName === "desktop") {

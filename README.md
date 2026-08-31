@@ -135,7 +135,7 @@ npm run lint
 
 ### Working in a worktree
 
-A second checkout (`git worktree add ../markdoc-task-x -b task-x`) needs its own `npm ci --ignore-scripts`: Turbopack refuses to run from a junctioned or symlinked `node_modules`, so linking the main checkout's dependencies is not enough. No `.env.local` is needed — `PORT=3800 npm run dev:port` starts with dev-only auth defaults (see below) and a private PGlite directory, and `E2E_PORT=3218 npm run test:e2e` gives the suite its own port and Next cache.
+A second checkout (`git worktree add ../markdoc-task-x -b task-x`) needs its own `npm ci --ignore-scripts`: Turbopack refuses to run from a junctioned or symlinked `node_modules`, so linking the main checkout's dependencies is not enough. No `.env.local` is needed — `PORT=3800 npm run dev:port` starts with dev-only auth defaults (see below) and a private PGlite directory, and `E2E_PORT=3218 npm run test:e2e` gives the suite its own port and Next cache. In a spec, after a `reload` or `goto` wait for `html[data-hydrated]` (the root layout's `<HydrationMarker>` sets it once React has committed) via `reloadHydrated` / `waitForHydration` from `e2e/helpers.ts` before clicking anything; never treat boot-script state such as `data-theme` as a readiness signal, it is written before React runs.
 
 ### Scripts and knobs
 

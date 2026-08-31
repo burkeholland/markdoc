@@ -1,5 +1,5 @@
 import { test, expect, type Browser, type Locator, type Page } from "@playwright/test";
-import { createDocument, ensureCommentsOpen, openDocument } from "./helpers";
+import { createDocument, ensureCommentsOpen, openDocument, reloadHydrated } from "./helpers";
 
 /**
  * Task #978: the desktop Comments / Versions / Activity panel is resizable from its left edge.
@@ -85,7 +85,7 @@ test.describe("resizable side panel (desktop)", () => {
     await expect(page.getByTestId("versions-panel")).toBeVisible();
     await expectWidth(page, 500, 2);
 
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     await ensureCommentsOpen(page);
     await expectWidth(page, 500, 2);

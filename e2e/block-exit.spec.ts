@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, codeText, clickCell, clickEdgeOf, caretPath, expectRhythm, type User } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, clickCell, clickEdgeOf, caretPath, expectRhythm, reloadHydrated, type User } from "./helpers";
 
 /**
  * Leaving blocks with the keyboard in the preview (task #415, Burke #1240: "I cannot get out of
@@ -97,7 +97,7 @@ test.describe("leaving blocks with the keyboard", () => {
     });
     expect(lines, "the quote paragraph renders as two lines").toBe(2);
     // After a reload the text still has the break.
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.locator(".md-rich blockquote p br")).toHaveCount(1);
     await expect.poll(() => codeText(page)).toContain("> A quote line.\\\n> second line");
 

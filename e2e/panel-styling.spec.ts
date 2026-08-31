@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
+import { signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, mintToken, setTheme, type MintedToken, type User } from "./helpers";
 
 /**
  * Comments panel polish (task #994, Burke): no coloured left bars anywhere in the UI, Accept all / Reject all
@@ -107,12 +107,6 @@ async function commentsOf(page: Page, docId: string) {
   const res = await page.request.get(`/api/documents/${docId}/comments`);
   expect(res.ok()).toBeTruthy();
   return ((await res.json()) as { comments: { id: string; resolved: boolean; suggestion: { state: string } | null }[] }).comments;
-}
-
-async function setTheme(page: Page, theme: "light" | "dark") {
-  await page.evaluate((t) => localStorage.setItem("markdoc:theme", t), theme);
-  await page.reload();
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
 /** Pills fade in (transition-colors, 150 ms); measure the settled colour, not a mid-transition alpha. */
@@ -520,9 +514,7 @@ test.describe("reader: the current heading in On this page is a filled pill, not
     expect(parseFloat(h3.paddingLeft)).toBeGreaterThan(parseFloat(h2.paddingLeft));
 
     await page.screenshot({ path: testInfo.outputPath("reader-toc-light.png"), clip: (await page.getByTestId("reader-aside").boundingBox())! });
-    await page.evaluate(() => localStorage.setItem("markdoc:theme", "dark"));
-    await page.reload();
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await setTheme(page, "dark");
     await page.evaluate(() => document.getElementById("third-section")!.scrollIntoView({ block: "start" }));
     await expect(activeEntry).toHaveText("Third section");
     await settledBackground(activeEntry);

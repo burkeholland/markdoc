@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, selectTextInRich } from "./helpers";
+import { signIn, createDocument, openDocument, selectTextInRich, reloadHydrated } from "./helpers";
 
 const CONTENT = ["# Theme doc", "", "First paragraph to comment on.", "", "```ts", "const answer: number = 42;", "```", ""].join("\n");
 
@@ -41,7 +41,7 @@ test.describe("dark mode", () => {
     expect(await page.evaluate(() => localStorage.getItem("markdoc:theme"))).toBe("light");
 
     // Persists after reload even though the OS still prefers dark.
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
     await expect(page.getByTestId("theme-toggle")).toHaveAttribute("data-theme-preference", "light");
 

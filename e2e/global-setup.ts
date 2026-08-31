@@ -1,5 +1,6 @@
 import { chromium, type FullConfig } from "@playwright/test";
 import { e2eDistDir, removeDistDir } from "./dist-dir";
+import { waitForHydration } from "./helpers";
 
 /**
  * A Next dist dir left behind by a killed run answers 404 on every API route (or EPERM on
@@ -102,8 +103,11 @@ export default async function globalSetup(config: FullConfig) {
       return body.document.id;
     });
 
-    await timed("/d/<id> until save-state=saved", async () => {
-      await page.goto(`/d/${docId}`);
+    await timed(`/d/<id> until save-state=saved (cap ${WARMUP_STEP_TIMEOUT_MS} ms)`, async () => {
+      // The editor route's first compile is the slowest step of the run; Playwright's default 30 s
+      // navigation timeout used to cut it off before any spec started.
+      await page.goto(`/d/${docId}`, { timeout: WARMUP_STEP_TIMEOUT_MS });
+      await waitForHydration(page, WARMUP_STEP_TIMEOUT_MS);
       const saveState = page.getByTestId("save-state");
       try {
         await saveState.waitFor({ state: "attached", timeout: WARMUP_STEP_TIMEOUT_MS });
