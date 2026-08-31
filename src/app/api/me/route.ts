@@ -4,8 +4,9 @@ import { agentMentionSlug } from "@/editor/collab/mentions";
 import { isAgentMentionUnique } from "@/server/tokens";
 
 /**
- * Who is calling: the user, the agent (token name, scope, document restriction) if any, and the user's
- * active webhooks (url + events, never the secret) so an unattended agent knows events are also pushed somewhere.
+ * Who is calling: the user, the agent (token name, scope, document restriction, whether other users may
+ * address requests to it) if any, and the user's active webhooks (url + events, never the secret) so an
+ * unattended agent knows events are also pushed somewhere.
  */
 export const GET = handler(async () => {
   const user = await requireUser();
@@ -23,6 +24,7 @@ export const GET = handler(async () => {
     agentMention,
     scope: user.agent ? (user.scope ?? "full") : null,
     documentIds: user.agent ? (user.documentIds ?? null) : null,
+    collaboratorsMayAsk: user.agent ? (user.collaboratorsMayAsk ?? false) : null,
     webhooks,
   });
 });

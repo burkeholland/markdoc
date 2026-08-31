@@ -107,6 +107,7 @@ export async function listApiTokens(userId: string) {
       prefix: schema.apiTokens.prefix,
       scope: schema.apiTokens.scope,
       documentIds: schema.apiTokens.documentIds,
+      collaboratorsMayAsk: schema.apiTokens.collaboratorsMayAsk,
       createdAt: schema.apiTokens.createdAt,
       lastUsedAt: schema.apiTokens.lastUsedAt,
       lastMcpSeenAt: schema.apiTokens.lastMcpSeenAt,
@@ -116,6 +117,24 @@ export async function listApiTokens(userId: string) {
     .from(schema.apiTokens)
     .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
     .orderBy(desc(schema.apiTokens.createdAt));
+}
+
+export type ApiTokenListItem = Awaited<ReturnType<typeof listApiTokens>>[number];
+
+/**
+ * Flip the owner switch that lets other users address requests to this agent (`@owner/slug`). Returns the
+ * token as `listApiTokens` lists it, or null when `tokenId` is not one of the user's live tokens.
+ */
+export async function setCollaboratorsMayAsk(userId: string, tokenId: string, value: boolean): Promise<ApiTokenListItem | null> {
+  const db = await getDb();
+  const [row] = await db
+    .update(schema.apiTokens)
+    .set({ collaboratorsMayAsk: value })
+    .where(and(eq(schema.apiTokens.id, tokenId), eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
+    .returning();
+  if (!row) return null;
+  const { id, name, prefix, scope, documentIds, collaboratorsMayAsk, createdAt, lastUsedAt, lastMcpSeenAt, lastMcpCallAt, expiresAt } = row;
+  return { id, name, prefix, scope, documentIds, collaboratorsMayAsk, createdAt, lastUsedAt, lastMcpSeenAt, lastMcpCallAt, expiresAt };
 }
 
 export type McpActivity = "list" | "call";
@@ -154,6 +173,8 @@ export interface TokenActor extends SessionUser {
   /** Documents the token is restricted to; null = all of the user's. */
   documentIds: string[] | null;
   expiresAt: Date | null;
+  /** Owner switch: other users may address requests to this agent. */
+  collaboratorsMayAsk: boolean;
 }
 
 const lastUsedWrites = new Map<string, number>();
@@ -176,6 +197,7 @@ function resolvedActor(row: TokenWithUser): TokenActor | null {
     scope: row.token.scope,
     documentIds: row.token.documentIds?.length ? row.token.documentIds : null,
     expiresAt: row.token.expiresAt,
+    collaboratorsMayAsk: row.token.collaboratorsMayAsk,
   };
 }
 

@@ -3,7 +3,7 @@ import { createTwoFilesPatch } from "diff";
 import { getDb, schema } from "@/server/db";
 import type { SessionUser } from "@/server/documents";
 import { contentHash } from "@/server/export/html";
-import { parseAgentMentions } from "@/editor/collab/mentions";
+import { agentMentionSlug, parseAgentMentions } from "@/editor/collab/mentions";
 
 // This module is loaded by both the custom server (Hocuspocus hooks wake waiters) and the Next.js route
 // bundle (long-polls wait). They are separate module graphs in one process, so all state lives on globalThis,
@@ -42,7 +42,7 @@ export type AgentEvent =
   | { type: "suggestion.accepted" | "suggestion.rejected"; documentId: string; threadId: string | null; replyId?: string; by: string; byKind: string; author: string | null; quote: string | null; actor: EventActor; at: string }
   | { type: "review.created"; documentId: string; reviewId: string; by: string; byKind: string; verdict: string; summary: string; comments: number; suggestions: number; threadIds: string[]; actor: EventActor; at: string }
   | { type: "mention"; documentId: string; documentTitle: string | null; refId: string; threadId: string | null; by: string | null; byLogin: string | null; snippet: string; agent: string | null; agents: string[]; actor: EventActor; at: string }
-  | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; threadId: string | null; actor: EventActor; at: string }
+  | { type: "request.created"; documentId: string; documentTitle: string | null; requestId: string; by: string | null; mode: string; instruction: string; quote: string | null; threadId: string | null; agent: string | null; actor: EventActor; at: string }
   | { type: "activity"; documentId: string; action: string; actor: EventActor; actorName: string; actorKind: string; detail: Record<string, unknown>; at: string };
 
 export interface WatchOptions {
@@ -354,6 +354,8 @@ function activityToEvent(row: typeof schema.activity.$inferSelect, selfId: strin
         quote: typeof d.quote === "string" ? d.quote : null,
         // The comment thread the request was made from; null for dialog requests and rows from before 0018.
         threadId: typeof d.threadId === "string" ? d.threadId : null,
+        // `login/slug` the request is addressed to; null when unaddressed (and on rows from before 0019).
+        agent: typeof d.agent === "string" ? d.agent : null,
       };
     default:
       return { type: "activity", ...base, action: row.action, actorName: row.actorName, actorKind: row.actorKind, detail: d };
@@ -547,6 +549,9 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
     if (event) events.push(event);
   }
 
+  // Addressed to the polling token (`@login/slug`), or unaddressed and asked by the token's own user (#1296).
+  const ownUnaddressed = and(isNull(schema.agentRequests.agentLogin), eq(schema.agentRequests.userId, user.id));
+  const addressedToMe = user.agent && login ? and(eq(schema.agentRequests.agentLogin, login), eq(schema.agentRequests.agentSlug, agentMentionSlug(user.agent).toLowerCase())) : null;
   const requests = await db
     .select({ request: schema.agentRequests, title: schema.documents.title, userName: schema.users.name, userLogin: schema.users.login })
     .from(schema.agentRequests)
@@ -559,6 +564,7 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
         inArray(schema.agentRequests.status, ["open", "claimed"]),
         sql`${schema.documents.deletedAt} is null`,
         or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`),
+        addressedToMe ? or(ownUnaddressed, addressedToMe) : ownUnaddressed,
       ),
     )
     .orderBy(asc(schema.agentRequests.createdAt))
@@ -575,6 +581,7 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
       instruction: request.instruction,
       quote: request.selection?.quote ?? null,
       threadId: request.threadId ?? null,
+      agent: request.agentLogin && request.agentSlug ? `${request.agentLogin}/${request.agentSlug}` : null,
       // Requests are asked by people in the editor; a token never asks itself.
       actor: { id: request.userId ?? null, name: userName ?? userLogin ?? "someone", login: userLogin ?? null, kind: "user", agent: null, self: false },
       at: request.createdAt.toISOString(),

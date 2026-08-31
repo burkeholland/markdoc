@@ -1,8 +1,8 @@
 import type * as Y from "yjs";
-import { and, eq, gt, inArray } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, or } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { makeCollabUser, type CollabUser } from "@/editor/collab/shared";
-import { agentMentionLogin } from "@/editor/collab/mentions";
+import { agentMentionLogin, agentMentionSlug } from "@/editor/collab/mentions";
 import type { Actor } from "@/server/http";
 import { META_KEY } from "@/server/collab/hocuspocus";
 import { agentCursorFromRaw, listAgentPresence, touchAgentPresence } from "@/server/agent-presence";
@@ -57,6 +57,8 @@ export interface MentionableAgent {
   ownerName: string | null;
   /** Present in the document right now (else it only acted here recently). */
   present: boolean;
+  /** The owner lets other users address requests to this agent (false when no live token answers to it). */
+  collaboratorsMayAsk: boolean;
 }
 
 export const RECENT_AGENT_DAYS = 30;
@@ -64,13 +66,14 @@ export const RECENT_AGENT_DAYS = 30;
 /**
  * Agents worth offering in the @-mention picker: those present on the document plus distinct agents with
  * activity rows here in the last 30 days (token owner resolved through the user table). Agents whose
- * owner has no login cannot be mentioned and are skipped.
+ * owner has no login cannot be mentioned and are skipped. `collaboratorsMayAsk` comes from the owner's
+ * live token with that mention slug.
  */
 export async function listMentionableAgents(docId: string, now = new Date()): Promise<MentionableAgent[]> {
-  const out = new Map<string, MentionableAgent>();
+  const out = new Map<string, MentionableAgent & { ownerId: string }>();
   for (const p of listAgentPresence(docId, now.getTime())) {
     if (!p.userLogin) continue;
-    out.set(p.id, { name: p.name, login: agentMentionLogin(p.userLogin, p.name), ownerLogin: p.userLogin, ownerName: p.userName, present: true });
+    out.set(p.id, { name: p.name, login: agentMentionLogin(p.userLogin, p.name), ownerLogin: p.userLogin, ownerName: p.userName, present: true, collaboratorsMayAsk: false, ownerId: p.userId });
   }
   const db = await getDb();
   const since = new Date(now.getTime() - RECENT_AGENT_DAYS * 24 * 60 * 60 * 1000);
@@ -93,8 +96,19 @@ export async function listMentionableAgents(docId: string, now = new Date()): Pr
     for (const r of recent) {
       const u = byId.get(r.userId);
       if (!u?.login || out.has(r.id)) continue;
-      out.set(r.id, { name: r.name, login: agentMentionLogin(u.login, r.name), ownerLogin: u.login, ownerName: u.name ?? null, present: false });
+      out.set(r.id, { name: r.name, login: agentMentionLogin(u.login, r.name), ownerLogin: u.login, ownerName: u.name ?? null, present: false, collaboratorsMayAsk: false, ownerId: r.userId });
     }
   }
-  return [...out.values()].sort((a, b) => Number(b.present) - Number(a.present) || a.name.localeCompare(b.name));
+  const agents = [...out.values()];
+  if (agents.length > 0) {
+    const tokens = await db
+      .select({ userId: schema.apiTokens.userId, mentionSlug: schema.apiTokens.mentionSlug, collaboratorsMayAsk: schema.apiTokens.collaboratorsMayAsk })
+      .from(schema.apiTokens)
+      .where(and(inArray(schema.apiTokens.userId, [...new Set(agents.map((a) => a.ownerId))]), isNull(schema.apiTokens.revokedAt), or(isNull(schema.apiTokens.expiresAt), gt(schema.apiTokens.expiresAt, now))));
+    const switches = new Map(tokens.filter((t) => t.mentionSlug).map((t) => [`${t.userId}/${t.mentionSlug}`, t.collaboratorsMayAsk]));
+    for (const a of agents) a.collaboratorsMayAsk = switches.get(`${a.ownerId}/${agentMentionSlug(a.name).toLowerCase()}`) ?? false;
+  }
+  return agents
+    .sort((a, b) => Number(b.present) - Number(a.present) || a.name.localeCompare(b.name))
+    .map(({ ownerId: _ownerId, ...agent }) => agent);
 }

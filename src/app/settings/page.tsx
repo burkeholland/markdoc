@@ -6,7 +6,7 @@ import { Logo } from "@/components/ui/logo";
 import { TokensPanel } from "@/components/settings/tokens-panel";
 import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
-import { listRequestsForUser } from "@/server/agent-requests";
+import { userHasRequested } from "@/server/agent-requests";
 import { embeddedDocumentPath } from "@/server/http";
 import { publicOrigin } from "@/server/public-origin";
 
@@ -24,10 +24,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   // Only relative document paths: never bounce the user off-site.
   const next = nextParam && /^\/d\/[a-z0-9]+$/i.test(nextParam) ? nextParam : null;
   // "Try read my doc" in the setup checklist also counts a request sent from the editor.
-  const requests = await listRequestsForUser(
-    { id: session.user.id, login: session.user.login ?? null, name: session.user.name ?? null, image: session.user.image ?? null },
-    { status: ["open", "claimed", "done", "cancelled"], limit: 1 },
-  ).catch(() => []);
+  const hasAgentRequests = await userHasRequested(session.user.id).catch(() => false);
   return (
     <main className="min-h-screen bg-surface-2">
       <header className="border-b border-line bg-surface">
@@ -51,7 +48,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           </div>
           <ThemePicker />
         </div>
-        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} hasAgentRequests={requests.length > 0} />
+        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} hasAgentRequests={hasAgentRequests} />
         <div className="mt-6">
           <WebhooksPanel />
         </div>

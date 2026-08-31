@@ -314,7 +314,7 @@ export function AgentCollaborateCard({ origin, open, docId }: { origin: string; 
       // humans accept the result here) and, unless unticked, only this document.
       const res = await api.tokens.create("GitHub Copilot CLI", 90, { scope, documentIds: restrict ? [docId] : null });
       setMinted({ name: res.token.name, token: res.token.token, scope: res.token.scope, documentIds: res.token.documentIds });
-      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, scope: res.token.scope, documentIds: res.token.documentIds, createdAt: new Date().toISOString(), lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null }, ...(list ?? [])]);
+      setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, scope: res.token.scope, documentIds: res.token.documentIds, collaboratorsMayAsk: false, createdAt: new Date().toISOString(), lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null }, ...(list ?? [])]);
       setExpanded(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create a token");

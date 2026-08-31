@@ -1695,7 +1695,9 @@ export function CommentsPanel({
           const status = (err as { status?: unknown }).status;
           if (status === 404 && i < delays.length - 1) continue;
           console.debug("[comments] agent request not posted", err);
-          onToast?.("The comment is posted, but the request did not reach the agent — mention them again.", "error");
+          // 400 (unknown agent) and 403 (the owner has not opened the agent to others) carry a message worth showing as is.
+          const message = (status === 400 || status === 403) && err instanceof Error && err.message ? err.message : null;
+          onToast?.(message ? `The comment is posted, but the request was refused: ${message}` : "The comment is posted, but the request did not reach the agent — mention them again.", "error");
           return;
         }
       }
