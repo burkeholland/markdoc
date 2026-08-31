@@ -21,7 +21,35 @@ export interface PublishResult {
   publishedAt: string;
   skipped?: boolean;
   status: SyncState;
+  /** Post-write bookkeeping that failed (the commit and the base stand); omitted when nothing did. */
+  warnings?: SyncWarning[];
 }
+
+/**
+ * Stable codes for a side effect that failed *after* the primary write of a publish, pull or link
+ * succeeded. The route answers 2xx with `warnings: [...]` instead of a 500, because a 500 here would
+ * break the API's "a non-2xx status means nothing changed" promise: GitHub (or the live text, or the
+ * link) did change, and only a version or activity row is missing.
+ */
+export type SyncWarning = "version-not-saved" | "activity-not-recorded";
+
+/**
+ * Run a post-write side effect (a version row, an activity row). A failure is logged once as
+ * `[<scope>] <code>` and appended to `warnings`; it never fails the request, whose primary write —
+ * the GitHub commit, the live-text replace, the base record, the link — has already happened.
+ * Never use it for those primary writes.
+ */
+export async function afterWrite(scope: "publish" | "pull" | "link", code: SyncWarning, warnings: SyncWarning[], fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`[${scope}] ${code}`, err);
+    warnings.push(code);
+  }
+}
+
+/** `{ warnings }` for a response body, or nothing when there are none (the key is absent, not `[]`). */
+export const withWarnings = (warnings: readonly SyncWarning[] | undefined): { warnings?: SyncWarning[] } => (warnings?.length ? { warnings: [...warnings] } : {});
 
 /** Where the document lives on GitHub; the metadata an access check returns is enough. */
 export type LinkedDocument = Pick<DocumentMeta, "id" | "title" | "storage" | "gistId" | "gistFile" | "repoOwner" | "repoName" | "repoBranch" | "repoPath" | "githubSha" | "publishedAt">;
@@ -142,9 +170,28 @@ function changedLines(from: string, to: string): number {
   return n;
 }
 
+/**
+ * Three-way classification. `base` is the last content both sides agreed on (`publishedContent`).
+ *
+ * | base | local | remote  | status       |
+ * |------|-------|---------|--------------|
+ * | B    | B     | B/none  | in-sync      |
+ * | B    | L     | B/none  | local-ahead  |
+ * | B    | B     | R       | remote-ahead |
+ * | B    | L     | R (≠L)  | diverged     |
+ * | B    | L     | L       | in-sync      | ← the base is merely behind
+ *
+ * The last row is a publish or pull that wrote GitHub (or the live text) and crashed before recording
+ * the base: the texts agree, so nothing is diverged and a plain retry must be allowed to heal the
+ * bookkeeping instead of being refused. `localChanged` / `remoteChanged` and `lines` are then
+ * computed against the remote text as the effective base — i.e. all false / `0/0`, the same answer a
+ * fully in-sync document gives — rather than against the stale stored base, so `in-sync` always
+ * means "no changes on either side" to the UI and the MCP tools.
+ */
 function classify(base: string | null, local: string, remote: RemoteFile): Omit<SyncStatus, "remote"> {
-  const baseText = base ?? "";
   const remoteText = remote.content ?? "";
+  // Only a file that exists counts: a missing file with an empty local text is the plain in-sync row.
+  const baseText = remote.content !== null && local === remoteText ? remoteText : (base ?? "");
   const localChanged = local !== baseText;
   // A file that does not exist yet (fresh link, nothing published) is not "changed".
   const remoteChanged = remote.content !== null && remoteText !== baseText;
@@ -231,8 +278,17 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
       });
     }
     if (status.status === "in-sync" && remote.content === content) {
-      if (doc.githubSha !== remote.revision) await updateDocument(doc.id, { githubSha: remote.revision });
-      return { url: githubUrlFor(doc), commitSha: null, publishedAt: (doc.publishedAt ?? new Date()).toISOString(), skipped: true, status: "in-sync" };
+      // Nothing to commit. The base may still be behind — a publish (or pull) that wrote GitHub and then
+      // crashed before recording it — so a plain retry repairs it here; a failure of this write is a
+      // 500 the next retry heals the same way.
+      const heal: Partial<Document> = {};
+      if (base !== content) {
+        heal.publishedContent = content;
+        heal.publishedAt = new Date();
+      }
+      if (doc.githubSha !== remote.revision) heal.githubSha = remote.revision;
+      if (Object.keys(heal).length) await updateDocument(doc.id, heal);
+      return { url: githubUrlFor(doc), commitSha: null, publishedAt: (heal.publishedAt ?? doc.publishedAt ?? new Date()).toISOString(), skipped: true, status: "in-sync" };
     }
   }
 
@@ -261,18 +317,25 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
     githubSha = result.sha;
   }
   const publishedAt = new Date();
-  await updateDocument(doc.id, { publishedContent: content, publishedAt, githubSha });
+  // GitHub has the text from here on: the cache says so even if the base write below fails, so a
+  // status read in the next 30 s sees in-sync (texts agree) rather than a stale local-ahead.
   rememberRemote(doc.id, { content, revision: githubSha, url: url ?? remote.url, updatedAt: publishedAt.toISOString() });
-  await addVersion({
-    documentId: doc.id,
-    content,
-    kind: "publish",
-    createdBy: user.id,
-    createdByName: actorName(user),
-    title: options.force ? "Force-published" : message?.trim() || (doc.storage === "gist" ? "Published to gist" : `Committed to ${doc.repoBranch ?? "main"}`),
-    commitSha,
-  });
-  return { url, commitSha, publishedAt: publishedAt.toISOString(), status: "in-sync" };
+  // The base record is the state the sync promise is about: it stays fatal. Should it fail, the plain
+  // retry above finds local == remote and heals it.
+  await updateDocument(doc.id, { publishedContent: content, publishedAt, githubSha });
+  const warnings: SyncWarning[] = [];
+  await afterWrite("publish", "version-not-saved", warnings, () =>
+    addVersion({
+      documentId: doc.id,
+      content,
+      kind: "publish",
+      createdBy: user.id,
+      createdByName: actorName(user),
+      title: options.force ? "Force-published" : message?.trim() || (doc.storage === "gist" ? "Published to gist" : `Committed to ${doc.repoBranch ?? "main"}`),
+      commitSha,
+    }),
+  );
+  return { url, commitSha, publishedAt: publishedAt.toISOString(), status: "in-sync", ...withWarnings(warnings) };
 }
 
 export interface PullOptions {
@@ -288,12 +351,18 @@ export interface PullResult {
   status: SyncState;
   /** Set when the pull merged GitHub's edits into local ones. */
   merged?: boolean;
+  /** Post-write bookkeeping that failed (the text and the base stand); omitted when nothing did. */
+  warnings?: SyncWarning[];
 }
 
 /**
  * Bring GitHub's copy into the live document. Refuses (409) when local edits would be lost unless
  * `force`; with `merge` a diverged document is three-way merged, and conflicts come back as a 409
  * with the marked text so the UI can hand them to the user.
+ *
+ * Order of writes: live text (broadcast to every editor) → version row (non-fatal, `warnings`) →
+ * base record (fatal). A crash before the base record leaves local == remote, which `classify`
+ * reads as in-sync, so the plain retry lands in the first branch and records the base.
  */
 export async function pullDocument(doc: LinkedDocument, user: SessionUser, options: PullOptions = {}): Promise<PullResult> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
@@ -305,8 +374,12 @@ export async function pullDocument(doc: LinkedDocument, user: SessionUser, optio
   const remoteText = remote.content ?? "";
   const url = remote.url ?? githubUrlFor(doc);
   const recordBase = () => updateDocument(doc.id, { publishedContent: remoteText, publishedAt: new Date(), githubSha: remote.revision });
+  const warnings: SyncWarning[] = [];
+  const saveVersion = (content: string, title: string) =>
+    afterWrite("pull", "version-not-saved", warnings, () => addVersion({ documentId: doc.id, content, kind: "import", createdBy: user.id, createdByName: actorName(user), title }));
 
   if (status.status === "in-sync") {
+    // Also the heal for a stale base whose texts already agree (see classify).
     await recordBase();
     return { changed: false, url, status: "in-sync" };
   }
@@ -324,9 +397,9 @@ export async function pullDocument(doc: LinkedDocument, user: SessionUser, optio
       });
     }
     await replaceLiveText(doc.id, contextFor(user, doc.id), merged.text);
-    await addVersion({ documentId: doc.id, content: merged.text, kind: "import", createdBy: user.id, createdByName: actorName(user), title: "Merged from GitHub" });
+    await saveVersion(merged.text, "Merged from GitHub");
     await recordBase();
-    return { changed: true, url, status: "local-ahead", merged: true };
+    return { changed: true, url, status: "local-ahead", merged: true, ...withWarnings(warnings) };
   }
 
   if ((status.status === "local-ahead" || status.status === "diverged") && !options.force) {
@@ -342,17 +415,10 @@ export async function pullDocument(doc: LinkedDocument, user: SessionUser, optio
   const changed = live.text !== remoteText;
   if (changed) {
     await replaceLiveText(doc.id, contextFor(user, doc.id), remoteText);
-    await addVersion({
-      documentId: doc.id,
-      content: remoteText,
-      kind: "import",
-      createdBy: user.id,
-      createdByName: actorName(user),
-      title: options.force && status.localChanged ? "Force-pulled from GitHub" : "Pulled from GitHub",
-    });
+    await saveVersion(remoteText, options.force && status.localChanged ? "Force-pulled from GitHub" : "Pulled from GitHub");
   }
   await recordBase();
-  return { changed, url, status: "in-sync" };
+  return { changed, url, status: "in-sync", ...withWarnings(warnings) };
 }
 
 export interface LinkGistInput {
@@ -379,8 +445,11 @@ const missingUnlessTooLarge = (err: unknown) => {
   return null;
 };
 
+/** The linked row, plus `warnings` when the version row of a new gist could not be written. */
+export type LinkResult = Document & { warnings?: SyncWarning[] };
+
 /** Link a document to a gist (existing or new) or a repository file, then publish. */
-export async function linkDocument(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<Document> {
+export async function linkDocument(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<LinkResult> {
   if (input.storage === "local") {
     return (await updateDocument(doc.id, {
       storage: "local",
@@ -420,8 +489,10 @@ export async function linkDocument(doc: LinkedDocument, user: SessionUser, input
       description: input.description ?? doc.title,
       isPublic: !!input.isPublic,
     });
-    await addVersion({ documentId: doc.id, content: live.clean, kind: "publish", createdBy: user.id, createdByName: actorName(user), title: "Published to new gist" });
-    return (await updateDocument(doc.id, {
+    // The gist exists now: write the link first so it is durable (a failure here is a 500 with the
+    // document still local and the gist orphaned — nothing more can be done without a transaction
+    // spanning GitHub). The version row is bookkeeping and must not undo that.
+    const linked = (await updateDocument(doc.id, {
       storage: "gist",
       gistId: created.gistId,
       gistFile: created.filename,
@@ -433,6 +504,11 @@ export async function linkDocument(doc: LinkedDocument, user: SessionUser, input
       publishedContent: live.clean,
       publishedAt: new Date(),
     }))!;
+    const warnings: SyncWarning[] = [];
+    await afterWrite("link", "version-not-saved", warnings, () =>
+      addVersion({ documentId: doc.id, content: live.clean, kind: "publish", createdBy: user.id, createdByName: actorName(user), title: "Published to new gist" }),
+    );
+    return { ...linked, ...withWarnings(warnings) };
   }
   const path = input.path.replace(/^\/+/, "");
   if (!path) throw new HttpError(400, "A file path is required");
