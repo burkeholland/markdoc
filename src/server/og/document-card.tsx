@@ -36,26 +36,31 @@ export type CardFonts = NonNullable<ImageResponseOptions["fonts"]>;
 // faces the app uses, as static instances from fonts.googleapis.com (`text=` requests answer TTF);
 // both SIL OFL, see ./fonts/OFL.txt. Together 106 492 bytes. Read relative to the working directory,
 // as the Next docs prescribe for `ImageResponse` assets; the Dockerfile copies this directory.
-const FONTS_DIR = join(process.cwd(), "src", "server", "og", "fonts");
 const DISPLAY_FAMILY = "Fraunces";
 const TEXT_FAMILY = "Inter";
 const FONT_FILES = { display: "Fraunces-SemiBold-latin.ttf", text: "Inter-Medium-latin.ttf" } as const;
+
+/** File names under ./fonts: the display face (title) and the text face (meta line, wordmark). */
+export type FontFiles = { display: string; text: string };
+
+/** A file of ./fonts. Keeping the folder literal here lets the build trace exactly that folder, nothing more. */
+const fontPath = (file: string) => join(process.cwd(), "src", "server", "og", "fonts", file);
 
 let defaultFonts: Promise<CardFonts | undefined> | undefined;
 
 /**
  * The vendored faces, or undefined when they cannot be read (the card then renders in `next/og`'s bundled
- * Geist). The default directory is read once per process, success or failure, so a missing file is logged once.
+ * Geist). The default files are read once per process, success or failure, so a missing file is logged once.
  */
-export function loadCardFonts(dir: string = FONTS_DIR): Promise<CardFonts | undefined> {
-  if (dir !== FONTS_DIR) return readFonts(dir);
-  defaultFonts ??= readFonts(dir);
+export function loadCardFonts(files: FontFiles = FONT_FILES): Promise<CardFonts | undefined> {
+  if (files !== FONT_FILES) return readFonts(files);
+  defaultFonts ??= readFonts(files);
   return defaultFonts;
 }
 
-async function readFonts(dir: string): Promise<CardFonts | undefined> {
+async function readFonts(files: FontFiles): Promise<CardFonts | undefined> {
   try {
-    const [display, text] = await Promise.all([readFile(join(dir, FONT_FILES.display)), readFile(join(dir, FONT_FILES.text))]);
+    const [display, text] = await Promise.all([readFile(fontPath(files.display)), readFile(fontPath(files.text))]);
     return [
       { name: DISPLAY_FAMILY, data: display, weight: 600, style: "normal" },
       { name: TEXT_FAMILY, data: text, weight: 500, style: "normal" },

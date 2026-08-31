@@ -77,9 +77,9 @@ describe("loadCardFonts", () => {
     expect(await loadCardFonts()).toBe(fonts);
   });
 
-  it("falls back to undefined and logs once when the directory is missing", async () => {
+  it("falls back to undefined and logs once when a file is missing", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect(await loadCardFonts("Z:\\no\\such\\fonts")).toBeUndefined();
+    expect(await loadCardFonts({ display: "no-such-face.ttf", text: "no-such-face.ttf" })).toBeUndefined();
     expect(error).toHaveBeenCalledTimes(1);
     expect(error.mock.calls[0][0]).toBe("[og] fonts");
   });
