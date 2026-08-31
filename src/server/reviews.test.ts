@@ -135,7 +135,7 @@ describe("the non-2xx promise for reviews (#1232)", () => {
     const realInsert = originalInsert.bind(db) as (table: unknown) => unknown;
     // The reviews table refuses the row; every other write (the threads' document store, the undo) goes through.
     db.insert = ((table: unknown) => {
-      if (table === schema.reviews) throw new Error('Failed query: insert into "reviews" ("id", "document_id") values ($1, $2) params: abc,secret-owner-uuid');
+      if (table === schema.reviews) throw new Error('Failed query: insert into "reviews" ("id", "document_id") values ($1, $2) params: abc,def');
       return realInsert(table);
     }) as typeof db.insert;
     try {
