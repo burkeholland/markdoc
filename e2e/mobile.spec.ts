@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDocument, cssPx, devLogin, selectTextInRich, waitForHydration } from "./helpers";
+import { createDocument, cssPx, devLogin, selectTextInRich, uniqueLogin, waitForHydration } from "./helpers";
 
 const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\nMore words.\n\n## Third\n\nEnd.\n";
 
@@ -361,6 +361,29 @@ test.describe("phone", () => {
     console.log(`[1495] /p/<id> phone CLS (4× CPU): ${cls.toFixed(3)}`);
     expect(cls).toBeLessThanOrEqual(0.02);
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    await context.close();
+  });
+
+  // The dashboard's chips row (sort select + five filters, 534 px) never fits beside the "Documents"
+  // heading on a phone, so its final place is a full-width second line. Painted beside the heading while
+  // only the select had parsed and dropped when the rest arrived, it pushed the cards ≈ 30 px down:
+  // 0.017 median / 0.022 max at 4× CPU (#1503). `max-sm:basis-full min-h-8` gives the row its line and its
+  // height from the first frame (0.000 in 5/5 runs after). 1× here, so 4× headroom below 0.1.
+  test("dashboard at 393 px does not shift after hydration (CLS ≤ 0.1)", async ({ browser }) => {
+    const context = await browser.newContext({ ...devices["Pixel 5"] });
+    await context.addInitScript(observeLayoutShifts);
+    const page = await context.newPage();
+    await devLogin(page, uniqueLogin("phone-cls-dash"));
+    for (const title of ["One", "Two"]) {
+      const res = await context.request.post("/api/documents", { data: { content: `# ${title}\n`, title } });
+      expect(res.ok()).toBeTruthy();
+    }
+    await page.goto("/");
+    await waitForHydration(page);
+    await page.waitForTimeout(1000);
+    const cls = await layoutShiftSum(page);
+    console.log(`[1525] / phone CLS: ${cls.toFixed(3)}`);
+    expect(cls).toBeLessThanOrEqual(0.1);
     await context.close();
   });
 
