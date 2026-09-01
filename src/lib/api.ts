@@ -182,7 +182,7 @@ export const api = {
     star: (id: string) => request<{ starred: true }>(`/api/documents/${id}/star`, { method: "PUT" }),
     unstar: (id: string) => request<{ starred: false }>(`/api/documents/${id}/star`, { method: "DELETE" }),
     patch: (id: string, body: { title?: string; linkAccess?: DocumentDto["linkAccess"] }) =>
-      request<{ document: DocumentDto }>(`/api/documents/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+      request<{ document: DocumentDto; warnings?: string[] }>(`/api/documents/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     /** Move to the trash; `permanent` removes the document for good (also from the trash). */
     delete: (id: string, opts: { permanent?: boolean } = {}) =>
       request<{ ok: true; permanent: boolean }>(`/api/documents/${id}${opts.permanent ? "?permanent=1" : ""}`, { method: "DELETE" }),
