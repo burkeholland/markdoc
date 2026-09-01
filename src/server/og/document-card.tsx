@@ -74,7 +74,7 @@ async function readFonts(files: FontFiles): Promise<CardFonts | undefined> {
 
 /**
  * Render the card. `fonts` defaults to the vendored faces; `null` forces the bundled fallback (tests).
- * `Cache-Control` replaces `next/og`'s default (`public, max-age=0, must-revalidate` in production).
+ * `Cache-Control` replaces `next/og`'s default (a year, immutable, in production: a renamed document must not keep its old card).
  */
 export async function renderDocumentCard(input: DocumentCardInput, fonts?: CardFonts | null): Promise<ImageResponse> {
   const loaded = fonts === undefined ? await loadCardFonts() : (fonts ?? undefined);
