@@ -992,8 +992,8 @@ resource postgresMonitorAgent 'Microsoft.Compute/virtualMachines/extensions@2024
 // Private Azure Monitor path for the VM agent (AMPLS + private endpoint + private DNS zones,
 // and the configurationAccessEndpoint association next to the rule association above).
 // Together with the subnet's Storage and Key Vault service endpoints this is the only egress the
-// template declares: the NAT gateway (<name>-pg-egress + its public IP) was retired per
-// docs/postgres-egress.md §5-§7 (detached 2026-08-30, 24 h check passed; Phase 5 deletes it by hand).
+// template declares: the retired egress gateway <name>-pg-egress and its public IP are gone from it
+// (docs/postgres-egress.md §5-§7: detached 2026-08-30, 24 h check passed, Phase 5 deletes them by hand).
 module postgresPrivateEgress './postgres-private-egress.bicep' = {
   name: '${name}-postgres-private-egress'
   params: {
