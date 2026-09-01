@@ -33,6 +33,37 @@ function RememberOpener({ targetRef }: { targetRef: React.RefObject<HTMLElement 
   return null;
 }
 
+/**
+ * A closing ⋮ menu hands focus back to its trigger in a `setTimeout(0)` queued when it unmounted (Radix
+ * FocusScope). A dialog whose content mounts after that — one whose chunk was still loading — has focus on
+ * its first control by then (`autoFocus`, or `onOpenAutoFocus` below), but a focus trap only defends focus
+ * it saw arrive after it started listening, so the trigger won and typing went to the ⋮ button. Until that
+ * timer has run, note where focus goes if it is taken — that is the opener `RememberOpener` could not see,
+ * since the menu was already gone — and then, if focus is still outside the open dialog, bring it back to
+ * the first control.
+ */
+function KeepOpeningFocus({ contentRef, targetRef }: { contentRef: React.RefObject<HTMLDivElement | null>; targetRef: React.RefObject<HTMLElement | null> }) {
+  React.useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const onFocusOut = (e: FocusEvent) => {
+      const to = e.relatedTarget;
+      if (to instanceof HTMLElement && !content.contains(to)) targetRef.current ??= to;
+    };
+    content.addEventListener("focusout", onFocusOut);
+    const timer = setTimeout(() => {
+      content.removeEventListener("focusout", onFocusOut);
+      if (!content.isConnected || content.contains(document.activeElement)) return;
+      (firstTabbable(content) ?? content).focus({ preventScroll: true });
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      content.removeEventListener("focusout", onFocusOut);
+    };
+  }, [contentRef, targetRef]);
+  return null;
+}
+
 export function DialogContent({
   title,
   description,
@@ -90,6 +121,7 @@ export function DialogContent({
         }}
       >
         <RememberOpener targetRef={returnRef} />
+        <KeepOpeningFocus contentRef={contentRef} targetRef={returnRef} />
         <div className="mb-4 flex items-start justify-between gap-4" data-focus-skip>
           <div>
             <RadixDialog.Title className="text-lg font-semibold text-ink">{title}</RadixDialog.Title>
