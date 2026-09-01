@@ -165,6 +165,7 @@ Every `npm run` script, and the environment variables the test tooling reads:
 | `repair:imported-ystate` | Re-seeds `ystate` for documents imported before `8e1f8c9` whose stored text disagrees with it (`-- --dry-run` reports, `-- --id <docId>` targets one); run with the live server stopped. |
 | `E2E_PORT` | Private port and Next cache (`.next-e2e-<port>`) for one e2e run; give each worktree its own on a shared machine. |
 | `E2E_WARMUP_TIMEOUT_MS` | Cap for each first-hit compile in `e2e/global-setup.ts` (editor route, API routes); default `300000` when the load gate is on, `120000` otherwise. The header line of the warm-up log shows the effective value. |
+| `E2E_BUDGET_SCALE` | Multiplier for the suite's timing budgets (`budgetMs` in `e2e/helpers.ts`; default `1` locally, `3` on CI). Set e.g. `2` when running targeted specs on a busy machine so load noise does not fail the performance budgets; the run log's first line states the scale, and a report from a scaled run must say so. Release preflight runs at `1`; CI never sets it. |
 | `E2E_SERVER_LOG` | `1` pipes the e2e dev server's stdout into the Playwright output so hydration warnings can be grepped. |
 | `PROD_BASE_URL` | Makes `e2e/prod-smoke.spec.ts` run against a built server instead of starting the dev server; the rest of the suite is skipped. |
 | `READER_POLL_MS` | How often the reader view (`/p/:id`) polls for a newer version (default 30 s). |

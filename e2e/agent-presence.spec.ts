@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
 
 interface EventsDto {
   cursor: string;
@@ -107,7 +107,7 @@ test.describe("agent presence and watch", () => {
     await expect(page.getByTestId("comment-thread")).toHaveCount(1);
 
     const result = await waiting;
-    expect(Date.now() - started).toBeLessThan(25_000);
+    expect(Date.now() - started).toBeLessThan(budgetMs(25_000));
     const added = result.events.find((e) => e.type === "comment.added");
     expect(added, JSON.stringify(result.events)).toBeTruthy();
     expect(added).toMatchObject({ author: "alice", body: "Agent, can you expand this?" });
@@ -159,7 +159,7 @@ test.describe("agent presence and watch", () => {
       result = await bot.events(docId, result.cursor, 2);
       mention = result.events.find((e) => e.type === "mention");
     }
-    expect(Date.now() - posted).toBeLessThan(2000);
+    expect(Date.now() - posted).toBeLessThan(budgetMs(2000));
     expect(mention, JSON.stringify(result.events)).toMatchObject({ agent: "Copilot", snippet: "@alice/Copilot tighten this" });
 
     // Alice's own bell does not ring for a mention of her own agent.
@@ -188,8 +188,8 @@ test.describe("agent presence and watch", () => {
 
     const edited = Date.now();
     await bot.suggest(docId, [{ find: "First paragraph for the agent", replace: "Opening paragraph for the agent" }]);
-    await expect(paragraph("for the agent to watch").locator(".md-remote-caret[data-agent]")).toHaveCount(1, { timeout: 3000 });
-    expect(Date.now() - edited).toBeLessThan(3000);
+    await expect(paragraph("for the agent to watch").locator(".md-remote-caret[data-agent]")).toHaveCount(1, { timeout: budgetMs(3000) });
+    expect(Date.now() - edited).toBeLessThan(budgetMs(3000));
     await expect(paragraph("Second paragraph").locator(".md-remote-caret[data-agent]")).toHaveCount(0);
 
     await bot.presence(docId, { state: "left" });

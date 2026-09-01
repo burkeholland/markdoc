@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, mintToken, setTheme, type MintedToken, type User } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, mintToken, setTheme, type MintedToken, type User } from "./helpers";
 
 /**
  * Comments panel polish (task #994, Burke): no coloured left bars anywhere in the UI, Accept all / Reject all
@@ -302,10 +302,10 @@ test.describe("comments panel polish: no left bars, one-line buttons, decided re
 
     const t0 = Date.now();
     await cardA.getByTestId("review-resolve-all").click();
-    await expect(openCards()).toHaveCount(0, { timeout: 1000 });
+    await expect(openCards()).toHaveCount(0, { timeout: budgetMs(1000) });
     const resolveMs = Date.now() - t0;
     console.log(`[994] Resolve all → card left Open in ${resolveMs} ms`);
-    expect(resolveMs).toBeLessThanOrEqual(1000);
+    expect(resolveMs).toBeLessThanOrEqual(budgetMs(1000));
     const afterResolve = await commentsOf(page, docId);
     expect(afterResolve.filter((c) => a.threadIds.includes(c.id)).every((c) => c.resolved)).toBe(true);
     await resolvedTab.click();

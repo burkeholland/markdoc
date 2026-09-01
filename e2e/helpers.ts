@@ -6,13 +6,24 @@ export interface User {
   login: string;
 }
 
+/** Multiplier for every timing budget: `E2E_BUDGET_SCALE` (a number ≥ 1), else 3 on CI, else 1. */
+export const budgetScale = (): number => {
+  const raw = Number(process.env.E2E_BUDGET_SCALE);
+  return Number.isFinite(raw) && raw >= 1 ? raw : process.env.CI ? 3 : 1;
+};
+
 /**
  * Wall-clock budget for a timing assertion ("the view follows within a second"). The 2-vCPU CI runner
  * shares its cores between two workers and the dev server, so it gets three times the local
  * allowance (the same rule as the perf budgets from task #278); the local figure stays tight so a
  * real slowdown is still caught here.
+ *
+ * `E2E_BUDGET_SCALE` (a number ≥ 1) replaces that multiplier for one run: it exists for a targeted pass
+ * on a loaded shared machine, where the performance budgets go red for reasons unrelated to the change
+ * under test. A report from a scaled run must say so (the run log's first line states the scale).
+ * Release preflight and CI never set it — CI keeps its ×3 by default and preflight runs at ×1.
  */
-export const budgetMs = (ms: number): number => (process.env.CI ? ms * 3 : ms);
+export const budgetMs = (ms: number): number => Math.round(ms * budgetScale());
 
 /** Sign in with the development login and land on the dashboard. */
 export async function signIn(browser: Browser, login: string): Promise<User> {
