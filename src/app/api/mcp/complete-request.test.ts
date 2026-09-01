@@ -7,7 +7,7 @@ import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
  * `markdoc_complete_request` must say only what the server did (#1232, audit #1202 Q5): the REST route answers
  * `{ request, notified, alreadyDone, warnings? }` and the tool's sentence is derived from those flags rather
  * than assumed. `markdoc_comment` resolve/reopen passes the route's body through as `structuredContent` so a
- * `warnings` array is not lost. The REST routes are faked with the bodies they produce (see
+ * `warnings` array is not lost, and (since #1304) says it in the text too. The REST routes are faked with the bodies they produce (see
  * src/server/agent-requests.test.ts and comments-api.test.ts for the real ones) and the tool result is read
  * through a real MCP client.
  */
@@ -99,11 +99,11 @@ describe("markdoc_complete_request", () => {
 });
 
 describe("markdoc_comment resolve/reopen", () => {
-  it("passes the route's body (with its warnings) through as structuredContent", async () => {
+  it("passes the route's body (with its warnings) through as structuredContent and names them in the text", async () => {
     nextCommentBody = { ok: true, warnings: ["activity-not-recorded"] };
     const res = await call("markdoc_comment", { id: "doc-1", action: "resolve", threadId: "t1" });
     expect(res.isError).toBeFalsy();
-    expect(res.text).toBe("Thread t1 resolved.");
+    expect(res.text).toBe("Thread t1 resolved. Warnings: activity-not-recorded.");
     expect(res.structuredContent).toEqual({ ok: true, warnings: ["activity-not-recorded"] });
     expect(calls.at(-1)).toEqual({ method: "POST", path: "/api/documents/doc-1/comments", body: { action: "resolve", threadId: "t1", resolved: true } });
 

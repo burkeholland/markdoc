@@ -82,6 +82,15 @@ export function createClient({ baseUrl, publicUrl = baseUrl, token, fetch: fetch
 const ok = (text, structured) => ({ content: [{ type: "text", text }], ...(structured ? { structuredContent: structured } : {}) });
 
 /**
+ * The REST write routes answer 2xx + top-level `warnings: string[]` (`version-not-saved`, `activity-not-recorded`,
+ * `notification-not-sent`, `request-not-attached`, `mentions-not-recorded`) when the change landed but a follow-up
+ * record did not; the key is absent when nothing failed. Appended to every write tool's text so the model learns
+ * it — most clients never show `structuredContent`.
+ * @param {unknown} res the REST body
+ */
+const warn = (res) => (Array.isArray(res?.warnings) && res.warnings.length ? ` Warnings: ${res.warnings.join(", ")}.` : "");
+
+/**
  * Zod `issues` from a 400, as " — content: Too big: expected string to have <=2000000 characters (+2 more)":
  * the path and message of the first issue are what tells a model *why* the request was invalid.
  * @param {unknown} issues
@@ -180,6 +189,7 @@ export function registerTools(server, client) {
       annotations: READ_ONLY,
     },
     async ({ starred, trash }) => {
+      if (trash && starred) throw new Error("Provide either `trash` or `starred`, not both.");
       const { documents } = await api("GET", `/api/documents${trash ? "?trash=1" : starred ? "?starred=1" : ""}`);
       const lines = documents.map(
         (d) =>
@@ -211,9 +221,11 @@ export function registerTools(server, client) {
       description:
         "Create a new Markdoc document from Markdown, or from a template (ids: blank, meeting-notes, project-readme, design-doc, weekly-status, blog-post, decision-record, checklist; see GET /api/templates). Returns the id and the URL to open it in the browser, where others can collaborate in real time.",
       inputSchema: {
-        title: z.string().optional().describe("Title; defaults to the first heading"),
-        content: z.string().optional().describe("Markdown content (omit when using `template`)"),
-        template: z.string().optional().describe("Template id; fills title and content when `content` is omitted"),
+        // Bounds mirror POST /api/documents: DOCUMENT_TITLE_MAX (src/server/document-title.ts) is 200; this file is
+        // plain Node for the stdio server, so the number is repeated here rather than imported.
+        title: z.string().max(200).optional().describe("Title; defaults to the first heading"),
+        content: z.string().max(2_000_000).optional().describe("Markdown content (omit when using `template`)"),
+        template: z.string().max(64).optional().describe("Template id; fills title and content when `content` is omitted"),
       },
       annotations: ADDITIVE,
     },
@@ -229,10 +241,11 @@ export function registerTools(server, client) {
     {
       title: "Import text",
       description:
-        "Create a new document from a string in a given format: Markdown as-is, plain text as-is, or HTML converted to GFM Markdown (sanitised; headings, lists, tables, links, images, code, strikethrough). Title defaults to the front-matter title, first heading or <title>. Returns the id, warnings and the URL.",
+        "Create a new document from a string in a given format: Markdown as-is, plain text as-is, or HTML converted to GFM Markdown (sanitised; headings, lists, tables, links, images, code, strikethrough). Title defaults to the front-matter title, first heading or <title>. Returns the id, warnings and the URL. The reply lists `Warnings:` for conversion notes (unreadable HTML, missing images) on a document that was created; do not repeat the call because of a warning.",
       inputSchema: {
         title: z.string().optional().describe("Title; defaults to the front-matter title, the first heading or the HTML <title>"),
-        content: z.string().describe("The text to import (≤ 2 MB)"),
+        // POST /api/import/file refuses more than MAX_IMPORT_BYTES (2 MiB of UTF-8) with a 413; the character bound here is the document bound.
+        content: z.string().max(2_000_000).describe("The text to import (≤ 2 MB)"),
         format: z.enum(["markdown", "text", "html"]).default("markdown").describe("How to read `content`"),
       },
       annotations: ADDITIVE,
@@ -297,7 +310,7 @@ export function registerTools(server, client) {
     async ({ id, content, message, ifContentHash }) => {
       try {
         const res = await api("PUT", `/api/documents/${id}/content`, { content, message, ...(ifContentHash ? { ifContentHash } : {}) });
-        return ok(res.changed ? `Document ${id} updated (hash ${res.contentHash}). ${docUrl(id)}` : `Document ${id} already had that content (hash ${res.contentHash}).`, { ...res, url: docUrl(id) });
+        return ok(`${res.changed ? `Document ${id} updated (hash ${res.contentHash}). ${docUrl(id)}` : `Document ${id} already had that content (hash ${res.contentHash}).`}${warn(res)}`, { ...res, url: docUrl(id) });
       } catch (err) {
         return staleOr(err);
       }
@@ -316,7 +329,7 @@ export function registerTools(server, client) {
     async ({ id, markdown, ifContentHash }) => {
       try {
         const res = await api("PATCH", `/api/documents/${id}/content`, { append: markdown, ...(ifContentHash ? { ifContentHash } : {}) });
-        return ok(`Appended to ${id} (hash ${res.contentHash}). ${docUrl(id)}`, { ...res, url: docUrl(id) });
+        return ok(`Appended to ${id} (hash ${res.contentHash}). ${docUrl(id)}${warn(res)}`, { ...res, url: docUrl(id) });
       } catch (err) {
         return staleOr(err);
       }
@@ -328,21 +341,23 @@ export function registerTools(server, client) {
     {
       title: "Suggest changes",
       description:
-        "Propose changes as tracked suggestions (green insertions, struck deletions) that the humans accept or reject in the app. Provide either the full revised `content`, or a list of `edits` (find → replace; each `find` must match exactly once unless `all` is true).",
+        "Propose changes as tracked suggestions (green insertions, struck deletions) that the humans accept or reject in the app. Provide either the full revised `content`, or a list of `edits` (find → replace; each `find` must match exactly once unless `all` is true). The reply lists `Warnings:` when the change landed but a follow-up record (activity row, notification, request link, mentions) did not; do not repeat the call because of a warning.",
       inputSchema: {
         id: z.string(),
-        content: z.string().optional().describe("Full revised Markdown"),
-        edits: z.array(z.object({ find: z.string(), replace: z.string(), all: z.boolean().optional() })).optional(),
+        // Bounds mirror POST /api/documents/:id/suggest; `content: ""` is legal (it proposes deleting the text).
+        content: z.string().max(2_000_000).optional().describe("Full revised Markdown (an empty string proposes deleting everything)"),
+        edits: z.array(z.object({ find: z.string().min(1), replace: z.string(), all: z.boolean().optional() })).min(1).max(200).optional(),
         requestId: z.string().optional().describe("Link the suggestions to a request you are working on (a person asked by mentioning you in a comment; from markdoc_list_requests)"),
         ifContentHash: IF_HASH,
       },
       annotations: ADDITIVE,
     },
     async ({ id, content, edits, requestId, ifContentHash }) => {
-      if (!content && !edits?.length) throw new Error("Provide `content` or `edits`.");
+      if (content === undefined && !edits?.length) throw new Error("Provide `content` or `edits`.");
+      if (content !== undefined && edits?.length) throw new Error("Provide either `content` or `edits`, not both.");
       try {
         const res = await api("POST", `/api/documents/${id}/suggest`, { ...(content !== undefined ? { content } : { edits }), ...(requestId ? { requestId } : {}), ...(ifContentHash ? { ifContentHash } : {}) });
-        return ok(`Proposed ${res.suggestions} change(s) on ${id}. Reviewers can accept or reject them at ${docUrl(id)}`, { ...res, url: docUrl(id) });
+        return ok(`Proposed ${res.suggestions} change(s) on ${id}. Reviewers can accept or reject them at ${docUrl(id)}${warn(res)}`, { ...res, url: docUrl(id) });
       } catch (err) {
         return staleOr(err);
       }
@@ -363,7 +378,7 @@ export function registerTools(server, client) {
     "markdoc_review_suggestions",
     {
       title: "Accept or reject suggestions",
-      description: "Accept or reject one suggestion by `suggestionId` (required for accept/reject; list ids with markdoc_suggestions), or all of them with acceptAll/rejectAll. Only do this when the user asked you to.",
+      description: "Accept or reject one suggestion by `suggestionId` (required for accept/reject; list ids with markdoc_suggestions), or all of them with acceptAll/rejectAll. Only do this when the user asked you to. The reply lists `Warnings:` when the change landed but a follow-up record (activity row, notification, request link, mentions) did not; do not repeat the call because of a warning.",
       inputSchema: {
         id: z.string(),
         action: z.enum(["accept", "reject", "acceptAll", "rejectAll"]),
@@ -376,10 +391,12 @@ export function registerTools(server, client) {
       if (single && !suggestionId) throw new Error("`suggestionId` is required for accept/reject (list them with markdoc_suggestions).");
       const res = await api("POST", `/api/documents/${id}/suggestions`, { action, ...(single ? { id: suggestionId } : {}) });
       const decided = Number(res?.decided ?? 0);
+      // The structured answer is rebuilt from the body, so the route's `warnings` is carried over explicitly (present exactly when the body had it).
+      const warnings = res?.warnings ? { warnings: res.warnings } : {};
       // acceptAll / rejectAll with nothing pending is an idempotent no-op, not a failure: the document is already in the asked-for state.
-      if (decided === 0) return ok(`Nothing to decide on ${id} (0 pending).`, { ok: true, action, decided: 0 });
+      if (decided === 0) return ok(`Nothing to decide on ${id} (0 pending).${warn(res)}`, { ok: true, action, decided: 0, ...warnings });
       const verb = action.startsWith("accept") ? "Accepted" : "Rejected";
-      return ok(single ? `${verb} suggestion ${suggestionId} on ${id}.` : `${verb} ${decided} suggestion(s) on ${id}.`, { ok: true, action, decided, ...(single ? { suggestionId } : {}) });
+      return ok(`${single ? `${verb} suggestion ${suggestionId} on ${id}.` : `${verb} ${decided} suggestion(s) on ${id}.`}${warn(res)}`, { ok: true, action, decided, ...(single ? { suggestionId } : {}), ...warnings });
     },
   );
 
@@ -402,15 +419,16 @@ export function registerTools(server, client) {
     {
       title: "Comment",
       description:
-        "Add a comment anchored to a quote of the document text, reply to a thread, resolve/reopen a thread, or toggle an emoji reaction on a thread or reply. Bodies may use inline Markdown (**bold**, *italic*, `code`, [links](https://…)) and @login mentions. To propose a rewrite from either a new comment or a reply, include one fenced block with the info string `suggestion` (exactly GitHub's syntax) — ```suggestion⏎new text⏎``` — people see a diff with Accept / Reject; Accept replaces the quoted text. Nothing is applied until a human accepts.",
+        "Add a comment anchored to a quote of the document text, reply to a thread, resolve/reopen a thread, or toggle an emoji reaction on a thread or reply. Bodies may use inline Markdown (**bold**, *italic*, `code`, [links](https://…)) and @login mentions. To propose a rewrite from either a new comment or a reply, include one fenced block with the info string `suggestion` (exactly GitHub's syntax) — ```suggestion⏎new text⏎``` — people see a diff with Accept / Reject; Accept replaces the quoted text. Nothing is applied until a human accepts. The reply lists `Warnings:` when the change landed but a follow-up record (activity row, notification, request link, mentions) did not; do not repeat the call because of a warning.",
       inputSchema: {
         id: z.string(),
         action: z.enum(["add", "reply", "resolve", "reopen", "react"]).default("add"),
-        quote: z.string().optional().describe("Exact text to anchor a new comment to"),
+        // Bounds mirror POST /api/documents/:id/comments.
+        quote: z.string().min(1).max(2000).optional().describe("Exact text to anchor a new comment to"),
         threadId: z.string().optional().describe("Thread to reply to / resolve / react to"),
         replyId: z.string().optional().describe("With `react`: react to this reply instead of the thread body"),
-        body: z.string().optional().describe("Comment text"),
-        emoji: z.string().optional().describe("With `react`: the emoji to toggle, e.g. 👍 ❤️ 🎉 👀 😄 🚀"),
+        body: z.string().min(1).max(5000).optional().describe("Comment text"),
+        emoji: z.string().min(1).max(16).optional().describe("With `react`: the emoji to toggle, e.g. 👍 ❤️ 🎉 👀 😄 🚀"),
         requestId: z.string().optional().describe("With `add` or `reply`: link the comment to a request you are working on (a person asked by mentioning you in a comment; from markdoc_list_requests). Prefer `reply` into the request's own comment thread (its `threadId`)"),
       },
       annotations: ADDITIVE,
@@ -419,13 +437,15 @@ export function registerTools(server, client) {
       if (action === "add") {
         if (!quote || !body) throw new Error("`quote` and `body` are required to add a comment.");
         const res = await api("POST", `/api/documents/${id}/comments`, { action: "add", quote, body, ...(requestId ? { requestId } : {}) });
-        return ok(`Commented on ${JSON.stringify(quote)} (thread ${res.id}).`, res);
+        // An `add` linked to a request that came from a comment is stored as a reply in that thread: `{ id: <replyId>, threadId, folded: true }`.
+        const text = res.folded && res.threadId ? `Replied into request thread ${res.threadId} (reply ${res.id}) — the request's own thread is where this comment belongs.` : `Commented on ${JSON.stringify(quote)} (thread ${res.id}).`;
+        return ok(`${text}${warn(res)}`, res);
       }
       if (!threadId) throw new Error("`threadId` is required.");
       if (action === "reply") {
         if (!body) throw new Error("`body` is required to reply.");
         const res = await api("POST", `/api/documents/${id}/comments`, { action: "reply", threadId, body, ...(requestId ? { requestId } : {}) });
-        return ok(`Replied to thread ${threadId}.`, res);
+        return ok(`Replied to thread ${threadId}.${warn(res)}`, res);
       }
       if (action === "react") {
         if (!emoji) throw new Error("`emoji` is required to react.");
@@ -433,7 +453,7 @@ export function registerTools(server, client) {
         return ok(`${res.reacted ? "Reacted" : "Removed reaction"} ${emoji} on ${replyId ? `reply ${replyId}` : `thread ${threadId}`}.`, res);
       }
       const res = await api("POST", `/api/documents/${id}/comments`, { action: "resolve", threadId, resolved: action === "resolve" });
-      return ok(`Thread ${threadId} ${action === "resolve" ? "resolved" : "reopened"}.`, res);
+      return ok(`Thread ${threadId} ${action === "resolve" ? "resolved" : "reopened"}.${warn(res)}`, res);
     },
   );
 
@@ -445,24 +465,28 @@ export function registerTools(server, client) {
         "Leave a GitHub-style review: a summary, a verdict (approve / request_changes / comment) and one comment per finding. Each comment quotes the exact text it is about (first occurrence) and may propose a rewrite of that quote in a ```suggestion fenced block — the humans see a diff and click Accept (applies it) or Reject. Nothing is changed until they accept. The review shows as a card at the top of the Comments panel with Accept all / Reject all. Atomic: if any quote is not found, nothing is created and the error lists which.",
       inputSchema: {
         id: z.string(),
-        summary: z.string().describe("One or two sentences on the whole document"),
+        // Bounds mirror POST /api/documents/:id/reviews. REST defaults `summary` to ""; the tool keeps it required on purpose: a review without a sentence on the whole document is a worse review.
+        summary: z.string().max(5000).describe("One or two sentences on the whole document"),
         verdict: z.enum(["approve", "request_changes", "comment"]).default("comment"),
         comments: z
           .array(
             z.object({
-              quote: z.string().describe("Exact text the comment is about"),
-              body: z.string().describe("Comment text; add ```suggestion⏎replacement⏎``` to propose a rewrite of the quote"),
+              quote: z.string().min(1).max(2000).describe("Exact text the comment is about"),
+              body: z.string().min(1).max(5000).describe("Comment text; add ```suggestion⏎replacement⏎``` to propose a rewrite of the quote"),
             }),
           )
           .min(1)
+          .max(50)
           .describe("One entry per finding"),
       },
       annotations: ADDITIVE,
     },
     async ({ id, summary, verdict, comments }) => {
-      const { review } = await api("POST", `/api/documents/${id}/reviews`, { summary, verdict, comments });
+      const res = await api("POST", `/api/documents/${id}/reviews`, { summary, verdict, comments });
+      const { review } = res;
       const suggestions = comments.filter((c) => /(^|\n)\s*(`{3,}|~{3,})\s*suggestion\s*\n/.test(c.body)).length;
-      return ok(`Review ${review.id} posted on ${id}: ${verdict}, ${comments.length} comment(s), ${suggestions} suggestion(s). People can accept them at ${docUrl(id)}`, { ...review, url: docUrl(id) });
+      // The structured answer is the review row, so the route's top-level `warnings` is carried over explicitly (present exactly when the body had it).
+      return ok(`Review ${review.id} posted on ${id}: ${verdict}, ${comments.length} comment(s), ${suggestions} suggestion(s). People can accept them at ${docUrl(id)}${warn(res)}`, { ...review, url: docUrl(id), ...(res.warnings ? { warnings: res.warnings } : {}) });
     },
   );
 
@@ -488,7 +512,7 @@ export function registerTools(server, client) {
     async ({ id, message, force }) => {
       try {
         const res = await api("POST", `/api/documents/${id}/publish${force ? "?force=1" : ""}`, { message });
-        return ok(res.result.skipped ? "Already up to date on GitHub." : `Published. ${res.result.url ?? ""}`, res);
+        return ok(`${res.result.skipped ? "Already up to date on GitHub." : `Published. ${res.result.url ?? ""}`}${warn(res)}`, res);
       } catch (err) {
         if (isUnreadableRemote(err)) throw withUnreadableHint(err);
         if (!err.sync) throw err;
@@ -511,7 +535,7 @@ export function registerTools(server, client) {
       try {
         const res = await api("POST", `/api/documents/${id}/pull${q ? `?${q}` : ""}`);
         const r = res.result;
-        return ok(r.merged ? "Merged GitHub\u2019s changes into the document; publish to finish." : r.changed ? "Pulled the latest version from GitHub." : "Already up to date.", res);
+        return ok(`${r.merged ? "Merged GitHub\u2019s changes into the document; publish to finish." : r.changed ? "Pulled the latest version from GitHub." : "Already up to date."}${warn(res)}`, res);
       } catch (err) {
         if (isUnreadableRemote(err)) throw withUnreadableHint(err);
         if (!err.sync) throw err;
@@ -641,15 +665,14 @@ export function registerTools(server, client) {
       const { request, notified, alreadyDone, warnings } = res;
       const r = request.result ?? { suggestions: 0, comments: 0 };
       // Say only what the server did: the already-done no-op and a requester without a login notify nobody.
-      const warned = Array.isArray(warnings) && warnings.length ? warnings : [];
-      const reason = warned.includes("notification-not-sent") ? "the notification could not be written" : "no account to notify";
+      const reason = Array.isArray(warnings) && warnings.includes("notification-not-sent") ? "the notification could not be written" : "no account to notify";
       const notNotified = `The requester was not notified (${reason}).`;
       const notice = alreadyDone
         ? `Already completed earlier; notification re-sent if it was missing.${notified ? "" : ` ${notNotified}`}`
         : notified
           ? "The requester has been notified."
           : notNotified;
-      return ok(`Request ${request.id} is done: ${r.suggestions} suggestion(s), ${r.comments} comment(s). ${notice}${warned.length ? ` Warnings: ${warned.join(", ")}.` : ""} ${docUrl(documentId)}`, res);
+      return ok(`Request ${request.id} is done: ${r.suggestions} suggestion(s), ${r.comments} comment(s). ${notice}${warn(res)} ${docUrl(documentId)}`, res);
     },
   );
 
