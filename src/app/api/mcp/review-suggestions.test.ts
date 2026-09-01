@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { describe, expect, it, beforeAll, beforeEach, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
@@ -10,10 +10,11 @@ import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
  * with `decided: 0`, so a "make sure nothing is pending" call is not a failure to retry. The
  * REST route is faked here with the answers it gives (see documents/suggestions.test.ts for the
  * real ones), and the tool result is read through a real MCP client so `isError` is what a model sees.
+ * The fake's state (`calls`, `pendingIds`) is reset before every test so the tests hold in any order.
  */
 type Call = { method: string; path: string; body: unknown };
 const calls: Call[] = [];
-const pendingIds = new Set(["sug-1", "sug-2"]);
+let pendingIds = new Set<string>();
 
 const fakeFetch: typeof fetch = async (input, init) => {
   const url = new URL(String(input));
@@ -55,13 +56,17 @@ afterAll(async () => {
   await client.close();
 });
 
+beforeEach(() => {
+  calls.length = 0;
+  pendingIds = new Set(["sug-1", "sug-2"]);
+});
+
 describe("markdoc_review_suggestions", () => {
   it("accept without suggestionId is an error and never reaches the server", async () => {
-    const before = calls.length;
     const res = await review({ action: "accept" });
     expect(res.isError).toBe(true);
     expect(res.text).toContain("`suggestionId` is required");
-    expect(calls.length).toBe(before);
+    expect(calls).toEqual([]);
   });
 
   it("accept with an unknown suggestionId surfaces the 404 as an error", async () => {
@@ -84,16 +89,20 @@ describe("markdoc_review_suggestions", () => {
     expect(res.isError).toBeFalsy();
     expect(res.text).toBe("Accepted suggestion sug-1 on doc-1.");
     expect(res.structuredContent).toEqual({ ok: true, action: "accept", decided: 1, suggestionId: "sug-1" });
-    expect(calls.at(-1)).toEqual({ method: "POST", path: "/api/documents/doc-1/suggestions", body: { action: "accept", id: "sug-1" } });
+    expect(calls).toEqual([{ method: "POST", path: "/api/documents/doc-1/suggestions", body: { action: "accept", id: "sug-1" } }]);
     expect(pendingIds.has("sug-1")).toBe(false);
+    expect(pendingIds.has("sug-2")).toBe(true);
   });
 
   it("rejectAll reports the count, and a second rejectAll with nothing pending is a plain no-op success", async () => {
+    // One of the two fixtures is already decided: the count must be what was still pending, not the total.
+    pendingIds.delete("sug-1");
     const res = await review({ action: "rejectAll" });
     expect(res.isError).toBeFalsy();
     expect(res.text).toBe("Rejected 1 suggestion(s) on doc-1.");
     expect(res.structuredContent).toEqual({ ok: true, action: "rejectAll", decided: 1 });
     expect(calls.at(-1)?.body).toEqual({ action: "rejectAll" });
+    expect(pendingIds.size).toBe(0);
 
     const nothing = await review({ action: "rejectAll" });
     expect(nothing.isError).toBeFalsy();
@@ -102,9 +111,11 @@ describe("markdoc_review_suggestions", () => {
   });
 
   it("acceptAll with nothing pending is the same idempotent no-op", async () => {
+    pendingIds.clear();
     const res = await review({ action: "acceptAll" });
     expect(res.isError).toBeFalsy();
     expect(res.text).toBe("Nothing to decide on doc-1 (0 pending).");
     expect(res.structuredContent).toEqual({ ok: true, action: "acceptAll", decided: 0 });
+    expect(calls.at(-1)?.body).toEqual({ action: "acceptAll" });
   });
 });
