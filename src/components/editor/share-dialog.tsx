@@ -4,7 +4,7 @@ import { memo, useEffect, useId, useRef, useState, type RefObject } from "react"
 import { BookOpen, Bot, Check, ChevronDown, Copy, Globe, KeyRound, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
-import { api, type ApiTokenDto, type CollaboratorDto } from "@/lib/api";
+import { api, apiErrorText, type ApiTokenDto, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CollaboratorLoginInput } from "@/components/editor/collaborator-login-input";
@@ -79,7 +79,7 @@ export const ShareDialog = memo(function ShareDialog({
         setCollabs(res.collaborators);
         setOwner(res.owner);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => setError(apiErrorText(e, "Could not add collaborator")));
   }, [open, doc.id]);
 
   const add = async () => {
@@ -92,7 +92,7 @@ export const ShareDialog = memo(function ShareDialog({
       setCollabs(res.collaborators);
       setLogin("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not add collaborator");
+      setError(apiErrorText(e, "Could not add collaborator"));
     } finally {
       setBusy(false);
     }

@@ -4,19 +4,24 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import type { DocumentDto } from "@/server/dto";
 
 const collaborators = vi.fn();
+const addCollaborator = vi.fn();
 const tokensList = vi.fn();
 const tokensCreate = vi.fn();
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   api: {
     documents: {
       collaborators: (...args: unknown[]) => collaborators(...args),
-      addCollaborator: vi.fn(),
+      addCollaborator: (...args: unknown[]) => addCollaborator(...args),
       removeCollaborator: vi.fn(),
       patch: vi.fn(),
     },
     tokens: {
       list: (...args: unknown[]) => tokensList(...args),
       create: (...args: unknown[]) => tokensCreate(...args),
+    },
+    github: {
+      searchUsers: async () => ({ users: [], limited: false }),
     },
   },
 }));
@@ -27,6 +32,7 @@ vi.mock("@/lib/clipboard", async (importOriginal) => {
   return { ...actual, copyText: (...args: unknown[]) => copyText(...args) };
 });
 
+import { ApiError } from "@/lib/api";
 import { ShareDialog } from "./share-dialog";
 
 const DOC_ID = "doc-919";
@@ -75,6 +81,7 @@ beforeEach(() => {
     collaborators: [{ login: "bob", name: "Bob", image: null, role: "editor" }],
     agents: [],
   });
+  addCollaborator.mockReset();
   tokensList.mockReset().mockResolvedValue({ tokens: [] });
   tokensCreate.mockReset().mockImplementation(async (name: string, _expires: number, options: { scope: string; documentIds: string[] | null }) => ({
     token: { id: "tok-1", name, token: "mdk_one_time_secret", prefix: "mdk_one_", scope: options.scope, documentIds: options.documentIds },
@@ -137,6 +144,20 @@ describe("ShareDialog layout", () => {
     expect(field).toHaveValue(`${window.location.origin}/d/${DOC_ID}`);
     expect(field).toHaveFocus();
     expect(screen.getByTestId("editor-link")).toContainElement(field);
+  });
+});
+
+describe("ShareDialog · add a collaborator", () => {
+  it("shows the server's validation reason, not the bare 'Invalid request', when the handle is rejected", async () => {
+    addCollaborator.mockRejectedValueOnce(new ApiError(400, "Invalid request", [{ path: ["login"], message: "Enter a GitHub handle" }]));
+    await openDialog();
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "someone.else" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+
+    expect(await screen.findByText("Enter a GitHub handle")).toBeInTheDocument();
+    expect(screen.queryByText("Invalid request")).toBeNull();
+    expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "someone.else", "editor");
+    expect(screen.getByTestId("share-login")).toHaveValue("someone.else");
   });
 });
 
