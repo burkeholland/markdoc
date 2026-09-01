@@ -394,6 +394,8 @@ Approximate monthly cost shape (pay-as-you-go, East US 2 list prices; storage, b
 
 Nothing alerts on the Container App itself yet — no metric or Activity Log alert scopes it — so after a release the runbook's post-release watch (health, `Requests` by status code, `RestartCount`, `Replicas`) is the only alarm until the next infrastructure deployment adds metric alerts for restarts, 5xx and a request floor.
 
+What every line in `ContainerAppConsoleLogs_CL` means — each `[prefix]` the server can print with its source line, whether it is expected, which ones a release and `release:verify` cause, and copy-pasteable KQL to count them — is in [`docs/operations-log-lines.md`](docs/operations-log-lines.md).
+
 The collaboration server keeps open documents in memory, so the app runs as a single replica; scaling out would need Hocuspocus's Redis extension.
 
 ## Project layout
