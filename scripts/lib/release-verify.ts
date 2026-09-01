@@ -1,8 +1,9 @@
 /**
  * Read-only release checks for an app-only production release (README "Production runbook: app-only
- * releases", step 3): health, the liveness probe, the HTTP→HTTPS redirect, the `/login` chunks byte for byte
- * against a local build of the same SHA, every other local chunk by name, brotli and gzip negotiation, the
- * Tailwind stylesheet rule by rule, a `localhost` leak scan and the unauthenticated `/collab` rejection.
+ * releases", step 3): health, the liveness probe, the HTTP→HTTPS redirect, the baseline security headers, the
+ * `/login` chunks byte for byte against a local build of the same SHA, every other local chunk by name, brotli
+ * and gzip negotiation, the Tailwind stylesheet rule by rule, a `localhost` leak scan and the unauthenticated
+ * `/collab` rejection.
  * Everything that touches the network or the disk is injected (`ReleaseVerifyIo`) so the checks are unit
  * tested without a server; the CLI (`scripts/release-verify.mts`) supplies fetch, node:https, node:fs and
  * @hocuspocus/provider. Nothing here writes anywhere: the script only issues GETs and one WebSocket connect.
@@ -13,7 +14,7 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 export type CheckStatus = "pass" | "fail" | "warn" | "skipped";
 
 export interface Check {
-  /** Stable id: `health`, `health:live`, `redirect`, `login`, `chunks:identity`, `chunks:all`, `css:rules`, `brotli`, `gzip`, `leak:localhost`, `collab:reject`, `flip`. */
+  /** Stable id: `health`, `health:live`, `redirect`, `headers`, `login`, `chunks:identity`, `chunks:all`, `css:rules`, `brotli`, `gzip`, `leak:localhost`, `collab:reject`, `flip`. */
   name: string;
   status: CheckStatus;
   /** The numbers; never an environment value, token or connection string. */
@@ -390,6 +391,55 @@ export function scanLocalhost(text: string): LocalhostScan {
   return { count, originLike, samples };
 }
 
+/** What `server/index.ts` stamps on every response (task #1224), by lower-case name. */
+export const BASELINE_SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+};
+/** `src/proxy.ts` on every page that is not the embedded document; never on `/api/*` or a static chunk. */
+export const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
+/** `server/index.ts`, only when the request arrived over HTTPS (`x-forwarded-proto` from the ingress). */
+export const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
+
+export interface HeaderRule {
+  /** Lower-case header name. */
+  name: string;
+  /** The exact value after trim, or null when the header must be absent. */
+  expected: string | null;
+  /** Appended in parentheses when the rule fails, e.g. why an absent header matters. */
+  note?: string;
+}
+
+/** `nosniff, nosniff`: one value repeated, joined with `, ` as fetch and node:http do when a header is sent twice. */
+function isRepeated(actual: string, expected: string): boolean {
+  if (!expected || actual === expected) return false;
+  let rest = actual;
+  while (rest.startsWith(`${expected}, `)) rest = rest.slice(expected.length + 2);
+  return rest === expected;
+}
+
+/**
+ * Every rule one response breaks, as `<label>: <header> <expected|absent>, got <actual|absent>`, with
+ * ` (duplicated)` when the same value arrived more than once and the rule's note when it has one. Header
+ * values are compared exactly after trim; names are looked up lower-case (`Headers` is already lower-case).
+ */
+export function checkHeaders(label: string, headers: Headers, rules: HeaderRule[]): string[] {
+  const problems: string[] = [];
+  for (const rule of rules) {
+    const raw = headers[rule.name];
+    const actual = raw === undefined ? undefined : raw.trim();
+    if (actual === undefined && rule.expected === null) continue;
+    if (actual !== undefined && actual === rule.expected) continue;
+    const got = actual === undefined ? "absent" : actual === "" ? '""' : actual;
+    const marks: string[] = [];
+    if (actual !== undefined && rule.expected !== null && isRepeated(actual, rule.expected)) marks.push("duplicated");
+    if (rule.note) marks.push(rule.note);
+    problems.push(`${label}: ${rule.name} ${rule.expected ?? "absent"}, got ${got}${marks.length > 0 ? ` (${marks.join("; ")})` : ""}`);
+  }
+  return problems;
+}
+
 function escapeCell(text: string): string {
   return text.replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
 }
@@ -583,6 +633,35 @@ export async function runReleaseVerify(options: ReleaseVerifyOptions, io: Releas
     const location = response.headers.location ?? "";
     const ok = [301, 302, 307, 308].includes(response.status) && location.startsWith(`https://${base.host}`);
     return { name: "redirect", status: ok ? "pass" : "fail", detail: `GET ${url} → ${response.status}${location ? ` location ${location}` : " (no location header)"}` };
+  });
+
+  await guarded("headers", async () => {
+    const https = base.protocol === "https:";
+    const baseline: HeaderRule[] = Object.entries(BASELINE_SECURITY_HEADERS).map(([name, expected]) => ({ name, expected }));
+    const hsts: HeaderRule = https ? { name: "strict-transport-security", expected: STRICT_TRANSPORT_SECURITY } : { name: "strict-transport-security", expected: null, note: "HSTS sent over plain HTTP" };
+    // The frame policy belongs to pages only: on /api/* it would replace /api/assets' sandbox CSP, and chunks are outside the proxy matcher.
+    const noCsp: HeaderRule = { name: "content-security-policy", expected: null };
+    const loginRules: HeaderRule[] = [...baseline, { name: "content-security-policy", expected: FRAME_ANCESTORS_NONE }, hsts];
+    const healthRules: HeaderRule[] = [...baseline, hsts];
+    const chunkRules: HeaderRule[] = [{ name: "x-content-type-options", expected: BASELINE_SECURITY_HEADERS["x-content-type-options"] }];
+
+    const login = await io.fetchText(`${origin}/login`, { redirect: "manual" });
+    const health = await io.fetchText(healthUrl, { redirect: "manual" });
+    const problems = [...checkHeaders("/login", login.headers, loginRules), ...checkHeaders("/api/health", health.headers, [...healthRules, noCsp])];
+    const targets = ["/login", "/api/health"];
+    const counts = [loginRules.length, healthRules.length];
+    let skipped = "";
+    // This row runs before `login` fills state.referenced, so it reads the /login HTML it fetched itself.
+    const chunkUrl = extractChunkUrls(login.text).find((url) => url.endsWith(".js"));
+    if (chunkUrl) {
+      const name = chunkName(chunkUrl);
+      const chunk = await io.fetchText(`${origin}${chunkUrl}`, { redirect: "manual" });
+      problems.push(...checkHeaders(name, chunk.headers, [...chunkRules, noCsp]));
+      targets.push(name);
+      counts.push(chunkRules.length);
+    } else skipped = "; chunk skipped: /login references no .js chunk (see login)";
+    if (problems.length > 0) return { name: "headers", status: "fail", detail: `${problems.join("; ")}${skipped}` };
+    return { name: "headers", status: "pass", detail: `GET ${targets.join(", ")}: ${counts.join(" + ")} headers as expected (HSTS ${https ? "checked" : "not expected over http"})${skipped}` };
   });
 
   const state: ChunkState = { referenced: [], identity: new Map(), referencedBytes: new Map(), cssPairedLocal: new Set(), cssRenamed: new Set() };
