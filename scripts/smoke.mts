@@ -1,7 +1,8 @@
 // API smoke test against a running Markdoc server (typically the production build started by
 // `npm run start:local`). No browser: it signs in with the development login, exercises the
-// REST surface that production has to get right (health, templates, bytea assets, HTML/PDF
-// export) and exits non-zero on the first failure.
+// REST surface that production has to get right (health and its DB-free `?probe=live` liveness
+// answer, the JSON 404 catch-all for unknown `/api/*` paths, the MCP liveness card, templates,
+// bytea assets, HTML export, PDF export twice in a row) and exits non-zero on the first failure.
 //
 //   npm run start:local                                     # terminal 1
 //   BASE_URL=http://localhost:3900 npm run smoke             # terminal 2
@@ -56,6 +57,17 @@ async function call(path: string, init: RequestInit = {}): Promise<Response> {
   return res;
 }
 
+/** Body text plus its parse as a JSON object (`null` when it is not one, e.g. Next's HTML 404 page). */
+async function readJson(res: Response): Promise<{ text: string; body: Record<string, unknown> | null }> {
+  const text = await res.text();
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return { text, body: parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null };
+  } catch {
+    return { text, body: null };
+  }
+}
+
 async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   console.log(`\n${name}`);
   return fn();
@@ -70,6 +82,40 @@ async function main() {
     const body = (await res.json()) as { ok: boolean; db: boolean; collab: boolean; version?: string };
     check(body.ok === true && body.db === true, "database reachable", JSON.stringify(body));
     check(body.collab === true, "collaboration server registered", `collab=${body.collab}`);
+
+    // The Liveness probe (infra/main.bicep) hits this every 30 s: it answers from the process alone,
+    // so the body carries `probe: "live"` and none of the database fields (`db`, `latencyMs`).
+    const live = await call("/api/health?probe=live");
+    const probe = await readJson(live);
+    check(
+      live.status === 200 && probe.body?.ok === true && probe.body.probe === "live" && !("db" in probe.body) && !("latencyMs" in probe.body),
+      "GET /api/health?probe=live",
+      `status ${live.status} ${probe.body ? JSON.stringify(probe.body) : JSON.stringify(probe.text.slice(0, 120))}`,
+    );
+  });
+
+  await step("unauthenticated API surface", async () => {
+    // Unknown `/api/*` paths are answered by the `[...rest]` catch-all with JSON, never Next's HTML 404
+    // page (agents parse the body). A random suffix keeps the row repeat-safe and cache-proof.
+    const missing = `/api/nonexistent-${Math.random().toString(36).slice(2, 10)}`;
+    const nf = await call(missing);
+    const nfType = nf.headers.get("content-type") ?? "none";
+    const notFound = await readJson(nf);
+    check(
+      nf.status === 404 && nfType.startsWith("application/json") && typeof notFound.body?.error === "string" && notFound.body.path === missing,
+      `GET ${missing}`,
+      `status ${nf.status} ${nfType} ${notFound.body ? JSON.stringify(notFound.body) : JSON.stringify(notFound.text.slice(0, 120))}`,
+    );
+
+    // Same expectation as e2e/share-agent.spec.ts ("The URL in the card is live"): a plain GET is the
+    // liveness card, name "markdoc", tools > 0.
+    const mcp = await call("/api/mcp");
+    const alive = await readJson(mcp);
+    check(
+      mcp.ok && alive.body?.name === "markdoc" && typeof alive.body.tools === "number" && alive.body.tools > 0,
+      "GET /api/mcp (alive)",
+      `status ${mcp.status} ${alive.body ? `name=${JSON.stringify(alive.body.name)} tools=${alive.body.tools}` : JSON.stringify(alive.text.slice(0, 120))}`,
+    );
   });
 
   await step("sign in (development login)", async () => {
@@ -163,8 +209,27 @@ async function main() {
       return;
     }
     check(pdf.status === 200, "export pdf", `status ${pdf.status} ${pdf.status === 503 ? await pdf.text() : ""}`.trim());
-    const head = Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString("latin1");
+    const pdfBytes = Buffer.from(await pdf.arrayBuffer());
+    const head = pdfBytes.subarray(0, 5).toString("latin1");
     check(head === "%PDF-", "pdf magic bytes", JSON.stringify(head));
+
+    // Straight away a second export: it is served by the shared Chromium the first one launched (the reuse
+    // itself is unit-tested in src/server/export/pdf-handle.test.ts); here two exports in a row must both answer.
+    const startedAt = Date.now();
+    const again = await call(`/api/documents/${docId}/export?format=pdf`);
+    if (again.status === 503 && pdfOptional) {
+      console.log("  skip export pdf (second) (503: Chromium not available; SMOKE_PDF_OPTIONAL=1)");
+      return;
+    }
+    const againBytes = Buffer.from(await again.arrayBuffer());
+    const elapsedMs = Date.now() - startedAt;
+    const againType = again.headers.get("content-type") ?? "none";
+    check(
+      again.status === 200 && againType.startsWith("application/pdf") && againBytes.subarray(0, 5).toString("latin1") === "%PDF-",
+      "GET /api/documents/:id/export?format=pdf (second)",
+      `status ${again.status} ${againType}; ${pdfBytes.length} then ${againBytes.length} bytes; ${elapsedMs} ms` +
+        (again.status === 200 ? "" : ` ${JSON.stringify(againBytes.toString("utf8").slice(0, 120))}`),
+    );
   });
 
   await step("cleanup", async () => {
@@ -180,5 +245,7 @@ main()
   .catch((err) => {
     if (failures === 0) console.error(`\n  FAIL ${err instanceof Error ? err.message : String(err)}`);
     console.error(`\nSMOKE FAILED against ${base}`);
-    process.exit(1);
+    // Exit naturally like the success path: `process.exit()` right after a few keep-alive fetches trips a
+    // libuv assertion on Windows (Node 24, `UV_HANDLE_CLOSING` in async.c) and exits -1073740791 instead of 1.
+    process.exitCode = 1;
   });
