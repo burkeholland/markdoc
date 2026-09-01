@@ -389,6 +389,9 @@ test.describe("axe: pages", () => {
     // Enter: the article itself takes focus, its top inside the viewport and clear of the sticky header.
     await page.keyboard.press("Enter");
     await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? null)).toBe("reader-article");
+    // No focus ring on the target: a click in the text focuses the article too, and the first PageDown after
+    // it would otherwise frame the whole column (the base-layer ring is for controls).
+    expect(await page.getByTestId("reader-article").evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
     const article = (await page.getByTestId("reader-article").boundingBox())!;
     const header = (await page.getByTestId("reader-header").boundingBox())!;
     expect(article.y).toBeGreaterThanOrEqual(header.y + header.height);

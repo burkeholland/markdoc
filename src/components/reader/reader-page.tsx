@@ -68,8 +68,9 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
           </aside>
         )}
         {/* The skip link's target: tabIndex -1 so Chromium moves focus here too (a fragment alone only scrolls);
-            the scroll margin keeps the title out from under the sticky header, like the headings' 88 px. */}
-        <article className="reader-article min-w-0 flex-1 scroll-mt-[88px]" id="reader-article" tabIndex={-1} data-testid="reader-article">
+            the scroll margin keeps the title out from under the sticky header, like the headings' 88 px. No ring:
+            a click in the text focuses the article too, and the first PageDown after it would frame the whole column. */}
+        <article className="reader-article min-w-0 flex-1 scroll-mt-[88px] focus-visible:outline-none" id="reader-article" tabIndex={-1} data-testid="reader-article">
           <header className="mb-8 border-b border-line pb-6">
             <h1 className="reader-title text-[2.25rem] font-bold leading-tight tracking-tight text-ink" data-testid="reader-title">
               {title}
