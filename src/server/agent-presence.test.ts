@@ -270,7 +270,7 @@ describe("agents in the @-mention picker", () => {
     presence.setAgentPresence(docId, agentActor("Copilot CLI"), { state: "active" }, t0);
     // An agent that only wrote here (activity row) in the past month, and one whose activity is older.
     await recordActivity(docId, activityActor(agentActor("Scribe")), "suggestion.add", { count: 1 });
-    await recordActivity(docId, activityActor(agentActor("Old Bot")), "comment.add", {}, new Date(t0 - 31 * 24 * 60 * 60 * 1000));
+    await recordActivity(docId, activityActor(agentActor("Old Bot")), "comment.add", {}, { now: new Date(t0 - 31 * 24 * 60 * 60 * 1000) });
     // Olive lets others ask her "Scribe" (#1296); "Copilot CLI" is present but has no live token of that name.
     const db = await getDb();
     const [existing] = await db.select({ id: schema.apiTokens.id }).from(schema.apiTokens).where(and(eq(schema.apiTokens.userId, owner.id), eq(schema.apiTokens.mentionSlug, "scribe"), isNull(schema.apiTokens.revokedAt)));

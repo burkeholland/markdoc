@@ -12,6 +12,7 @@ delete process.env.DATABASE_URL;
 
 const { getDb, schema } = await import("./db");
 const { createDocument } = await import("./documents");
+const { wakeSeq } = await import("./agent-events");
 const { recordActivity, recordEdit, listActivity, countActivity, activityActor, activityActorFromCollab, clip, watchDocumentActivity, EDIT_COALESCE_WINDOW_MS } =
   await import("./activity");
 const { TEXT_KEY, META_KEY, hydrateDoc, createCollabServer, shutdownCollab } = await import("./collab/hocuspocus");
@@ -46,7 +47,7 @@ describe("activity feed", () => {
     const docId = await newDoc(ownerId);
     const base = Date.parse("2026-01-01T10:00:00Z");
     for (let i = 0; i < 7; i++) {
-      await recordActivity(docId, alice, "comment.add", { quote: `c${i}` }, new Date(base + i * 60_000));
+      await recordActivity(docId, alice, "comment.add", { quote: `c${i}` }, { now: new Date(base + i * 60_000) });
     }
     const first = await listActivity(docId, { limit: 3 });
     expect(first.items.map((i) => i.detail.quote)).toEqual(["c6", "c5", "c4"]);
@@ -100,7 +101,7 @@ describe("activity feed", () => {
     // Alice types, comments, then keeps typing: the later keystrokes must not drag the
     // first edit row above the comment.
     const e1 = await recordEdit(docId, alice, 20, t(0));
-    await recordActivity(docId, alice, "comment.add", { quote: "Shorter?" }, t(5));
+    await recordActivity(docId, alice, "comment.add", { quote: "Shorter?" }, { now: t(5) });
     const e2 = await recordEdit(docId, alice, 13, t(6));
     expect(e2.id).not.toBe(e1.id);
     expect(e2.detail.chars).toBe(13);
@@ -116,7 +117,7 @@ describe("activity feed", () => {
 
     // A row by someone else (an agent's version through the API) closes it too.
     const agent = activityActor({ id: bob.id, login: "bob", name: "Bob", image: null, agent: "Review Bot" });
-    await recordActivity(docId, agent, "version.save", { number: 2, title: "Draft" }, t(60));
+    await recordActivity(docId, agent, "version.save", { number: 2, title: "Draft" }, { now: t(60) });
     const e5 = await recordEdit(docId, alice, 2, t(61));
     expect(e5.id).not.toBe(e2.id);
 
@@ -143,9 +144,9 @@ describe("activity feed", () => {
 
     // Explicit timestamps: ids are random, so three rows in the same millisecond would come back in random order.
     const t = (s: number) => new Date(Date.parse("2026-03-01T12:00:00Z") + s * 1000);
-    await recordActivity(docId, agent, "suggestion.add", { count: 3 }, t(0));
-    await recordActivity(docId, human, "suggestion.accept", { count: 3 }, t(1));
-    await recordActivity(docId, human, "version.restore", { number: 4, title: "Before review" }, t(2));
+    await recordActivity(docId, agent, "suggestion.add", { count: 3 }, { now: t(0) });
+    await recordActivity(docId, human, "suggestion.accept", { count: 3 }, { now: t(1) });
+    await recordActivity(docId, human, "version.restore", { number: 4, title: "Before review" }, { now: t(2) });
     const { items } = await listActivity(docId);
     expect(items.map((i) => [i.action, i.actorKind, i.actorName])).toEqual([
       ["version.restore", "user", "Alice"],
@@ -154,6 +155,35 @@ describe("activity feed", () => {
     ]);
     expect(items[2].detail).toEqual({ count: 3 });
     expect(items[0].detail).toEqual({ number: 4, title: "Before review" });
+  });
+
+  it("joins the caller's transaction with `opts.tx`: the row rolls back with it, commits with it, and the document is woken by the caller, not here", async () => {
+    const docId = await newDoc(ownerId);
+    const db = await getDb();
+    const before = await countActivity(docId);
+
+    // Rolled back: the caller's own write fails after the activity row was inserted → no row.
+    const seqBeforeRollback = wakeSeq(docId);
+    await expect(
+      db.transaction(async (tx) => {
+        await recordActivity(docId, alice, "agent.request", { requestId: "r1" }, { tx });
+        throw new Error("caller's write failed");
+      }),
+    ).rejects.toThrow("caller's write failed");
+    expect(await countActivity(docId)).toBe(before);
+    expect(wakeSeq(docId)).toBe(seqBeforeRollback);
+
+    // Committed: exactly one row, the item is the row as inserted, and nothing woke the document from inside.
+    const item = await db.transaction((tx) => recordActivity(docId, alice, "agent.request.done", { requestId: "r1" }, { tx, now: new Date("2026-04-01T00:00:00Z") }));
+    expect(await countActivity(docId)).toBe(before + 1);
+    expect(item).toMatchObject({ action: "agent.request.done", actorName: "Alice", detail: { requestId: "r1" }, createdAt: "2026-04-01T00:00:00.000Z" });
+    expect(wakeSeq(docId)).toBe(seqBeforeRollback);
+    const { items } = await listActivity(docId);
+    expect(items.map((i) => i.id)).toEqual([item.id]);
+
+    // Without `tx` the plain path still wakes the document itself.
+    await recordActivity(docId, alice, "comment.add", { quote: "plain" });
+    expect(wakeSeq(docId)).toBeGreaterThan(seqBeforeRollback);
   });
 
   it("clips quotes so detail never carries document text", () => {

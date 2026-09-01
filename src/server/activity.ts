@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { and, desc, eq, lt, ne, or, sql } from "drizzle-orm";
-import { getDb, schema } from "@/server/db";
+import { getDb, schema, type Db, type Tx } from "@/server/db";
 import type { Activity, ActivityAction, ActorKind } from "@/server/db/schema";
 import type { Actor } from "@/server/http";
 import { newId } from "@/editor/collab/shared";
@@ -69,14 +69,25 @@ function toItem(row: Activity): ActivityItem {
   };
 }
 
+export interface RecordActivityOptions {
+  /** The row's `created_at`; defaults to now. */
+  now?: Date;
+  /**
+   * Run the insert on the caller's transaction so the row lands (or rolls back) with the caller's own
+   * writes. The document is then *not* woken here — the row is invisible to readers until the caller
+   * commits, so the caller wakes it (`wakeDocument`) after the transaction returns.
+   */
+  tx?: Tx;
+}
+
 /** Append one activity row. `detail` is free-form but must stay small (no document text). */
-export async function recordActivity(docId: string, actor: ActivityActor, action: ActivityAction, detail: ActivityDetail = {}, now = new Date()): Promise<ActivityItem> {
-  const db = await getDb();
-  const [row] = await db
+export async function recordActivity(docId: string, actor: ActivityActor, action: ActivityAction, detail: ActivityDetail = {}, opts: RecordActivityOptions = {}): Promise<ActivityItem> {
+  const on: Db | Tx = opts.tx ?? (await getDb());
+  const [row] = await on
     .insert(schema.activity)
-    .values({ id: newId(), documentId: docId, actorId: actor.id, actorName: actor.name, actorKind: actor.kind, action, detail, createdAt: now })
+    .values({ id: newId(), documentId: docId, actorId: actor.id, actorName: actor.name, actorKind: actor.kind, action, detail, createdAt: opts.now ?? new Date() })
     .returning();
-  wakeDocument(docId);
+  if (!opts.tx) wakeDocument(docId);
   return toItem(row);
 }
 
@@ -110,7 +121,7 @@ export async function recordEdit(docId: string, actor: ActivityActor, chars: num
     wakeDocument(docId);
     return toItem(row);
   }
-  return recordActivity(docId, actor, "edit", { chars }, now);
+  return recordActivity(docId, actor, "edit", { chars }, { now });
 }
 
 export interface ActivityPage {

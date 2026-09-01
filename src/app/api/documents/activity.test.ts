@@ -64,9 +64,9 @@ describe("GET /api/documents/[id]/activity", () => {
   it("returns rows newest first and pages with nextBefore", async () => {
     const base = Date.parse("2026-03-01T12:00:00Z");
     const me = { id: eve.id, name: "Eve", kind: "user" as const };
-    await recordActivity(docId, me, "share.add", { login: "drew", role: "editor" }, new Date(base));
-    await recordActivity(docId, me, "version.save", { number: 2, title: "Draft" }, new Date(base + 1000));
-    await recordActivity(docId, me, "edit", { chars: 42 }, new Date(base + 2000));
+    await recordActivity(docId, me, "share.add", { login: "drew", role: "editor" }, { now: new Date(base) });
+    await recordActivity(docId, me, "version.save", { number: 2, title: "Draft" }, { now: new Date(base + 1000) });
+    await recordActivity(docId, me, "edit", { chars: 42 }, { now: new Date(base + 2000) });
 
     const res = await get("?limit=2");
     expect(res.status).toBe(200);
