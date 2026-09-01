@@ -344,8 +344,8 @@ test.describe("phone", () => {
   // Cumulative layout shift from first paint to one second after the editor is interactive. The server
   // and the hydration render assume a desktop viewport (useBreakpoint), so the phone layout must come
   // from CSS (`max-md:hidden` rail and code column, header residual) or the whole pane jumps at
-  // hydration: 0.852 before that CSS (#1470 measured 0.891), 0.009 with it — what is left is the status
-  // bar's compact swap. 0.1 is Lighthouse's "good" threshold.
+  // hydration: 0.852 before that CSS (#1470 measured 0.891), 0.009 with it (the status bar's compact
+  // swap), 0.000 once the status bar's phone form came from CSS too (#1531). 0.1 is Lighthouse's "good" threshold.
   test("editor first paint is already the phone layout: no layout shift while it hydrates", async ({ browser }) => {
     const context = await browser.newContext({ ...phone });
     await context.addInitScript(observeLayoutShifts);
