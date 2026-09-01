@@ -501,7 +501,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 className="flex flex-1 items-center gap-4 rounded-l-2xl p-5 text-left"
                 data-testid="new-document"
               >
-                <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent text-on-accent">{creating === "blank" ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
+                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-on-accent">{creating === "blank" ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
                 <span>
                   <span className="block text-[15px] font-semibold text-ink">New document</span>
                   <span className="block text-sm text-ink-3">Start with a blank Markdown page.</span>
@@ -547,7 +547,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md disabled:cursor-default disabled:opacity-60 disabled:hover:border-line disabled:hover:shadow-sm"
               data-testid="open-github"
             >
-              <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-inverse text-white">
+              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-inverse text-white">
                 <GitHubIcon size={22} />
               </span>
               <span>
@@ -596,7 +596,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <h2 className="text-sm font-semibold text-ink">Documents</h2>
-            <div className="ml-auto flex max-w-full items-center gap-2 overflow-x-auto" data-testid="dashboard-chips">
+            <div className="ml-auto flex min-h-8 max-w-full items-center gap-2 overflow-x-auto max-sm:basis-full" data-testid="dashboard-chips">
               <label className="flex items-center gap-1.5 text-xs text-ink-3">
                 <span className="sr-only">Sort by</span>
                 <select
