@@ -1381,4 +1381,13 @@ foreach ($parameter in @([regex]::Matches($patchSource, 'MARKDOC_[A-Z_]+') | For
 }
 Assert-True ($templateSource -match '(?s)activityLogAlerts@[0-9-]+'' = \{.+?scopes: \[\s*postgresNsg\.id\s*\].+?Microsoft\.Network/networkSecurityGroups/securityRules/write') 'The Activity Log tripwire must watch security-rule writes on the PostgreSQL NSG only.'
 
+# Retired database NAT gateway (docs/postgres-egress.md, Part 2): the template declares only the subnet service
+# endpoints and the private Azure Monitor path, so an incremental deployment can never re-attach the NAT.
+Assert-Equal 0 ([regex]::Matches($templateSource, 'Microsoft\.Network/natGateways').Count) 'infra/main.bicep must not declare a NAT gateway: an incremental deployment converges on the template and would re-attach the retired gateway to the postgres subnet.'
+Assert-Equal 0 ([regex]::Matches($templateSource, 'natGateway:').Count) 'No subnet in infra/main.bicep may reference a NAT gateway.'
+Assert-Equal 1 ([regex]::Matches($templateSource, "(?m)^module postgresPrivateEgress './postgres-private-egress\.bicep'").Count) 'The private Azure Monitor egress module must stay declared exactly once: it is the agent path that replaced the NAT gateway.'
+Assert-Equal 1 ([regex]::Matches($templateSource, "service: 'Microsoft\.Storage'").Count) 'The postgres subnet must keep exactly one Microsoft.Storage service endpoint: pgBackRest, the backup health uploads and the restore check reach the recovery storage account through it.'
+Assert-Equal 1 ([regex]::Matches($templateSource, "service: 'Microsoft\.KeyVault'").Count) 'The postgres subnet must keep exactly one Microsoft.KeyVault service endpoint: password rotation reads the vault through it.'
+Assert-True ($deploymentSource -notmatch 'postgresNatGatewayName') 'deploy/azure.ps1 must not read the removed postgresNatGatewayName deployment output.'
+
 Write-Host "azure safety tests: ok (PowerShell $($PSVersionTable.PSVersion))"

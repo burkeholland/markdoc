@@ -995,8 +995,9 @@ if ($candidateOnlyRotationRecovery) {
   if ($ConfigureRecovery) {
     Step 'Explicit recovery update: temporarily enabling bootstrap networking and configuring off-VM WAL archiving and backup verification.'
   }
-  # Recovery installs packages with apt, so it needs an explicit egress path that does not depend
-  # on the NAT gateway being attached (docs/postgres-egress.md); the cleanup below always detaches the IP.
+  # Recovery installs packages with apt, so it needs an explicit egress path: the subnet has no NAT
+  # gateway any more (retired per docs/postgres-egress.md; the template declares only the service
+  # endpoints and the private Azure Monitor path), and the cleanup below always detaches the IP.
   $temporaryPublicIp = [bool]($InitializeDatabase -or $ConfigureRecovery)
   $temporaryPackageEgress = [bool]($InitializeDatabase -or $ConfigureRecovery)
   $initialCleanup = @()
