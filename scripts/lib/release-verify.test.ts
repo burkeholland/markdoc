@@ -10,6 +10,7 @@ import { Hocuspocus } from "@hocuspocus/server";
 import { attachCollab } from "@/server/collab/ws";
 import {
   checkBrotli,
+  checkHeaders,
   compareChunk,
   cssRulesEqualUpToNumbers,
   diffCssRules,
@@ -178,9 +179,26 @@ describe("small helpers", () => {
     expect(formatSummary(summarize([...checks, { name: "gzip", status: "fail", detail: "" }]))).toBe("release-verify: 1 passed, 1 failed, 1 warned, 1 skipped");
     expect(summarize([...checks, { name: "gzip", status: "fail", detail: "" }]).exitCode).toBe(1);
   });
+  it("checkHeaders compares trimmed values exactly, names absent and forbidden headers, flags a repeated value", () => {
+    const rules = [
+      { name: "x-content-type-options", expected: "nosniff" },
+      { name: "permissions-policy", expected: "camera=(), microphone=(), geolocation=()" },
+      { name: "content-security-policy", expected: null },
+    ];
+    expect(checkHeaders("/x", { "x-content-type-options": " nosniff ", "permissions-policy": "camera=(), microphone=(), geolocation=()" }, rules)).toEqual([]);
+    expect(checkHeaders("/x", { "x-content-type-options": "nosniff, nosniff", "permissions-policy": "camera=(), microphone=(), geolocation=(), camera=(), microphone=(), geolocation=()", "content-security-policy": "default-src 'self'" }, rules)).toEqual([
+      "/x: x-content-type-options nosniff, got nosniff, nosniff (duplicated)",
+      "/x: permissions-policy camera=(), microphone=(), geolocation=(), got camera=(), microphone=(), geolocation=(), camera=(), microphone=(), geolocation=() (duplicated)",
+      "/x: content-security-policy absent, got default-src 'self'",
+    ]);
+    expect(checkHeaders("/x", { "x-content-type-options": "", "permissions-policy": "nosniff, camera=()" }, rules)).toEqual(['/x: x-content-type-options nosniff, got ""', "/x: permissions-policy camera=(), microphone=(), geolocation=(), got nosniff, camera=()"]);
+    const hsts = { name: "strict-transport-security", expected: null, note: "HSTS sent over plain HTTP" };
+    expect(checkHeaders("/x", {}, [hsts])).toEqual([]);
+    expect(checkHeaders("/x", { "strict-transport-security": "max-age=31536000" }, [hsts])).toEqual(["/x: strict-transport-security absent, got max-age=31536000 (HSTS sent over plain HTTP)"]);
+  });
 });
 
-/** An origin that behaves like production: health, /login, chunks with identity/br/gzip negotiation, /collab rejecting every token. */
+/** An origin that behaves like production: health, /login, chunks with identity/br/gzip negotiation, /collab rejecting every token, the #1224 headers. */
 interface FakeSite {
   server: Server;
   url: string;
@@ -188,26 +206,47 @@ interface FakeSite {
   chunks: Map<string, Buffer>;
   html: string;
   hocuspocus: Hocuspocus;
+  /** "The request arrived over HTTPS": Strict-Transport-Security on every response, as server/index.ts does behind the ingress. */
+  hsts: boolean;
+  /** Per-pathname header overrides for the headers-row tests: a string sets, an array sends the header that many times, null removes. */
+  headerOverrides: Map<string, Record<string, string | string[] | null>>;
 }
 
+const BASELINE_HEADERS: Record<string, string> = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+};
+
 function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite> {
-  const site = { version: SHA, chunks, html } as FakeSite;
+  const site = { version: SHA, chunks, html, hsts: false, headerOverrides: new Map() } as FakeSite;
   const handler = (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    // server/index.ts stamps these on every response; src/proxy.ts adds the frame policy to pages only (not /api/*, not chunks).
+    for (const [name, value] of Object.entries(BASELINE_HEADERS)) res.setHeader(name, value);
+    if (site.hsts) res.setHeader("strict-transport-security", "max-age=31536000");
+    if (url.pathname === "/login") res.setHeader("content-security-policy", "frame-ancestors 'none'");
+    const finish = (body: string | Buffer) => {
+      for (const [name, value] of Object.entries(site.headerOverrides.get(url.pathname) ?? {})) {
+        if (value === null) res.removeHeader(name);
+        else res.setHeader(name, value);
+      }
+      return res.end(body);
+    };
     if (url.pathname === "/api/health") {
       res.setHeader("content-type", "application/json");
       const body = url.searchParams.get("probe") === "live" ? { ok: true, probe: "live", collab: true, version: site.version } : { ok: true, db: true, collab: true, documentsLoaded: 0, connections: 0, latencyMs: 1, version: site.version };
-      return res.end(JSON.stringify(body));
+      return finish(JSON.stringify(body));
     }
     if (url.pathname === "/login") {
       res.setHeader("content-type", "text/html; charset=utf-8");
-      return res.end(site.html);
+      return finish(site.html);
     }
     if (url.pathname.startsWith("/_next/static/chunks/")) {
       const body = site.chunks.get(url.pathname.slice("/_next/static/chunks/".length));
       if (!body) {
         res.statusCode = 404;
-        return res.end("Not Found");
+        return finish("Not Found");
       }
       res.setHeader("content-type", url.pathname.endsWith(".css") ? "text/css; charset=UTF-8" : "application/javascript; charset=UTF-8");
       res.setHeader("cache-control", "public, max-age=31536000, immutable");
@@ -217,18 +256,18 @@ function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite>
         const compressed = brotliCompressSync(body);
         res.setHeader("content-encoding", "br");
         res.setHeader("content-length", String(compressed.length));
-        return res.end(compressed);
+        return finish(compressed);
       }
       if (/\bgzip\b/.test(accept) && body.length >= 1024) {
         res.setHeader("content-encoding", "gzip");
         res.setHeader("transfer-encoding", "chunked");
-        return res.end(gzipSync(body));
+        return finish(gzipSync(body));
       }
       res.setHeader("content-length", String(body.length));
-      return res.end(body);
+      return finish(body);
     }
     res.statusCode = 404;
-    res.end("Not Found");
+    finish("Not Found");
   };
   const server = createServer(handler);
   const hocuspocus = new Hocuspocus({
@@ -293,11 +332,12 @@ describe("runReleaseVerify against an in-process origin", () => {
 
   it("all rows pass with a matching build; redirect is skipped for an http:// base; exit code 0", async () => {
     const report = await runReleaseVerify({ base: site.url, sha: SHA }, io());
-    expect(report.checks.map((check) => check.name)).toEqual(["health", "health:live", "redirect", "login", "chunks:identity", "chunks:all", "css:rules", "brotli", "gzip", "leak:localhost", "collab:reject"]);
+    expect(report.checks.map((check) => check.name)).toEqual(["health", "health:live", "redirect", "headers", "login", "chunks:identity", "chunks:all", "css:rules", "brotli", "gzip", "leak:localhost", "collab:reject"]);
     expect(statusOf(report.checks)).toEqual({
       health: "pass",
       "health:live": "pass",
       redirect: "skipped",
+      headers: "pass",
       login: "pass",
       "chunks:identity": "pass",
       "chunks:all": "pass",
@@ -307,7 +347,8 @@ describe("runReleaseVerify against an in-process origin", () => {
       "leak:localhost": "pass",
       "collab:reject": "pass",
     });
-    expect(report.summary).toEqual({ passed: 10, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
+    expect(report.summary).toEqual({ passed: 11, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
+    expect(row(report.checks, "headers").detail).toBe("GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http)");
     expect(row(report.checks, "login").detail).toContain("references 3 .js + 1 .css chunks");
     expect(row(report.checks, "chunks:identity").detail).toContain("4 chunks");
     expect(row(report.checks, "chunks:identity").detail).toContain("3 .js + 1 .css byte/SHA-identical");
@@ -318,7 +359,82 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(row(report.checks, "collab:reject").detail).toContain("authenticationFailed after 12 ms (permission-denied)");
     expect(report.base).toBe(site.url);
     expect(report.startedAt <= report.finishedAt).toBe(true);
-    expect(formatReport(report.checks).split("\n")).toHaveLength(13);
+    expect(formatReport(report.checks).split("\n")).toHaveLength(14);
+  });
+
+  describe("headers", () => {
+    /** Run with `overrides` on one path (or `hsts` on) and hand back the report; the site is restored afterwards. */
+    async function withHeaders(pathname: string | null, overrides: Record<string, string | string[] | null>, hsts = false) {
+      if (pathname) site.headerOverrides.set(pathname, overrides);
+      site.hsts = hsts;
+      try {
+        return await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+      } finally {
+        site.headerOverrides.clear();
+        site.hsts = false;
+      }
+    }
+
+    it("a missing referrer-policy on /api/health fails the row naming the path, header and expected value; exactly one failure", async () => {
+      const report = await withHeaders("/api/health", { "referrer-policy": null });
+      expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "fail", detail: "/api/health: referrer-policy strict-origin-when-cross-origin, got absent" });
+      expect(report.summary).toMatchObject({ failed: 1, warned: 0, exitCode: 1 });
+      expect(statusOf(report.checks)).toMatchObject({ health: "pass", login: "pass", "chunks:identity": "pass" });
+    });
+
+    it("a frame policy on /api/health fails: the proxy must not touch API responses", async () => {
+      const report = await withHeaders("/api/health", { "content-security-policy": "frame-ancestors 'none'" });
+      expect(row(report.checks, "headers")).toMatchObject({ status: "fail", detail: "/api/health: content-security-policy absent, got frame-ancestors 'none'" });
+      expect(report.summary.failed).toBe(1);
+    });
+
+    it("HSTS on an http base fails with 'HSTS sent over plain HTTP'; a wrong frame policy on /login is named too", async () => {
+      const report = await withHeaders(null, {}, true);
+      const headers = row(report.checks, "headers");
+      expect(headers.status).toBe("fail");
+      expect(headers.detail).toBe("/login: strict-transport-security absent, got max-age=31536000 (HSTS sent over plain HTTP); /api/health: strict-transport-security absent, got max-age=31536000 (HSTS sent over plain HTTP)");
+      expect(report.summary.failed).toBe(1);
+      const framed = await withHeaders("/login", { "content-security-policy": "frame-ancestors 'self'", "permissions-policy": null });
+      expect(row(framed.checks, "headers").detail).toBe("/login: permissions-policy camera=(), microphone=(), geolocation=(), got absent; /login: content-security-policy frame-ancestors 'none', got frame-ancestors 'self'");
+    });
+
+    it("nosniff sent twice on the chunk fails as duplicated; a frame policy on a chunk fails too", async () => {
+      const report = await withHeaders("/_next/static/chunks/main-abc.js", { "x-content-type-options": ["nosniff", "nosniff"] });
+      expect(row(report.checks, "headers")).toMatchObject({ status: "fail", detail: "main-abc.js: x-content-type-options nosniff, got nosniff, nosniff (duplicated)" });
+      expect(report.summary.failed).toBe(1);
+      expect(statusOf(report.checks)).toMatchObject({ "chunks:identity": "pass", brotli: "pass", gzip: "pass" });
+      const framed = await withHeaders("/_next/static/chunks/main-abc.js", { "content-security-policy": "frame-ancestors 'none'" });
+      expect(row(framed.checks, "headers").detail).toBe("main-abc.js: content-security-policy absent, got frame-ancestors 'none'");
+    });
+
+    it("a /login without any .js chunk skips the chunk sub-check inside the detail; login fails on its own", async () => {
+      const original = site.html;
+      site.html = "<!DOCTYPE html><html><body>maintenance</body></html>";
+      try {
+        const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "pass", detail: "GET /login, /api/health: 5 + 4 headers as expected (HSTS not expected over http); chunk skipped: /login references no .js chunk (see login)" });
+        expect(row(report.checks, "login").status).toBe("fail");
+      } finally {
+        site.html = original;
+      }
+    });
+
+    it("an https base requires HSTS: present passes as 'HSTS checked', absent is named on both pages", async () => {
+      // The fixture speaks http: route every request for the https base to it, as the ingress would.
+      const real = io({}, null);
+      const toSite = (url: string) => url.replace(/^https?:\/\/[^/]+/, site.url);
+      const proxied: ReleaseVerifyIo = { ...real, fetchText: (url, init) => real.fetchText(toSite(url), init), fetchBytes: (url) => real.fetchBytes(toSite(url)), fetchRaw: (url, headers) => real.fetchRaw(toSite(url), headers) };
+      site.hsts = true;
+      try {
+        const report = await runReleaseVerify({ base: "https://release.example", sha: SHA }, proxied);
+        expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "pass", detail: "GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS checked)" });
+        expect(statusOf(report.checks)).toMatchObject({ login: "pass", "chunks:identity": "pass", brotli: "pass" });
+      } finally {
+        site.hsts = false;
+      }
+      const report = await runReleaseVerify({ base: "https://release.example", sha: SHA }, proxied);
+      expect(row(report.checks, "headers")).toMatchObject({ status: "fail", detail: "/login: strict-transport-security max-age=31536000, got absent; /api/health: strict-transport-security max-age=31536000, got absent" });
+    });
   });
 
   it("a served chunk that differs by one byte fails chunks:identity naming both hashes; exactly one failure", async () => {
@@ -372,7 +488,7 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(statusOf(report.checks)).toMatchObject({ "chunks:identity": "pass", "chunks:all": "skipped", "css:rules": "skipped", brotli: "pass", gzip: "pass" });
     expect(row(report.checks, "chunks:identity").detail).toContain("not compared");
     expect(row(report.checks, "chunks:all").detail).toContain("no --dist");
-    expect(report.summary).toEqual({ passed: 8, failed: 0, warned: 0, skipped: 3, exitCode: 0 });
+    expect(report.summary).toEqual({ passed: 9, failed: 0, warned: 0, skipped: 3, exitCode: 0 });
   });
 
   it("a renamed Tailwind stylesheet is compared rule by rule (warn on ≤ 5 local-only utilities), its .br by decompression only", async () => {
@@ -389,7 +505,7 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(all.status).toBe("fail");
     expect(all.detail).toContain("2 unreferenced local chunks (2 .js + 0 .css)");
     expect(all.detail).toContain("orphan-xyz.js: status 404");
-    expect(report.summary).toEqual({ passed: 8, failed: 1, warned: 1, skipped: 1, exitCode: 1 });
+    expect(report.summary).toEqual({ passed: 9, failed: 1, warned: 1, skipped: 1, exitCode: 1 });
   });
 
   it("a dev origin in a referenced chunk fails leak:localhost; a bare token only warns", async () => {
@@ -416,6 +532,8 @@ describe("runReleaseVerify against an in-process origin", () => {
     const report = await runReleaseVerify({ base: "http://127.0.0.1:1", sha: SHA, timeoutMs: 2000 }, io());
     expect(row(report.checks, "health").status).toBe("fail");
     expect(row(report.checks, "health").detail).toMatch(/^request failed: /);
+    expect(row(report.checks, "headers").status).toBe("fail");
+    expect(row(report.checks, "headers").detail).toMatch(/^request failed: /);
     expect(statusOf(report.checks)).toMatchObject({ "chunks:identity": "skipped", brotli: "skipped", gzip: "skipped", "leak:localhost": "skipped" });
     expect(formatReport(report.checks)).not.toMatch(/\n\s+at /);
   });
@@ -435,7 +553,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(flip.status).toBe("pass");
       expect(flip.detail).toMatch(/^at version after 3 samples, 0 non-200, max rtt 500 ms; first sample at the new version 2026-08-31T13:00:0\d\.\d{3}Z, \d\.\d s after the first sample$/);
       expect(report.checks[0].name).toBe("flip");
-      expect(report.checks).toHaveLength(12);
+      expect(report.checks).toHaveLength(13);
       expect(report.summary.failed).toBe(0);
     });
 
@@ -454,7 +572,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       const flip = row(report.checks, "flip");
       expect(flip.status).toBe("fail");
       expect(flip.detail).toMatch(/^version did not become 5f9eb0d\w+ within 6 s: [3-5] samples, 0 non-200, max rtt 500 ms, last version 0{40}$/);
-      expect(report.checks).toHaveLength(12);
+      expect(report.checks).toHaveLength(13);
       expect(statusOf(report.checks)).toMatchObject({ health: "pass", login: "pass", "collab:reject": "pass" });
       expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
     });
@@ -519,11 +637,11 @@ describe("runReleaseVerify against an in-process origin", () => {
       const code = await runMain(["--base", site.url, "--sha", SHA, "--dist", dist, "--json", jsonPath, "--timeout-ms", "5000"], { output, io: io() });
       expect(code).toBe(0);
       expect(lines[0].split("\n")[0]).toBe("| check | status | detail |");
-      expect(lines[1]).toBe("release-verify: 10 passed, 0 failed, 0 warned, 1 skipped");
+      expect(lines[1]).toBe("release-verify: 11 passed, 0 failed, 0 warned, 1 skipped");
       const written = JSON.parse(readFileSync(jsonPath, "utf8")) as { base: string; sha: string; checks: Check[]; summary: { exitCode: number } };
       expect(written.base).toBe(site.url);
       expect(written.sha).toBe(SHA);
-      expect(written.checks).toHaveLength(11);
+      expect(written.checks).toHaveLength(12);
       expect(written.summary.exitCode).toBe(0);
     });
 
@@ -544,7 +662,8 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(authenticateLogs).toHaveLength(1);
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain("| collab:reject | pass |");
-      expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 10 passed, 0 failed, 0 warned, 1 skipped");
+      expect(result.stdout).toContain("| headers | pass | GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http) |");
+      expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 11 passed, 0 failed, 0 warned, 1 skipped");
       expect(result.code).toBe(0);
     }, 60_000);
   });
