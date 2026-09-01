@@ -1,38 +1,25 @@
 import type * as Y from "yjs";
-import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { getDb, schema, type Db } from "@/server/db";
-import type { ActivityAction, AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
+import { and, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
+import { getDb, schema } from "@/server/db";
+import type { AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
 import { canComment, canEdit } from "@/server/documents";
 import { HttpError, type Actor } from "@/server/http";
-import { activityActor, clip, type ActivityActor, type ActivityDetail } from "@/server/activity";
+import { activityActor, clip, recordActivity } from "@/server/activity";
 import { wakeDocument } from "@/server/agent-events";
 import { notify } from "@/server/notifications";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { META_KEY } from "@/server/collab/hocuspocus";
 import { newId } from "@/editor/collab/shared";
 import { agentMentionSlug, parseAgentMentions } from "@/editor/collab/mentions";
+import { warnTail, type WarningCode } from "@/server/warnings";
 
 export const INSTRUCTION_MAX = 2000;
 export const QUOTE_MAX = 2000;
-
-/** Post-write side effects that can fail without taking the request's write back: reported as `warnings` on the 2xx (see docs/agents.md). */
-export type RequestWarning = "notification-not-sent";
 
 /** The agent a request is addressed to: `@login/slug`, both lower-cased. */
 export interface RequestAddressee {
   login: string;
   slug: string;
-}
-
-type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-
-/**
- * The activity row `recordActivity` would write, on the caller's transaction: it commits — or rolls back —
- * together with the request row it describes (`recordActivity` opens its own connection). The wake that
- * `recordActivity` performs is the caller's, after the commit.
- */
-async function recordActivityIn(tx: Tx, docId: string, actor: ActivityActor, action: ActivityAction, detail: ActivityDetail): Promise<void> {
-  await tx.insert(schema.activity).values({ id: newId(), documentId: docId, actorId: actor.id, actorName: actor.name, actorKind: actor.kind, action, detail, createdAt: new Date() });
 }
 
 export interface AgentRequestItem {
@@ -349,14 +336,20 @@ export async function createRequest(docId: string, actor: Actor, role: Role, inp
         updatedAt: now,
       })
       .returning();
-    await recordActivityIn(tx, docId, activityActor(actor), "agent.request", {
-      requestId: inserted.id,
-      mode,
-      instruction: clip(instruction),
-      quote: selection ? clip(selection.quote) : null,
-      threadId,
-      agent: agent ? formatAddressee(agent) : null,
-    });
+    await recordActivity(
+      docId,
+      activityActor(actor),
+      "agent.request",
+      {
+        requestId: inserted.id,
+        mode,
+        instruction: clip(instruction),
+        quote: selection ? clip(selection.quote) : null,
+        threadId,
+        agent: agent ? formatAddressee(agent) : null,
+      },
+      { tx },
+    );
     return inserted;
   });
   wakeDocument(docId);
@@ -489,7 +482,8 @@ export interface CompleteResult {
   notified: boolean;
   /** The request was done before this call: nothing was written; the notification was attempted again (idempotent). */
   alreadyDone: boolean;
-  warnings?: RequestWarning[];
+  /** Post-write side effects that failed after the request was completed (see docs/agents.md); each is logged as `[requests] <code>`. */
+  warnings?: WarningCode[];
 }
 
 /** A `request.done` row for this request exists for the requester (whoever wrote it). */
@@ -509,22 +503,17 @@ async function hasDoneNotification(userLogin: string, requestId: string): Promis
  * (`request.done`) — a failure there is `warnings: ["notification-not-sent"]` on the completed request,
  * never a non-2xx for a request that is done. Completing a done request writes nothing but attempts
  * the notification again (`notify` dedupes), so a retry after a crash still delivers the toast.
+ *
+ * The update is guarded (`status not in (done, cancelled)`): two completes racing on one claimed request —
+ * both passing the pre-check — write one activity row; the loser reads the row back and answers as if it had
+ * found it done, while a request cancelled meanwhile answers the 409 the pre-check would have given.
  */
 export async function completeRequest(docId: string, requestId: string, actor: Actor, input: CompleteInput = {}): Promise<CompleteResult> {
   const row = await getRequest(docId, requestId);
   await requireAddressee(row, actor);
-  if (row.status === "cancelled") throw new HttpError(409, "Request was cancelled", { status: row.status });
-  const failed: RequestWarning[] = [];
-  const tail = async (code: RequestWarning, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[requests] ${code}`, err);
-      failed.push(code);
-      return false;
-    }
-  };
+  const cancelled = (status: AgentRequestStatus) => new HttpError(409, "Request was cancelled", { status });
+  if (row.status === "cancelled") throw cancelled(row.status);
+  const { tail, answer } = warnTail("requests");
   const db = await getDb();
   // Everything after the commit that can fail is a warning on the completed request, never a non-2xx.
   const notifyRequester = async (done: AgentRequest): Promise<boolean> => {
@@ -550,11 +539,8 @@ export async function completeRequest(docId: string, requestId: string, actor: A
     });
     return notified;
   };
-  const respond = (done: AgentRequest, notified: boolean, alreadyDone: boolean): CompleteResult => {
-    const body: CompleteResult = { request: toRequestItem(done), notified, alreadyDone };
-    return failed.length ? { ...body, warnings: failed } : body;
-  };
-  if (row.status === "done") return respond(row, await notifyRequester(row), true);
+  const alreadyDone = async (done: AgentRequest): Promise<CompleteResult> => answer({ request: toRequestItem(done), notified: await notifyRequester(done), alreadyDone: true });
+  if (row.status === "done") return alreadyDone(row);
 
   const prev = row.result ?? { suggestions: 0, comments: 0 };
   const result: AgentRequestResult = {
@@ -566,26 +552,44 @@ export async function completeRequest(docId: string, requestId: string, actor: A
   if (summary) result.summary = clip(summary, 500);
   const name = row.claimedBy ?? agentName(actor);
   const claimedByLogin = row.claimedBy ? row.claimedByLogin : claimerLogin(actor);
-  const updated = await db.transaction(async (tx) => {
+  const { row: current, written } = await db.transaction(async (tx): Promise<{ row: AgentRequest; written: boolean }> => {
     const [done] = await tx
       .update(schema.agentRequests)
       .set({ status: "done", claimedBy: name, claimedByLogin, result, updatedAt: new Date() })
-      .where(eq(schema.agentRequests.id, requestId))
+      .where(and(eq(schema.agentRequests.id, requestId), notInArray(schema.agentRequests.status, ["done", "cancelled"])))
       .returning();
-    await recordActivityIn(tx, docId, activityActor(actor), "agent.request.done", {
-      requestId,
-      mode: row.mode,
-      suggestions: result.suggestions,
-      comments: result.comments,
-      summary: result.summary ?? null,
-      instruction: clip(row.instruction),
-    });
-    return done;
+    if (!done) {
+      // Someone finished first: read what the row became — on `tx`, so this is the same snapshot the update saw.
+      const [now] = await tx
+        .select()
+        .from(schema.agentRequests)
+        .where(and(eq(schema.agentRequests.id, requestId), eq(schema.agentRequests.documentId, docId)));
+      if (!now) throw new HttpError(404, "Request not found");
+      if (now.status === "cancelled") throw cancelled(now.status);
+      if (now.status === "done") return { row: now, written: false };
+      throw new HttpError(409, `Request is ${now.status}`, { status: now.status });
+    }
+    await recordActivity(
+      docId,
+      activityActor(actor),
+      "agent.request.done",
+      {
+        requestId,
+        mode: row.mode,
+        suggestions: result.suggestions,
+        comments: result.comments,
+        summary: result.summary ?? null,
+        instruction: clip(row.instruction),
+      },
+      { tx },
+    );
+    return { row: done, written: true };
   });
+  if (!written) return alreadyDone(current);
   wakeDocument(docId);
-  const notified = await notifyRequester(updated);
-  await mirrorRequest(updated, actor);
-  return respond(updated, notified, false);
+  const notified = await notifyRequester(current);
+  await mirrorRequest(current, actor);
+  return answer({ request: toRequestItem(current), notified, alreadyDone: false });
 }
 
 export function summarizeResult(result: AgentRequestResult | null): string | null {
