@@ -54,6 +54,14 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
       <UpdatePill docId={docId} initialHash={initialHash} pollMs={pollMs} />
 
       <div className="reader-layout mx-auto flex w-full max-w-[1180px] flex-1 flex-col gap-6 px-5 py-8 sm:px-8 lg:flex-row lg:gap-14 lg:py-12">
+        {/* The aside precedes the article in the DOM so the phone's "Contents" button, which sits above the article,
+            is in place before the streamed article paints (a trailing `order-first` aside pushed it down 62 px, #1470);
+            wide screens keep the TOC as the right column with `lg:order-last`. */}
+        {toc.length > 0 && (
+          <aside className="reader-aside lg:order-last lg:w-56 lg:shrink-0" data-testid="reader-aside">
+            <ReaderToc headings={toc} />
+          </aside>
+        )}
         <article className="reader-article min-w-0 flex-1" data-testid="reader-article">
           <header className="mb-8 border-b border-line pb-6">
             <h1 className="reader-title text-[2.25rem] font-bold leading-tight tracking-tight text-ink" data-testid="reader-title">
@@ -94,11 +102,6 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
             </Link>
           </footer>
         </article>
-        {toc.length > 0 && (
-          <aside className="reader-aside order-first lg:order-none lg:w-56 lg:shrink-0" data-testid="reader-aside">
-            <ReaderToc headings={toc} />
-          </aside>
-        )}
       </div>
     </div>
   );

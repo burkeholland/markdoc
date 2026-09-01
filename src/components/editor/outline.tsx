@@ -14,6 +14,8 @@ export interface OutlineProps {
   open: boolean;
   onToggle: () => void;
   onSelect: (heading: HeadingInfo) => void;
+  /** Extra classes for the rail (open) or the collapsed strip, e.g. `max-md:hidden` for the in-shell instance. */
+  className?: string;
 }
 
 const EMPTY_HEADINGS: HeadingInfo[] = [];
@@ -48,7 +50,7 @@ export function nextOutlineIndex(key: string, current: number, count: number): n
   return rovingIndex(key, current, count, { orientation: "vertical", wrap: false });
 }
 
-export function OutlinePanel({ session, open, onToggle, onSelect }: OutlineProps) {
+export function OutlinePanel({ session, open, onToggle, onSelect, className }: OutlineProps) {
   // IndexedDB can fill the document before React hydrates; keep the first client render
   // identical to the server (no headings) and switch in the next render.
   const hydrated = useHydrated();
@@ -59,7 +61,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect }: OutlineProps
 
   if (!open) {
     return (
-      <div className="flex w-10 shrink-0 flex-col items-center border-r border-line pt-3" data-testid="outline-collapsed">
+      <div className={cn("flex w-10 shrink-0 flex-col items-center border-r border-line pt-3", className)} data-testid="outline-collapsed">
         <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Show outline" title="Show outline">
           <ChevronsRight size={16} />
         </button>
@@ -70,7 +72,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect }: OutlineProps
   return (
     // max-h-full: inside the phone drawer (a fixed-height flex column) a long outline must scroll in the
     // nav instead of growing past the viewport; on the desktop row it already stretches to the main height.
-    <aside className="flex max-h-full min-h-0 w-56 shrink-0 flex-col border-r border-line" data-testid="outline">
+    <aside className={cn("flex max-h-full min-h-0 w-56 shrink-0 flex-col border-r border-line", className)} data-testid="outline">
       <div className="flex h-12 items-center justify-between pl-6 pr-2">
         <span className="pane-label">Outline</span>
         <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Hide outline" title="Hide outline">

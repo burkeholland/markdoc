@@ -1161,7 +1161,9 @@ export function EditorShell({
               </DialogPortal>
             </Dialog>
           ) : (
-            <OutlinePanel session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
+            // Hidden by CSS below `md` (= the hook's phone threshold, PHONE_MAX): the server and hydration
+            // renders assume a desktop viewport, so without it a phone paints a 224 px rail first (#1470).
+            <OutlinePanel className="max-md:hidden" session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
           )}
           <div className="relative flex min-w-0 flex-1">
             {showLoading && !showRichPlaceholder && (
@@ -1183,7 +1185,9 @@ export function EditorShell({
               </div>
             ) : (
               <>
-                <div className={cn("relative flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden")} data-testid="code-column">
+                {/* `layout` (not `shownLayout`): before hydration it is always "split", so the phone's first paint already
+                    hides the code column and the rich column's `flex-1 basis-0` fills the width, as after hydration (#1470). */}
+                <div className={cn("relative flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column">
                   {showLoading && showRichPlaceholder && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                       Loading…

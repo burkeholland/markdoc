@@ -104,7 +104,8 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
       title={compact ? label : undefined}
     >
       {m.icon}
-      <span className={cn(compact && "sr-only")}>{label}</span>
+      {/* Phones show the icon only; below `md` the server markup already hides the label so the chip is 16 px wide from the first paint (#1470). */}
+      <span className={cn(compact ? "sr-only" : "max-md:sr-only")}>{label}</span>
     </span>
   );
 }
@@ -160,8 +161,10 @@ function TitleEditor({ session, fallback, compact }: { session: CollabSession; f
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
-      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-[22px]")}>{title}</span>
-      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
+      {/* Phones render `compact` only after hydration; the `max-md:` rules make the server markup match its size and
+          set of controls so the header does not shift when the breakpoint flips (#1470). */}
+      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-lg md:text-[22px]")}>{title}</span>
+      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100 max-md:hidden" />}
     </button>
   );
 }
@@ -199,7 +202,7 @@ function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) {
       <button
         type="button"
         onClick={toggle}
-        className={cn("icon-btn h-8 w-8 shrink-0", starred ? "text-amber-500" : "text-ink-4")}
+        className={cn("icon-btn h-8 w-8 shrink-0 max-md:hidden", starred ? "text-amber-500" : "text-ink-4")}
         aria-pressed={starred}
         aria-label={starred ? "Unstar document" : "Star document"}
         data-testid="header-star"
@@ -645,11 +648,12 @@ export const Header = memo(function Header(props: HeaderProps) {
           <PanelLeft size={20} />
         </button>
       ) : embed ? (
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center" aria-label="Markdoc" data-testid="embed-logo">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center md:h-10 md:w-10" aria-label="Markdoc" data-testid="embed-logo">
           <Logo className="h-8 w-8" />
         </span>
       ) : (
-        <Link href="/" className="icon-btn h-10 w-10 shrink-0" aria-label="Back to documents" title="All documents">
+        // Below `md` the same 36 px box as the outline button that replaces it after hydration (#1470).
+        <Link href="/" className="icon-btn h-9 w-9 shrink-0 md:h-10 md:w-10" aria-label="Back to documents" title="All documents">
           <Logo className="h-8 w-8" />
         </Link>
       )}
@@ -667,7 +671,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         {keepAgentEverOpened && <KeepAgentHereDialog doc={{ id: doc.id, title: liveTitle }} open={keepAgentOpen} onOpenChange={setKeepAgentOpen} onCreateToken={props.onCreateToken} />}
         {!embed && session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
         {!embed && !compact && (
-          <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
+          <button type="button" className="btn btn-outline max-md:hidden" onClick={props.onShare} data-testid="share-button">
             <UserPlus size={17} />
             Share
           </button>
@@ -789,7 +793,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         </Menu>}
         {!embed && !compact && (
           <Menu>
-            <div className="flex items-stretch" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
+            <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
               {linked && canEdit && props.sync ? (
                 <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
               ) : (
