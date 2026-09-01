@@ -15,6 +15,19 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * What to show a person for a failed request: a 400's first validation issue (`issues[0].message`,
+ * e.g. "Enter a GitHub handle") when there is one, else the error's own message, else `fallback`.
+ * `ApiError.message` itself stays the server's `error` — callers match on it.
+ */
+export function apiErrorText(err: unknown, fallback: string): string {
+  if (err instanceof ApiError && Array.isArray(err.issues)) {
+    const first: unknown = err.issues[0];
+    if (first && typeof first === "object" && typeof (first as { message?: unknown }).message === "string") return (first as { message: string }).message;
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
 export type SyncState = "in-sync" | "local-ahead" | "remote-ahead" | "diverged" | "remote-unreadable";
 export interface SyncStatusDto {
   status: SyncState;
