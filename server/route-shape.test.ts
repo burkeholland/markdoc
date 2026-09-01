@@ -71,6 +71,11 @@ describe("routeShape", () => {
     expect(routeShape(`/embed/${NONCE}`)).toBe("/embed/:id");
   });
 
+  it("keeps the opengraph-image file route (the social card) as a static segment after an id", () => {
+    expect(routeShape(`/d/${DOCUMENT_ID}/opengraph-image?v=3`)).toBe("/d/:id/opengraph-image");
+    expect(routeShape(`/p/${DOCUMENT_ID_NO_DIGITS}/opengraph-image`)).toBe("/p/:id/opengraph-image");
+  });
+
   it("caps the shape at 120 characters and marks the cut", () => {
     const shape = routeShape(`/api/documents/${"x/".repeat(200)}`);
     expect(shape.length).toBe(ROUTE_SHAPE_MAX_LENGTH);
@@ -128,23 +133,43 @@ describe("looksLikeId", () => {
 });
 
 describe("STATIC_SEGMENTS", () => {
-  // The allow-list is closed by design: a folder that is not on it shows up as :x in the log. This keeps
-  // the list honest in the other direction — every static folder under src/app/api and src/app is on it.
-  function staticFolders(root: string): string[] {
-    const names: string[] = [];
+  // Next's metadata file routes: `opengraph-image.tsx` in a route folder serves `<folder>/opengraph-image`
+  // (the social card under /d/[id] and /p/[id]); the same goes for icon, apple-icon, twitter-image,
+  // sitemap, robots and manifest. The path segment is the file name up to its first dot.
+  const FILE_ROUTE = /^(opengraph-image|twitter-image|icon|apple-icon|sitemap|robots|manifest)(\.[a-z0-9]+)*\.(tsx?|jsx?)$/;
+
+  // The allow-list is closed by design: a segment that is not on it shows up as :x in the log. This keeps
+  // the list honest in the other direction — every static folder under src/app/api and src/app is on it,
+  // and so is every file route, which a folder walk alone cannot see (it is a file, not a folder).
+  function staticSegments(root: string): { folders: string[]; fileRoutes: string[] } {
+    const folders: string[] = [];
+    const fileRoutes = new Set<string>();
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        if (!entry.name.startsWith("[")) names.push(entry.name);
-        walk(path.join(dir, entry.name));
+        if (entry.isDirectory()) {
+          if (!entry.name.startsWith("[")) folders.push(entry.name);
+          walk(path.join(dir, entry.name));
+        } else if (FILE_ROUTE.test(entry.name)) {
+          fileRoutes.add(entry.name.slice(0, entry.name.indexOf(".")));
+        }
       }
     };
     walk(root);
-    return names;
+    return { folders, fileRoutes: [...fileRoutes] };
   }
 
+  const APP_ROOT = path.resolve(__dirname, "../src/app");
+
   it("lists every static folder under src/app (the API tree included)", () => {
-    const missing = staticFolders(path.resolve(__dirname, "../src/app")).filter((name) => !STATIC_SEGMENTS.has(name));
+    const missing = staticSegments(APP_ROOT).folders.filter((name) => !STATIC_SEGMENTS.has(name));
+    expect(missing).toEqual([]);
+  });
+
+  it("lists every Next file route under src/app (opengraph-image.tsx serves /d/:id/opengraph-image)", () => {
+    const { fileRoutes } = staticSegments(APP_ROOT);
+    // The social card exists today; this guards the walk itself against a regex that matches nothing.
+    expect(fileRoutes).toContain("opengraph-image");
+    const missing = fileRoutes.filter((name) => !STATIC_SEGMENTS.has(name));
     expect(missing).toEqual([]);
   });
 

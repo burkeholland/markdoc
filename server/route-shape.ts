@@ -6,7 +6,10 @@
 //   1. A segment on the STATIC_SEGMENTS allow-list is kept verbatim. The list is the set of folder
 //      names under src/app/api that are not `[param]` folders, plus the page routes under src/app, the
 //      Auth.js actions behind `/api/auth/[...nextauth]`, the files under public/, Next's `/_next/…`
-//      asset prefixes and the custom server's own paths (`/collab`, `/_standby/takeover`).
+//      asset prefixes and the custom server's own paths (`/collab`, `/_standby/takeover`) — and Next's
+//      metadata file routes (`opengraph-image.tsx` today, which serves `/d/<id>/opengraph-image` and
+//      `/p/<id>/opengraph-image`): a file, not a folder, so the folder walk in route-shape.test.ts
+//      cannot see it and its own file-route walk keeps this part of the list honest.
 //   2. A segment that looks like an id becomes `:id`. The shapes this app hands out: a UUID (users,
 //      webhook deliveries), 12+ hex characters (`newId()` in src/editor/collab/shared.ts — notification,
 //      activity, review and agent-request ids are 16), all digits, a base64url-ish token of 16+
@@ -117,6 +120,8 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "login",
   "p",
   "settings",
+  // src/app/d/[id]/* and p/[id]/*: Next file routes (opengraph-image.tsx → /d/:id/opengraph-image)
+  "opengraph-image",
   // Files served from src/app and public/
   "favicon.ico",
   "icon.svg",
