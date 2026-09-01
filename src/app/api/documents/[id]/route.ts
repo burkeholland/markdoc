@@ -5,6 +5,7 @@ import { changeLinkAccess } from "@/server/collab/authorization";
 import { META_KEY, type CollabContext } from "@/server/collab/hocuspocus";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { activityActor, clip, recordActivity } from "@/server/activity";
+import { warnTail } from "@/server/warnings";
 import type { Document } from "@/server/db/schema";
 import { publicDocument } from "@/server/dto";
 
@@ -42,6 +43,7 @@ async function renameLiveDocument(id: string, ctx: CollabContext, title: string)
 }
 
 export const PATCH = handler(async (req: Request, { params }: Params) => {
+  const warn = warnTail("documents");
   const { id } = await params;
   const body = await readJson(req, (d) => patchSchema.parse(d));
   const { doc: current, role, user } = await requireAccess(id, body.linkAccess !== undefined ? "own" : "edit");
@@ -53,10 +55,11 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
     const title = boundTitle(body.title);
     const renamed = await renameLiveDocument(id, { userId: user.id, docId: id, role, name: actorName(user) ?? "User", login: user.login, avatar: user.image ?? null }, title);
     // The live watcher attributes WebSocket transactions only (activity.ts actorFromOrigin); REST routes record their own rows.
-    if (renamed) void recordActivity(id, activityActor(user), "title.change", { title: clip(title) }).catch((err) => console.error("[activity] title failed", err));
+    // The rename has landed in the live document by now, so a failed row is `warnings: ["activity-not-recorded"]`, never a 5xx.
+    if (renamed) await warn.tail("activity-not-recorded", () => recordActivity(id, activityActor(user), "title.change", { title: clip(title) }));
     if (renamed || current.title !== title) patch.title = title;
   }
-  if (Object.keys(patch).length === 0) return json({ document: publicDocument(current) });
+  if (Object.keys(patch).length === 0) return json(warn.answer({ document: publicDocument(current) }));
   let doc: Document | null = null;
   if (patch.linkAccess !== undefined) {
     // Authoritative for live sockets: visitors admitted by the link are re-resolved (read-only or
@@ -68,7 +71,7 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
     doc = await updateDocument(id, patch);
   }
   if (!doc) throw new HttpError(404, "Document not found");
-  return json({ document: publicDocument(doc) });
+  return json(warn.answer({ document: publicDocument(doc) }));
 });
 
 /**
