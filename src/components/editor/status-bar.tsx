@@ -55,33 +55,25 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
       <StatsPopover session={session} source={source} selection={selection} hydrated={hydrated} />
       <div className="flex-1" />
 
-      {compact && (
-        <button
-          type="button"
-          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink"
-          onClick={onStorage}
-          disabled={!onStorage}
-          title={doc.storage === "repo" ? `${doc.repoOwner}/${doc.repoName}: ${doc.repoPath}` : doc.storage === "gist" ? `Gist ${doc.gistId}` : "Stored in Markdoc"}
-          data-testid="storage-indicator"
-        >
-          <StorageIcon size={14} />
-          {storageLabel}
-          {doc.hasUnpublishedChanges && doc.storage !== "local" && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="Unpublished changes" />}
-        </button>
-      )}
-
+      {/* One trigger for both layouts: `compact` is false on the server and during hydration, so the phone
+          form (32 px ⋯ icon, last in the row) comes from `max-md:`/`md:` classes and nothing moves when
+          `compact` flips (#1531). The menu's contents still branch on `compact` — a portal, not first paint. */}
       <Menu>
         <MenuTrigger asChild>
-          {compact ? (
-            <button type="button" className="icon-btn h-8 w-8" aria-label="View options" data-testid="layout-menu">
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-surface-3 hover:text-ink max-md:order-last max-md:text-ink-2 max-md:transition-colors md:h-7 md:w-auto md:gap-1 md:px-2"
+            aria-label={compact ? "View options" : undefined}
+            data-testid="layout-menu"
+          >
+            <span className="inline-flex md:hidden">
               <MoreHorizontal size={18} />
-            </button>
-          ) : (
-            <button type="button" className="inline-flex h-7 items-center gap-1 rounded-md px-2 hover:bg-surface-3 hover:text-ink" data-testid="layout-menu">
+            </span>
+            <span className="inline-flex items-center gap-1 max-md:hidden">
               Markdown
               <ChevronDown size={14} />
-            </button>
-          )}
+            </span>
+          </button>
         </MenuTrigger>
         <MenuContent align="end" className="w-60">
           <MenuLabel>View</MenuLabel>
@@ -142,13 +134,14 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         </MenuContent>
       </Menu>
 
+      {/* Desktop-only controls: hidden by CSS below `md` from the first paint, unmounted once `compact` is known
+          (mobile.spec.ts asserts they are absent, not merely hidden). */}
       {compact ? null : (
-        <>
       <Popover>
         <PopoverTrigger asChild>
           <button
             type="button"
-            className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3", issues.length ? (errors ? "text-danger" : "text-warning") : "text-ink-3 hover:text-ink")}
+            className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 max-md:hidden", issues.length ? (errors ? "text-danger" : "text-warning") : "text-ink-3 hover:text-ink")}
             data-testid="issues-button"
           >
             {issues.length ? <AlertTriangle size={14} /> : <Check size={14} />}
@@ -178,10 +171,12 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
           )}
         </PopoverContent>
       </Popover>
+      )}
 
+      {/* Rendered once for both layouts (32 px tall on phones, 28 px from `md`), so it is already in place at first paint. */}
       <button
         type="button"
-        className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink md:h-7"
         onClick={onStorage}
         disabled={!onStorage}
         title={doc.storage === "repo" ? `${doc.repoOwner}/${doc.repoName}: ${doc.repoPath}` : doc.storage === "gist" ? `Gist ${doc.gistId}` : "Stored in Markdoc"}
@@ -191,10 +186,13 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         {storageLabel}
         {doc.hasUnpublishedChanges && doc.storage !== "local" && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="Unpublished changes" />}
       </button>
-      <ThemeToggle className="h-7 w-7" />
-      <button type="button" className="icon-btn h-7 w-7" onClick={onShortcuts} aria-label="Help and shortcuts">
-        <CircleHelp size={16} />
-      </button>
+
+      {compact ? null : (
+        <>
+          <ThemeToggle className="h-7 w-7 max-md:hidden" />
+          <button type="button" className="icon-btn h-7 w-7 max-md:hidden" onClick={onShortcuts} aria-label="Help and shortcuts">
+            <CircleHelp size={16} />
+          </button>
         </>
       )}
     </footer>
