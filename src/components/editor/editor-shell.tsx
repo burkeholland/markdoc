@@ -34,6 +34,7 @@ import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY
 import type { SyncActions } from "./sync-dialog";
 import { useEverTrue } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
+import { useSyncPolling } from "./use-sync-polling";
 
 const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
 
@@ -533,31 +534,9 @@ export function EditorShell({
   );
 
   // Poll the three-way status while the document is GitHub-backed (60 s, or SYNC_POLL_MS via the response) and
-  // right after publish/pull; the server caches the GitHub read so this is cheap.
+  // right after publish/pull; the server caches the GitHub read so this is cheap. Hidden tabs do not poll.
   const linkedToGitHub = doc.storage !== "local";
-  useEffect(() => {
-    if (!linkedToGitHub) {
-      setSync(null);
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async (fresh: boolean) => {
-      try {
-        const s = await pollDocumentSync(doc.id, fresh);
-        if (cancelled) return;
-        setSync(s);
-        timer = setTimeout(() => void tick(false), s.pollMs ?? 60_000);
-      } catch {
-        if (!cancelled) timer = setTimeout(() => void tick(false), 60_000);
-      }
-    };
-    void tick(syncTick > 0);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [doc.id, linkedToGitHub, syncTick]);
+  useSyncPolling({ documentId: doc.id, enabled: linkedToGitHub, refreshKey: syncTick, onStatus: setSync });
 
   const syncActions = useMemo<SyncActions>(
     () => ({
