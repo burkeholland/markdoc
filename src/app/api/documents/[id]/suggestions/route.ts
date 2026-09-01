@@ -7,11 +7,9 @@ import { activityActor, recordActivity } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { notifySuggestionDecision } from "@/server/notifications";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
-
-/** Post-write side effects that can fail without taking the decision back: reported as `warnings` on the 200 (see docs/agents.md). */
-type Warning = "activity-not-recorded" | "notification-not-sent";
 
 /** Pending suggestions (tracked changes) with their current text ranges. */
 export const GET = handler(async (_req: Request, { params }: Params) => {
@@ -90,24 +88,12 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // The decision is in the shared document (text changed or suggestions cleared, broadcast to every editor,
   // irrevocable): an activity row or an author's notification that fails here is logged and reported as a warning
   // code on the 200 — never a 500 whose retry would answer `404 Suggestion not found` or `decided: 0`.
-  const failed: Warning[] = [];
-  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[suggestions] ${code}`, err);
-      failed.push(code);
-      return false;
-    }
-  };
+  const { tail, answer } = warnTail("suggestions");
   if (count > 0) {
     await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), accepted ? "suggestion.accept" : "suggestion.reject", { count }));
     const actor = { login: user!.login ?? null, name: actorName(user) ?? null };
-    await tail("notification-not-sent", async () => {
-      for (const s of decided) await notifySuggestionDecision(id, s, accepted, actor);
-    });
+    // One tail per author: a failure for one never skips the rest, and the code is reported once.
+    for (const s of decided) await tail("notification-not-sent", () => notifySuggestionDecision(id, s, accepted, actor));
   }
-  const result = { ok: true, decided: count, ...(single ? { id: body.id } : {}) };
-  return json(failed.length ? { ...result, warnings: failed } : result);
+  return json(answer({ ok: true, decided: count, ...(single ? { id: body.id } : {}) }));
 });

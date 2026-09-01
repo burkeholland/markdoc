@@ -1,11 +1,9 @@
 import { handler, json, requireAccess, HttpError, NUL_MESSAGE, nulFree, ValidationError } from "@/server/http";
 import { AssetError, MAX_ASSET_BYTES, normalizeMime, putAsset, type StoredAsset } from "@/server/assets";
 import { activityActor, recordActivity } from "@/server/activity";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
-
-/** Post-write side effect that can fail without taking the asset back: reported as `warnings` on the 201 (see docs/agents.md). */
-type Warning = "activity-not-recorded";
 
 interface Upload {
   name: string;
@@ -65,18 +63,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   }
   // The asset is stored (a retry would find it through the sha256 dedupe): an activity row that fails here is logged
   // and reported as a warning code on the 201, never a 500 for an upload that happened.
-  const failed: Warning[] = [];
-  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[assets] ${code}`, err);
-      failed.push(code);
-      return false;
-    }
-  };
+  const { tail, answer } = warnTail("assets");
   if (user) await tail("activity-not-recorded", () => recordActivity(id, activityActor(user), "asset.upload", { name: upload.name.slice(0, 120), size: asset.size }));
-  const result = { ...asset, alt: stripExtension(upload.name) };
-  return json(failed.length ? { ...result, warnings: failed } : result, { status: 201 });
+  return json(answer({ ...asset, alt: stripExtension(upload.name) }), { status: 201 });
 });

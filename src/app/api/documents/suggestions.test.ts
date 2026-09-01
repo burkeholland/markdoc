@@ -20,9 +20,9 @@ vi.mock("@/server/notifications", async (importOriginal) => {
 });
 
 const { getDb, schema } = await import("@/server/db");
-const { createDocument } = await import("@/server/documents");
+const { createDocument, upsertCollaborator } = await import("@/server/documents");
 const { recordActivity } = await import("@/server/activity");
-const { notifySuggestionDecision } = await import("@/server/notifications");
+const { notifySuggestionDecision, listNotifications } = await import("@/server/notifications");
 const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const suggestions = await import("@/app/api/documents/[id]/suggestions/route");
 const activity = await import("@/app/api/documents/[id]/activity/route");
@@ -208,6 +208,48 @@ describe("POST /api/documents/[id]/suggestions", () => {
       expect(await nothing.json()).toEqual({ ok: true, decided: 0 });
       expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
       expect(vi.mocked(notifySuggestionDecision)).not.toHaveBeenCalled();
+    });
+
+    /**
+     * #1233 decision 1 left the authors' notifications in one tail, so a failure for the first author skipped every
+     * later author. Each author is its own tail now: the second author is notified, the code is reported once.
+     */
+    it("acceptAll over two authors with the first author's notification failing: the second author is still notified, the code appears once", async () => {
+      const eve = actor!;
+      const db = await getDb();
+      const [fay] = await db.insert(schema.users).values({ name: "Fay", login: "fay-sugg", email: "fay-sugg@example.com" }).returning();
+      const [gus] = await db.insert(schema.users).values({ name: "Gus", login: "gus-sugg", email: "gus-sugg@example.com" }).returning();
+      const doc = await createDocument({ ownerId: eve.id, title: "authors", content: "# authors\n\nAlpha.\n\nOmega.\n" });
+      docId = doc.id;
+      await upsertCollaborator(docId, "fay-sugg", "editor", eve.id);
+      await upsertCollaborator(docId, "gus-sugg", "editor", eve.id);
+      // One pure insertion each, Fay's first in the text: `decided` is ordered by position, so Fay's notification runs first.
+      const propose = async (who: typeof actor, find: string, replace: string) => {
+        actor = who;
+        const res = await post(suggest.POST, "suggest", { edits: [{ find, replace }] });
+        expect(res.status).toBe(200);
+        const { suggestionIds } = (await res.json()) as { suggestionIds: string[] };
+        expect(suggestionIds).toHaveLength(1);
+        return suggestionIds[0];
+      };
+      const fays = await propose({ id: fay.id, login: "fay-sugg", name: "Fay", image: null }, "Alpha.", "Alpha. More.");
+      const guss = await propose({ id: gus.id, login: "gus-sugg", name: "Gus", image: null }, "Omega.", "Omega. Extra.");
+      actor = eve;
+      expect((await pending()).map((s) => s.id)).toEqual([fays, guss]);
+
+      vi.mocked(notifySuggestionDecision).mockClear();
+      vi.mocked(notifySuggestionDecision).mockRejectedValueOnce(DB_FAILURE);
+      const { result: res, logged } = await quietly(() => post(suggestions.POST, "suggestions", { action: "acceptAll" }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, decided: 2, warnings: ["notification-not-sent"] });
+      expect(logged).toEqual([["[suggestions] notification-not-sent", expect.any(Error)]]);
+      expect(await clean()).toBe("# authors\n\nAlpha. More.\n\nOmega. Extra.\n");
+
+      // Fay's notification is the one that failed; Gus's ran and reached him.
+      expect(vi.mocked(notifySuggestionDecision)).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(notifySuggestionDecision).mock.calls.map((c) => c[1].id)).toEqual([fays, guss]);
+      expect((await listNotifications("gus-sugg", { kind: "suggestion.accept" })).items.map((n) => n.refId)).toEqual([guss]);
+      expect((await listNotifications("fay-sugg", { kind: "suggestion.accept" })).items).toEqual([]);
     });
   });
 });

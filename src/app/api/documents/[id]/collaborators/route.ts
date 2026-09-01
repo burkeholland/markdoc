@@ -5,11 +5,9 @@ import { activityActor, recordActivity } from "@/server/activity";
 import { notifyShare } from "@/server/notifications";
 import { listMentionableAgents } from "@/server/agents";
 import { changeCollaboratorAccess } from "@/server/collab/authorization";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
-
-/** Post-write side effects that can fail without taking the share change back: reported as `warnings` on the 2xx (see docs/agents.md). */
-type Warning = "activity-not-recorded" | "notification-not-sent";
 
 /** Owner, collaborators and the agents that can be @-mentioned here (present now or active in the last 30 days). */
 export const GET = handler(async (_req: Request, { params }: Params) => {
@@ -53,21 +51,10 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // The access is granted (the row is written and live connections re-resolved, irrevocable): an activity row or
   // share notification that fails here is logged and reported as a warning code on the 2xx — never a non-2xx that
   // would claim nothing changed (the owner's UI showed an error for a share that had happened).
-  const failed: Warning[] = [];
-  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[collaborators] ${code}`, err);
-      failed.push(code);
-      return false;
-    }
-  };
+  const { tail, answer } = warnTail("collaborators");
   await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "share.add", { login, role: body.role }));
   await tail("notification-not-sent", () => notifyShare(id, login, body.role, { login: user!.login ?? null, name: user!.name ?? user!.login ?? null }));
-  const result = { ok: true, login, role: body.role, pending: !known };
-  return json(failed.length ? { ...result, warnings: failed } : result, { status: known ? 200 : 202 });
+  return json(answer({ ok: true, login, role: body.role, pending: !known }), { status: known ? 200 : 202 });
 });
 
 const removeSchema = z.object({ login: z.string().trim().min(1) });
@@ -89,17 +76,7 @@ export const DELETE = handler(async (req: Request, { params }: Params) => {
     removed = await removeCollaborator(id, login);
   });
   if (!removed) throw new HttpError(404, "Collaborator not found");
-  const failed: Warning[] = [];
-  const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[collaborators] ${code}`, err);
-      failed.push(code);
-      return false;
-    }
-  };
+  const { tail, answer } = warnTail("collaborators");
   await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "share.remove", { login }));
-  return json(failed.length ? { ok: true, warnings: failed } : { ok: true });
+  return json(answer({ ok: true }));
 });

@@ -8,6 +8,7 @@ import { activityActor, recordActivity } from "@/server/activity";
 import { attachWork, requireAttachableRequest } from "@/server/agent-requests";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { contentHash } from "@/server/export/html";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -113,20 +114,10 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // changed. `attachWork` still validates the request — one cancelled/completed between the pre-check and the write
   // is the residual race and surfaces as `request-not-attached` with the suggestions kept. It runs before the
   // activity row so that a row never claims work for a request that refused to count it (same order as comments).
-  const warnings: string[] = [];
-  const tail = async (code: string, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[suggest] ${code}`, err);
-      warnings.push(code);
-      return false;
-    }
-  };
+  const { tail, answer } = warnTail("suggest");
   const linkedRequest = body.requestId;
   const attached = linkedRequest ? await tail("request-not-attached", () => attachWork(id, linkedRequest, user!, { suggestions: count, suggestionIds: created })) : false;
   if (count > 0) await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(attached ? { requestId: linkedRequest } : {}) }));
-  return json({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter, ...(warnings.length ? { warnings } : {}) });
+  return json(answer({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter }));
 });
 
