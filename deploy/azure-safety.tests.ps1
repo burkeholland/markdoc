@@ -1390,4 +1390,8 @@ Assert-Equal 1 ([regex]::Matches($templateSource, "service: 'Microsoft\.Storage'
 Assert-Equal 1 ([regex]::Matches($templateSource, "service: 'Microsoft\.KeyVault'").Count) 'The postgres subnet must keep exactly one Microsoft.KeyVault service endpoint: password rotation reads the vault through it.'
 Assert-True ($deploymentSource -notmatch 'postgresNatGatewayName') 'deploy/azure.ps1 must not read the removed postgresNatGatewayName deployment output.'
 
+# Subnet private-endpoint network policies (task #1333): the API default is Enabled, both live subnets are Disabled; the pins keep a full deployment from putting postgresNsg's DenyAllInbound in front of the Azure Monitor private endpoint.
+Assert-Equal 1 ([regex]::Matches([regex]::Match($templateSource, '(?ms)^resource postgresSubnet .+?(?=^resource )').Value, "privateEndpointNetworkPolicies: 'Disabled'").Count) 'The postgres subnet must pin privateEndpointNetworkPolicies Disabled exactly once: the Azure Monitor private endpoint lives there and Enabled would apply the NSG DenyAllInbound rule to it.'
+Assert-Equal 1 ([regex]::Matches([regex]::Match($templateSource, '(?ms)^resource appSubnet .+?(?=^resource )').Value, "privateEndpointNetworkPolicies: 'Disabled'").Count) 'The container-apps subnet must pin privateEndpointNetworkPolicies Disabled exactly once, matching the live subnet so what-if stays at NoChange.'
+
 Write-Host "azure safety tests: ok (PowerShell $($PSVersionTable.PSVersion))"
