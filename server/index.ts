@@ -28,6 +28,7 @@ import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
+import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
@@ -219,6 +220,12 @@ async function main() {
   };
 
   requestHandler = (req, res) => {
+    // Clock starts here; when the response ends with a 5xx, a 4xx other than 401/404, or before any
+    // header was written, one `[http] <status> <METHOD> <route shape> <ms>ms` line goes to stderr
+    // (server/request-log.ts). The `[http] request failed` catch below keeps logging the thrown error;
+    // that path then also produces a `[http] 500 …` line — expected, the two lines answer different
+    // questions (what broke vs. which route and how long it took).
+    attachRequestLog(req, res);
     if (standbyPort > 0 && req.url === STANDBY_TAKEOVER_PATH && req.socket.localPort === standbyPort) {
       if (req.method !== "POST") { res.statusCode = 405; res.end("POST"); return; }
       takeover ??= runTakeover();
