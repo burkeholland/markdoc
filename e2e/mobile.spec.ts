@@ -65,6 +65,26 @@ function observeLayoutShifts() {
 const layoutShiftSum = (page: Page) => page.evaluate(() => ((window as Window & { __cls?: number[] }).__cls ?? []).reduce((a, b) => a + b, 0));
 
 /**
+ * Runs before any script of every document in the context: records the status bar's layout-menu
+ * trigger's box in the first frame it exists (`window.__firstMenuRect`) — the server markup as first
+ * painted, before React hydrates and `compact` flips (#1531). rAF rather than a MutationObserver so the
+ * measurement waits for the stylesheet: rendering (and rAF) is blocked until it has loaded.
+ */
+function observeFirstMenuRect() {
+  const w = window as Window & { __firstMenuRect?: { x: number; width: number } };
+  const tick = () => {
+    const el = document.querySelector('[data-testid="layout-menu"]');
+    if (!el) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    w.__firstMenuRect = { x: r.x, width: r.width };
+  };
+  requestAnimationFrame(tick);
+}
+
+/**
  * ~145 kB of HTML: on a 4× slower CPU (a phone) the parser paints the article before the end of the
  * document arrives, which is when a table of contents that follows the article in the DOM would push it down.
  * At 1× on localhost the whole page paints at once and no order bug is visible (measured 0.000 either way).
@@ -324,8 +344,8 @@ test.describe("phone", () => {
   // Cumulative layout shift from first paint to one second after the editor is interactive. The server
   // and the hydration render assume a desktop viewport (useBreakpoint), so the phone layout must come
   // from CSS (`max-md:hidden` rail and code column, header residual) or the whole pane jumps at
-  // hydration: 0.852 before that CSS (#1470 measured 0.891), 0.009 with it — what is left is the status
-  // bar's compact swap. 0.1 is Lighthouse's "good" threshold.
+  // hydration: 0.852 before that CSS (#1470 measured 0.891), 0.009 with it (the status bar's compact
+  // swap), 0.000 once the status bar's phone form came from CSS too (#1531). 0.1 is Lighthouse's "good" threshold.
   test("editor first paint is already the phone layout: no layout shift while it hydrates", async ({ browser }) => {
     const context = await browser.newContext({ ...phone });
     await context.addInitScript(observeLayoutShifts);
@@ -361,6 +381,36 @@ test.describe("phone", () => {
     console.log(`[1495] /p/<id> phone CLS (4× CPU): ${cls.toFixed(3)}`);
     expect(cls).toBeLessThanOrEqual(0.02);
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    await context.close();
+  });
+
+  // The status bar's phone form is CSS from the server too (#1531): `compact` is false until hydration,
+  // and the desktop bar painted first — the layout-menu trigger then moved 268 px and the word counter
+  // wrapped, 0.0087 of the editor's 0.009 above. Two checks: the page total, and the trigger's first
+  // rendered box against its settled one (the sum alone cannot tell a 0.009 status-bar swap from noise).
+  test("status bar first paint is already the phone bar: the layout-menu trigger does not move at hydration", async ({ browser }) => {
+    const context = await browser.newContext({ ...phone });
+    await context.addInitScript(observeLayoutShifts);
+    await context.addInitScript(observeFirstMenuRect);
+    const page = await context.newPage();
+    await devLogin(page, "phone-cls-status-bar");
+    const id = await createDocument(page, CLS_DOC, "Mobile CLS status bar");
+    await openDoc(page, id);
+    await expect(page.getByTestId("status-bar")).toHaveAttribute("data-compact", "true");
+    await page.waitForTimeout(1000);
+    const cls = await layoutShiftSum(page);
+    const { first, settled } = await page.evaluate(() => {
+      const w = window as Window & { __firstMenuRect?: { x: number; width: number } };
+      const r = document.querySelector('[data-testid="layout-menu"]')!.getBoundingClientRect();
+      return { first: w.__firstMenuRect ?? null, settled: { x: r.x, width: r.width } };
+    });
+    expect(first, "layout-menu was in the server markup").not.toBeNull();
+    const dx = Math.abs(settled.x - first!.x);
+    const dw = Math.abs(settled.width - first!.width);
+    console.log(`[1531] /d/<id> phone CLS: ${cls.toFixed(3)}; status-bar layout-menu Δx=${dx.toFixed(1)} Δwidth=${dw.toFixed(1)}`);
+    expect(cls).toBeLessThanOrEqual(0.1);
+    expect(dx).toBeLessThanOrEqual(2);
+    expect(dw).toBeLessThanOrEqual(2);
     await context.close();
   });
 
