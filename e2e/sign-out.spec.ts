@@ -1,6 +1,6 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import * as Y from "yjs";
-import { codeText, createDocument, focusCodeEnd, openDocument, signIn } from "./helpers";
+import { codeText, createDocument, devLogin, focusCodeEnd, openDocument, signIn } from "./helpers";
 
 const registryKey = "markdoc:idb-docs";
 
@@ -35,10 +35,7 @@ async function mirrorText(page: Page, docId: string): Promise<string> {
 
 async function signInWithin(context: BrowserContext, login: string): Promise<Page> {
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   return page;
 }
 

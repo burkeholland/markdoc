@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme } from "./helpers";
+import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -184,10 +184,7 @@ async function expectRenderedTextContrast(locator: Locator, state: string) {
 async function signInWithOptions(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
   const context = await browser.newContext(options);
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return { context, page };
 }
@@ -993,7 +990,9 @@ test.describe("axe: comment metadata contrast", () => {
 
 test.describe("axe: phone (iPhone 13)", () => {
   test("dashboard + editor", async ({ browser }) => {
-    const { page, context } = await signInPhone(browser, "a11y-phone");
+    // A user of its own per run: the tap below expects exactly seven starred cards, and a second run against the
+    // same server (--repeat-each, a CI retry) as a fixed login sees the previous run's seven too (received 14).
+    const { page, context } = await signInPhone(browser, `a11y-phone-${Date.now().toString(36)}`);
     await seedDashboard(page);
     // Seven starred documents so the strip overflows and renders "Show all starred" (#116).
     for (let i = 2; i <= 7; i++) {
@@ -1001,6 +1000,8 @@ test.describe("axe: phone (iPhone 13)", () => {
       expect((await page.request.put(`/api/documents/${id}/star`)).ok()).toBeTruthy();
     }
     await page.goto("/");
+    // Server markup carries no handlers: the tap below is this page's first interaction.
+    await waitForHydration(page);
     const showAll = page.getByTestId("show-all-starred");
     await expect(showAll).toBeVisible();
     const box = await showAll.boundingBox();

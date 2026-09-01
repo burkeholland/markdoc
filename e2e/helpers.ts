@@ -18,12 +18,24 @@ export const budgetMs = (ms: number): number => (process.env.CI ? ms * 3 : ms);
 export async function signIn(browser: Browser, login: string): Promise<User> {
   const context = await browser.newContext();
   const page = await context.newPage();
+  await devLogin(page, login);
+  await page.waitForLoadState("networkidle");
+  return { context, page, login };
+}
+
+/**
+ * The development login on an existing page: /login → React hydrated → fill → submit → URL is `/`.
+ * The first `goto` of a test lands on server markup, and a `fill`/`click` that arrives before
+ * `html[data-hydrated]` is dropped under load (task #1263), so every dev-login site goes through here.
+ * Returns as soon as the dashboard URL is in; callers that want its requests settled add
+ * `page.waitForLoadState("networkidle")` (as `signIn` does).
+ */
+export async function devLogin(page: Page, login: string) {
   await page.goto("/login");
+  await waitForHydration(page);
   await page.getByTestId("dev-login").fill(login);
   await page.getByTestId("dev-login-submit").click();
   await page.waitForURL((url) => url.pathname === "/");
-  await page.waitForLoadState("networkidle");
-  return { context, page, login };
 }
 
 /**

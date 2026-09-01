@@ -1,5 +1,5 @@
 import { test, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { createDocument, openDocument } from "./helpers";
+import { createDocument, devLogin, openDocument } from "./helpers";
 
 /**
  * Copy buttons on an origin without the async Clipboard API (#993: http://192.168.x.x:3000 is not a
@@ -19,10 +19,7 @@ const COPIED_OR_HINT = /^(Copied|Select & press Ctrl\+C)$/;
 
 async function signInWithin(context: BrowserContext, login: string): Promise<Page> {
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return page;
 }

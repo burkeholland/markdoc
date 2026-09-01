@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test, expect } from "@playwright/test";
-import { createDocument, reloadHydrated } from "./helpers";
+import { createDocument, devLogin, reloadHydrated, waitForHydration } from "./helpers";
 
 /**
  * Settings → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
@@ -33,11 +33,9 @@ test.describe("settings · webhooks", () => {
   });
 
   test("adds a webhook, shows the secret once, Send test lands a 200 in the list", async ({ page }) => {
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill("webhooks-owner");
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    await devLogin(page, "webhooks-owner");
     await page.goto("/settings");
+    await waitForHydration(page);
 
     const card = page.getByTestId("webhooks-card");
     await expect(card).toBeVisible();

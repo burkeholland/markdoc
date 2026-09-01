@@ -1,6 +1,6 @@
 import { chromium, type FullConfig } from "@playwright/test";
 import { e2eDistDir, removeDistDir } from "./dist-dir";
-import { waitForHydration } from "./helpers";
+import { devLogin, waitForHydration } from "./helpers";
 
 /**
  * A Next dist dir left behind by a killed run answers 404 on every API route (or EPERM on
@@ -87,10 +87,7 @@ export default async function globalSetup(config: FullConfig) {
 
   try {
     await timed("login page + dev login", async () => {
-      await page.goto("/login");
-      await page.getByTestId("dev-login").fill(login);
-      await page.getByTestId("dev-login-submit").click();
-      await page.waitForURL((url) => url.pathname === "/");
+      await devLogin(page, login);
       await page.waitForLoadState("networkidle");
     });
 

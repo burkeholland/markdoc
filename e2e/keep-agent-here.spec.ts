@@ -1,6 +1,6 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { codeText, createDocument, mintToken, openDocument, type MintedToken } from "./helpers";
+import { codeText, createDocument, devLogin, mintToken, openDocument, type MintedToken } from "./helpers";
 
 /**
  * "Keep an agent here" (#1970, #981): the sentence that puts a person's agent into the watch loop for this
@@ -14,10 +14,7 @@ const PILL_SELECTOR = '[data-testid="agent-pill"], [data-testid="agent-requests-
 
 async function signInWithin(context: BrowserContext, login: string): Promise<Page> {
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return page;
 }

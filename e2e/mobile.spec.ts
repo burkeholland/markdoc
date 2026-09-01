@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDocument, selectTextInRich } from "./helpers";
+import { createDocument, devLogin, selectTextInRich } from "./helpers";
 
 const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\nMore words.\n\n## Third\n\nEnd.\n";
 
@@ -8,10 +8,7 @@ const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\n
 async function signInOn(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
   const context = await browser.newContext(options);
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return { context, page };
 }

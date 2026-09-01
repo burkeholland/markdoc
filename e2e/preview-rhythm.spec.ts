@@ -1,6 +1,6 @@
 import { test, expect, devices, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument } from "./helpers";
+import { signIn, devLogin, createDocument, openDocument, setTheme } from "./helpers";
 
 /**
  * Vertical rhythm of rendered Markdown (task #346, Burke #1057: "things run together in the preview").
@@ -136,15 +136,6 @@ function assertRhythm(gaps: Gap[], label: string) {
 
 const previewGaps = (page: Page) => measure(page, ".md-rich");
 
-async function setTheme(page: Page, theme: "light" | "dark") {
-  await page.evaluate((t) => localStorage.setItem("markdoc:theme", t), theme);
-  // A full navigation rather than reload(): on a loaded box the reload raced the editor's own
-  // navigation and aborted (ERR_ABORTED) — see the first run of this spec.
-  await page.goto(page.url());
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
-}
-
 async function waitForPreview(page: Page) {
   await expect(page.locator(".md-rich table")).toBeVisible();
   await expect(page.locator(".md-rich pre")).toBeVisible();
@@ -205,10 +196,7 @@ test.describe("preview vertical rhythm", () => {
   test("phone layout (390×844) keeps the same rhythm", async ({ browser }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"], viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill("rhythm-phone");
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    await devLogin(page, "rhythm-phone");
     const id = await createDocument(page, DOC, "Rhythm fixture");
     await page.goto(`/d/${id}`);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });

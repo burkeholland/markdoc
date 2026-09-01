@@ -1,7 +1,7 @@
 import { test, expect, devices, type Page } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { signIn, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, reloadHydrated, type User } from "./helpers";
+import { signIn, devLogin, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, reloadHydrated, type User } from "./helpers";
 import { seedBurkeScale, h2Texts, firstH3Of, UNIQUE_WORD, UNIQUE_WORD_DOC_INDEX, MANY_DOCS, type BurkeScaleSeed } from "./fixtures/burke-scale";
 
 /**
@@ -607,10 +607,7 @@ test.describe("Burke-scale", () => {
     const context = await browser.newContext({ ...devices["iPhone 13"], viewport: { width: 390, height: 844 } });
     const page = await context.newPage();
     try {
-      await page.goto("/login");
-      await page.getByTestId("dev-login").fill(OWNER);
-      await page.getByTestId("dev-login-submit").click();
-      await page.waitForURL((url) => url.pathname === "/");
+      await devLogin(page, OWNER);
       const t0 = Date.now();
       await page.goto(`/d/${longDocId}`);
       await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 60_000 });

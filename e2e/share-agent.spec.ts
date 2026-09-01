@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { createDocument, openDocument } from "./helpers";
+import { createDocument, devLogin, openDocument } from "./helpers";
 
 /**
  * Share dialog height at 1280×800 on main (368ccc3), agent card always open: the dialog was capped at
@@ -19,10 +19,7 @@ test.describe("share dialog · collaborate with an agent", () => {
   test("shows the /api/mcp config for this origin, mints a token into it, and Copy puts it on the clipboard", async ({ browser }) => {
     const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
     const page = await context.newPage();
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill("share-agent-owner");
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    await devLogin(page, "share-agent-owner");
     const id = await createDocument(page, "# Agent share\n\nHello agent.\n", "Agent share");
     await openDocument(page, id);
     const origin = await page.evaluate(() => window.location.origin);
@@ -196,10 +193,7 @@ test.describe("share dialog · collaborate with an agent", () => {
   test("the scope picker mints a full-access token for this document only, and says so", async ({ browser }) => {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill("share-agent-scoper");
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    await devLogin(page, "share-agent-scoper");
     const id = await createDocument(page, "# Scoped share\n\nHello agent.\n", "Scoped share");
     const other = await createDocument(page, "# Elsewhere\n\nNot this one.\n", "Elsewhere");
     await openDocument(page, id);
