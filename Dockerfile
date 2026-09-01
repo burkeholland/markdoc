@@ -23,7 +23,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # AUTH_SECRET is only needed at runtime; a placeholder keeps the build from failing fast checks.
-RUN AUTH_SECRET=build-placeholder npm run build
+# .next/cache is Turbopack's persistent build cache (~200 MB, 74 % of .next): an input to the *next*
+# build only, which never happens inside an image, and read by nothing at runtime (the server needs
+# .next/server, .next/static, the manifests and BUILD_ID). Removed in the same layer so neither the
+# runtime stage's COPY of .next nor the `--target build` tools image (markdoc-maint) carries it.
+RUN AUTH_SECRET=build-placeholder npm run build && rm -rf .next/cache
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
