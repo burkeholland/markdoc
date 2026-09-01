@@ -16,8 +16,8 @@ let requestHeaders = new Headers();
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 // Wrapped so a test can make the activity step or the requester's notification fail at the right moment. The
-// request functions write their activity row on their own transaction (not through `recordActivity`, which
-// opens its own connection), so the activity step is failed at the row's actor mapping, `activityActor`.
+// request functions write their activity row through `recordActivity(…, { tx })`, on their own transaction, so
+// the activity step is failed at the row's actor mapping, `activityActor`, which runs before the insert.
 vi.mock("@/server/activity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/activity")>();
   return { ...actual, activityActor: vi.fn(actual.activityActor) };
@@ -31,6 +31,11 @@ vi.mock("@/server/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/db")>();
   return { ...actual, getDb: vi.fn(actual.getDb) };
 });
+// Pass-through, counted: `cancelRequest` writes no activity row, so the mirror write is what says a call wrote.
+vi.mock("@/server/livedoc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/livedoc")>();
+  return { ...actual, mutateLiveDoc: vi.fn(actual.mutateLiveDoc) };
+});
 
 const { getDb, schema } = await import("@/server/db");
 const { eq } = await import("drizzle-orm");
@@ -40,7 +45,7 @@ const { listNotifications, notify } = await import("@/server/notifications");
 const { listActivity, activityActor } = await import("@/server/activity");
 const { createRequest, listRequests, listRequestsForUser, claimRequest, completeRequest, cancelRequest, attachWork, readMirror } = await import("@/server/agent-requests");
 const { pollEvents } = await import("@/server/agent-events");
-const { readLiveDoc } = await import("@/server/livedoc");
+const { readLiveDoc, mutateLiveDoc } = await import("@/server/livedoc");
 const { POST: POST_REQUESTS, GET: GET_REQUESTS } = await import("@/app/api/documents/[id]/requests/route");
 const { POST: POST_CLAIM } = await import("@/app/api/documents/[id]/requests/[rid]/claim/route");
 const { POST: POST_COMPLETE } = await import("@/app/api/documents/[id]/requests/[rid]/complete/route");
@@ -602,8 +607,9 @@ describe("the non-2xx promise for requests (#1232)", () => {
   });
 
   /**
-   * Lands `race` between `attachWork`'s pre-check and its update: `getRequest` takes the first `getDb()` (the
-   * pre-check passes on the still-claimed row), `attachWork`'s own `getDb()` is the second and runs `race` first.
+   * Lands `race` between a request function's pre-check and its update: `getRequest` takes the first `getDb()` (the
+   * pre-check passes on the still-pending row), the function's own `getDb()` is the second and runs `race` first.
+   * Works for `attachWork`, `completeRequest` and `cancelRequest` alike — none fetches the connection in between.
    */
   const betweenPreCheckAndUpdate = async (race: () => Promise<unknown>) => {
     const actualGetDb = (await vi.importActual<typeof import("@/server/db")>("@/server/db")).getDb;
@@ -684,5 +690,59 @@ describe("the non-2xx promise for requests (#1232)", () => {
     expect(await doneRows(created.id)).toEqual([]);
     expect(await doneNotifications(created.id)).toEqual([]);
     expect((await readMirror(reqDocId))[created.id]).toMatchObject({ status: "cancelled" });
+  });
+
+  /**
+   * The mirror image of the test above (#1351): the cancel's pre-check sees `claimed`, the complete lands, and the
+   * cancel's update must not write `cancelled` over a done row whose activity row and notification already stand.
+   * Before the guard the cancel resolved and the row read `cancelled` with the result of a finished request.
+   */
+  it("cancelRequest: a request completed between the pre-check and the update stays done — 409 Request is already done, the done row and its notification stand, mirror done", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    const mirrorWrites = vi.mocked(mutateLiveDoc).mock.calls.length;
+    await betweenPreCheckAndUpdate(() => completeRequest(reqDocId, created.id, agentActor(), { summary: "Finished meanwhile." }));
+    await expect(cancelRequest(reqDocId, created.id, ownerActor(), "owner")).rejects.toMatchObject({ status: 409, message: "Request is already done", details: { status: "done" } });
+    expect(await rowOf(created.id)).toMatchObject({ status: "done", claimedBy: "Copilot CLI", result: { suggestions: 0, comments: 0, summary: "Finished meanwhile." } });
+    expect(await doneRows(created.id)).toHaveLength(1);
+    expect(await doneNotifications(created.id)).toHaveLength(1);
+    // The ask and the finish are the request's only activity rows: the cancel wrote nothing (there is no cancel row kind).
+    expect((await listActivity(reqDocId, { limit: 100 })).items.filter((a) => a.detail.requestId === created.id).map((a) => a.action).sort()).toEqual(["agent.request", "agent.request.done"]);
+    // One mirror write — the complete's; the cancel that lost did not touch the live document.
+    expect(vi.mocked(mutateLiveDoc).mock.calls.length - mirrorWrites).toBe(1);
+    expect((await readMirror(reqDocId))[created.id]).toMatchObject({ status: "done", claimedBy: "Copilot CLI", result: { summary: "Finished meanwhile." } });
+    // The route answers the same 409 for the row as it is now.
+    const res = await as(owner, () => POST_CANCEL(jsonReq(`/api/documents/${reqDocId}/requests/${created.id}/cancel`), params(reqDocId, created.id)));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "Request is already done", status: "done" });
+  });
+
+  /**
+   * Two cancels in the same tick (a double click on the chip's ×, or the requester and the owner at once): both
+   * pre-checks see the request pending, so only the guarded update decides. Before #1351 both updates wrote
+   * `cancelled` and both mirrored; now the loser reads the row back and answers as the pre-check does for a
+   * cancelled request — the same row, 200 — so the contract stays: cancelling a cancelled request is a no-op.
+   */
+  it("cancelRequest: two calls racing on one open request write once — both resolve cancelled with the same row, one mirror write (20 rounds)", async () => {
+    const rounds = 20;
+    const wroteTwice: string[] = [];
+    const disagreed: string[] = [];
+    let last = "";
+    for (let round = 0; round < rounds; round++) {
+      const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: `Cancel race ${round}`, mode: "suggest" });
+      last = created.id;
+      const mirrorWrites = vi.mocked(mutateLiveDoc).mock.calls.length;
+      const [a, b] = await Promise.all([cancelRequest(reqDocId, created.id, ownerActor(), "owner"), cancelRequest(reqDocId, created.id, ownerActor(), "owner")]);
+      const writes = vi.mocked(mutateLiveDoc).mock.calls.length - mirrorWrites;
+      if (writes !== 1) wroteTwice.push(`round ${round}: ${writes} mirror writes`);
+      // Both answers are 2xx and describe the same final row (the loser answers with the winner's `updatedAt`).
+      const row = await rowOf(created.id);
+      if (row.status !== "cancelled" || a.status !== "cancelled" || b.status !== "cancelled" || a.updatedAt !== b.updatedAt) {
+        disagreed.push(`round ${round}: row ${row.status}, answers ${a.status}@${a.updatedAt} / ${b.status}@${b.updatedAt}`);
+      }
+    }
+    expect(wroteTwice, `${wroteTwice.length}/${rounds} rounds wrote duplicates: ${wroteTwice.join("; ")}`).toEqual([]);
+    expect(disagreed, `${disagreed.length}/${rounds} rounds: ${disagreed.join("; ")}`).toEqual([]);
+    expect((await readMirror(reqDocId))[last]).toMatchObject({ status: "cancelled" });
   });
 });

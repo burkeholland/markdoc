@@ -174,15 +174,37 @@ async function findAddresseeToken(agent: RequestAddressee) {
 }
 
 /**
- * Who the new request is addressed to, checked against the actor: the addressee must be a live token, and
- * unless its owner switched `collaboratorsMayAsk` on, only the owner may ask it (403 `agent-owner-only`).
+ * Whether `user` is a member of the document — its owner or a collaborator row, any role: the predicate
+ * `listRequestsForUser` scopes the inbox with (link access does not count there either), so a request is only
+ * addressed where its addressee's token will ever list it.
  */
-async function resolveAddressee(actor: Actor, mention: RequestAddressee): Promise<RequestAddressee> {
+async function isDocumentMember(docId: string, user: { id: string; login: string | null }): Promise<boolean> {
+  const db = await getDb();
+  const login = user.login?.toLowerCase() ?? "";
+  const rows = await db
+    .select({ id: schema.documents.id })
+    .from(schema.documents)
+    .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
+    .where(and(eq(schema.documents.id, docId), or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
+ * Who the new request is addressed to, checked against the document and the actor: the addressee must be a live
+ * token (400 `unknown-agent`) whose owner is in the document (400 `agent-not-in-document` — nobody would ever
+ * list the request otherwise), and unless that owner switched `collaboratorsMayAsk` on, only the owner may ask
+ * it (403 `agent-owner-only`). In that order: a locked agent that is not even here is "not in this document".
+ */
+async function resolveAddressee(docId: string, actor: Actor, mention: RequestAddressee): Promise<RequestAddressee> {
   const found = await findAddresseeToken(mention);
   if (!found) throw new HttpError(400, `Unknown agent @${formatAddressee(mention)}`, { code: "unknown-agent", agent: formatAddressee(mention) });
   const { token, owner } = found;
+  const ownerName = owner.name ?? owner.login ?? "The owner";
+  if (!(await isDocumentMember(docId, owner))) {
+    throw new HttpError(400, `${ownerName}'s ${token.name} is not in this document`, { code: "agent-not-in-document", agent: mention });
+  }
   if (owner.id !== actor.id && !token.collaboratorsMayAsk) {
-    const ownerName = owner.name ?? owner.login ?? "The owner";
     throw new HttpError(403, `${ownerName}'s ${token.name} only takes requests from ${ownerName}`, { code: "agent-owner-only", agent: formatAddressee(mention) });
   }
   return mention;
@@ -313,7 +335,7 @@ export async function createRequest(docId: string, actor: Actor, role: Role, inp
       if (first) mention = { login: first.login, slug: first.agent.toLowerCase() };
     }
   }
-  const agent = mention ? await resolveAddressee(actor, mention) : null;
+  const agent = mention ? await resolveAddressee(docId, actor, mention) : null;
   const db = await getDb();
   const now = new Date();
   // One transaction: a request that exists without its `agent.request` row would be worked by agents while the
@@ -600,16 +622,43 @@ export function summarizeResult(result: AgentRequestResult | null): string | nul
   return parts.length ? parts.join(", ") : null;
 }
 
-/** Cancel an open or claimed request. Only the requester or the document owner may cancel. */
+/**
+ * Cancel an open or claimed request. Only the requester or the document owner may cancel. Cancelling a cancelled
+ * request is a no-op that answers the row as it is; cancelling a done one is a 409.
+ *
+ * The update is guarded like `completeRequest`'s (`status not in (done, cancelled)`): a complete landing between
+ * the pre-check and the update is not overwritten — its `agent.request.done` row and `request.done` notification
+ * stand and the cancel answers the 409 the pre-check would have given; a cancel landing meanwhile is the same
+ * no-op the pre-check makes of a cancelled row. The mirror is written only when the row was.
+ */
 export async function cancelRequest(docId: string, requestId: string, actor: Actor, role: Role): Promise<AgentRequestItem> {
   const row = await getRequest(docId, requestId);
   if (row.userId !== actor.id && role !== "owner") throw new HttpError(403, "Only the requester or the document owner can cancel a request");
+  const alreadyDone = (status: AgentRequestStatus) => new HttpError(409, "Request is already done", { status });
   if (row.status === "cancelled") return toRequestItem(row);
-  if (row.status === "done") throw new HttpError(409, "Request is already done", { status: row.status });
+  if (row.status === "done") throw alreadyDone(row.status);
   const db = await getDb();
-  const [updated] = await db.update(schema.agentRequests).set({ status: "cancelled", updatedAt: new Date() }).where(eq(schema.agentRequests.id, requestId)).returning();
-  await mirrorRequest(updated, actor);
-  return toRequestItem(updated);
+  const { row: current, written } = await db.transaction(async (tx): Promise<{ row: AgentRequest; written: boolean }> => {
+    const [cancelled] = await tx
+      .update(schema.agentRequests)
+      .set({ status: "cancelled", updatedAt: new Date() })
+      .where(and(eq(schema.agentRequests.id, requestId), notInArray(schema.agentRequests.status, ["done", "cancelled"])))
+      .returning();
+    if (!cancelled) {
+      // Someone finished or cancelled first: read what the row became — on `tx`, so this is the same snapshot the update saw.
+      const [now] = await tx
+        .select()
+        .from(schema.agentRequests)
+        .where(and(eq(schema.agentRequests.id, requestId), eq(schema.agentRequests.documentId, docId)));
+      if (!now) throw new HttpError(404, "Request not found");
+      if (now.status === "done") throw alreadyDone(now.status);
+      if (now.status === "cancelled") return { row: now, written: false };
+      throw new HttpError(409, `Request is ${now.status}`, { status: now.status });
+    }
+    return { row: cancelled, written: true };
+  });
+  if (written) await mirrorRequest(current, actor);
+  return toRequestItem(current);
 }
 
 /** The mirrored map as currently held in the live document (tests and diagnostics). */
