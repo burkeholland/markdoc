@@ -2,6 +2,9 @@
   "name": "markdoc",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx server/index.ts",
     "dev:port": "tsx scripts/dev-port.mts",
@@ -109,7 +112,7 @@
     "@testing-library/user-event": "^14.6.6",
     "@types/diff": "^7.0.2",
     "@types/mdast": "^4.0.4",
-    "@types/node": "^20",
+    "@types/node": "^22.20.1",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19.2.5",
