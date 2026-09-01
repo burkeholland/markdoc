@@ -34,9 +34,7 @@ import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY
 import type { SyncActions } from "./sync-dialog";
 import { useEverTrue } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
-import { useSyncPolling } from "./use-sync-polling";
-
-const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
+import { emptySync, useSyncPolling } from "./use-sync-polling";
 
 /** Same box as the pane's root while its chunk loads, so the split layout does not shift when the pane arrives. */
 function CodePanePlaceholder() {
@@ -96,21 +94,6 @@ const ShortcutsDialog = lazyOnFirstUse(loadDialogs, (m) => m.ShortcutsDialog);
 const FileDropDialog = lazyOnFirstUse(loadFileDropDialog, (m) => m.FileDropDialog);
 const FindBar = lazyOnFirstUse(loadFindBar, (m) => m.FindBar);
 const CommandPalette = lazyOnFirstUse(loadCommandPalette, (m) => m.CommandPalette);
-
-export async function pollDocumentSync(documentId: string, fresh: boolean): Promise<SyncStatusDto> {
-  try {
-    return await api.documents.sync(documentId, { fresh });
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 413 && error.body?.status === "remote-unreadable") {
-      return {
-        ...emptySync(),
-        ...(error.body as Partial<SyncStatusDto>),
-        status: "remote-unreadable",
-      };
-    }
-    throw error;
-  }
-}
 
 import { SelectionBubble } from "./selection-bubble";
 import { claimerName, describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests";
