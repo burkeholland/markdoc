@@ -2,12 +2,18 @@ import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import { execSync } from "node:child_process";
 import type { DocumentMeta } from "@/server/documents";
 
-// Real GitHub against the scratch repository (burkeholland/markdoc-scratch). Runs only when a token
-// is available (GITHUB_TOKEN or `gh auth token`); the file it creates is deleted at the end.
+// Real GitHub against the scratch repository (burkeholland/markdoc-scratch): opt-in, not part of an
+// ordinary `npm test`. Runs only with MARKDOC_GITHUB_INTEGRATION=1 *and* a token (GITHUB_TOKEN, else
+// `gh auth token`, which is read only when the flag is set so a plain run never spawns `gh`); the
+// release preflight runs it as `MARKDOC_GITHUB_INTEGRATION=1 npm run test:github`. The files it
+// creates are deleted at the end.
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
 delete process.env.GITHUB_MOCK;
+
+const integrationEnvironmentName = "MARKDOC_GITHUB_INTEGRATION";
+const enabled = Boolean(process.env[integrationEnvironmentName]);
 
 function findToken(): string | null {
   if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
@@ -17,7 +23,7 @@ function findToken(): string | null {
     return null;
   }
 }
-const token = findToken();
+const token = enabled ? findToken() : null;
 if (token) process.env.GITHUB_TOKEN = token;
 const [owner, repo] = (process.env.SCRATCH_REPO ?? "burkeholland/markdoc-scratch").split("/");
 
@@ -26,7 +32,7 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const BASE = "# Integration\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
 
-describe.skipIf(!token)("GitHub sync against the scratch repository", () => {
+describe.skipIf(!enabled || !token)("GitHub sync against the scratch repository", () => {
   const path = `markdoc-sync-test/${Date.now()}-${process.pid}.md`;
   let user: { id: string; login: string; name: string; image: null };
   let octokit: import("@octokit/rest").Octokit;

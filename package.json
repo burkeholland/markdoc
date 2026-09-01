@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:fuzz": "cross-env FUZZ_DOCS=1500 vitest run src/editor/markdown/incremental.test.ts --testTimeout=120000",
+    "test:github": "vitest run src/server/publish-github.integration.test.ts",
     "test:e2e": "playwright test",
     "posttest:e2e": "tsx scripts/e2e-cleanup.mts",
     "tsconfig:revert": "tsx scripts/tsconfig-churn.ts",
