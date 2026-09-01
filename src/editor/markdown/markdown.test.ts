@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Node } from "prosemirror-model";
 import { parseMarkdown, extractHeadings } from "./parse";
 import { serializeMarkdown } from "./serialize";
 import { schema } from "./schema";
@@ -297,5 +298,60 @@ describe("serializeMarkdown", () => {
 
   it("preserves trailing spaces in paragraphs", () => {
     expect(roundTrip("hello ")).toBe("hello ");
+  });
+
+  describe("a mark broken up by another mark right before whitespace (prosemirror-markdown 1.13.6, task #1363)", () => {
+    // When an outer mark closes, the inner one has to close with it and reopen for the rest of its run. If that
+    // rest starts with whitespace, the reopened delimiter must stay outside of it: `**f*oo**** bar*` reads back as
+    // bold "f", bold-italic "oo" and the literal text "* bar*", so every save changed what the next load showed.
+    // Markdown has no way to mark a space at that boundary, so the expected document carries it unmarked.
+    const m = (text: string, ...names: string[]) =>
+      schema.text(
+        text,
+        names.map((name) => (name === "link" ? schema.marks.link.create({ href: "https://x.y" }) : schema.marks[name].create())),
+      );
+    const para = (...content: ReturnType<typeof schema.text>[]) => schema.nodes.doc.create(null, [schema.nodes.paragraph.create(null, content)]);
+    const cases: [name: string, doc: Node, expected: Node, markdown: string][] = [
+      [
+        "em opened inside strong and continuing after it (the upstream test case)",
+        para(m("f", "strong"), m("oo", "strong", "em"), m(" bar", "em")),
+        para(m("f", "strong"), m("oo", "strong", "em"), m(" "), m("bar", "em")),
+        "**f*oo*** *bar*",
+      ],
+      [
+        "strong broken by em ending before a space",
+        para(m("f", "em"), m("oo", "em", "strong"), m(" bar", "strong")),
+        para(m("f", "em"), m("oo", "em", "strong"), m(" "), m("bar", "strong")),
+        "*f**oo*** **bar**",
+      ],
+      [
+        "strong broken by a link ending before a space",
+        para(m("f", "link"), m("oo", "link", "strong"), m(" bar", "strong")),
+        para(m("f", "link"), m("oo", "link", "strong"), m(" "), m("bar", "strong")),
+        "[f**oo**](https://x.y) **bar**",
+      ],
+      [
+        "em opened inside strikethrough and continuing after it",
+        para(m("f", "strikethrough"), m("oo", "strikethrough", "em"), m(" bar", "em")),
+        para(m("f", "strikethrough"), m("oo", "strikethrough", "em"), m(" "), m("bar", "em")),
+        "~~f*oo*~~ *bar*",
+      ],
+    ];
+
+    it.each(cases)("%s", (_name, doc, expected, markdown) => {
+      const out = serializeMarkdown(doc);
+      const back = parseMarkdown(out).doc;
+      // An orphan delimiter (`* bar*`, `** bar**`) is one the parser could not pair, so it survives as literal text.
+      expect(back.textContent, out).toBe(doc.textContent);
+      expect(back.eq(expected), out).toBe(true);
+      expect(out).toBe(markdown);
+      expect(roundTrip(out)).toBe(out);
+    });
+
+    it("a code mark is always innermost, so it never breaks the mark around it", () => {
+      const doc = para(m("f", "strong"), m("oo", "strong", "code"), m(" bar", "strong"));
+      expect(serializeMarkdown(doc)).toBe("**f`oo` bar**");
+      expect(parseMarkdown("**f`oo` bar**").doc.eq(doc)).toBe(true);
+    });
   });
 });
