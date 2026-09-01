@@ -79,7 +79,8 @@ class FakeResponse extends EventEmitter {
 }
 
 function fakeClock(stepMs: number) {
-  let now = 1_000_000_000n;
+  // Nanoseconds, like process.hrtime.bigint(); BigInt() rather than a literal — tsconfig targets ES2017.
+  let now = BigInt(1_000_000_000);
   return () => {
     const value = now;
     now += BigInt(Math.round(stepMs * 1e6));
