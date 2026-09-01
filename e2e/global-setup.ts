@@ -134,6 +134,13 @@ export default async function globalSetup(config: FullConfig) {
       "/api/mcp",
       // Agent requests from comments (#1024/#1025): the first hit compiles the route the comment composer posts to.
       `/api/documents/${docId}/requests`,
+      // agent-presence.spec.ts l.138/l.182 give the picker/caret 1 s from `bot.presence` (POST, same module): the
+      // first hit compiled in 1,554 ms on the unmodified tree (#1539).
+      `/api/agent/documents/${docId}/presence`,
+      // The comments panel's `useReviews` fires on mount inside agent-presence.spec.ts l.129–163 (first hit 1,524 ms).
+      `/api/documents/${docId}/reviews`,
+      // lan.spec.ts l.153–157 polls it under a 10 s budget.
+      `/api/documents/${docId}/content`,
     ];
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {
@@ -159,6 +166,15 @@ export default async function globalSetup(config: FullConfig) {
         timeout: WARMUP_STEP_TIMEOUT_MS,
       });
       if (!res.ok()) throw new Error(`[e2e warm-up] assets -> ${res.status()}`);
+    });
+    // agent-presence.spec.ts l.191–194 gives `bot.suggest` 3 s and #1491 measured a 4,341 ms cold compile there
+    // (1,568 ms in the #1539 evidence run); scale.spec.ts test 8 reaches the same route through `markdoc_suggest`.
+    await timed("POST /api/documents/<id>/suggest", async () => {
+      const res = await page.request.post(`/api/documents/${docId}/suggest`, {
+        data: { edits: [{ find: "Compiles the editor route.", replace: "Compiles the editor and suggest routes." }] },
+        timeout: WARMUP_STEP_TIMEOUT_MS,
+      });
+      if (!res.ok()) throw new Error(`[e2e warm-up] suggest -> ${res.status()} ${await res.text()}`);
     });
     await timed("GET /api/documents/<id>/comments", async () => {
       const res = await page.request.get(`/api/documents/${docId}/comments`, { timeout: WARMUP_STEP_TIMEOUT_MS });
