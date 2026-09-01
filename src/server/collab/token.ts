@@ -62,13 +62,18 @@ export async function verifyCollabToken(token: string): Promise<VerifiedCollabCl
 /**
  * The server-log line for a `verifyCollabToken` failure, by cause: an expired JWT (a tab reconnecting
  * after a release — the common case), a claim mismatch such as the audience, a signature the current
- * secret does not verify (a token minted elsewhere — the case worth noticing), or anything else.
- * Never the token, login or document. `JWTExpired` is checked first: in older jose versions it is a
- * subclass of `JWTClaimValidationFailed`.
+ * secret does not verify (a token minted elsewhere — the case worth noticing), a string that is not a
+ * JWT at all (`JWSInvalid`/`JWTInvalid` — what the `release:verify` `collab:reject` probe sends), a
+ * well-signed JWT whose claims are not collaboration claims (this module's own
+ * `Invalid collaboration token` — a token minted with our secret for something else, worth noticing),
+ * or anything else. Never the token, login or document. `JWTExpired` is checked first: in older jose
+ * versions it is a subclass of `JWTClaimValidationFailed`.
  */
 export function collabTokenFailureMessage(err: unknown): string {
   if (err instanceof joseErrors.JWTExpired) return "Invalid token (expired)";
   if (err instanceof joseErrors.JWTClaimValidationFailed) return "Invalid token (claims)";
   if (err instanceof joseErrors.JWSSignatureVerificationFailed) return "Invalid token (signature)";
+  if (err instanceof joseErrors.JWSInvalid || err instanceof joseErrors.JWTInvalid) return "Invalid token (malformed)";
+  if (err instanceof Error && err.message === "Invalid collaboration token") return "Invalid token (shape)";
   return "Invalid token";
 }
