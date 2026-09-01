@@ -32,33 +32,169 @@ Newest first. Each entry is one merged feature or fix on `main`; test-only and w
 
 - The save indicator reads a steady *Saving…* while you type and *Saved* about a second after you stop, instead of flicking between the two on every keystroke; opening a document and the *All changes saved* recovery flash are as quick as before, and a collaborator's typing leaves your chip alone (e28db7b)
 - Find and replace: editors see the replace row as soon as the find bar opens (a toggle with a replace icon hides it, and the choice is remembered), the shortcut is ⌥⌘F on a Mac — ⌘H is macOS *Hide* and never reached the browser — and Ctrl+H elsewhere, as the palette, the shortcuts dialog and the README now say; viewers get find only (e66fb29)
+- The editor's side panels, dialogs, command palette, find bar and keep-agent dialog load on first use behind `next/dynamic` and stay mounted afterwards: the `/d/[id]` entry drops from 1 567 to 1 405 kB of script, a first open takes 29–64 ms on the production build with one chunk request and none the second time, and focus return and Esc behave as before (f2632d7); highlight.js's core joined the lazy grammar chunk, another 20 kB off the entry (9df345a)
+- The code pane loads behind `next/dynamic` only when the layout shows it — about 640 kB less on the editor's first load, and a phone, which opens in the rich view, never downloads CodeMirror; every CodeMirror value import now lives inside the pane's boundary (5f9eb0d), and the shared constants the editor used to read from the tokens panel, the Copilot checklist and the import dialog moved into small modules so those never load with it (408cb28)
+
+### Organising
+
+- Importing a file with an extension Markdoc does not read names every accepted one in its `415` message — `.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`, `.text`, `.html` and `.htm` — instead of a shorter, stale list, and the never-recorded `mention` activity kind left the Activity panel (e2e0e82)
 
 ### Publishing
 
 - A shared document link unfurls with the document's own card: `/d/:id` and `/p/:id` carry `og:title` / `og:description` (the title and a 160-character excerpt) and a rendered 1200×630 `og:image` with the title, owner and reading time in the app's typefaces, cached for five minutes; a private document stays the generic Markdoc card and its image answers 404 to anyone without access (c5b9dd5)
+- Publish, pull and link keep their promises: a document whose text equals the GitHub file is *in sync* even when the recorded base is stale, a publish skipped for that reason heals the base, a version or activity tail that fails after the write answers `2xx` with `warnings[]`, and linking writes the gist link before the version so a failure leaves nothing half-done (ca6ea2c)
+- The public reader page sheds its last Radix chunk: the download split-menu is a dependency-free disclosure of three download links (`/p/[id]` entry script 572 → 478 kB, 27 kB less over brotli) (5e11200), after the UI primitives were split into tooltip, menu, popover, dialog and display modules so the reader imports only the two it uses (9e1d1fa)
+- After a force publish of a GitHub file too large to read, the header keeps polling: the sync route's `413 remote-unreadable` answer now carries `pollMs` (359e89d)
 
 ### Agents
 
 - Agent requests are addressed: a request mentioning `@owner/agent` is listed, claimed and completed only by that agent's token (`403 not-addressee` for everyone else; unaddressed requests stay with the requester's own agents), a request to an unknown, revoked or expired agent is `400 unknown-agent`, and only the token's owner may ask it unless the owner switches `collaboratorsMayAsk` on (`PATCH /api/tokens/:id`; `403 agent-owner-only` otherwise); `agent` and `claimedByLogin` ride on every request, `markdoc_list_requests` prints them, and migration `0019` adds the columns (e926a41)
 - In the editor, someone else's agent is named with its owner — *Alice's Copilot* — in request chips, presence and the finished toast; the `@` picker locks agents you may not ask (Enter still inserts the mention), the composer refuses a request to one with *… only takes requests from Alice.* and a disabled Send, and Settings → Agents gains a *Collaborators may ask this agent* switch per token (4b23ba8)
 - MCP write tools say the REST `warnings` in their text (`Warnings: activity-not-recorded.`) so an agent knows the write landed and what did not follow; `markdoc_suggest` refuses neither or both of `content` / `edits`, `markdoc_list_documents` refuses `trash` together with `starred`, a comment folded into a request thread says so, and the tool schemas carry the REST bounds so a too-long title or body is refused before any request (736c5ce)
+- `PATCH /api/documents/:id { title }` renames the live document too, so the new title survives the next save and one `title.change` activity row is recorded; it used to answer `200` and quietly revert when the document was next stored (368b0df)
+- `POST /api/documents/:id/suggest` checks its `requestId` before writing, so an unknown or finished request answers `404` / `409` with the document exactly as it was instead of leaving tracked changes an agent has to undo (445b21c)
 
 ### Reliability
 
 - Sharing, naming or restoring a version, deciding suggestions and uploading an asset no longer answer `500` (or `404`) for a change that already happened: when the activity row, the notification or the *Restored version* snapshot fails after the write stood, the route answers `2xx` with `warnings: ["activity-not-recorded" | "notification-not-sent" | "version-not-saved"]`, and two identical uploads racing on one document dedupe without an error (0c8155e)
 - Completing an agent request is race-safe — two completions in the same instant write one activity row and one notification, and a request cancelled between the pre-check and the write stays cancelled (`409`) — accepting suggestions notifies every author even when one notification fails, and the twelve warning tails share one `warnTail` helper whose activity rows join the caller's transaction (bdf4b83)
+- Completing or creating an agent request and posting a review are transactional — the status change, its activity row and a `notified` flag land together, `attachWork` can no longer resurrect a cancelled request, a review whose comments fail to post is undone, and `markdoc_complete_request`'s text says what did and did not happen; the race-safe completion above builds on this (6e251b1)
+- Duplicating or copying a document, creating one linked to GitHub and importing files each run in one transaction — an import reports `failed[]` per file rather than leaving half-created documents — and two saves that pick the same version number retry instead of failing (19b5c0a)
+- Agent-facing write routes keep "a non-2xx status means nothing changed": a comment for a request that can no longer take work is refused before anything is written, and once a suggestion or rewrite has landed a failing activity or notification tail answers `2xx` with `warnings[]` (6d2f5e1)
+- Every response carries baseline security headers: `Strict-Transport-Security` when the request arrived over https, `X-Content-Type-Options: nosniff` including the static chunks, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and `Content-Security-Policy: frame-ancestors 'none'` on every page outside the canvas embed flow (04cb486)
+- `npm run release:verify -- --base <url> --sha <sha> --dist <local .next>` runs the runbook's release checks as one pass/fail table: health and live probe, the HTTP → HTTPS redirect, `/login` chunk bytes and hashes against a local build of the same commit, every chunk, brotli and gzip, CSS rule counts, a localhost leak scan and the `/collab` rejection; `--wait-flip` samples the cutover first and `--json` keeps the record (59cf640)
+- `/login` ships no page-specific client script (574 → 455 kB): the GitHub icon left the client-only primitives module (8ee6d59)
 
 ### Build, ops and tests
 
 - `release:verify` gains a `headers` row: `nosniff`, `Referrer-Policy` and `Permissions-Policy` on `/login`, `/api/health` and a referenced chunk, `frame-ancestors 'none'` on `/login` only, HSTS required on an https base and refused over plain http (91e5357)
 - The infrastructure template no longer describes the retired database NAT gateway and its IP (f4c8aeb) and pins `privateEndpointNetworkPolicies: 'Disabled'` on the postgres and app subnets as Azure has them, so a full deployment cannot put the NSG in front of the private endpoint; template only, nothing was deployed (064abd6)
 - `npm audit` is clean: an `overrides` entry drops the never-executed esbuild under drizzle-kit's `@esbuild-kit` loader (8384482); e2e waits for `html[data-hydrated]` after every `reload` before clicking (21047e8) and the code-highlight spec places its caret with `focusRichEnd` (aa6843c); `docs/agents.md` has its 27-row MCP tool table swept against the tool schemas (3db26ff) and documents the `warnings[]` convention and the atomic write routes (a34ce90)
+- Runbook and docs: the README release runbook's CSS counts now match what `release:verify` prints (371bee4) after it gained the right-build chunk comparison, manifest-vs-HTML bytes, the brotli checks and the Windows-vs-image Tailwind CSS note (d1a3d73); `docs/agents.md`'s REST table was swept row by row against the routes (87ba16d); `docs/collab-capacity.md` records one replica's collaboration ceiling on the production build — 150 writers converged with server CPU at or under 37 % (61f05dc). Tests: four more timing tests scale with the machine (5e7e57a) and the load-sensitive stats budget judges the fastest of nine runs (f7c01de). Tooling: a lint rule refuses CodeMirror value imports outside the code pane's boundary (4d25053), `deploy/azure.ps1` lost five unreachable recovery blocks in its rotation paths (e86ae98), and the canvas extension test fails loudly instead of hanging (9937902)
 
-## 2026-08-27
+## 2026-08-30
+
+### Writing
+
+- Code-block highlighting loads its 37 grammars in their own chunk, only when a document has a recognised fenced block — 146 kB less on the editor's first load, colouring in about 22 ms after the editor is ready (3d8b12c)
+- The shared client chunk drops a dead markdown-it tail: prosemirror-markdown's serializer is vendored into `src/editor/markdown/to-markdown.ts` and the package uninstalled, 108 kB less raw and 37 kB less over brotli with byte-identical Markdown output (6d2d1fd)
+
+### Collaborating
+
+- Busy shared documents cost the server far less per keystroke: the activity watcher no longer walks the whole document for every edit, so twenty writers stay in sync with lower delay while the server keeps answering health checks, and fifty — who used to leave the document unconverged after two minutes — converge within a tenth of a second of the last keystroke (15d1d58)
+
+### Agents
+
+- The `mention` agent event carries the comment's `threadId`, so a reply that mentions an agent and the request it creates collapse into one push in the Copilot extension (e767882)
+- A comment that @-mentions an agent *is* the request, and the *Ask an agent* dialog is gone with its toolbar and bubble buttons, palette command and hint-bar action; docs, the MCP descriptions and the canvas extension say so (8536353)
+- A comment no longer needs a selection: with nothing selected it lands on the whole document and its card says *Whole document*; an empty Comments panel offers *Comment and mention an agent*, and someone without an agent sees a one-time *Connect an agent* row under the `@` picker (6ed5c69)
+- Mentioning an agent in a comment or reply makes it a request: while the text names an agent the composer shows a mode row — *Tracked changes*, *Comment only*, *Rewrite directly* — and quick-instruction chips, posting creates the request against the thread, and the thread card carries a chip from waiting through *… is working* to *Done* that the requester or the owner can cancel; commenters can only ask for comments (290904c)
+- On the server, a request knows its thread: migration `0018` adds `agent_request.thread_id`, `POST …/requests` takes `threadId`, the thread carries `requestId`, `request.created` events say which thread, and an agent's `add` with a `requestId` is stored as a reply on the requester's thread without a second notification (cd8d235)
 
 ### Reliability
 
-- Local and LAN access now advertises the stable machine hostname as the canonical origin instead of leading with a DHCP-issued address. Startup and live-status output use the hostname, list the `.local` alias, and retain physical-before-virtual numeric addresses as labelled diagnostics; WSL adapter ordering cannot change the canonical choice. The LAN Playwright regression opens the real machine hostname and records the session cookie domain, browser auth-session and collaboration-token hosts, exactly one active `/collab` socket, persistence, and reload. Local setup docs describe the one-time sign-in when changing origins and explicitly warn that origin-scoped unsynced IndexedDB data cannot be invisibly migrated.
+- The login, settings and reader pages no longer download the editor's 868 kB script bundle — login 1 333 → 574 kB, settings 62 % less, reader 56 % less — because the logo and wordmark moved out of the client editor header (2db3615)
+- `/_next/static` is served brotli-compressed: `npm run build` precompresses every script and stylesheet of 1 KiB or more at quality 11 (`scripts/precompress-static.mjs`, about 28 % of the raw bytes) and the custom server sends the `.br` file when the browser accepts it, falling through to Next otherwise (f4c666f)
+- The database VM is patched monthly (first Sunday 04:00Z, after the backups and before the restore check): `deploy/patch-postgres-vm.ps1` refuses unless the VM, the network and the last backups are in steady state, opens the same temporary egress path `-ConfigureRecovery` uses with the cleanup registered before the first mutation, runs `infra/patch-os.sh` as a managed run command (security-only, optional pre-patch snapshot, `-NoReboot`), and `-Rollback <package>=<version>` undoes a regression; `-DryRun` prints every `az` call and runs none, and `docs/postgres-patching.md` has the reasoning and the rollback paths (213c8ad)
+- `deploy/azure.ps1` refuses `-RotateDatabasePassword` together with `-ConfigureRecovery` — recovery configuration needs the temporary bootstrap IP the rotation flow does not attach — and the rotation paths never configure recovery on their own (ae25633)
+- The database VM's path off the NAT gateway is in the template: `infra/postgres-private-egress.bicep` (an Azure Monitor private link scope, data collection endpoint and private DNS zones for the VM's telemetry, plus a Key Vault service endpoint on the postgres subnet), one `deploy/azure.ps1` line, and `docs/postgres-egress.md` as the phased runbook; nothing in Azure changed with the merge (0818d66)
+- One-off maintenance inside the VNet has a runbook: the manual Container Apps Job `markdoc-maint` runs `repair:github-identity` and `transfer:legacy-ownership` from a tools image built from the Dockerfile's `build` stage at the running app's commit — a pristine export keeps both CLIs (b176df7) — and the README records the commands: tools image, backups, job start, wait, logs (19eba77)
+- Production logs say why a collaboration token was refused (`Invalid token (expired | claims | signature)`), the expected `MissingCSRF` and `UnknownAction` auth errors are one warn line each, and GitHub throttling is one line (ab2a2ef)
+
+### Build, ops and tests
+
+- E2E: global setup warms the notification routes (bd1668a), `mentions.spec` asserts per document so it passes after `agent-requests.spec` on one server (f57b04f), `focusRichEnd` clicks a real text block and confirms the caret reached the end (d850575), and every spec mints its token through one `mintToken` / `revoke` helper so token names no longer collide across specs (7bcf52f); `comments-panel.test.tsx` no longer leaks a rejecting mock into later tests (6ff0620). `npm run soak:collab` drives 5 / 20 / 50 concurrent writers, a reconnect storm, an offline merge and a crash against a local server — 20 writers converged at a median 46 ms, 50 saturated one replica, and a hard crash loses up to 8 s of typing unless a client reconnects (6e5b2f6). README: the link-preview origin, hadolint and maintenance-job notes folded in (e8255ff)
+
+## 2026-08-29
+
+### Look
+
+- Comments panel polish: review cards, quotes and the reader's page list lost their coloured left bars (a quote is a pill), *Accept all* / *Reject all* stay on one line at any width, long code words wrap inside their card, and a review whose comments are all settled leaves the Open tab — a *Resolve all* button clears the rest (8fcad0e)
+- The Comments / Version history / Activity panel is resizable on laptops and desktops: drag its left edge (280–720 px), double-click or Enter on the grip restores the default, the width is remembered per browser, and the grip is a keyboard separator (arrow keys ±16 px, Shift ±64, Home/End); phones and tablets are unchanged (247c90b)
+- The 404 page is Markdoc's own — *Page not found* with *Go to Markdoc*, in the app theme — and its link preview no longer names localhost (2793c79)
+
+### Collaborating
+
+- The comment composer grows with the text (up to 320 px or 40 % of the viewport), uses the card's full width and drops the instructions under the box (7eb47a5)
+- Clicking a comment card takes the document to the commented text at once — an instant scroll to the mark's centre instead of a distance-based glide that scroll sync used to cancel — in either pane and in split view (ac9854c)
+- Suggestion cards show the proposed text as plain text instead of a red/green word diff; a suggestion that removes the passage says *Deletes the highlighted text* (feae5f4)
+- The Share dialog puts *Copy link* under the people list and gives the agent card room, with a token-scope picker; the collapsed dialog is 129 px shorter (0a30b6d)
+- Adding a collaborator autocompletes GitHub usernames as you type (`GET /api/github/users?q=` searches logins by prefix, eight results, cached for a minute); when GitHub rate-limits the search, an exact handle still works (6c33363)
+
+### Agents
+
+- The header's agent pills are gone: an agent appears in the presence stack with a busy badge while a claimed request names it or it has acted in the last 45 s, and its popover row shows the last action — *proposed changes · 12 s ago* (90d3ef2)
+
+### Reliability
+
+- A dropped PostgreSQL connection no longer restarts the app: an idle client's error is logged as `[db] idle client error` and the pool opens a fresh connection on the next query. `GET /api/health?probe=live` answers from the process alone and is the Container App's liveness probe, so a slow or restarting database cannot make the platform kill a healthy replica; the startup probe keeps waiting on the full `/api/health` (5c945b0)
+- The weekly restore drill on the database VM catches up after downtime (`Persistent=true` on its timer) and reports `restore-check=ok duration-seconds=N` to Log Analytics, and an alert processing rule mutes the vault's *Modify policy* alert that every template redeploy fires; source only, rolled out with the next recovery-configure run (1975b96)
+- `npm run transfer:legacy-ownership` moves everything a dev-login account owns — documents, collaborations, versions, stars, tokens, webhooks, activity — to the GitHub account that replaces it, in one serializable transaction with dry-run (default), `--apply`, `--verify` and `--rollback` (migration `0017` keeps the rollback record); identities come from environment variables, TLS is required, and a refusal writes nothing (368ccc3)
+
+### Build, ops and tests
+
+- The design proposal for folding *Ask an agent* into comment mentions is in the docs (124c8ec); the e2e harness ends without the Turbopack teardown panic and its warm-up waits up to five minutes on a loaded machine (`E2E_WARMUP_TIMEOUT_MS`) (9fc1ba5); the production build no longer prints the two Turbopack dynamic-path warnings (50737b3)
+
+## 2026-08-28
+
+### Look
+
+- The Settings header fits below 390 px: the wordmark collapses (the home link keeps its name) and *Documents* no longer clips or forces a horizontal scroll (2ca5a6c)
+
+### Publishing
+
+- Link previews for shared pages carry the real preview image: `metadataBase` comes from the public origin (`MARKDOC_URL`, then `AUTH_URL`, then localhost), so `og:image` is an absolute URL instead of a blank card (28c5728)
+- When the linked GitHub file is too large to read, the header chip says *GitHub file too large* and opens the Sync dialog, which shows the file's size against Markdoc's limit and keeps only *Keep mine* (force publish); pull is disabled, and an unrelated poll error still leaves the last state alone (41454e6)
+
+### Collaborating
+
+- Undo and Redo of an accepted suggestion survive a reload: the decision is stored with the document (bounded, per actor) and rebuilt in a fresh session, and Ctrl+Z / Ctrl+Y in the code pane go through the same shared undo (3367083)
+- Accepting a comment suggestion is one undo step: Undo, or the toast's *Undo*, restores the text and returns the suggestion to pending, for root and reply suggestions alike; a suggestion identical to the text it replaces stays pending instead of being accepted as a no-op (1339349)
+- Notifications for a document in the trash leave the bell and `/api/mentions` — and come back when it is restored — instead of leading to a 404 (20bbb7b)
+- Mentioning `@login` notifies only someone who can open the document — the owner, a collaborator, or anyone when link access is on; the bell, `/api/mentions` and `GET /api/agent/events` re-check access when read, so mention rows for a document the recipient can no longer see are hidden (0923527)
+
+### Accessibility
+
+- Timestamps, resolved labels and mention chips in resolved comment threads render at full contrast in both themes: the card is dimmed with a surface tint instead of opacity (ba24a76)
+- The Comments panel is reachable by keyboard: opening it from the header by keyboard focuses the selected tab, closing it returns focus to the toggle, and Open / Resolved / Suggestions are one roving tab stop with arrow, Home and End keys (d79ff50)
+- Overflowing code blocks and wide tables in the reader are keyboard focus targets that scroll with the arrow keys; the tab stop disappears when the content fits (4549af9)
+- Light-theme code highlighting in the rich pane meets 4.5:1: strings and attributes, and function and class names, use darker greens and teals (874e5c6)
+- The reader's icon-only Download button on phones is named *Download Markdown* (3053b5d)
+- Token and webhook errors in Settings are announced as alerts and the one-time creation results as status (049f8b0)
+- Task-list checkboxes in the reader and in exports carry their item's text as their accessible name (5c20973)
+
+### Agents
+
+- `markdoc_watch` and `GET /api/agent/events` emit `review.created` again after an agent posts a review — to the owner and collaborators, and to the posting token with `includeSelf` (be88153)
+- Settings → Agents, the *Ask an agent* dialog and the *Keep an agent here* panel link to the agent docs in a new tab, and the panel names the supported MCP clients (d436415)
+- A Markdoc document opens in the GitHub Copilot app's canvas panel: the `extensions/markdoc` extension (Copilot CLI loads it push-only) pushes requests, mentions, comments and reviews into the attached Copilot session; the panel signs in through a one-time 60-second handoff bound to its origin and a short-lived, document-scoped embed cookie, so the token never appears in a URL, no other origin can frame the session, and one canvas is active per Copilot session; migrations `0015` and `0016` add the token's mention slug and a notification's agent targets (f615de7)
+
+### Reliability
+
+- Ready for a custom domain: `MARKDOC_CANONICAL_HOST` makes the proxy answer `308` to the canonical host for a page request on any other host (off when unset; API and WebSocket requests are left alone), `npm run domain:preflight` checks the DNS records before a cutover, and `docs/custom-domain.md` is the runbook (1a4d117)
+- Production runs on Azure Container Apps with PostgreSQL: `infra/main.bicep` describes the environment — Container App, ACR, Key Vault, managed identity, Log Analytics, and a private PostgreSQL VM with no public IP that accepts TLS only from the Container Apps subnet, protected by pgBackRest and a Recovery Services vault — `deploy/azure.ps1` provisions it and builds the image in ACR with safety tests around every mutation, the `Dockerfile` is `node:22-alpine` with Chromium for PDF export and a health check, and the README's *Deploy to Azure* section carries the app-only release runbook: build the exact commit in ACR, update the app by digest with `APP_VERSION`, wait for the startup probe, keep the previous revision as the rollback (b5ed7d2)
+- Signing in with GitHub reuses the matching dev-login account when that is unambiguous and safe — same login, the development e-mail, no accounts or sessions of its own — so documents, tokens and stars carry over; anything ambiguous fails closed and creates a normal account, and `npm run repair:github-identity` merges a duplicate afterwards under a dry-run / `--apply` / `--verify` / `--rollback` contract with a checksummed manifest (0853d18)
+- `scripts/migrate-pglite-to-postgres.mts` moves a live PGlite data directory into PostgreSQL in one transaction: it requires TLS (`sslmode=require`, confirmed on the backend before any query), refuses a target that already holds rows unless `--replace` is given, verifies every row by SHA-256 (`--verify-only` re-checks), restores the prior rows when a replacement fails, and never prints the URL or credentials (dd0c1d4)
+
+### Build, ops and tests
+
+- Main builds after the Dockerfile change and the last lint warning is gone (ed1cd08); README production database facts corrected — the private VM in East US 2, not the idle Flexible Server (41f1214); the login page unit test stubs `next/headers` (295ec18); `mobile.spec`'s selection helper waits for the live rich editor before selecting (4f5df82)
+
+## 2026-08-27
+
+### Writing
+
+- Undo and redo in a long document no longer jump to the top: the caret returns to where the edit was and only the nearest editor scroller moves, by the minimum needed to reveal it, in the rich pane, the code pane and split view (16c65a6)
+- Backspace at the start of a list item no longer deletes its text and then brings the bullet back: only the first item is lifted out of the list, an emptied later item is removed in one step with the caret in the item before, and every Backspace in either pane is one undo step (c45ec25)
+
+### Collaborating
+
+- A decided suggestion keeps its diff when the text around it moves, and an accepted or rejected suggestion body can no longer be edited (`409` from the API; deleting still works) (ec6201b)
+- A suggestion inside a comment reply gets Accept / Reject and a stored decision that survives a reload, like a root suggestion: `POST …/comments { action: "suggestion", replyId }` decides the reply's block, accepting it replaces the quote and notifies the author without resolving the thread, and `markdoc_watch`'s `suggestion.accepted` / `suggestion.rejected` carry `replyId` (16e3363)
+
+### Reliability
+
+- Local and LAN access now advertises the stable machine hostname as the canonical origin instead of leading with a DHCP-issued address. Startup and live-status output use the hostname, list the `.local` alias, and retain physical-before-virtual numeric addresses as labelled diagnostics; WSL adapter ordering cannot change the canonical choice. The LAN Playwright regression opens the real machine hostname and records the session cookie domain, browser auth-session and collaboration-token hosts, exactly one active `/collab` socket, persistence, and reload. Local setup docs describe the one-time sign-in when changing origins and explicitly warn that origin-scoped unsynced IndexedDB data cannot be invisibly migrated (89e86bc)
 
 ## 2026-08-25
 
