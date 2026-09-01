@@ -4,18 +4,29 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 
+// A provider that only supplies the awareness instance; tests drive presence by applying a remote client's
+// awareness state to it and firing `onAwarenessChange`, as Hocuspocus does when the server relays one.
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
   class HocuspocusProvider {
     awareness: InstanceType<typeof Awareness>;
-    constructor(opts: { document: Y.Doc }) {
+    static last: HocuspocusProvider | null = null;
+    constructor(readonly opts: { document: Y.Doc; onAwarenessChange?: (e: { states: unknown[] }) => void }) {
       this.awareness = new Awareness(opts.document);
+      HocuspocusProvider.last = this;
     }
     destroy() {
       this.awareness.destroy();
     }
   }
   return { HocuspocusProvider };
+});
+
+// The real module, with `claimerName` counted: the request chip must not be asked for a label when nothing about an
+// agent changed (#1382).
+vi.mock("./agent-requests", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./agent-requests")>();
+  return { ...actual, claimerName: vi.fn(actual.claimerName) };
 });
 
 vi.mock("@/lib/api", () => ({
@@ -37,14 +48,21 @@ vi.mock("@/lib/notifications-store", () => ({
   useUnreadRefs: () => new Set<string>(),
 }));
 
+import { HocuspocusProvider } from "@hocuspocus/provider";
+import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
+import { AGENT_CONNECT_DISMISSED_KEY } from "@/lib/mcp";
 import type { AgentRequestMirror } from "@/server/agent-requests";
 import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
-import { requestInstruction, waitForSynced } from "./agent-requests";
+import { claimerName, requestInstruction, waitForSynced } from "./agent-requests";
 import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps } from "./comments-panel";
+
+/** The mocked provider of the session under test (see the `@hocuspocus/provider` mock above). */
+type FakeProvider = { opts: { onAwarenessChange?: (e: { states: unknown[] }) => void } };
+const lastProvider = () => (HocuspocusProvider as unknown as { last: FakeProvider | null }).last!;
 
 function reviewDto(id: string, threadIds: string[]): ReviewDto {
   return {
@@ -465,7 +483,8 @@ describe("CommentsPanel", () => {
     const TEXT = "Intro text. The quick brown fox jumps.";
 
     type Role = "owner" | "editor" | "commenter";
-    const mount = (opts: { role?: Role; viewing?: boolean; me?: { id: string; name: string; login: string }; agents?: (typeof AGENT)[]; onCancelRequest?: (id: string) => void } = {}) => {
+    type ListedAgent = Awaited<ReturnType<typeof api.documents.collaborators>>["agents"][number];
+    const mount = (opts: { role?: Role; viewing?: boolean; me?: { id: string; name: string; login: string }; agents?: ListedAgent[]; onCancelRequest?: (id: string) => void } = {}) => {
       Element.prototype.scrollIntoView ??= () => {};
       const me = opts.me ?? { id: "alice", name: "Alice", login: "alice" };
       const user = makeCollabUser(me.id, me.name, null, me.login);
@@ -773,6 +792,120 @@ describe("CommentsPanel", () => {
       const ownThread = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: makeCollabUser("alice", "Alice", null, "alice") });
       setMirrors([mirror({ id: "r2", threadId: ownThread, status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "alice" })]);
       await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent(/^Copilot CLI is working…/));
+    });
+
+    describe("the request chip only re-renders for an agent's name (#1382)", () => {
+      const remotes: Awareness[] = [];
+      afterEach(() => {
+        for (const a of remotes.splice(0)) a.destroy();
+        vi.mocked(claimerName).mockClear();
+        window.localStorage.removeItem(AGENT_CONNECT_DISMISSED_KEY);
+      });
+      /** How often the chips asked for a claimer's label so far: one call per RequestChip render of a claimed request. */
+      const labelCalls = () => vi.mocked(claimerName).mock.calls.length;
+      /**
+       * Another browser or an agent, as the server relays it: `join` publishes its awareness state into the session's
+       * awareness (a person: `login`; an agent: `isAgent` with its owner's `userLogin`/`userName`, the shape
+       * src/server/agent-presence.ts writes) and `leave` removes it; each then fires the provider's awareness callback
+       * (what Hocuspocus does) and waits a tick so the session's microtask notification and React's render are done.
+       */
+      const remote = () => {
+        const doc = new Y.Doc();
+        const awareness = new Awareness(doc);
+        remotes.push(awareness);
+        const relay = async (change: () => void) => {
+          await act(async () => {
+            change();
+            lastProvider().opts.onAwarenessChange?.({ states: [] });
+            await new Promise((r) => setTimeout(r, 0));
+          });
+        };
+        return {
+          join: (user: Record<string, unknown>) =>
+            relay(() => {
+              awareness.setLocalState({ user: { color: "#2563eb", colorLight: "#2563eb33", avatar: null, role: "editor", ...user }, lastActive: Date.now() });
+              applyAwarenessUpdate(session!.awareness, encodeAwarenessUpdate(awareness, [doc.clientID]), "server");
+            }),
+          leave: () => relay(() => removeAwarenessStates(session!.awareness, [doc.clientID], "server")),
+        };
+      };
+      const agentUser = (name: string, ownerLogin: string, ownerName: string | null) => ({ id: `agent:${ownerLogin}:${name}`, name, login: null, role: null, isAgent: true, status: "reading", userLogin: ownerLogin, userName: ownerName });
+      // Listed by the collaborators route without its owner's name (Olive is in no one's collaborator list here): the
+      // login stands in on the chip until Olive's agent shows up in presence carrying `userName`.
+      const SCRIBE = { name: "Scribe", login: "olive/Scribe", ownerLogin: "olive", ownerName: null, present: false, collaboratorsMayAsk: true };
+      const chips = () => screen.getAllByTestId("comment-request-chip").map((c) => [c.getAttribute("data-status"), c.getAttribute("data-request-id"), c.textContent]);
+
+      it("a person joining or leaving presence never re-renders a claimed chip; an agent's owner name arriving does", async () => {
+        const { user } = mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" }, agents: [AGENT, SCRIBE] });
+        const first = session!.comments.add({ from: 0, to: 5, body: "@olive/Scribe shorter", author: user });
+        const second = session!.comments.add({ from: 16, to: 27, body: "@olive/Scribe and this", author: user });
+        setMirrors([
+          mirror({ id: "r1", threadId: first, status: "claimed", claimedBy: "Scribe", claimedByLogin: "olive", userId: "drew" }),
+          mirror({ id: "r2", threadId: second, status: "claimed", claimedBy: "Scribe", claimedByLogin: "olive", userId: "drew" }),
+        ]);
+        await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+        await waitFor(() => expect(chips().map((c) => c[2])).toEqual(["olive's Scribe is working…", "olive's Scribe is working…"]));
+        // Let a tick pass so the collaborators fetch and the first renders are behind us.
+        await act(() => new Promise((r) => setTimeout(r, 20)));
+        const chipsBefore = chips();
+        const before = labelCalls();
+        expect(before).toBeGreaterThan(0);
+
+        // A person joins and leaves: the picker's candidate list changes twice, the chips have nothing new to say.
+        const carol = remote();
+        await carol.join({ id: "carol", name: "Carol", login: "carol" });
+        expect(session!.presence().map((u) => u.login)).toContain("carol");
+        expect.soft(labelCalls() - before).toBe(0);
+        await carol.leave();
+        expect(session!.presence().map((u) => u.login)).not.toContain("carol");
+        expect.soft(labelCalls() - before).toBe(0);
+        expect(chips()).toEqual(chipsBefore);
+
+        // The same channel does reach the chips when it carries an agent's name.
+        const scribe = remote();
+        await scribe.join(agentUser("Scribe", "olive", "Olive"));
+        await waitFor(() => expect(chips().map((c) => c[2])).toEqual(["Olive's Scribe is working…", "Olive's Scribe is working…"]));
+        expect(labelCalls() - before).toBeGreaterThanOrEqual(2);
+      });
+
+      it("your own agent stays bare, also once it is present carrying your name", async () => {
+        const { user } = mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" }, agents: [AGENT, SCRIBE] });
+        const theirs = session!.comments.add({ from: 0, to: 5, body: "@olive/Scribe shorter", author: user });
+        const mine = session!.comments.add({ from: 16, to: 27, body: "@drew/Copilot-CLI and this", author: user });
+        setMirrors([
+          mirror({ id: "r1", threadId: theirs, status: "claimed", claimedBy: "Scribe", claimedByLogin: "olive", userId: "drew" }),
+          mirror({ id: "r2", threadId: mine, status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "drew", userId: "drew" }),
+        ]);
+        await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+        await waitFor(() => expect(chips().map((c) => c[2])).toEqual(["olive's Scribe is working…", "Copilot CLI is working…"]));
+        const own = remote();
+        await own.join(agentUser("Copilot CLI", "drew", "Drew"));
+        const scribe = remote();
+        await scribe.join(agentUser("Scribe", "olive", "Olive"));
+        await waitFor(() => expect(chips().map((c) => c[2])).toEqual(["Olive's Scribe is working…", "Copilot CLI is working…"]));
+      });
+
+      it("the picker's own-token fetch and the 'Connect an agent' row appearing and being dismissed never re-render a claimed chip", async () => {
+        const { user } = mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" } });
+        const threadId = session!.comments.add({ from: 30, to: 35, body: "@alice/Copilot-CLI shorter", author: user });
+        setMirrors([mirror({ id: "r1", threadId, status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "alice", userId: "drew" })]);
+        await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent("Alice's Copilot CLI is working…"));
+        await act(() => new Promise((r) => setTimeout(r, 20)));
+        const before = labelCalls();
+        // A new-comment composer (outside the card) opens its picker: the panel fetches Drew's tokens, finds none, and
+        // `connect.due` flips on; dismissing the row flips it off. Neither concerns the card's chip.
+        const box = await openComposer();
+        await type(box, "@");
+        await screen.findByTestId("mention-connect-row");
+        await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+        await act(() => new Promise((r) => setTimeout(r, 20)));
+        expect.soft(labelCalls() - before).toBe(0);
+        fireEvent.click(screen.getByTestId("mention-connect-dismiss"));
+        await waitFor(() => expect(screen.queryByTestId("mention-connect-row")).toBeNull());
+        await act(() => new Promise((r) => setTimeout(r, 20)));
+        expect.soft(labelCalls() - before).toBe(0);
+        expect(screen.getByTestId("comment-request-chip")).toHaveTextContent("Alice's Copilot CLI is working…");
+      });
     });
 
     it("the picker greys out an agent its owner keeps to themself; picking it still mentions, but the composer refuses to send (#1296)", async () => {

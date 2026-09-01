@@ -447,12 +447,41 @@ interface MentionCandidatesValue {
   connect: MentionConnectValue;
 }
 
+/** What a thread card's request chip needs to name the agent that claimed a request (#1330): the owner's name by login. */
+interface AgentNamesValue {
+  /** The current user's login; someone else's agent is labelled with its owner relative to them ("Drew's Copilot CLI"). */
+  viewerLogin: string | null;
+  /** Display name of an agent's owner by login, as far as the agent entries know it; null when unknown (the login stands in). */
+  nameOf: (login: string) => string | null;
+}
+
 /**
  * Mention candidates reach the composers through context rather than as a ThreadCard prop: the list
  * arrives a moment after the panel opens (collaborators fetch) and would otherwise re-render every
- * memoised card for a value only an open composer reads.
+ * memoised card for a value only an open composer reads. The one thing a card itself needs from the
+ * list — an agent's owner name for the request chip — comes through AgentNamesContext, whose value
+ * only changes when an agent entry does (#1382): a person joining or leaving, the token list loading
+ * or the "Connect an agent" row flipping never re-render a card.
  */
 const MentionCandidatesContext = createContext<MentionCandidatesValue>({ candidates: [], viewerLogin: null, onPickerOpen: () => {}, connect: { due: false, onDismiss: () => {} } });
+const AgentNamesContext = createContext<AgentNamesValue>({ viewerLogin: null, nameOf: () => null });
+
+/** An agent entry as a chip can see it (no image, `canAsk` or `own`); AgentNamesContext is stable while these are (jsonEqual). */
+function agentNameTuples(candidates: MentionCandidate[]): [login: string, name: string, ownerLogin: string, ownerName: string | null][] {
+  return candidates.map((c) => [c.login, c.name, c.agent?.ownerLogin ?? "", c.agent?.ownerName ?? null]);
+}
+
+/**
+ * `value` while it is equal (per `isEqual`) to the last one returned, else the new one — a reference that only changes
+ * with the content, for a context value memoised consumers must not re-render for. The React docs' "storing
+ * information from previous renders": a state set during render re-runs this render at once with the new value.
+ */
+function useStableValue<T>(value: T, isEqual: (a: T, b: T) => boolean): T {
+  const [stable, setStable] = useState(value);
+  if (isEqual(stable, value)) return stable;
+  setStable(value);
+  return value;
+}
 
 /** The picker's "Connect an agent" row shares the settings card's `localStorage` flag: dismissed once, gone everywhere. */
 function readConnectDismissed(): boolean {
@@ -1072,7 +1101,8 @@ const CANCEL_GRACE_MS = 8_000;
  * The × cancels for the requester or the document owner; it hides at once and comes back only if the server refuses.
  */
 function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMirror; canCancel: boolean; onCancel?: (requestId: string) => void }) {
-  const { candidates, viewerLogin } = useContext(MentionCandidatesContext);
+  // Not MentionCandidatesContext: that value changes with every presence event, and a card must not re-render for those (#1382).
+  const { viewerLogin, nameOf } = useContext(AgentNamesContext);
   const [cancelling, setCancelling] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const pending = request.status === "open" || request.status === "claimed";
@@ -1097,7 +1127,7 @@ function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMi
     request.status === "open"
       ? "Waiting for an agent"
       : request.status === "claimed"
-        ? `${claimerName(request, viewerLogin, (login) => displayNameOf(candidates, login))} is working…`
+        ? `${claimerName(request, viewerLogin, nameOf)} is working…`
         : showDetail
           ? `Done: ${describeResult(request.result)}`
           : "Done";
@@ -1758,6 +1788,14 @@ export function CommentsPanel({
     }),
     [candidates, session.user.login, tokenCount, connectDismissed, onCreateToken, dismissConnect],
   );
+  // The agent entries only, and the same reference while they read the same: the cards' request chips read this
+  // and stay out of every other candidate change (#1382).
+  const agents = useMemo(() => candidates.filter((c) => c.agent), [candidates]);
+  const agentCandidates = useStableValue(agents, (a, b) => a === b || jsonEqual(agentNameTuples(a), agentNameTuples(b)));
+  const agentNamesValue = useMemo<AgentNamesValue>(
+    () => ({ viewerLogin: session.user.login ?? null, nameOf: (login) => displayNameOf(agentCandidates, login) }),
+    [agentCandidates, session.user.login],
+  );
   const requests = useThreadRequests(session);
   /**
    * A comment that mentions an agent is also a request. The comment goes through the shared doc as usual and the
@@ -1941,6 +1979,7 @@ export function CommentsPanel({
 
   return (
     <MentionCandidatesContext.Provider value={mentionValue}>
+    <AgentNamesContext.Provider value={agentNamesValue}>
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="comments-panel">
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Comments</span>
@@ -2135,6 +2174,7 @@ export function CommentsPanel({
           ))}
       </div>
     </aside>
+    </AgentNamesContext.Provider>
     </MentionCandidatesContext.Provider>
   );
 }
