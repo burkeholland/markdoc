@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { contrast } from "./theme-contrast.test";
+import { contrast } from "./theme-contrast.helpers";
 
 /**
  * Token matrix for the one look ("Ink & teal", tasks #398 → #416): the `:root` (light) and
