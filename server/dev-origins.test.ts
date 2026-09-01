@@ -51,7 +51,18 @@ describe("stable local access", () => {
       "172.30.96.1",
       "surf",
       "surf.local",
+      "127.0.0.1",
+      "[::1]",
       "previewbox",
     ]);
+  });
+
+  it("does not duplicate a loopback literal that ALLOWED_DEV_ORIGINS also lists", () => {
+    const withoutExtras = devOrigins({ hostname: "SURF", interfaces, extras: "" });
+    const withLoopbackExtra = devOrigins({ hostname: "SURF", interfaces, extras: "127.0.0.1" });
+
+    expect(withoutExtras).toHaveLength(7);
+    expect(withLoopbackExtra).toEqual(withoutExtras);
+    expect(withLoopbackExtra.filter((name) => name === "127.0.0.1")).toHaveLength(1);
   });
 });
