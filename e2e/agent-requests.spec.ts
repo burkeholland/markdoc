@@ -91,6 +91,10 @@ test.describe("agent requests from comments", () => {
     carol = await signIn(browser, "carol");
     minted = await mintToken(alice.page, agentName, { expiresInDays: 1 });
     expect(minted.name).toBe(agentName);
+    // c) has bob (a commenter) ask alice's agent: since #1296 that needs alice's "Collaborators may ask this agent"
+    // switch on, or the picker locks the agent for him and the composer refuses to send (e2e/agent-addressing.spec.ts).
+    const opened = await alice.page.request.patch(`/api/tokens/${minted.id}`, { data: { collaboratorsMayAsk: true } });
+    expect(opened.ok(), await opened.text()).toBeTruthy();
     docId = await createDocument(alice.page, DOC, "Requests doc");
     await shareWith(alice.page, docId, "bob", "commenter");
     await shareWith(alice.page, docId, "carol", "editor");
