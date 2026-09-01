@@ -14,7 +14,7 @@ const fakeFetch: typeof fetch = async (input, init) => {
   const url = new URL(String(input));
   const method = init?.method ?? "GET";
   if (method === "POST" && url.pathname === "/api/documents") {
-    const body = JSON.parse(String(init?.body)) as { content?: string };
+    const body = JSON.parse(String(init?.body)) as { content?: string; title?: string };
     if ((body.content ?? "").length > 2_000_000) {
       return reply(400, {
         error: "Invalid request",
@@ -24,6 +24,8 @@ const fakeFetch: typeof fetch = async (input, init) => {
         ],
       });
     }
+    // The route trims the title and wants ≥ 1 character — a bound the tool's schema cannot know, so it is REST's 400 to explain.
+    if (body.title !== undefined && !body.title.trim()) return reply(400, { error: "Invalid request", issues: [{ code: "too_small", minimum: 1, path: ["title"], message: "Too small: expected string to have >=1 characters" }] });
     return reply(201, { document: { id: "doc-1", title: "New", updatedAt: "2026-08-25T00:00:00.000Z" } });
   }
   if (method === "POST" && url.pathname === "/api/documents/live-1/restore") return reply(409, { error: "Document is not in the trash" });
@@ -108,11 +110,17 @@ describe("tools over a real MCP client", () => {
     await mcp.close();
   });
 
-  it("markdoc_create_document with a 3 MB body is an error that names `content` and the cap", async () => {
+  it("markdoc_create_document with a 3 MB body is an error that names `content` and the cap — from the tool's own schema (the REST bound, #1304), before any request", async () => {
     const res = (await mcp.callTool({ name: "markdoc_create_document", arguments: { content: "x".repeat(3_000_000) } })) as { isError?: boolean; content: { type: string; text?: string }[] };
     expect(res.isError).toBe(true);
-    expect(text(res)).toContain("failed (400): Invalid request — content: Too big");
-    expect(text(res)).toContain("2000000");
+    expect(text(res)).toContain("Input validation error");
+    expect(text(res)).toContain("Too big: expected string to have <=2000000 characters at content");
+  });
+
+  it("a REST 400 with zod issues the tool could not foresee still names the field and why", async () => {
+    const res = (await mcp.callTool({ name: "markdoc_create_document", arguments: { title: "   ", content: "# Hi\n" } })) as { isError?: boolean; content: { type: string; text?: string }[] };
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("failed (400): Invalid request — title: Too small");
   });
 
   it("markdoc_restore_document on a live document is an error, not Restored", async () => {
