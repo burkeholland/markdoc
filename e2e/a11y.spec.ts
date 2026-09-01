@@ -343,6 +343,71 @@ test.describe("axe: pages", () => {
     await context.close();
   });
 
+  // Since #1495 the aside (one Tab stop per h2/h3) precedes the article in the DOM on every screen size, so
+  // keyboard and screen-reader users need a way past it (#1564): a skip link as the first Tab stop, hidden
+  // until focused; a <main> landmark; and a focusable article target, because Chromium only scrolls to a
+  // fragment whose element is not focusable.
+  test("reader skip link: first Tab stop, Enter focuses the article inside the one main landmark", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-reader-skip");
+    const id = await createDocument(page, DOC, "Reader skip-link fixture");
+    expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+    await page.goto(`/p/${id}`);
+    await waitForHydration(page);
+    await expect(page.getByTestId("reader-body")).toBeVisible();
+    const viewport = page.viewportSize()!;
+
+    const skip = page.getByTestId("reader-skip-link");
+    const aboveViewport = async () => {
+      const box = await skip.boundingBox();
+      return box !== null && box.y + box.height <= 0;
+    };
+    expect(await aboveViewport(), "the skip link sits above the viewport until it has focus").toBe(true);
+
+    // Tab once: the link is focused, rendered whole inside the viewport and above the sticky header.
+    await page.keyboard.press("Tab");
+    await expect(skip).toBeFocused();
+    await expect(skip).toBeVisible();
+    await expect(skip).toBeInViewport({ ratio: 1 });
+    await expect(skip).toHaveText("Skip to article");
+    const box = (await skip.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.height).toBeGreaterThanOrEqual(24);
+    const topmost = await page.evaluate(
+      ([x, y]) => document.elementFromPoint(x, y)?.closest("[data-testid=reader-skip-link]") !== null,
+      [box.x + box.width / 2, box.y + box.height / 2],
+    );
+    expect(topmost, "the focused skip link paints over the sticky header").toBe(true);
+
+    // Tab again: it hides and focus moves on to the header's logo link, as it did before the link existed.
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("link", { name: "All documents" })).toBeFocused();
+    await expect.poll(aboveViewport, "the skip link hides again once focus leaves it").toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    await expect(skip).toBeFocused();
+
+    // Enter: the article itself takes focus, its top inside the viewport and clear of the sticky header.
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? null)).toBe("reader-article");
+    // No focus ring on the target: a click in the text focuses the article too, and the first PageDown after
+    // it would otherwise frame the whole column (the base-layer ring is for controls).
+    expect(await page.getByTestId("reader-article").evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
+    const article = (await page.getByTestId("reader-article").boundingBox())!;
+    const header = (await page.getByTestId("reader-header").boundingBox())!;
+    expect(article.y).toBeGreaterThanOrEqual(header.y + header.height);
+    expect(article.y).toBeLessThan(viewport.height);
+    await expect(page.getByTestId("reader-title")).toBeInViewport({ ratio: 1 });
+
+    // Landmarks: exactly one main, holding the article; the TOC nav is untouched and still precedes it.
+    await expect(page.getByRole("main")).toHaveCount(1);
+    await expect(page.getByRole("main").getByTestId("reader-article")).toHaveCount(1);
+    const toc = page.getByRole("navigation", { name: "Table of contents" });
+    await expect(toc).toHaveCount(1);
+    await expect(toc.getByTestId("reader-toc-entry")).toHaveCount(4);
+    await scan(page, "reader /p/<id> with the article focused via the skip link");
+    await context.close();
+  });
+
   test("Burke-scale reader overflow regions are keyboard scrollable only when needed", async ({ browser }) => {
     const user = await signIn(browser, "a11y-reader-overflow");
     const id = await createDocument(user.page, LONG_DOC, "Reader overflow fixture");
