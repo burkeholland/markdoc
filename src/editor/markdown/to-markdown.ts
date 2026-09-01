@@ -25,9 +25,11 @@
 // and punycode.js (~100 kB uncompressed) into the shared client chunk, where none of it ever ran — Markdoc
 // parses with micromark (`parse.ts`) and only serializes with this class. `sideEffects: false` cannot drop a
 // top-level call and the `exports` map has no deep path to the serializer, hence the copy (task #1092).
-// Upstream fixes to `to_markdown.ts` must be copied here by hand. Local edits, kept to what the repo's lint
-// and type-check require: `let` → `const` where never reassigned (incl. splitting two mixed declarations),
-// `const [, x, y]` for the unused destructured `_`, `link.close` drops its unused `parent`/`index`
+// Upstream fixes to `to_markdown.ts` must be copied here by hand. Upstream lives at
+// https://code.haverbeke.berlin/prosemirror/prosemirror-markdown (the GitHub mirror stopped at 1.13.4); diff two versions
+// with https://code.haverbeke.berlin/api/v1/repos/prosemirror/prosemirror-markdown/compare/<a>...<b> or `npm pack` both tarballs.
+// Local edits, kept to what the repo's lint and type-check require: `let` → `const` where never reassigned (incl. splitting
+// two mixed declarations), `const [, x, y]` for the unused destructured `_`, `link.close` drops its unused `parent`/`index`
 // parameters, and the two `(node as any).withText(rest)` calls use the `TextNodeLike` type below.
 import {Node, Mark} from "prosemirror-model"
 
