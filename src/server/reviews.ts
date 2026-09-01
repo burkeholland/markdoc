@@ -9,6 +9,7 @@ import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { HttpError, type Actor } from "@/server/http";
 import { activityActor, clip, recordActivity, type ActivityActor } from "@/server/activity";
 import { loginForUserId, notify, recordMentions } from "@/server/notifications";
+import { warnTail, type WarningCode } from "@/server/warnings";
 import type { Review, ReviewVerdict, Role } from "@/server/db/schema";
 
 export interface ReviewCommentInput {
@@ -51,12 +52,10 @@ export function toReviewDto(r: Review): ReviewDto {
   };
 }
 
-/** Post-write side effects that can fail without taking the review back: reported as `warnings` on the 201 (see docs/agents.md). */
-export type ReviewWarning = "mentions-not-recorded" | "activity-not-recorded" | "notification-not-sent";
-
 export interface CreateReviewResult {
   review: ReviewDto;
-  warnings?: ReviewWarning[];
+  /** Post-write side effects that failed after the review row was saved (see docs/agents.md); each is logged as `[reviews] <code>`. */
+  warnings?: WarningCode[];
 }
 
 /**
@@ -130,17 +129,7 @@ export async function createReview(docId: string, user: Actor, role: Role, input
     throw err;
   }
 
-  const failed: ReviewWarning[] = [];
-  const tail = async (code: ReviewWarning, fn: () => Promise<unknown>): Promise<boolean> => {
-    try {
-      await fn();
-      return true;
-    } catch (err) {
-      console.error(`[reviews] ${code}`, err);
-      failed.push(code);
-      return false;
-    }
-  };
+  const { tail, answer } = warnTail("reviews");
   await tail("mentions-not-recorded", async () => {
     for (let i = 0; i < threadIds.length; i++) await recordMentions(docId, threadIds[i], user.login, input.comments[i].body, author.name);
   });
@@ -154,8 +143,7 @@ export async function createReview(docId: string, user: Actor, role: Role, input
       await notify({ userLogin: ownerLogin, documentId: docId, kind: "review", actorLogin: user.login, actorName: row.authorName, refId: row.id, snippet: `${verdictPhrase(input.verdict)}: ${input.summary}` });
     }
   });
-  const body: CreateReviewResult = { review: toReviewDto(row) };
-  return failed.length ? { ...body, warnings: failed } : body;
+  return answer({ review: toReviewDto(row) });
 }
 
 function verdictPhrase(verdict: ReviewVerdict): string {

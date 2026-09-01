@@ -13,6 +13,7 @@ import {
 } from "@/server/github";
 import { readLiveText, replaceLiveText } from "@/server/livedoc";
 import type { CollabContext } from "@/server/collab/hocuspocus";
+import { warnTail, type WarningCode } from "@/server/warnings";
 import { diff3Merge, diffIndices } from "node-diff3";
 
 export interface PublishResult {
@@ -21,35 +22,13 @@ export interface PublishResult {
   publishedAt: string;
   skipped?: boolean;
   status: SyncState;
-  /** Post-write bookkeeping that failed (the commit and the base stand); omitted when nothing did. */
-  warnings?: SyncWarning[];
+  /**
+   * Post-write bookkeeping that failed (the commit and the base stand); omitted when nothing did. A 500 here would
+   * break the API's "a non-2xx status means nothing changed" promise: GitHub (or the live text, or the link) did
+   * change, and only a version or activity row is missing — so the route answers 2xx with `warnings` instead.
+   */
+  warnings?: WarningCode[];
 }
-
-/**
- * Stable codes for a side effect that failed *after* the primary write of a publish, pull or link
- * succeeded. The route answers 2xx with `warnings: [...]` instead of a 500, because a 500 here would
- * break the API's "a non-2xx status means nothing changed" promise: GitHub (or the live text, or the
- * link) did change, and only a version or activity row is missing.
- */
-export type SyncWarning = "version-not-saved" | "activity-not-recorded";
-
-/**
- * Run a post-write side effect (a version row, an activity row). A failure is logged once as
- * `[<scope>] <code>` and appended to `warnings`; it never fails the request, whose primary write —
- * the GitHub commit, the live-text replace, the base record, the link — has already happened.
- * Never use it for those primary writes.
- */
-export async function afterWrite(scope: "publish" | "pull" | "link", code: SyncWarning, warnings: SyncWarning[], fn: () => Promise<unknown>): Promise<void> {
-  try {
-    await fn();
-  } catch (err) {
-    console.error(`[${scope}] ${code}`, err);
-    warnings.push(code);
-  }
-}
-
-/** `{ warnings }` for a response body, or nothing when there are none (the key is absent, not `[]`). */
-export const withWarnings = (warnings: readonly SyncWarning[] | undefined): { warnings?: SyncWarning[] } => (warnings?.length ? { warnings: [...warnings] } : {});
 
 /** Where the document lives on GitHub; the metadata an access check returns is enough. */
 export type LinkedDocument = Pick<DocumentMeta, "id" | "title" | "storage" | "gistId" | "gistFile" | "repoOwner" | "repoName" | "repoBranch" | "repoPath" | "githubSha" | "publishedAt">;
@@ -323,8 +302,9 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
   // The base record is the state the sync promise is about: it stays fatal. Should it fail, the plain
   // retry above finds local == remote and heals it.
   await updateDocument(doc.id, { publishedContent: content, publishedAt, githubSha });
-  const warnings: SyncWarning[] = [];
-  await afterWrite("publish", "version-not-saved", warnings, () =>
+  // The version row is bookkeeping: its failure never fails a publish whose commit and base already stand.
+  const { tail, answer } = warnTail("publish");
+  await tail("version-not-saved", () =>
     addVersion({
       documentId: doc.id,
       content,
@@ -335,7 +315,7 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
       commitSha,
     }),
   );
-  return { url, commitSha, publishedAt: publishedAt.toISOString(), status: "in-sync", ...withWarnings(warnings) };
+  return answer({ url, commitSha, publishedAt: publishedAt.toISOString(), status: "in-sync" });
 }
 
 export interface PullOptions {
@@ -352,7 +332,7 @@ export interface PullResult {
   /** Set when the pull merged GitHub's edits into local ones. */
   merged?: boolean;
   /** Post-write bookkeeping that failed (the text and the base stand); omitted when nothing did. */
-  warnings?: SyncWarning[];
+  warnings?: WarningCode[];
 }
 
 /**
@@ -374,9 +354,9 @@ export async function pullDocument(doc: LinkedDocument, user: SessionUser, optio
   const remoteText = remote.content ?? "";
   const url = remote.url ?? githubUrlFor(doc);
   const recordBase = () => updateDocument(doc.id, { publishedContent: remoteText, publishedAt: new Date(), githubSha: remote.revision });
-  const warnings: SyncWarning[] = [];
+  const { tail, answer } = warnTail("pull");
   const saveVersion = (content: string, title: string) =>
-    afterWrite("pull", "version-not-saved", warnings, () => addVersion({ documentId: doc.id, content, kind: "import", createdBy: user.id, createdByName: actorName(user), title }));
+    tail("version-not-saved", () => addVersion({ documentId: doc.id, content, kind: "import", createdBy: user.id, createdByName: actorName(user), title }));
 
   if (status.status === "in-sync") {
     // Also the heal for a stale base whose texts already agree (see classify).
@@ -399,7 +379,7 @@ export async function pullDocument(doc: LinkedDocument, user: SessionUser, optio
     await replaceLiveText(doc.id, contextFor(user, doc.id), merged.text);
     await saveVersion(merged.text, "Merged from GitHub");
     await recordBase();
-    return { changed: true, url, status: "local-ahead", merged: true, ...withWarnings(warnings) };
+    return answer({ changed: true, url, status: "local-ahead", merged: true });
   }
 
   if ((status.status === "local-ahead" || status.status === "diverged") && !options.force) {
@@ -418,7 +398,7 @@ export async function pullDocument(doc: LinkedDocument, user: SessionUser, optio
     await saveVersion(remoteText, options.force && status.localChanged ? "Force-pulled from GitHub" : "Pulled from GitHub");
   }
   await recordBase();
-  return { changed, url, status: "in-sync", ...withWarnings(warnings) };
+  return answer({ changed, url, status: "in-sync" });
 }
 
 export interface LinkGistInput {
@@ -446,7 +426,7 @@ const missingUnlessTooLarge = (err: unknown) => {
 };
 
 /** The linked row, plus `warnings` when the version row of a new gist could not be written. */
-export type LinkResult = Document & { warnings?: SyncWarning[] };
+export type LinkResult = Document & { warnings?: WarningCode[] };
 
 /** Link a document to a gist (existing or new) or a repository file, then publish. */
 export async function linkDocument(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<LinkResult> {
@@ -504,11 +484,11 @@ export async function linkDocument(doc: LinkedDocument, user: SessionUser, input
       publishedContent: live.clean,
       publishedAt: new Date(),
     }))!;
-    const warnings: SyncWarning[] = [];
-    await afterWrite("link", "version-not-saved", warnings, () =>
+    const { tail, answer } = warnTail("link");
+    await tail("version-not-saved", () =>
       addVersion({ documentId: doc.id, content: live.clean, kind: "publish", createdBy: user.id, createdByName: actorName(user), title: "Published to new gist" }),
     );
-    return { ...linked, ...withWarnings(warnings) };
+    return answer(linked);
   }
   const path = input.path.replace(/^\/+/, "");
   if (!path) throw new HttpError(400, "A file path is required");
