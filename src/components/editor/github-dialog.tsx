@@ -6,7 +6,7 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { signIn } from "next-auth/react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, apiErrorText } from "@/lib/api";
 
 import { cn, relativeTime } from "@/lib/utils";
 import { GITHUB_NOT_CONFIGURED } from "./labels";
@@ -160,7 +160,7 @@ export function GitHubPicker({
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong");
+      setError(apiErrorText(e, "Something went wrong"));
     } finally {
       setBusy(false);
     }
@@ -493,7 +493,7 @@ export const CommitDialog = memo(function CommitDialog({
               setDone(true);
               setTimeout(() => onOpenChange(false), 900);
             } catch (err) {
-              setError(err instanceof Error ? err.message : "Publish failed");
+              setError(apiErrorText(err, "Publish failed"));
             } finally {
               setBusy(false);
             }

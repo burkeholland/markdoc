@@ -13,7 +13,7 @@ import type { CodeApi } from "@/editor/codemirror/api";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
-import { api, ApiError, type SyncStatusDto } from "@/lib/api";
+import { api, ApiError, apiErrorText, type SyncStatusDto } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
@@ -495,7 +495,7 @@ export function EditorShell({
           setSyncOpen(true);
           throw e;
         }
-        toast(e instanceof Error ? e.message : "Publish failed", "error");
+        toast(apiErrorText(e, "Publish failed"), "error");
         throw e;
       } finally {
         setPublishing(false);
@@ -523,7 +523,7 @@ export function EditorShell({
           }
           throw e;
         }
-        toast(e instanceof Error ? e.message : "Pull failed", "error");
+        toast(apiErrorText(e, "Pull failed"), "error");
         throw e;
       } finally {
         setPublishing(false);
@@ -620,7 +620,7 @@ export function EditorShell({
         a.remove();
         setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
       } catch (e) {
-        toast(e instanceof Error ? e.message : "PDF export failed", "error");
+        toast(apiErrorText(e, "PDF export failed"), "error");
       }
     },
     [doc.id, doc.title, toast],
@@ -674,7 +674,7 @@ export function EditorShell({
     try {
       await api.documents.delete(doc.id);
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Could not move to trash", "error");
+      toast(apiErrorText(e, "Could not move to trash"), "error");
       return;
     }
     leavingRef.current = true;
@@ -701,7 +701,7 @@ export function EditorShell({
       );
       router.push(`/d/${res.id}`);
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Could not make a copy", "error");
+      toast(apiErrorText(e, "Could not make a copy"), "error");
     }
   }, [doc.id, doc.storage, router, toast]);
 
@@ -736,7 +736,7 @@ export function EditorShell({
       api.documents
         .cancelRequest(doc.id, requestId)
         .then(() => toast("Request cancelled.", "info"))
-        .catch((e) => toast(e instanceof Error ? e.message : "Could not cancel the request", "error"));
+        .catch((e) => toast(apiErrorText(e, "Could not cancel the request"), "error"));
     },
     [doc.id, toast],
   );

@@ -3,7 +3,7 @@ import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { memo, useEffect, useState } from "react";
 import { AlertTriangle, Check, CloudDownload, GitMerge, Loader2, Scale, UploadCloud } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
-import type { SyncStatusDto } from "@/lib/api";
+import { apiErrorText, type SyncStatusDto } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
 
 export interface SyncActions {
@@ -52,7 +52,7 @@ export const SyncDialog = memo(function SyncDialog({
       setDone(note);
       setTimeout(() => onOpenChange(false), 900);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Sync failed");
+      setError(apiErrorText(e, "Sync failed"));
     } finally {
       setBusy(null);
     }

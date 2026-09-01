@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
-import { api, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
+import { api, apiErrorText, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { takePendingNotice, type PendingNotice } from "@/lib/notice";
@@ -252,7 +252,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         router.refresh();
       } catch (err) {
         console.error(err);
-        setNotice({ message: err instanceof Error ? err.message : "Could not restore the document", kind: "error" });
+        setNotice({ message: apiErrorText(err, "Could not restore the document"), kind: "error" });
       } finally {
         setTrashBusy(null);
       }
@@ -267,7 +267,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       setTrash((t) => t?.filter((d) => d.id !== doc.id) ?? null);
     } catch (err) {
       console.error(err);
-      setNotice({ message: err instanceof Error ? err.message : "Could not delete the document", kind: "error" });
+      setNotice({ message: apiErrorText(err, "Could not delete the document"), kind: "error" });
     } finally {
       setTrashBusy(null);
     }
