@@ -1,6 +1,6 @@
 import type { DocumentDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
-import type { NotificationKind, Role, TokenScope } from "@/server/db/schema";
+import type { ActivityAction, NotificationKind, Role, TokenScope } from "@/server/db/schema";
 import type { ReviewDto } from "@/server/reviews";
 
 export class ApiError extends Error {
@@ -92,24 +92,8 @@ export interface NotificationsPageDto {
   unreadCount: number;
 }
 
-export type ActivityActionDto =
-  | "edit"
-  | "comment.add"
-  | "comment.reply"
-  | "comment.resolve"
-  | "suggestion.add"
-  | "suggestion.accept"
-  | "suggestion.reject"
-  | "version.save"
-  | "version.restore"
-  | "publish"
-  | "share.add"
-  | "share.remove"
-  | "asset.upload"
-  | "mention"
-  | "title.change"
-  | "agent.request"
-  | "agent.request.done";
+/** The server's union (`schema.ts`), so the client can never list an action the feed no longer records or miss a new one. */
+export type ActivityActionDto = ActivityAction;
 
 export interface ActivityItemDto {
   id: string;

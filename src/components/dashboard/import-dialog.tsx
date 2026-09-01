@@ -6,13 +6,18 @@ import { AlertTriangle, CheckCircle2, FileText, Loader2, XCircle } from "lucide-
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import { uploadImportBatch, type FailedImport, type ImportedDocument } from "@/lib/import-upload";
+import { IMPORT_ACCEPT, IMPORT_EXTENSIONS, IMPORT_EXTENSIONS_LIST, importFormatFor } from "@/lib/import-extensions";
 
-export const IMPORT_FILE_EXTENSIONS = [".md", ".markdown", ".mdown", ".mkd", ".txt", ".text", ".html", ".htm"];
-export const IMPORT_ACCEPT = [...IMPORT_FILE_EXTENSIONS, "image/*"].join(",");
+/** The server's list (`@/lib/import-extensions`), kept under the name this module has always exported. */
+export const IMPORT_FILE_EXTENSIONS = IMPORT_EXTENSIONS;
+export { IMPORT_ACCEPT };
 
+/** The drop-zone toast when nothing importable was dropped: the server's 415 sentence with a capital. */
+const NOTHING_IMPORTABLE_MESSAGE = `${IMPORT_EXTENSIONS_LIST[0].toUpperCase()}${IMPORT_EXTENSIONS_LIST.slice(1)}.`;
+
+/** Same predicate the server applies before it answers 415, so the client never disagrees with it. */
 export function isImportableFile(file: File): boolean {
-  const name = file.name.toLowerCase();
-  return IMPORT_FILE_EXTENSIONS.some((ext) => name.endsWith(ext));
+  return importFormatFor(file.name) !== null;
 }
 
 /** Split a drop/pick into documents to import and images that may be referenced by them. */
@@ -134,7 +139,7 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     const { documents, images, ignored: skipped } = splitImportFiles(files);
     setIgnored(skipped.map((f) => f.name));
     if (documents.length === 0) {
-      const msg = images.length ? "Drop a Markdown, text or HTML file together with the images." : "Only .md, .txt and .html files can be imported.";
+      const msg = images.length ? "Drop a Markdown, text or HTML file together with the images." : NOTHING_IMPORTABLE_MESSAGE;
       optionsRef.current.onError?.(msg);
       setItems([]);
       setOpen(skipped.length > 0 || images.length > 0);
