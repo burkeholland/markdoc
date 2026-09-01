@@ -631,4 +631,58 @@ describe("the non-2xx promise for requests (#1232)", () => {
     await expect(attachWork(reqDocId, created.id, agentActor(), { comments: 1, commentIds: ["c-late"] })).rejects.toMatchObject({ status: 409, message: "Request is done", details: { status: "done" } });
     expect(await rowOf(created.id)).toMatchObject({ status: "done", result: { suggestions: 0, comments: 0, summary: "Closed meanwhile." } });
   });
+
+  /**
+   * Two completes in the same tick (an agent's retry overlapping its first call, or two agents on one request): the
+   * pre-check sees `claimed` for both, so only the guarded update decides. Before #1303 the second update rewrote
+   * `done` and wrote a second `agent.request.done` row; the notification was always one row (unique index).
+   */
+  it("completeRequest: two calls racing on one claimed request write one activity row and one notification; one of them is alreadyDone (20 rounds)", async () => {
+    const rounds = 20;
+    const duplicates: string[] = [];
+    const bothWrote: number[] = [];
+    const disagreed: string[] = [];
+    for (let round = 0; round < rounds; round++) {
+      const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: `Race ${round}`, mode: "suggest" });
+      await claimRequest(reqDocId, created.id, agentActor());
+      const [a, b] = await Promise.all([
+        completeRequest(reqDocId, created.id, agentActor(), { summary: "First to finish." }),
+        completeRequest(reqDocId, created.id, agentActor(), { summary: "Second to finish." }),
+      ]);
+      const rows = await doneRows(created.id);
+      const notes = await doneNotifications(created.id);
+      if (rows.length !== 1 || notes.length !== 1) duplicates.push(`round ${round}: ${rows.length} activity rows, ${notes.length} notifications`);
+      if (!a.alreadyDone && !b.alreadyDone) bothWrote.push(round);
+      // Both answers are 2xx and describe the same final row; the loser did not overwrite the winner's summary.
+      const row = await rowOf(created.id);
+      const winner = a.alreadyDone ? b : a;
+      if (row.status !== "done" || !a.notified || !b.notified || row.result?.summary !== winner.request.result?.summary) {
+        disagreed.push(`round ${round}: row ${row.status} "${row.result?.summary}", answers "${a.request.result?.summary}"/"${b.request.result?.summary}"`);
+      }
+    }
+    expect(duplicates, `${duplicates.length}/${rounds} rounds wrote duplicates: ${duplicates.join("; ")}`).toEqual([]);
+    expect(bothWrote, `${bothWrote.length}/${rounds} rounds had both calls write (neither alreadyDone)`).toEqual([]);
+    expect(disagreed, `${disagreed.length}/${rounds} rounds: ${disagreed.join("; ")}`).toEqual([]);
+  });
+
+  it("cancelRequest then completeRequest: 409 Request was cancelled, the row stays cancelled, nothing written", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    await cancelRequest(reqDocId, created.id, ownerActor(), "owner");
+    await expect(completeRequest(reqDocId, created.id, agentActor(), { summary: "Too late." })).rejects.toMatchObject({ status: 409, message: "Request was cancelled", details: { status: "cancelled" } });
+    expect(await rowOf(created.id)).toMatchObject({ status: "cancelled", result: null });
+    expect(await doneRows(created.id)).toEqual([]);
+    expect(await doneNotifications(created.id)).toEqual([]);
+  });
+
+  it("completeRequest: a request cancelled between the pre-check and the update is not completed — the same 409, the row stays cancelled, nothing written", async () => {
+    const created = await createRequest(reqDocId, ownerActor(), "owner", { instruction: "Tighten this", mode: "suggest" });
+    await claimRequest(reqDocId, created.id, agentActor());
+    await betweenPreCheckAndUpdate(() => cancelRequest(reqDocId, created.id, ownerActor(), "owner"));
+    await expect(completeRequest(reqDocId, created.id, agentActor(), { summary: "Too late." })).rejects.toMatchObject({ status: 409, message: "Request was cancelled", details: { status: "cancelled" } });
+    expect(await rowOf(created.id)).toMatchObject({ status: "cancelled", result: null });
+    expect(await doneRows(created.id)).toEqual([]);
+    expect(await doneNotifications(created.id)).toEqual([]);
+    expect((await readMirror(reqDocId))[created.id]).toMatchObject({ status: "cancelled" });
+  });
 });

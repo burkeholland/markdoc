@@ -1,7 +1,8 @@
 import { handler, json, requireAccess } from "@/server/http";
-import { pullDocument, withWarnings } from "@/server/publish";
+import { pullDocument } from "@/server/publish";
 import { publicDocument } from "@/server/dto";
 import { getDocumentAccess } from "@/server/documents";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -19,5 +20,5 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const q = new URL(req.url).searchParams;
   const { warnings, ...result } = await pullDocument(doc, user!, { force: q.get("force") === "1", merge: q.get("merge") === "1" });
   const fresh = await getDocumentAccess(id, user);
-  return json({ result, document: fresh ? publicDocument(fresh.doc) : null, ...withWarnings(warnings) });
+  return json(warnTail("pull", warnings).answer({ result, document: fresh ? publicDocument(fresh.doc) : null }));
 });

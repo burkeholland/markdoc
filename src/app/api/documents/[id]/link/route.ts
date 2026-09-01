@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess } from "@/server/http";
-import { linkDocument, withWarnings } from "@/server/publish";
+import { linkDocument } from "@/server/publish";
 import { publicDocument } from "@/server/dto";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -33,5 +34,5 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const { doc, user } = await requireAccess(id, "own");
   const body = await readJson(req, (d) => schema.parse(d));
   const { warnings, ...updated } = await linkDocument(doc, user!, body);
-  return json({ document: publicDocument(updated), ...withWarnings(warnings) });
+  return json(warnTail("link", warnings).answer({ document: publicDocument(updated) }));
 });

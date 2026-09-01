@@ -9,11 +9,9 @@ import { notifyReply, notifyResolved, readThread, recordMentions } from "@/serve
 import { activityActor, clip, recordActivity } from "@/server/activity";
 import { recordSuggestionDecision } from "@/server/reviews";
 import { attachWork, requireAttachableRequest } from "@/server/agent-requests";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
-
-/** Post-write side effects that can fail without taking the comment back: reported as `warnings` on the 2xx (see docs/agents.md). */
-type Warning = "mentions-not-recorded" | "notification-not-sent" | "request-not-attached" | "activity-not-recorded";
 
 const schema = z.discriminatedUnion("action", [
   z.object({
@@ -189,21 +187,10 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // The thread/reply is already in the shared document (broadcast to every editor, irrevocable), so a mention,
   // notification, request link or activity row that fails here is logged and reported as a warning code on the
   // 2xx — never a non-2xx that would claim nothing changed, never a silent gap.
-  const warnings = await afterMutation();
-  return json(warnings.length ? { ...(result as Record<string, unknown>), warnings } : result);
+  return json(await afterMutation());
 
-  async function afterMutation(): Promise<Warning[]> {
-    const failed: Warning[] = [];
-    const tail = async (code: Warning, fn: () => Promise<unknown>): Promise<boolean> => {
-      try {
-        await fn();
-        return true;
-      } catch (err) {
-        console.error(`[comments] ${code}`, err);
-        failed.push(code);
-        return false;
-      }
-    };
+  async function afterMutation(): Promise<Record<string, unknown>> {
+    const { tail, answer } = warnTail("comments");
     const createdId = (result as { id?: string | null }).id ?? null;
     if (body.action === "add" || body.action === "reply" || body.action === "edit") {
       const target = body.action === "edit" ? body.replyId ?? body.threadId : createdId;
@@ -228,7 +215,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       const d = decided as { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null;
       if (d) await tail("activity-not-recorded", () => recordSuggestionDecision(id, d.thread, d.accepted, { ...activityActor(user), login: user.login ?? null }, d.reply));
     }
-    return failed;
+    return answer(result as Record<string, unknown>);
   }
 });
 

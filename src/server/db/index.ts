@@ -6,6 +6,14 @@ type PgDb = import("drizzle-orm/node-postgres").NodePgDatabase<typeof schema>;
 type LiteDb = import("drizzle-orm/pglite").PgliteDatabase<typeof schema>;
 export type Db = PgDb | LiteDb;
 
+/**
+ * A transaction on the shared connection (`db.transaction(async (tx) => …)`), PGlite or PostgreSQL alike.
+ * The create paths take one so a document, its assets and its first version land together or not at all;
+ * everything inside the callback must run on `tx` — a `getDb()` statement there would not see the
+ * uncommitted rows on PostgreSQL and, on PGlite, would wait for the transaction's lock forever.
+ */
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 interface DbGlobal {
   promise?: Promise<Db>;
   migrated?: Promise<void>;

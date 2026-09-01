@@ -5,8 +5,8 @@ import rehypeRemark from "rehype-remark";
 import remarkGfm from "remark-gfm";
 import remarkStringify from "remark-stringify";
 import { customAlphabet } from "nanoid";
-import { getDb, schema } from "@/server/db";
-import { addVersion, createDocument, setDocumentText, type Tx } from "@/server/documents";
+import { getDb, schema, type Tx } from "@/server/db";
+import { addVersion, createDocument, setDocumentText } from "@/server/documents";
 import { boundTitle } from "@/server/document-title";
 import { AssetError, assetUrl, cleanAssetName, normalizeMime, sha256Hex, validateAsset, type PutAssetInput, type StoredAsset } from "@/server/assets";
 

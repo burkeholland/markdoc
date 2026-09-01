@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess } from "@/server/http";
-import { afterWrite, publishDocument, withWarnings, type SyncWarning } from "@/server/publish";
+import { publishDocument } from "@/server/publish";
 import { publicDocument } from "@/server/dto";
 import { getDocumentAccess } from "@/server/documents";
 import { activityActor, recordActivity } from "@/server/activity";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -22,13 +23,14 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const { doc, user } = await requireAccess(id, "edit");
   const body = await readJson(req, (d) => schema.parse(d ?? {}));
   const force = body.force === true || new URL(req.url).searchParams.get("force") === "1";
-  const { warnings: published = [], ...result } = await publishDocument(doc, user!, { message: body.message, force });
-  const warnings: SyncWarning[] = [...published];
+  // `publishDocument`'s own warnings (the version row) are carried over so the route answers with one top-level list.
+  const { warnings: published, ...result } = await publishDocument(doc, user!, { message: body.message, force });
+  const { tail, answer } = warnTail("publish", published);
   if (!result.skipped) {
-    await afterWrite("publish", "activity-not-recorded", warnings, () =>
+    await tail("activity-not-recorded", () =>
       recordActivity(id, activityActor(user!), "publish", { storage: doc.storage, commitSha: result.commitSha, message: body.message ?? null, force: force || undefined }),
     );
   }
   const fresh = await getDocumentAccess(id, user);
-  return json({ result, document: fresh ? publicDocument(fresh.doc) : null, ...withWarnings(warnings) });
+  return json(answer({ result, document: fresh ? publicDocument(fresh.doc) : null }));
 });

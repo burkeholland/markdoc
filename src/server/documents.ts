@@ -1,22 +1,15 @@
 import { and, desc, eq, getTableColumns, ilike, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
-import { getDb, schema, type Db } from "@/server/db";
+import { getDb, schema, type Db, type Tx } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
 import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
 import { excerptOf, excerptOfPrefix } from "@/editor/stats";
 
 export { DOCUMENT_TITLE_MAX, boundTitle } from "@/server/document-title";
+export type { Tx } from "@/server/db";
 
 const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
-
-/**
- * A transaction on the shared connection (`db.transaction(async (tx) => …)`), PGlite or PostgreSQL alike.
- * The create paths take one so a document, its assets and its first version land together or not at all;
- * everything inside the callback must run on `tx` — a `getDb()` statement there would not see the
- * uncommitted rows on PostgreSQL and, on PGlite, would wait for the transaction's lock forever.
- */
-export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /** Whatever a statement can run on: the shared connection or a transaction on it. */
 type Executor = Db | Tx;
