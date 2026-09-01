@@ -20,6 +20,9 @@ const querySchema = z.object({
  * dialog's handle autocomplete: `{ users: [{ login, name, avatarUrl }], limited }`. Browser sessions
  * only: an API token gets 403 (a leaked token must not be able to search accounts through the
  * user's GitHub credentials). When GitHub rate-limits the search, `limited: true` with no users.
+ * A session that signed in without GitHub has no token to search with: that is not a malformed
+ * request, so it answers 200 `{ users: [], limited: false, reason: "no-github-token" }` and the
+ * client stops asking for the life of the dialog (task #1481: every such share used to log 400s).
  */
 export const GET = handler(async (req: Request) => {
   const user = await requireUser();
@@ -27,7 +30,7 @@ export const GET = handler(async (req: Request) => {
   const { q } = querySchema.parse({ q: new URL(req.url).searchParams.get("q") ?? undefined });
   // Under GITHUB_MOCK the fake needs no credentials (dev-login users have none).
   const token = isGitHubMock() ? "mock" : await getGitHubToken(user.id);
-  if (!token) throw new HttpError(400, "No GitHub token. Sign in with GitHub.");
+  if (!token) return json({ users: [], limited: false, reason: "no-github-token" }, { headers: { "Cache-Control": "private, max-age=60" } });
   const result = await searchUsers(githubClient(token), q);
   return json(result, { headers: { "Cache-Control": "private, max-age=60" } });
 });

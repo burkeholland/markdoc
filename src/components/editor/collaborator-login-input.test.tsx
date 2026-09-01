@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 
-const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<{ users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean }>>();
+const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<{ users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: "no-github-token" }>>();
 vi.mock("@/lib/api", () => ({ api: { github: { searchUsers: (...args: [string, RequestInit?]) => searchUsers(...args) } } }));
 
 import { CollaboratorLoginInput, SUGGEST_DEBOUNCE_MS, suggestQuery } from "./collaborator-login-input";
@@ -237,6 +237,52 @@ describe("CollaboratorLoginInput", () => {
     type("octopu");
     await settle();
     expect(options()).toEqual(["octopus"]);
+  });
+
+  it("after the route answers reason=no-github-token it asks no more while mounted: one request for a whole share, no hint, the box still types (task #1481)", async () => {
+    searchUsers.mockImplementation(() => Promise.resolve({ users: [], limited: false, reason: "no-github-token" as const }));
+    render(<Harness />);
+    type("oc");
+    await settle();
+    expect(searchUsers).toHaveBeenCalledTimes(1);
+    expect(searchUsers.mock.calls[0][0]).toBe("oc");
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    // Nothing is said about it: no alert, no rate-limit style hint (the component has none), no stray text.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/limit|token|GitHub/i)).toBeNull();
+
+    // Two more settled prefixes — past the debounce each — go nowhere.
+    searchUsers.mockImplementation(() => answer("octocat"));
+    type("octo");
+    await settle(SUGGEST_DEBOUNCE_MS * 2);
+    type("octocat");
+    await settle(SUGGEST_DEBOUNCE_MS * 2);
+    expect(searchUsers).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(input().value).toBe("octocat");
+    expect(input()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("a superseded no-github-token answer still settles it, and the in-flight later query shows nothing", async () => {
+    const pending = new Map<string, (r: { users: ReturnType<typeof user>[]; limited: boolean; reason?: "no-github-token" }) => void>();
+    searchUsers.mockImplementation((q) => new Promise((resolve) => pending.set(q, resolve)));
+    render(<Harness />);
+    type("oc");
+    await settle();
+    type("octo");
+    await settle();
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+    // The stale answer arrives first and carries the reason.
+    await act(async () => {
+      pending.get("oc")!({ users: [], limited: false, reason: "no-github-token" });
+    });
+    await act(async () => {
+      pending.get("octo")!({ users: [], limited: false, reason: "no-github-token" });
+    });
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    type("octoc");
+    await settle(SUGGEST_DEBOUNCE_MS * 2);
+    expect(searchUsers).toHaveBeenCalledTimes(2);
   });
 
   it("reuses the answer for a prefix typed again instead of asking twice, and closes when the box empties or loses focus", async () => {

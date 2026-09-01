@@ -26,6 +26,8 @@ export function suggestQuery(value: string): string | null {
  * closes the list (the dialog stays open), a click picks. Picking fills the box and calls `onPick` so
  * the owner lands on the role select and still presses Add. Anything GitHub cannot answer — a
  * rate-limited search, no token, a network error — shows nothing: adding by exact handle never breaks.
+ * A session without a GitHub token (`reason: "no-github-token"`) is remembered for the life of the
+ * box: it asks no more and stays a plain text field.
  */
 export function CollaboratorLoginInput({
   value,
@@ -50,6 +52,8 @@ export function CollaboratorLoginInput({
   const cache = useRef(new Map<string, GitHubUserDto[]>());
   // The login a pick just wrote into the box: it is not searched again (its owner is about to press Add).
   const picked = useRef<string | null>(null);
+  // Set once the route answered `reason: "no-github-token"`: this session cannot search, so no further request goes out while mounted.
+  const noToken = useRef(false);
   const query = suggestQuery(value);
 
   useEffect(() => {
@@ -60,7 +64,7 @@ export function CollaboratorLoginInput({
       // A late answer must not pop the list open under a box that was already left.
       setOpen(users.length > 0 && document.activeElement === inputRef.current);
     };
-    if (!query || query === picked.current) {
+    if (!query || query === picked.current || noToken.current) {
       show([]);
       return;
     }
@@ -74,7 +78,13 @@ export function CollaboratorLoginInput({
       api.github
         .searchUsers(query, { signal: controller.signal })
         .then((res) => {
+          // "No token" is true of the session, not of this query: even a superseded answer settles it.
+          if (res.reason === "no-github-token") noToken.current = true;
           if (seq.current !== current) return;
+          if (noToken.current) {
+            show([]);
+            return;
+          }
           if (!res.limited) cache.current.set(query.toLowerCase(), res.users);
           show(res.limited ? [] : res.users);
         })
