@@ -32,6 +32,7 @@ export const COMPONENT_PREFIXES = [
   "avatar",
   "drawer",
   "sheet",
+  "switch",
 ] as const;
 
 // `.btn`, `.btn-sm`, `.btn:disabled`, `.icon-btn[data-active="true"]` — but not `.drawer > aside` or `.btnx`.
