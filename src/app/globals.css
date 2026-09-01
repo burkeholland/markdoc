@@ -323,6 +323,17 @@ body {
   .pane-label {
     @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-3;
   }
+  /* A toggle (`role="switch"` button): the track is the button, the thumb slides across on aria-checked. */
+  .switch {
+    @apply relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-line-2 bg-surface-3 transition-colors aria-checked:border-accent aria-checked:bg-accent disabled:pointer-events-none disabled:opacity-50;
+  }
+  .switch::after {
+    content: "";
+    @apply absolute left-0.5 h-3.5 w-3.5 rounded-full bg-surface shadow-sm transition-transform;
+  }
+  .switch[aria-checked="true"]::after {
+    @apply translate-x-4;
+  }
   /* Skip-to-content link: off-screen until it receives keyboard focus. */
   .skip-link {
     @apply fixed left-3 top-3 z-[80] -translate-y-[200%] rounded-lg bg-accent px-3 py-2 text-sm font-medium text-on-accent shadow-lg transition-transform;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRequestMirror } from "./agent-requests";
-import { AGENT_ACTIVITY_SHOW_FOR_MS, activityVerb, busyAgentNames, isRecentActivity, pendingWorker, secondsAgo, waitingLabel } from "./presence-agents";
+import type { PresenceUser } from "@/editor/collab/session";
+import { claimerName, type AgentRequestMirror } from "./agent-requests";
+import { AGENT_ACTIVITY_SHOW_FOR_MS, activityVerb, busyAgentNames, isRecentActivity, pendingWorker, presenceAgentName, presenceNameOf, secondsAgo, waitingLabel } from "./presence-agents";
 
 const NOW = 1_700_000_000_000;
 
@@ -42,6 +43,61 @@ describe("pendingWorker", () => {
   it("names the agent that claimed a pending request, if any", () => {
     expect(pendingWorker([request({})])).toBeNull();
     expect(pendingWorker([request({}), request({ id: "r2", status: "claimed", claimedBy: "Copilot CLI" })])).toBe("Copilot CLI");
+  });
+
+  it("labels someone else's agent with its owner for the viewer (#1296)", () => {
+    const claimed = [request({ status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "burkeholland" })];
+    expect(pendingWorker(claimed, "burkeholland")).toBe("Copilot CLI");
+    expect(pendingWorker(claimed, "drew")).toBe("burkeholland's Copilot CLI");
+    expect(pendingWorker(claimed, "drew", (login) => (login === "burkeholland" ? "Burke" : null))).toBe("Burke's Copilot CLI");
+  });
+});
+
+describe("claimerName / presence names (#1296)", () => {
+  const user = (over: Partial<PresenceUser>): PresenceUser => ({
+    id: "u",
+    name: "Someone",
+    color: "#000",
+    colorLight: "#fff",
+    clientId: 1,
+    cursor: null,
+    section: null,
+    idleSince: null,
+    role: null,
+    isLocal: false,
+    isAgent: false,
+    status: null,
+    ownerLogin: null,
+    ownerName: null,
+    ...over,
+  });
+  const users = [
+    user({ id: "u-drew", name: "Drew", login: "drew" }),
+    user({ id: "agent:burke", name: "Copilot CLI", isAgent: true, ownerLogin: "burkeholland", ownerName: "Burke" }),
+    user({ id: "agent:alice", name: "Scribe", isAgent: true, ownerLogin: "alice", ownerName: null }),
+  ];
+
+  it("reads the claimer as the viewer should: bare for their own token, owner-labelled for anyone else's", () => {
+    expect(claimerName(request({ status: "claimed", claimedBy: null }), "drew")).toBe("An agent");
+    expect(claimerName(request({ status: "claimed", claimedBy: "Copilot CLI" }), "drew")).toBe("Copilot CLI");
+    const r = request({ status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "burkeholland" });
+    expect(claimerName(r, "burkeholland")).toBe("Copilot CLI");
+    expect(claimerName(r, "drew")).toBe("burkeholland's Copilot CLI");
+    expect(claimerName(r, "drew", (login) => presenceNameOf(users, login))).toBe("Burke's Copilot CLI");
+  });
+
+  it("finds a display name in presence by login: a person by theirs, an agent's owner by the agent's", () => {
+    expect(presenceNameOf(users, "drew")).toBe("Drew");
+    expect(presenceNameOf(users, "BurkeHolland")).toBe("Burke");
+    expect(presenceNameOf(users, "alice")).toBeNull();
+    expect(presenceNameOf(users, "nobody")).toBeNull();
+  });
+
+  it("labels a present agent for the viewer", () => {
+    expect(presenceAgentName(users[1], "burkeholland")).toBe("Copilot CLI");
+    expect(presenceAgentName(users[1], "drew")).toBe("Burke's Copilot CLI");
+    expect(presenceAgentName(users[2], "drew")).toBe("alice's Scribe");
+    expect(presenceAgentName(users[0], "drew")).toBe("Drew");
   });
 });
 

@@ -2,11 +2,11 @@
 
 import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
-import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
+import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { QUICK_REACTIONS, isDocumentRange, type CommentReply, type CommentThread, type Reactions } from "@/editor/collab/comments";
 import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
-import { agentMentionLogin, mentionTriggerAt, parseAgentMentions, splitMentions } from "@/editor/collab/mentions";
+import { agentDisplayName, agentMentionLogin, mentionTriggerAt, parseAgentMentions, splitMentions } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { ReviewDto } from "@/server/reviews";
@@ -16,7 +16,7 @@ import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
 import { jsonEqual, useSessionValue } from "./use-session";
-import { describeResult, QUICK_INSTRUCTIONS, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
+import { claimerName, describeResult, QUICK_INSTRUCTIONS, REQUEST_QUOTE_MAX, requestInstruction, useThreadRequests, waitForSynced, type AgentRequestMirror, type AgentRequestMode } from "./agent-requests";
 import "./comments.css";
 
 type Tab = "open" | "resolved" | "suggestions";
@@ -33,10 +33,48 @@ export interface MentionCandidate {
   login: string;
   name: string;
   image: string | null;
-  /** Set for agents (API tokens): the login of the user the token acts for. */
-  agent?: { ownerLogin: string } | null;
+  /** Set for agents (API tokens): whose it is and whether this user may address a request to it. */
+  agent?: MentionCandidateAgent | null;
   /** One of the current user's own tokens that has not been in this document yet (listed so it can still be asked). */
   own?: boolean;
+}
+
+export interface MentionCandidateAgent {
+  /** The login of the user the token acts for. */
+  ownerLogin: string;
+  /** That user's display name, when the collaborators route knows it (the login stands in otherwise). */
+  ownerName?: string | null;
+  /**
+   * Whether the current user may address a request to it: their own tokens always; someone else's only once its
+   * owner switched `collaboratorsMayAsk` on (#1296). A locked agent can still be *mentioned* — the picker greys it.
+   */
+  canAsk: boolean;
+}
+
+/** The agent's owner as the UI names them: display name when known, else the login. */
+export function agentOwnerName(agent: Pick<MentionCandidateAgent, "ownerLogin" | "ownerName">): string {
+  return agent.ownerName?.trim() || agent.ownerLogin;
+}
+
+/**
+ * What the composer says instead of sending to a locked agent — the same sentence the server would answer with
+ * (`403 agent-owner-only`, `resolveAddressee` in src/server/agent-requests.ts): `Burke's Copilot CLI only takes
+ * requests from Burke.` The server's 403 stays as the fallback when the two disagree (stale picker, owner just
+ * switched it off).
+ */
+export function agentOwnerOnlyMessage(candidate: MentionCandidate & { agent: MentionCandidateAgent }, viewerLogin: string | null | undefined): string {
+  return `${agentDisplayName({ name: candidate.name, ownerLogin: candidate.agent.ownerLogin, ownerName: candidate.agent.ownerName }, viewerLogin)} only takes requests from ${agentOwnerName(candidate.agent)}.`;
+}
+
+/**
+ * Display name of a user by login, as far as the panel knows them: a collaborator or present person, or the owner of
+ * an agent the collaborators route listed. Null when unknown (callers then show the login).
+ */
+export function displayNameOf(candidates: MentionCandidate[], login: string): string | null {
+  const key = login.toLowerCase();
+  for (const c of candidates) if (!c.agent && c.login.toLowerCase() === key && c.name) return c.name;
+  for (const c of candidates) if (c.agent && c.agent.ownerLogin.toLowerCase() === key && c.agent.ownerName) return c.agent.ownerName;
+  return null;
 }
 
 /** Candidates matching a picker query: login or name prefix; agents also by their slug. Humans first, then agents. */
@@ -313,6 +351,8 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
   const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
   const [knownAgents, setKnownAgents] = useState<MentionCandidate[]>([]);
   const [ownTokens, setOwnTokens] = useState<MentionCandidate[] | null>(null);
+  const ownerLogin = session.user.login ?? null;
+  const me = ownerLogin?.toLowerCase();
   useEffect(() => {
     let cancelled = false;
     api.documents
@@ -323,14 +363,20 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
         if (res.owner?.login) list.push({ login: res.owner.login, name: res.owner.name ?? res.owner.login, image: res.owner.image });
         for (const c of res.collaborators) list.push({ login: c.login, name: c.name ?? c.login, image: c.image });
         setCollaborators(list);
-        setKnownAgents((res.agents ?? []).map((a) => ({ login: a.login, name: a.name, image: null, agent: { ownerLogin: a.ownerLogin } })));
+        setKnownAgents(
+          (res.agents ?? []).map((a) => ({
+            login: a.login,
+            name: a.name,
+            image: null,
+            agent: { ownerLogin: a.ownerLogin, ownerName: a.ownerName ?? null, canAsk: a.ownerLogin.toLowerCase() === me || a.collaboratorsMayAsk === true },
+          })),
+        );
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [session.docId]);
-  const ownerLogin = session.user.login ?? null;
+  }, [session.docId, me]);
   useEffect(() => {
     if (!withOwnTokens || !ownerLogin) return;
     let cancelled = false;
@@ -338,7 +384,9 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
       .list()
       .then((res) => {
         if (cancelled) return;
-        setOwnTokens(res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin }, own: true })));
+        setOwnTokens(
+          res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin, ownerName: session.user.name, canAsk: true }, own: true })),
+        );
       })
       .catch((err: unknown) => {
         // Agents' sessions cannot list tokens (403); the picker simply offers what the document knows.
@@ -347,7 +395,7 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
     return () => {
       cancelled = true;
     };
-  }, [withOwnTokens, ownerLogin]);
+  }, [withOwnTokens, ownerLogin, session.user.name]);
   const present = useSessionValue(
     session,
     (s) =>
@@ -356,7 +404,8 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
         .filter((u) => !u.isLocal && (u.isAgent ? u.ownerLogin : u.login))
         .map((u): MentionCandidate =>
           u.isAgent
-            ? { login: agentMentionLogin(u.ownerLogin!, u.name), name: u.name, image: null, agent: { ownerLogin: u.ownerLogin! } }
+            ? // Presence does not carry the owner's switch; the merge below fills `canAsk` in from the collaborators route.
+              { login: agentMentionLogin(u.ownerLogin!, u.name), name: u.name, image: null, agent: { ownerLogin: u.ownerLogin!, ownerName: u.ownerName, canAsk: u.ownerLogin!.toLowerCase() === me } }
             : { login: u.login!, name: u.name, image: u.avatar ?? null },
         ),
     jsonEqual,
@@ -364,17 +413,18 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
   return useMemo(() => {
     const seen = new Set<string>();
     const out: MentionCandidate[] = [];
-    const me = session.user.login?.toLowerCase();
+    const known = new Map(knownAgents.map((a) => [a.login.toLowerCase(), a] as const));
     // Your own agent stays in the list even though you are not: it is the agent that needs the mention.
     // Own tokens come last so one that is present or recently active keeps its ordinary entry.
     for (const c of [...present, ...collaborators, ...knownAgents, ...(ownTokens ?? [])]) {
       const key = c.login.toLowerCase();
       if (key === me || seen.has(key)) continue;
       seen.add(key);
-      out.push(c);
+      const listed = c.agent ? known.get(key)?.agent : undefined;
+      out.push(listed && c.agent ? { ...c, agent: { ...c.agent, ownerName: c.agent.ownerName ?? listed.ownerName, canAsk: c.agent.canAsk || listed.canAsk } } : c);
     }
     return { candidates: out, tokenCount: ownTokens ? ownTokens.length : null };
-  }, [present, collaborators, knownAgents, ownTokens, session.user.login]);
+  }, [present, collaborators, knownAgents, ownTokens, me]);
 }
 
 const MAX_SUGGESTIONS = 6;
@@ -390,6 +440,8 @@ interface MentionConnectValue {
 
 interface MentionCandidatesValue {
   candidates: MentionCandidate[];
+  /** The current user's login; someone else's agent is labelled with its owner relative to them ("Drew's Copilot CLI"). */
+  viewerLogin: string | null;
   /** A composer's `@` picker opened: the panel fetches the user's own tokens once (see useMentionCandidates). */
   onPickerOpen: () => void;
   connect: MentionConnectValue;
@@ -400,7 +452,7 @@ interface MentionCandidatesValue {
  * arrives a moment after the panel opens (collaborators fetch) and would otherwise re-render every
  * memoised card for a value only an open composer reads.
  */
-const MentionCandidatesContext = createContext<MentionCandidatesValue>({ candidates: [], onPickerOpen: () => {}, connect: { due: false, onDismiss: () => {} } });
+const MentionCandidatesContext = createContext<MentionCandidatesValue>({ candidates: [], viewerLogin: null, onPickerOpen: () => {}, connect: { due: false, onDismiss: () => {} } });
 
 /** The picker's "Connect an agent" row shares the settings card's `localStorage` flag: dismissed once, gone everywhere. */
 function readConnectDismissed(): boolean {
@@ -556,7 +608,7 @@ function Composer({
   /** Offer the "How should the agent answer?" row when an agent is mentioned; absent on the edit composer. */
   request?: ComposerRequestOptions;
 }) {
-  const { candidates, onPickerOpen, connect } = useContext(MentionCandidatesContext);
+  const { candidates, viewerLogin, onPickerOpen, connect } = useContext(MentionCandidatesContext);
   const [value, setValue] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
@@ -672,7 +724,19 @@ function Composer({
   const showRow = request !== undefined && agents.length > 0;
   const effectiveMode: AgentRequestMode = request && !request.canEdit ? "comment" : mode;
   const modeDisabled = (id: AgentRequestMode) => id !== "comment" && request !== undefined && !request.canEdit;
-  const rowLabel = agents.length === 1 ? `How should ${agents[0].name} answer?` : "How should the agents answer?";
+  /** An agent as this user sees it: their own by its plain name, anyone else's as "Drew's Copilot CLI". */
+  const nameOf = (c: MentionCandidate) => (c.agent ? agentDisplayName({ name: c.name, ownerLogin: c.agent.ownerLogin, ownerName: c.agent.ownerName }, viewerLogin) : c.name);
+  const rowLabel = agents.length === 1 ? `How should ${nameOf(agents[0])} answer?` : "How should the agents answer?";
+  // The request goes to the first agent mentioned (part A's `resolveAddressee`); when its owner has not opened it to
+  // collaborators the composer says so and will not send, instead of letting the server answer 403 (#1296).
+  const addressee = useMemo(() => {
+    if (!showRow) return null;
+    const first = parseAgentMentions(value)[0];
+    const login = first ? `${first.login}/${first.agent}`.toLowerCase() : null;
+    const hit = agents.find((c) => c.login.toLowerCase() === login);
+    return hit?.agent ? (hit as MentionCandidate & { agent: MentionCandidateAgent }) : null;
+  }, [showRow, value, agents]);
+  const locked = addressee !== null && !addressee.agent.canAsk;
 
   /** A quick instruction goes right after the mention; once the body has text past it, at the caret instead. Focus stays in the box. */
   const insertInstruction = (text: string) => {
@@ -733,7 +797,7 @@ function Composer({
 
   const submit = async () => {
     const body = value.trim();
-    if (!body) return;
+    if (!body || locked) return;
     setBusy(true);
     try {
       await onSubmit(body, showRow ? { mode: effectiveMode, agents } : null);
@@ -832,31 +896,45 @@ function Composer({
         >
           {matches.length > 0 && (
             <ul role="listbox" aria-label="Mention someone">
-              {matches.map((c, i) => (
-                <li
-                  key={c.login}
-                  role="option"
-                  aria-selected={i === highlight}
-                  className={cn("menu-item py-1.5", i === highlight && "bg-surface-3")}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onMouseEnter={() => setHighlight(i)}
-                  onClick={() => pick(c)}
-                  data-testid="mention-option"
-                  data-login={c.login}
-                  data-agent={c.agent ? "" : undefined}
-                  data-own={c.own ? "" : undefined}
-                >
-                  {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
-                  <span className="min-w-0 flex-1 truncate text-[13px]">{c.name}</span>
-                  {c.agent ? (
-                    <span className="truncate text-xs text-ink-4" title={c.own ? "One of your API tokens; it has not been in this document yet" : `Agent of @${c.agent.ownerLogin}`}>
-                      {c.own ? "your agent · not here yet" : "agent"}
-                    </span>
-                  ) : (
-                    <span className="truncate text-xs text-ink-3">@{c.login}</span>
-                  )}
-                </li>
-              ))}
+              {matches.map((c, i) => {
+                // Someone else's agent whose owner has not opened it to collaborators: greyed, with a lock and the reason
+                // (#1296). It can still be picked — the mention is legitimate — but the composer will not send a request.
+                const lockedAgent = c.agent && !c.agent.canAsk ? c.agent : null;
+                const lockedRow = lockedAgent !== null;
+                const reason = lockedAgent ? `Only ${agentOwnerName(lockedAgent)} can ask this agent` : undefined;
+                return (
+                  <li
+                    key={c.login}
+                    role="option"
+                    aria-selected={i === highlight}
+                    aria-disabled={lockedRow || undefined}
+                    className={cn("menu-item py-1.5", i === highlight && "bg-surface-3", lockedRow && "text-ink-3")}
+                    title={reason}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setHighlight(i)}
+                    onClick={() => pick(c)}
+                    data-testid="mention-option"
+                    data-login={c.login}
+                    data-agent={c.agent ? "" : undefined}
+                    data-own={c.own ? "" : undefined}
+                    data-locked={lockedRow ? "" : undefined}
+                  >
+                    {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
+                    <span className="min-w-0 flex-1 truncate text-[13px]">{nameOf(c)}</span>
+                    {c.agent ? (
+                      <span
+                        className={cn("flex min-w-0 items-center gap-1 truncate text-xs", lockedRow ? "text-ink-3" : "text-ink-4")}
+                        title={reason ?? (c.own ? "One of your API tokens; it has not been in this document yet" : `Agent of @${c.agent.ownerLogin}`)}
+                      >
+                        {lockedRow && <Lock size={11} aria-hidden="true" className="shrink-0" />}
+                        {c.own ? "your agent · not here yet" : lockedRow ? "owner only" : "agent"}
+                      </span>
+                    ) : (
+                      <span className="truncate text-xs text-ink-3">@{c.login}</span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
           {/* No agent to mention yet: a footer that leads to Settings → API tokens, once per browser (#1025). Pointer
@@ -930,6 +1008,14 @@ function Composer({
           </div>
         </div>
       )}
+      {/* The agent named first is someone else's and its owner keeps it to themself: say so here, before the server
+          would (403 agent-owner-only), and hold the send. A sibling of the row, not inside it: the row is controls only. */}
+      {locked && addressee && (
+        <p className="flex items-start gap-1.5 text-xs text-ink-3" role="status" data-testid="agent-owner-only">
+          <Lock size={12} aria-hidden="true" className="mt-px shrink-0" />
+          <span>{agentOwnerOnlyMessage(addressee, viewerLogin)}</span>
+        </p>
+      )}
       {/* Nothing sits between the box and its buttons (Burke, #4138): the shortcuts are in the Save / send button's tooltip.
           One row, single-line labels: below ~21rem of composer width (the 340 px panel) "Suggest a change"
           is icon-only — the tooltip and aria-label carry the name — so the three buttons never wrap. */}
@@ -958,7 +1044,7 @@ function Composer({
           <button
             type="button"
             className="btn btn-primary btn-sm whitespace-nowrap"
-            disabled={!value.trim() || busy}
+            disabled={!value.trim() || busy || locked}
             onClick={() => void submit()}
             // Read after the button's name by screen readers, so keyboard users get the shortcuts without hovering.
             // (Not aria-label, which would replace "Save"; not title, which would add a second, native tooltip.)
@@ -982,9 +1068,11 @@ const CANCEL_GRACE_MS = 8_000;
 /**
  * The request a thread carries, as a soft pill in the card header: Waiting for an agent → <agent> is working… →
  * Done: 2 suggestions (then a plain Done once the detail is a minute old). A cancelled request shows nothing.
+ * Someone else's agent is named with its owner ("Drew's Copilot CLI is working…"); your own by its plain name.
  * The × cancels for the requester or the document owner; it hides at once and comes back only if the server refuses.
  */
 function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMirror; canCancel: boolean; onCancel?: (requestId: string) => void }) {
+  const { candidates, viewerLogin } = useContext(MentionCandidatesContext);
   const [cancelling, setCancelling] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const pending = request.status === "open" || request.status === "claimed";
@@ -1009,7 +1097,7 @@ function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMi
     request.status === "open"
       ? "Waiting for an agent"
       : request.status === "claimed"
-        ? `${request.claimedBy ?? "An agent"} is working…`
+        ? `${claimerName(request, viewerLogin, (login) => displayNameOf(candidates, login))} is working…`
         : showDetail
           ? `Done: ${describeResult(request.result)}`
           : "Done";
@@ -1664,10 +1752,11 @@ export function CommentsPanel({
   const mentionValue = useMemo<MentionCandidatesValue>(
     () => ({
       candidates,
+      viewerLogin: session.user.login ?? null,
       onPickerOpen: () => setWithOwnTokens(true),
       connect: { due: tokenCount === 0 && !connectDismissed, onCreateToken, onDismiss: dismissConnect },
     }),
-    [candidates, tokenCount, connectDismissed, onCreateToken, dismissConnect],
+    [candidates, session.user.login, tokenCount, connectDismissed, onCreateToken, dismissConnect],
   );
   const requests = useThreadRequests(session);
   /**

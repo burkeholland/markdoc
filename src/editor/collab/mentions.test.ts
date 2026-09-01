@@ -1,5 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { agentMentionLogin, agentMentionSlug, mentionTriggerAt, parseAgentMentions, parseMentions, splitMentions } from "./mentions";
+import { agentDisplayName, agentMentionLogin, agentMentionSlug, mentionTriggerAt, parseAgentMentions, parseMentions, possessive, splitMentions } from "./mentions";
+
+describe("agentDisplayName (owner-labelled agent names, #1296)", () => {
+  const agent = { name: "Copilot CLI", ownerLogin: "burkeholland", ownerName: "Burke" };
+
+  it("names the viewer's own agent plainly and someone else's with its owner", () => {
+    expect(agentDisplayName(agent, "burkeholland")).toBe("Copilot CLI");
+    expect(agentDisplayName(agent, "drew")).toBe("Burke's Copilot CLI");
+    expect(agentDisplayName(agent, null)).toBe("Burke's Copilot CLI");
+    expect(agentDisplayName(agent, undefined)).toBe("Burke's Copilot CLI");
+  });
+
+  it("matches the viewer to the owner case-insensitively and ignores surrounding whitespace", () => {
+    expect(agentDisplayName(agent, "BurkeHolland")).toBe("Copilot CLI");
+    expect(agentDisplayName(agent, " burkeholland ")).toBe("Copilot CLI");
+  });
+
+  it("falls back to the owner's login without a display name, and to the bare name without an owner", () => {
+    expect(agentDisplayName({ name: "Copilot CLI", ownerLogin: "drew" }, "burkeholland")).toBe("drew's Copilot CLI");
+    expect(agentDisplayName({ name: "Copilot CLI", ownerLogin: "drew", ownerName: "  " }, "burkeholland")).toBe("drew's Copilot CLI");
+    expect(agentDisplayName({ name: "Copilot CLI", ownerLogin: null }, "burkeholland")).toBe("Copilot CLI");
+    expect(agentDisplayName({ name: "Copilot CLI" }, "burkeholland")).toBe("Copilot CLI");
+  });
+
+  it("uses a bare apostrophe after a name that already ends in s", () => {
+    expect(possessive("Chris")).toBe("Chris'");
+    expect(possessive("Burke")).toBe("Burke's");
+    expect(possessive("JAMES")).toBe("JAMES'");
+    expect(agentDisplayName({ name: "Scribe", ownerLogin: "chris", ownerName: "Chris" }, "burkeholland")).toBe("Chris' Scribe");
+  });
+});
 
 describe("agent mentions (@login/Agent-Name)", () => {
   it("slugs token names into mention-safe text", () => {
