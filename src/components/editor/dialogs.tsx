@@ -3,7 +3,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
-import { shortcut } from "@/lib/utils";
+import { findReplaceShortcut, shortcut } from "@/lib/utils";
 
 /**
  * Editor actions picked in a dialog run after the dialog has closed and let go of focus (see
@@ -350,7 +350,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ["Indent / outdent list item", "Tab / Shift-Tab"],
       ["Add comment", "Mod-Alt-M"],
       ["Find", "Mod-F"],
-      ["Find and replace", "Mod-H"],
+      ["Find and replace", findReplaceShortcut()],
       ["Next / previous match", "Enter / Shift-Enter"],
       ["Close find", "Esc"],
       ["Clear the selection / hide the table menu", "Esc"],

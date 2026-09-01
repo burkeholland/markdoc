@@ -5,6 +5,7 @@ import type { Layout } from "./status-bar";
 import type { DialogKind } from "./actions";
 import type { ExportFormat } from "./header";
 import { nextTheme, readThemePreference, setThemePreference, themeLabel } from "@/lib/theme";
+import { findReplaceShortcut } from "@/lib/utils";
 
 /**
  * One entry in the command palette. The registry is a pure function of a plain
@@ -269,7 +270,7 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       run: () => ctx.keepAgent?.(),
     },
     { id: "doc:find", title: "Find", keywords: ["search", "locate"], group: "Document", icon: "Search", shortcut: "Mod-F", run: () => ctx.openFind(false) },
-    { id: "doc:find-replace", title: "Find and replace", keywords: ["search", "substitute", "rename"], group: "Document", icon: "Replace", shortcut: "Mod-H", when: canEdit, run: () => ctx.openFind(true) },
+    { id: "doc:find-replace", title: "Find and replace", keywords: ["search", "substitute", "rename"], group: "Document", icon: "Replace", shortcut: findReplaceShortcut(), when: canEdit, run: () => ctx.openFind(true) },
   ];
 
   const view: Command[] = [
