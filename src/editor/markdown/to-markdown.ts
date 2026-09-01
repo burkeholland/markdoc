@@ -1,4 +1,4 @@
-// Vendored from prosemirror-markdown 1.13.5 (`src/to_markdown.ts`), MIT licence, licence text below.
+// Vendored from prosemirror-markdown 1.13.6 (`src/to_markdown.ts`), MIT licence, licence text below.
 //
 // Copyright (C) 2015-2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 //
@@ -349,32 +349,6 @@ export class MarkdownSerializerState {
           return m.isInSet(next.marks) && (!next.isText || /\S/.test(next.text!))
         })
 
-      let leading = trailing
-      trailing = ""
-      // If whitespace has to be expelled from the node, adjust
-      // leading and trailing accordingly.
-      if (node && node.isText && marks.some(mark => {
-        const info = this.getMark(mark.type.name)
-        return info && info.expelEnclosingWhitespace && !mark.isInSet(active)
-      })) {
-        const [, lead, rest] = /^(\s*)(.*)$/m.exec(node.text!)!
-        if (lead) {
-          leading += lead
-          node = rest ? (node as TextNodeLike).withText(rest) : null
-          if (!node) marks = active
-        }
-      }
-      if (node && node.isText && marks.some(mark => {
-        const info = this.getMark(mark.type.name)
-        return info && info.expelEnclosingWhitespace && !this.isMarkAhead(parent, index + 1, mark)
-      })) {
-        const [, rest, trail] = /^(.*?)(\s*)$/m.exec(node.text!)!
-        if (trail) {
-          trailing = trail
-          node = rest ? (node as TextNodeLike).withText(rest) : null
-          if (!node) marks = active
-        }
-      }
       const inner = marks.length ? marks[marks.length - 1] : null
       const noEsc = inner && this.getMark(inner.type.name).escape === false
       const len = marks.length - (noEsc ? 1 : 0)
@@ -403,8 +377,35 @@ export class MarkdownSerializerState {
       let keep = 0
       while (keep < Math.min(active.length, len) && marks[keep].eq(active[keep])) ++keep
 
+      let leading = trailing
+      trailing = ""
+      // If whitespace has to be expelled from the node, adjust
+      // leading and trailing accordingly.
+      if (node && node.isText && marks.some(mark => {
+        const info = this.getMark(mark.type.name)
+        return info && info.expelEnclosingWhitespace && !active.some((m, i) => i < keep && m.eq(mark))
+      })) {
+        const [, lead, rest] = /^(\s*)(.*)$/m.exec(node.text!)!
+        if (lead) {
+          leading += lead
+          node = rest ? (node as TextNodeLike).withText(rest) : null
+          if (!node) marks = active
+        }
+      }
+      if (node && node.isText && marks.some(mark => {
+        const info = this.getMark(mark.type.name)
+        return info && info.expelEnclosingWhitespace && !this.isMarkAhead(parent, index + 1, mark)
+      })) {
+        const [, rest, trail] = /^(.*?)(\s*)$/m.exec(node.text!)!
+        if (trail) {
+          trailing = trail
+          node = rest ? (node as TextNodeLike).withText(rest) : null
+          if (!node) marks = active
+        }
+      }
+
       // Close the marks that need to be closed
-      while (keep < active.length)
+      if (node || index == parent.childCount) while (keep < active.length)
         this.text(this.markString(active.pop()!, false, parent, index), false)
 
       // Output any previously expelled trailing whitespace outside the marks
@@ -427,16 +428,14 @@ export class MarkdownSerializerState {
         else
           this.render(node, parent, index)
         this.atBlockStart = false
-      }
 
-      // After the first non-empty text node is rendered, the end of output
-      // is no longer at block start.
-      //
-      // FIXME: If a non-text node writes something to the output for this
-      // block, the end of output is also no longer at block start. But how
-      // can we detect that?
-      if (node?.isText && node.nodeSize > 0) {
-        this.atBlockStart = false
+        // After the first non-empty text node is rendered, the end of output
+        // is no longer at block start.
+        //
+        // FIXME: If a non-text node writes something to the output for this
+        // block, the end of output is also no longer at block start. But how
+        // can we detect that?
+        if (node.isText && node.nodeSize > 0) this.atBlockStart = false
       }
     }
     parent.forEach(progress)
