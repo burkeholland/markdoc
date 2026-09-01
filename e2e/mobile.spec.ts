@@ -51,7 +51,7 @@ const CLS_DOC = [
  * Runs before any script of every document in the context: collects every `layout-shift` entry's
  * score into `window.__cls`. Nothing is filtered on `hadRecentInput` on purpose — at 1× the
  * emulator's resize flags the hydration flip as input for 500 ms, so a filtered sum reads 0.000 on
- * a page that visibly jumps (#1470). The unfiltered sum read 0.891 before the SSR phone layout.
+ * a page that visibly jumps (#1470). The unfiltered sum read 0.852 here (0.891 in #1470) before the SSR phone layout.
  */
 function observeLayoutShifts() {
   const w = window as Window & { __cls?: number[] };
@@ -62,6 +62,19 @@ function observeLayoutShifts() {
 }
 
 const layoutShiftSum = (page: Page) => page.evaluate(() => ((window as Window & { __cls?: number[] }).__cls ?? []).reduce((a, b) => a + b, 0));
+
+/**
+ * ~145 kB of HTML: on a 4× slower CPU (a phone) the parser paints the article before the end of the
+ * document arrives, which is when a table of contents that follows the article in the DOM would push it down.
+ * At 1× on localhost the whole page paints at once and no order bug is visible (measured 0.000 either way).
+ */
+const LONG_READER_DOC =
+  "# Long reader fixture\n\n" +
+  Array.from(
+    { length: 60 },
+    (_, i) =>
+      `## Section ${i + 1}\n\nA paragraph of ordinary prose that runs long enough to wrap on a phone several times over, so the article has real height and the parser has real work to do before it reaches the end of the document.\n\n- first point\n- second point\n- third point\n\n| Col A | Col B |\n| --- | --- |\n| ${i} | ${i * 2} |\n\n\`\`\`ts\nconst value${i} = ${i};\n\`\`\`\n`,
+  ).join("\n");
 
 /** Sign in on a context that emulates a phone (or the given viewport). */
 async function signInOn(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
@@ -310,7 +323,8 @@ test.describe("phone", () => {
   // Cumulative layout shift from first paint to one second after the editor is interactive. The server
   // and the hydration render assume a desktop viewport (useBreakpoint), so the phone layout must come
   // from CSS (`max-md:hidden` rail and code column, header residual) or the whole pane jumps at
-  // hydration: 0.891 before that CSS, ≤ 0.02 with it. 0.1 is Lighthouse's "good" threshold.
+  // hydration: 0.852 before that CSS (#1470 measured 0.891), 0.009 with it — what is left is the status
+  // bar's compact swap. 0.1 is Lighthouse's "good" threshold.
   test("editor first paint is already the phone layout: no layout shift while it hydrates", async ({ browser }) => {
     const context = await browser.newContext({ ...phone });
     await context.addInitScript(observeLayoutShifts);
@@ -327,20 +341,25 @@ test.describe("phone", () => {
   });
 
   // The reader's "Contents" button sits above the article on phones; it must precede the article in
-  // the DOM too, or the streamed article paints first and drops when the aside arrives.
+  // the DOM too, or the streamed article paints first and drops 62 px when the aside arrives. Visible
+  // only when the parser paints mid-document: a long document on a 4× throttled CPU (a mid-range phone)
+  // read 0.073 with the aside last in the DOM and 0.000 with it first, so the bar is 0.02, not 0.1.
   test("reader first paint keeps the Contents button above the article: no layout shift", async ({ browser }) => {
     const context = await browser.newContext({ ...phone });
     await context.addInitScript(observeLayoutShifts);
     const page = await context.newPage();
     await devLogin(page, "phone-cls-reader");
-    const id = await createDocument(page, CLS_DOC, "Mobile CLS reader");
+    const id = await createDocument(page, LONG_READER_DOC, "Mobile CLS reader");
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
     await page.goto(`/p/${id}`);
     await waitForHydration(page);
     await expect(page.getByTestId("reader-toc-toggle")).toBeVisible();
     await page.waitForTimeout(1000);
     const cls = await layoutShiftSum(page);
-    console.log(`[1495] /p/<id> phone CLS: ${cls.toFixed(3)}`);
-    expect(cls).toBeLessThanOrEqual(0.1);
+    console.log(`[1495] /p/<id> phone CLS (4× CPU): ${cls.toFixed(3)}`);
+    expect(cls).toBeLessThanOrEqual(0.02);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
     await context.close();
   });
 

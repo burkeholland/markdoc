@@ -104,7 +104,8 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
       title={compact ? label : undefined}
     >
       {m.icon}
-      <span className={cn(compact && "sr-only")}>{label}</span>
+      {/* Phones show the icon only; below `md` the server markup already hides the label so the chip is 16 px wide from the first paint (#1470). */}
+      <span className={cn(compact ? "sr-only" : "max-md:sr-only")}>{label}</span>
     </span>
   );
 }
@@ -647,11 +648,12 @@ export const Header = memo(function Header(props: HeaderProps) {
           <PanelLeft size={20} />
         </button>
       ) : embed ? (
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center" aria-label="Markdoc" data-testid="embed-logo">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center md:h-10 md:w-10" aria-label="Markdoc" data-testid="embed-logo">
           <Logo className="h-8 w-8" />
         </span>
       ) : (
-        <Link href="/" className="icon-btn h-10 w-10 shrink-0" aria-label="Back to documents" title="All documents">
+        // Below `md` the same 36 px box as the outline button that replaces it after hydration (#1470).
+        <Link href="/" className="icon-btn h-9 w-9 shrink-0 md:h-10 md:w-10" aria-label="Back to documents" title="All documents">
           <Logo className="h-8 w-8" />
         </Link>
       )}
