@@ -2,7 +2,7 @@ import os from "node:os";
 import { isIP } from "node:net";
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import { stableHostnames } from "../scripts/lib/dev-origins.mjs";
-import { reloadHydrated } from "./helpers";
+import { devLogin, reloadHydrated } from "./helpers";
 
 /**
  * The app must work through the stable machine name rather than a DHCP-issued address. The e2e
@@ -54,10 +54,7 @@ async function signInAt(
     ws.on("close", () => (record.closed = true));
     ws.on("socketerror", (error) => errors.push(`WebSocket ${record.path}: ${error}`));
   });
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return { page, errors, sockets, requests };
 }

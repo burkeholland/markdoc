@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, selectTextInRich, reloadHydrated } from "./helpers";
+import { signIn, devLogin, createDocument, openDocument, selectTextInRich, reloadHydrated, waitForHydration } from "./helpers";
 
 const CONTENT = ["# Theme doc", "", "First paragraph to comment on.", "", "```ts", "const answer: number = 42;", "```", ""].join("\n");
 
@@ -22,10 +22,7 @@ test.describe("dark mode", () => {
   test("follows the OS preference by default, toggles without a reload and persists", async ({ browser }) => {
     const context = await browser.newContext({ colorScheme: "dark" });
     const page = await context.newPage();
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill("themer");
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    await devLogin(page, "themer");
 
     // Dashboard in dark.
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -128,6 +125,7 @@ test.describe("dark mode", () => {
 
     // Settings page has a theme row.
     await page.goto("/settings");
+    await waitForHydration(page);
     await expect(page.getByTestId("theme-row")).toBeVisible();
     await expect(page.getByTestId("theme-option-dark")).toHaveAttribute("aria-checked", "true");
     await page.getByTestId("theme-option-light").click();

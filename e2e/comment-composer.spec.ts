@@ -1,6 +1,6 @@
 import { test, expect, type Browser, type Locator, type Page, type Request } from "@playwright/test";
 import { mkdirSync } from "node:fs";
-import { createDocument, ensureCommentsOpen, openDocument, selectTextInRich } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, openDocument, selectTextInRich } from "./helpers";
 
 /**
  * Task #984 (Burke): the comment composer follows its content — three lines at rest, growing to min(320 px, 40 vh)
@@ -19,10 +19,7 @@ const lines = (n: number) => Array.from({ length: n }, (_, i) => "line " + (i + 
 async function signInAt(browser: Browser, login: string) {
   const context = await browser.newContext({ viewport: VIEWPORT });
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return { context, page };
 }

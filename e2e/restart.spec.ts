@@ -6,7 +6,7 @@ import path from "node:path";
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import WebSocket from "ws";
 import { e2eDistDir, removeDistDir } from "./dist-dir";
-import { reloadHydrated } from "./helpers";
+import { devLogin, reloadHydrated } from "./helpers";
 
 /**
  * A server restart while the user types (#190, the browser side of a zero-downtime promote, #577).
@@ -213,10 +213,7 @@ function countTokens(text: string): { present: number; doubled: string[] } {
 async function signInAt(browser: Browser, baseURL: string, login: string) {
   const context = await browser.newContext({ baseURL });
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   return { context, page };
 }
 

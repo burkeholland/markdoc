@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { encode } from "next-auth/jwt";
+import { devLogin } from "./helpers";
 
 /**
  * A browser still carrying a session cookie signed with a previous AUTH_SECRET (every rebuild
@@ -50,10 +51,7 @@ test.describe("stale session cookie", () => {
     expect(consoleErrors).toEqual([]);
 
     // A fresh sign-in from the same browser works and its cookie is left alone.
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill("stale-cookie-user");
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    await devLogin(page, "stale-cookie-user");
     const me = await page.request.get("/api/me");
     expect(me.status()).toBe(200);
     await page.goto("/");

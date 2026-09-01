@@ -1,5 +1,5 @@
 import { test, expect, type Browser, type Locator, type Page } from "@playwright/test";
-import { createDocument, ensureCommentsOpen, openDocument, reloadHydrated } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, openDocument, reloadHydrated } from "./helpers";
 
 /**
  * Task #978: the desktop Comments / Versions / Activity panel is resizable from its left edge.
@@ -16,10 +16,7 @@ const MAX_WIDTH = Math.min(720, Math.floor(VIEWPORT.width * 0.6));
 async function signInDesktop(browser: Browser, login: string) {
   const context = await browser.newContext({ viewport: VIEWPORT });
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return { context, page };
 }

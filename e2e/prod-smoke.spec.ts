@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { richText } from "./helpers";
+import { devLogin, richText } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -26,11 +26,9 @@ test.describe("production build", () => {
     expect(health.status()).toBe(200);
     expect(await health.json()).toMatchObject({ ok: true, db: true, collab: true });
 
-    // Development login (allowed in production only with AUTH_DEV_LOGIN=force).
-    await page.goto("/login");
-    await page.getByTestId("dev-login").fill(login);
-    await page.getByTestId("dev-login-submit").click();
-    await page.waitForURL((url) => url.pathname === "/");
+    // Development login (allowed in production only with AUTH_DEV_LOGIN=force). The build under test comes
+    // from this checkout, so it carries the html[data-hydrated] marker devLogin waits for.
+    await devLogin(page, login);
     await page.waitForLoadState("networkidle");
 
     // The API limiter is on in production: every /api/* response says how much budget is left.

@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme } from "./helpers";
+import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -184,10 +184,7 @@ async function expectRenderedTextContrast(locator: Locator, state: string) {
 async function signInWithOptions(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
   const context = await browser.newContext(options);
   const page = await context.newPage();
-  await page.goto("/login");
-  await page.getByTestId("dev-login").fill(login);
-  await page.getByTestId("dev-login-submit").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await devLogin(page, login);
   await page.waitForLoadState("networkidle");
   return { context, page };
 }
@@ -1001,6 +998,8 @@ test.describe("axe: phone (iPhone 13)", () => {
       expect((await page.request.put(`/api/documents/${id}/star`)).ok()).toBeTruthy();
     }
     await page.goto("/");
+    // The strip is server markup; a tap before React attaches its handler does nothing (received 14 cards, not 7).
+    await waitForHydration(page);
     const showAll = page.getByTestId("show-all-starred");
     await expect(showAll).toBeVisible();
     const box = await showAll.boundingBox();

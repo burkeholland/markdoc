@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, waitForHydration, type User } from "./helpers";
 
 test.describe("@mentions in comments", () => {
   let alice: User;
@@ -62,6 +62,7 @@ test.describe("@mentions in comments", () => {
       .toEqual(["Mentions doc"]);
 
     await bob.page.goto("/");
+    await waitForHydration(bob.page);
     const strip = bob.page.getByTestId("notifications-strip");
     await expect(strip).toBeVisible();
     // The strip carries every kind (Bob was also notified of the share); look at the mention.
