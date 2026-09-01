@@ -1,4 +1,5 @@
-import { test, expect, type Page, type Response } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page, Response } from "@playwright/test";
 import { budgetMs, createDocument, focusRichEnd, openDocument, signIn } from "./helpers";
 
 // highlight.js' core and its 37 `common` grammars live in their own chunk (src/editor/prosemirror/code-highlight-languages.ts)

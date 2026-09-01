@@ -1,4 +1,5 @@
-import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import { devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { createDocument, cssPx, devLogin, selectTextInRich, waitForHydration } from "./helpers";
 

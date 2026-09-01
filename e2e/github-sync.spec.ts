@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, codeText } from "./helpers";
 
 // GitHub is an in-memory fake in the e2e server (GITHUB_MOCK=1, see src/server/github/mock.ts); the

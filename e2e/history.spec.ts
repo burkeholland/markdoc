@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, codeText, focusCodeEnd } from "./helpers";
 
 test.describe("version history", () => {

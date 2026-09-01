@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { createDocument, mintToken, signIn, type MintedToken } from "./helpers";
 
 const extensionModule = "../extensions/markdoc/extension-core.mjs";

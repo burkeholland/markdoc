@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, shareWith, focusRichEnd, selectTextInRich, type User } from "./helpers";
 
 const mod = process.platform === "darwin" ? "Meta" : "Control";

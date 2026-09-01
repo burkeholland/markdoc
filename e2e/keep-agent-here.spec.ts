@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { BrowserContext, Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
 import { codeText, createDocument, devLogin, mintToken, openDocument, type MintedToken } from "./helpers";
 

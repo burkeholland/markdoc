@@ -1,4 +1,5 @@
-import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import { devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";

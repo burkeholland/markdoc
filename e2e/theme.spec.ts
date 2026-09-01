@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { signIn, devLogin, createDocument, openDocument, selectTextInRich, reloadHydrated, waitForHydration } from "./helpers";
 
 const CONTENT = ["# Theme doc", "", "First paragraph to comment on.", "", "```ts", "const answer: number = 42;", "```", ""].join("\n");

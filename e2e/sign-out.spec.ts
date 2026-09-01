@@ -1,4 +1,5 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
+import type { BrowserContext, Page } from "@playwright/test";
 import * as Y from "yjs";
 import { codeText, createDocument, devLogin, focusCodeEnd, openDocument, signIn } from "./helpers";
 

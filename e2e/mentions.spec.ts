@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, waitForHydration, uniqueLogin, type User } from "./helpers";
 
 test.describe("@mentions in comments", () => {
