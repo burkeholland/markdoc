@@ -268,6 +268,8 @@ Two health checks, two probes. `GET /api/health` is the full check — one datab
 
 A release never overlaps another mutation on `markdoc-rg` — no `deploy/azure.ps1` run, no NAT gateway or subnet change, no OS patch window at the same time; if one is under way, wait for it to finish before step 2 (building the image in step 1 changes nothing that runs).
 
+The other production mutation, an **infrastructure deployment** (`deploy/azure.ps1 -InfraOnly -SecretsPath <clixml>`: alert rules, the NSG rule-write tripwire, subnets, network policies — never the image, a revision or the database), is never part of a release and has its own runbook, [`docs/infra-deploy.md`](docs/infra-deploy.md): preflight checklist, what a what-if cannot prove, the `Step` lines to expect, verification, and rollback (forward fixes only — the last deployed template `1975b96` must never be redeployed).
+
 Production is the one Container App `markdoc` in `markdoc-rg` (East US 2), and it already exists. A release changes **only its image**: it does not rerun the Bicep template or `deploy/azure.ps1`, the one-time PGlite data migration (`scripts/migrate-pglite-to-postgres.mts`, and never its `--replace` mode), credential rotation, or provisioning; the app's own Drizzle schema migrations still run at container startup, as on every start. PostgreSQL stays authoritative throughout, and the app image is the only thing that rolls forward or back. `.github/workflows/deploy.yml` is the in-repo implementation of steps 1–3; the same commands work from a workstation.
 
 1. Pick the exact accepted `main` commit (full 40-character SHA) and build from a clean checkout of it in ACR (`az acr build`), tagging the image with the full SHA and its 12-character prefix and passing `--build-arg APP_VERSION=<sha>` so `/api/health` reports it. (`deploy/azure.ps1 -SourceCommit <sha>` builds the same way from a clean deployment checkout and refuses when that checkout differs from the commit in application files, but as a full-template run it is not the release path for the existing app.) `hadolint` is not available through npm on this machine (the wrapper's binary download 404s); lint the Dockerfile with the official `hadolint/hadolint` image or GitHub Action when one is available. `npm audit` must print `found 0 vulnerabilities`; the `overrides` block in `package.json` exists only to replace the never-executed `esbuild@0.18` nested under drizzle-kit's deprecated `@esbuild-kit` loader — remove it when drizzle-kit drops that dependency (drizzle-team/drizzle-orm#5689). The preflight also runs the one real-GitHub unit file, which an ordinary `npm test` skips: `MARKDOC_GITHUB_INTEGRATION=1 npm run test:github` must report 2 passed (it commits to and cleans up `burkeholland/markdoc-scratch`).
@@ -443,7 +445,7 @@ scripts/dev-port.mts         dev server on a private port/cache/db
 scripts/build-server.mjs     esbuild bundles: server/index.ts -> dist/server.mjs, the Markdown render worker -> dist/render-worker.mjs
 scripts/precompress-static.mjs  build step after `next build`: brotli q11 `.br` next to every .js/.css >= 1 kB under <distDir>/static
 scripts/live/                PowerShell ops for Burke's live :3000 server (start, promote, autostart, snapshot/restore, resume-check)
-infra, deploy                Bicep and deployment script
+infra, deploy                Bicep and deployment script (infrastructure-deployment runbook: docs/infra-deploy.md)
 ```
 
 ## Live test server (Burke's :3000)
