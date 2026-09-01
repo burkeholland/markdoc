@@ -164,7 +164,10 @@ export function parseAddressee(value: string): RequestAddressee | null {
   return { login, slug: agent.toLowerCase() };
 }
 
-/** A live (unrevoked, unexpired) token answering to `@login/slug`, with its owner: who the request goes to. */
+/**
+ * The live (unrevoked, unexpired) token answering to `@login/slug`, with its owner: who the request goes to.
+ * Live mention slugs are unique per user, so at most one row matches.
+ */
 async function findAddresseeToken(agent: RequestAddressee) {
   const db = await getDb();
   const [row] = await db

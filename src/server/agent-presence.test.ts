@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
 import * as Y from "yjs";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
+import { and, eq, isNull } from "drizzle-orm";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -17,7 +18,7 @@ vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, upsertCollaborator } = await import("@/server/documents");
-const { createApiToken } = await import("@/server/tokens");
+const { createApiToken, setCollaboratorsMayAsk } = await import("@/server/tokens");
 const { createCollabServer, shutdownCollab } = await import("@/server/collab/hocuspocus");
 const { attachCollab } = await import("@/server/collab/ws");
 const { registerCollab } = await import("@/server/collab/registry");
@@ -263,20 +264,28 @@ describe("agent caret", () => {
 });
 
 describe("agents in the @-mention picker", () => {
-  it("lists present agents and agents active in the last 30 days, not expired ones", async () => {
+  it("lists present agents and agents active in the last 30 days, not expired ones; each with its owner and the collaboratorsMayAsk switch", async () => {
     presence.resetAgentPresence();
     const t0 = Date.now();
     presence.setAgentPresence(docId, agentActor("Copilot CLI"), { state: "active" }, t0);
     // An agent that only wrote here (activity row) in the past month, and one whose activity is older.
     await recordActivity(docId, activityActor(agentActor("Scribe")), "suggestion.add", { count: 1 });
     await recordActivity(docId, activityActor(agentActor("Old Bot")), "comment.add", {}, new Date(t0 - 31 * 24 * 60 * 60 * 1000));
+    // Olive lets others ask her "Scribe" (#1296); "Copilot CLI" is present but has no live token of that name.
+    const db = await getDb();
+    const [existing] = await db.select({ id: schema.apiTokens.id }).from(schema.apiTokens).where(and(eq(schema.apiTokens.userId, owner.id), eq(schema.apiTokens.mentionSlug, "scribe"), isNull(schema.apiTokens.revokedAt)));
+    const scribe = existing ?? (await createApiToken(owner.id, "Scribe"));
+    await setCollaboratorsMayAsk(owner.id, scribe.id, true);
     const res = await asHuman(() => GET_COLLABORATORS(req(`/api/documents/${docId}/collaborators`), params(docId)));
     expect(res.status).toBe(200);
-    const { agents } = (await res.json()) as { agents: { name: string; login: string; ownerLogin: string; present: boolean }[] };
+    const { agents } = (await res.json()) as { agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean; collaboratorsMayAsk: boolean }[] };
     // Present agents first, then the recently active ones; "Old Bot" (31 days) is out.
-    expect(agents[0]).toMatchObject({ name: "Copilot CLI", login: "olive/Copilot-CLI", ownerLogin: "olive", present: true });
-    expect(agents.find((a) => a.name === "Scribe")).toMatchObject({ login: "olive/Scribe", present: false });
+    expect(agents[0]).toMatchObject({ name: "Copilot CLI", login: "olive/Copilot-CLI", ownerLogin: "olive", ownerName: "Olive", present: true, collaboratorsMayAsk: false });
+    expect(agents.find((a) => a.name === "Scribe")).toMatchObject({ login: "olive/Scribe", ownerName: "Olive", present: false, collaboratorsMayAsk: true });
     expect(agents.map((a) => a.name)).not.toContain("Old Bot");
+    await setCollaboratorsMayAsk(owner.id, scribe.id, false);
+    const locked = (await (await asHuman(() => GET_COLLABORATORS(req(`/api/documents/${docId}/collaborators`), params(docId)))).json()) as { agents: { name: string; collaboratorsMayAsk: boolean }[] };
+    expect(locked.agents.find((a) => a.name === "Scribe")?.collaboratorsMayAsk).toBe(false);
 
     // Once the presence expires, the present one is gone too (it has no activity rows).
     presence.sweep(t0 + presence.AGENT_PRESENCE_TTL_MS + 1);

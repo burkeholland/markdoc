@@ -1673,17 +1673,20 @@ export function CommentsPanel({
   /**
    * A comment that mentions an agent is also a request. The comment goes through the shared doc as usual and the
    * request follows over REST, after the server has that thread: `createRequest` checks `threadId` against the live
-   * doc and answers 404 otherwise, so this waits for the sync ack and retries briefly. A failed request never loses
-   * the comment; the toast says to mention the agent again.
+   * doc and answers 404 otherwise, so this waits for the sync ack and retries briefly. The request is addressed to
+   * the first agent the body mentions (a reply may name a different agent than the thread's root comment). A failed
+   * request never loses the comment; the toast says why, or to mention the agent again.
    */
   const postAgentRequest = useCallback(
     async (threadId: string, body: string, mode: AgentRequestMode, selection: { from: number; to: number; quote: string } | null) => {
       await waitForSynced(session);
+      const [addressee] = parseAgentMentions(body);
       const payload = {
         mode,
         instruction: requestInstruction(body),
         selection: selection ? { ...selection, quote: selection.quote.slice(0, REQUEST_QUOTE_MAX) } : null,
         threadId,
+        agent: addressee ? `${addressee.login}/${addressee.agent}` : null,
       };
       const delays = [0, 250, 500, 1000];
       for (let i = 0; i < delays.length; i++) {

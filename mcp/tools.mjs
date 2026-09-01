@@ -150,17 +150,23 @@ export function registerTools(server, client) {
 
   tool(
     "markdoc_whoami",
-    { title: "Who am I", description: "Show which user and agent identity this token acts as, its scope (read / comment / full) and whether it is restricted to certain documents.", inputSchema: {}, annotations: READ_ONLY },
+    { title: "Who am I", description: "Show which user and agent identity this token acts as, its scope (read / comment / full), whether it is restricted to certain documents, and whether other users may address requests to it.", inputSchema: {}, annotations: READ_ONLY },
     async () => {
       const me = await api("GET", "/api/me");
       const scope = me.scope ?? "full";
       const restriction = me.documentIds?.length ? ` Restricted to ${me.documentIds.length} document(s): ${me.documentIds.join(", ")}.` : "";
       const limits = scope === "full" ? "" : scope === "comment" ? " It can read, comment, suggest and review but not rewrite, publish or delete (ask for a full-access token at /settings for that)." : " It can only read; comments and edits need a comment or full-access token from /settings.";
+      const mention = me.user.login && me.agentMention?.slug ? `@${me.user.login}/${me.agentMention.slug}` : null;
+      const asking = me.agent
+        ? me.collaboratorsMayAsk
+          ? ` Other users may address requests to it${mention ? ` as ${mention}` : ""} (the owner switched "collaborators may ask" on).`
+          : ` Only its owner may address requests to it${mention ? ` as ${mention}` : ""} (the owner can switch "collaborators may ask" on at /settings).`
+        : "";
       const hooks = Array.isArray(me.webhooks) ? me.webhooks : [];
       const pushes = hooks.length
         ? `\nEvents are also pushed to ${hooks.length} webhook${hooks.length === 1 ? "" : "s"}: ${hooks.map((h) => `${h.url} (${h.events.join(", ")}${h.documentIds ? `; ${h.documentIds.length} document${h.documentIds.length === 1 ? "" : "s"}` : ""})`).join("; ")}.`
         : "";
-      return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}" with ${scope} scope.${limits}${restriction} Server: ${baseUrl}${pushes}`, me);
+      return ok(`Acting as ${me.user.name ?? me.user.login} (${me.user.login ?? me.user.id}) via agent "${me.agent}" with ${scope} scope.${limits}${restriction}${asking} Server: ${baseUrl}${pushes}`, me);
     },
   );
 
@@ -579,7 +585,7 @@ export function registerTools(server, client) {
     {
       title: "List requests for me",
       description:
-        "Check Markdoc for work people asked for from inside the editor by mentioning an agent in a comment: open requests across every document the user can see, each with the document, the selected text (if any), the instruction and the mode — suggest (propose tracked changes with markdoc_suggest), comment (reply with markdoc_comment) or rewrite (edit directly with markdoc_replace_content). Each request carries `threadId` when it came from a comment — answer in that thread (markdoc_comment { action: \"reply\", threadId, requestId }) rather than opening a new one. Claim one with markdoc_claim_request, do the work passing its requestId, then markdoc_complete_request.",
+        "Check Markdoc for work people asked for from inside the editor by mentioning an agent in a comment: requests addressed to this agent (@your-login/your-slug), or asked by your own user without an addressee, on documents you own or collaborate on — each with the document, the selected text (if any), the instruction and the mode — suggest (propose tracked changes with markdoc_suggest), comment (reply with markdoc_comment) or rewrite (edit directly with markdoc_replace_content). Requests addressed to another agent are not listed and cannot be claimed or completed by you (403). Each request carries `threadId` when it came from a comment — answer in that thread (markdoc_comment { action: \"reply\", threadId, requestId }) rather than opening a new one. Claim one with markdoc_claim_request, do the work passing its requestId, then markdoc_complete_request.",
       inputSchema: {
         status: z.enum(["open", "claimed", "done", "cancelled"]).optional().describe("Default: open"),
         limit: z.number().int().min(1).max(200).optional(),
@@ -592,9 +598,10 @@ export function registerTools(server, client) {
       if (limit) q.set("limit", String(limit));
       const qs = q.toString();
       const { requests } = await api("GET", `/api/agent/requests${qs ? `?${qs}` : ""}`);
+      const addressee = (r) => (r.agent ? ` · for @${r.agent.login}/${r.agent.slug}${r.agentName ? ` (${r.agentName})` : ""}` : "");
       const lines = requests.map(
         (r) =>
-          `- [${r.id}] ${r.status}${r.claimedBy ? ` (${r.claimedBy})` : ""} · ${r.mode} · "${r.documentTitle}" (document ${r.documentId}) · from ${r.userName ?? r.userLogin ?? "someone"} · ${r.createdAt}${r.threadId ? ` · thread ${r.threadId}` : ""}\n    instruction: ${r.instruction}${r.selection ? `\n    selection: ${JSON.stringify(r.selection.quote)}` : "\n    selection: whole document"}`,
+          `- [${r.id}] ${r.status}${r.claimedBy ? ` (${r.claimedBy}${r.claimedByLogin ? ` @${r.claimedByLogin}` : ""})` : ""} · ${r.mode} · "${r.documentTitle}" (document ${r.documentId}) · from ${r.userName ?? r.userLogin ?? "someone"}${addressee(r)} · ${r.createdAt}${r.threadId ? ` · thread ${r.threadId}` : ""}\n    instruction: ${r.instruction}${r.selection ? `\n    selection: ${JSON.stringify(r.selection.quote)}` : "\n    selection: whole document"}`,
       );
       return ok(lines.length ? lines.join("\n") : `No ${status ?? "open"} requests. Nothing to do right now.`, { requests });
     },
@@ -604,7 +611,7 @@ export function registerTools(server, client) {
     "markdoc_claim_request",
     {
       title: "Claim a request",
-      description: "Take an open request so the human sees who is working on it. Then read the document (markdoc_read_document), do the work with markdoc_suggest / markdoc_comment / markdoc_replace_content passing the same requestId, and finish with markdoc_complete_request.",
+      description: "Take an open request so the human sees who is working on it. Only the agent the request is addressed to (or, for an unaddressed one, the requester's own agents) may claim it; anyone else gets a 403 naming the addressee. Then read the document (markdoc_read_document), do the work with markdoc_suggest / markdoc_comment / markdoc_replace_content passing the same requestId, and finish with markdoc_complete_request.",
       inputSchema: { documentId: z.string(), requestId: z.string() },
       annotations: ADDITIVE,
     },
@@ -621,7 +628,7 @@ export function registerTools(server, client) {
     "markdoc_complete_request",
     {
       title: "Complete a request",
-      description: "Mark a request done once your suggestions/comments are in. The requester is notified and sees the result; `summary` is shown to them (one sentence on what you did).",
+      description: "Mark a request done once your suggestions/comments are in. Only the addressee may complete it (403 otherwise). The requester is notified and sees the result; `summary` is shown to them (one sentence on what you did).",
       inputSchema: {
         documentId: z.string(),
         requestId: z.string(),
@@ -677,7 +684,7 @@ export function registerTools(server, client) {
     {
       title: "Wait for humans",
       description:
-        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment or reply; reply decisions include `replyId`), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set; `refId` is the comment or reply, `threadId` the thread to answer in), request.created (a person mentioned an agent in a comment: `requestId`, `mode`, `instruction` and the request's comment thread as `threadId`), activity. Without `id`, mentions, reviews and requests across every document you own or collaborate on. Every event carries `actor` ({ name, login, kind: user|agent, agent, self }); your own writes (append, suggest, comment, review) are not delivered, so the call keeps waiting after your own actions — pass includeSelf: true to see them, marked (you). The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
+        "Long-poll for what people do: with `id`, everything on that document — content.changed (hash + unified diff of the clean text), comment.added / comment.replied / comment.resolved, suggestion.accepted / suggestion.rejected (a decision on a ```suggestion block in a comment or reply; reply decisions include `replyId`), review.created, mention (someone @-mentioned your user, or you by name as @<user>/<your-token-name> from the picker — then `agent` is set; `refId` is the comment or reply, `threadId` the thread to answer in), request.created (a person mentioned an agent in a comment: `requestId`, `mode`, `instruction`, the request's comment thread as `threadId` and the addressee as `agent` (login/slug, or null) — skip requests addressed to another agent), activity. Without `id`, mentions across every document you can open (link-accessible ones included), plus reviews across documents you own or collaborate on and, on those documents, the requests addressed to you or asked by your own user without an addressee. Every event carries `actor` ({ name, login, kind: user|agent, agent, self }); your own writes (append, suggest, comment, review) are not delivered, so the call keeps waiting after your own actions — pass includeSelf: true to see them, marked (you). The first call without `since` returns only a cursor (start from now); loop passing the last cursor back as `since`. Blocks up to `wait` seconds (default 30, max 55) and returns early as soon as something happens. Respond with markdoc_comment / markdoc_suggest, then call markdoc_presence idle and watch again.",
       inputSchema: {
         id: z.string().optional().describe("Document id; omit for the cross-document inbox"),
         since: z.string().optional().describe("Cursor from the previous call"),
