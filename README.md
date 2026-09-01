@@ -132,6 +132,7 @@ npm run lint
 ```
 
 - Component tests declare `// @vitest-environment jsdom` at the top of the file; that pragma is also what installs the jest-dom matchers (`toBeInTheDocument`, `toHaveAttribute`, …) — a node-environment test that calls one fails with `Invalid Chai property`, and the fix is the pragma, not a change to `vitest.setup.ts`.
+- The unit suite is two vitest projects (`vitest.config.mts`): `default` runs every file in its own fork, `pure` runs the stateless files with `isolate: false` in shared workers (`npx vitest run --project pure` / `--project default` runs one of them); a file that misbehaves only under `pure` is added to `PURE_EXCLUDE` in the config with its reason — the test itself is not edited.
 - Burke-scale fixture: `e2e/fixtures/burke-scale.ts` seeds a ~12k-word document with 25 comment threads, 60 documents (starred, shared, trashed) and an API token; `e2e/scale.spec.ts` runs the long-document flows against it with measured budgets (`npx playwright test --project scale`; its own CI job), and `npm run seed:burke-scale` loads the same fixture into a dev server so you can try the app with real volume.
 
 ### Working in a worktree
