@@ -133,6 +133,17 @@ const noHorizontalScroll = (page: Page) =>
     return el.scrollWidth <= window.innerWidth;
   });
 
+/** Page-level horizontal overflow in CSS px (#1556's census read): 0 when nothing widens the page. */
+const pageOverflowX = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+
+/**
+ * A 120-character title and a 200-character first paragraph with no break opportunity at all (letters
+ * and digits only — a browser may break after a `/` or `-`, so a pasted URL is the softer case).
+ * The excerpt keeps the first 160 characters, unbroken.
+ */
+const LONG_TITLE = "TitleWordNoSpaces".repeat(8).slice(0, 120);
+const LONG_WORD = "Xk7".repeat(67).slice(0, 200);
+
 const settingsViewports = [
   { width: 320, height: 568 },
   { width: 360, height: 800 },
@@ -574,6 +585,45 @@ test.describe("phone", () => {
     const cls = await layoutShiftSum(page);
     console.log(`[1525] / phone CLS: ${cls.toFixed(3)}`);
     expect(cls).toBeLessThanOrEqual(0.1);
+    await context.close();
+  });
+
+  // One long unbroken word as a card's title or first paragraph (a pasted URL, an identifier) made the
+  // single-column grid as wide as the word: the `li` could not shrink below its min-content width and the
+  // whole page scrolled sideways — 382 px of overflow at 520 px in #1556's census, 900 px at 393 px with
+  // this fixture. `min-w-0` on the grid items lets a card shrink and `break-words` wraps the word inside
+  // it; the `line-clamp` still caps the excerpt at three 20 px lines. Same list markup on `/`, the search
+  // results and the trash, so all three are read.
+  test("dashboard at 393 px: a long unbroken word in a card wraps instead of widening the page", async ({ browser }) => {
+    const { context, page } = await signInOn(browser, uniqueLogin("phone-long-word"), { ...devices["Pixel 5"] });
+    const longId = await createDocument(page, `# ${LONG_TITLE}\n\n${LONG_WORD}\n`, LONG_TITLE);
+    await createDocument(page, "# Two\n\nA short paragraph.\n", "Two");
+    const fits = (text: Locator) =>
+      text.evaluate((el) => ({ fits: el.scrollWidth <= el.clientWidth + 1, height: el.getBoundingClientRect().height }));
+
+    await page.goto("/");
+    await waitForHydration(page);
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+    const card = page.getByTestId("document-card").filter({ hasText: LONG_TITLE.slice(0, 24) });
+    expect(await pageOverflowX(page), "/ overflow-x").toBe(0);
+    expect((await fits(card.getByRole("heading"))).fits).toBe(true);
+    const excerpt = await fits(card.locator("p").first());
+    expect(excerpt.fits).toBe(true);
+    expect(cssPx(excerpt.height)).toBeLessThanOrEqual(60);
+
+    await page.getByTestId("search").fill(LONG_WORD.slice(20, 40));
+    await expect(page.getByTestId("search-result")).toHaveCount(1);
+    await expect(page.getByTestId("search-snippet")).toBeVisible();
+    expect(await pageOverflowX(page), "search overflow-x").toBe(0);
+    expect((await fits(page.getByTestId("search-snippet"))).fits).toBe(true);
+    await page.getByTestId("search-clear").click();
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+
+    expect((await page.request.delete(`/api/documents/${longId}`)).ok()).toBeTruthy();
+    await page.getByTestId("filter-trash").click();
+    await expect(page.getByTestId("trash-card")).toHaveCount(1);
+    expect(await pageOverflowX(page), "trash overflow-x").toBe(0);
+    expect((await fits(page.getByTestId("trash-card").locator("p").first())).fits).toBe(true);
     await context.close();
   });
 

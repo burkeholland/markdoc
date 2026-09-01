@@ -114,7 +114,7 @@ export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) 
         const Icon = TEMPLATE_ICONS[t.icon];
         const isBusy = busy === t.id;
         return (
-          <li key={t.id}>
+          <li key={t.id} className="min-w-0">
             <button
               type="button"
               onClick={() => onPick(t)}
@@ -578,13 +578,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               </div>
               <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
                 {starred.slice(0, STARRED_STRIP_MAX).map((d) => (
-                  <li key={d.id} className="group relative">
+                  <li key={d.id} className="group relative min-w-0">
                     <Link
                       href={`/d/${d.id}`}
                       className="flex h-full flex-col gap-1 rounded-xl border border-line bg-surface px-3 py-2.5 pr-9 shadow-sm transition hover:border-accent hover:shadow-md"
                       data-testid="starred-card"
                     >
-                      <span className="line-clamp-2 text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
+                      <span className="line-clamp-2 break-words text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
                       <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                     </Link>
                     <StarButton starred={d.starred} onToggle={() => toggleStar(d)} className="absolute right-1.5 top-1.5" />
@@ -669,24 +669,24 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           ) : (
             <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
               {filtered.map((d) => (
-                <li key={d.id} className="group relative" data-testid={trimmed ? "search-result" : undefined}>
+                <li key={d.id} className="group relative min-w-0" data-testid={trimmed ? "search-result" : undefined}>
                   <Link
                     href={`/d/${d.id}`}
                     className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md"
                     data-testid="document-card"
                   >
                     <div className="mb-2 flex items-start justify-between gap-2">
-                      <h3 className="line-clamp-2 text-[15px] font-semibold leading-5 text-ink">
+                      <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">
                         <Highlight text={d.title} needle={trimmed} />
                       </h3>
                       <StorageBadge doc={d} />
                     </div>
                     {d.snippet ? (
-                      <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-2" data-testid="search-snippet">
+                      <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-2" data-testid="search-snippet">
                         <Highlight text={d.snippet} needle={trimmed} />
                       </p>
                     ) : (
-                      <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
+                      <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
                     )}
                     <div className="mt-3 flex items-center gap-2 pr-8 text-xs text-ink-4">
                       <span>{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
@@ -755,12 +755,12 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
           {documents.map((d) => {
             const isBusy = busy === d.id;
             return (
-              <li key={d.id} className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm" data-testid="trash-card" aria-busy={isBusy || undefined}>
+              <li key={d.id} className="flex h-full min-w-0 flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm" data-testid="trash-card" aria-busy={isBusy || undefined}>
                 <div className="mb-2 flex items-start justify-between gap-2">
-                  <h3 className="line-clamp-2 text-[15px] font-semibold leading-5 text-ink">{d.title}</h3>
+                  <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">{d.title}</h3>
                   <StorageBadge doc={d} />
                 </div>
-                <p className="line-clamp-3 flex-1 text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
+                <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-4">
                   <span className="whitespace-nowrap">{d.deletedAt ? <RelativeTime date={d.deletedAt} prefix="Trashed " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                   <div className="ml-auto flex items-center gap-1.5">
