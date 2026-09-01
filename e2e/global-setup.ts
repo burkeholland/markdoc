@@ -1,6 +1,6 @@
 import { chromium, type FullConfig } from "@playwright/test";
 import { e2eDistDir, removeDistDir } from "./dist-dir";
-import { devLogin, waitForHydration } from "./helpers";
+import { budgetScale, devLogin, waitForHydration } from "./helpers";
 
 /**
  * A Next dist dir left behind by a killed run answers 404 on every API route (or EPERM on
@@ -36,6 +36,7 @@ async function assertHealthy(baseURL: string, distDir: string) {
  * Skipped when PROD_BASE_URL is set (the suite then targets an already-built server).
  */
 export default async function globalSetup(config: FullConfig) {
+  console.log(`[e2e] timing budgets ×${budgetScale()}${process.env.E2E_BUDGET_SCALE ? " (E2E_BUDGET_SCALE)" : process.env.CI ? " (CI)" : ""}`);
   if (process.env.PROD_BASE_URL) {
     console.log("[e2e warm-up] PROD_BASE_URL set, skipping");
     return;

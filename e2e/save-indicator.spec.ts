@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { codeText, createDocument, focusRichEnd, openDocument, richText, shareWith, signIn } from "./helpers";
+import { budgetMs, codeText, createDocument, focusRichEnd, openDocument, richText, shareWith, signIn } from "./helpers";
 
 /**
  * The header's save chip while typing (#1282). The provider counts one unsynced change per keystroke and
@@ -77,7 +77,7 @@ test("one user typing: the chip flips twice while the sync still runs per keystr
     // The chip moved exactly twice: into Saving… at the first key, back to Saved once after the hold.
     expect(shown.map((c) => c.value)).toEqual(["saving", "saved"]);
     expect(settle.t - lastAck.t).toBeGreaterThanOrEqual(SAVED_HOLD_MS - 100);
-    expect(settle.t - typedEnd).toBeLessThanOrEqual(3_000);
+    expect(settle.t - typedEnd).toBeLessThanOrEqual(budgetMs(3_000));
     // Saving… showed at the first key, not after a delay.
     expect(shown[0].t).toBeLessThanOrEqual(live[0].t + 200);
   } finally {

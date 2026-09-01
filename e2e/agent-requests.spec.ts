@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
 
 /**
  * Agent requests from comments (task #1024): mentioning an agent in a comment or reply makes the comment a request.
@@ -339,7 +339,7 @@ test.describe("agent requests from comments", () => {
     test.info().annotations.push({ type: "measurement", description: `POST /requests 404s over 10 runs: ${notFound()}; sync-wait p95 ${p95.toFixed(1)} ms over ${waits.length} waits (max ${max.toFixed(1)} ms)` });
     console.log(`[agent-requests] 404s=${notFound()} sync-wait p95=${p95.toFixed(1)}ms max=${max.toFixed(1)}ms n=${waits.length}`);
     expect(notFound()).toBe(0);
-    expect(p95).toBeLessThan(2000);
+    expect(p95).toBeLessThan(budgetMs(2000));
   });
 });
 
@@ -409,7 +409,7 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     const pickerMs = Date.now() - t0;
     test.info().annotations.push({ type: "measurement", description: `empty state → composer with "@" and the picker open: ${pickerMs} ms` });
     console.log(`[document-comment] empty state → "@" + picker in ${pickerMs}ms`);
-    expect(pickerMs).toBeLessThan(2_000);
+    expect(pickerMs).toBeLessThan(budgetMs(2_000));
     // Alice has a token: her own agent is offered and the connect row stays away.
     const own = picker.locator('[data-testid="mention-option"][data-own]');
     await expect(own).toHaveCount(1);

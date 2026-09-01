@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, mintToken, reloadHydrated, type MintedToken, type User } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, mintToken, reloadHydrated, type MintedToken, type User } from "./helpers";
 
 const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
 /**
@@ -131,7 +131,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     const before = Date.now();
     await aliceThread.getByTestId("suggestion-accept-comment").click();
     await expect.poll(() => codeText(alice.page)).toContain("Our product is unique.");
-    expect(Date.now() - before).toBeLessThan(1500);
+    expect(Date.now() - before).toBeLessThan(budgetMs(1500));
     // The dev-login display name is the lower-case handle.
     await expect(alice.page.getByTestId("toast")).toContainText(/Accepted suggestion from bob/i);
     // Accepting resolves the thread (it moves to the Resolved tab).
@@ -273,8 +273,8 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
 
     const started = Date.now();
     await reply().getByTestId("suggestion-accept-comment").click();
-    await expect.poll(() => codeText(page), { timeout: 1_000 }).toContain("sales are strong");
-    expect(Date.now() - started).toBeLessThan(1_000);
+    await expect.poll(() => codeText(page), { timeout: budgetMs(1_000) }).toContain("sales are strong");
+    expect(Date.now() - started).toBeLessThan(budgetMs(1_000));
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionText(reply().getByTestId("suggestion-text"), "sales are strong");
     await expect(page.getByTestId("toast")).toContainText(`Accepted suggestion from ${AGENT}`);

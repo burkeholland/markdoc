@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, codeText, focusRichEnd, focusCodeEnd } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, codeText, focusRichEnd, focusCodeEnd } from "./helpers";
 
 /**
  * Client-side parse guard (#115 follow-up): Markdown that micromark parses in quadratic time
@@ -73,11 +73,11 @@ test.describe("pathological Markdown never freezes the tab", () => {
     expect(text).toContain("```\n" + SOUP + "\n```");
     expect(text.startsWith("Intro paragraph.")).toBe(true);
     await expect(page.locator(".md-rich pre code")).toHaveCount(1);
-    expect(await longestTask(page)).toBeLessThan(1_000);
+    expect(await longestTask(page)).toBeLessThan(budgetMs(1_000));
 
     await focusRichEnd(page);
     await page.keyboard.press("Enter");
-    expect(await typingEcho(page, "Q")).toBeLessThan(2_000);
+    expect(await typingEcho(page, "Q")).toBeLessThan(budgetMs(2_000));
     await user.context.close();
   });
 
@@ -97,11 +97,11 @@ test.describe("pathological Markdown never freezes the tab", () => {
 
     await expect.poll(() => codeText(page)).toContain("```\n" + SOUP + "\n```");
     await expect(page.locator(".md-rich pre code")).toHaveCount(1);
-    expect(await longestTask(page)).toBeLessThan(1_000);
+    expect(await longestTask(page)).toBeLessThan(budgetMs(1_000));
 
     await page.keyboard.press("Control+End");
     await page.keyboard.press("Enter");
-    expect(await typingEcho(page, "Q")).toBeLessThan(2_000);
+    expect(await typingEcho(page, "Q")).toBeLessThan(budgetMs(2_000));
     await user.context.close();
   });
 
@@ -122,7 +122,7 @@ test.describe("pathological Markdown never freezes the tab", () => {
     await expect(placeholder).toBeVisible({ timeout: 10_000 });
     await expect(placeholder).toHaveText("This section cannot be rendered");
     // Page load includes Next's dev compile; the budget is generous but the placeholder must be up.
-    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(Date.now() - started).toBeLessThan(budgetMs(30_000));
 
     await expect(page.locator(".md-rich h1")).toHaveText("Title");
     await expect(page.locator(".md-rich p").last()).toHaveText("After.");
@@ -130,10 +130,11 @@ test.describe("pathological Markdown never freezes the tab", () => {
     expect(await codeText(page)).toContain(SOUP);
     await focusCodeEnd(page);
     await page.keyboard.press("Enter");
-    expect(await typingEcho(page, "Z")).toBeLessThan(2_000);
+    expect(await typingEcho(page, "Z")).toBeLessThan(budgetMs(2_000));
 
-    const tasks = await page.evaluate(() => (window.__longTasks ?? []).filter((d) => d > 1_000));
-    expect(tasks, `long tasks > 1 s: ${tasks.join(", ")}`).toEqual([]);
+    const longTaskBudget = budgetMs(1_000);
+    const tasks = await page.evaluate((limit) => (window.__longTasks ?? []).filter((d) => d > limit), longTaskBudget);
+    expect(tasks, `long tasks > ${longTaskBudget} ms: ${tasks.join(", ")}`).toEqual([]);
 
     // The status bar stats stay linear (#476): the word count is up.
     await expect(page.getByTestId("word-count")).toContainText("words");
