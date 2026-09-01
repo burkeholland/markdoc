@@ -1,8 +1,7 @@
 import type * as Y from "yjs";
-import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { getDb, schema, type Db } from "@/server/db";
 import type { ActivityAction, AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
-import type { SessionUser } from "@/server/documents";
 import { canComment, canEdit } from "@/server/documents";
 import { HttpError, type Actor } from "@/server/http";
 import { activityActor, clip, type ActivityActor, type ActivityDetail } from "@/server/activity";
@@ -11,12 +10,19 @@ import { notify } from "@/server/notifications";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { META_KEY } from "@/server/collab/hocuspocus";
 import { newId } from "@/editor/collab/shared";
+import { agentMentionSlug, parseAgentMentions } from "@/editor/collab/mentions";
 
 export const INSTRUCTION_MAX = 2000;
 export const QUOTE_MAX = 2000;
 
 /** Post-write side effects that can fail without taking the request's write back: reported as `warnings` on the 2xx (see docs/agents.md). */
 export type RequestWarning = "notification-not-sent";
+
+/** The agent a request is addressed to: `@login/slug`, both lower-cased. */
+export interface RequestAddressee {
+  login: string;
+  slug: string;
+}
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
@@ -42,9 +48,15 @@ export interface AgentRequestItem {
   selection: AgentRequestSelection | null;
   /** Comment thread the request was made from; null for requests from the Ask-an-agent dialog. */
   threadId: string | null;
+  /** The agent the request is addressed to (`@login/slug`); null = the requester's own agents. */
+  agent: RequestAddressee | null;
+  /** The addressee token's name, when known (cross-document listing: it is the calling token's). */
+  agentName?: string | null;
   mode: AgentRequestMode;
   status: AgentRequestStatus;
   claimedBy: string | null;
+  /** Owner login of the token that claimed it (tells two users' same-named tokens apart); null before 0019. */
+  claimedByLogin: string | null;
   result: AgentRequestResult | null;
   createdAt: string;
   updatedAt: string;
@@ -57,11 +69,25 @@ export interface AgentRequestMirror {
   mode: AgentRequestMode;
   instruction: string;
   claimedBy: string | null;
+  /** Owner login of the claiming token. Absent on mirrors written before #1296. */
+  claimedByLogin?: string | null;
   result: AgentRequestResult | null;
   userId: string;
   /** Comment thread the request belongs to, when it was made from a comment. Absent on mirrors written before #997. */
   threadId?: string | null;
+  /** Addressee (`@login/slug`), null when unaddressed. Absent on mirrors written before #1296. */
+  agent?: RequestAddressee | null;
   updatedAt: number;
+}
+
+/** `{ login, slug }` from a row, or null for an unaddressed request. */
+export function rowAddressee(row: Pick<AgentRequest, "agentLogin" | "agentSlug">): RequestAddressee | null {
+  return row.agentLogin && row.agentSlug ? { login: row.agentLogin, slug: row.agentSlug } : null;
+}
+
+/** `login/slug` as it is written after `@`. */
+export function formatAddressee(agent: RequestAddressee): string {
+  return `${agent.login}/${agent.slug}`;
 }
 
 export function toRequestItem(row: AgentRequest, extra: Partial<AgentRequestItem> = {}): AgentRequestItem {
@@ -72,9 +98,11 @@ export function toRequestItem(row: AgentRequest, extra: Partial<AgentRequestItem
     instruction: row.instruction,
     selection: row.selection ?? null,
     threadId: row.threadId ?? null,
+    agent: rowAddressee(row),
     mode: row.mode,
     status: row.status,
     claimedBy: row.claimedBy ?? null,
+    claimedByLogin: row.claimedByLogin ?? null,
     result: row.result ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -88,6 +116,12 @@ export interface CreateRequestInput {
   mode?: AgentRequestMode;
   /** Comment thread this request comes from: must exist in the document; its Y.Map gets `requestId` stamped. */
   threadId?: string | null;
+  /**
+   * The agent to address: `login/slug` (a leading `@` is accepted; case-insensitive). When absent and
+   * `threadId` is set, the first `@login/slug` in the thread's root comment is used; otherwise the request
+   * is unaddressed and only the requester's own agents see it.
+   */
+  agent?: string | null;
 }
 
 /** The minimum role a mode needs: commenting is enough to ask for comments; anything that changes text needs edit. */
@@ -98,6 +132,92 @@ export function modeAllowed(mode: AgentRequestMode, role: Role): boolean {
 /** Agent (token) name, or the human's name when a person claims/completes directly. */
 function agentName(actor: Actor): string {
   return actor.agent ?? actor.name ?? actor.login ?? "User";
+}
+
+/** The claiming token's owner login (lower-cased), or the human's login; null when the user has none. */
+function claimerLogin(actor: Actor): string | null {
+  return actor.login?.toLowerCase() ?? null;
+}
+
+/** The `@login/slug` this actor answers to (its user's login + its token name as a slug); null for a person. */
+export function actorAddressee(actor: Pick<Actor, "login" | "agent">): RequestAddressee | null {
+  if (!actor.agent || !actor.login) return null;
+  return { login: actor.login.toLowerCase(), slug: agentMentionSlug(actor.agent).toLowerCase() };
+}
+
+/**
+ * The rows `user` may see (and work): those addressed to the token it is calling with, plus its own
+ * unaddressed ones. A person (no `agent`) sees only their own unaddressed requests.
+ */
+export function requestVisibleTo(user: Pick<Actor, "id" | "login" | "agent">) {
+  const own = and(isNull(schema.agentRequests.agentLogin), eq(schema.agentRequests.userId, user.id));
+  const me = actorAddressee(user);
+  if (!me) return own;
+  return or(own, and(eq(schema.agentRequests.agentLogin, me.login), eq(schema.agentRequests.agentSlug, me.slug)));
+}
+
+/** Parse a `login/slug` (or `@login/slug`) into an addressee; null when it is not one. */
+export function parseAddressee(value: string): RequestAddressee | null {
+  const parsed = parseAgentMentions(`@${value.trim().replace(/^@/, "")}`);
+  if (parsed.length !== 1) return null;
+  const [{ login, agent }] = parsed;
+  return { login, slug: agent.toLowerCase() };
+}
+
+/**
+ * The live (unrevoked, unexpired) token answering to `@login/slug`, with its owner: who the request goes to.
+ * Live mention slugs are unique per user, so at most one row matches.
+ */
+async function findAddresseeToken(agent: RequestAddressee) {
+  const db = await getDb();
+  const [row] = await db
+    .select({ token: schema.apiTokens, owner: schema.users })
+    .from(schema.apiTokens)
+    .innerJoin(schema.users, eq(schema.users.id, schema.apiTokens.userId))
+    .where(
+      and(
+        sql`lower(${schema.users.login}) = ${agent.login}`,
+        eq(schema.apiTokens.mentionSlug, agent.slug),
+        isNull(schema.apiTokens.revokedAt),
+        or(isNull(schema.apiTokens.expiresAt), gt(schema.apiTokens.expiresAt, new Date())),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * Who the new request is addressed to, checked against the actor: the addressee must be a live token, and
+ * unless its owner switched `collaboratorsMayAsk` on, only the owner may ask it (403 `agent-owner-only`).
+ */
+async function resolveAddressee(actor: Actor, mention: RequestAddressee): Promise<RequestAddressee> {
+  const found = await findAddresseeToken(mention);
+  if (!found) throw new HttpError(400, `Unknown agent @${formatAddressee(mention)}`, { code: "unknown-agent", agent: formatAddressee(mention) });
+  const { token, owner } = found;
+  if (owner.id !== actor.id && !token.collaboratorsMayAsk) {
+    const ownerName = owner.name ?? owner.login ?? "The owner";
+    throw new HttpError(403, `${ownerName}'s ${token.name} only takes requests from ${ownerName}`, { code: "agent-owner-only", agent: formatAddressee(mention) });
+  }
+  return mention;
+}
+
+/**
+ * Only the addressee may work a request: for an addressed one, the token answering to its `@login/slug`;
+ * for an unaddressed one, the requester's own tokens (or the requester in person). Checked before any
+ * status check or write, so an outsider learns nothing beyond "not yours".
+ */
+async function requireAddressee(row: AgentRequest, actor: Actor): Promise<void> {
+  const agent = rowAddressee(row);
+  if (agent) {
+    const me = actorAddressee(actor);
+    if (me && me.login === agent.login && me.slug === agent.slug) return;
+    throw new HttpError(403, `Request is addressed to @${formatAddressee(agent)}`, { code: "not-addressee", agent: formatAddressee(agent) });
+  }
+  if (row.userId === actor.id) return;
+  const db = await getDb();
+  const [requester] = await db.select({ name: schema.users.name, login: schema.users.login }).from(schema.users).where(eq(schema.users.id, row.userId));
+  const who = requester?.name ?? requester?.login ?? "the requester";
+  throw new HttpError(403, `Request can only be worked by ${who}'s own agents`, { code: "not-addressee", agent: null });
 }
 
 async function getRequest(docId: string, requestId: string): Promise<AgentRequest> {
@@ -151,9 +271,11 @@ async function mirrorRequest(row: AgentRequest, actor: Actor | null, opts: { sta
         mode: row.mode,
         instruction: clip(row.instruction, 200),
         claimedBy: row.claimedBy ?? null,
+        claimedByLogin: row.claimedByLogin ?? null,
         result: row.result ?? null,
         userId: row.userId,
         threadId: row.threadId ?? null,
+        agent: rowAddressee(row),
         updatedAt: row.updatedAt.getTime(),
       };
       meta.set("agentRequests", next);
@@ -164,7 +286,10 @@ async function mirrorRequest(row: AgentRequest, actor: Actor | null, opts: { sta
   }
 }
 
-/** Create a request. Callers must already have resolved access; `role` decides which modes are allowed. */
+/**
+ * Create a request. Callers must already have resolved access; `role` decides which modes are allowed.
+ * The addressee is `input.agent`, else the first `@login/slug` in the thread's root comment, else none.
+ */
 export async function createRequest(docId: string, actor: Actor, role: Role, input: CreateRequestInput): Promise<AgentRequestItem> {
   const mode = input.mode ?? "suggest";
   if (!modeAllowed(mode, role)) {
@@ -179,9 +304,29 @@ export async function createRequest(docId: string, actor: Actor, role: Role, inp
     const to = Math.max(from, Math.floor(input.selection.to));
     selection = { from, to, quote: input.selection.quote.slice(0, QUOTE_MAX) };
   }
+  const explicit = input.agent?.trim() || null;
+  let mention: RequestAddressee | null = null;
+  if (explicit) {
+    mention = parseAddressee(explicit);
+    if (!mention) throw new HttpError(400, `Unknown agent @${explicit.replace(/^@/, "")}`, { code: "unknown-agent", agent: explicit.replace(/^@/, "") });
+  }
   const threadId = input.threadId?.trim() || null;
-  // Same resolution as the comments route (`CommentsModel.ymap.get`): the thread must be in the live document.
-  if (threadId && !(await readLiveDoc(docId, (doc) => commentsMap(doc).has(threadId)))) throw new HttpError(404, "Comment not found");
+  if (threadId) {
+    // Same resolution as the comments route (`CommentsModel.ymap.get`): the thread must be in the live document.
+    // The root comment's first `@login/slug` addresses the request when the caller named no agent.
+    const thread = await readLiveDoc(docId, (doc) => {
+      const t = commentsMap(doc).get(threadId);
+      if (!t) return null;
+      const body = t.get("body");
+      return { body: typeof body === "string" ? body : "" };
+    });
+    if (!thread) throw new HttpError(404, "Comment not found");
+    if (!mention) {
+      const [first] = parseAgentMentions(thread.body);
+      if (first) mention = { login: first.login, slug: first.agent.toLowerCase() };
+    }
+  }
+  const agent = mention ? await resolveAddressee(actor, mention) : null;
   const db = await getDb();
   const now = new Date();
   // One transaction: a request that exists without its `agent.request` row would be worked by agents while the
@@ -189,9 +334,29 @@ export async function createRequest(docId: string, actor: Actor, role: Role, inp
   const row = await db.transaction(async (tx) => {
     const [inserted] = await tx
       .insert(schema.agentRequests)
-      .values({ id: newId(), documentId: docId, userId: actor.id, instruction, selection, threadId, mode, status: "open", createdAt: now, updatedAt: now })
+      .values({
+        id: newId(),
+        documentId: docId,
+        userId: actor.id,
+        instruction,
+        selection,
+        threadId,
+        agentLogin: agent?.login ?? null,
+        agentSlug: agent?.slug ?? null,
+        mode,
+        status: "open",
+        createdAt: now,
+        updatedAt: now,
+      })
       .returning();
-    await recordActivityIn(tx, docId, activityActor(actor), "agent.request", { requestId: inserted.id, mode, instruction: clip(instruction), quote: selection ? clip(selection.quote) : null, threadId });
+    await recordActivityIn(tx, docId, activityActor(actor), "agent.request", {
+      requestId: inserted.id,
+      mode,
+      instruction: clip(instruction),
+      quote: selection ? clip(selection.quote) : null,
+      threadId,
+      agent: agent ? formatAddressee(agent) : null,
+    });
     return inserted;
   });
   wakeDocument(docId);
@@ -210,9 +375,11 @@ export async function listRequests(docId: string, opts: { status?: AgentRequestS
 
 /**
  * Requests across every document the user owns or collaborates on (link-shared documents are not
- * included: an agent only works where its human is a member). This is how agents find work.
+ * included: an agent only works where its human is a member), narrowed to what the caller may work:
+ * requests addressed to the token it calls with, plus its own user's unaddressed ones. This is how
+ * agents find work.
  */
-export async function listRequestsForUser(user: SessionUser, opts: { status?: AgentRequestStatus | AgentRequestStatus[]; limit?: number } = {}): Promise<AgentRequestItem[]> {
+export async function listRequestsForUser(user: Actor, opts: { status?: AgentRequestStatus | AgentRequestStatus[]; limit?: number } = {}): Promise<AgentRequestItem[]> {
   const db = await getDb();
   const login = user.login?.toLowerCase() ?? "";
   const statuses: AgentRequestStatus[] = opts.status ? (Array.isArray(opts.status) ? opts.status : [opts.status]) : ["open"];
@@ -233,23 +400,33 @@ export async function listRequestsForUser(user: SessionUser, opts: { status?: Ag
         inArray(schema.agentRequests.status, statuses),
         sql`${schema.documents.deletedAt} is null`,
         or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`),
+        requestVisibleTo(user),
       ),
     )
     .orderBy(desc(schema.agentRequests.createdAt), desc(schema.agentRequests.id))
     .limit(limit);
-  return rows.map((r) => toRequestItem(r.request, { documentTitle: r.documentTitle, userName: r.userName, userLogin: r.userLogin }));
+  // Visibility guarantees an addressed row is addressed to the calling token, so its name is the token's.
+  return rows.map((r) => toRequestItem(r.request, { documentTitle: r.documentTitle, userName: r.userName, userLogin: r.userLogin, agentName: r.request.agentLogin ? user.agent ?? null : null }));
+}
+
+/** Whether `userId` has ever sent a request (any status, addressed or not): the Settings checklist's "asked from the editor" step. */
+export async function userHasRequested(userId: string): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select({ id: schema.agentRequests.id }).from(schema.agentRequests).where(eq(schema.agentRequests.userId, userId)).limit(1);
+  return rows.length > 0;
 }
 
 /** Claim an open request. Re-claiming by the same agent is a no-op; another agent's claim is a 409. */
 export async function claimRequest(docId: string, requestId: string, actor: Actor): Promise<AgentRequestItem> {
   const row = await getRequest(docId, requestId);
+  await requireAddressee(row, actor);
   const name = agentName(actor);
   if (row.status === "claimed" && row.claimedBy === name) return toRequestItem(row);
   if (row.status !== "open") throw new HttpError(409, `Request is ${row.status}`, { status: row.status, claimedBy: row.claimedBy });
   const db = await getDb();
   const [updated] = await db
     .update(schema.agentRequests)
-    .set({ status: "claimed", claimedBy: name, updatedAt: new Date() })
+    .set({ status: "claimed", claimedBy: name, claimedByLogin: claimerLogin(actor), updatedAt: new Date() })
     .where(and(eq(schema.agentRequests.id, requestId), eq(schema.agentRequests.status, "open")))
     .returning();
   if (!updated) throw new HttpError(409, "Request was just claimed by someone else");
@@ -257,9 +434,10 @@ export async function claimRequest(docId: string, requestId: string, actor: Acto
   return toRequestItem(updated);
 }
 
-/** The request `attachWork` will accept, or the 404/409 it would throw — call it before writing anything. */
-export async function requireAttachableRequest(docId: string, requestId: string): Promise<AgentRequest> {
+/** The request `attachWork` will accept for this actor, or the 404/403/409 it would throw — call it before writing anything. */
+export async function requireAttachableRequest(docId: string, requestId: string, actor: Actor): Promise<AgentRequest> {
   const row = await getRequest(docId, requestId);
+  await requireAddressee(row, actor);
   if (row.status === "done" || row.status === "cancelled") throw new HttpError(409, `Request is ${row.status}`, { status: row.status });
   return row;
 }
@@ -271,7 +449,7 @@ export async function requireAttachableRequest(docId: string, requestId: string)
  * update is conditional and answers the same 409 the pre-check would have.
  */
 export async function attachWork(docId: string, requestId: string, actor: Actor, work: { suggestions?: number; comments?: number; suggestionIds?: string[]; commentIds?: string[] }): Promise<AgentRequestItem> {
-  const row = await requireAttachableRequest(docId, requestId);
+  const row = await requireAttachableRequest(docId, requestId, actor);
   const prev = row.result ?? { suggestions: 0, comments: 0 };
   const prevIds = (prev as { suggestionIds?: string[]; commentIds?: string[] }) ?? {};
   const result: AgentRequestResult & { suggestionIds?: string[]; commentIds?: string[] } = {
@@ -284,7 +462,7 @@ export async function attachWork(docId: string, requestId: string, actor: Actor,
   const db = await getDb();
   const [updated] = await db
     .update(schema.agentRequests)
-    .set({ result, status: "claimed", claimedBy: row.claimedBy ?? agentName(actor), updatedAt: new Date() })
+    .set({ result, status: "claimed", claimedBy: row.claimedBy ?? agentName(actor), claimedByLogin: row.claimedBy ? row.claimedByLogin : claimerLogin(actor), updatedAt: new Date() })
     .where(and(eq(schema.agentRequests.id, requestId), ne(schema.agentRequests.status, "cancelled"), ne(schema.agentRequests.status, "done")))
     .returning();
   if (!updated) {
@@ -334,6 +512,7 @@ async function hasDoneNotification(userLogin: string, requestId: string): Promis
  */
 export async function completeRequest(docId: string, requestId: string, actor: Actor, input: CompleteInput = {}): Promise<CompleteResult> {
   const row = await getRequest(docId, requestId);
+  await requireAddressee(row, actor);
   if (row.status === "cancelled") throw new HttpError(409, "Request was cancelled", { status: row.status });
   const failed: RequestWarning[] = [];
   const tail = async (code: RequestWarning, fn: () => Promise<unknown>): Promise<boolean> => {
@@ -386,10 +565,11 @@ export async function completeRequest(docId: string, requestId: string, actor: A
   const summary = input.summary?.trim();
   if (summary) result.summary = clip(summary, 500);
   const name = row.claimedBy ?? agentName(actor);
+  const claimedByLogin = row.claimedBy ? row.claimedByLogin : claimerLogin(actor);
   const updated = await db.transaction(async (tx) => {
     const [done] = await tx
       .update(schema.agentRequests)
-      .set({ status: "done", claimedBy: name, result, updatedAt: new Date() })
+      .set({ status: "done", claimedBy: name, claimedByLogin, result, updatedAt: new Date() })
       .where(eq(schema.agentRequests.id, requestId))
       .returning();
     await recordActivityIn(tx, docId, activityActor(actor), "agent.request.done", {

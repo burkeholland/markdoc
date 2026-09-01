@@ -35,7 +35,7 @@ vi.mock("@/server/db", async (importOriginal) => {
 const { getDb, schema } = await import("@/server/db");
 const { eq } = await import("drizzle-orm");
 const { createDocument, upsertCollaborator } = await import("@/server/documents");
-const { createApiToken } = await import("@/server/tokens");
+const { createApiToken, setCollaboratorsMayAsk } = await import("@/server/tokens");
 const { listNotifications, notify } = await import("@/server/notifications");
 const { listActivity, activityActor } = await import("@/server/activity");
 const { createRequest, listRequests, listRequestsForUser, claimRequest, completeRequest, cancelRequest, attachWork, readMirror } = await import("@/server/agent-requests");
@@ -89,7 +89,10 @@ beforeAll(async () => {
   docId = doc.id;
   await upsertCollaborator(docId, "cam", "commenter", owner.id);
   await upsertCollaborator(docId, "vic", "viewer", owner.id);
-  ownerToken = (await createApiToken(owner.id, "Copilot CLI")).token;
+  const minted = await createApiToken(owner.id, "Copilot CLI");
+  ownerToken = minted.token;
+  // Olive lets collaborators address her agent (#1296): Cam's requests below are addressed to `@olive/copilot-cli`.
+  await setCollaboratorsMayAsk(owner.id, minted.id, true);
   strangerToken = (await createApiToken(stranger.id, "Sam's agent")).token;
 });
 
@@ -147,8 +150,12 @@ describe("agent requests (server module)", () => {
     const cancelled = await cancelRequest(docId, byCommenter.id, { ...commenter }, "commenter");
     expect(cancelled.status).toBe("cancelled");
     expect((await readMirror(docId))[byCommenter.id]).toMatchObject({ status: "cancelled" });
-    await expect(claimRequest(docId, byCommenter.id, agentActor())).rejects.toMatchObject({ status: 409 });
-    await expect(completeRequest(docId, byCommenter.id, agentActor())).rejects.toMatchObject({ status: 409 });
+    // Cam's own agent hears the status (409); an outsider is refused first (403), the state stays private (#1296).
+    const camBot = { ...commenter, agent: "Cam bot" };
+    await expect(claimRequest(docId, byCommenter.id, camBot)).rejects.toMatchObject({ status: 409 });
+    await expect(completeRequest(docId, byCommenter.id, camBot)).rejects.toMatchObject({ status: 409 });
+    await expect(claimRequest(docId, byCommenter.id, agentActor())).rejects.toMatchObject({ status: 403, message: "Request can only be worked by Cam's own agents" });
+    await expect(completeRequest(docId, byCommenter.id, agentActor())).rejects.toMatchObject({ status: 403 });
 
     const open = await listRequests(docId, { status: "open" });
     expect(open.find((r) => r.id === byCommenter.id)).toBeUndefined();
@@ -166,8 +173,9 @@ describe("agent requests (server module)", () => {
     expect(forOwner.map((r) => r.id)).not.toContain(theirs.id);
     expect(forOwner.find((r) => r.id === mine.id)).toMatchObject({ documentTitle: "Asked", userLogin: "olive", status: "open" });
 
-    // Commenter collaborators see the document's requests too; a stranger only sees their own.
-    expect((await listRequestsForUser(commenter)).map((r) => r.id)).toContain(mine.id);
+    // Unaddressed requests go to the requester's own agents: a commenter collaborator no longer sees the owner's
+    // (#1296); a stranger only sees their own.
+    expect((await listRequestsForUser(commenter)).map((r) => r.id)).not.toContain(mine.id);
     const forStranger = await listRequestsForUser(stranger);
     expect(forStranger.map((r) => r.id)).toEqual([theirs.id]);
 
@@ -274,10 +282,10 @@ describe("requests made from a comment thread (#997)", () => {
     const { cursor } = await pollEvents(docId, agentActor(), null, 0);
     const { cursor: inboxCursor } = await pollEvents(null, agentActor(), null, 0);
 
-    const fromThread = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Check the animal", mode: "comment", threadId });
+    const fromThread = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Check the animal", mode: "comment", threadId, agent: "olive/copilot-cli" });
     expect(fromThread.threadId).toBe(threadId);
     expect((await listRequests(docId)).find((r) => r.id === fromThread.id)?.threadId).toBe(threadId);
-    expect((await listRequestsForUser(owner)).find((r) => r.id === fromThread.id)?.threadId).toBe(threadId);
+    expect((await listRequestsForUser(agentActor())).find((r) => r.id === fromThread.id)?.threadId).toBe(threadId);
     expect((await readMirror(docId))[fromThread.id]).toMatchObject({ status: "open", threadId });
     expect(await stampedRequestId(threadId)).toBe(fromThread.id);
     const asked = (await listActivity(docId)).items.find((i) => i.action === "agent.request" && i.detail.requestId === fromThread.id);
@@ -319,10 +327,11 @@ describe("requests made from a comment thread (#997)", () => {
     // Cam starts the thread and asks; Olive's agent answers in it. Cam would normally hear `reply` from Olive.
     const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "lazy dog", body: "Too lazy?" }), params(docId)));
     const { id: threadId } = (await add.json()) as { id: string };
-    const res = await as(commenter, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Is the dog too lazy?", mode: "comment", threadId }), params(docId)));
+    const res = await as(commenter, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Is the dog too lazy?", mode: "comment", threadId, agent: "@olive/copilot-cli" }), params(docId)));
     expect(res.status).toBe(201);
-    const { request } = (await res.json()) as { request: { id: string; threadId: string | null } };
+    const { request } = (await res.json()) as { request: { id: string; threadId: string | null; agent: { login: string; slug: string } | null } };
     expect(request.threadId).toBe(threadId);
+    expect(request.agent).toEqual({ login: "olive", slug: "copilot-cli" });
     const camBefore = (await replyNotifications("cam")).length;
     // Cam's own agent watches the document and the inbox; the mention in the agent's reply reaches both.
     const cam = { id: commenter.id, login: commenter.login, name: commenter.name, image: null };
@@ -340,7 +349,7 @@ describe("requests made from a comment thread (#997)", () => {
     expect(thread.replies).toHaveLength(1);
 
     const worked = (await listRequests(docId)).find((r) => r.id === request.id)!;
-    expect(worked).toMatchObject({ status: "claimed", claimedBy: "Copilot CLI", result: { suggestions: 0, comments: 1, commentIds: [replyId] } });
+    expect(worked).toMatchObject({ status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "olive", result: { suggestions: 0, comments: 1, commentIds: [replyId] } });
     expect((await listActivity(docId)).items.find((i) => i.action === "comment.reply" && i.detail.replyId === replyId)?.detail.requestId).toBe(request.id);
 
     // No `reply` for the request-linked answer; the mention inside it still reaches Cam.
@@ -365,9 +374,11 @@ describe("requests made from a comment thread (#997)", () => {
   });
 
   it("folds `add` + requestId into the request's thread as a reply (quote ignored, no new thread, no reply notification)", async () => {
-    const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "quick", body: "Quick enough?" }), params(docId)));
+    const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "quick", body: "@olive/copilot-cli Quick enough?" }), params(docId)));
     const { id: threadId } = (await add.json()) as { id: string };
+    // No `agent` given: the thread's root comment mentions `@olive/copilot-cli`, which addresses the request.
     const fromThread = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Quick enough?", mode: "comment", threadId });
+    expect(fromThread.agent).toEqual({ login: "olive", slug: "copilot-cli" });
     const before = (await threads()).comments.length;
     const camBefore = (await replyNotifications("cam")).length;
 
@@ -569,7 +580,8 @@ describe("the non-2xx promise for requests (#1232)", () => {
     const db = await getDb();
     const [ghost] = await db.insert(schema.users).values({ name: "Ghost", login: null, email: "ghost-1232@example.com" }).returning();
     const created = await createRequest(reqDocId, { id: ghost.id, login: null, name: "Ghost", image: null }, "owner", { instruction: "Tighten this", mode: "suggest" });
-    const { result, logged } = await quietly(() => completeRequest(reqDocId, created.id, agentActor()));
+    // Unaddressed: only the requester's own agents may complete it.
+    const { result, logged } = await quietly(() => completeRequest(reqDocId, created.id, { id: ghost.id, login: null, name: "Ghost", image: null, agent: "Ghost bot" }));
     expect(result).toEqual({ request: expect.objectContaining({ status: "done" }), notified: false, alreadyDone: false });
     expect(logged).toEqual([]);
   });

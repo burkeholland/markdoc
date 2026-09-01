@@ -64,6 +64,8 @@ export interface Actor extends SessionUser {
   embedSessionExpiresAt?: number;
   /** API-token expiry, retained so collaboration sockets cannot outlive it. */
   tokenExpiresAt?: Date | null;
+  /** The token's owner switch (other users may address requests to it); only set when acting as an agent. */
+  collaboratorsMayAsk?: boolean;
 }
 
 /**
@@ -78,7 +80,7 @@ export async function currentUser(): Promise<Actor | null> {
     if (looksLikeApiToken(token)) {
       const actor = await resolveBearer(token, h);
       if (!actor) throw new HttpError(401, "Invalid or revoked API token");
-      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds, tokenExpiresAt: actor.expiresAt };
+      return { id: actor.id, login: actor.login, name: actor.name, image: actor.image, agent: actor.agent, tokenId: actor.tokenId, scope: actor.scope, documentIds: actor.documentIds, tokenExpiresAt: actor.expiresAt, collaboratorsMayAsk: actor.collaboratorsMayAsk };
     }
   }
   const session = await auth();

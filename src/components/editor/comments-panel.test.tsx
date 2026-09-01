@@ -613,6 +613,8 @@ describe("CommentsPanel", () => {
         instruction: "@bob tighten this please",
         selection: { from: 16, to: 27, quote: "quick brown" },
         threadId: threads[0].id,
+        // The first agent mention is the addressee (#1296); the server verifies it against a live token.
+        agent: "alice/Copilot-CLI",
       });
       expect(onToast).not.toHaveBeenCalled();
       // The composer closed as it always does.
@@ -671,6 +673,31 @@ describe("CommentsPanel", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("a refused request (403 agent-owner-only, 400 unknown-agent) shows the server's sentence and keeps the comment; no retry (#1296)", async () => {
+      const { onToast } = mount();
+      const box = await openComposer();
+      await type(box, "@alice/Copilot-CLI summarise");
+      await screen.findByTestId("composer-agent-row");
+      const locked = Object.assign(new Error("Alice's Copilot CLI only takes requests from Alice"), { status: 403 });
+      vi.mocked(api.documents.createRequest).mockRejectedValueOnce(locked);
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(onToast).toHaveBeenCalledWith("The comment is posted, but the request was refused: Alice's Copilot CLI only takes requests from Alice", "error"));
+      expect(api.documents.createRequest).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.documents.createRequest).mock.calls[0][1]).toMatchObject({ agent: "alice/Copilot-CLI", instruction: "summarise" });
+      expect(session!.comments.list()).toHaveLength(1);
+
+      const unknown = Object.assign(new Error("Unknown agent @alice/copilot-cli"), { status: 400 });
+      vi.mocked(api.documents.createRequest).mockClear().mockRejectedValueOnce(unknown);
+      act(() => session!.setPendingComment({ from: 0, to: 5 }));
+      const again = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      await type(again, "@alice/Copilot-CLI again");
+      await screen.findByTestId("composer-agent-row");
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(onToast).toHaveBeenCalledWith("The comment is posted, but the request was refused: Unknown agent @alice/copilot-cli", "error"));
+      expect(api.documents.createRequest).toHaveBeenCalledTimes(1);
+      expect(session!.comments.list()).toHaveLength(2);
     });
 
     it("does not post before the session is synced", async () => {
@@ -776,6 +803,7 @@ describe("CommentsPanel", () => {
         instruction: "and the numbers?",
         selection: { from: 16, to: 27, quote: "quick brown" },
         threadId,
+        agent: "alice/Copilot-CLI",
       });
       expect(session!.comments.list()[0].replies).toHaveLength(1);
     });
@@ -944,6 +972,7 @@ describe("CommentsPanel", () => {
         instruction: "review the whole thing",
         selection: null,
         threadId: thread.id,
+        agent: "alice/Copilot-CLI",
       });
     });
 

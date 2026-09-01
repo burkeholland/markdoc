@@ -70,11 +70,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // The text the action concerns (new comment's quote, replied thread's range): an agent's caret moves there.
   let at: { from: number; to: number } | undefined;
   let decided: { thread: CommentThread; reply: CommentReply | null; accepted: boolean } | null = null;
-  // A linked request must exist and be open/claimed before anything is written (404/409 with nothing to undo,
-  // exactly as `suggest` does). For `add`, a request made from a comment thread folds the new comment into that
-  // thread (see the schema); `requestThread` is that thread.
+  // A linked request must exist, be addressed to this caller and be open/claimed before anything is written
+  // (404/403/409 with nothing to undo, exactly as `suggest` does). For `add`, a request made from a comment thread
+  // folds the new comment into that thread (see the schema); `requestThread` is that thread.
   const requestId = body.action === "add" || body.action === "reply" ? body.requestId : undefined;
-  const requestThread = requestId ? ((await requireAttachableRequest(id, requestId)).threadId ?? null) : null;
+  const requestThread = requestId ? ((await requireAttachableRequest(id, requestId, user)).threadId ?? null) : null;
   let folded: string | null = null;
 
   await mutateLiveDoc(id, { userId: user.id, docId: id, role, name: author.name, login: user.login, avatar: user.image ?? null }, (doc) => {

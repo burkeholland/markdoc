@@ -208,6 +208,8 @@ export const apiTokens = pgTable(
     scope: text("scope").$type<TokenScope>().notNull().default("full"),
     /** When set, the token only sees these documents; every other id answers 404. Null = all the user's documents. */
     documentIds: text("document_ids").array(),
+    /** Owner switch: other users may address requests to this agent (`@owner/slug`). Off = the owner alone (#1296). */
+    collaboratorsMayAsk: boolean("collaborators_may_ask").notNull().default(false),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { mode: "date", withTimezone: true }),
     /** Last time an MCP client listed tools with this token (`tools/list` on /api/mcp): the CLI is connected. */
@@ -333,9 +335,10 @@ export interface AgentRequestResult {
 }
 
 /**
- * Work a human handed to agents from inside the editor ("Ask an agent"). Agents find open
- * requests across the documents their token's user can see, claim one, do the work with
- * the suggest/comment tools (linking by `requestId`) and complete it.
+ * Work a human handed to agents from inside the editor ("Ask an agent"). A request is addressed to one
+ * agent — the `@login/slug` mentioned in the comment (owner login + token mention slug, lower-cased) — or to
+ * none (`agent_login` null: the requester's own tokens). Only the addressee's owner-token lists, claims and
+ * completes it; `claimed_by_login` tells two users' same-named tokens apart.
  */
 export const agentRequests = pgTable(
   "agent_request",
@@ -351,10 +354,16 @@ export const agentRequests = pgTable(
     selection: jsonb("selection").$type<AgentRequestSelection | null>(),
     /** Comment thread (in the shared Y.Doc) the request was made from, when it came from a comment. */
     threadId: text("thread_id"),
+    /** Addressee: the mentioned agent's owner login (lower-cased); null = unaddressed (rows from before 0019 too). */
+    agentLogin: text("agent_login"),
+    /** Addressee: the mentioned agent's mention slug (lower-cased; `api_token.mention_slug`), stored by name so a rotated token keeps receiving. */
+    agentSlug: text("agent_slug"),
     mode: text("mode").$type<AgentRequestMode>().notNull().default("suggest"),
     status: text("status").$type<AgentRequestStatus>().notNull().default("open"),
     /** Token (agent) name that claimed the request. */
     claimedBy: text("claimed_by"),
+    /** Owner login (lower-cased) of the token that claimed it; null on rows claimed before 0019. */
+    claimedByLogin: text("claimed_by_login"),
     result: jsonb("result").$type<AgentRequestResult | null>(),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
@@ -363,6 +372,7 @@ export const agentRequests = pgTable(
     index("agent_request_document_status_idx").on(t.documentId, t.status),
     index("agent_request_status_created_idx").on(t.status, t.createdAt.desc()),
     index("agent_request_document_thread_idx").on(t.documentId, t.threadId),
+    index("agent_request_agent_status_idx").on(t.agentLogin, t.agentSlug, t.status),
   ],
 );
 

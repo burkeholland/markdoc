@@ -14,6 +14,8 @@ const createSchema = z.object({
   mode: z.enum(["suggest", "comment", "rewrite"]).default("suggest"),
   /** The comment thread the request is made from (must exist: `404 Comment not found`); the thread's Y.Map gets `requestId`. */
   threadId: z.string().trim().min(1).nullable().optional(),
+  /** The agent to address, `login/slug` (leading `@` accepted, case-insensitive). Default: the thread's first `@login/slug`, else unaddressed. */
+  agent: z.string().trim().min(1).max(100).nullable().optional(),
 });
 
 const STATUSES = ["open", "claimed", "done", "cancelled"] as const satisfies readonly AgentRequestStatus[];
@@ -21,8 +23,10 @@ const STATUSES = ["open", "claimed", "done", "cancelled"] as const satisfies rea
 const querySchema = z.object({ status: z.array(z.enum(STATUSES)).min(1).optional() });
 
 /**
- * Ask an agent: hand a selection plus an instruction to whichever agent picks it up. Commenters
- * may ask for comments; asking for changes (suggest / rewrite) needs edit access.
+ * Ask an agent: hand a selection plus an instruction to one agent. Commenters may ask for comments;
+ * asking for changes (suggest / rewrite) needs edit access. The addressee (`agent`, or the thread's first
+ * `@login/slug`) must be a live token (`400 unknown-agent`) whose owner is the caller or has switched
+ * `collaboratorsMayAsk` on (`403 agent-owner-only`); without one the request goes to the caller's own agents.
  */
 export const POST = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;

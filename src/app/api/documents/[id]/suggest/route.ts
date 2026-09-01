@@ -56,8 +56,8 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   let count = 0;
   const created: string[] = [];
   let hashAfter = "";
-  // A linked request must exist and be open/claimed before anything is written (404/409 with nothing to undo).
-  if (body.requestId) await requireAttachableRequest(id, body.requestId);
+  // A linked request must exist, be addressed to this caller and be open/claimed before anything is written (404/403/409 with nothing to undo).
+  if (body.requestId) await requireAttachableRequest(id, body.requestId, user!);
 
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     hashAfter = assertContentUnchanged(id, doc, expected);

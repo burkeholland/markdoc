@@ -134,9 +134,13 @@ export interface AgentRequestDto {
   selection: { from: number; to: number; quote: string } | null;
   /** Comment thread the request was made from (the composer always sets it); null for requests posted through the API without one. */
   threadId: string | null;
+  /** The agent the request is addressed to (`@login/slug`, lower-cased); null = the requester's own agents. */
+  agent: { login: string; slug: string } | null;
   mode: "suggest" | "comment" | "rewrite";
   status: "open" | "claimed" | "done" | "cancelled";
   claimedBy: string | null;
+  /** Owner login of the token that claimed it; null before it is claimed (and on rows from before #1296). */
+  claimedByLogin: string | null;
   result: { suggestions: number; comments: number; summary?: string } | null;
   createdAt: string;
   updatedAt: string;
@@ -151,6 +155,8 @@ export interface ApiTokenDto {
   scope: TokenScope;
   /** Documents the token is restricted to; null = all of the user's. */
   documentIds: string[] | null;
+  /** Owner switch: other users may address requests to this agent (`@you/slug`). Default off. */
+  collaboratorsMayAsk: boolean;
   createdAt: string;
   lastUsedAt: string | null;
   /** Last `tools/list` over /api/mcp with this token (an MCP client is connected). */
@@ -250,7 +256,7 @@ export const api = {
     reviews: (id: string) => request<{ reviews: ReviewDto[] }>(`/api/documents/${id}/reviews`),
     requests: (id: string, opts: { status?: string[] } = {}) =>
       request<{ requests: AgentRequestDto[] }>(`/api/documents/${id}/requests${opts.status?.length ? `?status=${opts.status.join(",")}` : ""}`),
-    createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"]; threadId?: string | null }) =>
+    createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"]; threadId?: string | null; agent?: string | null }) =>
       request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests`, { method: "POST", body: JSON.stringify(body) }),
     cancelRequest: (id: string, rid: string) => request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests/${rid}/cancel`, { method: "POST" }),
   },
@@ -262,6 +268,8 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ name, expiresInDays, ...options }),
       }),
+    /** Flip the owner switch that lets other users address requests to this agent (browser sessions only). */
+    update: (id: string, body: { collaboratorsMayAsk: boolean }) => request<{ token: ApiTokenDto }>(`/api/tokens/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   },
   github: {
     gists: () =>

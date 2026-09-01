@@ -468,9 +468,10 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     });
 
     it("refuses a done request before writing: 409 with no comment, no activity row and no mention notification", async () => {
-      actor = alice;
-      const request = await createRequest(reqDocId, alice, "owner", { instruction: "Comment on the first paragraph", mode: "comment" });
-      await completeRequest(reqDocId, request.id, alice, { summary: "Done elsewhere." });
+      // Carol asks and works it herself: an unaddressed request is only for the requester's own agents (#1296).
+      actor = carol;
+      const request = await createRequest(reqDocId, carol, "commenter", { instruction: "Comment on the first paragraph", mode: "comment" });
+      await completeRequest(reqDocId, request.id, carol, { summary: "Done elsewhere." });
       const { comments: before } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
       const activityBefore = (await listActivity(reqDocId, { limit: 100 })).items;
       const mentionsBefore = (await listNotifications("alice", { kind: "mention" })).items;
@@ -490,8 +491,8 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     });
 
     it("keeps the comment and answers 200 with warnings when the activity row fails after the write", async () => {
-      actor = alice;
-      const request = await createRequest(reqDocId, alice, "owner", { instruction: "Comment on the first paragraph", mode: "comment" });
+      actor = carol;
+      const request = await createRequest(reqDocId, carol, "commenter", { instruction: "Comment on the first paragraph", mode: "comment" });
       const { comments: before } = (await (await get(reqDocId)).json()) as { comments: ThreadJson[] };
 
       actor = carol;
@@ -516,11 +517,11 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     });
 
     it("a request closed between the pre-check and the write: 200 with request-not-attached, the comment stays, its activity row carries no requestId", async () => {
-      actor = alice;
-      const request = await createRequest(reqDocId, alice, "owner", { instruction: "Comment on the first paragraph", mode: "comment" });
+      actor = carol;
+      const request = await createRequest(reqDocId, carol, "commenter", { instruction: "Comment on the first paragraph", mode: "comment" });
       // The residual race: the request is completed after `requireAttachableRequest` passed and the comment is written.
       vi.mocked(attachWork).mockImplementationOnce(async (...args) => {
-        await completeRequest(reqDocId, request.id, alice, { summary: "Closed meanwhile." });
+        await completeRequest(reqDocId, request.id, carol, { summary: "Closed meanwhile." });
         const actual = (await vi.importActual<typeof import("@/server/agent-requests")>("@/server/agent-requests")).attachWork;
         return actual(...args);
       });
