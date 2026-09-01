@@ -27,7 +27,9 @@ COPY . .
 # build only, which never happens inside an image, and read by nothing at runtime (the server needs
 # .next/server, .next/static, the manifests and BUILD_ID). Removed in the same layer so neither the
 # runtime stage's COPY of .next nor the `--target build` tools image (markdoc-maint) carries it.
-RUN AUTH_SECRET=build-placeholder npm run build && rm -rf .next/cache
+# Turbopack writes its client chunks group-writable (0664); the chmod drops that bit in the same
+# layer, so the runtime image has nothing writable by anyone but the owner.
+RUN AUTH_SECRET=build-placeholder npm run build && rm -rf .next/cache && chmod -R go-w .next
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
@@ -52,8 +54,8 @@ RUN apk add --no-cache \
       font-noto-emoji \
       wget
 # Everything under /app arrives owned by the unprivileged `node` user (COPY --chown) or is written by
-# it (npm ci below runs as node), so no `chown -R /app` pass follows: in overlayfs that pass re-wrote
-# every file into one more 144 MB layer (the whole image shipped twice).
+# it (npm ci below runs as node). The `chown -R node:node /app` that used to run last, after npm ci
+# and every COPY, is gone: in overlayfs it re-wrote every file into one more 144 MB layer.
 COPY --chown=node:node package.json package-lock.json ./
 # Files that come from the source tree, copied first so the one RUN below can fix their modes while
 # /app is still small. The build stage's `COPY . .` keeps the modes of the uploaded context, and a
@@ -67,9 +69,11 @@ COPY --chown=node:node --from=build /app/drizzle ./drizzle
 COPY --chown=node:node --from=build /app/next.config.ts ./next.config.ts
 COPY --chown=node:node --from=build /app/scripts/lib/dev-origins.mjs ./scripts/lib/dev-origins.mjs
 # .data is where PGlite writes when no DATABASE_URL is given (mount a volume there to keep it).
-# /app itself must belong to node so that `npm ci` can create node_modules; the chown is not
-# recursive because every file copied so far already belongs to node (≈ 230 KB in this layer).
-RUN mkdir -p /app/.data && chown node:node /app /app/.data && chmod -R go-w /app
+# /app itself must belong to node so that `npm ci` can create node_modules. The chown is recursive
+# only over what is here so far (≈ 230 KB, which the chmod re-writes into this layer anyway): the
+# classic builder leaves the parent directories it creates for a directory COPY (src/, src/server/,
+# src/server/og/) owned by root even with --chown.
+RUN mkdir -p /app/.data && chown -R node:node /app && chmod -R go-w /app
 # Run as the unprivileged user that ships with the image from here on (build steps included).
 USER node
 # Runtime dependencies only. @electric-sql/pglite ships its WASM/data files inside the package, so
