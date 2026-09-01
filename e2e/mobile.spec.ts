@@ -65,24 +65,28 @@ function observeLayoutShifts() {
 const layoutShiftSum = (page: Page) => page.evaluate(() => ((window as Window & { __cls?: number[] }).__cls ?? []).reduce((a, b) => a + b, 0));
 
 /**
- * Runs before any script of every document in the context: records the status bar's layout-menu
- * trigger's box in the first frame it exists (`window.__firstMenuRect`) — the server markup as first
- * painted, before React hydrates and `compact` flips (#1531). rAF rather than a MutationObserver so the
- * measurement waits for the stylesheet: rendering (and rAF) is blocked until it has loaded.
+ * Runs before any script of every document in the context: records the box of the first element matching
+ * `selector` in the first frame it exists (`window[key]`) — the server markup as first painted, before React
+ * hydrates and `compact` flips (#1531). rAF rather than a MutationObserver so the measurement waits for the
+ * stylesheet: rendering (and rAF) is blocked until it has loaded. Under a slow CPU that first frame can come while
+ * the parser is still inside the element (#1562), which is exactly the state the header row below checks.
  */
-function observeFirstMenuRect() {
-  const w = window as Window & { __firstMenuRect?: { x: number; width: number } };
+function observeFirstRect({ selector, key }: { selector: string; key: string }) {
+  const w = window as unknown as Record<string, { x: number; width: number } | undefined>;
   const tick = () => {
-    const el = document.querySelector('[data-testid="layout-menu"]');
+    const el = document.querySelector(selector);
     if (!el) {
       requestAnimationFrame(tick);
       return;
     }
     const r = el.getBoundingClientRect();
-    w.__firstMenuRect = { x: r.x, width: r.width };
+    w[key] = { x: r.x, width: r.width };
   };
   requestAnimationFrame(tick);
 }
+
+const FIRST_MENU_RECT = { selector: '[data-testid="layout-menu"]', key: "__firstMenuRect" };
+const FIRST_HEADER_RIGHT_RECT = { selector: '[data-testid="header-right"]', key: "__firstHeaderRightRect" };
 
 /**
  * ~145 kB of HTML: on a 4× slower CPU (a phone) the parser paints the article before the end of the
@@ -391,7 +395,7 @@ test.describe("phone", () => {
   test("status bar first paint is already the phone bar: the layout-menu trigger does not move at hydration", async ({ browser }) => {
     const context = await browser.newContext({ ...phone });
     await context.addInitScript(observeLayoutShifts);
-    await context.addInitScript(observeFirstMenuRect);
+    await context.addInitScript(observeFirstRect, FIRST_MENU_RECT);
     const page = await context.newPage();
     await devLogin(page, "phone-cls-status-bar");
     const id = await createDocument(page, CLS_DOC, "Mobile CLS status bar");
@@ -412,6 +416,95 @@ test.describe("phone", () => {
     expect(dx).toBeLessThanOrEqual(2);
     expect(dw).toBeLessThanOrEqual(2);
     await context.close();
+  });
+
+  // The header's right group is in the server markup in full, but a phone can paint while the parser is still inside
+  // it (4× CPU: `readyState` "loading" at the first frame in 2 of 3 runs, #1562): laid out with only the pane segment
+  // (70 px) or segment + bell (110 px), it grew to 190 px when the comments toggle and ⋮ arrived and pushed the title
+  // and the save chip left (0.0033–0.0050). The group now reserves its final phone width (`max-md:min-w-…` from the
+  // signed-in/embed state the server knows), so a partially parsed group already sits where the complete one will.
+  // Two checks: the first rendered box against the settled one, and — the parser yield being timing-dependent — the
+  // settled group with its later children taken out of the layout, which is what the parser had produced when it painted.
+  test("header right group first paint is already its final width: nothing moves while the header is still parsing", async ({ browser }) => {
+    const context = await browser.newContext({ ...phone });
+    await context.addInitScript(observeLayoutShifts);
+    await context.addInitScript(observeFirstRect, FIRST_HEADER_RIGHT_RECT);
+    const page = await context.newPage();
+    await devLogin(page, "phone-cls-header-right");
+    const id = await createDocument(page, CLS_DOC, "Mobile CLS header right");
+    await openDoc(page, id);
+    await expect(page.getByTestId("editor-shell")).toHaveAttribute("data-breakpoint", "phone");
+    await page.waitForTimeout(1000);
+    const cls = await layoutShiftSum(page);
+    const { first, settled, partial } = await page.evaluate(() => {
+      const w = window as Window & { __firstHeaderRightRect?: { x: number; width: number } };
+      const group = document.querySelector<HTMLElement>('[data-testid="header-right"]')!;
+      const box = () => {
+        const r = group.getBoundingClientRect();
+        return { x: r.x, width: r.width };
+      };
+      const settled = box();
+      // The group as the parser would have painted it mid-way: the first child only, then the first two, and so on.
+      const children = Array.from(group.children) as HTMLElement[];
+      const partial: { kept: number; x: number; width: number }[] = [];
+      for (let keep = 1; keep < children.length; keep++) {
+        const later = children.slice(keep).map((el) => ({ el, display: el.style.display }));
+        for (const { el } of later) el.style.display = "none";
+        partial.push({ kept: keep, ...box() });
+        for (const { el, display } of later) el.style.display = display;
+      }
+      return { first: w.__firstHeaderRightRect ?? null, settled, partial };
+    });
+    expect(first, "header-right was in the server markup").not.toBeNull();
+    const dx = Math.abs(settled.x - first!.x);
+    const dw = Math.abs(settled.width - first!.width);
+    const worst = partial.reduce((m, p) => Math.max(m, Math.abs(p.x - settled.x), Math.abs(p.width - settled.width)), 0);
+    console.log(
+      `[1562] /d/<id> phone header-right Δx=${dx.toFixed(1)} Δwidth=${dw.toFixed(1)}; CLS ${cls.toFixed(3)}; partially parsed (first 1…${partial.length} of ${partial.length + 1} children) worst Δ=${worst.toFixed(1)}`,
+    );
+    expect(cls).toBeLessThanOrEqual(0.1);
+    expect(dx).toBeLessThanOrEqual(2);
+    expect(dw).toBeLessThanOrEqual(2);
+    for (const p of partial) {
+      expect(Math.abs(p.x - settled.x), `header-right x with its first ${p.kept} child(ren) only`).toBeLessThanOrEqual(2);
+      expect(Math.abs(p.width - settled.width), `header-right width with its first ${p.kept} child(ren) only`).toBeLessThanOrEqual(2);
+    }
+    await context.close();
+  });
+
+  // The ⋯ trigger's `aria-label` comes from `compact`, which is false until hydration, and its visible "Markdown" text is
+  // `max-md:hidden` — so for about a second the phone's server markup had a button with no name (#1531 left it). A
+  // `sr-only md:hidden` span names it from the first byte (#1562); after hydration `aria-label` wins, and from `md` the
+  // span is hidden so the visible text stays the only name. Scripts are blocked for the first load so the assertion
+  // really runs against un-hydrated markup rather than racing React.
+  test("status bar ⋯ trigger has its name before hydration on phones, and only one name after", async ({ browser }) => {
+    const { context, page } = await signInOn(browser, "phone-menu-name", { ...phone });
+    const id = await createDocument(page, DOC, "Mobile menu name");
+    const isScript = (url: URL) => url.pathname.startsWith("/_next/") && /\.m?js$/.test(url.pathname);
+    await page.route(isScript, (route) => route.abort());
+    await page.goto(`/d/${id}`);
+    const trigger = page.getByTestId("layout-menu");
+    await expect(trigger).toBeAttached();
+    expect(await page.locator("html[data-hydrated]").count(), "React must not have run").toBe(0);
+    await expect(trigger).not.toHaveAttribute("aria-label");
+    await expect(trigger).toHaveAccessibleName("View options");
+    await expect(page.getByRole("button", { name: "View options", exact: true })).toHaveCount(1);
+    await page.unroute(isScript);
+    await openDoc(page, id);
+    await expect(page.getByTestId("status-bar")).toHaveAttribute("data-compact", "true");
+    await expect(trigger).toHaveAttribute("aria-label", "View options");
+    await expect(trigger).toHaveAccessibleName("View options");
+    await expect(page.getByRole("button", { name: "View options", exact: true })).toHaveCount(1);
+    await context.close();
+    // From `md` the visible "Markdown" is the only name.
+    const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const wide = await desktop.newPage();
+    await devLogin(wide, "phone-menu-name");
+    await openDoc(wide, id);
+    await expect(wide.getByTestId("status-bar")).not.toHaveAttribute("data-compact");
+    await expect(wide.getByTestId("layout-menu")).toHaveAccessibleName("Markdown");
+    await expect(wide.getByRole("button", { name: "View options", exact: true })).toHaveCount(0);
+    await desktop.close();
   });
 
   // The dashboard's chips row (sort select + five filters, 534 px) never fits beside the "Documents"
