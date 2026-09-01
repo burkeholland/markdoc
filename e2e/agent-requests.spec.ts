@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, waitForHydration, type MintedToken, type User } from "./helpers";
 
 /**
  * Agent requests from comments (task #1024): mentioning an agent in a comment or reply makes the comment a request.
@@ -529,6 +529,8 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     await expect(row).toBeVisible();
     await row.getByTestId("mention-connect-agent").click();
     await page.waitForURL((u) => u.pathname === "/settings");
+    // The stdio toggle below is clicked into a freshly navigated /settings: wait for React to hydrate (the `<details open>` hydration warning).
+    await waitForHydration(page);
     expect(new URL(page.url()).hash).toBe("#tokens");
     await expect(page.getByTestId("token-name")).toBeVisible();
     const card = page.getByTestId("agent-connect-card");
