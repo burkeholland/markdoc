@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, uniqueLogin, type User } from "./helpers";
 
 /** Pull the notifications store now instead of waiting for the 30 s poll. */
 const refresh = (page: Page) =>
@@ -17,14 +17,16 @@ test.describe("notifications", () => {
   let docId: string;
 
   test.beforeAll(async ({ browser }) => {
-    alice = await signIn(browser, "alice");
-    bob = await signIn(browser, "bob");
-    carol = await signIn(browser, "carol");
+    // All three per run (computed once, here): unread counts, the badge and the dashboard strip are counted over
+    // the whole account, so a fixed login shares them with other specs and with a previous run (--repeat-each).
+    alice = await signIn(browser, uniqueLogin("alice"));
+    bob = await signIn(browser, uniqueLogin("bob"));
+    carol = await signIn(browser, uniqueLogin("carol"));
     await alice.page.request.post("/api/notifications/read-all");
     await bob.page.request.post("/api/notifications/read-all");
     await carol.page.request.post("/api/notifications/read-all");
     docId = await createDocument(alice.page, "# Notify doc\n\nFirst paragraph.\n\nSecond paragraph.\n", "Notify doc");
-    await shareWith(alice.page, docId, "bob", "editor");
+    await shareWith(alice.page, docId, bob.login, "editor");
     // Bob was just notified of the share; start the thread tests from a clean slate.
     await bob.page.request.post("/api/notifications/read-all");
     await openDocument(alice.page, docId);
@@ -70,7 +72,7 @@ test.describe("notifications", () => {
     await expect(popover.locator("[data-testid=notification-item][data-unread=true]")).toHaveCount(1);
     const item = popover.getByTestId("notification-item").first();
     await expect(item).toHaveAttribute("data-kind", "reply");
-    await expect(item).toContainText("bob replied to your comment");
+    await expect(item).toContainText(`${bob.login} replied to your comment`);
     await expect(item).toContainText("Sure, on it.");
     await expect(item.getByTestId("notification-unread-dot")).toBeVisible();
     if (process.env.SHOT_DIR) await alice.page.screenshot({ path: `${process.env.SHOT_DIR}/notifications-bell.png` });
@@ -107,7 +109,7 @@ test.describe("notifications", () => {
     await alice.page.getByTestId("notifications-bell").click();
     const item = alice.page.getByTestId("notifications-popover").getByTestId("notification-item").first();
     await expect(item).toHaveAttribute("data-kind", "resolve");
-    await expect(item).toContainText("bob resolved your thread");
+    await expect(item).toContainText(`${bob.login} resolved your thread`);
     await alice.page.keyboard.press("Escape");
 
     // The resolved thread shows a dot in the panel; activating it marks the notification read.
@@ -162,7 +164,7 @@ test.describe("notifications", () => {
     await alice.page.getByTestId("notifications-bell").click();
     const item = alice.page.getByTestId("notifications-popover").getByTestId("notification-item").first();
     await expect(item).toHaveAttribute("data-kind", "suggestion.accept");
-    await expect(item).toContainText("bob accepted your suggestion");
+    await expect(item).toContainText(`${bob.login} accepted your suggestion`);
     await expect(item).toContainText("Suggested text.");
     await alice.page.keyboard.press("Escape");
     expect(await unreadCount(bob.page)).toBe(0);
@@ -170,7 +172,7 @@ test.describe("notifications", () => {
 
   test("sharing a document notifies the new collaborator on the dashboard and on any document's bell", async () => {
     const other = await createDocument(alice.page, "# Shared with Carol\n\nHello.\n", "Shared with Carol");
-    await shareWith(alice.page, other, "carol", "commenter");
+    await shareWith(alice.page, other, carol.login, "commenter");
     await expect.poll(() => unreadCount(carol.page)).toBe(1);
 
     await carol.page.goto("/");
@@ -179,7 +181,7 @@ test.describe("notifications", () => {
     const row = strip.getByTestId("notification-item");
     await expect(row).toHaveCount(1);
     await expect(row).toHaveAttribute("data-kind", "share");
-    await expect(row).toContainText("alice shared ‘Shared with Carol’ with you as commenter");
+    await expect(row).toContainText(`${alice.login} shared ‘Shared with Carol’ with you as commenter`);
 
     // Carol's own document: the bell shows the share too.
     const mine = await createDocument(carol.page, "# Carol's notes\n", "Carol's notes");
@@ -195,7 +197,7 @@ test.describe("notifications", () => {
     await carol.page.keyboard.press("Escape");
 
     // Opening the shared item from the popover of another document navigates there.
-    await shareWith(alice.page, docId, "carol", "viewer");
+    await shareWith(alice.page, docId, carol.login, "viewer");
     await refresh(carol.page);
     await expect(carol.page.getByTestId("notifications-badge")).toHaveText("1");
     await carol.page.getByTestId("notifications-bell").click();

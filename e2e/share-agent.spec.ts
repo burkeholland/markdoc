@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { createDocument, devLogin, openDocument } from "./helpers";
+import { createDocument, devLogin, openDocument, uniqueLogin } from "./helpers";
 
 /**
  * Share dialog height at 1280×800 on main (368ccc3), agent card always open: the dialog was capped at
@@ -19,7 +19,10 @@ test.describe("share dialog · collaborate with an agent", () => {
   test("shows the /api/mcp config for this origin, mints a token into it, and Copy puts it on the clipboard", async ({ browser }) => {
     const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
     const page = await context.newPage();
-    await devLogin(page, "share-agent-owner");
+    // Per run: the card mints "GitHub Copilot CLI" and the form below "Read bot"; token names are unique per
+    // user (409), so a fixed login fails on its second run (--repeat-each, a CI retry) — the tokens never expire in time.
+    const login = uniqueLogin("share-agent-owner");
+    await devLogin(page, login);
     const id = await createDocument(page, "# Agent share\n\nHello agent.\n", "Agent share");
     await openDocument(page, id);
     const origin = await page.evaluate(() => window.location.origin);
@@ -40,7 +43,7 @@ test.describe("share dialog · collaborate with an agent", () => {
     expect(size.scrollHeight).toBeLessThanOrEqual(size.height + 1);
     // Vertical order: add-people form → people list → Copy link row → General access → the agent disclosure; the footer is Done alone.
     const top = (testId: string) => page.getByTestId(testId).evaluate((el) => el.getBoundingClientRect().top);
-    const tops = { login: await top("share-login"), owner: await page.getByText("@share-agent-owner").evaluate((el) => el.getBoundingClientRect().top), copyLink: await top("copy-link"), linkAccess: await top("link-access"), toggle: await top("share-agent-toggle") };
+    const tops = { login: await top("share-login"), owner: await page.getByText(`@${login}`).evaluate((el) => el.getBoundingClientRect().top), copyLink: await top("copy-link"), linkAccess: await top("link-access"), toggle: await top("share-agent-toggle") };
     expect(tops.login).toBeLessThan(tops.owner);
     expect(tops.owner).toBeLessThan(tops.copyLink);
     expect(tops.copyLink).toBeLessThan(tops.linkAccess);
@@ -193,7 +196,7 @@ test.describe("share dialog · collaborate with an agent", () => {
   test("the scope picker mints a full-access token for this document only, and says so", async ({ browser }) => {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await devLogin(page, "share-agent-scoper");
+    await devLogin(page, uniqueLogin("share-agent-scoper"));
     const id = await createDocument(page, "# Scoped share\n\nHello agent.\n", "Scoped share");
     const other = await createDocument(page, "# Elsewhere\n\nNot this one.\n", "Elsewhere");
     await openDocument(page, id);

@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, codeText, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, codeText, uniqueLogin, type User } from "./helpers";
 
 async function goHome(page: Page) {
   await page.goto("/");
@@ -10,11 +10,10 @@ async function goHome(page: Page) {
 test.describe("make a copy and trash", () => {
   let owner: User;
   let other: User;
-  const suffix = Date.now().toString(36);
 
   test.beforeAll(async ({ browser }) => {
-    owner = await signIn(browser, `trash-owner-${suffix}`);
-    other = await signIn(browser, `trash-other-${suffix}`);
+    owner = await signIn(browser, uniqueLogin("trash-owner"));
+    other = await signIn(browser, uniqueLogin("trash-other"));
   });
 
   test.afterAll(async () => {

@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme } from "./helpers";
+import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -312,7 +312,7 @@ test.describe("axe: pages", () => {
   });
 
   test("onboarding: dashboard empty state with the guided-doc action, editor hint bar", async ({ browser }) => {
-    const { page, context } = await signIn(browser, `a11y-onboard-${Date.now().toString(36)}`);
+    const { page, context } = await signIn(browser, uniqueLogin("a11y-onboard"));
     await expect(page.getByTestId("empty-state")).toBeVisible();
     await expect(page.getByTestId("start-guided-doc")).toBeVisible();
     await scan(page, "dashboard empty state");
@@ -992,7 +992,7 @@ test.describe("axe: phone (iPhone 13)", () => {
   test("dashboard + editor", async ({ browser }) => {
     // A user of its own per run: the tap below expects exactly seven starred cards, and a second run against the
     // same server (--repeat-each, a CI retry) as a fixed login sees the previous run's seven too (received 14).
-    const { page, context } = await signInPhone(browser, `a11y-phone-${Date.now().toString(36)}`);
+    const { page, context } = await signInPhone(browser, uniqueLogin("a11y-phone"));
     await seedDashboard(page);
     // Seven starred documents so the strip overflows and renders "Show all starred" (#116).
     for (let i = 2; i <= 7; i++) {
@@ -1006,16 +1006,16 @@ test.describe("axe: phone (iPhone 13)", () => {
     await expect(showAll).toBeVisible();
     const box = await showAll.boundingBox();
     expect(box, "show-all-starred bounding box").not.toBeNull();
-    expect(box!.height).toBeGreaterThanOrEqual(44);
-    expect(box!.width).toBeGreaterThanOrEqual(44);
+    expect(cssPx(box!.height)).toBeGreaterThanOrEqual(44);
+    expect(cssPx(box!.width)).toBeGreaterThanOrEqual(44);
     await scan(page, "phone dashboard", { targetSize: true });
 
     // Desktop keeps a ≥ 24 px target (WCAG 2.2 minimum) without the phone padding.
     await page.setViewportSize({ width: 1280, height: 900 });
     const desktopBox = await showAll.boundingBox();
-    expect(desktopBox!.height).toBeGreaterThanOrEqual(24);
+    expect(cssPx(desktopBox!.height)).toBeGreaterThanOrEqual(24);
     await page.setViewportSize(devices["iPhone 13"].viewport);
-    expect((await showAll.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect(cssPx((await showAll.boundingBox())!.height)).toBeGreaterThanOrEqual(44);
 
     // Tapping it filters to the starred documents.
     await showAll.tap();
