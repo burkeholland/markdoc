@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test, expect } from "@playwright/test";
-import { createDocument } from "./helpers";
+import { createDocument, reloadHydrated } from "./helpers";
 
 /**
  * Settings → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
@@ -87,7 +87,7 @@ test.describe("settings · webhooks", () => {
     expect(payload).toMatchObject({ type: "comment.added", documentId: docId, documentTitle: "Pushed", body: "Pushed to the hook." });
     expect(typeof payload.cursor).toBe("string");
     expect(pushed.signature).toMatch(/^sha256=[0-9a-f]{64}$/);
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("webhook-status")).toContainText("200");
 
     page.once("dialog", (d) => void d.accept());

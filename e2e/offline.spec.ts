@@ -1,5 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, codeText, richText, focusCodeEnd, type User } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, richText, focusCodeEnd, reloadHydrated, type User } from "./helpers";
 
 /**
  * Offline resilience. `context.setOffline(true)` is used while typing (real offline
@@ -66,9 +66,10 @@ test.describe("offline resilience", () => {
     expect(unsynced).toBeGreaterThan(0);
 
     // Reload while still cut off from the collaboration server. The page shell needs the
-    // dev server, so network comes back but /collab stays blocked by the route above.
+    // dev server, so network comes back but /collab stays blocked by the route above; the
+    // shell itself loads and hydrates normally, so the reload waits for React like any other.
     await context.setOffline(false);
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.locator(".cm-content")).toBeVisible();
     await expect(page.getByTestId("doc-loading")).toHaveCount(0);
 

@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, codeText } from "./helpers";
+import { signIn, createDocument, codeText, reloadHydrated } from "./helpers";
 
 test.describe("templates", () => {
   test("a fresh user sees the template grid in the empty state", async ({ browser }) => {
@@ -15,7 +15,7 @@ test.describe("templates", () => {
   test("the empty-state grid goes away once the user has a document", async ({ browser }) => {
     const user = await signIn(browser, `has-docs-${Date.now().toString(36)}`);
     await createDocument(user.page, "# Existing\n", "Existing");
-    await user.page.reload();
+    await reloadHydrated(user.page);
     await user.page.waitForLoadState("networkidle");
     await expect(user.page.getByTestId("document-list")).toBeVisible();
     await expect(user.page.getByTestId("empty-state")).toHaveCount(0);

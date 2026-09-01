@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import * as Y from "yjs";
-import { signIn, createDocument, openDocument, codeText, budgetMs, type User } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, budgetMs, reloadHydrated, type User } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 /**
@@ -78,13 +78,13 @@ test.describe("hydration happens once", () => {
       expect(await codeText(page)).toBe(content);
       await expect(outline).toHaveCount(headingCount(content));
 
-      await page.reload();
+      await reloadHydrated(page);
       await openDocument(page, docId);
       expect(await codeText(page)).toBe(content);
       await expect(outline).toHaveCount(headingCount(content));
 
       // Once more: the second load must not have minted a new seed either.
-      await page.reload();
+      await reloadHydrated(page);
       await openDocument(page, docId);
       expect(await codeText(page)).toBe(content);
       await expect(outline).toHaveCount(headingCount(content));
@@ -105,7 +105,7 @@ test.describe("hydration happens once", () => {
     const before = await codeText(page);
     expect(before.length).toBeGreaterThan(0);
 
-    await page.reload();
+    await reloadHydrated(page);
     await expect(saveState).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     await expect(page.locator(".cm-content")).toBeVisible();
     expect(await codeText(page)).toBe(before);
@@ -125,7 +125,7 @@ test.describe("hydration happens once", () => {
     try {
       await openDocument(second.page, docId);
       expect(await codeText(second.page)).toBe(CONTENT);
-      await second.page.reload();
+      await reloadHydrated(second.page);
       await openDocument(second.page, docId);
       expect(await codeText(second.page)).toBe(CONTENT);
     } finally {
@@ -153,7 +153,7 @@ test.describe("hydration happens once", () => {
       await expect.poll(() => localDbNames(old.page), { timeout: budgetMs(5_000) }).not.toContain("markdoc:bystander");
 
       // Still single after a reload (the fresh mirror matches the server), and nothing doubled was pushed.
-      await old.page.reload();
+      await reloadHydrated(old.page);
       await openDocument(old.page, docId);
       expect(await codeText(old.page)).toBe(CONTENT);
     } finally {
@@ -175,7 +175,7 @@ test.describe("hydration happens once", () => {
       await openDocument(user.page, docId);
       expect(await user.page.evaluate((key) => localStorage.getItem(key), EPOCH_KEY)).toBe("2");
       await expect.poll(() => localDbNames(user.page)).toContain(`markdoc:${docId}`);
-      await user.page.reload();
+      await reloadHydrated(user.page);
       await openDocument(user.page, docId);
       expect(await localDbNames(user.page)).toContain(`markdoc:${docId}`);
       expect(await codeText(user.page)).toBe(CONTENT);

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono, Fraunces } from "next/font/google";
 import { THEME_BOOT_SCRIPT } from "@/lib/theme";
 import { publicOrigin } from "@/server/public-origin";
+import { HydrationMarker } from "@/components/hydration-marker";
 import "./globals.css";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"], display: "swap" });
@@ -49,7 +50,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_CLEANUP_SCRIPT }} />
       </head>
-      <body className="min-h-full flex flex-col bg-surface text-ink">{children}</body>
+      <body className="min-h-full flex flex-col bg-surface text-ink">
+        {children}
+        <HydrationMarker />
+      </body>
     </html>
   );
 }

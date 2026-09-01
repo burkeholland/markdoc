@@ -2,6 +2,7 @@ import os from "node:os";
 import { isIP } from "node:net";
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import { stableHostnames } from "../scripts/lib/dev-origins.mjs";
+import { reloadHydrated } from "./helpers";
 
 /**
  * The app must work through the stable machine name rather than a DHCP-issued address. The e2e
@@ -157,7 +158,8 @@ test.describe("LAN access", () => {
     const saveMs = Date.now() - saveStartedAt;
     expect(saveMs, "20 tokens reach saved within 10 seconds").toBeLessThanOrEqual(10_000);
 
-    await page.reload();
+    // The server is up throughout; the reload only swaps origins, so it must hydrate like any other.
+    await reloadHydrated(page);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 10_000 });
     const { text } = await sessionState(page);
     for (const token of tokens) expect(text.split(token)).toHaveLength(2);

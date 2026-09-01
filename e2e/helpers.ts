@@ -26,6 +26,28 @@ export async function signIn(browser: Browser, login: string): Promise<User> {
   return { context, page, login };
 }
 
+/**
+ * Resolves once React has hydrated the current document (html[data-hydrated], set by <HydrationMarker>
+ * from the root layout). Server markup carries no handlers, so a click that lands before this is dropped;
+ * `data-theme` is written by the boot script before React runs and is not a readiness signal.
+ */
+export async function waitForHydration(page: Page, timeout = 30_000) {
+  await page.locator("html[data-hydrated]").waitFor({ state: "attached", timeout });
+}
+
+/** page.reload() that does not return until React is interactive again. */
+export async function reloadHydrated(page: Page) {
+  await page.reload();
+  await waitForHydration(page);
+}
+
+/** Store a theme preference and reload; returns once the boot script applied it and React is interactive. */
+export async function setTheme(page: Page, theme: "light" | "dark") {
+  await page.evaluate((t) => localStorage.setItem("markdoc:theme", t), theme);
+  await reloadHydrated(page);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+}
+
 /** Create a document through the API (faster and more reliable than clicking through). */
 export async function createDocument(page: Page, content: string, title?: string): Promise<string> {
   const res = await page.request.post("/api/documents", { data: { content, title } });
@@ -366,6 +388,8 @@ export async function expectRhythm(page: Page, prev: string, next: string) {
 
 /** Open the comments side panel if it is not already visible. */
 export async function ensureCommentsOpen(page: Page) {
+  // The toggle is server-rendered without a handler: clicked before hydration, the panel simply stays closed.
+  await waitForHydration(page);
   if ((await page.getByTestId("comments-panel").count()) === 0) {
     await page.getByTestId("comments-toggle").click();
   }

@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, mintToken, type MintedToken, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, mintToken, reloadHydrated, type MintedToken, type User } from "./helpers";
 
 const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n";
 /**
@@ -149,7 +149,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(aliceThread.getByTestId("suggestion-accept-comment")).toBeVisible();
     await expect(aliceThread.getByTestId("suggestion-reject-comment")).toBeVisible();
 
-    await alice.page.reload();
+    await reloadHydrated(alice.page);
     await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(alice.page);
     await pressSourceHistory(alice.page, "redo");
@@ -157,14 +157,14 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await alice.page.getByTestId("comments-tab-resolved").click();
     await expect(aliceThread).toHaveAttribute("data-suggestion", "accepted");
 
-    await alice.page.reload();
+    await reloadHydrated(alice.page);
     await expect(alice.page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
     await pressSourceHistory(alice.page, "undo");
     await expect.poll(() => codeText(alice.page)).toContain("Our product is very unique.");
     await ensureCommentsOpen(alice.page);
     await expect(aliceThread).toHaveAttribute("data-suggestion", "pending");
 
-    await alice.page.reload();
+    await reloadHydrated(alice.page);
     await expect(alice.page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(alice.page);
     await pressSourceHistory(alice.page, "redo");
@@ -310,7 +310,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       })
       .toMatchObject({ quote: "sales are good", currentText: "sales are good" });
 
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(page);
     await pressSourceHistory(page, "redo");
@@ -318,13 +318,13 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(reply()).toHaveAttribute("data-state", "accepted");
     await expectSuggestionText(reply().getByTestId("suggestion-text"), "sales are strong");
 
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("tb-undo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(page);
     await pressSourceHistory(page, "undo");
     await expect.poll(() => codeText(page)).toContain("sales are good");
     await expect(reply()).toHaveAttribute("data-state", "pending");
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("tb-redo")).toBeEnabled({ timeout: 5_000 });
     await ensureCommentsOpen(page);
     await pressSourceHistory(page, "redo");
@@ -367,7 +367,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expect(secondReply).toHaveAttribute("data-state", "accepted");
     await expectSuggestionText(firstReply.getByTestId("suggestion-text"), "unique");
     await expectSuggestionText(secondReply.getByTestId("suggestion-text"), "distinctive");
-    await page.reload();
+    await reloadHydrated(page);
     await ensureCommentsOpen(page);
     await page.getByTestId("comments-tab-open").click();
     const reloadedBulkThread = page.locator(`[data-testid="comment-thread"][data-thread-id="${bulkThreadId}"]`);
@@ -401,7 +401,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
       data: { action: "suggestion", threadId: staleThreadId, replyId: stale.id, decision: "reject" },
     });
     expect(repeat.status()).toBe(409);
-    await page.reload();
+    await reloadHydrated(page);
     await ensureCommentsOpen(page);
     await expect(page.locator(`[data-testid="comment-reply"][data-reply-id="${stale.id}"]`)).toHaveAttribute("data-state", "rejected");
   });
@@ -433,7 +433,7 @@ test.describe("review suggestions: ```suggestion blocks in comments, Accept / Re
     await expectSuggestionText(thread.getByTestId("suggestion-text").first(), "sales are strong");
     await expectSuggestionText(replyCard.getByTestId("suggestion-text"), "sales are excellent");
 
-    await alice.page.reload();
+    await reloadHydrated(alice.page);
     await ensureCommentsOpen(alice.page);
     const reloaded = alice.page.locator(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`);
     await expectSuggestionText(reloaded.getByTestId("suggestion-text").first(), "sales are strong");

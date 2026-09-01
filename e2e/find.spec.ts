@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument, codeText, focusRichEnd, shareWith, budgetMs } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, focusRichEnd, shareWith, budgetMs, reloadHydrated } from "./helpers";
 
 const SAMPLE = `# Pets
 
@@ -22,7 +22,7 @@ async function openFromCodePane(page: import("@playwright/test").Page) {
 
 /** Reload the open document and wait until the editor is live again (same gates as openDocument). */
 async function reloadEditor(page: import("@playwright/test").Page) {
-  await page.reload();
+  await reloadHydrated(page);
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
   await expect(page.locator(".cm-content")).toBeVisible();
   await expect(page.locator(".md-rich")).toBeVisible();
