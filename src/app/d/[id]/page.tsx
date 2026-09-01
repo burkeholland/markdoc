@@ -5,16 +5,19 @@ import { currentUser, getEffectiveDocumentAccess } from "@/server/http";
 import { githubConfigured } from "@/auth";
 import { getGitHubToken } from "@/server/documents";
 import { publicDocument } from "@/server/dto";
-import { readLiveText } from "@/server/livedoc";
+import { documentMetadata, liveTextForRequest } from "@/server/document-metadata";
 import { renderMarkdownBody } from "@/server/export/html";
 
 export const dynamic = "force-dynamic";
 
+// The social card (og:title/description; og:image comes from ./opengraph-image.tsx) for whoever may read
+// the document; anyone else gets the bare title and the root layout's generic card.
 export async function generateMetadata({ params }: PageProps<"/d/[id]">): Promise<Metadata> {
   const { id } = await params;
   const user = await currentUser();
   const access = await getEffectiveDocumentAccess(id, user);
-  return { title: access?.doc.title ?? "Document" };
+  const live = access ? await liveTextForRequest(id).catch(() => null) : null;
+  return documentMetadata(access, live, "/d");
 }
 
 export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
@@ -54,11 +57,12 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
  * state (issue #118): on a 12k-word document the client otherwise paints nothing useful for
  * 2–4 s after the HTML loaded (hydration, Yjs sync, a full parse and a ProseMirror render of
  * the whole text). Rendered off-thread with the reader's pipeline; an empty or unrenderable
- * document (or a render error) yields null and the editor loads as before.
+ * document (or a render error) yields null and the editor loads as before. The live text is the
+ * read `generateMetadata` already made for this request.
  */
 async function renderInitialHtml(id: string): Promise<string | null> {
   try {
-    const live = await readLiveText(id);
+    const live = await liveTextForRequest(id);
     if (live.clean.trim() === "") return null;
     const { html } = await renderMarkdownBody(live.clean, { assetBaseUrl: "" });
     return html;

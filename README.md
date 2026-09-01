@@ -109,7 +109,7 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 | --- | --- | --- |
 | `AUTH_SECRET` | yes | Signs sessions and collaboration tokens. |
 | `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` | for GitHub login | GitHub OAuth App credentials. |
-| `AUTH_URL` | in production | Public URL, e.g. `https://markdoc.example.com`. Also the fallback origin for absolute URLs the server builds itself (link-preview `og:image` / `twitter:image`) when `MARKDOC_URL` is unset; without either, previews point at `http://localhost:<PORT>`. |
+| `AUTH_URL` | in production | Public URL, e.g. `https://markdoc.example.com`. Also the fallback origin for absolute URLs the server builds itself (link-preview `og:image` / `twitter:image`, including the per-document card a shared document link unfurls with — title, first lines, owner) when `MARKDOC_URL` is unset; without either, previews point at `http://localhost:<PORT>`. |
 | `MARKDOC_URL` | optional | Canonical public origin (bare `https://host`, no path) used for MCP tool output and link-preview images; wins over `AUTH_URL`. The server refuses to start on a non-bare-origin value. |
 | `MARKDOC_CANONICAL_HOST` | optional | Bare hostname (e.g. `markdoc.example.com`) the site should be reached on. When set, a top-level `GET`/`HEAD` that arrives on any other host (such as the Container App's default `*.azurecontainerapps.io` name after a custom-domain cutover) is answered `308` to `https://<host>` with the same path and query; `/api/*`, WebSocket upgrades and writes pass through. Unset (the default) changes nothing; an invalid value logs one warning and is ignored. See `docs/custom-domain.md`. |
 | `DATABASE_URL` | in production | Postgres connection string. Omit locally to use PGlite in `.data/pglite`. |

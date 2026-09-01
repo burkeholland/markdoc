@@ -22,8 +22,12 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Markdoc",
     description: "Markdown, together. Write in real time, review with comments and suggestions, keep every version.",
+    siteName: "Markdoc",
     images: [{ url: "/brand/og.png", width: 1200, height: 630, alt: "Markdoc — Markdown, together." }],
   },
+  // Document pages (`/d/[id]`, `/p/[id]`) replace title, description and image with the document's own
+  // card for whoever may read it (src/server/document-metadata.ts); everything else unfurls as this.
+  twitter: { card: "summary_large_image" },
 };
 
 // themeColor mirrors --p-surface in globals.css for each theme; viewport-fit=cover lets the header
