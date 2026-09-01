@@ -29,7 +29,7 @@ const { POST: POST_REQUESTS } = await import("@/app/api/documents/[id]/requests/
 const { POST: POST_CLAIM } = await import("@/app/api/documents/[id]/requests/[rid]/claim/route");
 const { POST: POST_COMPLETE } = await import("@/app/api/documents/[id]/requests/[rid]/complete/route");
 const { GET: GET_AGENT_REQUESTS } = await import("@/app/api/agent/requests/route");
-const { POST: POST_COMMENTS } = await import("@/app/api/documents/[id]/comments/route");
+const { POST: POST_COMMENTS, GET: GET_COMMENTS } = await import("@/app/api/documents/[id]/comments/route");
 const { POST: POST_SUGGEST } = await import("@/app/api/documents/[id]/suggest/route");
 
 let alice: Actor;
@@ -296,5 +296,74 @@ describe("working a request (f)–(i)", () => {
     await db.update(schema.agentRequests).set({ status: "claimed", claimedBy: "Copilot" }).where(eq(schema.agentRequests.id, id));
     const done = await completeRequest(docId, id, agent(alice, "Copilot"));
     expect(done.request).toMatchObject({ status: "done", claimedBy: "Copilot", claimedByLogin: null, agent: null });
+  });
+});
+
+/**
+ * An agent only works where its human is a member (`listRequestsForUser`): a request addressed to an agent whose
+ * owner is neither the document's owner nor a collaborator would be created and never listed by anyone (#1351).
+ * Such a request is refused at creation, before the `collaboratorsMayAsk` check — the picker never offers it,
+ * but the API does not depend on the picker.
+ */
+describe("the addressee's owner must be in the document (j)–(l)", () => {
+  let dana: Actor;
+  const threads = async () => (await (await as(alice, () => GET_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, undefined, "GET"), params(docId)))).json()) as { comments: { id: string; body: string }[] };
+
+  beforeAll(async () => {
+    const db = await getDb();
+    // Mixed-case login: the membership predicate lower-cases the owner's login like `upsertCollaborator` does.
+    const [d] = await db.insert(schema.users).values({ name: "Dana", login: "Dana", email: "dana-1351@example.com" }).returning();
+    dana = { id: d.id, login: "Dana", name: "Dana", image: null };
+    // Scribe is open to collaborators, Quill is not; Dana is a member of nothing yet.
+    const scribe = await createApiToken(dana.id, "Scribe");
+    await setCollaboratorsMayAsk(dana.id, scribe.id, true);
+    await createApiToken(dana.id, "Quill");
+  });
+
+  it("(j) @dana/scribe — a live token open to collaborators, its owner not in the document — is 400 agent-not-in-document; nothing stored, the comment stands", async () => {
+    const before = (await listRequests(docId)).length;
+    const add = await as(alice, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "brown fox", body: "@dana/scribe transcribe this" }), params(docId)));
+    expect(add.status).toBe(200);
+    const { id: threadId } = (await add.json()) as { id: string };
+
+    const refused = await as(alice, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Transcribe this", mode: "comment", threadId }), params(docId)));
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "Dana's Scribe is not in this document", code: "agent-not-in-document", agent: { login: "dana", slug: "scribe" } });
+    // The same for an explicit `agent`, however it is spelled, and from Bob, an editor.
+    for (const [who, role, mention] of [[alice, "owner", "Dana/Scribe"], [alice, "owner", "@dana/scribe"], [bob, "editor", "dana/scribe"]] as const) {
+      await expect(createRequest(docId, who, role, { instruction: "Transcribe this", mode: "comment", agent: mention })).rejects.toMatchObject({
+        status: 400,
+        message: "Dana's Scribe is not in this document",
+        details: { code: "agent-not-in-document", agent: { login: "dana", slug: "scribe" } },
+      });
+    }
+    expect((await listRequests(docId)).length).toBe(before);
+    expect((await listRequestsForUser({ ...dana, agent: "Scribe" })).map((r) => r.documentId)).not.toContain(docId);
+    // The comment that mentioned her is posted all the same — the request was refused, not the comment.
+    expect((await threads()).comments.find((t) => t.id === threadId)?.body).toBe("@dana/scribe transcribe this");
+    // A slug nobody has is still `unknown-agent` first: the membership check never speaks for an agent that does not exist.
+    const unknown = (await (await as(alice, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Hi", mode: "comment", agent: "dana/nobody" }), params(docId)))).json()) as { code?: string };
+    expect(unknown.code).toBe("unknown-agent");
+  });
+
+  it("(k) the membership check comes before the switch: a locked agent whose owner is not here is also agent-not-in-document, not agent-owner-only", async () => {
+    const refused = await as(alice, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Write this up", mode: "comment", agent: "dana/quill" }), params(docId)));
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "Dana's Quill is not in this document", code: "agent-not-in-document", agent: { login: "dana", slug: "quill" } });
+  });
+
+  it("(l) once Dana is a commenter, @dana/scribe is 201 as before and lands in Scribe's inbox; her locked Quill is the usual 403 agent-owner-only", async () => {
+    await upsertCollaborator(docId, "dana", "commenter", alice.id);
+    const accepted = await as(alice, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Transcribe this", mode: "comment", agent: "dana/scribe" }), params(docId)));
+    expect(accepted.status).toBe(201);
+    const { request } = (await accepted.json()) as { request: { id: string; agent: unknown } };
+    expect(request.agent).toEqual({ login: "dana", slug: "scribe" });
+    expect((await listRequestsForUser({ ...dana, agent: "Scribe" })).find((r) => r.id === request.id)).toMatchObject({ documentId: docId, userLogin: "Alice", agentName: "Scribe" });
+
+    const locked = await as(alice, () => POST_REQUESTS(jsonReq(`/api/documents/${docId}/requests`, { instruction: "Write this up", mode: "comment", agent: "dana/quill" }), params(docId)));
+    expect(locked.status).toBe(403);
+    expect(await locked.json()).toEqual({ error: "Dana's Quill only takes requests from Dana", code: "agent-owner-only", agent: "dana/quill" });
+    // Dana asking her own locked agent needs no switch — and she is in the document now.
+    expect((await createRequest(docId, dana, "commenter", { instruction: "Mine", mode: "comment", agent: "dana/quill" })).agent).toEqual({ login: "dana", slug: "quill" });
   });
 });

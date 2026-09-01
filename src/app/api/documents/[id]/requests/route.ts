@@ -25,8 +25,9 @@ const querySchema = z.object({ status: z.array(z.enum(STATUSES)).min(1).optional
 /**
  * Ask an agent: hand a selection plus an instruction to one agent. Commenters may ask for comments;
  * asking for changes (suggest / rewrite) needs edit access. The addressee (`agent`, or the thread's first
- * `@login/slug`) must be a live token (`400 unknown-agent`) whose owner is the caller or has switched
- * `collaboratorsMayAsk` on (`403 agent-owner-only`); without one the request goes to the caller's own agents.
+ * `@login/slug`) must be a live token (`400 unknown-agent`) whose owner is in the document
+ * (`400 agent-not-in-document`) and is the caller or has switched `collaboratorsMayAsk` on
+ * (`403 agent-owner-only`); without one the request goes to the caller's own agents.
  */
 export const POST = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
