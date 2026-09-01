@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
-import { api, type DocumentSummaryDto } from "@/lib/api";
+import { ApiError, api, apiErrorText, type DocumentSummaryDto } from "@/lib/api";
 import { SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { AgentConnectCard, mcpHttpConfigFor, useOrigin } from "@/components/settings/agent-connect-card";
 import { CopilotChecklist } from "@/components/settings/copilot-checklist";
@@ -28,7 +28,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
   const body = await res.text();
   const data = body ? JSON.parse(body) : null;
-  if (!res.ok) throw new Error((data as { error?: string })?.error ?? res.statusText);
+  if (!res.ok) {
+    // Keep the 400's `issues` so the form can show the field's reason, not the bare "Invalid request".
+    const err = (data ?? {}) as { error?: string; issues?: unknown };
+    throw new ApiError(res.status, err.error ?? res.statusText, err.issues);
+  }
   return data as T;
 }
 
@@ -85,7 +89,7 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
       const res = await request<{ tokens: TokenRow[] }>("/api/tokens");
       setTokens(res.tokens);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load tokens");
+      setError(apiErrorText(e, "Failed to load tokens"));
     }
   }, []);
   useEffect(() => {
@@ -117,7 +121,7 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
       setCreated({ token: res.token.token, name: res.token.name, scope: res.token.scope, documentIds: res.token.documentIds });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not create token");
+      setError(apiErrorText(e, "Could not create token"));
     } finally {
       setBusy(false);
     }

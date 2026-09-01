@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy, Loader2, Plus, Send, Trash2, Webhook } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
+import { ApiError, apiErrorText } from "@/lib/api";
 
 interface WebhookRow {
   id: string;
@@ -32,7 +33,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
   const body = await res.text();
   const data = body ? JSON.parse(body) : null;
-  if (!res.ok) throw new Error((data as { error?: string })?.error ?? res.statusText);
+  if (!res.ok) {
+    // Keep the 400's `issues` so the form can show the field's reason, not the bare "Invalid request".
+    const err = (data ?? {}) as { error?: string; issues?: unknown };
+    throw new ApiError(res.status, err.error ?? res.statusText, err.issues);
+  }
   return data as T;
 }
 
@@ -77,7 +82,7 @@ export function WebhooksPanel() {
       const res = await request<{ webhooks: WebhookRow[] }>("/api/webhooks");
       setHooks(res.webhooks);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load webhooks");
+      setError(apiErrorText(e, "Failed to load webhooks"));
     }
   }, []);
   useEffect(() => {
@@ -103,7 +108,7 @@ export function WebhooksPanel() {
       setAdding(false);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not add webhook");
+      setError(apiErrorText(e, "Could not add webhook"));
     } finally {
       setBusy(false);
     }
@@ -123,7 +128,7 @@ export function WebhooksPanel() {
       await request(`/api/webhooks/${h.id}/test`, { method: "POST" });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Test failed");
+      setError(apiErrorText(e, "Test failed"));
     } finally {
       setTesting(null);
     }
