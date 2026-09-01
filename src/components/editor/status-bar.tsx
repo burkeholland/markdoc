@@ -14,6 +14,7 @@ import { THEME_ORDER, themeLabel, type ThemePreference } from "@/lib/theme";
 import { useHydrated } from "@/lib/hooks";
 import { useDebouncedSessionValue } from "./use-session";
 import { StatsPopover, useLocalSelection } from "./stats-popover";
+import { STATUS_BOX } from "./chrome-classes";
 
 export type { Layout } from "@/lib/viewport";
 import type { Layout } from "@/lib/viewport";
@@ -51,7 +52,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const [themePreference, setThemePreference] = useTheme();
 
   return (
-    <footer className="safe-bottom safe-x box-content flex h-10 shrink-0 items-center gap-1 border-t border-line text-[13px] text-ink-3" data-testid="status-bar" data-compact={compact || undefined}>
+    <footer className={STATUS_BOX} data-testid="status-bar" data-compact={compact || undefined}>
       <StatsPopover session={session} source={source} selection={selection} hydrated={hydrated} />
       <div className="flex-1" />
 

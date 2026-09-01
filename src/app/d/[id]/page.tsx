@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
-import { EditorShell } from "@/components/editor/editor-shell";
+import { EditorClient } from "./editor-client";
 import { currentUser, getEffectiveDocumentAccess } from "@/server/http";
 import { githubConfigured } from "@/auth";
 import { getGitHubToken } from "@/server/documents";
@@ -33,7 +33,7 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
   if (!user && access.doc.linkAccess === "view") redirect(`/p/${id}`);
   const [githubAvailable, initialHtml] = await Promise.all([user ? getGitHubToken(user.id).then((t) => !!t) : false, renderInitialHtml(id)]);
   return (
-    <EditorShell
+    <EditorClient
       doc={publicDocument(access.doc)}
       role={access.role}
       user={{

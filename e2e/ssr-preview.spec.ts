@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { signIn, createDocument, type User } from "./helpers";
+import { signIn, createDocument, waitForHydration, type User } from "./helpers";
 import { LONG_DOC, wordCount } from "./fixtures/burke-scale";
 
 /**
@@ -152,5 +152,138 @@ test.describe("server-rendered preview matches the editor's layout", () => {
     const swap = await measureSwap(page, id);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     assertNoJump(swap, "long dark");
+  });
+});
+
+/**
+ * The editor stack loads behind the server-rendered chrome (task #1545): `/d/<id>` ships a placeholder
+ * of the shell's outer boxes (`[data-testid="editor-loading"]`) and `next/dynamic({ ssr: false })` swaps
+ * the shell in once its chunks are down. Two things must hold for that swap to be invisible: the shell
+ * mounts inside the same `display: contents` host as the placeholder (React would otherwise append it at
+ * the end of `<body>`, behind the skip link and the portals), and every chrome box of the placeholder is
+ * the shell's to the pixel — header, toolbar, rail, pane-label row, status bar — so nothing in the preview moves.
+ */
+test.describe("editor stack loads behind the server-rendered chrome", () => {
+  let user: User;
+
+  test.beforeAll(async ({ browser }) => {
+    user = await signIn(browser, "ssr-defer");
+  });
+
+  test.afterAll(async () => {
+    await user.context.close();
+  });
+
+  const CHROME = {
+    header: ['[data-testid="editor-loading"] > header', 'header[data-testid="header"]'],
+    toolbar: ['[data-testid="editor-loading"] > header + div', '[data-testid="toolbar"]'],
+    "outline rail": ['[data-testid="editor-loading"] main > div:nth-child(2)', 'aside[data-testid="outline"]'],
+    "code column": ['[data-testid="editor-loading"] main > div:nth-child(3) > div:nth-child(1)', '[data-testid="code-column"]'],
+    "rich column": ['[data-testid="editor-loading"] .rich-column', '[data-testid="rich-column"]'],
+    "pane-label row": ['[data-testid="editor-loading"] .rich-column > div:nth-child(1)', '[data-testid="rich-column"] > div:nth-child(1)'],
+    "status bar": ['[data-testid="editor-loading"] > footer', 'footer[data-testid="status-bar"]'],
+  } as const;
+
+  const boxOf = (page: Page, selector: string) =>
+    page.locator(selector).evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)].join(",");
+    });
+
+  test("the shell mounts where the placeholder was, keeps body order, and every chrome box is the same", async () => {
+    const { page } = user;
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.evaluate(() => localStorage.setItem("markdoc:theme", "light"));
+    const id = await createDocument(page, SHORT_DOC, "Deferred shell");
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await page.route(/\/_next\/static\/.*\.js(\?|$)/, async (route) => {
+      await gate;
+      await route.continue();
+    });
+    await page.goto(`/d/${id}`, { waitUntil: "commit" });
+
+    const loading = page.getByTestId("editor-loading");
+    await expect(loading).toBeVisible();
+    await expect(loading).toHaveAttribute("aria-busy", "true");
+    await expect(page.getByTestId("editor-shell")).toHaveCount(0);
+    await expect(page.getByTestId("rich-placeholder").locator("h1")).toHaveText("On-call handbook");
+    // Landmarks are there before any script: header, main, footer.
+    await expect(loading.locator("header")).toHaveCount(1);
+    await expect(loading.locator("main#editor-main")).toHaveCount(1);
+    await expect(loading.locator("footer")).toHaveCount(1);
+    await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="rich-placeholder"]')!).maxWidth === "820px");
+    const placeholderBoxes: Record<string, string> = {};
+    for (const [name, [before]] of Object.entries(CHROME)) placeholderBoxes[name] = await boxOf(page, before);
+    // Tag the first child of <body> so we can tell it is the very same node after the swap, and note where the host sits.
+    // A JS property, not an attribute: React would report an attribute it did not render as a hydration mismatch.
+    const bodyFirst = await page.evaluate(() => {
+      const first = document.body.children[0] as HTMLElement & { __e2eBodyFirst?: true };
+      first.__e2eBodyFirst = true;
+      return `${first.tagName.toLowerCase()}${first.className ? "." + first.className.trim().split(/\s+/).join(".") : ""}`;
+    });
+    const hostIndex = () => page.evaluate(() => [...document.body.children].indexOf(document.querySelector('[data-testid="editor-root"]')!));
+    const hostIndexBefore = await hostIndex();
+    expect(hostIndexBefore).toBeGreaterThanOrEqual(0);
+
+    release();
+    const shell = page.getByTestId("editor-shell");
+    await shell.waitFor({ state: "attached", timeout: 30_000 });
+    await expect(loading).toHaveCount(0);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+
+    // Same host: the shell is a child of the `display: contents` root, not a late sibling at the end of <body>.
+    await expect(shell.locator("xpath=..")).toHaveAttribute("data-testid", "editor-root");
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="editor-root"]')!).display)).toBe("contents");
+    expect(await page.evaluate(() => (document.body.children[0] as HTMLElement & { __e2eBodyFirst?: true }).__e2eBodyFirst === true), `body's first child changed (was ${bodyFirst})`).toBe(true);
+    expect(await hostIndex(), "the host moved among body's children").toBe(hostIndexBefore);
+
+    const moved: string[] = [];
+    for (const [name, [, after]] of Object.entries(CHROME)) {
+      const box = await boxOf(page, after);
+      if (box !== placeholderBoxes[name]) moved.push(`${name}: placeholder ${placeholderBoxes[name]} → shell ${box}`);
+    }
+    expect(moved, `chrome boxes that differ between placeholder and shell (left,top,width,height):\n${moved.join("\n")}`).toEqual([]);
+  });
+
+  test("hydrated placeholder announces the load; the live region goes with the placeholder", async () => {
+    const { page } = user;
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const id = await createDocument(page, SHORT_DOC, "Deferred shell live region");
+
+    // Hold back only the chunks that are not in the server HTML: the page hydrates (placeholder effects
+    // run), while the editor's own chunks — requested by the dynamic import — wait.
+    const html = await (await page.request.get(`/d/${id}`)).text();
+    const initial = new Set([...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => new URL(m[1], page.url()).pathname));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await page.route(/\/_next\/static\/.*\.js(\?|$)/, async (route) => {
+      if (!initial.has(new URL(route.request().url()).pathname)) await gate;
+      await route.continue();
+    });
+    await page.goto(`/d/${id}`, { waitUntil: "commit" });
+    await waitForHydration(page);
+
+    const status = page.getByTestId("editor-loading-status");
+    await expect(status).toHaveText("Loading the editor…");
+    await expect(status).toHaveAttribute("role", "status");
+    await expect(status).toHaveAttribute("aria-live", "polite");
+    // Outside the busy subtree, so assistive technology does not suppress it.
+    await expect(page.locator('[data-testid="editor-loading"] [data-testid="editor-loading-status"]')).toHaveCount(0);
+    await expect(page.getByTestId("editor-shell")).toHaveCount(0);
+    // Nothing in the placeholder takes focus: its only controls-to-be are empty boxes and the preview is `inert`.
+    expect(
+      await page.evaluate(() =>
+        [...document.querySelector('[data-testid="editor-loading"]')!.querySelectorAll("a, button, input, textarea, select, [tabindex]")].filter((el) => !el.closest("[inert]")).length,
+      ),
+    ).toBe(0);
+    await page.keyboard.press("Tab");
+    expect(await page.evaluate(() => document.querySelector('[data-testid="editor-loading"]')!.contains(document.activeElement))).toBe(false);
+
+    release();
+    await page.getByTestId("editor-shell").waitFor({ state: "attached", timeout: 30_000 });
+    await expect(status).toHaveCount(0);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
   });
 });

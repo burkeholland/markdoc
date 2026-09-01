@@ -35,6 +35,7 @@ import type { SyncActions } from "./sync-dialog";
 import { useEverTrue } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
 import { emptySync, useSyncPolling } from "./use-sync-polling";
+import { CODE_COLUMN_BOX, CODE_COLUMN_SPLIT, MAIN_BOX, PANE_LABEL_ROW_BOX, PANES_BOX, RICH_COLUMN_BOX, RICH_COLUMN_SPLIT, RICH_PLACEHOLDER_BOX, RICH_SCROLLER_BOX, SHELL_BOX } from "./chrome-classes";
 
 /** Same box as the pane's root while its chunk loads, so the split layout does not shift when the pane arrives. */
 function CodePanePlaceholder() {
@@ -1063,7 +1064,7 @@ export function EditorShell({
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen flex-col overflow-hidden bg-surface supports-[height:100dvh]:h-[100dvh]" data-testid="editor-shell" data-breakpoint={breakpoint}>
+      <div className={SHELL_BOX} data-testid="editor-shell" data-breakpoint={breakpoint}>
         <a
           href="#editor-main"
           className="skip-link"
@@ -1132,7 +1133,7 @@ export function EditorShell({
             </button>
           </div>
         )}
-        <main id="editor-main" className="relative flex min-h-0 flex-1">
+        <main id="editor-main" className={MAIN_BOX}>
           {isPhone ? (
             <Dialog open={outlineDrawerOpen} onOpenChange={setOutlineDrawerOpen}>
               <DialogPortal>
@@ -1148,7 +1149,7 @@ export function EditorShell({
             // renders assume a desktop viewport, so without it a phone paints a 224 px rail first (#1470).
             <OutlinePanel className="max-md:hidden" session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
           )}
-          <div className="relative flex min-w-0 flex-1">
+          <div className={PANES_BOX}>
             {showLoading && !showRichPlaceholder && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                 Loading…
@@ -1170,7 +1171,7 @@ export function EditorShell({
               <>
                 {/* `layout` (not `shownLayout`): before hydration it is always "split", so the phone's first paint already
                     hides the code column and the rich column's `flex-1 basis-0` fills the width, as after hydration (#1470). */}
-                <div className={cn("relative flex min-w-0 flex-col", showRich ? "flex-1 basis-0 border-r border-line" : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column">
+                <div className={cn(CODE_COLUMN_BOX, showRich ? CODE_COLUMN_SPLIT : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column">
                   {showLoading && showRichPlaceholder && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                       Loading…
@@ -1192,8 +1193,8 @@ export function EditorShell({
                     )}
                   </div>
                 </div>
-                <div className={cn("rich-column flex min-w-0 flex-col", showCode ? "flex-1 basis-0" : "flex-1", !showRich && "hidden")} data-testid="rich-column">
-                  <div className="flex h-12 shrink-0 items-center justify-between pl-6 pr-3">
+                <div className={cn(RICH_COLUMN_BOX, showCode ? RICH_COLUMN_SPLIT : "flex-1", !showRich && "hidden")} data-testid="rich-column">
+                  <div className={PANE_LABEL_ROW_BOX}>
                     <span className="pane-label">{viewingOnly ? "Preview" : "Preview"}</span>
                     <Tip label={viewingOnly ? "Switch to editing" : "View only"}>
                       <button
@@ -1208,10 +1209,10 @@ export function EditorShell({
                       </button>
                     </Tip>
                   </div>
-                  <div ref={setRichScrollRef} className="scrollbar-thin relative min-h-0 flex-1 overflow-y-auto">
+                  <div ref={setRichScrollRef} className={RICH_SCROLLER_BOX}>
                     {showRichPlaceholder && (
                       // Read-only stand-in until the live text is in; `inert` keeps its links and headings out of focus and a11y order.
-                      <div className="rich-placeholder reader-body" data-testid="rich-placeholder" aria-hidden="true" inert dangerouslySetInnerHTML={{ __html: initialHtml }} />
+                      <div className={RICH_PLACEHOLDER_BOX} data-testid="rich-placeholder" aria-hidden="true" inert dangerouslySetInnerHTML={{ __html: initialHtml }} />
                     )}
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />

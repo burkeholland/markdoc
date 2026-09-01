@@ -97,6 +97,15 @@ const LONG_READER_DOC =
       `## Section ${i + 1}\n\nA paragraph of ordinary prose that runs long enough to wrap on a phone several times over, so the article has real height and the parser has real work to do before it reaches the end of the document.\n\n- first point\n- second point\n- third point\n\n| Col A | Col B |\n| --- | --- |\n| ${i} | ${i * 2} |\n\n\`\`\`ts\nconst value${i} = ${i};\n\`\`\`\n`,
   ).join("\n");
 
+/** ≈ 300 lines for the deferred-editor CLS row: headings, prose, lists and code (no tables, see the row). */
+const DEFER_DOC =
+  "# Deferred editor fixture\n\n" +
+  Array.from(
+    { length: 27 },
+    (_, i) =>
+      `## Section ${i + 1}\n\nA paragraph of ordinary prose that runs long enough to wrap on a phone several times over, so the preview has real height from the first paint and the parser has real work to do before it reaches the end of the document.\n\n- first point\n- second point\n\n\`\`\`ts\nconst value${i} = ${i};\n\`\`\`\n`,
+  ).join("\n");
+
 /** Sign in on a context that emulates a phone (or the given viewport). */
 async function signInOn(browser: Browser, login: string, options: Parameters<Browser["newContext"]>[0]) {
   const context = await browser.newContext(options);
@@ -361,6 +370,36 @@ test.describe("phone", () => {
     await context.close();
   });
 
+  // #1545: the editor stack (8 chunks, ≈ 924 kB) loads behind a server-rendered placeholder of the shell's
+  // chrome, and the swap must not move a pixel. 4× CPU keeps the placeholder on screen for seconds (≈ 2–3 s
+  // to hydrate, ≈ 6–9 s to the shell on a production build); the observer runs from the first byte to 1 s after
+  // the shell has saved. Measured 0.000 in 5/5 runs (short and 300-line fixtures) after the change, 0.011–0.020
+  // before it (status-bar compact swap, header controls re-laid out at hydration) and 0.129 at 820 px (the rail
+  // collapsing at hydration). No table in the fixture: the TableMenu's touch strip resizes once the rich pane
+  // mounts (0.008 on a phone, in the previous build too), which is outside what this row guards.
+  test("editor stack loads behind the placeholder without a layout shift (300 lines, 4× CPU, CLS ≤ 0.01)", async ({ browser }) => {
+    const context = await browser.newContext({ ...phone });
+    await context.addInitScript(observeLayoutShifts);
+    const page = await context.newPage();
+    await devLogin(page, "phone-cls-defer");
+    const id = await createDocument(page, DEFER_DOC, "Mobile CLS deferred editor");
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+    await page.goto(`/d/${id}`, { waitUntil: "commit" });
+    // The placeholder is the server HTML: on screen before any script, gone once the shell has mounted.
+    await expect(page.getByTestId("editor-loading")).toBeVisible();
+    await expect(page.getByTestId("rich-placeholder").locator("h1")).toHaveText("Deferred editor fixture");
+    await expect(page.getByTestId("editor-shell")).toHaveAttribute("data-breakpoint", "phone", { timeout: 60_000 });
+    await expect(page.getByTestId("editor-loading")).toHaveCount(0);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+    await page.waitForTimeout(1000);
+    const cls = await layoutShiftSum(page);
+    console.log(`[defer] /d/<id> phone CLS (4× CPU, 300 lines): ${cls.toFixed(3)}`);
+    expect(cls).toBeLessThanOrEqual(0.01);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    await context.close();
+  });
+
   // The reader's "Contents" button sits above the article on phones; it must precede the article in
   // the DOM too, or the streamed article paints first and drops 62 px when the aside arrives. Visible
   // only when the parser paints mid-document: a long document on a 4× throttled CPU (a mid-range phone)
@@ -388,6 +427,8 @@ test.describe("phone", () => {
   // and the desktop bar painted first — the layout-menu trigger then moved 268 px and the word counter
   // wrapped, 0.0087 of the editor's 0.009 above. Two checks: the page total, and the trigger's first
   // rendered box against its settled one (the sum alone cannot tell a 0.009 status-bar swap from noise).
+  // Since #1545 the bar's controls arrive with the shell (the server sends an empty footer of the same box),
+  // so "first" is the shell's first client frame; the row still catches a bar that re-lays itself out after it.
   test("status bar first paint is already the phone bar: the layout-menu trigger does not move at hydration", async ({ browser }) => {
     const context = await browser.newContext({ ...phone });
     await context.addInitScript(observeLayoutShifts);
@@ -404,7 +445,7 @@ test.describe("phone", () => {
       const r = document.querySelector('[data-testid="layout-menu"]')!.getBoundingClientRect();
       return { first: w.__firstMenuRect ?? null, settled: { x: r.x, width: r.width } };
     });
-    expect(first, "layout-menu was in the server markup").not.toBeNull();
+    expect(first, "layout-menu rendered (with the shell since #1545)").not.toBeNull();
     const dx = Math.abs(settled.x - first!.x);
     const dw = Math.abs(settled.width - first!.width);
     console.log(`[1531] /d/<id> phone CLS: ${cls.toFixed(3)}; status-bar layout-menu Δx=${dx.toFixed(1)} Δwidth=${dw.toFixed(1)}`);
