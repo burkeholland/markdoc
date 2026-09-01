@@ -8,7 +8,7 @@ import { MarkdownBinding, markdownBindingPlugin } from "../sync/markdown-binding
 import { schema } from "../markdown/schema";
 import { SLASH_ITEMS } from "../slash-items";
 import { setHeadingLevel } from "./commands";
-import { editablePlugin, setEditable } from "./setup";
+import { editablePlugin, setEditable } from "./editable";
 import { applySlashCommand, applySlashItem, slashMenuPlugin, slashMenuState, type SlashKey, type SlashState } from "./slash-menu";
 
 describe("slashMenuPlugin", () => {
