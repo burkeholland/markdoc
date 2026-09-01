@@ -162,9 +162,10 @@ test.describe("agent presence and watch", () => {
     expect(Date.now() - posted).toBeLessThan(budgetMs(2000));
     expect(mention, JSON.stringify(result.events)).toMatchObject({ agent: "Copilot", snippet: "@alice/Copilot tighten this" });
 
-    // Alice's own bell does not ring for a mention of her own agent.
+    // Alice's own bell does not ring for a mention of her own agent (scoped to this document — other specs may leave alice unread mentions).
     const bell = await page.request.get("/api/notifications?unread=1&kind=mention");
-    expect(((await bell.json()) as { unreadCount: number }).unreadCount).toBe(0);
+    const { items } = (await bell.json()) as { items: { documentId: string; readAt: string | null }[] };
+    expect(items.filter((n) => n.documentId === docId)).toHaveLength(0);
     await expect(page.getByTestId("comment-thread")).toHaveCount(2);
   });
 

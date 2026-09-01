@@ -91,7 +91,13 @@ test.describe("share dialog · collaborate with an agent", () => {
     if (process.env.SHOT_DIR) await card.screenshot({ path: `${process.env.SHOT_DIR}/share-agent-card-permissions.png` });
 
     // The URL in the card is live: a plain GET is the liveness card, tools > 0.
-    const alive = await page.request.get(`${origin}/api/mcp`);
+    // ≈ 25 s of UI work precede this request; the dev server occasionally drops a stale keep-alive socket (read ECONNRESET) — retry once.
+    const getAlive = () => page.request.get(`${origin}/api/mcp`);
+    const alive = await getAlive().catch(async (err: unknown) => {
+      if (!/ECONNRESET|ECONNREFUSED|socket hang up/.test(String(err))) throw err;
+      await page.waitForTimeout(500);
+      return getAlive();
+    });
     expect(alive.ok()).toBeTruthy();
     const body = (await alive.json()) as { name: string; tools: number };
     expect(body.name).toBe("markdoc");
