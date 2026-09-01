@@ -2,6 +2,58 @@
 
 Newest first. Each entry is one merged feature or fix on `main`; test-only and work-in-progress commits are folded into the feature they belong to. Short hashes point at the merge or squash commit.
 
+## 2026-09-01
+
+### Writing
+
+- Emphasis that another mark breaks up right before a space no longer serializes with stray `*` / `**`: the vendored prosemirror-markdown serializer carries upstream 1.13.6's fix, so `**f*oo*** *bar*` round-trips instead of leaving invalid marks in the Markdown (f6c42ed)
+
+### Exporting
+
+- Closing PDF export's shared Chromium is bounded to 10 s: a close that hangs on a loaded machine is logged once (`[pdf] browser close still running after … ms`) and left to process exit instead of holding up the caller, and the idle close takes the same bound (cf81c98)
+- PDF export no longer forgets a freshly launched Chromium when an older one's `disconnected` event or failed launch arrives late: the shared handle is cleared only by the browser that owns it, so the next export neither relaunches nor fails needlessly (d09d722)
+
+### Accessibility
+
+- ⋮ → *Name current version* focuses its name field again and Esc returns to the ⋮ button (a regression shipped with the lazy-loaded dialogs): a dialog whose chunk is already loaded now mounts in the same commit as the menu action, and a `KeepOpeningFocus` guard brings focus back inside the dialog when the closing menu steals it in the other ordering (005b033)
+
+### Agents
+
+- `PATCH /api/documents/:id` joins the `warnings[]` convention: a rename whose `title.change` activity row fails answers `200 { document, warnings: ["activity-not-recorded"] }` instead of failing after the title already changed; a same-title no-op keeps its exact body (e4457ad)
+- Agent requests: cancelling is guarded like completing, so a cancel racing a completion cannot resurrect a finished request or write a second activity row, and a request addressed to an agent whose owner is not in the document is refused with `400 agent-not-in-document` before anything is stored (c45e70e)
+
+### Build, ops and tests
+
+- Dependencies: Next 16.3.2 with `eslint-config-next` and `@next/env` (chunk hashes change against revision 29) (934a2fe); editor patches — prosemirror-view 1.42.3 with its clipboard XSS fix, `@codemirror/view` 6.43.9, `@codemirror/commands` 6.11.0, y-codemirror.next 0.3.6 (0f8450d); jose 6.2.10, lucide-react 1.34.0 and three type/test packages (cdf63a1); PGlite 0.5.7 and Vitest 4.1.11 (fb71e53); `@types/node` 22 and `engines.node >=22` (a243aa6). Unit suite: the jest-dom matchers load only under jsdom, shaving most of the per-file setup time — a node-environment test that needs them adds the `// @vitest-environment jsdom` pragma (d687968); the real-GitHub publish test is opt-in via `MARKDOC_GITHUB_INTEGRATION=1` / `npm run test:github` (7a2d29b). E2E: every dev-login site goes through `devLogin` and waits for hydration after a `goto` before its first interaction (3e10ee4); `E2E_BUDGET_SCALE` scales every timing budget from one knob and the run log's first line states the scale (02b0769). Docs: README *Test it* refreshed with the measured suite sizes and the jsdom-pragma rule (ee8a9dc); `docs/infra-deploy.md` is the infrastructure-deployment runbook — preflight, what what-if cannot prove, run, verify, rollback (8062e3c)
+
+## 2026-08-31
+
+### Writing
+
+- The save indicator reads a steady *Saving…* while you type and *Saved* about a second after you stop, instead of flicking between the two on every keystroke; opening a document and the *All changes saved* recovery flash are as quick as before, and a collaborator's typing leaves your chip alone (e28db7b)
+- Find and replace: editors see the replace row as soon as the find bar opens (a toggle with a replace icon hides it, and the choice is remembered), the shortcut is ⌥⌘F on a Mac — ⌘H is macOS *Hide* and never reached the browser — and Ctrl+H elsewhere, as the palette, the shortcuts dialog and the README now say; viewers get find only (e66fb29)
+
+### Publishing
+
+- A shared document link unfurls with the document's own card: `/d/:id` and `/p/:id` carry `og:title` / `og:description` (the title and a 160-character excerpt) and a rendered 1200×630 `og:image` with the title, owner and reading time in the app's typefaces, cached for five minutes; a private document stays the generic Markdoc card and its image answers 404 to anyone without access (c5b9dd5)
+
+### Agents
+
+- Agent requests are addressed: a request mentioning `@owner/agent` is listed, claimed and completed only by that agent's token (`403 not-addressee` for everyone else; unaddressed requests stay with the requester's own agents), a request to an unknown, revoked or expired agent is `400 unknown-agent`, and only the token's owner may ask it unless the owner switches `collaboratorsMayAsk` on (`PATCH /api/tokens/:id`; `403 agent-owner-only` otherwise); `agent` and `claimedByLogin` ride on every request, `markdoc_list_requests` prints them, and migration `0019` adds the columns (e926a41)
+- In the editor, someone else's agent is named with its owner — *Alice's Copilot* — in request chips, presence and the finished toast; the `@` picker locks agents you may not ask (Enter still inserts the mention), the composer refuses a request to one with *… only takes requests from Alice.* and a disabled Send, and Settings → Agents gains a *Collaborators may ask this agent* switch per token (4b23ba8)
+- MCP write tools say the REST `warnings` in their text (`Warnings: activity-not-recorded.`) so an agent knows the write landed and what did not follow; `markdoc_suggest` refuses neither or both of `content` / `edits`, `markdoc_list_documents` refuses `trash` together with `starred`, a comment folded into a request thread says so, and the tool schemas carry the REST bounds so a too-long title or body is refused before any request (736c5ce)
+
+### Reliability
+
+- Sharing, naming or restoring a version, deciding suggestions and uploading an asset no longer answer `500` (or `404`) for a change that already happened: when the activity row, the notification or the *Restored version* snapshot fails after the write stood, the route answers `2xx` with `warnings: ["activity-not-recorded" | "notification-not-sent" | "version-not-saved"]`, and two identical uploads racing on one document dedupe without an error (0c8155e)
+- Completing an agent request is race-safe — two completions in the same instant write one activity row and one notification, and a request cancelled between the pre-check and the write stays cancelled (`409`) — accepting suggestions notifies every author even when one notification fails, and the twelve warning tails share one `warnTail` helper whose activity rows join the caller's transaction (bdf4b83)
+
+### Build, ops and tests
+
+- `release:verify` gains a `headers` row: `nosniff`, `Referrer-Policy` and `Permissions-Policy` on `/login`, `/api/health` and a referenced chunk, `frame-ancestors 'none'` on `/login` only, HSTS required on an https base and refused over plain http (91e5357)
+- The infrastructure template no longer describes the retired database NAT gateway and its IP (f4c8aeb) and pins `privateEndpointNetworkPolicies: 'Disabled'` on the postgres and app subnets as Azure has them, so a full deployment cannot put the NSG in front of the private endpoint; template only, nothing was deployed (064abd6)
+- `npm audit` is clean: an `overrides` entry drops the never-executed esbuild under drizzle-kit's `@esbuild-kit` loader (8384482); e2e waits for `html[data-hydrated]` after every `reload` before clicking (21047e8) and the code-highlight spec places its caret with `focusRichEnd` (aa6843c); `docs/agents.md` has its 27-row MCP tool table swept against the tool schemas (3db26ff) and documents the `warnings[]` convention and the atomic write routes (a34ce90)
+
 ## 2026-08-27
 
 ### Reliability
