@@ -19,7 +19,7 @@ const { createApiToken } = await import("@/server/tokens");
 const { searchUsers, USER_SEARCH_LIMIT, USER_SEARCH_LIMITED_LOG_INTERVAL_MS } = await import("@/server/github");
 const { GET } = await import("./route");
 
-type Body = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; error?: string };
+type Body = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: string; error?: string; issues?: { message: string }[] };
 
 let owner: Actor;
 const get = (query: string) => GET(new Request(`http://localhost:3700/api/github/users${query}`));
@@ -97,12 +97,38 @@ describe("GET /api/github/users", () => {
     }
   });
 
-  it("answers 400 \"No GitHub token\" outside the mock for a user who signed in without GitHub", async () => {
+  it("answers 200 reason=no-github-token (no users, cached a minute) outside the mock for a user who signed in without GitHub — not a 400 (task #1481)", async () => {
     process.env.GITHUB_MOCK = "0";
     try {
       const res = await get("?q=oc");
-      expect(res.status).toBe(400);
-      expect(((await res.json()) as Body).error).toBe("No GitHub token. Sign in with GitHub.");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("private, max-age=60");
+      expect((await res.json()) as Body).toEqual({ users: [], limited: false, reason: "no-github-token" });
+    } finally {
+      process.env.GITHUB_MOCK = "1";
+    }
+  });
+
+  it("without a token, a bad prefix is still refused with 400 and the zod message, and an API token still gets 403", async () => {
+    // The mock-mode versions of both live above ("rejects an empty, one-character…" and "requires a signed-in
+    // browser session…"); this pins the order of the checks: prefix and caller are judged before the token.
+    process.env.GITHUB_MOCK = "0";
+    try {
+      const bad = await get("?q=a");
+      expect(bad.status).toBe(400);
+      const body = (await bad.json()) as Body;
+      expect(body.error).toBe("Invalid request");
+      expect(body.reason).toBeUndefined();
+      expect(body.issues?.map((i) => i.message)).toContain("Too small: expected string to have >=2 characters");
+      const token = await createApiToken(owner.id, "Copilot CLI (no-token check)");
+      bearer = token.token;
+      try {
+        const res = await get("?q=oc");
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as Body).error).toBe("GitHub user search is only available from a signed-in browser session");
+      } finally {
+        bearer = null;
+      }
     } finally {
       process.env.GITHUB_MOCK = "1";
     }
