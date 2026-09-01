@@ -96,3 +96,22 @@ describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () =
     expect(patches()).toHaveLength(1);
   });
 });
+
+describe("Settings → Agents: the create form shows the validation reason (#1480)", () => {
+  it("shows the field's issue message, not the bare \"Invalid request\", when the server rejects the new token", async () => {
+    // `handler()` answers a zod failure with `400 { error: "Invalid request", issues }`; the panel's `request()` turns
+    // that into `new ApiError(400, "Invalid request", [{ path: ["name"], message: "Name is required" }])`.
+    fetchMock
+      .mockResolvedValueOnce(response({ tokens: [] }))
+      .mockResolvedValueOnce(response({ error: "Invalid request", issues: [{ path: ["name"], message: "Name is required" }] }, 400));
+    render(<TokensPanel origin="https://markdoc.test" userLogin="alice" />);
+
+    await screen.findByText("No tokens yet.");
+    fireEvent.click(screen.getByTestId("token-create"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Name is required");
+    expect(alert).not.toHaveTextContent("Invalid request");
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+});
