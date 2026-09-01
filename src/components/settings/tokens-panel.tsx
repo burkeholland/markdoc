@@ -83,12 +83,24 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
   // The browser's origin wins (LAN access, tunnels): the config must point where the user actually is.
   const liveOrigin = useOrigin(origin);
   const base = liveOrigin || origin;
+  // Sequence of the newest `load()`; a successful PATCH bumps it too, so a list load that was in flight when the PATCH
+  // completed is dropped when it lands (#1538: a stale GET carrying the old value snapped the switch back).
+  const loadSeq = useRef(0);
+  // Rows with a PATCH in flight → the value the user asked for; one object per click so only the latest click's
+  // PATCH settles the row (two quick clicks must not let the first answer overwrite the second).
+  const pendingFlips = useRef(new Map<string, { value: boolean }>());
 
   const load = useCallback(async () => {
+    // Loads are ordered: an answer from a load that is no longer the newest is dropped, whenever it lands.
+    const seq = ++loadSeq.current;
     try {
       const res = await request<{ tokens: TokenRow[] }>("/api/tokens");
-      setTokens(res.tokens);
+      if (seq !== loadSeq.current) return;
+      // A row with a PATCH in flight shows the value the user asked for, not what the list carried when it was sent.
+      const flips = pendingFlips.current;
+      setTokens(res.tokens.map((row) => ({ ...row, collaboratorsMayAsk: flips.get(row.id)?.value ?? row.collaboratorsMayAsk })));
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(apiErrorText(e, "Failed to load tokens"));
     }
   }, []);
@@ -135,17 +147,25 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
 
   /**
    * "Collaborators may ask this agent": flips at once, then PATCHes; a refusal puts it back and says why, under the
-   * switch. Part A's `PATCH /api/tokens/:id` (#1296) takes exactly `{ collaboratorsMayAsk }`.
+   * switch. Part A's `PATCH /api/tokens/:id` (#1296) takes exactly `{ collaboratorsMayAsk }` and answers the updated row,
+   * which becomes this row's truth. A stale list load can no longer undo the flip: one that lands while the PATCH is in
+   * flight shows the wanted value, one that started before the PATCH completed is dropped (#1538).
    */
   const setCollaboratorsMayAsk = async (t: TokenRow, collaboratorsMayAsk: boolean) => {
     const flip = (value: boolean) => setTokens((list) => list?.map((row) => (row.id === t.id ? { ...row, collaboratorsMayAsk: value } : row)) ?? list);
     flip(collaboratorsMayAsk);
     setSwitchError(null);
+    const pending = { value: collaboratorsMayAsk };
+    pendingFlips.current.set(t.id, pending);
     try {
-      await request(`/api/tokens/${t.id}`, { method: "PATCH", body: JSON.stringify({ collaboratorsMayAsk }) });
+      const res = await request<{ token: TokenRow }>(`/api/tokens/${t.id}`, { method: "PATCH", body: JSON.stringify({ collaboratorsMayAsk }) });
+      loadSeq.current++;
+      if (pendingFlips.current.get(t.id) === pending) setTokens((list) => list?.map((row) => (row.id === t.id ? { ...row, ...res.token } : row)) ?? list);
     } catch (e) {
       flip(!collaboratorsMayAsk);
       setSwitchError({ id: t.id, message: `Could not update “${t.name}”: ${e instanceof Error ? e.message : "the change was not saved"}` });
+    } finally {
+      if (pendingFlips.current.get(t.id) === pending) pendingFlips.current.delete(t.id);
     }
   };
 
