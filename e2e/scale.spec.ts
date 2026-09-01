@@ -1,4 +1,5 @@
-import { test, expect, devices, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import { devices, type Page } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { signIn, devLogin, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, reloadHydrated, type User } from "./helpers";

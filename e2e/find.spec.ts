@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, codeText, focusRichEnd, shareWith, budgetMs, reloadHydrated } from "./helpers";
 
 const SAMPLE = `# Pets

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, focusCodeEnd, codeText } from "./helpers";
 
 const CONTENT = ["# Reader Title", "", "Intro paragraph for the reader.", "", "## First Section", "", "Some text in the first section.", "", "## Second Section", "", "```ts", "const x = 1;", "```", ""].join("\n");

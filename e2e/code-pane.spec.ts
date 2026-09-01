@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, codeText, focusCodeEnd } from "./helpers";
 
 /** Selects `word` on the current code-pane line by walking the caret with Shift+ArrowLeft from the line end. */

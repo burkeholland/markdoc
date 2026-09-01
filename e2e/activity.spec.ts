@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, shareWith, focusRichEnd, selectTextInRich, mintToken, type MintedToken, type User } from "./helpers";
 
 async function openActivity(page: User["page"]) {

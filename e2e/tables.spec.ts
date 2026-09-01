@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, codeText, tableLines, clickCell, expectTableShape } from "./helpers";
 
 const isMac = process.platform === "darwin";

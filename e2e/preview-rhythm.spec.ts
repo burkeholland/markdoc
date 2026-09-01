@@ -1,4 +1,5 @@
-import { test, expect, devices, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import { devices, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { signIn, devLogin, createDocument, openDocument, setTheme } from "./helpers";
 

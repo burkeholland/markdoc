@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, codeText, focusCodeEnd } from "./helpers";
 
 const V1 = "# Compare\n\nIntro stays the same in every version.\n\nFirst body line.\n\n\n\nClosing words stay put.\n\nAlpha paragraph carries distinct wording that is long enough to count.\n";

@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, codeText, focusCodeEnd, pmSelectionSynced } from "./helpers";
 
 const BLOCKS = Array.from({ length: 180 }, (_, index) => {

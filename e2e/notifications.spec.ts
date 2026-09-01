@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, uniqueLogin, type User } from "./helpers";
 
 /** Pull the notifications store now instead of waiting for the 30 s poll. */

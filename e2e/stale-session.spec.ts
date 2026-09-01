@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { encode } from "next-auth/jwt";
 import { devLogin } from "./helpers";
 

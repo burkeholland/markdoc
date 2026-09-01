@@ -1,4 +1,5 @@
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Locator, Page } from "@playwright/test";
 import { budgetMs, signIn, createDocument, openDocument, ensureCommentsOpen, selectTextInRich, mintToken, setTheme, type MintedToken, type User } from "./helpers";
 
 /**

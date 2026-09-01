@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { mintToken, signIn, type MintedToken, type User } from "./helpers";
 
 const listen = (server: Server) =>

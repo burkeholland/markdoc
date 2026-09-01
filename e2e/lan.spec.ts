@@ -1,6 +1,7 @@
 import os from "node:os";
 import { isIP } from "node:net";
-import { test, expect, type Browser, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Browser, Page } from "@playwright/test";
 import { stableHostnames } from "../scripts/lib/dev-origins.mjs";
 import { budgetMs, devLogin, reloadHydrated } from "./helpers";
 

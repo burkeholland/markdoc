@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { caretPath, clickEdgeOf, codeText, createDocument, openDocument, reloadHydrated, selectTextInRich, shareWith, signIn } from "./helpers";
 
 const INITIAL = ["Paragraph above.", "", "- first bullet text", "- second bullet text", "", "Paragraph below.", ""].join("\n");

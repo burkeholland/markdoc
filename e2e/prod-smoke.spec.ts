@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { devLogin, richText } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */

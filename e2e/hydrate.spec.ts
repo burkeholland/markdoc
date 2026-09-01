@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import * as Y from "yjs";
 import { signIn, createDocument, openDocument, codeText, budgetMs, reloadHydrated, type User } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";

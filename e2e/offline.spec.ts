@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { BrowserContext, Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, codeText, richText, focusCodeEnd, reloadHydrated, type User } from "./helpers";
 
 /**

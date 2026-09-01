@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
 
 test.describe("rich comments: Markdown, shortcuts, reactions, edited marker", () => {

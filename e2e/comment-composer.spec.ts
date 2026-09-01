@@ -1,4 +1,5 @@
-import { test, expect, type Browser, type Locator, type Page, type Request } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Browser, Locator, Page, Request } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { createDocument, devLogin, ensureCommentsOpen, openDocument, selectTextInRich } from "./helpers";
 
