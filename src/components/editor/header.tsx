@@ -160,8 +160,10 @@ function TitleEditor({ session, fallback, compact }: { session: CollabSession; f
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
-      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-[22px]")}>{title}</span>
-      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
+      {/* Phones render `compact` only after hydration; the `max-md:` rules make the server markup match its size and
+          set of controls so the header does not shift when the breakpoint flips (#1470). */}
+      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-lg md:text-[22px]")}>{title}</span>
+      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100 max-md:hidden" />}
     </button>
   );
 }
@@ -199,7 +201,7 @@ function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) {
       <button
         type="button"
         onClick={toggle}
-        className={cn("icon-btn h-8 w-8 shrink-0", starred ? "text-amber-500" : "text-ink-4")}
+        className={cn("icon-btn h-8 w-8 shrink-0 max-md:hidden", starred ? "text-amber-500" : "text-ink-4")}
         aria-pressed={starred}
         aria-label={starred ? "Unstar document" : "Star document"}
         data-testid="header-star"
@@ -667,7 +669,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         {keepAgentEverOpened && <KeepAgentHereDialog doc={{ id: doc.id, title: liveTitle }} open={keepAgentOpen} onOpenChange={setKeepAgentOpen} onCreateToken={props.onCreateToken} />}
         {!embed && session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
         {!embed && !compact && (
-          <button type="button" className="btn btn-outline" onClick={props.onShare} data-testid="share-button">
+          <button type="button" className="btn btn-outline max-md:hidden" onClick={props.onShare} data-testid="share-button">
             <UserPlus size={17} />
             Share
           </button>
@@ -789,7 +791,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         </Menu>}
         {!embed && !compact && (
           <Menu>
-            <div className="flex items-stretch" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
+            <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
               {linked && canEdit && props.sync ? (
                 <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
               ) : (
