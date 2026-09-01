@@ -4,6 +4,10 @@ import os from "node:os";
 
 const VIRTUAL_INTERFACE = /\b(?:wsl|hyper-v|vethernet|virtual|vmware|virtualbox|docker|default switch)\b/i;
 
+// Loopback spellings other than `localhost` (the only one Next exempts itself). Next compares
+// `new URL(origin).hostname`, which keeps the IPv6 brackets, so the entry is `[::1]`, not `::1`.
+const LOOPBACK_LITERALS = ["127.0.0.1", "[::1]"];
+
 function compareText(left, right) {
   const a = left.toLowerCase();
   const b = right.toLowerCase();
@@ -69,6 +73,7 @@ export function devOrigins(options = {}) {
   const names = [
     ...lanAddresses(options.interfaces ?? os.networkInterfaces()),
     ...stableHostnames(options.hostname ?? os.hostname()),
+    ...LOOPBACK_LITERALS,
   ];
   for (const extra of (options.extras ?? process.env.ALLOWED_DEV_ORIGINS ?? "").split(",")) {
     if (extra.trim()) names.push(extra.trim());

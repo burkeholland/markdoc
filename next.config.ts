@@ -3,9 +3,9 @@ import { devOrigins } from "./scripts/lib/dev-origins.mjs";
 
 const nextConfig: NextConfig = {
   // Dev only: Next 403s `/_next/*` (chunks, HMR socket) for any browser origin other than localhost, so
-  // a phone on the LAN loaded the HTML but none of the JS. Allow this machine's stable names and its
-  // current numeric diagnostics (restart after DHCP only if using a numeric origin). ALLOWED_DEV_ORIGINS
-  // adds more.
+  // a phone on the LAN loaded the HTML but none of the JS. Allow this machine's stable names, its
+  // current numeric diagnostics (restart after DHCP only if using a numeric origin) and the loopback
+  // literals `127.0.0.1`/`[::1]`. ALLOWED_DEV_ORIGINS adds more.
   allowedDevOrigins: devOrigins(),
   // A separate build directory lets a second dev server (e.g. the Playwright suite) run next to `npm run dev`.
   distDir: process.env.NEXT_DIST_DIR || ".next",
