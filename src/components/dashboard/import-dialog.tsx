@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, FileText, Loader2, XCircle } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
+import { apiErrorText } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { uploadImportBatch, type FailedImport, type ImportedDocument } from "@/lib/import-upload";
 import { IMPORT_ACCEPT, IMPORT_EXTENSIONS, IMPORT_EXTENSIONS_LIST, importFormatFor } from "@/lib/import-extensions";
@@ -162,7 +163,7 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       );
       optionsRef.current.onDone?.(created, failed);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Import failed";
+      const message = apiErrorText(err, "Import failed");
       setItems(documents.map((f) => ({ name: f.name, status: "error", warnings: [], error: message })));
       optionsRef.current.onError?.(message);
       optionsRef.current.onDone?.([], []);

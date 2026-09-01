@@ -3,6 +3,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
+import { apiErrorText } from "@/lib/api";
 import { findReplaceShortcut, shortcut } from "@/lib/utils";
 
 /**
@@ -133,7 +134,7 @@ export const ImageDialog = memo(function ImageDialog({
       setSrc(result.url);
       setAlt((current) => current || result.alt || file.name.replace(/\.[a-z0-9]{2,5}$/i, ""));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Upload failed");
+      setError(apiErrorText(e, "Upload failed"));
     } finally {
       setUploading(false);
       if (fileInput.current) fileInput.current.value = "";

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, GitCommit, History, Loader2, MoveVertical, Pencil, RotateCcw, Tag, Upload, X, Download } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import { api, type VersionSummary } from "@/lib/api";
+import { api, apiErrorText, type VersionSummary } from "@/lib/api";
 import { collapseSegment, detectMoves, diffStats, hunkCounter, hunks, wordDiff, type Collapsed, type DiffSegment } from "@/editor/diff";
 import { cn, formatDateTime, formatDayHeading, relativeTime } from "@/lib/utils";
 import { setPendingNotice } from "@/lib/notice";
@@ -116,7 +116,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
       setVersions(list);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load versions");
+      setError(apiErrorText(e, "Failed to load versions"));
     }
   }, [session.docId]);
 
@@ -157,7 +157,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
         }
         onPreview(null);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load version");
+        setError(apiErrorText(e, "Failed to load version"));
       } finally {
         setBusy(null);
       }
@@ -188,7 +188,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
       onPreview(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Restore failed");
+      setError(apiErrorText(e, "Restore failed"));
     } finally {
       setBusy(null);
     }
@@ -202,7 +202,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
       await api.documents.renameVersion(session.docId, v.id, title);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Rename failed");
+      setError(apiErrorText(e, "Rename failed"));
     }
   };
 
@@ -213,7 +213,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
       setPendingNotice(`Created “${res.title}” from version ${v.number}.`, "success");
       router.push(`/d/${res.id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not copy the version");
+      setError(apiErrorText(e, "Could not copy the version"));
       setBusy(null);
     }
   };

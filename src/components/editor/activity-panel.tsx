@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity as ActivityIcon, Bot, Loader2, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import { api, type ActivityItemDto } from "@/lib/api";
+import { api, apiErrorText, type ActivityItemDto } from "@/lib/api";
 import { cn, formatDateTime, relativeTime } from "@/lib/utils";
 import { Avatar, EmptyState, Spinner } from "@/components/ui/primitives";
 
@@ -151,7 +151,7 @@ export function ActivityPanel({ session, onClose }: ActivityPanelProps) {
       setError(null);
       setNow(Date.now());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load activity");
+      setError(apiErrorText(e, "Failed to load activity"));
     }
   }, [session.docId]);
 
@@ -173,7 +173,7 @@ export function ActivityPanel({ session, onClose }: ActivityPanelProps) {
       setNextBefore(page.nextBefore);
       expanded.current = true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load more");
+      setError(apiErrorText(e, "Failed to load more"));
     } finally {
       setLoadingMore(false);
     }

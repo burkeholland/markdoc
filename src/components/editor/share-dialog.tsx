@@ -317,7 +317,7 @@ export function AgentCollaborateCard({ origin, open, docId }: { origin: string; 
       setTokens((list) => [{ id: res.token.id, name: res.token.name, prefix: res.token.prefix, scope: res.token.scope, documentIds: res.token.documentIds, collaboratorsMayAsk: false, createdAt: new Date().toISOString(), lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null }, ...(list ?? [])]);
       setExpanded(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not create a token");
+      setError(apiErrorText(e, "Could not create a token"));
     } finally {
       setBusy(false);
     }
