@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
@@ -8,7 +8,7 @@ delete process.env.DATABASE_URL;
 const { getDb, schema } = await import("../db");
 const { putAsset } = await import("../assets");
 const { renderDocumentHtml } = await import("./html");
-const { closePdfBrowser, renderPdf } = await import("./pdf");
+const { BROWSER_CLOSE_TIMEOUT_MS, closePdfBrowser, closeWithin, renderPdf } = await import("./pdf");
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const PNG = Uint8Array.from(Buffer.from(PNG_B64, "base64"));
@@ -92,4 +92,71 @@ describe("renderPdf", () => {
     },
     30_000,
   );
+
+  it(
+    "closes the live Chromium well inside the close bound",
+    async () => {
+      // Runs after the render above launched the shared browser. A healthy close is a matter of a few hundred
+      // ms; hitting the bound would mean `closePdfBrowser` gave up waiting, which is worth a red line here.
+      const started = performance.now();
+      await closePdfBrowser();
+      const ms = Math.round(performance.now() - started);
+      console.log(`[pdf.test] closePdfBrowser() with a live browser took ${ms} ms`);
+      expect(ms).toBeLessThan(BROWSER_CLOSE_TIMEOUT_MS);
+    },
+    30_000,
+  );
+});
+
+describe("closeWithin", () => {
+  it('resolves "closed" as soon as the browser has closed', async () => {
+    const started = performance.now();
+    await expect(closeWithin({ close: async () => {} }, 1_000)).resolves.toBe("closed");
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it('resolves "timed-out" once the bound passes while the close is still running', async () => {
+    const started = performance.now();
+    await expect(closeWithin({ close: () => new Promise<void>(() => {}) }, 50)).resolves.toBe("timed-out");
+    const elapsed = performance.now() - started;
+    // libuv keeps its loop clock in whole milliseconds, so a timer can fire up to 1 ms early by performance.now().
+    expect(elapsed).toBeGreaterThanOrEqual(49);
+    expect(elapsed).toBeLessThan(2_000);
+  });
+
+  it('resolves "failed" instead of throwing when the close rejects', async () => {
+    const close = async () => {
+      throw new Error("gone");
+    };
+    await expect(closeWithin({ close }, 1_000)).resolves.toBe("failed");
+  });
+
+  it("clears its timer in every outcome", async () => {
+    vi.useFakeTimers();
+    try {
+      await expect(closeWithin({ close: async () => {} }, 1_000)).resolves.toBe("closed");
+      expect(vi.getTimerCount()).toBe(0);
+
+      const close = async () => {
+        throw new Error("gone");
+      };
+      await expect(closeWithin({ close }, 1_000)).resolves.toBe("failed");
+      expect(vi.getTimerCount()).toBe(0);
+
+      const pending = closeWithin({ close: () => new Promise<void>(() => {}) }, 50);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toBe("timed-out");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closePdfBrowser resolves at once when no browser was launched", async () => {
+    // The common `afterAll` path when Chromium could not launch (and after a close, as in the describe above).
+    const started = performance.now();
+    await closePdfBrowser();
+    expect(performance.now() - started).toBeLessThan(100);
+  });
 });
