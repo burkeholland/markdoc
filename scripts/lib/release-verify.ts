@@ -1,20 +1,20 @@
 /**
  * Read-only release checks for an app-only production release (README "Production runbook: app-only
- * releases", step 3): health, the liveness probe, the HTTP→HTTPS redirect, the baseline security headers, the
- * `/login` chunks byte for byte against a local build of the same SHA, every other local chunk by name, brotli
- * and gzip negotiation, the Tailwind stylesheet rule by rule, a `localhost` leak scan and the unauthenticated
- * `/collab` rejection.
+ * releases", step 3): health, the liveness probe, the JSON `/api/*` 404 catch-all, the MCP liveness card, the
+ * HTTP→HTTPS redirect, the baseline security headers, the `/login` chunks byte for byte against a local build
+ * of the same SHA, every other local chunk by name, brotli and gzip negotiation, the Tailwind stylesheet rule
+ * by rule, a `localhost` leak scan and the unauthenticated `/collab` rejection.
  * Everything that touches the network or the disk is injected (`ReleaseVerifyIo`) so the checks are unit
  * tested without a server; the CLI (`scripts/release-verify.mts`) supplies fetch, node:https, node:fs and
  * @hocuspocus/provider. Nothing here writes anywhere: the script only issues GETs and one WebSocket connect.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
 export type CheckStatus = "pass" | "fail" | "warn" | "skipped";
 
 export interface Check {
-  /** Stable id: `health`, `health:live`, `redirect`, `headers`, `login`, `chunks:identity`, `chunks:all`, `css:rules`, `brotli`, `gzip`, `leak:localhost`, `collab:reject`, `flip`. */
+  /** Stable id: `health`, `health:live`, `api:404`, `mcp:alive`, `redirect`, `headers`, `login`, `chunks:identity`, `chunks:all`, `css:rules`, `brotli`, `gzip`, `leak:localhost`, `collab:reject`, `flip`. */
   name: string;
   status: CheckStatus;
   /** The numbers; never an environment value, token or connection string. */
@@ -110,11 +110,27 @@ export const CSS_LOCAL_ONLY_WARN_LIMIT = 5;
 const CONCURRENCY = 4;
 /** Longest list of names one table cell carries; the count of the rest follows. */
 const LIST_LIMIT = 25;
+/** Characters of a response body quoted in a failure detail (`api:404`, `mcp:alive`): enough to see `<!DOCTYPE html>` and a title. */
+const BODY_EXCERPT_CHARS = 120;
+/** Random base-36 characters after `/api/nonexistent-`: the unknown path is never the same twice (repeat-safe, cache-proof). */
+const RANDOM_PATH_CHARS = 8;
 
 export const SHA_PATTERN = /^[0-9a-f]{7,40}$/;
 
 export function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+/** `length` random base-36 characters (`randomInt` is unbiased; `Math.random().toString(36)` can come up short). */
+export function randomBase36(length: number): string {
+  return Array.from({ length }, () => BASE36[randomInt(BASE36.length)]).join("");
+}
+
+/** The first `BODY_EXCERPT_CHARS` characters of a body as one quoted JSON string: control characters escaped, one table cell. */
+export function bodyExcerpt(text: string): string {
+  return JSON.stringify(text.slice(0, BODY_EXCERPT_CHARS));
 }
 
 /** `229280` → `229 280`, the runbook's notation. */
@@ -503,6 +519,11 @@ function parseJson(text: string): Record<string, unknown> | null {
   }
 }
 
+/** One body field in a failure detail: its JSON, or `absent` when the key is missing. */
+function shown(value: unknown): string {
+  return value === undefined ? "absent" : JSON.stringify(value);
+}
+
 function localDigest(dist: LocalDist, name: string): ChunkDigest | null {
   const bytes = dist.read(name);
   return bytes ? { name, bytes: bytes.length, sha256: sha256(bytes) } : null;
@@ -624,6 +645,50 @@ export async function runReleaseVerify(options: ReleaseVerifyOptions, io: Releas
     if (body && "db" in body) problems.push("body has a db key (the liveness probe must not touch the database)");
     const detail = `GET /api/health?probe=live: status ${response.status}, rtt ${rtt} ms, probe=${String(body?.probe)}, db key ${body && "db" in body ? "present" : "absent"}, version ${typeof body?.version === "string" ? body.version : "?"}${versionNote}`;
     return { name: "health:live", status: problems.length === 0 ? "pass" : "fail", detail: problems.length === 0 ? detail : `${detail}; ${problems.join("; ")}` };
+  });
+
+  await guarded("api:404", async () => {
+    // The probe scripts/smoke.mts' unauthenticated-API step makes: an unknown /api/* path must reach the
+    // `[...rest]` catch-all (src/app/api/[...rest]/route.ts) and answer JSON, never Next's HTML 404 page.
+    const pathname = `/api/nonexistent-${randomBase36(RANDOM_PATH_CHARS)}`;
+    const started = io.now();
+    const response = await io.fetchText(`${origin}${pathname}`);
+    const rtt = io.now() - started;
+    const contentType = response.headers["content-type"] ?? "";
+    const body = parseJson(response.text);
+    const problems: string[] = [];
+    if (response.status !== 404) problems.push(`status ${response.status}`);
+    if (!contentType.startsWith("application/json")) problems.push(`content-type ${contentType ? `"${contentType}"` : "missing"} is not application/json${contentType.startsWith("text/html") ? " (Next's HTML 404 page: the [...rest] catch-all is gone from the build)" : ""}`);
+    if (!body) problems.push("body is not JSON");
+    else {
+      if (typeof body.error !== "string") problems.push("body has no error string");
+      if (body.path !== pathname) problems.push(`body path=${shown(body.path)} is not the requested path`);
+    }
+    const detail = `GET ${pathname}: status ${response.status}, rtt ${rtt} ms, ${contentType || "no content-type"}`;
+    if (problems.length === 0) return { name: "api:404", status: "pass", detail: `${detail}, JSON { error, path } echoing the path` };
+    return { name: "api:404", status: "fail", detail: `${detail}, body ${bodyExcerpt(response.text)}; ${problems.join("; ")}` };
+  });
+
+  await guarded("mcp:alive", async () => {
+    // The card scripts/smoke.mts' "GET /api/mcp (alive)" row and e2e/share-agent.spec.ts read: a plain Accept
+    // (never text/event-stream, which the stateless transport refuses with 405) answers JSON, not a stream.
+    const started = io.now();
+    const response = await io.fetchText(`${origin}/api/mcp`);
+    const rtt = io.now() - started;
+    const contentType = response.headers["content-type"] ?? "";
+    const body = parseJson(response.text);
+    const problems: string[] = [];
+    if (response.status !== 200) problems.push(`status ${response.status}`);
+    if (!contentType.startsWith("application/json")) problems.push(`content-type ${contentType ? `"${contentType}"` : "missing"} is not application/json`);
+    if (!body) problems.push(`body is not JSON: ${bodyExcerpt(response.text)}`);
+    else {
+      if (body.name !== "markdoc") problems.push(`name=${shown(body.name)} (expected "markdoc")`);
+      if (typeof body.tools !== "number" || !(body.tools > 0)) problems.push(`tools=${shown(body.tools)} (expected a number > 0)`);
+      if (body.transport !== "streamable-http") problems.push(`transport=${shown(body.transport)} (expected "streamable-http")`);
+    }
+    // The card's name and version are fixed strings and tools a count; its auth and docs lines are never echoed.
+    const detail = `GET /api/mcp: status ${response.status}, rtt ${rtt} ms, name=${typeof body?.name === "string" ? body.name : "?"} tools=${typeof body?.tools === "number" ? body.tools : "?"} version=${typeof body?.version === "string" ? body.version : "?"}`;
+    return { name: "mcp:alive", status: problems.length === 0 ? "pass" : "fail", detail: problems.length === 0 ? detail : `${detail}; ${problems.join("; ")}` };
   });
 
   await guarded("redirect", async () => {
