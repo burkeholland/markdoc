@@ -160,7 +160,7 @@ export function registerTools(server, client) {
       const asking = me.agent
         ? me.collaboratorsMayAsk
           ? ` Other users may address requests to it${mention ? ` as ${mention}` : ""} (the owner switched "collaborators may ask" on).`
-          : ` Only its owner may address requests to it${mention ? ` as ${mention}` : ""} (the owner can switch "collaborators may ask" on at /settings).`
+          : ` Only its owner may address requests to it${mention ? ` as ${mention}` : ""} (the owner can switch "collaborators may ask" on with PATCH /api/tokens/:id).`
         : "";
       const hooks = Array.isArray(me.webhooks) ? me.webhooks : [];
       const pushes = hooks.length

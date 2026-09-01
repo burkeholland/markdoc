@@ -109,7 +109,7 @@ describe("markdoc_whoami and the collaborators-may-ask switch", () => {
     const locked = await call("markdoc_whoami");
     expect(locked.isError).toBeFalsy();
     expect(locked.text).toContain('Acting as Alice (alice) via agent "Copilot" with full scope.');
-    expect(locked.text).toContain('Only its owner may address requests to it as @alice/copilot (the owner can switch "collaborators may ask" on at /settings).');
+    expect(locked.text).toContain('Only its owner may address requests to it as @alice/copilot (the owner can switch "collaborators may ask" on with PATCH /api/tokens/:id).');
 
     nextMe = me(true);
     const open = await call("markdoc_whoami");

@@ -110,5 +110,5 @@ export async function listMentionableAgents(docId: string, now = new Date()): Pr
   }
   return agents
     .sort((a, b) => Number(b.present) - Number(a.present) || a.name.localeCompare(b.name))
-    .map(({ ownerId: _ownerId, ...agent }) => agent);
+    .map(({ name, login, ownerLogin, ownerName, present, collaboratorsMayAsk }) => ({ name, login, ownerLogin, ownerName, present, collaboratorsMayAsk }));
 }

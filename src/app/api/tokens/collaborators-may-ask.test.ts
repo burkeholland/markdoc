@@ -62,7 +62,7 @@ beforeAll(async () => {
 
 describe("PATCH /api/tokens/:id { collaboratorsMayAsk }", () => {
   it("is off by default and the owner can switch it on and off again from a browser session", async () => {
-    const before = (await (await as(olive, null, () => GET_TOKENS(jsonReq("/api/tokens", "GET")))).json()) as { tokens: TokenDto[] };
+    const before = (await (await as(olive, null, () => GET_TOKENS())).json()) as { tokens: TokenDto[] };
     expect(before.tokens.find((t) => t.id === copilotId)?.collaboratorsMayAsk).toBe(false);
 
     const on = await as(olive, null, () => PATCH(jsonReq(`/api/tokens/${copilotId}`, "PATCH", { collaboratorsMayAsk: true }), params(copilotId)));
@@ -72,17 +72,17 @@ describe("PATCH /api/tokens/:id { collaboratorsMayAsk }", () => {
     expect(typeof onBody.token.createdAt).toBe("string");
     expect("tokenHash" in onBody.token).toBe(false);
 
-    const listed = (await (await as(olive, null, () => GET_TOKENS(jsonReq("/api/tokens", "GET")))).json()) as { tokens: TokenDto[] };
+    const listed = (await (await as(olive, null, () => GET_TOKENS())).json()) as { tokens: TokenDto[] };
     expect(listed.tokens.find((t) => t.id === copilotId)?.collaboratorsMayAsk).toBe(true);
 
     // The token itself learns about it through /api/me.
-    const me = (await (await as(null, copilotSecret, () => GET_ME(jsonReq("/api/me", "GET")))).json()) as { agent: string; collaboratorsMayAsk: boolean | null };
+    const me = (await (await as(null, copilotSecret, () => GET_ME())).json()) as { agent: string; collaboratorsMayAsk: boolean | null };
     expect(me).toMatchObject({ agent: "Copilot", collaboratorsMayAsk: true });
 
     const off = await as(olive, null, () => PATCH(jsonReq(`/api/tokens/${copilotId}`, "PATCH", { collaboratorsMayAsk: false }), params(copilotId)));
     expect(off.status).toBe(200);
     expect(((await off.json()) as { token: TokenDto }).token.collaboratorsMayAsk).toBe(false);
-    const meOff = (await (await as(null, copilotSecret, () => GET_ME(jsonReq("/api/me", "GET")))).json()) as { collaboratorsMayAsk: boolean | null };
+    const meOff = (await (await as(null, copilotSecret, () => GET_ME())).json()) as { collaboratorsMayAsk: boolean | null };
     expect(meOff.collaboratorsMayAsk).toBe(false);
   });
 
@@ -93,7 +93,7 @@ describe("PATCH /api/tokens/:id { collaboratorsMayAsk }", () => {
 
     const other = await as(cam, null, () => PATCH(jsonReq(`/api/tokens/${copilotId}`, "PATCH", { collaboratorsMayAsk: true }), params(copilotId)));
     expect(other.status).toBe(404);
-    const stillOff = (await (await as(olive, null, () => GET_TOKENS(jsonReq("/api/tokens", "GET")))).json()) as { tokens: TokenDto[] };
+    const stillOff = (await (await as(olive, null, () => GET_TOKENS())).json()) as { tokens: TokenDto[] };
     expect(stillOff.tokens.find((t) => t.id === copilotId)?.collaboratorsMayAsk).toBe(false);
 
     const bad = await as(olive, null, () => PATCH(jsonReq(`/api/tokens/${copilotId}`, "PATCH", { collaboratorsMayAsk: "yes" }), params(copilotId)));
@@ -104,7 +104,7 @@ describe("PATCH /api/tokens/:id { collaboratorsMayAsk }", () => {
     expect(revoked.status).toBe(404);
 
     // A person (no token) has no switch of their own: /api/me reports null.
-    const me = (await (await as(olive, null, () => GET_ME(jsonReq("/api/me", "GET")))).json()) as { agent: string | null; collaboratorsMayAsk: boolean | null };
+    const me = (await (await as(olive, null, () => GET_ME())).json()) as { agent: string | null; collaboratorsMayAsk: boolean | null };
     expect(me).toMatchObject({ agent: null, collaboratorsMayAsk: null });
   });
 });
