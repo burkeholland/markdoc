@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { CollabSession } from "@/editor/collab/session";
-import { splitMentions } from "@/editor/collab/mentions";
+import { agentDisplayName, splitMentions } from "@/editor/collab/mentions";
 import type { AgentRequestMirror } from "@/server/agent-requests";
 import { jsonEqual, useSessionValue } from "./use-session";
 
@@ -110,6 +110,18 @@ export function describeResult(result: AgentRequestMirror["result"]): string {
   if (result.suggestions) parts.push(`${result.suggestions} suggestion${result.suggestions === 1 ? "" : "s"}`);
   if (result.comments) parts.push(`${result.comments} comment${result.comments === 1 ? "" : "s"}`);
   return parts.length ? parts.join(", ") : "no changes";
+}
+
+/**
+ * The agent that claimed a request, as this viewer should read it: `Copilot CLI` for the viewer's own token,
+ * `Burke's Copilot CLI` for someone else's (`agentDisplayName`), `An agent` before anyone claimed it. Mirrors written
+ * before #1296 carry no `claimedByLogin` and keep the bare name. `ownerNameOf` turns the owner's login into a display
+ * name when the caller knows one (collaborators, presence); the login stands in otherwise.
+ */
+export function claimerName(request: Pick<AgentRequestMirror, "claimedBy" | "claimedByLogin">, viewerLogin: string | null | undefined, ownerNameOf?: (login: string) => string | null): string {
+  if (!request.claimedBy) return "An agent";
+  const ownerLogin = request.claimedByLogin ?? null;
+  return agentDisplayName({ name: request.claimedBy, ownerLogin, ownerName: ownerLogin ? (ownerNameOf?.(ownerLogin) ?? null) : null }, viewerLogin);
 }
 
 /** How the agent was asked to answer, as the presence popover words it. */

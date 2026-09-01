@@ -55,7 +55,7 @@ import { jsonEqual, useOpenSettled, useSessionValue, useSettledSaveState } from 
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { pendingRequests, useAgentRequests } from "./agent-requests";
-import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, useAgentActivity, waitingLabel } from "./presence-agents";
+import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, presenceAgentName, presenceNameOf, useAgentActivity, waitingLabel } from "./presence-agents";
 import { signOutSafely } from "@/lib/sign-out";
 import { Logo } from "@/components/ui/logo";
 import { useEverTrue, useHydrated } from "@/lib/hooks";
@@ -276,10 +276,14 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
   const others = users.filter((u) => !u.isLocal);
   const agents = users.filter((u) => u.isAgent);
   const busy = busyAgentNames(requests, activity, now);
+  // Someone else's agent reads "Burke's Copilot CLI" everywhere (docs/agents.md, UI conventions); your own keeps its plain name.
+  const viewer = session.user.login ?? null;
+  const ownerNameOf = (login: string) => presenceNameOf(users, login);
+  const agentName = (u: PresenceUser) => presenceAgentName(u, viewer);
   // No agent in presence but requests pending: the stack shows a dashed placeholder. It reads "waiting" until an
   // agent claims one (agents may claim over REST/MCP before they ever announce themselves), then "working".
   const noAgent = agents.length === 0 && pending.length > 0;
-  const unseenWorker = noAgent ? pendingWorker(pending) : null;
+  const unseenWorker = noAgent ? pendingWorker(pending, viewer, ownerNameOf) : null;
   const waiting = noAgent && !unseenWorker;
   const nameOf = (userId: string) => users.find((u) => !u.isAgent && u.id === userId)?.name ?? null;
   const jump = (u: PresenceUser) => {
@@ -296,7 +300,7 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
     onKeepAgent?.();
   };
   const roleLabel: Record<string, string> = { owner: "Owner", editor: "Editor", commenter: "Commenter", viewer: "Viewer" };
-  const label = (u: PresenceUser) => (u.isLocal ? `${u.name} (you)` : u.isAgent ? `${u.name} (agent${u.status ? `: ${u.status}` : ""})` : u.name);
+  const label = (u: PresenceUser) => (u.isLocal ? `${u.name} (you)` : u.isAgent ? `${agentName(u)} (agent${u.status ? `: ${u.status}` : ""})` : u.name);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -317,12 +321,12 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
                 data-busy={u.isAgent && busy.has(u.name) ? "" : undefined}
               >
                 {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={36} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={36} />}
-                {u.isAgent && busy.has(u.name) && <AgentBusyBadge name={u.name} />}
+                {u.isAgent && busy.has(u.name) && <AgentBusyBadge name={agentName(u)} />}
               </span>
             </Tip>
           ))}
           {extra > 0 && (
-            <Tip label={users.slice(3).map((u) => u.name).join(", ")}>
+            <Tip label={users.slice(3).map((u) => (u.isAgent ? agentName(u) : u.name)).join(", ")}>
               <span className="avatar text-[13px]">+{extra}</span>
             </Tip>
           )}
@@ -348,11 +352,11 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
               <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && !working && "opacity-60")} data-testid="presence-row" data-user-id={u.id} data-agent={u.isAgent ? "" : undefined}>
                 <span className="relative inline-flex shrink-0">
                   {u.isAgent ? <AgentAvatar name={u.name} color={u.color} size={28} /> : <Avatar name={u.name} src={u.avatar} color={u.color} size={28} />}
-                  {working && <AgentBusyBadge name={u.name} />}
+                  {working && <AgentBusyBadge name={agentName(u)} />}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 text-sm font-medium text-ink">
-                    <span className="truncate">{u.isLocal ? `${u.name} (you)` : u.name}</span>
+                    <span className="truncate">{u.isLocal ? `${u.name} (you)` : u.isAgent ? agentName(u) : u.name}</span>
                     {u.isAgent && <span className="rounded-md bg-violet-100 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:bg-violet-950 dark:text-violet-300">Agent</span>}
                     {u.role && <span className="rounded-md bg-surface-2 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-ink-3">{roleLabel[u.role] ?? u.role}</span>}
                   </div>
@@ -395,7 +399,7 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
             );
           })}
         </ul>
-        {pending.length > 0 && <PresenceRequests session={session} pending={pending} nameOf={nameOf} onCancel={onCancelRequest ? cancelRequest : undefined} />}
+        {pending.length > 0 && <PresenceRequests session={session} pending={pending} nameOf={nameOf} ownerNameOf={ownerNameOf} onCancel={onCancelRequest ? cancelRequest : undefined} />}
         {waiting && (
           <p className="px-2 pb-1 pt-1.5 text-xs text-ink-3" data-testid="presence-waiting-note">
             {waitingLabel(pending.length)} — none is sitting in this document.

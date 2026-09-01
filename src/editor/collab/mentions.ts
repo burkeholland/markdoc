@@ -30,6 +30,32 @@ export function agentMentionLogin(ownerLogin: string, agentName: string): string
   return `${ownerLogin}/${agentMentionSlug(agentName)}`;
 }
 
+/** An agent (API token) and, when known, the user it acts for — what `agentDisplayName` labels. */
+export interface AgentOwnerRef {
+  /** Token name ("Copilot CLI"). */
+  name: string;
+  /** Owner's login; null / undefined when unknown (a request row from before #1296), which reads as the bare name. */
+  ownerLogin?: string | null;
+  /** Owner's display name when known; the login stands in otherwise. */
+  ownerName?: string | null;
+}
+
+/** `Burke's`, `Chris'` — the English possessive of a display name. */
+export function possessive(name: string): string {
+  return /s$/i.test(name) ? `${name}'` : `${name}'s`;
+}
+
+/**
+ * How one viewer sees an agent's name: the bare token name for the viewer's own agent (or when nobody knows whose
+ * it is), `Burke's Copilot CLI` for someone else's — the owner's display name, or their login when that is all
+ * the caller has (docs/agents.md, UI conventions).
+ */
+export function agentDisplayName(agent: AgentOwnerRef, viewerLogin: string | null | undefined): string {
+  const owner = agent.ownerLogin?.trim();
+  if (!owner || (viewerLogin && owner.toLowerCase() === viewerLogin.trim().toLowerCase())) return agent.name;
+  return `${possessive(agent.ownerName?.trim() || owner)} ${agent.name}`;
+}
+
 /** Split a body into text and mention parts. Mention values are the bare login (no `@`, no agent suffix). */
 export function splitMentions(body: string): MentionPart[] {
   const parts: MentionPart[] = [];

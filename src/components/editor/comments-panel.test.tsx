@@ -460,11 +460,12 @@ describe("CommentsPanel", () => {
     });
   });
   describe("agent requests from comments (#1024)", () => {
-    const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", present: false };
+    // As the collaborators route lists it (#1296): whose it is, and — off by default — whether others may ask it.
+    const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false };
     const TEXT = "Intro text. The quick brown fox jumps.";
 
     type Role = "owner" | "editor" | "commenter";
-    const mount = (opts: { role?: Role; viewing?: boolean; me?: { id: string; name: string; login: string }; onCancelRequest?: (id: string) => void } = {}) => {
+    const mount = (opts: { role?: Role; viewing?: boolean; me?: { id: string; name: string; login: string }; agents?: (typeof AGENT)[]; onCancelRequest?: (id: string) => void } = {}) => {
       Element.prototype.scrollIntoView ??= () => {};
       const me = opts.me ?? { id: "alice", name: "Alice", login: "alice" };
       const user = makeCollabUser(me.id, me.name, null, me.login);
@@ -477,7 +478,7 @@ describe("CommentsPanel", () => {
       vi.mocked(api.documents.collaborators).mockResolvedValue({
         owner: { login: "alice", name: "Alice", image: null },
         collaborators: [{ login: "bob", name: "Bob", image: null }],
-        agents: [AGENT],
+        agents: opts.agents ?? [AGENT],
       } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
       const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
       render(
@@ -566,10 +567,14 @@ describe("CommentsPanel", () => {
     });
 
     it("a commenter can only ask for comments: the other modes are disabled with a tooltip and Comment only is preselected", async () => {
-      mount({ role: "commenter", me: { id: "carol", name: "Carol", login: "carol" } });
+      // Alice opened her agent to collaborators (#1296); otherwise Carol could not send at all (see the locked-agent tests).
+      mount({ role: "commenter", me: { id: "carol", name: "Carol", login: "carol" }, agents: [{ ...AGENT, collaboratorsMayAsk: true }] });
       const box = await openComposer();
       await type(box, "@alice/Copilot-CLI is this right?");
       await screen.findByTestId("composer-agent-row");
+      expect(screen.queryByTestId("agent-owner-only")).toBeNull();
+      // Someone else's agent is named with its owner.
+      expect(screen.getByRole("radiogroup", { name: "How should Alice's Copilot CLI answer?" })).toBeInTheDocument();
       const suggest = screen.getByTestId("composer-mode-suggest");
       const rewrite = screen.getByTestId("composer-mode-rewrite");
       const comment = screen.getByTestId("composer-mode-comment");
@@ -752,6 +757,90 @@ describe("CommentsPanel", () => {
       await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveAttribute("data-request-id", "legacy"));
     });
 
+    it("the chip names someone else's agent with its owner — 'Alice's Copilot CLI is working…' — and the owner's own plainly (#1296)", async () => {
+      const { user } = mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" } });
+      const threadId = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: user });
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+      setMirrors([mirror({ id: "r1", threadId, status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "alice", userId: "drew" })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent("Alice's Copilot CLI is working…"));
+      // A mirror from before #1296 has no claimedByLogin: nobody knows whose it is, so the bare name stays.
+      setMirrors([mirror({ id: "r1", threadId, status: "claimed", claimedBy: "Copilot CLI", userId: "drew" })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent(/^Copilot CLI is working…/));
+      cleanup();
+      session!.destroy();
+
+      mount();
+      const ownThread = session!.comments.add({ from: 16, to: 27, body: "@alice/Copilot-CLI shorter", author: makeCollabUser("alice", "Alice", null, "alice") });
+      setMirrors([mirror({ id: "r2", threadId: ownThread, status: "claimed", claimedBy: "Copilot CLI", claimedByLogin: "alice" })]);
+      await waitFor(() => expect(screen.getByTestId("comment-request-chip")).toHaveTextContent(/^Copilot CLI is working…/));
+    });
+
+    it("the picker greys out an agent its owner keeps to themself; picking it still mentions, but the composer refuses to send (#1296)", async () => {
+      mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" } });
+      const box = await openComposer();
+      await type(box, "@");
+      const options = await screen.findAllByTestId("mention-option");
+      expect(options.map((o) => o.getAttribute("data-login"))).toEqual(["alice", "bob", "alice/Copilot-CLI"]);
+      const [alice, bob, agent] = options;
+      expect(alice).not.toHaveAttribute("aria-disabled");
+      expect(bob).not.toHaveAttribute("aria-disabled");
+      expect(agent).toHaveAttribute("aria-disabled", "true");
+      expect(agent).toHaveAttribute("data-locked");
+      expect(agent).toHaveAttribute("title", "Only Alice can ask this agent");
+      expect(agent).toHaveTextContent("Alice's Copilot CLI");
+      expect(agent).toHaveTextContent("owner only");
+      expect(screen.getAllByTestId("mention-option").filter((o) => o.hasAttribute("data-locked"))).toHaveLength(1);
+
+      fireEvent.click(agent);
+      await waitFor(() => expect(box.value).toBe("@alice/Copilot-CLI "));
+      await type(box, "tighten this");
+      await screen.findByTestId("composer-agent-row");
+      const notice = screen.getByTestId("agent-owner-only");
+      expect(notice).toHaveTextContent("Alice's Copilot CLI only takes requests from Alice.");
+      // A sibling after the row, not inside it: the row stays controls only.
+      expect(screen.getByTestId("composer-agent-row").contains(notice)).toBe(false);
+      expect(screen.getByTestId("composer-agent-row").nextElementSibling).toBe(notice);
+      expect(screen.getByTestId("comment-submit")).toBeDisabled();
+      // Enter does nothing either: no comment, no request, no 403 round trip.
+      fireEvent.keyDown(box, { key: "Enter" });
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await new Promise((r) => setTimeout(r, 30));
+      expect(session!.comments.list()).toHaveLength(0);
+      expect(api.documents.createRequest).not.toHaveBeenCalled();
+      // Take the agent out of the body: the notice goes and the send comes back.
+      fireEvent.change(box, { target: { value: "@bob tighten this" } });
+      await waitFor(() => expect(screen.queryByTestId("agent-owner-only")).toBeNull());
+      expect(screen.getByTestId("comment-submit")).toBeEnabled();
+    });
+
+    it("an agent whose owner switched 'Collaborators may ask' on is an ordinary row for others, and the owner's own is never locked (#1296)", async () => {
+      mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" }, agents: [{ ...AGENT, collaboratorsMayAsk: true }] });
+      let box = await openComposer();
+      await type(box, "@ali");
+      let options = await screen.findAllByTestId("mention-option");
+      let agent = options.find((o) => o.getAttribute("data-login") === AGENT.login)!;
+      expect(agent).not.toHaveAttribute("aria-disabled");
+      expect(agent).not.toHaveAttribute("data-locked");
+      expect(agent).toHaveTextContent("Alice's Copilot CLI");
+      fireEvent.click(agent);
+      await screen.findByTestId("composer-agent-row");
+      expect(screen.queryByTestId("agent-owner-only")).toBeNull();
+      expect(screen.getByTestId("comment-submit")).toBeEnabled();
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(api.documents.createRequest).mock.calls[0][1]).toMatchObject({ agent: "alice/Copilot-CLI" });
+      cleanup();
+      session!.destroy();
+
+      mount();
+      box = await openComposer();
+      await type(box, "@ali");
+      options = await screen.findAllByTestId("mention-option");
+      agent = options.find((o) => o.getAttribute("data-login") === AGENT.login)!;
+      expect(agent).not.toHaveAttribute("aria-disabled");
+      expect(agent).toHaveTextContent(/^Copilot CLIagent$/);
+    });
+
     it.each([
       ["the requester", { id: "carol", name: "Carol", login: "carol" }, "commenter" as Role, true],
       ["the document owner", { id: "alice", name: "Alice", login: "alice" }, "owner" as Role, true],
@@ -843,8 +932,8 @@ describe("CommentsPanel", () => {
     it("mentionedAgents matches the picker's agents case-insensitively, once each, in order", () => {
       const candidates = [
         { login: "bob", name: "Bob", image: null },
-        { login: "alice/Copilot-CLI", name: "Copilot CLI", image: null, agent: { ownerLogin: "alice" } },
-        { login: "bob/Reviewer", name: "Reviewer", image: null, agent: { ownerLogin: "bob" } },
+        { login: "alice/Copilot-CLI", name: "Copilot CLI", image: null, agent: { ownerLogin: "alice", canAsk: true } },
+        { login: "bob/Reviewer", name: "Reviewer", image: null, agent: { ownerLogin: "bob", canAsk: true } },
       ];
       expect(mentionedAgents("@bob/reviewer then @ALICE/copilot-cli and @bob/Reviewer again", candidates).map((c) => c.name)).toEqual(["Reviewer", "Copilot CLI"]);
       expect(mentionedAgents("@bob only, and @alice/Other-Bot", candidates)).toEqual([]);

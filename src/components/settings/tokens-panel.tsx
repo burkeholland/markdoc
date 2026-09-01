@@ -20,6 +20,8 @@ interface TokenRow {
   lastMcpSeenAt: string | null;
   lastMcpCallAt: string | null;
   expiresAt: string | null;
+  /** Whether people the owner shares documents with may address requests to this agent (#1296); off by default. */
+  collaboratorsMayAsk: boolean;
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -71,6 +73,7 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
   const [documents, setDocuments] = useState<DocumentSummaryDto[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null);
   const [created, setCreated] = useState<{ token: string; name: string; scope: TokenScopeName; documentIds: string[] | null } | null>(null);
   const restrictionError = restrict && documentIds.length === 0 ? "Select at least one document when restricting a token." : null;
   // The browser's origin wins (LAN access, tunnels): the config must point where the user actually is.
@@ -124,6 +127,22 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
     if (!confirm(`Revoke “${t.name}”? Anything using it will stop working immediately.`)) return;
     await request(`/api/tokens/${t.id}`, { method: "DELETE" });
     await load();
+  };
+
+  /**
+   * "Collaborators may ask this agent": flips at once, then PATCHes; a refusal puts it back and says why, under the
+   * switch. Part A's `PATCH /api/tokens/:id` (#1296) takes exactly `{ collaboratorsMayAsk }`.
+   */
+  const setCollaboratorsMayAsk = async (t: TokenRow, collaboratorsMayAsk: boolean) => {
+    const flip = (value: boolean) => setTokens((list) => list?.map((row) => (row.id === t.id ? { ...row, collaboratorsMayAsk: value } : row)) ?? list);
+    flip(collaboratorsMayAsk);
+    setSwitchError(null);
+    try {
+      await request(`/api/tokens/${t.id}`, { method: "PATCH", body: JSON.stringify({ collaboratorsMayAsk }) });
+    } catch (e) {
+      flip(!collaboratorsMayAsk);
+      setSwitchError({ id: t.id, message: `Could not update “${t.name}”: ${e instanceof Error ? e.message : "the change was not saved"}` });
+    }
   };
 
   const mcpConfig = mcpHttpConfigFor(base, created?.token ?? "mdk_…");
@@ -275,25 +294,56 @@ export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false 
         ) : (
           <ul className="divide-y divide-line">
             {tokens.map((t) => (
-              <li key={t.id} className="flex items-center gap-4 px-5 py-3" data-testid="token-row">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium text-ink">{t.name}</span>
-                    <ScopeChip scope={t.scope} />
-                    <span className="shrink-0 text-xs text-ink-3" data-testid="token-documents-count">
-                      {t.documentIds?.length ? (t.documentIds.length === 1 ? "1 document" : `${t.documentIds.length} documents`) : "all documents"}
-                    </span>
+              <li key={t.id} className="flex flex-col gap-2 px-5 py-3" data-testid="token-row">
+                <div className="flex items-center gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium text-ink">{t.name}</span>
+                      <ScopeChip scope={t.scope} />
+                      <span className="shrink-0 text-xs text-ink-3" data-testid="token-documents-count">
+                        {t.documentIds?.length ? (t.documentIds.length === 1 ? "1 document" : `${t.documentIds.length} documents`) : "all documents"}
+                      </span>
+                    </div>
+                    <div className="truncate font-mono text-xs text-ink-3">{t.prefix}…</div>
                   </div>
-                  <div className="truncate font-mono text-xs text-ink-3">{t.prefix}…</div>
+                  <div className="hidden text-xs text-ink-3 sm:block">
+                    Created {relativeTime(t.createdAt)}
+                    {t.lastUsedAt ? ` · used ${relativeTime(t.lastUsedAt)}` : " · never used"}
+                    {t.expiresAt ? ` · expires ${relativeTime(t.expiresAt)}` : ""}
+                  </div>
+                  <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void revoke(t)} aria-label={`Revoke ${t.name}`} data-testid="token-revoke">
+                    <Trash2 size={15} />
+                  </button>
                 </div>
-                <div className="hidden text-xs text-ink-3 sm:block">
-                  Created {relativeTime(t.createdAt)}
-                  {t.lastUsedAt ? ` · used ${relativeTime(t.lastUsedAt)}` : " · never used"}
-                  {t.expiresAt ? ` · expires ${relativeTime(t.expiresAt)}` : ""}
+                {/* Who may @mention this agent with a request (#1296). Off, the picker greys it out for everyone else. */}
+                <div className="flex items-start gap-2.5">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={t.collaboratorsMayAsk === true}
+                    aria-labelledby={`token-${t.id}-may-ask-label`}
+                    aria-describedby={`token-${t.id}-may-ask-help`}
+                    className="switch mt-px"
+                    onClick={() => void setCollaboratorsMayAsk(t, t.collaboratorsMayAsk !== true)}
+                    data-testid="token-collaborators-may-ask"
+                  />
+                  <div className="min-w-0 text-xs leading-5">
+                    <span id={`token-${t.id}-may-ask-label`} className="font-medium text-ink-2">
+                      Collaborators may ask this agent
+                    </span>
+                    <span aria-hidden="true" className="text-ink-3">
+                      {" — "}
+                    </span>
+                    <span id={`token-${t.id}-may-ask-help`} className="text-ink-3">
+                      Off: only you can send requests to it. On: people you share documents with can too.
+                    </span>
+                    {switchError?.id === t.id && (
+                      <p className="mt-1 font-medium text-danger" role="alert" aria-atomic="true" data-testid="token-collaborators-may-ask-error">
+                        {switchError.message}
+                      </p>
+                    )}
+                  </div>
                 </div>
-                <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void revoke(t)} aria-label={`Revoke ${t.name}`} data-testid="token-revoke">
-                  <Trash2 size={15} />
-                </button>
               </li>
             ))}
           </ul>

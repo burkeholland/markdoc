@@ -112,7 +112,8 @@ export async function pollDocumentSync(documentId: string, fresh: boolean): Prom
 }
 
 import { SelectionBubble } from "./selection-bubble";
-import { describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests";
+import { claimerName, describeResult, useAgentRequests, useAgentRequestsDone } from "./agent-requests";
+import { presenceNameOf } from "./presence-agents";
 import { TableMenu } from "./table-menu";
 import { SlashMenu, useSlashMenuController } from "./slash-menu";
 import { FollowBanner } from "./follow-banner";
@@ -741,7 +742,8 @@ export function EditorShell({
   );
   const agentRequests = useAgentRequests(session);
   useAgentRequestsDone(session, agentRequests, (r) => {
-    const who = r.claimedBy ?? "An agent";
+    // Someone else's agent is "Drew's Copilot CLI"; the owner's display name comes from presence when they are here.
+    const who = claimerName(r, session.user.login, (login) => presenceNameOf(session.presence(), login));
     toast(`${who} finished: ${describeResult(r.result)}`, "success");
     setSidePanel("comments");
     setCommentsFocus({ tab: r.result?.suggestions ? "suggestions" : "open", nonce: Date.now() });

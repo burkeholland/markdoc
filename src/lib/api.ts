@@ -210,8 +210,8 @@ export const api = {
         owner: { login: string | null; name: string | null; image: string | null } | null;
         linkAccess: DocumentDto["linkAccess"];
         collaborators: CollaboratorDto[];
-        /** Agents that can be @-mentioned here: `login` is `<ownerLogin>/<slug>` (see src/server/agents.ts). */
-        agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean }[];
+        /** Agents that can be @-mentioned here: `login` is `<ownerLogin>/<slug>` (see src/server/agents.ts `MentionableAgent`). */
+        agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean; collaboratorsMayAsk: boolean }[];
       }>(`/api/documents/${id}/collaborators`),
     addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">) =>
       request<{ ok: true; login: string; role: string; pending: boolean }>(`/api/documents/${id}/collaborators`, { method: "POST", body: JSON.stringify({ login, role }) }),
