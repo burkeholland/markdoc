@@ -41,7 +41,7 @@
     "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.9",
-    "@electric-sql/pglite": "^0.5.5",
+    "@electric-sql/pglite": "^0.5.7",
     "@hocuspocus/provider": "^4.6.0",
     "@hocuspocus/server": "^4.6.0",
     "@lezer/common": "^1.5.2",
@@ -125,7 +125,7 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.12",
     "typescript": "^5",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "@esbuild-kit/core-utils": {
