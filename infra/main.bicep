@@ -117,8 +117,6 @@ var postgresVmName = '${name}-pg'
 var postgresNicName = '${postgresVmName}-nic'
 var postgresNsgName = '${postgresVmName}-nsg'
 var postgresBootstrapIpName = '${postgresVmName}-bootstrap-ip'
-var postgresNatIpName = '${postgresVmName}-egress-ip'
-var postgresNatGatewayName = '${postgresVmName}-egress'
 var postgresPrivateIp = '10.42.2.4'
 var postgresAdminLogin = 'markdoc'
 var postgresDatabaseName = 'markdoc'
@@ -315,34 +313,6 @@ resource postgresNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   }
 }
 
-resource postgresNatIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
-  name: postgresNatIpName
-  location: location
-  sku: {
-    name: 'Standard'
-  }
-  properties: {
-    publicIPAllocationMethod: 'Static'
-    publicIPAddressVersion: 'IPv4'
-  }
-}
-
-resource postgresNatGateway 'Microsoft.Network/natGateways@2024-05-01' = {
-  name: postgresNatGatewayName
-  location: location
-  sku: {
-    name: 'Standard'
-  }
-  properties: {
-    idleTimeoutInMinutes: 4
-    publicIpAddresses: [
-      {
-        id: postgresNatIp.id
-      }
-    ]
-  }
-}
-
 resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   name: vnetName
   location: location
@@ -387,9 +357,6 @@ resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' =
     ]
     networkSecurityGroup: {
       id: postgresNsg.id
-    }
-    natGateway: {
-      id: postgresNatGateway.id
     }
   }
 }
@@ -1024,7 +991,9 @@ resource postgresMonitorAgent 'Microsoft.Compute/virtualMachines/extensions@2024
 
 // Private Azure Monitor path for the VM agent (AMPLS + private endpoint + private DNS zones,
 // and the configurationAccessEndpoint association next to the rule association above).
-// Additive: the NAT gateway above stays until docs/postgres-egress.md has retired it.
+// Together with the subnet's Storage and Key Vault service endpoints this is the only egress the
+// template declares: the retired egress gateway <name>-pg-egress and its public IP are gone from it
+// (docs/postgres-egress.md §5-§7: detached 2026-08-30, 24 h check passed, Phase 5 deletes them by hand).
 module postgresPrivateEgress './postgres-private-egress.bicep' = {
   name: '${name}-postgres-private-egress'
   params: {
@@ -1374,7 +1343,6 @@ output backupVaultName string = backupVault.name
 output recoveryStorageName string = recoveryStorage.name
 output recoveryContainerName string = recoveryContainer.name
 output bootstrapPublicIpName string = postgresBootstrapIpName
-output postgresNatGatewayName string = postgresNatGateway.name
 output postgresAlertActionGroupName string = postgresAlertActionGroup.name
 output identityId string = identity.id
 output secretsVaultName string = secretsVault.name
