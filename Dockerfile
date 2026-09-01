@@ -51,23 +51,33 @@ RUN apk add --no-cache \
       ttf-freefont \
       font-noto-emoji \
       wget
-COPY package.json package-lock.json ./
-# Runtime dependencies only. @electric-sql/pglite ships its WASM/data files inside the package, so
-# the embedded database (used when DATABASE_URL is not set) needs nothing else copied.
-RUN npm ci --omit=dev && npm cache clean --force
-COPY --from=build /app/.next ./.next
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/public ./public
+# Everything under /app arrives owned by the unprivileged `node` user (COPY --chown) or is written by
+# it (npm ci below runs as node), so no `chown -R /app` pass follows: in overlayfs that pass re-wrote
+# every file into one more 144 MB layer (the whole image shipped twice).
+COPY --chown=node:node package.json package-lock.json ./
+# Files that come from the source tree, copied first so the one RUN below can fix their modes while
+# /app is still small. The build stage's `COPY . .` keeps the modes of the uploaded context, and a
+# context packed on Windows (az acr build) arrives with 0666 files; the classic builder ACR uses has
+# no `COPY --chmod`, so `chmod -R go-w` in that RUN normalises them to 0644.
+COPY --chown=node:node --from=build /app/public ./public
 # The social card (src/server/og) reads its fonts from the source tree at request time.
-COPY --from=build /app/src/server/og/fonts ./src/server/og/fonts
+COPY --chown=node:node --from=build /app/src/server/og/fonts ./src/server/og/fonts
 # Drizzle migrations run on startup from ./drizzle (DRIZZLE_MIGRATIONS_DIR overrides).
-COPY --from=build /app/drizzle ./drizzle
-COPY --from=build /app/next.config.ts ./next.config.ts
-COPY --from=build /app/scripts/lib/dev-origins.mjs ./scripts/lib/dev-origins.mjs
-# Run as the unprivileged user that ships with the image; .data is where PGlite writes when no
-# DATABASE_URL is given (mount a volume there to keep it).
-RUN mkdir -p /app/.data && chown -R node:node /app
+COPY --chown=node:node --from=build /app/drizzle ./drizzle
+COPY --chown=node:node --from=build /app/next.config.ts ./next.config.ts
+COPY --chown=node:node --from=build /app/scripts/lib/dev-origins.mjs ./scripts/lib/dev-origins.mjs
+# .data is where PGlite writes when no DATABASE_URL is given (mount a volume there to keep it).
+# /app itself must belong to node so that `npm ci` can create node_modules; the chown is not
+# recursive because every file copied so far already belongs to node (≈ 230 KB in this layer).
+RUN mkdir -p /app/.data && chown node:node /app /app/.data && chmod -R go-w /app
+# Run as the unprivileged user that ships with the image from here on (build steps included).
 USER node
+# Runtime dependencies only. @electric-sql/pglite ships its WASM/data files inside the package, so
+# the embedded database (used when DATABASE_URL is not set) needs nothing else copied. npm's cache
+# lands in /home/node/.npm; the clean empties it in the same layer.
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --chown=node:node --from=build /app/.next ./.next
+COPY --chown=node:node --from=build /app/dist ./dist
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:${PORT}/api/health" || exit 1
