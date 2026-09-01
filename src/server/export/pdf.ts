@@ -17,24 +17,32 @@ export class PdfUnavailableError extends Error {
   }
 }
 
-async function launch(): Promise<Browser> {
+async function launch(onDisconnected: () => void): Promise<Browser> {
   const { chromium } = await import("playwright-core");
   // CHROMIUM_PATH points at a system Chromium (the Docker image installs Alpine's). Playwright's
   // own download is used when it is unset.
   const executablePath = process.env.CHROMIUM_PATH || undefined;
   const browser = await chromium.launch({ headless: true, executablePath });
-  browser.on("disconnected", () => {
-    browserPromise = null;
-  });
+  browser.on("disconnected", onDisconnected);
   return browser;
 }
 
 function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
-    browserPromise = launch().catch((err) => {
-      browserPromise = null;
+    // Only the browser that owns the slot may empty it. An idle close or `closePdfBrowser` empties the slot
+    // and then closes the old browser, which can take seconds; a render arriving meanwhile launches a new
+    // browser into the slot. When the old browser's close then fires `disconnected` (or its still-pending
+    // launch fails), an unconditional reset would drop the new browser while it is alive and possibly
+    // mid-render — unreachable, never closed, leaked until process exit (task #1409). `p` is assigned before
+    // either callback can run: `launch` yields at its first `await` and `.catch` handlers are always deferred.
+    const forget = () => {
+      if (browserPromise === p) browserPromise = null;
+    };
+    const p: Promise<Browser> = launch(forget).catch((err) => {
+      forget();
       throw new PdfUnavailableError(err);
     });
+    browserPromise = p;
   }
   return browserPromise;
 }
