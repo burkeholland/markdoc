@@ -141,6 +141,12 @@ export default async function globalSetup(config: FullConfig) {
       `/api/documents/${docId}/reviews`,
       // lan.spec.ts l.153–157 polls it under a 10 s budget.
       `/api/documents/${docId}/content`,
+      // agent-presence.spec.ts l.129–138: the comments panel's mention picker reads it on mount, 1 s from `bot.presence`; warm only via the hint bar before (#1566).
+      `/api/documents/${docId}/collaborators`,
+      // header.tsx reads the star state on every editor page (dashboard/star flows); warm only by the /d/<id> step before (#1566).
+      `/api/documents/${docId}/star`,
+      // agent-requests.spec.ts l.413 (picker within 2 s) and agent-presence.spec.ts l.138 list the session's tokens; warm only via the hint bar before (#1566).
+      "/api/tokens",
     ];
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {
