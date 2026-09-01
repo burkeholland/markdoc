@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
-import { pollDocumentSync } from "./editor-shell";
+import { pollDocumentSync } from "./use-sync-polling";
 import { PublishStatusButton } from "./header";
 import { SyncDialog, type SyncActions } from "./sync-dialog";
 import { SYNC_LABELS } from "./labels";

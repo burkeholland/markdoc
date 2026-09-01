@@ -1,11 +1,27 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { SyncStatusDto } from "@/lib/api";
-import { pollDocumentSync } from "./editor-shell";
+import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 
 const DEFAULT_POLL_MS = 60_000;
 const ERROR_RETRY_MS = 60_000;
+
+export const emptySync = (): SyncStatusDto => ({ status: "diverged", remote: { sha: null, revision: null, url: null, updatedAt: null }, localChanged: true, remoteChanged: true, lines: { local: 0, remote: 0 } });
+
+export async function pollDocumentSync(documentId: string, fresh: boolean): Promise<SyncStatusDto> {
+  try {
+    return await api.documents.sync(documentId, { fresh });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 413 && error.body?.status === "remote-unreadable") {
+      return {
+        ...emptySync(),
+        ...(error.body as Partial<SyncStatusDto>),
+        status: "remote-unreadable",
+      };
+    }
+    throw error;
+  }
+}
 
 /**
  * Polls the three-way sync status of a GitHub-backed document: the first tick runs at once (`fresh`
