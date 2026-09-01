@@ -126,5 +126,10 @@
     "typescript": "^5",
     "vitest": "^4.1.10"
   },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "$esbuild"
+    }
+  },
   "type": "module"
 }
