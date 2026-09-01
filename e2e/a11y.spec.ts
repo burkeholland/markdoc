@@ -990,7 +990,9 @@ test.describe("axe: comment metadata contrast", () => {
 
 test.describe("axe: phone (iPhone 13)", () => {
   test("dashboard + editor", async ({ browser }) => {
-    const { page, context } = await signInPhone(browser, "a11y-phone");
+    // A user of its own per run: the tap below expects exactly seven starred cards, and a second run against the
+    // same server (--repeat-each, a CI retry) as a fixed login sees the previous run's seven too (received 14).
+    const { page, context } = await signInPhone(browser, `a11y-phone-${Date.now().toString(36)}`);
     await seedDashboard(page);
     // Seven starred documents so the strip overflows and renders "Show all starred" (#116).
     for (let i = 2; i <= 7; i++) {
@@ -998,7 +1000,7 @@ test.describe("axe: phone (iPhone 13)", () => {
       expect((await page.request.put(`/api/documents/${id}/star`)).ok()).toBeTruthy();
     }
     await page.goto("/");
-    // The strip is server markup; a tap before React attaches its handler does nothing (received 14 cards, not 7).
+    // Server markup carries no handlers: the tap below is this page's first interaction.
     await waitForHydration(page);
     const showAll = page.getByTestId("show-all-starred");
     await expect(showAll).toBeVisible();
