@@ -328,6 +328,8 @@ resource appSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
   name: appSubnetName
   properties: {
     addressPrefix: appSubnetPrefix
+    // Matches the live subnet; no private endpoint lives here, the line keeps what-if at NoChange (the API default is Enabled).
+    privateEndpointNetworkPolicies: 'Disabled'
     delegations: [
       {
         name: 'MicrosoftAppEnvironments'
@@ -344,6 +346,8 @@ resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' =
   name: postgresSubnetName
   properties: {
     addressPrefix: postgresSubnetPrefix
+    // The Azure Monitor private endpoint (postgres-private-egress.bicep) lives here; Enabled would apply postgresNsg's DenyAllInbound to it (docs/postgres-egress.md, section 3).
+    privateEndpointNetworkPolicies: 'Disabled'
     serviceEndpoints: [
       {
         service: 'Microsoft.Storage'

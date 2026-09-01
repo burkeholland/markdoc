@@ -5,8 +5,10 @@
 // telemetry. Backups never used the NAT: pgBackRest already rides the
 // Microsoft.Storage service endpoint. Retirement runbook: docs/postgres-egress.md.
 //
-// Additive only. The NAT gateway stays in main.bicep and in Azure until the
-// private path is verified in production; a later change removes it.
+// Additive only. The private path is verified in production (Phase 4, 2026-09-01)
+// and main.bicep no longer declares the NAT gateway (Part 2, task #1321); the
+// detached gateway and its IP are deleted by hand in Phase 5, after the
+// 2026-09-06 restore drill (runbook section 7).
 //
 // Deployable on its own (no secure parameters, every default matches markdoc-rg):
 //   az deployment group what-if -g markdoc-rg --template-file infra/postgres-private-egress.bicep
