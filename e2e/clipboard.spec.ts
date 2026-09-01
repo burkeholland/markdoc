@@ -1,5 +1,5 @@
 import { test, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { createDocument, devLogin, openDocument } from "./helpers";
+import { createDocument, devLogin, openDocument, uniqueLogin } from "./helpers";
 
 /**
  * Copy buttons on an origin without the async Clipboard API (#993: http://192.168.x.x:3000 is not a
@@ -46,7 +46,8 @@ async function openSettings(page: Page) {
 test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)", () => {
   test("Share agent card, Copy link and the settings token card copy without a page error", async ({ browser }) => {
     const context = await contextWithout(browser, NO_CLIPBOARD_API);
-    const page = await signInWithin(context, "clip-lan");
+    // Per run: step 3 mints a token with the default name and never revokes it; names are unique per user (409).
+    const page = await signInWithin(context, uniqueLogin("clip-lan"));
     const errors = collectPageErrors(page);
     expect(await page.evaluate(() => typeof navigator.clipboard)).toBe("undefined");
 
@@ -114,7 +115,8 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
 
   test("with the Clipboard API the copied text is byte-equal to what the card shows", async ({ browser }) => {
     const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
-    const page = await signInWithin(context, "clip-api");
+    // Per run: mints a token with the default name too (see the LAN test).
+    const page = await signInWithin(context, uniqueLogin("clip-api"));
     const errors = collectPageErrors(page);
     const id = await createDocument(page, "# Clipboard\n\nSecure.\n", "Clipboard api");
     await openDocument(page, id);

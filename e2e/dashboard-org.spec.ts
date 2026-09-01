@@ -1,8 +1,12 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, type User } from "./helpers";
+import { signIn, createDocument, openDocument, uniqueLogin, waitForHydration, type User } from "./helpers";
 
 async function goHome(page: Page) {
   await page.goto("/");
+  // Not just "visible": the dashboard's mount effect adopts a localStorage sort and rewrites the cookie. The
+  // localStorage-only test below edits both right after goHome; if the previous page hydrated in between, its
+  // effect wrote the cookie behind the next load's back and that load kept the server default (seen on a loaded run).
+  await waitForHydration(page);
   await page.waitForLoadState("networkidle");
   await expect(page.getByTestId("document-list")).toBeVisible();
 }
@@ -15,8 +19,8 @@ test.describe("dashboard organisation", () => {
   let idB: string;
 
   test.beforeAll(async ({ browser }) => {
-    // A dedicated user so documents from other specs on the shared server stay out of the way.
-    user = await signIn(browser, `organiser-${Date.now().toString(36)}`);
+    // A user of its own per run so documents from other specs (and from a previous run) stay out of the counts.
+    user = await signIn(browser, uniqueLogin("organiser"));
     // Chosen so the sort orders differ: recent = Mike, Zulu, Alpha; title = Alpha, Mike, Zulu; created = Alpha, Zulu, Mike.
     idA = await createDocument(user.page, "# Mike\n\nOpened last.\n", "Mike");
     idB = await createDocument(user.page, "# Zulu\n\nOpened first.\n", "Zulu");
@@ -205,7 +209,7 @@ test.describe("dashboard organisation", () => {
 
 test.describe("card excerpt (#158)", () => {
   test("reads like the rendered text: image alt without the asset URL, link text without the href, table cells without pipes — cards and trash", async ({ browser }) => {
-    const user = await signIn(browser, `excerpt-${Date.now().toString(36)}`);
+    const user = await signIn(browser, uniqueLogin("excerpt"));
     const { page } = user;
     const imageId = await createDocument(page, "# Dropped doc\n\nHello ![pixel](/api/assets/y7j816vpf1wvljmy) world.\n", "Dropped doc");
     await createDocument(

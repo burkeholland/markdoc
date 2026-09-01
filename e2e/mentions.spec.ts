@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, waitForHydration, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, waitForHydration, uniqueLogin, type User } from "./helpers";
 
 test.describe("@mentions in comments", () => {
   let alice: User;
@@ -7,10 +7,12 @@ test.describe("@mentions in comments", () => {
   let docId: string;
 
   test.beforeAll(async ({ browser }) => {
-    alice = await signIn(browser, "alice");
-    bob = await signIn(browser, "bob");
+    // Both per run (computed once, here): Bob's notifications strip is counted account-wide below, and a fixed
+    // `bob` still carries the previous run's mention (--repeat-each, a CI retry) and other specs' shares.
+    alice = await signIn(browser, uniqueLogin("alice"));
+    bob = await signIn(browser, uniqueLogin("bob"));
     docId = await createDocument(alice.page, "# Mentions doc\n\nFirst paragraph.\n", "Mentions doc");
-    await shareWith(alice.page, docId, "bob", "editor");
+    await shareWith(alice.page, docId, bob.login, "editor");
     await openDocument(alice.page, docId);
   });
 
@@ -30,10 +32,10 @@ test.describe("@mentions in comments", () => {
     await expect(suggestions).toBeVisible();
     // Bob is a collaborator (not present), Alice herself is not offered.
     await expect(suggestions.getByTestId("mention-option")).toHaveCount(1);
-    await expect(suggestions.getByTestId("mention-option").first()).toHaveAttribute("data-login", "bob");
+    await expect(suggestions.getByTestId("mention-option").first()).toHaveAttribute("data-login", bob.login);
     await alice.page.keyboard.press("Enter");
     await expect(suggestions).toHaveCount(0);
-    await expect(composer).toHaveValue("hi @bob ");
+    await expect(composer).toHaveValue(`hi @${bob.login} `);
     await expect(composer).toBeFocused();
 
     await alice.page.keyboard.type("can you check this?");
@@ -41,15 +43,15 @@ test.describe("@mentions in comments", () => {
     const thread = alice.page.getByTestId("comment-thread");
     await expect(thread).toHaveCount(1);
     const chip = thread.getByTestId("mention-chip");
-    await expect(chip).toHaveText("@bob");
-    await expect(chip).toHaveAttribute("title", "bob");
-    await expect(thread).toContainText("hi @bob can you check this?");
+    await expect(chip).toHaveText(`@${bob.login}`);
+    await expect(chip).toHaveAttribute("title", bob.login);
+    await expect(thread).toContainText(`hi @${bob.login} can you check this?`);
 
     // The body stays plain text; the mentions are parsed once and exposed to agents.
     const res = await alice.page.request.get(`/api/documents/${docId}/comments`);
     const { comments } = (await res.json()) as { comments: { body: string; mentions: string[] }[] };
-    expect(comments[0].body).toBe("hi @bob can you check this?");
-    expect(comments[0].mentions).toEqual(["bob"]);
+    expect(comments[0].body).toBe(`hi @${bob.login} can you check this?`);
+    expect(comments[0].mentions).toEqual([bob.login]);
   });
 
   test("the mentioned user sees the mention on the dashboard and clicking it marks it read", async () => {
@@ -69,8 +71,8 @@ test.describe("@mentions in comments", () => {
     const item = strip.locator("[data-testid=notification-item][data-kind=mention]");
     await expect(item).toHaveCount(1);
     await expect(item.getByTestId("notification-doc-title")).toHaveText("Mentions doc");
-    await expect(item).toContainText("alice mentioned you");
-    await expect(item).toContainText("hi @bob can you check this?");
+    await expect(item).toContainText(`${alice.login} mentioned you`);
+    await expect(item).toContainText(`hi @${bob.login} can you check this?`);
 
     await item.getByTestId("notification-open").click();
     await bob.page.waitForURL(`**/d/${docId}**`);
@@ -87,8 +89,9 @@ test.describe("@mentions in comments", () => {
   });
 
   test("mentions written through the comments API are recorded too and e-mails are not", async () => {
+    const body = `@${bob.login} ping, and not mail@bob.example`;
     const res = await alice.page.request.post(`/api/documents/${docId}/comments`, {
-      data: { action: "add", quote: "Mentions doc", body: "@bob ping, and not mail@bob.example" },
+      data: { action: "add", quote: "Mentions doc", body },
     });
     expect(res.ok()).toBeTruthy();
     await expect
@@ -96,7 +99,7 @@ test.describe("@mentions in comments", () => {
         const r = await bob.page.request.get("/api/mentions");
         return ((await r.json()) as { mentions: { documentId: string; snippet: string }[] }).mentions.filter((m) => m.documentId === docId).map((m) => m.snippet);
       })
-      .toEqual(["@bob ping, and not mail@bob.example"]);
+      .toEqual([body]);
     // Nobody called "bob.example" was mentioned: alice (the author) has no mention in this document.
     // Per document, not "alice has none anywhere": other specs mention `@alice/<agent>` on the same server.
     const alicesMentions = await alice.page.request.get("/api/mentions");

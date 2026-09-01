@@ -1,6 +1,6 @@
 import { test, expect, devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDocument, devLogin, selectTextInRich } from "./helpers";
+import { createDocument, cssPx, devLogin, selectTextInRich } from "./helpers";
 
 const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\nMore words.\n\n## Third\n\nEnd.\n";
 
@@ -139,7 +139,7 @@ test.describe("phone", () => {
     const box = (await bubble.boundingBox())!;
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(phone.viewport.width);
-    expect(box.height).toBeGreaterThanOrEqual(40);
+    expect(cssPx(box.height)).toBeGreaterThanOrEqual(40);
     const selectionBottom = await page.evaluate(() => {
       const range = window.getSelection()!.getRangeAt(0);
       return range.getBoundingClientRect().bottom;
@@ -222,8 +222,8 @@ test.describe("phone", () => {
     const clear = page.getByTestId("search-clear");
     await expect(clear).toBeVisible();
     const clearBox = (await clear.boundingBox())!;
-    expect(clearBox.width).toBeGreaterThanOrEqual(44);
-    expect(clearBox.height).toBeGreaterThanOrEqual(44);
+    expect(cssPx(clearBox.width)).toBeGreaterThanOrEqual(44);
+    expect(cssPx(clearBox.height)).toBeGreaterThanOrEqual(44);
     expect(await noHorizontalScroll(page)).toBe(true);
     await clear.click();
     await expect(page.getByTestId("search")).toHaveValue("");
@@ -262,7 +262,7 @@ test.describe("phone", () => {
       const documentsBox = (await documentsLink.boundingBox())!;
       expect(documentsBox.x).toBeGreaterThanOrEqual(0);
       expect(documentsBox.x + documentsBox.width).toBeLessThanOrEqual(viewport.width);
-      expect(documentsBox.height).toBeGreaterThanOrEqual(32);
+      expect(cssPx(documentsBox.height)).toBeGreaterThanOrEqual(32);
 
       const picker = page.getByTestId("theme-picker");
       await expect(picker).toBeVisible();

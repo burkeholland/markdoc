@@ -1,9 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, codeText, reloadHydrated } from "./helpers";
+import { signIn, createDocument, codeText, reloadHydrated, uniqueLogin } from "./helpers";
 
 test.describe("templates", () => {
   test("a fresh user sees the template grid in the empty state", async ({ browser }) => {
-    const user = await signIn(browser, `fresh-${Date.now().toString(36)}`);
+    const user = await signIn(browser, uniqueLogin("fresh"));
     const empty = user.page.getByTestId("empty-state");
     await expect(empty).toBeVisible();
     await expect(empty.getByTestId("template-grid")).toBeVisible();
@@ -13,7 +13,7 @@ test.describe("templates", () => {
   });
 
   test("the empty-state grid goes away once the user has a document", async ({ browser }) => {
-    const user = await signIn(browser, `has-docs-${Date.now().toString(36)}`);
+    const user = await signIn(browser, uniqueLogin("has-docs"));
     await createDocument(user.page, "# Existing\n", "Existing");
     await reloadHydrated(user.page);
     await user.page.waitForLoadState("networkidle");

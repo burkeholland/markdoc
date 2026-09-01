@@ -1,12 +1,13 @@
 import { test, expect } from "@playwright/test";
-import { signIn, createDocument, type User } from "./helpers";
+import { signIn, createDocument, uniqueLogin, type User } from "./helpers";
 
 test.describe("dashboard search", () => {
   let searcher: User;
 
   test.beforeAll(async ({ browser }) => {
-    // A dedicated user so documents created by other specs on the shared server don't show up here.
-    searcher = await signIn(browser, "searcher");
+    // A user of its own per run: every count below is over the whole account (2 cards, 1 result), so documents
+    // created by other specs — or by a previous run of this one (--repeat-each, a CI retry) — must stay out.
+    searcher = await signIn(browser, uniqueLogin("searcher"));
     await createDocument(searcher.page, "# Grocery list\n\nEggs, milk, bread.\n\nAlso remember the quokka treats for the weekend.\n", "Grocery list");
     await createDocument(searcher.page, "# Travel plans\n\nFly to Lisbon in May, then the train north.\n", "Travel plans");
     await searcher.page.goto("/");

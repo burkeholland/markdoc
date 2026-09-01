@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test, expect } from "@playwright/test";
-import { createDocument, devLogin, reloadHydrated, waitForHydration } from "./helpers";
+import { createDocument, devLogin, reloadHydrated, uniqueLogin, waitForHydration } from "./helpers";
 
 /**
  * Settings → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
@@ -33,7 +33,9 @@ test.describe("settings · webhooks", () => {
   });
 
   test("adds a webhook, shows the secret once, Send test lands a 200 in the list", async ({ page }) => {
-    await devLogin(page, "webhooks-owner");
+    // Per run: the empty state and the one-row list are counted over the account, and a fixed login keeps the
+    // webhook of a run that failed before the delete at the end (a CI retry would then start from one row).
+    await devLogin(page, uniqueLogin("webhooks-owner"));
     await page.goto("/settings");
     await waitForHydration(page);
 

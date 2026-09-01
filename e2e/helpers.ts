@@ -25,6 +25,18 @@ export const budgetScale = (): number => {
  */
 export const budgetMs = (ms: number): number => Math.round(ms * budgetScale());
 
+// `boundingBox()` is CSS px computed from device px: at DPR 2/3 a 40 px control reads 39.99998 (#1350).
+// Assertions on minimum sizes (touch targets) compare whole CSS pixels; the fraction is rounding noise.
+export const cssPx = (n: number): number => Math.round(n);
+
+/**
+ * A login of its own per run (`searcher-m1abc2de`). A test that asserts an exact count over the account's
+ * data (dashboard cards, starred strip, search results, notifications strip, webhooks) must not sign in as a
+ * fixed literal: on the shared server a second run (`--repeat-each`, a CI retry) sees the first run's rows
+ * too. Call it once per person and reuse the returned login wherever the test names that person.
+ */
+export const uniqueLogin = (base: string): string => `${base}-${Date.now().toString(36)}`;
+
 /** Sign in with the development login and land on the dashboard. */
 export async function signIn(browser: Browser, login: string): Promise<User> {
   const context = await browser.newContext();
