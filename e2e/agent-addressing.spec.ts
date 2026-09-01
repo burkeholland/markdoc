@@ -1,5 +1,17 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
+import {
+  signIn,
+  createDocument,
+  openDocument,
+  shareWith,
+  selectTextInRich,
+  ensureCommentsOpen,
+  mintToken,
+  waitForHydration,
+  reloadHydrated,
+  type MintedToken,
+  type User,
+} from "./helpers";
 
 /**
  * Agent addressing, the UI half (task #1330 on top of #1296): someone else's agent is named with its owner
@@ -139,6 +151,8 @@ test.describe("agent addressing (UI): owner-labelled names, locked agents, colla
   test("2) the owner turns 'Collaborators may ask this agent' on in Settings → Agents: exactly one PATCH, the API agrees, and the collaborator's ask then goes through to that agent", async () => {
     const page = alice.page;
     await page.goto("/settings");
+    // The switch is a client handler: a click before hydration is dropped (e2e rule since #1263).
+    await waitForHydration(page);
     const tokenRow = page.getByTestId("token-row").filter({ hasText: agentName }).first();
     const toggle = tokenRow.getByTestId("token-collaborators-may-ask");
     await expect(toggle).toHaveAttribute("role", "switch");
@@ -160,7 +174,7 @@ test.describe("agent addressing (UI): owner-labelled names, locked agents, colla
     expect(listed.ok()).toBeTruthy();
     const { tokens } = (await listed.json()) as { tokens: { id: string; collaboratorsMayAsk: boolean }[] };
     expect(tokens.find((t) => t.id === minted.id)?.collaboratorsMayAsk).toBe(true);
-    await page.reload();
+    await reloadHydrated(page);
     await expect(page.getByTestId("token-row").filter({ hasText: agentName }).first().getByTestId("token-collaborators-may-ask")).toHaveAttribute("aria-checked", "true");
     await shot(page, "settings-switch-on");
 
