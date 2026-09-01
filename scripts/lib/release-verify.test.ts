@@ -9,6 +9,7 @@ import { brotliCompressSync, gzipSync } from "node:zlib";
 import { Hocuspocus } from "@hocuspocus/server";
 import { attachCollab } from "@/server/collab/ws";
 import {
+  bodyExcerpt,
   checkBrotli,
   checkHeaders,
   compareChunk,
@@ -18,6 +19,7 @@ import {
   formatReport,
   formatSummary,
   normalizeCssRule,
+  randomBase36,
   runReleaseVerify,
   scanLocalhost,
   sha256,
@@ -196,9 +198,18 @@ describe("small helpers", () => {
     expect(checkHeaders("/x", {}, [hsts])).toEqual([]);
     expect(checkHeaders("/x", { "strict-transport-security": "max-age=31536000" }, [hsts])).toEqual(["/x: strict-transport-security absent, got max-age=31536000 (HSTS sent over plain HTTP)"]);
   });
+  it("randomBase36 gives exactly n base-36 characters, fresh each call; bodyExcerpt quotes at most 120 of them with control characters escaped", () => {
+    const first = randomBase36(8);
+    expect(first).toMatch(/^[0-9a-z]{8}$/);
+    expect(randomBase36(8)).not.toBe(first);
+    expect(randomBase36(3)).toHaveLength(3);
+    expect(bodyExcerpt("x".repeat(200))).toBe(`"${"x".repeat(120)}"`);
+    expect(bodyExcerpt('<a href="x">\n\t</a>')).toBe('"<a href=\\"x\\">\\n\\t</a>"');
+    expect(bodyExcerpt("")).toBe('""');
+  });
 });
 
-/** An origin that behaves like production: health, /login, chunks with identity/br/gzip negotiation, /collab rejecting every token, the #1224 headers. */
+/** An origin that behaves like production: health, the JSON `/api/*` 404 catch-all, the `/api/mcp` card, /login, chunks with identity/br/gzip negotiation, /collab rejecting every token, the #1224 headers. */
 interface FakeSite {
   server: Server;
   url: string;
@@ -210,6 +221,12 @@ interface FakeSite {
   hsts: boolean;
   /** Per-pathname header overrides for the headers-row tests: a string sets, an array sends the header that many times, null removes. */
   headerOverrides: Map<string, Record<string, string | string[] | null>>;
+  /** What an unknown `/api/*` path answers: production's JSON catch-all, Next's HTML 404 page (the catch-all gone from the build) or a 200 (a route swallowed the path). */
+  apiNotFound: "json" | "html" | "ok";
+  /** The `GET /api/mcp` liveness card as JSON; a string is sent verbatim as text/html (a non-JSON body). */
+  mcp: Record<string, unknown> | string;
+  /** The `Accept` header of the last `GET /api/mcp` the site saw. */
+  lastMcpAccept?: string;
 }
 
 const BASELINE_HEADERS: Record<string, string> = {
@@ -218,8 +235,13 @@ const BASELINE_HEADERS: Record<string, string> = {
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
 
+/** What production's `GET /api/mcp` answers (src/app/api/mcp/route.ts): 27 tools at revision 29. */
+const MCP_CARD: Record<string, unknown> = { name: "markdoc", version: "0.1.0", transport: "streamable-http", tools: 27, docs: "https://release.example/docs/agents.md", auth: "Authorization: ****** — create one at /settings" };
+/** Next's HTML 404 page: what an unknown `/api/*` path answers once the `[...rest]` catch-all is gone from the build. */
+const HTML_404 = `<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width"/><title>404: This page could not be found.</title></head><body><div style="font-family:system-ui"><h1>404</h1><h2>This page could not be found.</h2></div></body></html>`;
+
 function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite> {
-  const site = { version: SHA, chunks, html, hsts: false, headerOverrides: new Map() } as FakeSite;
+  const site = { version: SHA, chunks, html, hsts: false, headerOverrides: new Map(), apiNotFound: "json", mcp: { ...MCP_CARD } } as FakeSite;
   const handler = (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     // server/index.ts stamps these on every response; src/proxy.ts adds the frame policy to pages only (not /api/*, not chunks).
@@ -237,6 +259,16 @@ function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite>
       res.setHeader("content-type", "application/json");
       const body = url.searchParams.get("probe") === "live" ? { ok: true, probe: "live", collab: true, version: site.version } : { ok: true, db: true, collab: true, documentsLoaded: 0, connections: 0, latencyMs: 1, version: site.version };
       return finish(JSON.stringify(body));
+    }
+    if (url.pathname === "/api/mcp") {
+      // src/app/api/mcp/route.ts: a plain GET is the liveness card (an SSE Accept would get a 405; the check never sends one).
+      site.lastMcpAccept = req.headers.accept;
+      if (typeof site.mcp === "string") {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return finish(site.mcp);
+      }
+      res.setHeader("content-type", "application/json");
+      return finish(JSON.stringify(site.mcp));
     }
     if (url.pathname === "/login") {
       res.setHeader("content-type", "text/html; charset=utf-8");
@@ -265,6 +297,21 @@ function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite>
       }
       res.setHeader("content-length", String(body.length));
       return finish(body);
+    }
+    if (url.pathname.startsWith("/api/")) {
+      // src/app/api/[...rest]/route.ts answers every unclaimed /api/* path with JSON; "html" is Next's page instead
+      // (the catch-all gone from the build), "ok" a route that swallowed the path.
+      if (site.apiNotFound === "ok") {
+        res.setHeader("content-type", "application/json");
+        return finish(JSON.stringify({ ok: true }));
+      }
+      res.statusCode = 404;
+      if (site.apiNotFound === "html") {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return finish(HTML_404);
+      }
+      res.setHeader("content-type", "application/json");
+      return finish(JSON.stringify({ error: "Not found", path: url.pathname }));
     }
     res.statusCode = 404;
     finish("Not Found");
@@ -332,10 +379,12 @@ describe("runReleaseVerify against an in-process origin", () => {
 
   it("all rows pass with a matching build; redirect is skipped for an http:// base; exit code 0", async () => {
     const report = await runReleaseVerify({ base: site.url, sha: SHA }, io());
-    expect(report.checks.map((check) => check.name)).toEqual(["health", "health:live", "redirect", "headers", "login", "chunks:identity", "chunks:all", "css:rules", "brotli", "gzip", "leak:localhost", "collab:reject"]);
+    expect(report.checks.map((check) => check.name)).toEqual(["health", "health:live", "api:404", "mcp:alive", "redirect", "headers", "login", "chunks:identity", "chunks:all", "css:rules", "brotli", "gzip", "leak:localhost", "collab:reject"]);
     expect(statusOf(report.checks)).toEqual({
       health: "pass",
       "health:live": "pass",
+      "api:404": "pass",
+      "mcp:alive": "pass",
       redirect: "skipped",
       headers: "pass",
       login: "pass",
@@ -347,7 +396,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       "leak:localhost": "pass",
       "collab:reject": "pass",
     });
-    expect(report.summary).toEqual({ passed: 11, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
+    expect(report.summary).toEqual({ passed: 13, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
     expect(row(report.checks, "headers").detail).toBe("GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http)");
     expect(row(report.checks, "login").detail).toContain("references 3 .js + 1 .css chunks");
     expect(row(report.checks, "chunks:identity").detail).toContain("4 chunks");
@@ -359,7 +408,7 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(row(report.checks, "collab:reject").detail).toContain("authenticationFailed after 12 ms (permission-denied)");
     expect(report.base).toBe(site.url);
     expect(report.startedAt <= report.finishedAt).toBe(true);
-    expect(formatReport(report.checks).split("\n")).toHaveLength(14);
+    expect(formatReport(report.checks).split("\n")).toHaveLength(16);
   });
 
   describe("headers", () => {
@@ -437,6 +486,140 @@ describe("runReleaseVerify against an in-process origin", () => {
     });
   });
 
+  describe("api:404 and mcp:alive", () => {
+    const PASS_404 = /^GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, application\/json, JSON \{ error, path \} echoing the path$/;
+    const PASS_MCP = /^GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0$/;
+    /** The quoted body excerpt of a failure detail, decoded. */
+    const excerptOf = (detail: string): string => JSON.parse(detail.match(/body(?: is not JSON:)? ("(?:[^"\\]|\\.)*")/)![1]) as string;
+
+    it("both pass on the fixture: the catch-all echoes the random path as JSON, the card says markdoc with 27 tools", async () => {
+      const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+      expect(row(report.checks, "api:404")).toEqual({ name: "api:404", status: "pass", detail: expect.stringMatching(PASS_404) });
+      expect(row(report.checks, "mcp:alive")).toEqual({ name: "mcp:alive", status: "pass", detail: expect.stringMatching(PASS_MCP) });
+      expect(report.summary).toMatchObject({ failed: 0, exitCode: 0 });
+    });
+
+    it("the two rows sit right after health:live and before redirect, after flip with --wait-flip", async () => {
+      const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+      expect(report.checks.map((check) => check.name).slice(0, 5)).toEqual(["health", "health:live", "api:404", "mcp:alive", "redirect"]);
+      const flipped = await runReleaseVerify({ base: site.url, sha: SHA, waitFlipSeconds: 5 }, io({}, null));
+      expect(flipped.checks.map((check) => check.name).slice(0, 6)).toEqual(["flip", "health", "health:live", "api:404", "mcp:alive", "redirect"]);
+      expect(flipped.checks).toHaveLength(15);
+    });
+
+    it("the card is asked for with a plain Accept, the unknown path differs between runs, and no detail echoes the auth line", async () => {
+      const real = io({}, null);
+      const asked: string[] = [];
+      const spy: ReleaseVerifyIo = {
+        ...real,
+        fetchText: (url, init) => {
+          asked.push(url);
+          return real.fetchText(url, init);
+        },
+      };
+      const first = await runReleaseVerify({ base: site.url, sha: SHA }, spy);
+      const second = await runReleaseVerify({ base: site.url, sha: SHA }, spy);
+      const paths = asked.filter((url) => url.includes("/api/nonexistent-")).map((url) => new URL(url).pathname);
+      expect(paths).toHaveLength(2);
+      expect(paths[0]).toMatch(/^\/api\/nonexistent-[0-9a-z]{8}$/);
+      expect(paths[1]).toMatch(/^\/api\/nonexistent-[0-9a-z]{8}$/);
+      expect(paths[0]).not.toBe(paths[1]);
+      expect(asked.filter((url) => url.endsWith("/api/mcp"))).toHaveLength(2);
+      expect(site.lastMcpAccept).toBeDefined();
+      expect(site.lastMcpAccept).not.toContain("text/event-stream");
+      for (const report of [first, second]) expect(formatReport(report.checks)).not.toMatch(/Authorization|\*\*\*\*\*\*|\/settings|docs\/agents/);
+    });
+
+    it("Next's HTML 404 page on the unknown path fails api:404 with status, content-type and exactly the first 120 body characters", async () => {
+      site.apiNotFound = "html";
+      try {
+        const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        const check = row(report.checks, "api:404");
+        expect(check.status).toBe("fail");
+        expect(check.detail).toMatch(/^GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, text\/html; charset=utf-8, body "<!DOCTYPE html>/);
+        expect(check.detail).toContain(`body ${JSON.stringify(HTML_404.slice(0, 120))}; content-type "text/html; charset=utf-8" is not application/json (Next's HTML 404 page: the [...rest] catch-all is gone from the build); body is not JSON`);
+        expect(HTML_404.length).toBeGreaterThan(120);
+        expect(excerptOf(check.detail)).toBe(HTML_404.slice(0, 120));
+        expect(row(report.checks, "mcp:alive")).toMatchObject({ status: "pass" });
+        expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
+        expect(formatReport(report.checks).split("\n")).toHaveLength(16);
+      } finally {
+        site.apiNotFound = "json";
+      }
+    });
+
+    it("a 200 on the unknown path fails api:404 naming the status and the missing error/path; a JSON 404 echoing another path fails too", async () => {
+      site.apiNotFound = "ok";
+      try {
+        const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(report.checks, "api:404")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET \/api\/nonexistent-[0-9a-z]{8}: status 200, rtt \d+ ms, application\/json, body "\{\\"ok\\":true\}"; status 200; body has no error string; body path=absent is not the requested path$/) });
+        expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
+      } finally {
+        site.apiNotFound = "json";
+      }
+      const real = io({}, null);
+      const rewritten = { status: 404, headers: { "content-type": "application/json" }, text: JSON.stringify({ error: "Not found", path: "/api/other" }) };
+      const proxied = await runReleaseVerify({ base: site.url, sha: SHA }, { ...real, fetchText: (url, init) => (url.includes("/api/nonexistent-") ? Promise.resolve(rewritten) : real.fetchText(url, init)) });
+      expect(row(proxied.checks, "api:404")).toMatchObject({ status: "fail", detail: expect.stringMatching(/; body path="\/api\/other" is not the requested path$/) });
+      expect(row(proxied.checks, "api:404").detail).not.toContain("error string");
+    });
+
+    it("mcp:alive fails on tools: 0 and on a non-numeric tools, naming the value", async () => {
+      site.mcp = { ...MCP_CARD, tools: 0 };
+      try {
+        const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(report.checks, "mcp:alive")).toEqual({ name: "mcp:alive", status: "fail", detail: expect.stringMatching(/^GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=0 version=0\.1\.0; tools=0 \(expected a number > 0\)$/) });
+        expect(row(report.checks, "api:404").status).toBe("pass");
+        expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
+        site.mcp = { ...MCP_CARD, tools: "27" };
+        const stringy = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(stringy.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/ name=markdoc tools=\? version=0\.1\.0; tools="27" \(expected a number > 0\)$/) });
+      } finally {
+        site.mcp = { ...MCP_CARD };
+      }
+    });
+
+    it("mcp:alive fails on a non-JSON body (an HTML page), naming the content-type and quoting the first 120 characters", async () => {
+      site.mcp = HTML_404;
+      try {
+        const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        const check = row(report.checks, "mcp:alive");
+        expect(check.status).toBe("fail");
+        expect(check.detail).toMatch(/^GET \/api\/mcp: status 200, rtt \d+ ms, name=\? tools=\? version=\?; content-type "text\/html; charset=utf-8" is not application\/json; body is not JSON: "<!DOCTYPE html>/);
+        expect(excerptOf(check.detail)).toBe(HTML_404.slice(0, 120));
+        expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
+      } finally {
+        site.mcp = { ...MCP_CARD };
+      }
+    });
+
+    it("mcp:alive fails on name \"other\", on a transport that is not streamable-http, and on a card missing all three", async () => {
+      try {
+        site.mcp = { ...MCP_CARD, name: "other" };
+        const other = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(other.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET \/api\/mcp: status 200, rtt \d+ ms, name=other tools=27 version=0\.1\.0; name="other" \(expected "markdoc"\)$/) });
+        expect(other.summary.failed).toBe(1);
+        site.mcp = { ...MCP_CARD, transport: "sse" };
+        const sse = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(sse.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/ name=markdoc tools=27 version=0\.1\.0; transport="sse" \(expected "streamable-http"\)$/) });
+        site.mcp = { version: "0.1.0" };
+        const bare = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(bare.checks, "mcp:alive").detail).toMatch(/ name=\? tools=\? version=0\.1\.0; name=absent \(expected "markdoc"\); tools=absent \(expected a number > 0\); transport=absent \(expected "streamable-http"\)$/);
+      } finally {
+        site.mcp = { ...MCP_CARD };
+      }
+    });
+
+    it("a 405 on GET /api/mcp (the stateless transport refusing an SSE stream) fails mcp:alive by status", async () => {
+      const real = io({}, null);
+      const refused = { status: 405, headers: { "content-type": "application/json", allow: "GET, POST" }, text: JSON.stringify({ error: "Method Not Allowed", detail: "GET as an SSE stream is not supported: this MCP endpoint is stateless." }) };
+      const report = await runReleaseVerify({ base: site.url, sha: SHA }, { ...real, fetchText: (url, init) => (url.endsWith("/api/mcp") ? Promise.resolve(refused) : real.fetchText(url, init)) });
+      expect(row(report.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET \/api\/mcp: status 405, rtt \d+ ms, name=\? tools=\? version=\?; status 405; name=absent \(expected "markdoc"\); tools=absent \(expected a number > 0\); transport=absent \(expected "streamable-http"\)$/) });
+      expect(row(report.checks, "mcp:alive").detail).not.toContain("stateless");
+      expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
+    });
+  });
+
   it("a served chunk that differs by one byte fails chunks:identity naming both hashes; exactly one failure", async () => {
     const original = site.chunks.get("tiny.js")!;
     const mutated = Buffer.from(original);
@@ -488,7 +671,7 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(statusOf(report.checks)).toMatchObject({ "chunks:identity": "pass", "chunks:all": "skipped", "css:rules": "skipped", brotli: "pass", gzip: "pass" });
     expect(row(report.checks, "chunks:identity").detail).toContain("not compared");
     expect(row(report.checks, "chunks:all").detail).toContain("no --dist");
-    expect(report.summary).toEqual({ passed: 9, failed: 0, warned: 0, skipped: 3, exitCode: 0 });
+    expect(report.summary).toEqual({ passed: 11, failed: 0, warned: 0, skipped: 3, exitCode: 0 });
   });
 
   it("a renamed Tailwind stylesheet is compared rule by rule (warn on ≤ 5 local-only utilities), its .br by decompression only", async () => {
@@ -505,7 +688,7 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(all.status).toBe("fail");
     expect(all.detail).toContain("2 unreferenced local chunks (2 .js + 0 .css)");
     expect(all.detail).toContain("orphan-xyz.js: status 404");
-    expect(report.summary).toEqual({ passed: 9, failed: 1, warned: 1, skipped: 1, exitCode: 1 });
+    expect(report.summary).toEqual({ passed: 11, failed: 1, warned: 1, skipped: 1, exitCode: 1 });
   });
 
   it("a dev origin in a referenced chunk fails leak:localhost; a bare token only warns", async () => {
@@ -532,6 +715,8 @@ describe("runReleaseVerify against an in-process origin", () => {
     const report = await runReleaseVerify({ base: "http://127.0.0.1:1", sha: SHA, timeoutMs: 2000 }, io());
     expect(row(report.checks, "health").status).toBe("fail");
     expect(row(report.checks, "health").detail).toMatch(/^request failed: /);
+    expect(row(report.checks, "api:404")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^request failed: /) });
+    expect(row(report.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^request failed: /) });
     expect(row(report.checks, "headers").status).toBe("fail");
     expect(row(report.checks, "headers").detail).toMatch(/^request failed: /);
     expect(statusOf(report.checks)).toMatchObject({ "chunks:identity": "skipped", brotli: "skipped", gzip: "skipped", "leak:localhost": "skipped" });
@@ -553,7 +738,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(flip.status).toBe("pass");
       expect(flip.detail).toMatch(/^at version after 3 samples, 0 non-200, max rtt 500 ms; first sample at the new version 2026-08-31T13:00:0\d\.\d{3}Z, \d\.\d s after the first sample$/);
       expect(report.checks[0].name).toBe("flip");
-      expect(report.checks).toHaveLength(13);
+      expect(report.checks).toHaveLength(15);
       expect(report.summary.failed).toBe(0);
     });
 
@@ -572,7 +757,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       const flip = row(report.checks, "flip");
       expect(flip.status).toBe("fail");
       expect(flip.detail).toMatch(/^version did not become 5f9eb0d\w+ within 6 s: [3-5] samples, 0 non-200, max rtt 500 ms, last version 0{40}$/);
-      expect(report.checks).toHaveLength(13);
+      expect(report.checks).toHaveLength(15);
       expect(statusOf(report.checks)).toMatchObject({ health: "pass", login: "pass", "collab:reject": "pass" });
       expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
     });
@@ -628,6 +813,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(await runMain(["--base", site.url, "--sha", SHA, "--bogus"], { output })).toBe(2);
       expect(await runMain(["--help"], { output })).toBe(0);
       expect(lines.at(-1)).toContain("usage: npm run release:verify");
+      expect(lines.at(-1)).toMatch(/\n {2}health:live {6}GET .*\n {2}api:404 {10}GET \/api\/nonexistent-<8 random chars>: 404 application\/json .*\n {2}mcp:alive {8}GET \/api\/mcp with a plain Accept: 200 JSON, name "markdoc", tools > 0, transport "streamable-http"\n {2}redirect {9}GET /);
     });
 
     it("runMain prints the table and the summary line, writes --json and returns the exit code", async () => {
@@ -637,11 +823,11 @@ describe("runReleaseVerify against an in-process origin", () => {
       const code = await runMain(["--base", site.url, "--sha", SHA, "--dist", dist, "--json", jsonPath, "--timeout-ms", "5000"], { output, io: io() });
       expect(code).toBe(0);
       expect(lines[0].split("\n")[0]).toBe("| check | status | detail |");
-      expect(lines[1]).toBe("release-verify: 11 passed, 0 failed, 0 warned, 1 skipped");
+      expect(lines[1]).toBe("release-verify: 13 passed, 0 failed, 0 warned, 1 skipped");
       const written = JSON.parse(readFileSync(jsonPath, "utf8")) as { base: string; sha: string; checks: Check[]; summary: { exitCode: number } };
       expect(written.base).toBe(site.url);
       expect(written.sha).toBe(SHA);
-      expect(written.checks).toHaveLength(12);
+      expect(written.checks).toHaveLength(14);
       expect(written.summary.exitCode).toBe(0);
     });
 
@@ -662,8 +848,10 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(authenticateLogs).toHaveLength(1);
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain("| collab:reject | pass |");
+      expect(result.stdout).toMatch(/\| api:404 \| pass \| GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, application\/json, JSON \{ error, path \} echoing the path \|/);
+      expect(result.stdout).toMatch(/\| mcp:alive \| pass \| GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0 \|/);
       expect(result.stdout).toContain("| headers | pass | GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http) |");
-      expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 11 passed, 0 failed, 0 warned, 1 skipped");
+      expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 13 passed, 0 failed, 0 warned, 1 skipped");
       expect(result.code).toBe(0);
     }, 60_000);
   });

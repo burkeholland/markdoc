@@ -23,6 +23,8 @@ Read-only release checks (README "Production runbook: app-only releases", step 3
   flip             only with --wait-flip S: 2 s /api/health samples until version = --sha or S seconds pass
   health           GET /api/health x3: 200, ok, db, version = --sha (a 7+ hex prefix compares as a prefix)
   health:live      GET /api/health?probe=live: 200, ok, probe=live, version, and no db key
+  api:404          GET /api/nonexistent-<8 random chars>: 404 application/json { error, path } from the [...rest] catch-all, never Next's HTML page
+  mcp:alive        GET /api/mcp with a plain Accept: 200 JSON, name "markdoc", tools > 0, transport "streamable-http"
   redirect         GET http://<host>/ answers 301/302/307/308 to https://<host> (skipped for an http base)
   headers          nosniff, Referrer-Policy, Permissions-Policy on /login, /api/health and a referenced .js chunk; frame-ancestors 'none' on /login only; HSTS only for an https base
   login            GET /login is 200 text/html and references .js chunks
