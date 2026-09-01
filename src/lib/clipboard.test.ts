@@ -6,15 +6,29 @@ function setClipboard(value: unknown) {
   Object.defineProperty(navigator, "clipboard", { value, configurable: true, writable: true });
 }
 
+// jsdom does not implement `document.execCommand`, so the tests define it per test and must take it away
+// again afterwards (or put back whatever the environment had) rather than leave a stub on the shared document.
+const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+
+function setExecCommand(value: unknown) {
+  Object.defineProperty(document, "execCommand", { value, configurable: true, writable: true });
+}
+
+function restoreExecCommand() {
+  if (originalExecCommand) Object.defineProperty(document, "execCommand", originalExecCommand);
+  else Reflect.deleteProperty(document, "execCommand");
+}
+
 describe("copyText", () => {
   let execCommand: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     execCommand = vi.fn().mockReturnValue(true);
-    Object.defineProperty(document, "execCommand", { value: execCommand, configurable: true, writable: true });
+    setExecCommand(execCommand);
   });
 
   afterEach(() => {
+    restoreExecCommand();
     setClipboard(undefined);
     document.querySelectorAll("textarea").forEach((t) => t.remove());
   });
@@ -101,15 +115,18 @@ describe("copyText", () => {
 });
 
 describe("canCopy", () => {
-  afterEach(() => setClipboard(undefined));
+  afterEach(() => {
+    restoreExecCommand();
+    setClipboard(undefined);
+  });
 
   it("is true with the async API, true with execCommand only, false with neither", () => {
-    Object.defineProperty(document, "execCommand", { value: vi.fn(), configurable: true, writable: true });
+    setExecCommand(vi.fn());
     setClipboard({ writeText: vi.fn() });
     expect(canCopy()).toBe(true);
     setClipboard(undefined);
     expect(canCopy()).toBe(true);
-    Object.defineProperty(document, "execCommand", { value: undefined, configurable: true, writable: true });
+    setExecCommand(undefined);
     expect(canCopy()).toBe(false);
   });
 });

@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { contrast } from "./theme-contrast.helpers";
 
 /**
  * WCAG AA guard for both palettes in globals.css: body text on the page surface, secondary text on
  * the surface, and text on filled accent controls. Parses the CSS rather than importing it so the
- * numbers match what ships.
+ * numbers match what ships. The `contrast` formula lives in theme-contrast.helpers.ts
+ * (tokens-contrast.test.ts shares it).
  */
 
 const css = readFileSync(path.resolve(__dirname, "globals.css"), "utf8");
@@ -28,18 +30,6 @@ function palette(body: string): Palette {
 
 const light = palette(block("\n:root {"));
 const dark = palette(block('\n[data-theme="dark"] {'));
-
-function luminance(hex: string): number {
-  const h = hex.replace("#", "");
-  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
-  const [r, g, b] = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-export function contrast(a: string, b: string): number {
-  const [l1, l2] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (l1 + 0.05) / (l2 + 0.05);
-}
 
 const TOKENS = ["ink", "ink-2", "ink-3", "ink-4", "line", "line-2", "surface", "surface-2", "surface-3", "accent", "accent-hover", "accent-soft", "success", "warning", "danger", "on-accent", "inverse"];
 

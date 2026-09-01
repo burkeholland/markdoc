@@ -22,13 +22,27 @@ function fakeMatchMedia(matches: boolean) {
   }));
 }
 
+// jsdom has no working `matchMedia`; each test installs a fake and `afterEach` puts the original property back
+// (or removes the fake when there was none) so the stub does not outlive this file on the shared window.
+const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+
+function setMatchMedia(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", { value: fakeMatchMedia(matches), configurable: true, writable: true });
+}
+
+function restoreMatchMedia() {
+  if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+  else Reflect.deleteProperty(window, "matchMedia");
+}
+
 describe("theme", () => {
   beforeEach(() => {
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
-    Object.defineProperty(window, "matchMedia", { value: fakeMatchMedia(false), configurable: true, writable: true });
+    setMatchMedia(false);
   });
   afterEach(() => {
+    restoreMatchMedia();
     localStorage.clear();
   });
 
@@ -58,7 +72,7 @@ describe("theme", () => {
   });
 
   it("system mode follows matchMedia when applied", () => {
-    Object.defineProperty(window, "matchMedia", { value: fakeMatchMedia(true), configurable: true, writable: true });
+    setMatchMedia(true);
     expect(applyTheme("system")).toBe("dark");
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });

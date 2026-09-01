@@ -94,17 +94,27 @@ describe("renderPdf", () => {
   );
 
   it(
-    "closes the live Chromium well inside the close bound",
+    "closes the live Chromium without the close timing out",
     async () => {
       // Runs after the render above launched the shared browser. A healthy close is a matter of a few hundred
-      // ms; hitting the bound would mean `closePdfBrowser` gave up waiting, which is worth a red line here.
-      const started = performance.now();
-      await closePdfBrowser();
-      const ms = Math.round(performance.now() - started);
-      console.log(`[pdf.test] closePdfBrowser() with a live browser took ${ms} ms`);
-      expect(ms).toBeLessThan(BROWSER_CLOSE_TIMEOUT_MS);
+      // ms, but on a loaded box Chromium has taken > 10 s to go away (#1390 measured 10 034 ms under 20 vitest
+      // workers), so the production bound `BROWSER_CLOSE_TIMEOUT_MS` — there to keep shutdown from blocking, not
+      // a benchmark — is not what this test asserts against. The bound here is generous; the real "gave up
+      // waiting" signal is the `[pdf] browser close still running` warn, which must not be emitted.
+      const warn = vi.spyOn(console, "warn");
+      try {
+        const started = performance.now();
+        await closePdfBrowser(60_000);
+        const ms = Math.round(performance.now() - started);
+        console.log(`[pdf.test] closePdfBrowser() with a live browser took ${ms} ms (production bound ${BROWSER_CLOSE_TIMEOUT_MS} ms)`);
+        expect(ms).toBeLessThan(60_000);
+        const gaveUp = warn.mock.calls.filter((args) => String(args[0]).includes("[pdf] browser close still running"));
+        expect(gaveUp).toEqual([]);
+      } finally {
+        warn.mockRestore();
+      }
     },
-    30_000,
+    75_000,
   );
 });
 

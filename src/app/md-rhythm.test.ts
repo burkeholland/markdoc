@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseRules } from "./css-layers.test";
+import { parseRules } from "./css-layers.helpers";
 
 /**
  * Vertical-rhythm guard for the rendered-Markdown surfaces (task #346, Burke #1057). Block spacing in
