@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
-import { SignJWT } from "jose";
+import { SignJWT, errors as joseErrors } from "jose";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import { MarkdocProvider } from "@/editor/collab/provider";
 
@@ -177,7 +177,7 @@ describe("collaboration server", () => {
       ["expired (a tab reconnecting after a release)", () => signCollabToken(claims(), -60), "Invalid token (expired)"],
       ["claims (wrong audience)", () => mint(process.env.AUTH_SECRET!, "not-markdoc-collab"), "Invalid token (claims)"],
       ["signature (minted with another secret)", () => mint("another-secret-another-secret-another", "markdoc-collab-v2"), "Invalid token (signature)"],
-      ["other (not a JWT at all)", async () => "not-a-token", "Invalid token"],
+      ["other (not a JWT at all — what the release:verify probe sends)", async () => "not-a-token", "Invalid token (malformed)"],
     ];
 
     it.each(cases)("%s: the log says why, the client still only sees permission-denied", async (_kind, mintToken, logged) => {
@@ -206,12 +206,26 @@ describe("collaboration server", () => {
       }
     });
 
-    it("a well-signed token that is not a collaboration token is the plain fallback", async () => {
+    it("a well-signed token that is not a collaboration token is the (shape) line; unknown causes stay bare", async () => {
       const notCollab = await new SignJWT({ userId, role: "owner" }).setProtectedHeader({ alg: "HS256" }).setAudience("markdoc-collab-v2").setExpirationTime("1h").sign(new TextEncoder().encode(process.env.AUTH_SECRET!));
       const failure = await verifyCollabToken(notCollab).then(() => null, (err: unknown) => err);
       expect(failure).toBeInstanceOf(Error);
-      expect(collabTokenFailureMessage(failure)).toBe("Invalid token");
+      expect((failure as Error).message).toBe("Invalid collaboration token");
+      expect(collabTokenFailureMessage(failure)).toBe("Invalid token (shape)");
       expect(collabTokenFailureMessage(undefined)).toBe("Invalid token");
+    });
+
+    // Task #1445 (#1423 triage row 14): the fall-through line is split so the release:verify probe
+    // (`(malformed)`) and a suspicious wrong-shape token (`(shape)`) no longer print the same line.
+    const byCause: [kind: string, logged: string, error: () => unknown][] = [
+      ["a jose JWSInvalid (not a compact JWS)", "Invalid token (malformed)", () => new joseErrors.JWSInvalid("Invalid Compact JWS")],
+      ["a jose JWTInvalid (a JWS that is not a JWT)", "Invalid token (malformed)", () => new joseErrors.JWTInvalid("JWT Claims Set must be a top-level JSON object")],
+      ["this module's own wrong-shape rejection", "Invalid token (shape)", () => new Error("Invalid collaboration token")],
+      ["an unrelated error", "Invalid token", () => new Error("boom")],
+    ];
+
+    it.each(byCause)("%s → %s", (_kind, logged, error) => {
+      expect(collabTokenFailureMessage(error())).toBe(logged);
     });
   });
 
