@@ -28,7 +28,15 @@ vi.mock("@/server/http", () => {
 });
 
 const { HttpError } = await import("@/server/http");
-const { CSP_LOG_INTERVAL_MS, CSP_REPORT_BODY_LIMIT, GET, POST, resetCspReportState } = await import("./route");
+const {
+  CSP_LOG_INTERVAL_MS,
+  CSP_REPORT_BODY_LIMIT,
+  CSP_REPORT_KEY_LIMIT,
+  CSP_REPORT_OVERFLOW_KEY,
+  GET,
+  POST,
+  resetCspReportState,
+} = await import("./route");
 
 const BASE = "http://localhost:3297/api/csp-report";
 const browserUser = { id: "user-1", login: "reader", name: "Reader", image: null };
@@ -112,6 +120,31 @@ describe("/api/csp-report", () => {
       ["[csp] script-src-elem https://cdn.example.test /d/:id n=1"],
       ["[csp] script-src-elem https://cdn.example.test /d/:id n=4"],
     ]);
+  });
+
+  it("caps distinct keys and aggregates every unseen report into one throttled overflow key", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+
+    for (let i = 0; i < CSP_REPORT_KEY_LIMIT + 2; i++) {
+      const body = cspPayload({ "blocked-uri": `https://cdn-${i}.example.test/app.js` });
+      expect((await post("application/csp-report", JSON.stringify(body))).status).toBe(204);
+    }
+
+    const first = (await (await GET()).json()) as { counters: Record<string, number> };
+    const normalKeys = Object.keys(first.counters).filter((key) => key !== CSP_REPORT_OVERFLOW_KEY);
+    expect(CSP_REPORT_KEY_LIMIT).toBe(128);
+    expect(normalKeys).toHaveLength(CSP_REPORT_KEY_LIMIT);
+    expect(first.counters[CSP_REPORT_OVERFLOW_KEY]).toBe(2);
+    expect(Object.keys(first.counters)).toHaveLength(CSP_REPORT_KEY_LIMIT + 1);
+    expect(error).toHaveBeenCalledTimes(CSP_REPORT_KEY_LIMIT + 1);
+
+    const another = cspPayload({ "blocked-uri": "https://another-new-origin.example.test/app.js" });
+    await post("application/csp-report", JSON.stringify(another));
+    const second = (await (await GET()).json()) as { counters: Record<string, number> };
+    expect(second.counters[CSP_REPORT_OVERFLOW_KEY]).toBe(3);
+    expect(Object.keys(second.counters)).toHaveLength(CSP_REPORT_KEY_LIMIT + 1);
+    expect(error).toHaveBeenCalledTimes(CSP_REPORT_KEY_LIMIT + 1);
   });
 
   it("GET requires a signed-in browser session and refuses agents", async () => {

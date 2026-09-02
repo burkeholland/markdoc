@@ -5,6 +5,8 @@ export const dynamic = "force-dynamic";
 
 export const CSP_REPORT_BODY_LIMIT = 8 * 1024;
 export const CSP_LOG_INTERVAL_MS = 10 * 60 * 1000;
+export const CSP_REPORT_KEY_LIMIT = 128;
+export const CSP_REPORT_OVERFLOW_KEY = "overflow inline /";
 
 const reportCounts = new Map<string, number>();
 const lastLoggedAt = new Map<string, number>();
@@ -92,7 +94,13 @@ function normalizeReport(value: unknown): NormalizedReport | null {
 }
 
 function recordReport(report: NormalizedReport): void {
-  const key = `${report.directive} ${report.blocked} ${report.route}`;
+  const requestedKey = `${report.directive} ${report.blocked} ${report.route}`;
+  const normalKeyCount = reportCounts.size - (reportCounts.has(CSP_REPORT_OVERFLOW_KEY) ? 1 : 0);
+  const key = requestedKey === CSP_REPORT_OVERFLOW_KEY
+    || reportCounts.has(requestedKey)
+    || normalKeyCount < CSP_REPORT_KEY_LIMIT
+    ? requestedKey
+    : CSP_REPORT_OVERFLOW_KEY;
   const count = (reportCounts.get(key) ?? 0) + 1;
   reportCounts.set(key, count);
   const now = Date.now();
