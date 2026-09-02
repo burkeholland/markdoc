@@ -68,7 +68,8 @@ test.describe("security response headers", () => {
     const scripts = [...(await res.text()).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
     expect(scripts.length).toBeGreaterThan(0);
     for (const [, attributes] of scripts) expect(attributes).toContain(`nonce="${nonce}"`);
-    expect(scripts.some(([, , body]) => body.includes("_R_"))).toBe(true);
+    // Production names the bootstrap `_R_`; the development transport spells out `__next_f`.
+    expect(scripts.some(([, , body]) => body.includes("_R_") || body.includes("__next_f"))).toBe(true);
     expect(scripts.some(([, , body]) => body.includes("markdoc:brand"))).toBe(true);
   });
 
