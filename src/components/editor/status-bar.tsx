@@ -67,6 +67,10 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             aria-label={compact ? "View options" : undefined}
             data-testid="layout-menu"
           >
+            {/* The phone name from the first byte: `compact` (and so `aria-label`) is false until hydration, and the
+                visible "Markdown" text is `max-md:hidden` — without this the server markup has an unnamed button for ≈ 1 s.
+                After hydration `aria-label` wins; from `md` the span is hidden and the visible text is the name (#1562). */}
+            <span className="sr-only md:hidden">View options</span>
             <span className="inline-flex md:hidden">
               <MoreHorizontal size={18} />
             </span>

@@ -641,6 +641,18 @@ export const Header = memo(function Header(props: HeaderProps) {
   const keepAgentEverOpened = useEverTrue(keepAgentOpen);
   const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
   const openKeepAgent = useCallback(() => setKeepAgentOpen(true), []);
+  // Phones can paint the header while the HTML is still being parsed (a 4× slower CPU: `readyState` was "loading" at the
+  // first frame in 2 of 3 runs), and then the right group is laid out with only its first children — 70 px, or 110 px
+  // with the bell — and grows to 190 px once the comments toggle and ⋮ have arrived, pushing the title and the save chip
+  // left (#1562: {x 268, w 110} → {x 188, w 190}, 0.0033–0.0050). Every child is already in the server markup, so the
+  // group reserves its final phone width from the first byte: the 70 px pane segment plus 36 px icon buttons with 4 px
+  // gaps — comments always, the bell when signed in, ⋮ outside embeds (the desktop-only children are `hidden`/
+  // `max-md:hidden` below `md` and add nothing). In rem like the utilities it mirrors; from `md` the class is inert.
+  const phoneRightMinWidth = embed
+    ? "max-md:min-w-[calc(6.75rem+2px)]" // segment + comments: 110 px
+    : session.user.login
+      ? "max-md:min-w-[calc(11.75rem+2px)]" // segment + bell + comments + ⋮: 190 px
+      : "max-md:min-w-[calc(9.25rem+2px)]"; // segment + comments + ⋮: 150 px
 
   return (
     <header className={HEADER_BOX} data-testid="header" data-embed={embed || undefined}>
@@ -663,7 +675,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         {!embed && !compact && <HeaderStar docId={doc.id} ready={settled} />}
         <SaveIndicator session={session} compact={compact} />
       </div>
-      <div className="flex shrink-0 items-center gap-1 md:gap-3" data-testid="header-right">
+      <div className={cn("flex shrink-0 items-center gap-1 md:gap-3", phoneRightMinWidth)} data-testid="header-right">
         <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
         <div className="hidden items-center gap-3 md:flex">
           <ModeSwitcher session={session} />
