@@ -119,7 +119,7 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, 
         Works with any MCP client: Copilot CLI, VS Code, Claude, Cursor.
       </p>
       <a
-        className="inline-flex w-fit items-center gap-1 text-xs font-medium text-accent underline-offset-2 hover:underline"
+        className="inline-flex min-h-6 w-fit items-center gap-1 text-xs font-medium text-accent underline-offset-2 hover:underline"
         href={`${AGENT_DOCS_URL}#sit-in-a-document`}
         target="_blank"
         rel="noreferrer"

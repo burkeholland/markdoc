@@ -165,7 +165,7 @@ export function WebhooksPanel() {
             <legend className="mb-1">Events</legend>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5">
               {EVENT_CHOICES.map((c) => (
-                <label key={c.id} className="flex items-center gap-1.5 font-mono text-xs text-ink-2">
+                <label key={c.id} className="flex min-h-6 items-center gap-1.5 font-mono text-xs text-ink-2">
                   <input
                     type="checkbox"
                     checked={choices.includes(c.id)}

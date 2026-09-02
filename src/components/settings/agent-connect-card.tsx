@@ -137,7 +137,7 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
         <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
           <Plug size={16} className="text-violet-600" /> Connect an agent
         </h3>
-        <a className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-accent hover:underline" href={AGENT_DOCS_URL} target="_blank" rel="noreferrer" data-testid="agent-docs-link">
+        <a className="inline-flex min-h-6 shrink-0 items-center gap-1 text-xs font-medium text-accent hover:underline" href={AGENT_DOCS_URL} target="_blank" rel="noreferrer" data-testid="agent-docs-link">
           Agent docs <ExternalLink size={13} aria-hidden="true" />
         </a>
       </div>
@@ -193,7 +193,7 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
                   <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">MARKDOC_TOKEN</code>; use <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{base}</code> for the URL.
                 </p>
                 <CopyBlock value={COPILOT_APP_INSTALL} label="Copilot app install command" testId="agent-connect-app-install" />
-                <a className="mt-2 inline-flex text-xs font-medium text-accent hover:underline" href={COPILOT_APP_DOCS} target="_blank" rel="noreferrer">
+                <a className="mt-2 inline-flex min-h-6 items-center text-xs font-medium text-accent hover:underline" href={COPILOT_APP_DOCS} target="_blank" rel="noreferrer">
                   Inside the Copilot app setup and limits
                 </a>
               </div>
