@@ -102,7 +102,7 @@ export function TableMenu({
       { left: rect.left, top: Math.max(host.top + 4, rect.top - MENU_HEIGHT - 8), width: MENU_WIDTH, height: MENU_HEIGHT },
       { width: window.innerWidth, height: window.innerHeight },
     );
-    const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
+    const left = Math.max(8, Math.min(container.clientWidth - box.width - 8, box.left - host.left));
     const top = Math.max(container.scrollTop + 4, box.top - host.top + container.scrollTop);
     setPos({ left, top, width: box.width });
   }, [view, canEdit, activeSurface, containerRef, format.tablePos]);
