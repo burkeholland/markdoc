@@ -20,6 +20,8 @@ const NEW_ID = "3f2a9c8b1d4e6f70";
 const UUID = "6f1d2c3b-4a5e-4f60-8a9b-0c1d2e3f4a5b";
 const NONCE = "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eA";
 
+const TEST_ACCESS_TOKEN = "test-access-token";
+
 describe("routeShape", () => {
   it("replaces a UUID segment with :id", () => {
     expect(routeShape(`/api/users/${UUID}`)).toBe("/api/users/:id");
@@ -111,7 +113,7 @@ describe("routeShape", () => {
   });
 
   it("never lets a title, e-mail or token through", () => {
-    const secrets = ["My%20Secret%20Plan", "someone@example.com", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", "Bearer"];
+    const secrets = ["My%20Secret%20Plan", "someone@example.com", TEST_ACCESS_TOKEN, "Bearer"];
     for (const secret of secrets) {
       const shape = routeShape(`/api/documents/${secret}`);
       expect(shape.startsWith("/api/documents/")).toBe(true);
@@ -122,6 +124,10 @@ describe("routeShape", () => {
 });
 
 describe("looksLikeId", () => {
+  it("recognizes the explicit non-secret token fixture as a redacted id shape", () => {
+    expect(looksLikeId(TEST_ACCESS_TOKEN)).toBe(true);
+  });
+
   it.each([UUID, NEW_ID, "0123456789ab", "42", DOCUMENT_ID, DOCUMENT_ID_NO_DIGITS, ASSET_ID, NONCE, "a".repeat(64)])("%s is an id", (segment) => {
     expect(looksLikeId(segment)).toBe(true);
   });
