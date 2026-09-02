@@ -2,6 +2,16 @@
 
 Newest first. Each entry is one merged feature or fix on `main`; test-only and work-in-progress commits are folded into the feature they belong to. Short hashes point at the merge or squash commit.
 
+## 2026-09-02
+
+### Reliability
+
+- A client disconnecting mid-request or mid-response no longer becomes an uncaught server error or restarts Markdoc: expected disconnect codes stay quiet, while unexpected stream errors write one redacted `[http]` line (994d037)
+
+### Build, ops and tests
+
+- Runtime-image payloads gain their final ownership as they are copied and production dependencies install as the unprivileged user, removing a 144,061,740 B (21.0 %) compressed copy-up layer — 684,568,023 B fell to 540,506,283 B (990c208); `[http]` route shapes preserve `opengraph-image` instead of redacting it as `:x`, and the route census now includes Next metadata file routes (d98be74); internal editor state and shared keys live in leaf modules instead of importing through features that consume them, removing two module cycles without changing behaviour (1f518b7)
+
 ## 2026-09-01
 
 ### Writing
@@ -15,24 +25,38 @@ Newest first. Each entry is one merged feature or fix on `main`; test-only and w
 
 ### Collaborating
 
+- Share's GitHub-handle suggestions stop asking after the server says that the account has no GitHub token, using a successful `reason: "no-github-token"` answer instead of repeatedly retrying a request that cannot work (d3f2145)
 - The Share dialog shows why a handle was refused — *Enter a GitHub handle* for one with a dot, an underscore, a space or an e-mail shape, the length message for one over 39 characters — instead of the bare *Invalid request*; a refusal without a validation detail (403, 409, 5xx) reads exactly as before, and `apiErrorText(err, fallback)` in `src/lib/api.ts` is the helper any other dialog can use (a58c415)
+
+### Look
+
+- The phone status bar is compact in the server-rendered page instead of changing shape at hydration: its measured layout shift fell from 0.0087 to zero while the desktop bar stayed unchanged (9d8ba00)
+- The dashboard's document-count chips reserve their phone layout before hydration, so parsing and React startup no longer move the row (a697aee)
+- The phone editor no longer jumps into place after hydration: its measured layout shift fell from 0.852 to 0.009, while the reader stayed at zero at normal speed and improved from 0.073 to zero under 4× CPU slowdown (5560806)
 
 ### Accessibility
 
+- Public reader pages have a *Skip to article* link, a main landmark and a focusable article target, so keyboard and screen-reader users can bypass the table of contents (80f75b6)
 - ⋮ → *Name current version* focuses its name field again and Esc returns to the ⋮ button (a regression shipped with the lazy-loaded dialogs): a dialog whose chunk is already loaded now mounts in the same commit as the menu action, and a `KeepOpeningFocus` guard brings focus back inside the dialog when the closing menu steals it in the other ordering (005b033)
 
 ### Agents
 
+- Settings → Agents keeps the newest *Collaborators may ask this agent* choice when an older token-list response arrives during or after the update, instead of snapping the switch back (e0622be)
+- Settings → API tokens and Settings → Webhooks show the server's field-specific validation reason instead of the bare *Invalid request*, in the same error boxes as before (8586add)
 - `PATCH /api/documents/:id` joins the `warnings[]` convention: a rename whose `title.change` activity row fails answers `200 { document, warnings: ["activity-not-recorded"] }` instead of failing after the title already changed; a same-title no-op keeps its exact body (e4457ad)
 - Agent requests: cancelling is guarded like completing, so a cancel racing a completion cannot resurrect a finished request or write a second activity row, and a request addressed to an agent whose owner is not in the document is refused with `400 agent-not-in-document` before anything is stored (c45e70e)
 
 ### Reliability
 
+- App and global failures have a Markdoc error screen with *Try again*, *Back to your documents* and diagnostic details instead of falling through to the framework's error page (0f26646)
+- Hidden tabs stop polling GitHub sync status and make one immediate check when they become visible again (2dae183)
+- Versions, sync, GitHub publishing, import and editor/dashboard actions show the server's specific validation reason when it has one, while keeping their existing fallback text for other failures (e74e4f3)
 - Every failed request leaves one stderr line, `[http] <status> <METHOD> <route shape> <ms>ms`: every response with a status of 500 or more, every 4xx except 401 and 404, and status `0` when the client went away before any header was written; 2xx, 3xx, 101, 401 and 404 log nothing. The route shape drops the query string, keeps only known static segments and replaces ids with `:id` and anything else with `:x`, so no login, title or token ever reaches the log, and a thrown handler error still prints `[http] request failed` with its stack, now followed by its `[http] 500 …` line (5112cf3)
 - The collaboration server's reject line says why: `[onAuthenticate] Invalid token (malformed)` for a string that is not a JWT at all — what the release check's `collab:reject` probe sends — and `(shape)` for a well-signed token whose claims are not collaboration claims, alongside the existing `(expired)`, `(claims)` and `(signature)`; the message clients receive, the log site and the probe are unchanged (abf7ed7)
 
 ### Build, ops and tests
 
+- E2E setup warms the collaborators, tokens and star routes before agent-presence checks (41157fc), after adding the suggest, presence, review and content routes to the same warm-up (195e502); the release-rehearsal runbook records how to build, start and measure a candidate image in ACR without touching production (eff83aa); the browser fixture closes every context a test opened so abandoned pages stop holding sockets and requests (dc87bdb); sync polling's internal helpers moved beside their hook to remove its editor-shell import cycle (d5c8664); development accepts both IPv4 and IPv6 loopback origins for Next chunks, so those pages hydrate instead of receiving 403s (c4540c4); the not-found page's plain home link removes one 8,895 B shared chunk from every route's first load (4b712ed); the operator log-lines reference lists every production console prefix, its meaning and useful KQL (e430afa); and the preceding daily sweep brought the smoke row, suite size and test rules in the README up to date (9084d8b)
 - The image no longer carries `.next/cache`, Turbopack's persistent build cache — about 200 MB of files (74 % of `.next`) that only a following build would read and nothing serves at runtime — so the runtime image and the `--target build` tools image are that much smaller and the pull at a release shorter; the build stage deletes it in the same layer as `npm run build`, and the runbook says to compare the registry's `imageSize` before and after the first release that carries the change (7eb5f28)
 - Release checks: `release:verify` gains two read-only rows between `health:live` and `redirect` — `api:404` asks an unknown `/api/*` path and requires `404 application/json { error, path }` from the catch-all rather than Next's HTML page, and `mcp:alive` requires `GET /api/mcp` with a plain `Accept` to answer the JSON liveness card (`name` `markdoc`, `tools` > 0, `transport` `streamable-http`); each is one GET and both are listed in `--help` (aeaeeaa). `npm run smoke` checks the same two things before signing in, plus `GET /api/health?probe=live` (200, `probe: "live"`, no `db` or `latencyMs` key) right after the full health check and a second PDF export right after the first (both byte counts and the wall time in the row; `SMOKE_PDF_OPTIONAL` honoured) — 31 checks instead of 27 — and a failing run now exits `1` cleanly instead of tripping Node's `process.exit()` teardown assertion on a warm keep-alive connection (c8da171)
 - Tests: unit tests no longer depend on order or load — the MCP review-suggestions test resets its fake before every test, no test file imports another test file (the shared `parseRules` and `contrast` helpers moved to `src/app/css-layers.helpers.ts` and `src/app/theme-contrast.helpers.ts`), the clipboard and theme tests restore `document.execCommand` / `window.matchMedia` after each test, and the PDF close test asserts that no *browser close still running* warning fired rather than racing a wall clock (9a2db8e); e2e: the agent-presence unread check is scoped to its own document, the share-agent MCP liveness GET retries once on a dropped keep-alive socket, and agent-requests waits for hydration after landing on `/settings` (a223fe7); touch-target assertions compare whole CSS pixels (`cssPx`, a 40 px control reads 39.99998 at DPR 2), and tests that count account-wide data — search results, notifications, the dashboard's empty state, webhooks, the tokens they mint — sign in as `uniqueLogin(base)` so `--repeat-each` and CI retries stay green (ba0471b). Docs: every merge from the first commit to production `6e251b1` has a changelog entry — 94 merges from 2026-08-27 to 2026-08-31 written under one heading per date (1403e03) — after the block from production to `8062e3c`, which came with the README's `E2E_WORKERS` row, the flip-time-vs-probe-window sentence in runbook step 5 and an upstream pointer in the vendored serializer (b919cc1); the README and `docs/postgres-patching.md` now say that the `os-patch=failed` alert clause and the `markdoc-postgres-nsg-rule-write` tripwire are template-only until the next infrastructure deployment, that nothing alerts on the Container App itself yet, how to read an ACR build log on Windows, and that the vendored serializer is 1.13.6 (d9a4168)
