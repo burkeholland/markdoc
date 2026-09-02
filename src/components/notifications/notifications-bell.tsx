@@ -75,7 +75,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
           </button>
         </PopoverTrigger>
       </Tip>
-      <PopoverContent align="end" className="w-[380px] p-0" data-testid="notifications-popover">
+      <PopoverContent align="end" collisionPadding={8} className="w-[min(380px,calc(100vw-16px))] p-0" data-testid="notifications-popover">
         <div className="flex h-10 items-center justify-between border-b border-line px-3">
           <span className="text-sm font-semibold text-ink">Notifications</span>
           {unreadCount > 0 && <span className="text-xs text-ink-4">{unreadCount} unread</span>}

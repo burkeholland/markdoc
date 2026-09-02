@@ -131,7 +131,7 @@ export function DialogContent({
               <RadixDialog.Description className="sr-only">{title}</RadixDialog.Description>
             )}
           </div>
-          <RadixDialog.Close className="icon-btn -mr-2 -mt-1 h-8 w-8" aria-label="Close">
+          <RadixDialog.Close className="icon-btn -mr-2 -mt-1 h-8 w-8 shrink-0" aria-label="Close">
             <X size={16} />
           </RadixDialog.Close>
         </div>
