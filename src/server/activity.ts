@@ -5,7 +5,7 @@ import type { Activity, ActivityAction, ActorKind } from "@/server/db/schema";
 import type { Actor } from "@/server/http";
 import { newId } from "@/editor/collab/shared";
 import { readReplySuggestionDecision } from "@/editor/collab/comments";
-import { META_KEY, TEXT_KEY } from "@/server/collab/hocuspocus";
+import { META_KEY, TEXT_KEY } from "@/server/collab/seed";
 import type { CollabClaims } from "@/server/collab/token";
 import { noteTypist, wakeDocument } from "@/server/agent-events";
 

@@ -2,7 +2,7 @@ import { Plugin, PluginKey, type Command, type EditorState, type Transaction } f
 import { Mapping, ReplaceStep } from "prosemirror-transform";
 import type { EditorView } from "prosemirror-view";
 import { schema } from "../markdown/schema";
-import { isEditable } from "./setup";
+import { isEditable } from "./editable";
 
 export interface SlashState {
   /** Position of the `/` character. */
