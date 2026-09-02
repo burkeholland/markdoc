@@ -7,6 +7,7 @@ import { useHydrated } from "@/lib/hooks";
 import { rovingIndex } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
+import { RAIL_BOX, RAIL_COLLAPSED_BOX } from "./chrome-classes";
 import { memo, type KeyboardEvent } from "react";
 
 export interface OutlineProps {
@@ -61,7 +62,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
 
   if (!open) {
     return (
-      <div className={cn("flex w-10 shrink-0 flex-col items-center border-r border-line pt-3", className)} data-testid="outline-collapsed">
+      <div className={cn(RAIL_COLLAPSED_BOX, className)} data-testid="outline-collapsed">
         <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Show outline" title="Show outline">
           <ChevronsRight size={16} />
         </button>
@@ -72,7 +73,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
   return (
     // max-h-full: inside the phone drawer (a fixed-height flex column) a long outline must scroll in the
     // nav instead of growing past the viewport; on the desktop row it already stretches to the main height.
-    <aside className={cn("flex max-h-full min-h-0 w-56 shrink-0 flex-col border-r border-line", className)} data-testid="outline">
+    <aside className={cn(RAIL_BOX, className)} data-testid="outline">
       <div className="flex h-12 items-center justify-between pl-6 pr-2">
         <span className="pane-label">Outline</span>
         <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Hide outline" title="Hide outline">

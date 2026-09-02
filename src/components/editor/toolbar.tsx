@@ -27,6 +27,7 @@ import { Menu, MenuContent, MenuRadioGroup, MenuRadioItem, MenuTrigger, Tip } fr
 import { cn, shortcut } from "@/lib/utils";
 import { rovingIndex } from "@/lib/a11y";
 import { shallowEqual, useSessionValue } from "./use-session";
+import { TOOLBAR_BOX } from "./chrome-classes";
 
 function ToolButton({
   label,
@@ -146,7 +147,7 @@ export const Toolbar = memo(function Toolbar({
   return (
     <div
       ref={rootRef}
-      className="app-toolbar toolbar-scroll safe-x flex h-12 shrink-0 items-center gap-0.5 border-b border-line"
+      className={TOOLBAR_BOX}
       role="toolbar"
       aria-label="Formatting"
       aria-orientation="horizontal"

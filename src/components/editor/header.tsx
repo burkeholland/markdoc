@@ -60,6 +60,7 @@ import { signOutSafely } from "@/lib/sign-out";
 import { Logo } from "@/components/ui/logo";
 import { useEverTrue, useHydrated } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
+import { HEADER_BOX } from "./chrome-classes";
 
 // On demand (#1150): the dialog, with the agent-connect card and copy blocks behind it, is fetched on its first
 // open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
@@ -642,7 +643,7 @@ export const Header = memo(function Header(props: HeaderProps) {
   const openKeepAgent = useCallback(() => setKeepAgentOpen(true), []);
 
   return (
-    <header className="app-header safe-top safe-x box-content flex h-14 shrink-0 items-center gap-2 border-b border-line md:h-16 md:gap-3 md:[--safe-pad:1rem]" data-testid="header" data-embed={embed || undefined}>
+    <header className={HEADER_BOX} data-testid="header" data-embed={embed || undefined}>
       {compact ? (
         <button type="button" className="icon-btn h-9 w-9 shrink-0" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
           <PanelLeft size={20} />

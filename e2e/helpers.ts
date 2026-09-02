@@ -65,15 +65,34 @@ export async function devLogin(page: Page, login: string) {
  * Resolves once React has hydrated the current document (html[data-hydrated], set by <HydrationMarker>
  * from the root layout). Server markup carries no handlers, so a click that lands before this is dropped;
  * `data-theme` is written by the boot script before React runs and is not a readiness signal.
+ *
+ * On `/d/<id>` this is not enough: the server renders only a placeholder there (chrome + the preview,
+ * `src/app/d/[id]/editor-client.tsx`), so hydrated means "placeholder committed", not "editor interactive";
+ * use `openDocument` / `waitForEditor` before touching a header, toolbar or status-bar control.
  */
 export async function waitForHydration(page: Page, timeout = 30_000) {
   await page.locator("html[data-hydrated]").waitFor({ state: "attached", timeout });
 }
 
-/** page.reload() that does not return until React is interactive again. */
+/**
+ * Resolves once the editor shell (`[data-testid=editor-shell]`) is in the DOM of a `/d/<id>` page. The shell
+ * mounts when its chunks have loaded — ≈ 0.4 s after hydration on a desktop, 10–15 s on a phone at 4× CPU
+ * (#1505) — and every header/toolbar/status-bar control exists only from then on. Locators that live in the
+ * shell (`save-state`, `.cm-content`, `.md-rich`) auto-wait for it; a `getByTestId(...).click()` on a control
+ * that follows a bare `waitForHydration` does not, so it goes through here (or `openDocument`).
+ */
+export async function waitForEditor(page: Page, timeout = 60_000) {
+  await page.getByTestId("editor-shell").waitFor({ state: "attached", timeout });
+}
+
+/** Is the page on an editor URL (`/d/<id>`), where the shell loads after the server-rendered placeholder? */
+const onEditorPage = (page: Page) => /^\/d\/[^/]+/.test(new URL(page.url()).pathname);
+
+/** page.reload() that does not return until React is interactive again (on `/d/`, until the editor shell is in the DOM). */
 export async function reloadHydrated(page: Page) {
   await page.reload();
   await waitForHydration(page);
+  if (onEditorPage(page)) await waitForEditor(page);
 }
 
 /** Store a theme preference and reload; returns once the boot script applied it and React is interactive. */
@@ -93,6 +112,8 @@ export async function createDocument(page: Page, content: string, title?: string
 
 export async function openDocument(page: Page, id: string) {
   await page.goto(`/d/${id}`);
+  // The server renders a placeholder; the shell (and `save-state` in its header) arrives with the editor chunks.
+  await waitForEditor(page);
   const saveState = page.getByTestId("save-state");
   try {
     // 30 s is plenty once the dev server is warm (see e2e/global-setup.ts); do not raise it.
@@ -423,8 +444,8 @@ export async function expectRhythm(page: Page, prev: string, next: string) {
 
 /** Open the comments side panel if it is not already visible. */
 export async function ensureCommentsOpen(page: Page) {
-  // The toggle is server-rendered without a handler: clicked before hydration, the panel simply stays closed.
-  await waitForHydration(page);
+  // The toggle lives in the shell's header, which mounts after the placeholder: clicked before that, there is nothing to click.
+  await waitForEditor(page);
   if ((await page.getByTestId("comments-panel").count()) === 0) {
     await page.getByTestId("comments-toggle").click();
   }
