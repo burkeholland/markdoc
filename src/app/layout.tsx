@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono, Fraunces } from "next/font/google";
+import { headers } from "next/headers";
 import { THEME_BOOT_SCRIPT } from "@/lib/theme";
 import { publicOrigin } from "@/server/public-origin";
 import { HydrationMarker } from "@/components/hydration-marker";
@@ -43,12 +44,13 @@ export const viewport: Viewport = {
   ],
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     // data-theme is set by the boot script before React runs, so the server markup never matches it.
     <html lang="en" className={`${inter.variable} ${mono.variable} ${fraunces.variable} h-full antialiased`} suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_CLEANUP_SCRIPT }} />
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_CLEANUP_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col bg-surface text-ink">
         {children}

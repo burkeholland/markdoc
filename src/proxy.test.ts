@@ -6,8 +6,8 @@ process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.AUTH_SECRET_1;
 
-const { proxy, framePolicyApplies, FRAME_ANCESTORS_NONE } = await import("@/proxy");
-const { EMBED_SESSION_COOKIE, SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
+const { config, contentSecurityPolicy, CSP_REPORT_ONLY_HEADER, cspPolicyApplies, NONCE_HEADER, proxy } = await import("@/proxy");
+const { SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
 
 const OLD_SECRET = "old-secret-old-secret-old-secret-old";
 
@@ -17,12 +17,12 @@ function request(cookie?: string, extra: Record<string, string> = {}, path = "/"
   return new NextRequest(new URL(path, "http://localhost:3610"), { headers });
 }
 
-/** The Cookie header the route behind the proxy will see (Next carries overridden request headers in `x-middleware-request-*`). */
-function forwardedCookie(res: Response): string | null {
-  if (!res.headers.get("x-middleware-override-headers")) return "(unchanged)";
-  return res.headers.get("x-middleware-request-cookie");
+/** A header the route behind the proxy will see (Next carries overrides in `x-middleware-request-*`). */
+function forwardedHeader(res: Response, name: string): string | null {
+  return res.headers.get(`x-middleware-request-${name.toLowerCase()}`);
 }
 
+const forwardedCookie = (res: Response) => forwardedHeader(res, "cookie");
 const setCookies = (res: Response) => res.headers.getSetCookie();
 
 let warn: ReturnType<typeof vi.spyOn>;
@@ -62,7 +62,7 @@ describe("proxy: stale session cookie", () => {
   it("the second request (cookie gone) is a no-op: nothing set, nothing logged", async () => {
     const res = await proxy(request("theme=dark"));
     expect(setCookies(res)).toHaveLength(0);
-    expect(forwardedCookie(res)).toBe("(unchanged)");
+    expect(forwardedCookie(res)).toBe("theme=dark");
     expect(warn).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
   });
@@ -71,7 +71,7 @@ describe("proxy: stale session cookie", () => {
     const token = await encode({ token: { sub: "u1", login: "burke" }, secret: process.env.AUTH_SECRET!, salt: SESSION_COOKIE });
     const res = await proxy(request(`${SESSION_COOKIE}=${token}`, { authorization: "Bearer mdk_notasessiontoken" }));
     expect(setCookies(res)).toHaveLength(0);
-    expect(forwardedCookie(res)).toBe("(unchanged)");
+    expect(forwardedCookie(res)).toContain(`${SESSION_COOKIE}=`);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -102,129 +102,67 @@ describe("proxy: stale session cookie", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("binds a valid embed session response to its canvas parent origin", async () => {
-    const token = await encode({
-      token: {
-        sub: "u1",
-        embedTokenId: "token-1",
-        embedDocumentId: "doc-1",
-        embedParentOrigin: "http://127.0.0.1:4749",
-      },
-      secret: process.env.AUTH_SECRET!,
-      salt: EMBED_SESSION_COOKIE,
-      maxAge: 300,
-    });
-    const cookie = `${EMBED_SESSION_COOKIE}=${token}`;
-    const res = await proxy(request(cookie, {}, "/d/doc-1?embed=1"));
-    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors http://127.0.0.1:4749");
-    expect(setCookies(res)).toHaveLength(0);
-
-    const asset = await proxy(request(cookie, {}, "/api/assets/asset-1"));
-    expect(asset.headers.get("content-security-policy")).toBeNull();
-  });
 });
 
-// Task #1224. The proxy owns exactly one baseline header, the frame policy: it needs the embed cookie and
-// must stay off /api/*. nosniff, Referrer-Policy, Permissions-Policy and HSTS are set for every response
-// in server/index.ts (the proxy matcher never sees /api/auth, /_next/static, /_next/image, favicon.ico),
-// so they are deliberately absent here and checked end to end in e2e/security-headers.spec.ts.
-describe("proxy: frame policy (Content-Security-Policy)", () => {
-  const PARENT = "http://127.0.0.1:4749";
-  const embedCookie = async (documentId = "doc-1") => {
-    const token = await encode({
-      token: { sub: "u1", embedTokenId: "token-1", embedDocumentId: documentId, embedParentOrigin: PARENT },
-      secret: process.env.AUTH_SECRET!,
-      salt: EMBED_SESSION_COOKIE,
-      maxAge: 300,
-    });
-    return `${EMBED_SESSION_COOKIE}=${token}`;
-  };
-  /** Headers the proxy added itself (Next's x-middleware-* bookkeeping excluded). */
-  const ownHeaders = (res: Response) => [...res.headers.keys()].filter((k) => !k.startsWith("x-middleware-")).sort();
+describe("proxy: report-only Content-Security-Policy", () => {
+  it("forwards one nonce and policy to Next, returns the same policy, and generates a fresh 16-byte nonce per request", async () => {
+    const first = await proxy(request(undefined, {}, "/login"));
+    const nonce = forwardedHeader(first, NONCE_HEADER);
+    const policy = first.headers.get(CSP_REPORT_ONLY_HEADER);
+    expect(nonce).toMatch(/^[A-Za-z0-9+/]{22}==$/);
+    expect(Buffer.from(nonce!, "base64")).toHaveLength(16);
+    expect(forwardedHeader(first, CSP_REPORT_ONLY_HEADER)).toBe(policy);
+    expect(policy).toContain(`'nonce-${nonce}'`);
+    expect(policy).toContain("'strict-dynamic'");
+    expect(policy).toContain("report-uri /api/csp-report");
 
-  it.each(["/", "/login", "/p/doc-1", "/d/doc-1", "/settings", "/d/doc-1?mode=focus"])("a plain page %s refuses to be framed", async (path) => {
-    const res = await proxy(request(undefined, {}, path));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
-    expect(FRAME_ANCESTORS_NONE).toBe("frame-ancestors 'none'");
-    expect(ownHeaders(res)).toEqual(["content-security-policy"]);
+    const second = await proxy(request(undefined, {}, "/login"));
+    expect(forwardedHeader(second, NONCE_HEADER)).not.toBe(nonce);
   });
 
-  it("sets none of the server's four headers, with or without x-forwarded-proto: https (one owner each)", async () => {
-    for (const extra of [{}, { "x-forwarded-proto": "https" }] as Record<string, string>[]) {
-      const res = await proxy(request(undefined, extra, "/login"));
-      expect(res.headers.get("strict-transport-security")).toBeNull();
-      expect(res.headers.get("x-content-type-options")).toBeNull();
-      expect(res.headers.get("referrer-policy")).toBeNull();
-      expect(res.headers.get("permissions-policy")).toBeNull();
-      expect(ownHeaders(res)).toEqual(["content-security-policy"]);
-    }
+  it("adds unsafe-eval only outside production and report-sample to scripts and styles", () => {
+    const development = contentSecurityPolicy("nonce", { NODE_ENV: "development" });
+    expect(development).toContain("script-src 'self' 'nonce-nonce' 'strict-dynamic' 'unsafe-eval' 'report-sample'");
+    expect(development).toContain("style-src 'self' 'unsafe-inline' 'report-sample'");
+    const production = contentSecurityPolicy("nonce", { NODE_ENV: "production" });
+    expect(production).not.toContain("'unsafe-eval'");
+    expect(production).toBe("default-src 'self'; script-src 'self' 'nonce-nonce' 'strict-dynamic' 'report-sample'; style-src 'self' 'unsafe-inline' 'report-sample'; img-src 'self' blob: data: https:; font-src 'self'; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self' https://github.com; report-uri /api/csp-report");
   });
 
-  it("the embedded document keeps exactly frame-ancestors <parentOrigin>", async () => {
-    const res = await proxy(request(await embedCookie(), {}, "/d/doc-1?embed=1"));
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors ${PARENT}`);
-    expect(res.headers.get("content-security-policy")).not.toContain("'none'");
-    expect(ownHeaders(res)).toEqual(["content-security-policy"]);
-  });
-
-  it("the embed cookie does not open other pages: another document, the same document without ?embed=1, or no cookie at all", async () => {
-    const cookie = await embedCookie();
-    for (const [path, withCookie] of [
-      ["/d/doc-2?embed=1", true],
-      ["/d/doc-1", true],
-      ["/d/doc-1?embed=0", true],
-      ["/", true],
-      // The frame after the 5-minute cookie expired (or was never set): the page, and the /login it
-      // redirects to, are blocked inside the canvas frame instead of rendering a login form there.
-      ["/d/doc-1?embed=1", false],
-      ["/login?next=%2Fd%2Fdoc-1", false],
-    ] as const) {
-      const res = await proxy(request(withCookie ? cookie : undefined, {}, path));
-      expect(res.headers.get("content-security-policy"), path).toBe("frame-ancestors 'none'");
-    }
-  });
-
-  it("an expired embed cookie counts as missing", async () => {
-    const token = await encode({
-      token: { sub: "u1", embedTokenId: "token-1", embedDocumentId: "doc-1", embedParentOrigin: PARENT },
-      secret: process.env.AUTH_SECRET!,
-      salt: EMBED_SESSION_COOKIE,
-      maxAge: -60,
-    });
-    const res = await proxy(request(`${EMBED_SESSION_COOKIE}=${token}`, {}, "/d/doc-1?embed=1"));
-    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
-  });
-
-  it.each(["/api/health", "/api/assets/asset-1", "/api/documents/abc", "/api/mcp", "/embed/some-nonce"])(
-    "%s gets no Content-Security-Policy from the proxy (API routes keep their own; the handoff answers inside the frame)",
+  it.each(["/api", "/api/health", "/api/assets/asset-1", "/_next/static/chunks/a.js", "/_next/image", "/favicon.ico"])(
+    "%s gets no CSP or nonce from the proxy",
     async (path) => {
-      for (const cookie of [undefined, await embedCookie()]) {
-        const res = await proxy(request(cookie, {}, path));
-        expect(res.status).toBe(200);
-        expect(res.headers.get("content-security-policy"), path).toBeNull();
-        expect(ownHeaders(res), path).toEqual([]);
-      }
+      const res = await proxy(request(undefined, {}, path));
+      expect(res.headers.get("content-security-policy")).toBeNull();
+      expect(res.headers.get(CSP_REPORT_ONLY_HEADER)).toBeNull();
+      expect(forwardedHeader(res, NONCE_HEADER)).toBeNull();
+      expect(cspPolicyApplies(new URL(path, "http://localhost").pathname)).toBe(false);
     },
   );
 
-  it("framePolicyApplies: pages yes, /api/* and /embed/* no", () => {
-    for (const page of ["/", "/login", "/p/x", "/d/x", "/settings", "/apis", "/embedded", "/api"]) expect(framePolicyApplies(page), page).toBe(true);
-    for (const skipped of ["/api/health", "/api/assets/a", "/api/auth/session", "/embed/nonce"]) expect(framePolicyApplies(skipped), skipped).toBe(false);
+  it("the matcher excludes every API route and immutable asset while keeping pages", () => {
+    expect(config.matcher).toEqual(["/((?!api(?:/|$)|_next/static|_next/image|favicon\\.ico).*)"]);
+    for (const page of ["/", "/login", "/p/x", "/d/x", "/settings", "/embed/nonce", "/apis"]) {
+      expect(cspPolicyApplies(page), page).toBe(true);
+    }
   });
 
-  it("the response that clears a stale session cookie is a page response too", async () => {
-    const res = await proxy(request(`${SESSION_COOKIE}=not-a-jwt`, {}, "/d/doc-1"));
-    expect(setCookies(res)).toHaveLength(1);
-    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+  it("never sets the enforced frame policy, including on the stale-cookie response", async () => {
+    const plain = await proxy(request(undefined, {}, "/login"));
+    expect(plain.headers.get("content-security-policy")).toBeNull();
+    const stale = await proxy(request(`${SESSION_COOKIE}=not-a-jwt`, {}, "/d/doc-1"));
+    expect(setCookies(stale)).toHaveLength(1);
+    expect(stale.headers.get("content-security-policy")).toBeNull();
+    expect(stale.headers.get(CSP_REPORT_ONLY_HEADER)).toContain("'strict-dynamic'");
   });
 
-  it("the canonical-host 308 carries no frame policy (a redirect has no document to frame)", async () => {
+  it("the canonical-host 308 carries no policy (a redirect has no rendered scripts)", async () => {
     process.env.MARKDOC_CANONICAL_HOST = "markdoc.example.com";
     try {
       const res = await proxy(request(undefined, { host: "old.example" }, "/d/doc-1"));
       expect(res.status).toBe(308);
       expect(res.headers.get("content-security-policy")).toBeNull();
+      expect(res.headers.get(CSP_REPORT_ONLY_HEADER)).toBeNull();
     } finally {
       delete process.env.MARKDOC_CANONICAL_HOST;
     }

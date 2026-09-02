@@ -27,6 +27,7 @@ import { closeDb, getDb } from "@/server/db";
 import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
+import { decodeEmbedSession } from "@/server/session-cookie";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
 import { attachRequestErrorGuards } from "./request-guards";
 import { attachRequestLog } from "./request-log";
@@ -36,12 +37,11 @@ import { serveStaticBrotli } from "./static-brotli";
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // Baseline security headers on every response, set here rather than in the proxy because the proxy
-// matcher skips /api/auth, /_next/static, /_next/image and favicon.ico, and the brotli branch below
+// matcher skips /api/*, /_next/static, /_next/image and favicon.ico, and the brotli branch below
 // never reaches Next at all. Next keeps headers that are already on `res`: middleware headers land via
 // setHeader, a route's Response headers are only appended when absent (send-response.js), and nothing
 // on the app-router path removes them — so a route that sets the same header (nosniff on
-// /api/assets) keeps one value, not two. The frame policy stays in src/proxy.ts: it depends on the
-// embed cookie and must not touch /api/*.
+// /api/assets) keeps one value, not two.
 const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "strict-origin-when-cross-origin",
@@ -52,6 +52,7 @@ const SECURITY_HEADERS: Readonly<Record<string, string>> = {
 // settled. Only for requests that arrived over HTTPS: the Container Apps ingress terminates TLS and
 // sets x-forwarded-proto, while local dev and the e2e server speak plain HTTP.
 const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
+const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
 
 function arrivedOverHttps(req: IncomingMessage): boolean {
   const forwarded = req.headers["x-forwarded-proto"];
@@ -62,6 +63,25 @@ function arrivedOverHttps(req: IncomingMessage): boolean {
 function setSecurityHeaders(req: IncomingMessage, res: ServerResponse) {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
   if (arrivedOverHttps(req)) res.setHeader("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY);
+}
+
+function framePolicyApplies(pathname: string): boolean {
+  return pathname !== "/api"
+    && !pathname.startsWith("/api/")
+    && !pathname.startsWith("/embed/")
+    && !pathname.startsWith("/_next/static")
+    && !pathname.startsWith("/_next/image")
+    && !pathname.startsWith("/favicon.ico");
+}
+
+async function setFramePolicy(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  if (!framePolicyApplies(url.pathname)) return;
+  const embed = await decodeEmbedSession(req.headers.cookie);
+  const isEmbeddedDocument = embed
+    && url.pathname === `/d/${embed.documentId}`
+    && url.searchParams.get("embed") === "1";
+  res.setHeader("Content-Security-Policy", isEmbeddedDocument ? `frame-ancestors ${embed.parentOrigin}` : FRAME_ANCESTORS_NONE);
 }
 
 // Where `next build` put the client assets (same rule as next.config.ts). Production serves the
@@ -164,9 +184,18 @@ async function main() {
     // above stays). The standby side port re-emits its requests here, so it is covered too.
     attachRequestErrorGuards(req, res);
     setSecurityHeaders(req, res);
-    if (requestHandler) return requestHandler(req, res);
-    res.statusCode = 503;
-    res.end("starting");
+    void setFramePolicy(req, res).then(
+      () => {
+        if (requestHandler) return requestHandler(req, res);
+        res.statusCode = 503;
+        res.end("starting");
+      },
+      (err: unknown) => {
+        console.error("[http] frame policy failed", err);
+        res.statusCode = 500;
+        res.end("internal server error");
+      },
+    );
   });
   // Start accepting TCP connections before Next prepares. Reject upgrades promptly while starting:
   // a pending HMR handshake makes Chromium queue every later /collab socket behind it.

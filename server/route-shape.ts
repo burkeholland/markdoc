@@ -47,6 +47,7 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "agent",
   "assets",
   "auth",
+  "csp-report",
   "documents",
   "embed",
   "github",

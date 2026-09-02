@@ -5,10 +5,11 @@ import { createDocument, signIn } from "./helpers";
 /**
  * Baseline security response headers (task #1224). server/index.ts stamps nosniff, Referrer-Policy and
  * Permissions-Policy on every response and Strict-Transport-Security only when the request arrived
- * over HTTPS (x-forwarded-proto from the Container Apps ingress); src/proxy.ts adds
- * `frame-ancestors 'none'` to every page except the embedded document, which keeps
- * `frame-ancestors <parentOrigin>` (asserted byte-for-byte in e2e/copilot-canvas.spec.ts). The e2e
- * server speaks plain HTTP, so HSTS must be absent here unless the ingress header is simulated.
+ * over HTTPS (x-forwarded-proto from the Container Apps ingress), plus the enforced page frame policy.
+ * src/proxy.ts adds the nonce-bearing report-only policy that Next uses for its scripts. Embedded
+ * documents keep `frame-ancestors <parentOrigin>` (asserted byte-for-byte in
+ * e2e/copilot-canvas.spec.ts). The e2e server speaks plain HTTP, so HSTS must be absent here unless
+ * the ingress header is simulated.
  */
 
 const BASELINE: Record<string, string> = {
@@ -33,6 +34,7 @@ function expectPage(res: APIResponse, label: string) {
 function expectNotPage(res: APIResponse, label: string) {
   expectBaseline(res, label);
   expect(res.headers()["content-security-policy"], `${label}: no frame policy`).toBeUndefined();
+  expect(res.headers()["content-security-policy-report-only"], `${label}: no report-only page policy`).toBeUndefined();
 }
 
 /** First /_next/static/chunks/*.js the login page's HTML references (dev and production name it differently). */
@@ -50,13 +52,33 @@ test.describe("security response headers", () => {
     expectPage(res, "/login");
   });
 
-  test("GET /api/health: baseline headers, no Content-Security-Policy on an API route", async ({ request }) => {
+  test("GET /login: report-only CSP carries a nonce, strict-dynamic and its report endpoint", async ({ request }) => {
+    const res = await request.get("/login");
+    const policy = res.headers()["content-security-policy-report-only"];
+    expect(policy).toMatch(/script-src [^;]*'nonce-[A-Za-z0-9+/]+={0,2}'[^;]*'strict-dynamic'/);
+    expect(policy).toContain("report-uri /api/csp-report");
+    expect(policy).toContain("'unsafe-eval'");
+  });
+
+  test("GET /login: the Next bootstrap and Markdoc boot script carry the report-only nonce", async ({ request }) => {
+    const res = await request.get("/login");
+    const policy = res.headers()["content-security-policy-report-only"];
+    const nonce = /'nonce-([^']+)'/.exec(policy)?.[1];
+    expect(nonce).toBeTruthy();
+    const scripts = [...(await res.text()).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const [, attributes] of scripts) expect(attributes).toContain(`nonce="${nonce}"`);
+    expect(scripts.some(([, , body]) => body.includes("_R_"))).toBe(true);
+    expect(scripts.some(([, , body]) => body.includes("markdoc:brand"))).toBe(true);
+  });
+
+  test("GET /api/health: baseline headers, no CSP of either kind on an API route", async ({ request }) => {
     const res = await request.get("/api/health");
     expect(res.status()).toBe(200);
     expectNotPage(res, "/api/health");
   });
 
-  test("a /_next/static chunk referenced by /login carries nosniff (default and identity encodings), no CSP", async ({ request }) => {
+  test("a /_next/static chunk referenced by /login carries nosniff (default and identity encodings), no CSP of either kind", async ({ request }) => {
     const chunk = await chunkReferencedByLogin(request);
     for (const [label, headers] of [
       ["default", {}],

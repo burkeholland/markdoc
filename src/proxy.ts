@@ -1,7 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
-import { clearingCookie, decodeEmbedSession, findStaleSessionCookie, hasSessionCookie, STALE_SESSION_MESSAGE, stripCookies } from "@/server/session-cookie";
+import { clearingCookie, findStaleSessionCookie, hasSessionCookie, STALE_SESSION_MESSAGE, stripCookies } from "@/server/session-cookie";
 
 export const CANONICAL_HOST_ENV = "MARKDOC_CANONICAL_HOST";
+export const CSP_REPORT_ONLY_HEADER = "Content-Security-Policy-Report-Only";
+export const NONCE_HEADER = "x-nonce";
 
 /** Last raw value seen, so a misconfiguration is warned about once rather than on every request. */
 let canonicalHostCache: { raw: string; host: string | null } | null = null;
@@ -62,24 +65,41 @@ export function canonicalRedirect(request: NextRequest, canonical: string | null
   return NextResponse.redirect(location, 308);
 }
 
-/**
- * Frame policy for every page that is not the embedded document (task #1224). Nothing but the Copilot
- * canvas frames Markdoc, and that frame is the one `frame-ancestors <parentOrigin>` case below; every
- * other page refuses to be framed. No X-Frame-Options: it cannot name the canvas origin, and every
- * browser that matters honours frame-ancestors. The other baseline headers (nosniff, Referrer-Policy,
- * Permissions-Policy, HSTS over HTTPS) are set for every response in server/index.ts, which also sees
- * the paths the matcher below skips.
- */
-export const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
+/** The report-only policy sent to a page and forwarded to Next so it can nonce its own scripts. */
+export function contentSecurityPolicy(nonce: string, env: NodeJS.ProcessEnv = process.env): string {
+  const unsafeEval = env.NODE_ENV === "production" ? "" : " 'unsafe-eval'";
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${unsafeEval} 'report-sample'`,
+    "style-src 'self' 'unsafe-inline' 'report-sample'",
+    "img-src 'self' blob: data: https:",
+    "font-src 'self'",
+    "connect-src 'self'",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self' https://github.com",
+    "report-uri /api/csp-report",
+  ].join("; ");
+}
 
-/**
- * Only pages get the frame policy. `/api/*` responses keep their own headers — `/api/assets/[id]` sets
- * a sandboxing CSP on SVGs that a header set here would replace — and the handoff route
- * (`/embed/<nonce>`, `src/app/embed/[nonce]/route.ts`) is loaded inside the canvas frame by design: its
- * `302` carries no document and its `403`/`410` bodies are the message the frame shows.
- */
-export function framePolicyApplies(pathname: string): boolean {
-  return !pathname.startsWith("/api/") && !pathname.startsWith("/embed/");
+/** Mirrors the matcher for direct unit calls: API and immutable assets never receive page CSP. */
+export function cspPolicyApplies(pathname: string): boolean {
+  return pathname !== "/api"
+    && !pathname.startsWith("/api/")
+    && !pathname.startsWith("/_next/static")
+    && !pathname.startsWith("/_next/image")
+    && !pathname.startsWith("/favicon.ico");
+}
+
+function nextWithCsp(headers: Headers): NextResponse {
+  const nonce = randomBytes(16).toString("base64");
+  const policy = contentSecurityPolicy(nonce);
+  headers.set(NONCE_HEADER, nonce);
+  headers.set(CSP_REPORT_ONLY_HEADER, policy);
+  const response = NextResponse.next({ request: { headers } });
+  response.headers.set(CSP_REPORT_ONLY_HEADER, policy);
+  return response;
 }
 
 /**
@@ -95,30 +115,25 @@ export async function proxy(request: NextRequest) {
   const redirect = canonicalRedirect(request);
   if (redirect) return redirect;
 
-  const cookieHeader = request.headers.get("cookie");
-  const embed = await decodeEmbedSession(cookieHeader);
   const pathname = request.nextUrl.pathname;
-  const isEmbeddedDocument = embed
-    && pathname === `/d/${embed.documentId}`
-    && request.nextUrl.searchParams.get("embed") === "1";
-  const withFramePolicy = (response: NextResponse) => {
-    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}`);
-    else if (framePolicyApplies(pathname)) response.headers.set("Content-Security-Policy", FRAME_ANCESTORS_NONE);
-    return response;
-  };
-  if (!hasSessionCookie(cookieHeader)) return withFramePolicy(NextResponse.next());
-  const stale = await findStaleSessionCookie(cookieHeader);
-  if (!stale) return withFramePolicy(NextResponse.next());
+  if (!cspPolicyApplies(pathname)) return NextResponse.next();
 
-  console.warn(`[auth][warn] ${STALE_SESSION_MESSAGE} (${stale.reason})`);
   const headers = new Headers(request.headers);
-  headers.set("cookie", stripCookies(cookieHeader as string, stale.names));
-  const response = NextResponse.next({ request: { headers } });
-  for (const name of stale.names) response.cookies.set(clearingCookie(name, stale.secure));
-  return withFramePolicy(response);
+  const cookieHeader = request.headers.get("cookie");
+  const stale = hasSessionCookie(cookieHeader) ? await findStaleSessionCookie(cookieHeader) : null;
+  if (stale) {
+    console.warn(`[auth][warn] ${STALE_SESSION_MESSAGE} (${stale.reason})`);
+    headers.set("cookie", stripCookies(cookieHeader as string, stale.names));
+  }
+
+  const response = nextWithCsp(headers);
+  if (stale) {
+    for (const name of stale.names) response.cookies.set(clearingCookie(name, stale.secure));
+  }
+  return response;
 }
 
 export const config = {
-  // Auth.js's own routes clear the cookie themselves (and set new ones on sign-in); static assets never carry a session.
-  matcher: ["/((?!api/auth|_next/static|_next/image|favicon\\.ico).*)"],
+  // API routes and immutable assets do not render page scripts and must not carry this page policy.
+  matcher: ["/((?!api(?:/|$)|_next/static|_next/image|favicon\\.ico).*)"],
 };

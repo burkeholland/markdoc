@@ -234,6 +234,7 @@ const BASELINE_HEADERS: Record<string, string> = {
   "referrer-policy": "strict-origin-when-cross-origin",
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
+const REPORT_ONLY_CSP = "default-src 'self'; script-src 'self' 'nonce-AAAAAAAAAAAAAAAAAAAAAA==' 'strict-dynamic' 'report-sample'; report-uri /api/csp-report";
 
 /** What production's `GET /api/mcp` answers (src/app/api/mcp/route.ts): 27 tools at revision 29. */
 const MCP_CARD: Record<string, unknown> = { name: "markdoc", version: "0.1.0", transport: "streamable-http", tools: 27, docs: "https://release.example/docs/agents.md", auth: "Authorization: ****** — create one at /settings" };
@@ -244,10 +245,13 @@ function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite>
   const site = { version: SHA, chunks, html, hsts: false, headerOverrides: new Map(), apiNotFound: "json", mcp: { ...MCP_CARD } } as FakeSite;
   const handler = (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    // server/index.ts stamps these on every response; src/proxy.ts adds the frame policy to pages only (not /api/*, not chunks).
+    // server/index.ts stamps the baseline and frame policy; src/proxy.ts adds report-only CSP to pages.
     for (const [name, value] of Object.entries(BASELINE_HEADERS)) res.setHeader(name, value);
     if (site.hsts) res.setHeader("strict-transport-security", "max-age=31536000");
-    if (url.pathname === "/login") res.setHeader("content-security-policy", "frame-ancestors 'none'");
+    if (url.pathname === "/login") {
+      res.setHeader("content-security-policy", "frame-ancestors 'none'");
+      res.setHeader("content-security-policy-report-only", REPORT_ONLY_CSP);
+    }
     const finish = (body: string | Buffer) => {
       for (const [name, value] of Object.entries(site.headerOverrides.get(url.pathname) ?? {})) {
         if (value === null) res.removeHeader(name);
@@ -397,7 +401,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       "collab:reject": "pass",
     });
     expect(report.summary).toEqual({ passed: 13, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
-    expect(row(report.checks, "headers").detail).toBe("GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http)");
+    expect(row(report.checks, "headers").detail).toBe("GET /login, /api/health, main-abc.js: 6 + 4 + 1 headers as expected (HSTS not expected over http)");
     expect(row(report.checks, "login").detail).toContain("references 3 .js + 1 .css chunks");
     expect(row(report.checks, "chunks:identity").detail).toContain("4 chunks");
     expect(row(report.checks, "chunks:identity").detail).toContain("3 .js + 1 .css byte/SHA-identical");
@@ -437,6 +441,20 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(report.summary.failed).toBe(1);
     });
 
+    it("requires report-only CSP with a nonce and strict-dynamic on /login, and forbids it on API routes and chunks", async () => {
+      const missing = await withHeaders("/login", { "content-security-policy-report-only": null });
+      expect(row(missing.checks, "headers")).toMatchObject({
+        status: "fail",
+        detail: "/login: content-security-policy-report-only with nonce and strict-dynamic, got absent",
+      });
+      const invalid = await withHeaders("/login", { "content-security-policy-report-only": "default-src 'self'" });
+      expect(row(invalid.checks, "headers").detail).toBe("/login: content-security-policy-report-only missing nonce or strict-dynamic");
+      const api = await withHeaders("/api/health", { "content-security-policy-report-only": REPORT_ONLY_CSP });
+      expect(row(api.checks, "headers").detail).toBe(`/api/health: content-security-policy-report-only absent, got ${REPORT_ONLY_CSP}`);
+      const chunk = await withHeaders("/_next/static/chunks/main-abc.js", { "content-security-policy-report-only": REPORT_ONLY_CSP });
+      expect(row(chunk.checks, "headers").detail).toBe(`main-abc.js: content-security-policy-report-only absent, got ${REPORT_ONLY_CSP}`);
+    });
+
     it("HSTS on an http base fails with 'HSTS sent over plain HTTP'; a wrong frame policy on /login is named too", async () => {
       const report = await withHeaders(null, {}, true);
       const headers = row(report.checks, "headers");
@@ -461,7 +479,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       site.html = "<!DOCTYPE html><html><body>maintenance</body></html>";
       try {
         const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
-        expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "pass", detail: "GET /login, /api/health: 5 + 4 headers as expected (HSTS not expected over http); chunk skipped: /login references no .js chunk (see login)" });
+        expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "pass", detail: "GET /login, /api/health: 6 + 4 headers as expected (HSTS not expected over http); chunk skipped: /login references no .js chunk (see login)" });
         expect(row(report.checks, "login").status).toBe("fail");
       } finally {
         site.html = original;
@@ -476,7 +494,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       site.hsts = true;
       try {
         const report = await runReleaseVerify({ base: "https://release.example", sha: SHA }, proxied);
-        expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "pass", detail: "GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS checked)" });
+        expect(row(report.checks, "headers")).toEqual({ name: "headers", status: "pass", detail: "GET /login, /api/health, main-abc.js: 6 + 4 + 1 headers as expected (HSTS checked)" });
         expect(statusOf(report.checks)).toMatchObject({ login: "pass", "chunks:identity": "pass", brotli: "pass" });
       } finally {
         site.hsts = false;
@@ -850,7 +868,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(result.stdout).toContain("| collab:reject | pass |");
       expect(result.stdout).toMatch(/\| api:404 \| pass \| GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, application\/json, JSON \{ error, path \} echoing the path \|/);
       expect(result.stdout).toMatch(/\| mcp:alive \| pass \| GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0 \|/);
-      expect(result.stdout).toContain("| headers | pass | GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http) |");
+      expect(result.stdout).toContain("| headers | pass | GET /login, /api/health, main-abc.js: 6 + 4 + 1 headers as expected (HSTS not expected over http) |");
       expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 13 passed, 0 failed, 0 warned, 1 skipped");
       expect(result.code).toBe(0);
     }, 60_000);

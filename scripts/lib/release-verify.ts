@@ -413,8 +413,9 @@ export const BASELINE_SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "referrer-policy": "strict-origin-when-cross-origin",
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
-/** `src/proxy.ts` on every page that is not the embedded document; never on `/api/*` or a static chunk. */
+/** `server/index.ts` on every page that is not the embedded document; never on `/api/*` or a static chunk. */
 export const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
+export const CSP_REPORT_ONLY_HEADER = "content-security-policy-report-only";
 /** `server/index.ts`, only when the request arrived over HTTPS (`x-forwarded-proto` from the ingress). */
 export const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
 
@@ -454,6 +455,17 @@ export function checkHeaders(label: string, headers: Headers, rules: HeaderRule[
     problems.push(`${label}: ${rule.name} ${rule.expected ?? "absent"}, got ${got}${marks.length > 0 ? ` (${marks.join("; ")})` : ""}`);
   }
   return problems;
+}
+
+/** The proxy's report-only page policy must give Next a per-request nonce and strict-dynamic. */
+export function checkReportOnlyCsp(label: string, headers: Headers): string | null {
+  const policy = headers[CSP_REPORT_ONLY_HEADER]?.trim();
+  if (!policy) return `${label}: ${CSP_REPORT_ONLY_HEADER} with nonce and strict-dynamic, got absent`;
+  const script = /(?:^|;\s*)script-src\s+([^;]+)/.exec(policy)?.[1];
+  if (!script || !/'nonce-[A-Za-z0-9+/]+={0,2}'/.test(script) || !script.includes("'strict-dynamic'")) {
+    return `${label}: ${CSP_REPORT_ONLY_HEADER} missing nonce or strict-dynamic`;
+  }
+  return null;
 }
 
 function escapeCell(text: string): string {
@@ -704,24 +716,30 @@ export async function runReleaseVerify(options: ReleaseVerifyOptions, io: Releas
     const https = base.protocol === "https:";
     const baseline: HeaderRule[] = Object.entries(BASELINE_SECURITY_HEADERS).map(([name, expected]) => ({ name, expected }));
     const hsts: HeaderRule = https ? { name: "strict-transport-security", expected: STRICT_TRANSPORT_SECURITY } : { name: "strict-transport-security", expected: null, note: "HSTS sent over plain HTTP" };
-    // The frame policy belongs to pages only: on /api/* it would replace /api/assets' sandbox CSP, and chunks are outside the proxy matcher.
+    // Both CSP headers belong to pages only: API routes keep their own policies and chunks are outside the proxy matcher.
     const noCsp: HeaderRule = { name: "content-security-policy", expected: null };
+    const noReportOnlyCsp: HeaderRule = { name: CSP_REPORT_ONLY_HEADER, expected: null };
     const loginRules: HeaderRule[] = [...baseline, { name: "content-security-policy", expected: FRAME_ANCESTORS_NONE }, hsts];
     const healthRules: HeaderRule[] = [...baseline, hsts];
     const chunkRules: HeaderRule[] = [{ name: "x-content-type-options", expected: BASELINE_SECURITY_HEADERS["x-content-type-options"] }];
 
     const login = await io.fetchText(`${origin}/login`, { redirect: "manual" });
     const health = await io.fetchText(healthUrl, { redirect: "manual" });
-    const problems = [...checkHeaders("/login", login.headers, loginRules), ...checkHeaders("/api/health", health.headers, [...healthRules, noCsp])];
+    const reportOnlyProblem = checkReportOnlyCsp("/login", login.headers);
+    const problems = [
+      ...checkHeaders("/login", login.headers, loginRules),
+      ...(reportOnlyProblem ? [reportOnlyProblem] : []),
+      ...checkHeaders("/api/health", health.headers, [...healthRules, noCsp, noReportOnlyCsp]),
+    ];
     const targets = ["/login", "/api/health"];
-    const counts = [loginRules.length, healthRules.length];
+    const counts = [loginRules.length + 1, healthRules.length];
     let skipped = "";
     // This row runs before `login` fills state.referenced, so it reads the /login HTML it fetched itself.
     const chunkUrl = extractChunkUrls(login.text).find((url) => url.endsWith(".js"));
     if (chunkUrl) {
       const name = chunkName(chunkUrl);
       const chunk = await io.fetchText(`${origin}${chunkUrl}`, { redirect: "manual" });
-      problems.push(...checkHeaders(name, chunk.headers, [...chunkRules, noCsp]));
+      problems.push(...checkHeaders(name, chunk.headers, [...chunkRules, noCsp, noReportOnlyCsp]));
       targets.push(name);
       counts.push(chunkRules.length);
     } else skipped = "; chunk skipped: /login references no .js chunk (see login)";
