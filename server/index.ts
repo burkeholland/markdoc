@@ -28,6 +28,7 @@ import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
+import { attachRequestErrorGuards } from "./request-guards";
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 
@@ -158,6 +159,10 @@ function setupNextWebSocketHandler(app: object, server: Server) {
 async function main() {
   let requestHandler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
   const server = createServer((req, res) => {
+    // First, before anything reads the request or writes the response: a client that leaves mid-body or
+    // mid-response must not become an uncaughtException (server/request-guards.ts; the exit(1) policy
+    // above stays). The standby side port re-emits its requests here, so it is covered too.
+    attachRequestErrorGuards(req, res);
     setSecurityHeaders(req, res);
     if (requestHandler) return requestHandler(req, res);
     res.statusCode = 503;
