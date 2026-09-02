@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDocument, cssPx, devLogin, selectTextInRich, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, cssPx, devLogin, focusRichEnd, selectTextInRich, uniqueLogin, waitForEditor, waitForHydration } from "./helpers";
 
 const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\nMore words.\n\n## Third\n\nEnd.\n";
 
@@ -389,12 +389,18 @@ test.describe("phone", () => {
     // The placeholder is the server HTML: on screen before any script, gone once the shell has mounted.
     await expect(page.getByTestId("editor-loading")).toBeVisible();
     await expect(page.getByTestId("rich-placeholder").locator("h1")).toHaveText("Deferred editor fixture");
-    await expect(page.getByTestId("editor-shell")).toHaveAttribute("data-breakpoint", "phone", { timeout: 60_000 });
+    await waitForEditor(page);
+    await expect(page.getByTestId("editor-shell")).toHaveAttribute("data-breakpoint", "phone");
     await expect(page.getByTestId("editor-loading")).toHaveCount(0);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
-    await page.waitForTimeout(1000);
+    const rich = page.locator(".md-rich[contenteditable=true]");
+    await expect(rich).toBeVisible();
+    await focusRichEnd(page);
+    await page.keyboard.type("x");
+    await expect(rich).toHaveText(/x$/);
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     const cls = await layoutShiftSum(page);
-    console.log(`[defer] /d/<id> phone CLS (4× CPU, 300 lines): ${cls.toFixed(3)}`);
+    console.log(`[defer] /d/<id> phone CLS through first keystroke (4× CPU, 300 lines): ${cls.toFixed(3)}`);
     expect(cls).toBeLessThanOrEqual(0.01);
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
     await context.close();
