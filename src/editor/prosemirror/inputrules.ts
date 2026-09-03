@@ -1,15 +1,17 @@
 import { InputRule, textblockTypeInputRule, wrappingInputRule } from "prosemirror-inputrules";
 import { Mark, type MarkType } from "prosemirror-model";
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from "prosemirror-state";
+import { ReplaceStep } from "prosemirror-transform";
 import type { EditorView } from "prosemirror-view";
 import { schema } from "../markdown/schema";
+import { markdownBindingKey } from "../sync/markdown-binding";
 import { findParentNode } from "./utils";
 
 interface MarkMatch {
   from: number;
   text: string;
   marks?: readonly Mark[];
-  underscoreOrigin?: Omit<UnderscoreOrigin, "from" | "to">;
+  underscoreOrigin?: Omit<UnderscoreOrigin, "from" | "to" | "continuationTo">;
 }
 
 type MarkMatchResolver = (state: EditorState, match: RegExpMatchArray, start: number, end: number) => MarkMatch | null;
@@ -17,11 +19,12 @@ type MarkMatchResolver = (state: EditorState, match: RegExpMatchArray, start: nu
 interface UnderscoreOrigin {
   from: number;
   to: number;
+  continuationTo: number;
   leadingUnderscores: number;
 }
 
 interface MarkdownInputRuleState {
-  underscoreOrigins: readonly UnderscoreOrigin[];
+  activeOrigin: UnderscoreOrigin | null;
 }
 
 interface RunnableInputRule {
@@ -36,8 +39,15 @@ interface UnderscoreOriginUpdate {
   add?: UnderscoreOrigin;
 }
 
+interface LocalTextInput {
+  from: number;
+  to: number;
+  text: string;
+}
+
 const inputRuleKey = new PluginKey<MarkdownInputRuleState>("markdownInputRules");
 const UNDERSCORE_ORIGIN_META = "markdownUnderscoreOrigin";
+const localTextInputKey = new PluginKey<LocalTextInput>("markdownLocalTextInput");
 const MAX_MATCH = 500;
 
 /**
@@ -67,6 +77,7 @@ function markInputRule(pattern: RegExp, type: MarkType, resolve?: MarkMatchResol
         add: {
           from: found.from,
           to: found.from + found.text.length,
+          continuationTo: found.from + found.text.length,
           ...found.underscoreOrigin,
         },
       } satisfies UnderscoreOriginUpdate);
@@ -157,28 +168,32 @@ function recoverDoubleUnderscoreRun(
   if (!pluginState) return null;
   const $cursor = state.doc.resolve(start);
 
-  for (const origin of [...pluginState.underscoreOrigins].reverse()) {
-    if (state.doc.resolve(origin.from).parent !== $cursor.parent || !originMarks(state, origin)) continue;
-
-    // `__word_` first becomes `_` + em(`word`). If another `_` arrives immediately,
-    // restore both consumed delimiters so the unsupported `__word__` shortcut stays literal.
-    if (origin.to === start && origin.leadingUnderscores > 0) {
-      const from = origin.from - origin.leadingUnderscores;
-      const prefix = state.doc.textBetween(from, origin.from, "", "\ufffc");
-      if (prefix !== "_".repeat(origin.leadingUnderscores)) return null;
-      const marked = state.doc.textBetween(origin.from, origin.to, "", "\ufffc");
-      const emMarks = originMarks(state, origin)!;
-      const baseMarks = emMarks.filter((mark) => mark.type !== schema.marks.em);
-      const prefixMarks = uniformMarks(state, from, origin.from);
-      if (!prefixMarks || !Mark.sameSet(prefixMarks, baseMarks)) return null;
-      const literal = `${"_".repeat(origin.leadingUnderscores + 1)}${marked}__`;
-      return state.tr
-        .replaceWith(from, end, schema.text(literal, baseMarks))
-        .removeStoredMark(schema.marks.em)
-        .setMeta(UNDERSCORE_ORIGIN_META, { remove: origin } satisfies UnderscoreOriginUpdate);
-    }
+  const origin = pluginState.activeOrigin;
+  if (
+    !origin ||
+    (origin.continuationTo !== start && origin.continuationTo !== end) ||
+    state.doc.resolve(origin.from).parent !== $cursor.parent ||
+    !originMarks(state, origin) ||
+    origin.to !== start ||
+    origin.leadingUnderscores === 0
+  ) {
+    return null;
   }
-  return null;
+  // `__word_` first becomes `_` + em(`word`). If another `_` arrives immediately,
+  // restore both consumed delimiters so the unsupported `__word__` shortcut stays literal.
+  const from = origin.from - origin.leadingUnderscores;
+  const prefix = state.doc.textBetween(from, origin.from, "", "\ufffc");
+  if (prefix !== "_".repeat(origin.leadingUnderscores)) return null;
+  const marked = state.doc.textBetween(origin.from, origin.to, "", "\ufffc");
+  const emMarks = originMarks(state, origin)!;
+  const baseMarks = emMarks.filter((mark) => mark.type !== schema.marks.em);
+  const prefixMarks = uniformMarks(state, from, origin.from);
+  if (!prefixMarks || !Mark.sameSet(prefixMarks, baseMarks)) return null;
+  const literal = `${"_".repeat(origin.leadingUnderscores + 1)}${marked}__`;
+  return state.tr
+    .replaceWith(from, end, schema.text(literal, baseMarks))
+    .removeStoredMark(schema.marks.em)
+    .setMeta(UNDERSCORE_ORIGIN_META, { remove: origin } satisfies UnderscoreOriginUpdate);
 }
 
 function recoverAdjacentUnderscoreRun(
@@ -191,40 +206,47 @@ function recoverAdjacentUnderscoreRun(
   if (!pluginState) return null;
   const $cursor = state.doc.resolve(start);
 
-  for (const origin of [...pluginState.underscoreOrigins].reverse()) {
-    if (state.doc.resolve(origin.from).parent !== $cursor.parent || !originMarks(state, origin)) continue;
-
-    // `_a_b_` has already converted `_a_` when more body text arrives. Restore
-    // that consumed closer inside the expanded emphasis without touching unrelated text.
-    if (origin.to < start) {
-      const suffix = state.doc.textBetween(origin.to, start, "", "\ufffc");
-      const first = suffix[0];
-      if (
-        !/[^_]/.test(suffix) ||
-        !suffix.at(-1) ||
-        isWhitespace(suffix.at(-1)) ||
-        (first !== "_" && (isWhitespace(first) || isPunctuationOrSymbol(first))) ||
-        /[\\\r\n\ufffc]/.test(suffix)
-      ) {
-        continue;
-      }
-      const emMarks = originMarks(state, origin)!;
-      const baseMarks = emMarks.filter((mark) => mark.type !== schema.marks.em);
-      const suffixMarks = uniformMarks(state, origin.to, start);
-      if (!suffixMarks || !Mark.sameSet(suffixMarks, baseMarks)) continue;
-      const marked = state.doc.textBetween(origin.from, origin.to, "", "\ufffc");
-      const text = `${marked}_${suffix}`;
-      const tr = state.tr.replaceWith(origin.from, end, schema.text(text, baseMarks));
-      tr.addMark(origin.from, origin.from + text.length, schema.marks.em.create());
-      return tr
-        .removeStoredMark(schema.marks.em)
-        .setMeta(UNDERSCORE_ORIGIN_META, {
-          remove: origin,
-          add: { ...origin, to: origin.from + text.length },
-        } satisfies UnderscoreOriginUpdate);
-    }
+  const origin = pluginState.activeOrigin;
+  if (
+    !origin ||
+    (origin.continuationTo !== start && origin.continuationTo !== end) ||
+    origin.to >= start ||
+    state.doc.resolve(origin.from).parent !== $cursor.parent ||
+    !originMarks(state, origin)
+  ) {
+    return null;
   }
-  return null;
+  // `_a_b_` has already converted `_a_` when more body text arrives. Restore
+  // that consumed closer inside the expanded emphasis without touching unrelated text.
+  const suffix = state.doc.textBetween(origin.to, start, "", "\ufffc");
+  const first = suffix[0];
+  if (
+    !/[^_]/.test(suffix) ||
+    !suffix.at(-1) ||
+    isWhitespace(suffix.at(-1)) ||
+    (first !== "_" && (isWhitespace(first) || isPunctuationOrSymbol(first))) ||
+    /[\\\r\n\ufffc]/.test(suffix)
+  ) {
+    return null;
+  }
+  const emMarks = originMarks(state, origin)!;
+  const baseMarks = emMarks.filter((mark) => mark.type !== schema.marks.em);
+  const suffixMarks = uniformMarks(state, origin.to, start);
+  if (!suffixMarks || !Mark.sameSet(suffixMarks, baseMarks)) return null;
+  const marked = state.doc.textBetween(origin.from, origin.to, "", "\ufffc");
+  const text = `${marked}_${suffix}`;
+  const tr = state.tr.replaceWith(origin.from, end, schema.text(text, baseMarks));
+  tr.addMark(origin.from, origin.from + text.length, schema.marks.em.create());
+  return tr
+    .removeStoredMark(schema.marks.em)
+    .setMeta(UNDERSCORE_ORIGIN_META, {
+      remove: origin,
+      add: {
+        ...origin,
+        to: origin.from + text.length,
+        continuationTo: origin.from + text.length,
+      },
+    } satisfies UnderscoreOriginUpdate);
 }
 
 function runInputRules(
@@ -259,6 +281,54 @@ function runInputRules(
     return true;
   }
   return false;
+}
+
+function mapOrigin(origin: UnderscoreOrigin, transaction: Transaction): UnderscoreOrigin {
+  return {
+    ...origin,
+    from: transaction.mapping.map(origin.from, 1),
+    to: transaction.mapping.map(origin.to, -1),
+    continuationTo: transaction.mapping.map(origin.continuationTo, 1),
+  };
+}
+
+function isExactInsertion(transaction: Transaction, position: number, text?: string): boolean {
+  if (transaction.steps.length !== 1 || !(transaction.steps[0] instanceof ReplaceStep)) return false;
+  const step = transaction.steps[0];
+  const insertedSize = step.slice.size;
+  const insertedText = step.slice.content.textBetween(0, step.slice.content.size, "", "\ufffc");
+  const $start = transaction.doc.resolve(position);
+  const $end = transaction.doc.resolve(position + insertedSize);
+  if (
+    step.from !== position ||
+    step.to !== position ||
+    insertedSize === 0 ||
+    insertedText.length !== insertedSize ||
+    !$start.parent.isTextblock ||
+    !$start.sameParent($end) ||
+    !transaction.selection.empty ||
+    transaction.selection.from !== position + insertedSize
+  ) {
+    return false;
+  }
+  return text === undefined || insertedText === text;
+}
+
+function isLocalTextContinuation(transaction: Transaction, origin: UnderscoreOrigin): boolean {
+  const input = transaction.getMeta(localTextInputKey);
+  return Boolean(
+    input &&
+    input.from === origin.continuationTo &&
+    input.to === input.from &&
+    isExactInsertion(transaction, origin.continuationTo, input.text),
+  );
+}
+
+function isCompositionContinuation(transaction: Transaction, origin: UnderscoreOrigin): boolean {
+  return (
+    transaction.getMeta("composition") !== undefined &&
+    isExactInsertion(transaction, origin.continuationTo)
+  );
 }
 
 /**
@@ -327,29 +397,28 @@ export function markdownInputRules(): Plugin {
   const plugin = new Plugin<MarkdownInputRuleState>({
     key: inputRuleKey,
     state: {
-      init: () => ({ underscoreOrigins: [] }),
+      init: () => ({ activeOrigin: null }),
       apply(transaction, value) {
         const update = transaction.getMeta(UNDERSCORE_ORIGIN_META) as UnderscoreOriginUpdate | undefined;
-        const origins = value.underscoreOrigins
-          .filter(
-            (origin) =>
-              !update?.remove ||
-              origin.from !== update.remove.from ||
-              origin.to !== update.remove.to ||
-              origin.leadingUnderscores !== update.remove.leadingUnderscores,
-          )
-          .map((origin) => ({
-            ...origin,
-            from: transaction.mapping.map(origin.from, 1),
-            to: transaction.mapping.map(origin.to, -1),
-          }));
-        const current = update?.add ? [...origins, update.add] : origins;
-        return { underscoreOrigins: current.filter((origin) => origin.from < origin.to).slice(-32) };
+        if (transaction.getMeta(markdownBindingKey)?.remote) return { activeOrigin: null };
+        if (update?.add) return { activeOrigin: update.add };
+        if (update?.remove) return { activeOrigin: null };
+        const origin = value.activeOrigin;
+        if (!origin) return value;
+        if (isLocalTextContinuation(transaction, origin) || isCompositionContinuation(transaction, origin)) {
+          const mapped = mapOrigin(origin, transaction);
+          return { activeOrigin: mapped.from < mapped.to ? mapped : null };
+        }
+        return { activeOrigin: null };
       },
     },
     props: {
-      handleTextInput(view, from, to, text): boolean {
-        return runInputRules(view, from, to, text, rules);
+      handleTextInput(view, from, to, text, defaultTransaction): boolean {
+        if (runInputRules(view, from, to, text, rules)) return true;
+        const origin = inputRuleKey.getState(view.state)?.activeOrigin;
+        if (!origin || !text || from !== to || from !== origin.continuationTo) return false;
+        view.dispatch(defaultTransaction().setMeta(localTextInputKey, { from, to, text } satisfies LocalTextInput));
+        return true;
       },
       handleDOMEvents: {
         compositionend(view) {

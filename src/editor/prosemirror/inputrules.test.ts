@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { parseMarkdown } from "../markdown/parse";
 import { schema } from "../markdown/schema";
 import { serializeMarkdown } from "../markdown/serialize";
+import { markdownBindingKey, minimalReplaceTransaction } from "../sync/markdown-binding";
 import { markdownInputRules } from "./inputrules";
 
 type MarkName = "code" | "em" | "link" | "strong" | "strikethrough";
@@ -73,12 +74,13 @@ function typeWithRules(initial: EditorState, text: string): EditorState {
       dispatch: (transaction: Transaction) => void (state = state.apply(transaction)),
     } as unknown as EditorView;
     const handled =
-      (rules.props.handleTextInput as (this: unknown, view: EditorView, from: number, to: number, text: string) => boolean).call(
+      (rules.props.handleTextInput as (this: unknown, view: EditorView, from: number, to: number, text: string, defaultTransaction: () => Transaction) => boolean).call(
         rules,
         view,
         from,
         to,
         character,
+        () => state.tr.insertText(character, from, to),
       ) ?? false;
     if (!handled) state = state.apply(state.tr.insertText(character));
   }
@@ -99,12 +101,13 @@ function invokeTextInput(
     dispatch: (transaction: Transaction) => void (state = state.apply(transaction)),
   } as unknown as EditorView;
   const handled =
-    (rules.props.handleTextInput as (this: unknown, view: EditorView, from: number, to: number, text: string) => boolean).call(
+    (rules.props.handleTextInput as (this: unknown, view: EditorView, from: number, to: number, text: string, defaultTransaction: () => Transaction) => boolean).call(
       rules,
       view,
       from,
       to,
       text,
+      () => state.tr.insertText(text, from, to),
     ) ?? false;
   return { state, handled };
 }
@@ -125,6 +128,20 @@ function textRuns(doc: ProseMirrorNode): TextRun[] {
 
 function parserResult(source: string): ProseMirrorNode {
   return parseMarkdown(source).doc;
+}
+
+function applyRemoteMarkdown(state: EditorState, source: string): EditorState {
+  return state.apply(
+    minimalReplaceTransaction(state, parserResult(source)).setMeta(markdownBindingKey, { remote: true }),
+  );
+}
+
+function moveCaret(state: EditorState, position: number): EditorState {
+  return state.apply(
+    state.tr
+      .setSelection(TextSelection.create(state.doc, position))
+      .setStoredMarks([]),
+  );
 }
 
 function assertEquivalentToParser(testCase: CorpusCase, live: EditorState) {
@@ -614,26 +631,101 @@ describe("Markdown underscore emphasis input rule", () => {
 
   it("recovers delimiter runs from committed composition text without duplicating the closing underscore", () => {
     let double = typeWithRules(stateFrom({}), "__word_");
-    double = double.apply(double.tr.insertText("_"));
+    double = double.apply(double.tr.insertText("_").setMeta("composition", 1));
     const doubleResult = invokeTextInput(double, double.selection.from, double.selection.to, "");
     expect(doubleResult.handled).toBe(true);
     expect(textRuns(doubleResult.state.doc)).toEqual([{ text: "__word__", marks: [] }]);
 
     let adjacent = typeWithRules(stateFrom({}), "_one__two");
-    adjacent = adjacent.apply(adjacent.tr.insertText("_"));
+    adjacent = adjacent.apply(adjacent.tr.insertText("_").setMeta("composition", 2));
     const adjacentResult = invokeTextInput(adjacent, adjacent.selection.from, adjacent.selection.to, "");
     expect(adjacentResult.handled).toBe(true);
     expect(textRuns(adjacentResult.state.doc)).toEqual([{ text: "one__two", marks: ["em"] }]);
   });
 
-  it("replaces a non-empty selection when delimiter recovery handles the typed underscore", () => {
+  it("replaces a non-empty selection exactly after the selection move invalidates recovery", () => {
     let state = typeWithRules(stateFrom({}), "__word_");
-    state = state.apply(state.tr.insertText("XY"));
+    state = typeWithRules(state, "XY");
     const from = state.selection.from - 2;
     state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, from, state.selection.from)));
     const result = invokeTextInput(state, state.selection.from, state.selection.to, "_");
-    expect(result.handled).toBe(true);
-    expect(textRuns(result.state.doc)).toEqual([{ text: "__word__", marks: [] }]);
+    expect(result.handled).toBe(false);
+    state = result.state.apply(result.state.tr.insertText("_", from, result.state.selection.to));
+    expect(textRuns(state.doc)).toEqual([
+      { text: "_", marks: [] },
+      { text: "word", marks: ["em"] },
+      { text: "_", marks: [] },
+    ]);
+  });
+
+  it("never absorbs text from a remote Markdown rebuild into a retained local origin", () => {
+    let state = typeWithRules(stateFrom({}), "_word_");
+    state = applyRemoteMarkdown(state, "*word*remote");
+    state = moveCaret(state, state.doc.content.size - 1);
+    state = typeWithRules(state, "_");
+    expect(textRuns(state.doc)).toEqual([
+      { text: "word", marks: ["em"] },
+      { text: "remote_", marks: [] },
+    ]);
+  });
+
+  it.each([
+    ["before", "remote*word*", "remoteword_"],
+    ["after", "*word*remote", "wordremote_"],
+    ["inside", "*woXrd*", "woXrd_"],
+  ])("invalidates an origin when a remote rebuild inserts %s its retained region", (_name, source, text) => {
+    let state = typeWithRules(stateFrom({}), "_word_");
+    state = applyRemoteMarkdown(state, source);
+    state = moveCaret(state, state.doc.content.size - 1);
+    const expected = state.apply(state.tr.insertText("_")).doc;
+    state = typeWithRules(state, "_");
+    expect(state.doc.textContent).toBe(text);
+    expect(state.doc.eq(expected)).toBe(true);
+    expect(textRuns(state.doc).at(-1)?.text.endsWith("_")).toBe(true);
+  });
+
+  it("does not revive an origin after a local selection moves away and back", () => {
+    let state = typeWithRules(stateFrom({}), "__word_");
+    state = moveCaret(state, 1);
+    state = moveCaret(state, state.doc.content.size - 1);
+    state = typeWithRules(state, "_");
+    expect(textRuns(state.doc)).toEqual([
+      { text: "_", marks: [] },
+      { text: "word", marks: ["em"] },
+      { text: "_", marks: [] },
+    ]);
+  });
+
+  it("does not revive an origin after an unrelated local command transaction", () => {
+    let state = typeWithRules(stateFrom({}), "__word_");
+    state = state.apply(state.tr.setMeta("unrelatedCommand", true));
+    state = typeWithRules(state, "_");
+    expect(textRuns(state.doc)).toEqual([
+      { text: "_", marks: [] },
+      { text: "word", marks: ["em"] },
+      { text: "_", marks: [] },
+    ]);
+  });
+
+  it("does not revive an origin when an undo-like document change restores the same text", () => {
+    let state = typeWithRules(stateFrom({}), "__word_");
+    const position = state.selection.from;
+    state = state.apply(state.tr.insertText("X", position));
+    state = state.apply(state.tr.delete(position, position + 1));
+    state = typeWithRules(state, "_");
+    expect(textRuns(state.doc)).toEqual([
+      { text: "_", marks: [] },
+      { text: "word_", marks: ["em"] },
+    ]);
+  });
+
+  it("keeps concurrent-looking origins from claiming each other's suffix", () => {
+    const state = typeWithRules(stateFrom({}), "__one_ __two__");
+    expect(textRuns(state.doc)).toEqual([
+      { text: "_", marks: [] },
+      { text: "one", marks: ["em"] },
+      { text: " __two__", marks: [] },
+    ]);
   });
 
   it("matches the real parser across the classified deterministic corpus", () => {
@@ -674,6 +766,7 @@ describe("Markdown underscore emphasis input rule", () => {
       categories: Object.fromEntries(Object.entries(categoryCounts).sort(([left], [right]) => left.localeCompare(right))),
       unexpectedDivergences: divergences.length,
       unsafeCharacterCases: 0,
+      collaborationDiscontinuityRows: 8,
     };
     console.log(`UNDERSCORE_CORPUS ${JSON.stringify(summary)}`);
     expect(corpus.length).toBeGreaterThanOrEqual(288);
