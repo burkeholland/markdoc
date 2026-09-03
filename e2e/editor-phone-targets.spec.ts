@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type Locator, type Page } from "@playwright/test";
-import { createDocument, cssPx, devLogin, openDocument, uniqueLogin } from "./helpers";
+import { createDocument, cssPx, devLogin, uniqueLogin, waitForEditor } from "./helpers";
 
 const viewports = [
   { width: 360, height: 780 },
@@ -44,7 +44,9 @@ for (const viewport of viewports) {
       data: { action: "add", quote: "Second body.", body: "Please clarify this." },
     });
     expect(comment.ok()).toBeTruthy();
-    await openDocument(page, documentId);
+    await page.goto(`/d/${documentId}`);
+    await waitForEditor(page);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
 
     await page.getByTestId("more-menu").click();
     await page.getByRole("menuitem", { name: "Version history" }).click();
