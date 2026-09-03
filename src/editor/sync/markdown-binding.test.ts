@@ -217,6 +217,27 @@ describe("MarkdownBinding", () => {
     }
   });
 
+  it.each([
+    ["heading", "#text", " ", "# text", "heading"],
+    ["bullet list", "-text", " ", "- text", "bullet_list"],
+    ["blockquote", "text", ">", ">text", "blockquote"],
+  ])("reparses a hard-break continuation that becomes a %s", async (_label, before, insert, after, expectedType) => {
+    const source = `Intro\\\n${before}`;
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    const map = binding.getSourceMap();
+    expect(view.state.doc.firstChild!.child(1).type).toBe(schema.nodes.hard_break);
+
+    typeText(view, insert, map.srcToPm(source.indexOf("text")));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe(`Intro\\\n${after}`);
+    const canonical = parseMarkdown(ytext.toString()).doc;
+    expect(canonical.childCount).toBe(2);
+    expect(canonical.child(1).type.name).toBe(expectedType);
+    expect(view.state.doc.eq(canonical)).toBe(true);
+  });
+
   it("reflects text changes in the rich editor while preserving the selection", () => {
     ytext.insert(0, "# Title\n\nHello world.");
     const { view } = editor();

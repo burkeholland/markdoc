@@ -95,6 +95,10 @@ function isEmptyBlock(node: PMNode): boolean {
   return node.type === schema.nodes.paragraph && node.content.size === 0;
 }
 
+function containsHardBreak(node: PMNode | null | undefined): boolean {
+  return node?.content.content.some((child) => child.type === schema.nodes.hard_break) ?? false;
+}
+
 function blockStarts(doc: PMNode): number[] {
   const starts: number[] = [];
   let pos = 0;
@@ -818,6 +822,8 @@ export class MarkdownBinding {
       !chunks[0].phantom &&
       oldDoc.child(k)?.type === schema.nodes.paragraph &&
       newDoc.child(k)?.type === schema.nodes.paragraph &&
+      !containsHardBreak(oldDoc.child(k)) &&
+      !containsHardBreak(newDoc.child(k)) &&
       op &&
       sourceOldTo - op.index === change.endA - change.start &&
       sourceNewTo - op.index === change.endB - change.start &&
