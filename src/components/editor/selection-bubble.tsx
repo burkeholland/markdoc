@@ -92,6 +92,13 @@ export function SelectionBubble({
       const topEdge = Math.min(start.top, end.top);
       const bottomEdge = Math.max(start.bottom, end.bottom);
       const centerX = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2;
+      const visibleTop = Math.max(host.top, 0);
+      const visibleBottom = Math.min(host.bottom, window.innerHeight);
+      // Do not clamp an inactive selection's toolbar to a screen edge after its text scrolls away.
+      if (bottomEdge <= visibleTop || topEdge >= visibleBottom) {
+        setVisible(false);
+        return;
+      }
       // Touch devices draw the OS selection toolbar above the selection; sit below it there.
       let below = isCoarsePointer() || topEdge - host.top - BUBBLE_HEIGHT - 10 < 4;
       const viewport = { width: window.innerWidth, height: window.innerHeight };

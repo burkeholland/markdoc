@@ -139,6 +139,36 @@ test.describe("single user editing", () => {
     await user.context.close();
   });
 
+  test("selection bubble leaves the page when its selection scrolls out of view", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const content = Array.from({ length: 60 }, (_, index) =>
+      index === 30 ? "The selected passage is in the middle." : `Filler paragraph ${index + 1}.`,
+    ).join("\n\n");
+    const id = await createDocument(user.page, content);
+    await openDocument(user.page, id);
+    const { page } = user;
+    const scroller = page.locator('[data-testid="rich-column"] .overflow-y-auto');
+    const target = page.locator(".md-rich p").filter({ hasText: "selected passage" });
+
+    await target.scrollIntoViewIfNeeded();
+    await selectTextInRich(page, "selected passage");
+    await expect(page.getByTestId("selection-bubble")).toBeVisible();
+
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+
+    await target.scrollIntoViewIfNeeded();
+    await expect(page.getByTestId("selection-bubble")).toBeVisible();
+
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect(page.getByTestId("selection-bubble")).toHaveCount(0);
+    await user.context.close();
+  });
+
   test("insert dialogs add links, images and tables", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, "Read the docs for details.\n");
