@@ -1,4 +1,4 @@
-import { Plugin, PluginKey, type EditorState, type Transaction } from "prosemirror-state";
+import { EditorState, Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import type * as Md from "mdast";
@@ -7,7 +7,7 @@ import { parseMarkdown, type HeadingInfo, type ParseResult } from "../markdown/p
 import { reparseRange, textChangeSpan, type ChangeSpan } from "../markdown/incremental";
 import { serializeBlocks } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
-import type { BlockRange, Segment, SourceMap } from "../markdown/sourcemap";
+import { buildSourceMap, type BlockRange, type Segment, type SourceMap } from "../markdown/sourcemap";
 import { diffOps, applyOps, type TextOp } from "./text-diff";
 import { perfMark } from "../collab/shared";
 
@@ -28,7 +28,22 @@ interface LocalChangeAuthorization {
   map: SourceMap;
   from: Y.RelativePosition;
   to: Y.RelativePosition;
-  insert: string;
+  richInsert: string;
+}
+
+/** Current plus historical ProseMirror documents reachable through the cached source map. */
+export const SOURCE_MAP_MAX_RETAINED_DOCUMENTS = 128;
+const SOURCE_MAP_MAX_WRAPPER_DEPTH = SOURCE_MAP_MAX_RETAINED_DOCUMENTS - 1;
+const sourceMapWrapperDepth = new WeakMap<SourceMap, number>();
+
+export interface SourceMapDiagnostics {
+  currentWrapperDepth: number;
+  maxWrapperDepth: number;
+  currentRetainedDocuments: number;
+  maxRetainedDocuments: number;
+  compactionCount: number;
+  maxCompactionDurationMs: number;
+  maxCompactionSegments: number;
 }
 
 interface MarkdownBindingState {
@@ -221,10 +236,24 @@ function hasLinearUnmarkedMapping(old: SourceMap, oldDoc: PMNode, newDoc: PMNode
 /**
  * Carry an already-current source map through a simple text replacement. The changed source and
  * ProseMirror spans have equal lengths here, so positions inside the edit map directly; positions
- * outside it go through the transaction mapping and the previous map. Segments are materialized
- * only for diagnostics -- editor position lookups use the bounded mapping functions.
+ * outside it go through the transaction mapping and the previous map. After a fixed number of
+ * generations, exact segments are materialized once into a flat map so lookup depth and retained
+ * ProseMirror documents stay bounded.
  */
-function mapSourceMap(old: SourceMap, blocks: BlockRange[], doc: PMNode, change: LocalDocChange, source: SourceChange): SourceMap {
+function mapSourceMap(
+  old: SourceMap,
+  blocks: BlockRange[],
+  doc: PMNode,
+  change: LocalDocChange,
+  source: SourceChange,
+): {
+  map: SourceMap;
+  wrapperDepth: number;
+  retainedDocuments: number;
+  compacted: boolean;
+  compactionDurationMs: number;
+  compactionSegments: number;
+} {
   const inverse = change.mapping.invert();
   const sourceDelta = source.newTo - source.oldTo;
   const sourceNewLength = source.newTo - source.oldFrom;
@@ -240,7 +269,7 @@ function mapSourceMap(old: SourceMap, blocks: BlockRange[], doc: PMNode, change:
     if (offset > source.newTo || (offset === source.newTo && assoc > 0)) return offset - sourceDelta;
     return assoc < 0 ? source.oldFrom : source.oldTo;
   };
-  return {
+  const mapped: SourceMap = {
     blocks,
     get segments() {
       segments ??= old.segments.map((segment) => ({
@@ -268,6 +297,32 @@ function mapSourceMap(old: SourceMap, blocks: BlockRange[], doc: PMNode, change:
       if (pos >= doc.content.size) return Math.max(0, doc.childCount - 1);
       return doc.resolve(Math.max(0, pos)).index(0);
     },
+  };
+
+  const wrapperDepth = (sourceMapWrapperDepth.get(old) ?? 0) + 1;
+  if (wrapperDepth <= SOURCE_MAP_MAX_WRAPPER_DEPTH) {
+    sourceMapWrapperDepth.set(mapped, wrapperDepth);
+    return {
+      map: mapped,
+      wrapperDepth,
+      retainedDocuments: wrapperDepth + 1,
+      compacted: false,
+      compactionDurationMs: 0,
+      compactionSegments: 0,
+    };
+  }
+
+  const startedAt = performance.now();
+  const compactedSegments = mapped.segments;
+  const compacted = buildSourceMap(doc, blocks, compactedSegments);
+  sourceMapWrapperDepth.set(compacted, 0);
+  return {
+    map: compacted,
+    wrapperDepth: 0,
+    retainedDocuments: 1,
+    compacted: true,
+    compactionDurationMs: performance.now() - startedAt,
+    compactionSegments: compactedSegments.length,
   };
 }
 
@@ -352,6 +407,15 @@ export class MarkdownBinding {
   /** An unverified incremental parse touched structural Markdown. */
   private structuralEdit = false;
   readonly verifyStats: VerifyStats = { runs: 0, matches: 0, mismatches: 0, skipped: 0 };
+  readonly sourceMapDiagnostics: SourceMapDiagnostics = {
+    currentWrapperDepth: 0,
+    maxWrapperDepth: 0,
+    currentRetainedDocuments: 1,
+    maxRetainedDocuments: 1,
+    compactionCount: 0,
+    maxCompactionDurationMs: 0,
+    maxCompactionSegments: 0,
+  };
   private inLocalHandler = false;
   private pendingSync = false;
   /** True while a remote sync is being dispatched to the view. */
@@ -533,6 +597,7 @@ export class MarkdownBinding {
     this.headingsCache = { text, headings: result.headings };
     if (text === this.currentText && this.currentDoc?.eq(result.doc) && this.phantoms.size === 0) {
       this.mapCache = { text, phantomKey: "", map: { ...result.map, blocks: this.blocks } };
+      this.updateSourceMapDiagnostics(0, 1);
     }
     return result;
   }
@@ -684,7 +749,21 @@ export class MarkdownBinding {
     const { map } = this.parse(text);
     const adjusted = this.phantoms.size === 0 ? { ...map, blocks: this.blocks } : this.adjustMapForPhantoms(map);
     this.mapCache = { text, phantomKey, map: adjusted };
+    this.updateSourceMapDiagnostics(0, 1);
     return adjusted;
+  }
+
+  private updateSourceMapDiagnostics(wrapperDepth: number, retainedDocuments: number) {
+    this.sourceMapDiagnostics.currentWrapperDepth = wrapperDepth;
+    this.sourceMapDiagnostics.maxWrapperDepth = Math.max(
+      this.sourceMapDiagnostics.maxWrapperDepth,
+      wrapperDepth,
+    );
+    this.sourceMapDiagnostics.currentRetainedDocuments = retainedDocuments;
+    this.sourceMapDiagnostics.maxRetainedDocuments = Math.max(
+      this.sourceMapDiagnostics.maxRetainedDocuments,
+      retainedDocuments,
+    );
   }
 
   private adjustMapForPhantoms(map: SourceMap): SourceMap {
@@ -804,7 +883,7 @@ export class MarkdownBinding {
         map,
         from,
         to,
-        insert: op.insert,
+        richInsert: change.after.textBetween(change.start, change.endB, "", ""),
       },
     };
   }
@@ -827,16 +906,21 @@ export class MarkdownBinding {
     }
     const sourceFrom = Math.min(from.index, to.index);
     const sourceTo = Math.max(from.index, to.index);
-    const ops: TextOp[] = [{ index: sourceFrom, deleteCount: sourceTo - sourceFrom, insert: authorization.insert }];
-    if (this.options.interceptor?.(ops, this.ytext, this)) {
+    const currentText = this.ytext.toString();
+    const parsed = parseMarkdown(currentText);
+    const pmFrom = parsed.map.srcToPm(sourceFrom);
+    const pmTo = parsed.map.srcToPm(sourceTo);
+    if (pmFrom > pmTo) {
       this.requestSync();
-      this.options.onSync?.("local");
-      return true;
+      return false;
     }
-    this.ydoc.transact(() => applyOps(this.ytext, ops), this);
-    this.requestSync();
-    this.options.onSync?.("local");
-    return true;
+    const tr = EditorState.create({ doc: parsed.doc }).tr;
+    const mergedDoc =
+      authorization.richInsert.length === 0
+        ? tr.delete(pmFrom, pmTo).doc
+        : tr.replaceWith(pmFrom, pmTo, schema.text(authorization.richInsert)).doc;
+    this.currentText = currentText;
+    return this.fallbackReplaceAll(mergedDoc);
   }
 
   private handleLocal(oldState: EditorState, newState: EditorState, change: LocalDocChange | null): boolean {
@@ -1084,11 +1168,30 @@ export class MarkdownBinding {
       op &&
       sourceChange;
     if (onePlainTextBlock) {
+      const mapped = mapSourceMap(
+        previousMap,
+        this.blocks,
+        newDoc,
+        change,
+        sourceChange,
+      );
       this.mapCache = {
         text: nextFullText,
         phantomKey: "",
-        map: mapSourceMap(previousMap, this.blocks, newDoc, change, sourceChange),
+        map: mapped.map,
       };
+      this.updateSourceMapDiagnostics(mapped.wrapperDepth, mapped.retainedDocuments);
+      if (mapped.compacted) {
+        this.sourceMapDiagnostics.compactionCount++;
+        this.sourceMapDiagnostics.maxCompactionDurationMs = Math.max(
+          this.sourceMapDiagnostics.maxCompactionDurationMs,
+          mapped.compactionDurationMs,
+        );
+        this.sourceMapDiagnostics.maxCompactionSegments = Math.max(
+          this.sourceMapDiagnostics.maxCompactionSegments,
+          mapped.compactionSegments,
+        );
+      }
       if (this.headingsCache?.text === fullText) {
         this.headingsCache = {
           text: nextFullText,

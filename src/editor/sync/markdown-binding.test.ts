@@ -11,11 +11,13 @@ import {
   minimalReplaceTransaction,
   isStructuralChange,
   localDocChange,
+  SOURCE_MAP_MAX_RETAINED_DOCUMENTS,
   VERIFY_TRUST_AFTER,
   VERIFY_EVERY_NTH_WINDOW,
 } from "./markdown-binding";
 import { schema } from "../markdown/schema";
 import { parseMarkdown } from "../markdown/parse";
+import { serializeBlocks } from "../markdown/serialize";
 import { insertHardBreak } from "../prosemirror/commands";
 import { textChangeSpan } from "../markdown/incremental";
 import { diffOps, diffOpsWords, applyOps } from "./text-diff";
@@ -281,6 +283,175 @@ describe("MarkdownBinding", () => {
     remote.destroy();
   });
 
+  it.each([
+    [">", "blockquote marker"],
+    ["# ", "heading marker"],
+    ["- ", "dash-list marker"],
+    ["* ", "star-list marker"],
+    ["1. ", "ordered-list marker"],
+    ["```", "code-fence marker"],
+    ["---", "thematic-break marker"],
+    ["[x](y)", "link punctuation"],
+    ["![](x)", "image punctuation"],
+    ["**", "emphasis delimiter"],
+  ])(
+    "contextually serializes a stale %s moved to the start by a joined-client deletion",
+    async (insert) => {
+      ytext.insert(0, "za");
+      const { view, binding } = editor();
+      binding.getSourceMap();
+      const before = view.state;
+      const tr = before.tr.insertText(insert, 2);
+      const after = before.apply(tr);
+      const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+      expect(change.authorization).not.toBeNull();
+
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+      const vector = Y.encodeStateVector(ydoc);
+      remote.getText("content").delete(0, 1);
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+      expect(ytext.toString()).toBe("a");
+
+      const intendedDoc = schema.nodes.doc.create(
+        null,
+        schema.nodes.paragraph.create(null, schema.text(`${insert}a`)),
+      );
+      const expected = serializeBlocks([intendedDoc.firstChild!]);
+      const observedBindingWrites: string[] = [];
+      const observer = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+        if (transaction.origin === binding) observedBindingWrites.push(ytext.toString());
+      };
+      ytext.observe(observer);
+
+      expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+      expect(observedBindingWrites).toEqual([expected]);
+      expect(ytext.toString()).toBe(expected);
+      expect(view.state.doc.toJSON()).toEqual(intendedDoc.toJSON());
+      expect(binding["currentDoc"]?.toJSON()).toEqual(intendedDoc.toJSON());
+      expect(binding.blocks).toEqual(parseMarkdown(expected).map.blocks);
+      expect(binding.getHeadings()).toEqual([]);
+      expectCompleteCanonicalMap(binding, view, expected);
+      ytext.unobserve(observer);
+      remote.destroy();
+    },
+  );
+
+  it("keeps contextual stale replay in binding undo history beside later joined-client edits", async () => {
+    ytext.insert(0, "za");
+    const { view, binding } = editor();
+    const undo = new Y.UndoManager(ytext, { trackedOrigins: new Set([binding]) });
+    binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText(">", 2);
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").delete(0, 1);
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(ytext.toString()).toBe("\\>a");
+
+    undo.stopCapturing();
+    vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(remote.getText("content").length, "R");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe("\\>aR");
+
+    undo.undo();
+    expect(ytext.toString()).toBe("aR");
+    undo.redo();
+    expect(ytext.toString()).toBe("\\>aR");
+    vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(remote.getText("content").length, "Q");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+
+    expect(ytext.toString()).toBe("\\>aRQ");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown("\\>aRQ").doc.toJSON());
+    expect(binding["currentDoc"]?.toJSON()).toEqual(view.state.doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, "\\>aRQ");
+    undo.destroy();
+    remote.destroy();
+  });
+
+  it.each([
+    {
+      label: "a newline and heading inserted at its saved boundary",
+      source: "za",
+      sourceOffset: 1,
+      remoteChange: (text: Y.Text) => text.insert(1, "\n\n# Remote\n\n"),
+      expected: "z\n\n# Remote\n\n\\>a",
+    },
+    {
+      label: "its complete surrounding block replaced by a heading",
+      source: "before\n\nza\n\nafter",
+      sourceOffset: 9,
+      remoteChange: (text: Y.Text) => {
+        text.delete(8, 2);
+        text.insert(8, "# Remote");
+      },
+      expected: "before>\n\n# Remote\n\nafter",
+    },
+    {
+      label: "its original block deleted so it moves to a different block",
+      source: "za\n\nsecond",
+      sourceOffset: 1,
+      remoteChange: (text: Y.Text) => text.delete(0, 4),
+      expected: "\\>second",
+    },
+    {
+      label: "the remote client deletes the entire document",
+      source: "za",
+      sourceOffset: 1,
+      remoteChange: (text: Y.Text) => text.delete(0, 2),
+      expected: "\\>",
+    },
+  ])(
+    "rebases stale rich intent when $label",
+    async ({ source, sourceOffset, remoteChange, expected }) => {
+      ytext.insert(0, source);
+      const { view, binding } = editor();
+      const map = binding.getSourceMap();
+      const before = view.state;
+      const position = map.srcToPm(sourceOffset);
+      const tr = before.tr.insertText(">", position);
+      const after = before.apply(tr);
+      const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+      expect(change.authorization).not.toBeNull();
+
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+      const vector = Y.encodeStateVector(ydoc);
+      remote.transact(() => remoteChange(remote.getText("content")));
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+
+      const observedBindingWrites: string[] = [];
+      const observer = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+        if (transaction.origin === binding) observedBindingWrites.push(ytext.toString());
+      };
+      ytext.observe(observer);
+      expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+      const canonical = parseMarkdown(expected);
+      expect(observedBindingWrites).toEqual([expected]);
+      expect(ytext.toString()).toBe(expected);
+      expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+      expect(binding["currentDoc"]?.toJSON()).toEqual(canonical.doc.toJSON());
+      expect(binding.blocks).toEqual(canonical.map.blocks);
+      expect(binding.getHeadings()).toEqual(canonical.headings);
+      expectCompleteCanonicalMap(binding, view, expected);
+      ytext.unobserve(observer);
+      remote.destroy();
+    },
+  );
+
   it("preserves local and remote edits when an earlier plugin appends during the same view update", async () => {
     ytext.insert(0, "a\n\nb");
     const binding = new MarkdownBinding(ytext);
@@ -406,6 +577,117 @@ describe("MarkdownBinding", () => {
     expect(mapped.blocks).toEqual(authoritative.blocks);
     expect(mapped.segments).toEqual(authoritative.segments);
   });
+
+  it(
+    "bounds source-map history through 10,000 marked-document edits",
+    () => {
+      const paragraphCount = 1_000;
+      const editCount = 10_000;
+      const targetIndexes = [0, 500, 999] as const;
+      const source = Array.from(
+        { length: paragraphCount },
+        (_, index) => `P${index} plain **bold** [link](x) ![](i) 😀.`,
+      ).join("\n\n");
+      ytext.insert(0, source);
+      const binding = new MarkdownBinding(ytext);
+      bindings.push(binding);
+      let state = EditorState.create({ doc: binding.initialDoc() });
+      binding.getSourceMap();
+
+      const fragment = Object.getPrototypeOf(state.doc.content) as {
+        findDiffStart: (...args: unknown[]) => unknown;
+        findDiffEnd: (...args: unknown[]) => unknown;
+      };
+      const findDiffStart = vi.spyOn(fragment, "findDiffStart");
+      const findDiffEnd = vi.spyOn(fragment, "findDiffEnd");
+      const materialize = vi.spyOn(ytext as unknown as { toString: () => string }, "toString");
+      const parse = vi.fn(binding["parse"].bind(binding));
+      const buildDoc = vi.fn(binding["buildDoc"].bind(binding));
+      binding["parse"] = parse;
+      binding["buildDoc"] = buildDoc;
+      const inserted = [0, 0, 0];
+
+      for (let edit = 0; edit < editCount; edit++) {
+        const target = edit % targetIndexes.length;
+        const paragraphIndex = targetIndexes[target];
+        const sourceOffset =
+          binding.blocks[paragraphIndex].from +
+          `P${paragraphIndex} plain`.length +
+          inserted[target];
+        const position = binding.getSourceMap().srcToPm(sourceOffset);
+        const tr = state.tr.insertText("x", position);
+        const next = state.apply(tr);
+        const change = localDocChange(tr, state.doc, next.doc);
+        expect(change).not.toBeNull();
+        expect(binding.handleLocalTransaction(state, next, change)).toBe(true);
+        expect(binding["mapCache"]).not.toBeNull();
+        state = next;
+        inserted[target]++;
+      }
+
+      const expectedCompactions = Math.floor(editCount / SOURCE_MAP_MAX_RETAINED_DOCUMENTS);
+      expect(SOURCE_MAP_MAX_RETAINED_DOCUMENTS).toBeGreaterThan(120);
+      expect(findDiffStart).not.toHaveBeenCalled();
+      expect(findDiffEnd).not.toHaveBeenCalled();
+      expect(materialize).not.toHaveBeenCalled();
+      expect(parse).not.toHaveBeenCalled();
+      expect(buildDoc).not.toHaveBeenCalled();
+      expect(binding.sourceMapDiagnostics).toMatchObject({
+        currentWrapperDepth: editCount % SOURCE_MAP_MAX_RETAINED_DOCUMENTS,
+        maxWrapperDepth: SOURCE_MAP_MAX_RETAINED_DOCUMENTS - 1,
+        currentRetainedDocuments: (editCount % SOURCE_MAP_MAX_RETAINED_DOCUMENTS) + 1,
+        maxRetainedDocuments: SOURCE_MAP_MAX_RETAINED_DOCUMENTS,
+        compactionCount: expectedCompactions,
+      });
+      expect(binding.sourceMapDiagnostics.maxCompactionDurationMs).toBeGreaterThanOrEqual(0);
+      expect(binding.sourceMapDiagnostics.maxCompactionSegments).toBeGreaterThan(0);
+
+      materialize.mockRestore();
+      const finalSource = ytext.toString();
+      const canonical = parseMarkdown(finalSource);
+      const mapped = binding.getSourceMap();
+      expect(mapped.blocks).toEqual(canonical.map.blocks);
+      expect(mapped.segments).toEqual(canonical.map.segments);
+      expect(binding.sourceMapDiagnostics.maxCompactionSegments).toBe(canonical.map.segments.length);
+
+      const sourceOffsets = new Set<number>([0, finalSource.length]);
+      const richPositions = new Set<number>([0, canonical.doc.content.size]);
+      for (const segment of canonical.map.segments) {
+        sourceOffsets.add(segment.srcFrom);
+        sourceOffsets.add(segment.srcTo);
+        richPositions.add(segment.pmFrom);
+        richPositions.add(segment.pmTo);
+      }
+      for (let sample = 0; sample <= 257; sample++) {
+        sourceOffsets.add(Math.floor((sample * finalSource.length) / 257));
+        richPositions.add(Math.floor((sample * canonical.doc.content.size) / 257));
+      }
+      for (const offset of sourceOffsets) {
+        expect(mapped.srcToPm(offset), `source offset ${offset}`).toBe(canonical.map.srcToPm(offset));
+      }
+      for (const position of richPositions) {
+        expect(mapped.pmToSrc(position), `rich position ${position}`).toBe(
+          canonical.map.pmToSrc(position),
+        );
+      }
+      expect(state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+
+      console.info(
+        "[source-map-long-session]",
+        JSON.stringify({
+          edits: editCount,
+          paragraphs: paragraphCount,
+          ...binding.sourceMapDiagnostics,
+          finalSegments: mapped.segments.length,
+          sourceSamples: sourceOffsets.size,
+          richSamples: richPositions.size,
+        }),
+      );
+      findDiffStart.mockRestore();
+      findDiffEnd.mockRestore();
+    },
+    120_000,
+  );
 
   it.each([
     ["after an empty-alt image", "![](x)a", 2, "![](x)Xa"],
