@@ -39,7 +39,7 @@ az acr task show-run -r markdocacrmnd542unepl56 --run-id <id> --query "{status:s
 $env:AZ_INSTALLER='MSI'; & "C:\Program Files\Microsoft SDKs\Azure\CLI2\python.exe" -X utf8 -IBm azure.cli acr task logs -r markdocacrmnd542unepl56 --run-id <id>
 ```
 
-Two glyphs make this necessary, and both are in every log from now on: `▲` in the Next build banner (`▲ Next.js 16.3.2 (Turbopack)`, build log) and `✓` in `✓ Running next.config.ts took Nms`, which Next 16.3.2 prints at server start (#1514 found it in the start-up log of §4; the same `✓` also precedes `Compiled successfully` in the build log). `az.cmd` dies on either under cp1252, and `PYTHONUTF8` does not help because the bundled Python runs with `-I`.
+Two glyphs make this necessary, and both are in every log from now on: `▲` in the Next build banner (`▲ Next.js 16.3.3 (Turbopack)`, build log) and `✓` in `✓ Running next.config.ts took Nms`, which Next 16.3.3 prints at server start (#1514 found it in the start-up log of §4; the same `✓` also precedes `Compiled successfully` in the build log). `az.cmd` dies on either under cp1252, and `PYTHONUTF8` does not help because the bundled Python runs with `-I`.
 
 What to check in the build log (585 lines and 29 steps at `e74e4f3`; step numbers move with the `Dockerfile`):
 
@@ -201,7 +201,7 @@ A known, harmless finding to expect in the second `ls -ld` block: `next.config.t
 
 **Expected start-up lines** that are not noise — the whole server output of a healthy start is these, in this order:
 
-- `✓ Running next.config.ts took Nms` — Next 16.3.2 loading the config (the `✓` that needs the Python log reader).
+- `✓ Running next.config.ts took Nms` — Next 16.3.3 loading the config (the `✓` that needs the Python log reader).
 - `> Markdoc ready on http://<hostname>:3000 (stable hostname; production)` and `> Collaboration WebSocket on ws://<hostname>:3000/collab` (`server/index.ts` l.265–266).
 - `> Hostname alias: http://<hostname>.local:3000`, `> Loopback diagnostic: http://localhost:3000`, `> Numeric diagnostic (eth0): http://<container ip>:3000` (`server/index.ts` l.268–271) — printed whenever `HOST` is `0.0.0.0`, which the `Dockerfile` sets, so production prints them at every start too.
 - On SIGTERM, the two `[exit]` lines of row 11 (`server/index.ts` l.277 and l.85).

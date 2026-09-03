@@ -125,8 +125,8 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 ## Test it
 
 ```bash
-npm test              # Vitest: ~1 870 unit tests in 154 files (parser/serializer, sync binding, comments/suggestions models, DB, routes, collaboration server, request log); the incremental-parser fuzz runs 300 seeded docs; 5 files are opt-in integration tests and show as skipped (see MARKDOC_PG_INTEGRATION_URL and test:github below)
-npm run test:e2e      # Playwright: ~360 tests in 67 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, notifications, offline, dark mode, phone layouts, import, …); e2e/scale.spec.ts runs the same flows against the Burke-scale fixture with measured budgets (CI: two shards for the suite, `--project default --shard=N/2`, plus a third job for the scale spec alone, `--project scale`)
+npm test              # Vitest: ~1 920 unit tests in 161 files (parser/serializer, sync binding, comments/suggestions models, DB, routes, collaboration server, request log); the incremental-parser fuzz runs 300 seeded docs; 5 files are opt-in integration tests and show as skipped (see MARKDOC_PG_INTEGRATION_URL and test:github below)
+npm run test:e2e      # Playwright: ~360 tests in 69 specs (two-browser collaboration, comments, suggestions, versions, sharing, tables, templates, search, stars, trash, reader, palette, notifications, offline, dark mode, phone layouts, import, …); e2e/scale.spec.ts runs the same flows against the Burke-scale fixture with measured budgets (CI: two shards for the suite, `--project default --shard=N/2`, plus a third job for the scale spec alone, `--project scale`)
 npm run typecheck
 npm run lint
 ```
