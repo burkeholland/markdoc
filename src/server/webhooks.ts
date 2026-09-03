@@ -5,6 +5,7 @@ import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
 import { getDocumentAccess, type SessionUser } from "@/server/documents";
 import { notify } from "@/server/notifications";
+import { registerPressureGauge } from "@/server/pressure-gauges";
 import { collectDocumentEvents, decodeCursor, encodeCursor, waitForWake, wakeSeq, wokenDocuments, type AgentEvent } from "@/server/agent-events";
 
 /**
@@ -272,14 +273,19 @@ interface DispatcherState {
   retryDelays: readonly number[];
   seqs: Map<string, number>;
   sweeping: Promise<number> | null;
+  deliveryInflight: number;
   /** Active hooks as of `at`; refreshed every few seconds and dropped on any change, so a wake per keystroke does not mean a query per keystroke. */
   hooksCache: { at: number; rows: schema.Webhook[] } | null;
 }
 
 // One dispatcher per process even when the module is re-evaluated (dev HMR).
 const g = globalThis as typeof globalThis & { __markdocWebhooks?: DispatcherState };
-const state: DispatcherState = (g.__markdocWebhooks ??= { loop: null, stopped: false, cursors: new Map(), lastSweep: Date.now(), lastPrune: 0, retryTimers: new Set(), inflight: new Set(), retryDelays: RETRY_DELAYS_MS, seqs: new Map(), sweeping: null, hooksCache: null });
+const state: DispatcherState = (g.__markdocWebhooks ??= { loop: null, stopped: false, cursors: new Map(), lastSweep: Date.now(), lastPrune: 0, retryTimers: new Set(), inflight: new Set(), retryDelays: RETRY_DELAYS_MS, seqs: new Map(), sweeping: null, deliveryInflight: 0, hooksCache: null });
+state.deliveryInflight ??= 0;
 const HOOKS_CACHE_MS = 5_000;
+
+registerPressureGauge("webhook_inflight", () => state.deliveryInflight);
+registerPressureGauge("webhook_retries", () => state.retryTimers.size);
 
 async function activeHooks(now: number): Promise<schema.Webhook[]> {
   if (state.hooksCache && now - state.hooksCache.at < HOOKS_CACHE_MS) return state.hooksCache.rows;
@@ -301,12 +307,14 @@ async function postOnce(url: string, headers: Record<string, string>, body: stri
   if (targetsSelf(url)) return 0;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), DELIVERY_TIMEOUT_MS);
+  state.deliveryInflight++;
   try {
     const res = await fetch(url, { method: "POST", headers, body, signal: ctl.signal, redirect: "manual" });
     return res.status;
   } catch {
     return 0;
   } finally {
+    state.deliveryInflight = Math.max(0, state.deliveryInflight - 1);
     clearTimeout(timer);
   }
 }

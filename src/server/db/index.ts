@@ -1,5 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
+import type { Pool as PgPool, PoolClient } from "pg";
+import { registerPressureGauge } from "@/server/pressure-gauges";
 import * as schema from "./schema";
 
 type PgDb = import("drizzle-orm/node-postgres").NodePgDatabase<typeof schema>;
@@ -36,11 +38,58 @@ async function create(): Promise<Db> {
   if (url) {
     const { drizzle } = await import("drizzle-orm/node-postgres");
     const { Pool } = await import("pg");
-    const pool = new Pool({
+    type PoolConnectCallback = Parameters<PgPool["connect"]>[0];
+    const pendingCheckouts = new Map<number, bigint>();
+    let checkoutSequence = 0;
+    let completedCheckoutMaxMs = 0;
+    const observeCheckout = (id: number) => {
+      const started = pendingCheckouts.get(id);
+      if (started === undefined) return;
+      pendingCheckouts.delete(id);
+      completedCheckoutMaxMs = Math.max(completedCheckoutMaxMs, Number(process.hrtime.bigint() - started) / 1e6);
+    };
+    class ObservedPool extends Pool {
+      connect(): Promise<PoolClient>;
+      connect(callback: PoolConnectCallback): void;
+      override connect(callback?: PoolConnectCallback): Promise<PoolClient> | void {
+        const id = ++checkoutSequence;
+        pendingCheckouts.set(id, process.hrtime.bigint());
+        if (callback) {
+          super.connect((err, client, done) => {
+            observeCheckout(id);
+            callback(err, client, done);
+          });
+          return;
+        }
+        return super.connect().then(
+          (client) => {
+            observeCheckout(id);
+            return client;
+          },
+          (err: unknown) => {
+            observeCheckout(id);
+            throw err;
+          },
+        );
+      }
+    }
+    const pool = new ObservedPool({
       connectionString: url,
       max: Number(process.env.DATABASE_POOL_MAX ?? 10),
       ssl: /sslmode=require/.test(url) || process.env.DATABASE_SSL === "1" ? { rejectUnauthorized: false } : undefined,
     });
+    const gaugeDisposers = [
+      registerPressureGauge("pg_total", () => pool.totalCount),
+      registerPressureGauge("pg_idle", () => pool.idleCount),
+      registerPressureGauge("pg_waiting", () => pool.waitingCount),
+      registerPressureGauge("pg_checkout_max_ms", (reset) => {
+        let maximum = completedCheckoutMaxMs;
+        const now = process.hrtime.bigint();
+        for (const started of pendingCheckouts.values()) maximum = Math.max(maximum, Number(now - started) / 1e6);
+        if (reset) completedCheckoutMaxMs = 0;
+        return maximum;
+      }),
+    ];
     // node-postgres emits "error" on the pool when an *idle* client's connection dies (PostgreSQL restart,
     // pg_terminate_backend, VM patching, network blip). With no listener Node raises it as an uncaught
     // exception and server/index.ts exits the process (seen in production as "terminating connection due
@@ -48,7 +97,10 @@ async function create(): Promise<Db> {
     // client; the next query opens a fresh one. Message only: never the error object or connection string.
     pool.on("error", (err) => console.warn("[db] idle client error:", err.message));
     const db = drizzle(pool, { schema });
-    registry.close = () => pool.end();
+    registry.close = async () => {
+      for (const dispose of gaugeDisposers) dispose();
+      await pool.end();
+    };
     const { migrate } = await import("drizzle-orm/node-postgres/migrator");
     await migrate(db, { migrationsFolder: migrationsFolder() });
     return db;
@@ -96,4 +148,3 @@ export async function closeDb(): Promise<void> {
 }
 
 export { schema };
-

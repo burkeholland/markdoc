@@ -30,7 +30,9 @@ import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
 import { attachRequestErrorGuards } from "./request-guards";
 import { attachRequestLog } from "./request-log";
+import { PressureObservability } from "./pressure-observability";
 import { serveStaticBrotli } from "./static-brotli";
+import { registerPressureGauge } from "@/server/pressure-gauges";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -158,7 +160,9 @@ function setupNextWebSocketHandler(app: object, server: Server) {
 
 async function main() {
   let requestHandler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
+  const pressure = new PressureObservability();
   const server = createServer((req, res) => {
+    pressure.attachRequest(req, res);
     // First, before anything reads the request or writes the response: a client that leaves mid-body or
     // mid-response must not become an uncaughtException (server/request-guards.ts; the exit(1) policy
     // above stays). The standby side port re-emits its requests here, so it is covered too.
@@ -168,6 +172,8 @@ async function main() {
     res.statusCode = 503;
     res.end("starting");
   });
+  pressure.attachServer(server);
+  pressure.start();
   // Start accepting TCP connections before Next prepares. Reject upgrades promptly while starting:
   // a pending HMR handshake makes Chromium queue every later /collab socket behind it.
   const rejectStartupUpgrade = (_req: IncomingMessage, socket: Duplex) => {
@@ -186,6 +192,7 @@ async function main() {
   const handle = app.getRequestHandler();
 
   const hocuspocus = createCollabServer();
+  registerPressureGauge("collab_connections", () => hocuspocus.getConnectionsCount());
   registerCollab(hocuspocus);
   // Install Next's HMR listener before reporting readiness. Next otherwise waits for the first HTTP
   // request, leaving a browser that survived a restart unable to reconnect through WebSockets alone.
@@ -261,6 +268,9 @@ async function main() {
   // takeover leaves only :PORT.
   const standby = standbyPort > 0 ? createServer((req, res) => server.emit("request", req, res)) : null;
   if (standby) {
+    // The side listener has no upgrade handler; observing an `upgrade` event would make Node leave that
+    // otherwise rejected socket open, so only its TCP connections join the process-wide count.
+    pressure.attachServer(standby, { trackUpgrades: false });
     standby.listen(standbyPort, "127.0.0.1", () => {
       console.log(`> Markdoc STANDBY on http://127.0.0.1:${standbyPort} (throwaway database; POST ${STANDBY_TAKEOVER_PATH} to take :${port})`);
     });
@@ -282,6 +292,7 @@ async function main() {
     console.log(`> [exit] ${signal} after ${uptime()}; shutting down, flushing documents...`);
     server.close();
     standby?.close();
+    pressure.stop();
     try {
       await shutdownCollab(hocuspocus);
     } finally {

@@ -9,7 +9,19 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Worker } from "node:worker_threads";
+import { registerPressureGauge } from "@/server/pressure-gauges";
 import { WORKER_ROLE, type RenderedFragment, type WorkerRequest, type WorkerResponse } from "./render-markdown";
+
+interface RenderPressure {
+  queued: number;
+  inflight: number;
+}
+
+const g = globalThis as typeof globalThis & { __markdocRenderPressure?: RenderPressure };
+const pressure: RenderPressure = (g.__markdocRenderPressure ??= { queued: 0, inflight: 0 });
+
+registerPressureGauge("render_queue", () => pressure.queued);
+registerPressureGauge("render_inflight", () => pressure.inflight);
 
 /**
  * Default budget for one render (`MARKDOWN_RENDER_TIMEOUT_MS` overrides). The guard keeps ordinary
@@ -72,6 +84,7 @@ class RenderPool {
   render(markdown: string, assetBaseUrl: string, timeoutMs: number): Promise<RenderedFragment> {
     return new Promise<RenderedFragment>((resolve, reject) => {
       this.queue.push({ id: ++this.seq, markdown, assetBaseUrl, timeoutMs, resolve, reject });
+      pressure.queued++;
       this.pump();
     });
   }
@@ -83,7 +96,9 @@ class RenderPool {
       this.idleTimer = null;
     }
     const job = this.queue.shift()!;
+    pressure.queued = Math.max(0, pressure.queued - 1);
     this.current = job;
+    pressure.inflight++;
     const worker = this.ensureWorker();
     this.timer = setTimeout(() => this.fail(job, new RenderTimeoutError(job.timeoutMs), true), job.timeoutMs);
     const req: WorkerRequest = { id: job.id, markdown: job.markdown, assetBaseUrl: job.assetBaseUrl };
@@ -127,6 +142,7 @@ class RenderPool {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.current = null;
+    pressure.inflight = Math.max(0, pressure.inflight - 1);
     if (this.queue.length === 0 && this.worker) {
       const worker = this.worker;
       this.idleTimer = setTimeout(() => {

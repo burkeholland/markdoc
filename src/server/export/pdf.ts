@@ -1,4 +1,5 @@
 import type { Browser } from "playwright-core";
+import { registerPressureGauge } from "@/server/pressure-gauges";
 
 const IDLE_CLOSE_MS = 60_000;
 /** How long a close waits for Chromium to shut down before the caller moves on (task #1310). */
@@ -8,6 +9,16 @@ const CONTENT_LOAD_TIMEOUT_MS = 10_000;
 let browserPromise: Promise<Browser> | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
 let inFlight = 0;
+
+interface PdfPressure {
+  inflight: number;
+}
+
+const g = globalThis as typeof globalThis & { __markdocPdfPressure?: PdfPressure };
+const pressure: PdfPressure = (g.__markdocPdfPressure ??= { inflight: 0 });
+
+registerPressureGauge("pdf_queue", () => 0);
+registerPressureGauge("pdf_inflight", () => pressure.inflight);
 
 /** Thrown when Chromium cannot be launched (not installed, sandbox denied, ...). */
 export class PdfUnavailableError extends Error {
@@ -95,6 +106,7 @@ function scheduleIdleClose() {
  */
 export async function renderPdf(html: string): Promise<Uint8Array> {
   inFlight++;
+  pressure.inflight++;
   if (idleTimer) clearTimeout(idleTimer);
   try {
     const browser = await getBrowser();
@@ -114,6 +126,7 @@ export async function renderPdf(html: string): Promise<Uint8Array> {
     }
   } finally {
     inFlight--;
+    pressure.inflight = Math.max(0, pressure.inflight - 1);
     if (inFlight === 0) scheduleIdleClose();
   }
 }

@@ -3,6 +3,7 @@ import { createTwoFilesPatch } from "diff";
 import { getDb, schema } from "@/server/db";
 import type { SessionUser } from "@/server/documents";
 import { contentHash } from "@/server/export/html";
+import { registerPressureGauge } from "@/server/pressure-gauges";
 import { agentMentionSlug, parseAgentMentions } from "@/editor/collab/mentions";
 
 // This module is loaded by both the custom server (Hocuspocus hooks wake waiters) and the Next.js route
@@ -112,13 +113,17 @@ interface SharedState {
   writes: Map<string, ContentWrite[]>;
   /** The last person seen typing in the editor (WebSocket), per document. */
   typists: Map<string, WriterRef>;
+  longPolls: number;
 }
 const g = globalThis as typeof globalThis & { __markdocAgentEvents?: SharedState };
-const shared: SharedState = (g.__markdocAgentEvents ??= { seqs: new Map(), waiters: new Map(), textCache: new Map(), writes: new Map(), typists: new Map() });
+const shared: SharedState = (g.__markdocAgentEvents ??= { seqs: new Map(), waiters: new Map(), textCache: new Map(), writes: new Map(), typists: new Map(), longPolls: 0 });
 shared.writes ??= new Map();
 shared.typists ??= new Map();
+shared.longPolls ??= 0;
 const { seqs, waiters, textCache, writes, typists } = shared;
 const WRITES_PER_DOC = 32;
+
+registerPressureGauge("long_polls", () => shared.longPolls);
 
 function bump(key: string) {
   seqs.set(key, (seqs.get(key) ?? 0) + 1);
@@ -606,14 +611,20 @@ export async function pollEvents(docId: string | null, user: SessionUser & { age
   const cursor = decodeCursor(since);
   const deadline = Date.now() + waitS * 1000;
   const collect = () => (docId ? collectDocumentEvents(docId, user, cursor, opts) : collectUserEvents(user, cursor, opts));
-  for (;;) {
-    const seq = wakeSeq(docId);
-    const page = await collect();
-    if (page.events.length > 0 || !cursor) return page;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return page;
-    await waitForWake(docId, seq, remaining);
-    if (Date.now() >= deadline) return collect();
+  const isLongPoll = cursor !== null && waitS > 0;
+  if (isLongPoll) shared.longPolls++;
+  try {
+    for (;;) {
+      const seq = wakeSeq(docId);
+      const page = await collect();
+      if (page.events.length > 0 || !cursor) return page;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return page;
+      await waitForWake(docId, seq, remaining);
+      if (Date.now() >= deadline) return collect();
+    }
+  } finally {
+    if (isLongPoll) shared.longPolls = Math.max(0, shared.longPolls - 1);
   }
 }
 
@@ -629,4 +640,5 @@ export function resetAgentEvents() {
   textCache.clear();
   writes.clear();
   typists.clear();
+  shared.longPolls = 0;
 }
