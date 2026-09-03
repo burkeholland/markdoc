@@ -5,11 +5,11 @@ import { schema } from "../markdown/schema";
 import { findParentNode } from "./utils";
 
 /**
- * Typing Markdown inline syntax applies the mark (task #437): `**bold**`, `*em*`, `~~gone~~` and
+ * Typing Markdown inline syntax applies the mark (task #437): `**bold**`, `*em*`, `_em_`, `~~gone~~` and
  * `` `code` `` become the mark the moment the closing delimiter is typed, instead of staying literal
  * and landing in the source escaped (`\*\*bold\*\*`). The optional first group is the character
- * before the opening delimiter, which must not be another delimiter, so `*` never fires halfway
- * through `**bold**`; the typed text goes on unmarked.
+ * before the opening delimiter; each pattern uses it to exclude invalid boundaries, so `*` never fires
+ * halfway through `**bold**` and `_` does not turn an intraword underscore into emphasis.
  */
 function markInputRule(pattern: RegExp, type: MarkType): InputRule {
   return new InputRule(pattern, (state, match, start, end) => {
@@ -69,6 +69,7 @@ export function markdownInputRules(): Plugin {
     textblockTypeInputRule(CODE_FENCE_RULE, schema.nodes.code_block, (match) => ({ language: match[1] || null })),
     markInputRule(/(^|[^*])(\*\*([^*]+)\*\*)$/, schema.marks.strong),
     markInputRule(/(^|[^*])(\*([^*]+)\*)$/, schema.marks.em),
+    markInputRule(/(^|[^\p{L}\p{N}_])(_([^_]+)_)$/u, schema.marks.em),
     markInputRule(/(^|[^~])(~~([^~]+)~~)$/, schema.marks.strikethrough),
     markInputRule(/(^|[^`])(`([^`]+)`)$/, schema.marks.code),
     // Horizontal rule when a paragraph consists of exactly "---", "***" or "___".
