@@ -3,6 +3,7 @@ import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import * as Y from "yjs";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
+import type { Node as PMNode } from "prosemirror-model";
 import { splitBlock, setBlockType } from "prosemirror-commands";
 import {
   MarkdownBinding,
@@ -31,6 +32,50 @@ function typeText(view: EditorView, text: string, at?: number) {
   if (at !== undefined) tr.setSelection(TextSelection.create(tr.doc, at));
   tr.insertText(text);
   view.dispatch(tr);
+}
+
+const RAW_LINE_POSITIONS = [
+  { label: "first", before: 0, after: 0 },
+  { label: "middle", before: 500, after: 500 },
+  { label: "late", before: 1_000, after: 0 },
+] as const;
+
+function rawLineFixture(before: number, after: number, separator = ""): string {
+  return [
+    ...Array.from({ length: before }, (_, index) => `Prefix paragraph ${index}.`),
+    `pl${separator}ain text`,
+    "# H",
+    ...Array.from({ length: after }, (_, index) => `Suffix paragraph ${index}.`),
+  ].join("\n\n");
+}
+
+function expectCanonicalBinding(binding: MarkdownBinding, view: EditorView, source: string, headingLine: number) {
+  const canonical = parseMarkdown(source);
+  expect(binding.ytext.toString()).toBe(source);
+  expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+  expect(view.state.doc.textContent).toBe(canonical.doc.textContent);
+  expect(binding.blocks).toEqual(canonical.map.blocks);
+
+  const map = binding.getSourceMap();
+  expect(map.blocks).toEqual(canonical.map.blocks);
+  const sourceEndpoints = new Set([0, source.length]);
+  for (const block of canonical.map.blocks) {
+    sourceEndpoints.add(block.from);
+    sourceEndpoints.add(block.to);
+  }
+  for (const offset of sourceEndpoints) expect(map.srcToPm(offset), `source endpoint ${offset}`).toBe(canonical.map.srcToPm(offset));
+
+  const pmEndpoints = new Set([0, canonical.doc.content.size]);
+  let pos = 0;
+  canonical.doc.forEach((node) => {
+    pmEndpoints.add(pos);
+    pos += node.nodeSize;
+    pmEndpoints.add(pos);
+  });
+  for (const endpoint of pmEndpoints) expect(map.pmToSrc(endpoint), `rich endpoint ${endpoint}`).toBe(canonical.map.pmToSrc(endpoint));
+
+  expect(binding.getHeadings()).toEqual(canonical.headings);
+  expect(binding.getHeadings().find((heading) => heading.text === "H")?.line).toBe(headingLine);
 }
 
 describe("diffOps", () => {
@@ -107,12 +152,13 @@ describe("MarkdownBinding", () => {
     expect(updates.length).toBe(1);
   });
 
-  it("uses the transaction range instead of scanning every block for a plain-text edit", () => {
+  it("uses the optimized path without a binding-owned scan, parse, or map rebuild for a plain-text edit", () => {
     const source = Array.from({ length: 1_000 }, (_, index) => `Paragraph ${index} keeps long document typing responsive.`).join("\n\n");
     ytext.insert(0, source);
     const binding = new MarkdownBinding(ytext);
     bindings.push(binding);
     const before = EditorState.create({ doc: binding.initialDoc() });
+    binding.getSourceMap();
     const tr = before.tr.insertText("x", before.doc.content.size - 1);
     const after = before.apply(tr);
     const change = localDocChange(tr, before.doc, after.doc);
@@ -130,10 +176,18 @@ describe("MarkdownBinding", () => {
     };
     const findDiffStart = vi.spyOn(fragment, "findDiffStart");
     const findDiffEnd = vi.spyOn(fragment, "findDiffEnd");
+    const parse = vi.fn(binding["parse"].bind(binding));
+    const buildDoc = vi.fn(binding["buildDoc"].bind(binding));
+    binding["parse"] = parse;
+    binding["buildDoc"] = buildDoc;
     expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
     expect(ytext.toString()).toBe(source + "x");
+    const mapped = binding.getSourceMap();
     expect(findDiffStart).not.toHaveBeenCalled();
     expect(findDiffEnd).not.toHaveBeenCalled();
+    expect(parse).not.toHaveBeenCalled();
+    expect(buildDoc).not.toHaveBeenCalled();
+    expect(binding["mapCache"]?.map).toBe(mapped);
     findDiffStart.mockRestore();
     findDiffEnd.mockRestore();
   });
@@ -236,6 +290,62 @@ describe("MarkdownBinding", () => {
     expect(canonical.childCount).toBe(2);
     expect(canonical.child(1).type.name).toBe(expectedType);
     expect(view.state.doc.eq(canonical)).toBe(true);
+  });
+
+  it.each(RAW_LINE_POSITIONS)("reparses a composition-tagged raw newline inserted at the $label paragraph", async ({ before, after }) => {
+    const source = rawLineFixture(before, after);
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    const sourceOffset = source.indexOf("plain text") + 2;
+    const pmOffset = binding.getSourceMap().srcToPm(sourceOffset);
+    if (before === 0) {
+      expect(source).toBe("plain text\n\n# H");
+      expect(pmOffset).toBe(3);
+    }
+
+    view.dispatch(view.state.tr.insertText("\n", pmOffset).setMeta("composition", 1));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expectCanonicalBinding(binding, view, rawLineFixture(before, after, "\n"), before * 2 + 4);
+  });
+
+  it.each([
+    ["CR", "\r", 3],
+    ["CRLF", "\r\n", 4],
+  ])("reparses composition-tagged %s bytes that reach a paragraph text node", async (_label, separator, headingLine) => {
+    const source = rawLineFixture(0, 0);
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    const pmOffset = binding.getSourceMap().srcToPm(2);
+
+    view.dispatch(view.state.tr.insertText(separator, pmOffset).setMeta("composition", 1));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expectCanonicalBinding(binding, view, rawLineFixture(0, 0, separator), headingLine);
+  });
+
+  it.each(RAW_LINE_POSITIONS)("reparses a composition-tagged raw newline deleted at the $label paragraph", async ({ before, after }) => {
+    const source = rawLineFixture(before, after, "\n");
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const canonical = binding.initialDoc();
+    binding.getSourceMap();
+
+    const children: PMNode[] = [];
+    canonical.forEach((node, _offset, index) => {
+      children.push(index === before ? schema.nodes.paragraph.create(null, schema.text("pl\nain text")) : node);
+    });
+    const staleDoc = schema.nodes.doc.create(null, children);
+    const state = EditorState.create({ doc: staleDoc, plugins: [markdownBindingPlugin(binding)] });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+    const pmOffset = binding.getSourceMap().srcToPm(source.indexOf("pl\nain text") + 2);
+
+    view.dispatch(view.state.tr.insertText("", pmOffset, pmOffset + 1).setMeta("composition", 1));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expectCanonicalBinding(binding, view, rawLineFixture(before, after), before * 2 + 3);
   });
 
   it("reflects text changes in the rich editor while preserving the selection", () => {

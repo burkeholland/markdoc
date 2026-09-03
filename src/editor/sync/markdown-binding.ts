@@ -99,6 +99,10 @@ function containsHardBreak(node: PMNode | null | undefined): boolean {
   return node?.content.content.some((child) => child.type === schema.nodes.hard_break) ?? false;
 }
 
+function containsLineEnding(text: string): boolean {
+  return text.includes("\n") || text.includes("\r");
+}
+
 function blockStarts(doc: PMNode): number[] {
   const starts: number[] = [];
   let pos = 0;
@@ -814,6 +818,13 @@ export class MarkdownBinding {
           newTo: sourceNewTo,
         }
       : null;
+    const changeContainsLineEnding =
+      (op &&
+        (containsLineEnding(op.insert) ||
+          containsLineEnding(fullText.slice(op.index, sourceOldTo)) ||
+          containsLineEnding(oldDoc.textBetween(start, endA, "\n", "\n")) ||
+          containsLineEnding(newDoc.textBetween(start, endB, "\n", "\n")))) ??
+      false;
     const simpleParagraphChange =
       change &&
       oldTo === k + 1 &&
@@ -824,6 +835,7 @@ export class MarkdownBinding {
       newDoc.child(k)?.type === schema.nodes.paragraph &&
       !containsHardBreak(oldDoc.child(k)) &&
       !containsHardBreak(newDoc.child(k)) &&
+      !changeContainsLineEnding &&
       op &&
       sourceOldTo - op.index === change.endA - change.start &&
       sourceNewTo - op.index === change.endB - change.start &&
