@@ -422,6 +422,10 @@ export class CollabSession {
   followEnded: { name: string; seq: number } | null = null;
   /** Collaborator whose remote caret is flashing (after "Jump"), if any. */
   flashUserId: string | null = null;
+  /** Y.Text identity changes not produced by the matching rich transaction. */
+  relativePositionVersion = 0;
+  /** Comment-anchor identity changes independent of document text. */
+  commentRangeVersion = 0;
   private flashTimer: ReturnType<typeof setTimeout> | null = null;
   private lastActivityPublish = 0;
   private sectionCache: { headings: HeadingInfo[]; byOffset: Map<number, string | null> } | null = null;
@@ -1334,11 +1338,17 @@ export class CollabSession {
       const transition = this.readStoredCommentSuggestionTransition();
       if (transition) this.invalidateCommentSuggestionTransition(transition.id);
     }
-    if (transaction.origin === this.binding) this.notifyAfterPaint(true);
-    else this.notify();
+    if (transaction.origin === this.binding) {
+      if (transaction.deleteSet.clients.size > 0) this.relativePositionVersion++;
+      this.notifyAfterPaint(true);
+    } else {
+      this.relativePositionVersion++;
+      this.notify();
+    }
   };
 
   private onCommentsChanged = (_events: Y.YEvent<Y.AbstractType<unknown>>[], transaction: Y.Transaction) => {
+    this.commentRangeVersion++;
     if (transaction.local) {
       const transition = this.readStoredCommentSuggestionTransition();
       if (transition?.phase === "undone" && !this.isCommentSuggestionTransitionCurrent(transition, "undone")) {

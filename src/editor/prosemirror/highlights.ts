@@ -110,6 +110,7 @@ function refreshSignature(session: CollabSession, getFocus: () => number | null)
       highlight.id === "pending";
     return `${highlight.kind}:${highlight.id ?? ""}:${highlight.active ? 1 : 0}:${rangeMatters ? `${highlight.from}-${highlight.to}` : ""}`;
   });
+  parts.push(`identity:${session.relativePositionVersion}:${session.commentRangeVersion}`);
   parts.push(`focus:${getFocus() ?? ""}`);
   return parts.join("|");
 }

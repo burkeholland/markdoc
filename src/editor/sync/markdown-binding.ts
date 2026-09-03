@@ -18,6 +18,17 @@ export interface LocalDocChange {
   start: number;
   endA: number;
   endB: number;
+  authorization?: LocalChangeAuthorization | null;
+}
+
+interface LocalChangeAuthorization {
+  doc: PMNode;
+  sourceGeneration: number;
+  text: string;
+  map: SourceMap;
+  from: Y.RelativePosition;
+  to: Y.RelativePosition;
+  insert: string;
 }
 
 interface MarkdownBindingState {
@@ -93,6 +104,30 @@ export interface MarkdownBindingOptions {
 
 function isEmptyBlock(node: PMNode): boolean {
   return node.type === schema.nodes.paragraph && node.content.size === 0;
+}
+
+function isPlainText(node: PMNode | null): boolean {
+  return node?.isText === true && node.marks.length === 0;
+}
+
+/** Whether a changed range is owned by plain text without touching an atom or marked-text endpoint. */
+function hasUnambiguousPlainTextOwnership(doc: PMNode, from: number, to: number): boolean {
+  const $from = doc.resolve(from);
+  const $to = doc.resolve(to);
+  if ($from.depth !== 1 || $to.depth !== 1 || $from.parent !== $to.parent || $from.parent.type !== schema.nodes.paragraph) return false;
+  const boundaryIsPlain = ($pos: typeof $from) => {
+    const before = $pos.nodeBefore;
+    const after = $pos.nodeAfter;
+    return (!!before || !!after) && (!before || isPlainText(before)) && (!after || isPlainText(after));
+  };
+  if (!boundaryIsPlain($from) || !boundaryIsPlain($to)) return false;
+  let plain = true;
+  if (to > from) {
+    doc.nodesBetween(from, to, (node) => {
+      if (node.isInline && !isPlainText(node)) plain = false;
+    });
+  }
+  return plain;
 }
 
 function containsHardBreak(node: PMNode | null | undefined): boolean {
@@ -298,6 +333,10 @@ export class MarkdownBinding {
   private currentDoc: PMNode | null = null;
   /** Markdown represented by currentDoc; avoids materializing the complete Y.Text for local lookups. */
   private currentText = "";
+  /** Every Y.Text transaction, including binding-owned writes, advances this generation. */
+  private sourceGeneration = 0;
+  /** Source generation represented by currentText/currentDoc. */
+  private currentTextGeneration = 0;
   private mapCache: { text: string; phantomKey: string; map: SourceMap } | null = null;
   private parseCache: { text: string; result: ParseResult } | null = null;
   private headingsCache: { text: string; headings: HeadingInfo[] } | null = null;
@@ -455,6 +494,7 @@ export class MarkdownBinding {
     const text = this.ytext.toString();
     const built = this.buildDoc(text);
     this.currentText = text;
+    this.currentTextGeneration = this.sourceGeneration;
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
     this.currentDoc = built.doc;
@@ -592,6 +632,7 @@ export class MarkdownBinding {
   }
 
   private onTextChange = (_event: Y.YTextEvent, tr: Y.Transaction) => {
+    this.sourceGeneration++;
     if (this.destroyed || tr.origin === this) return;
     if (this.holding) {
       this.holdSync();
@@ -704,6 +745,100 @@ export class MarkdownBinding {
     }
   }
 
+  /**
+   * Bind a one-map local change to the exact rich document and Y.Text generation it started from.
+   * Relative source boundaries let the canonical path replay the local edit if Yjs advances before
+   * the view plugin applies it.
+   */
+  authorizeLocalChange(change: LocalDocChange): LocalDocChange {
+    if (
+      this.currentDoc !== change.before ||
+      this.currentTextGeneration !== this.sourceGeneration ||
+      this.phantoms.size > 0 ||
+      this.mapCache?.text !== this.currentText
+    ) {
+      return { ...change, authorization: null };
+    }
+    const oldIndex = blockIndexAtResolvedStart(change.before, change.start);
+    const newIndex = blockIndexAtResolvedStart(change.after, change.start);
+    if (
+      oldIndex >= change.before.childCount ||
+      newIndex >= change.after.childCount ||
+      blockIndexAtResolvedEnd(change.before, change.endA) !== oldIndex ||
+      blockIndexAtResolvedEnd(change.after, change.endB) !== newIndex ||
+      change.before.child(oldIndex).type !== schema.nodes.paragraph ||
+      change.after.child(newIndex).type !== schema.nodes.paragraph ||
+      !hasUnambiguousPlainTextOwnership(change.before, change.start, change.endA) ||
+      !hasUnambiguousPlainTextOwnership(change.after, change.start, change.endB)
+    ) {
+      return { ...change, authorization: null };
+    }
+    const map = this.mapCache.map;
+    const block = this.blocks[oldIndex];
+    if (!block || block.phantom) return { ...change, authorization: null };
+    const oldBlock = this.currentText.slice(block.from, block.to);
+    const newBlock = serializeBlocks([change.after.child(newIndex)]);
+    if (serializeBlocks([change.before.child(oldIndex)]) !== oldBlock) return { ...change, authorization: null };
+    const ops = diffOps(oldBlock, newBlock, block.from);
+    const op = ops.length === 1 ? ops[0] : null;
+    if (!op) return { ...change, authorization: null };
+    const sourceFrom = op.index;
+    const sourceTo = op.index + op.deleteCount;
+    if (
+      map.srcToPm(sourceFrom) !== change.start ||
+      map.srcToPm(sourceTo) !== change.endA ||
+      sourceTo - sourceFrom !== change.endA - change.start ||
+      containsLineEnding(this.currentText.slice(sourceFrom, sourceTo)) ||
+      containsLineEnding(op.insert)
+    ) {
+      return { ...change, authorization: null };
+    }
+    const from = Y.createRelativePositionFromTypeIndex(this.ytext, sourceFrom);
+    const to = sourceFrom === sourceTo ? from : Y.createRelativePositionFromTypeIndex(this.ytext, sourceTo, -1);
+    return {
+      ...change,
+      authorization: {
+        doc: this.currentDoc,
+        sourceGeneration: this.sourceGeneration,
+        text: this.currentText,
+        map,
+        from,
+        to,
+        insert: op.insert,
+      },
+    };
+  }
+
+  private authorizationIsCurrent(authorization: LocalChangeAuthorization): boolean {
+    return (
+      this.currentDoc === authorization.doc &&
+      this.sourceGeneration === authorization.sourceGeneration &&
+      this.currentTextGeneration === authorization.sourceGeneration &&
+      this.currentText === authorization.text
+    );
+  }
+
+  private reconcileStaleLocalChange(authorization: LocalChangeAuthorization): boolean {
+    const from = Y.createAbsolutePositionFromRelativePosition(authorization.from, this.ydoc);
+    const to = Y.createAbsolutePositionFromRelativePosition(authorization.to, this.ydoc);
+    if (!from || !to || from.type !== this.ytext || to.type !== this.ytext) {
+      this.requestSync();
+      return false;
+    }
+    const sourceFrom = Math.min(from.index, to.index);
+    const sourceTo = Math.max(from.index, to.index);
+    const ops: TextOp[] = [{ index: sourceFrom, deleteCount: sourceTo - sourceFrom, insert: authorization.insert }];
+    if (this.options.interceptor?.(ops, this.ytext, this)) {
+      this.requestSync();
+      this.options.onSync?.("local");
+      return true;
+    }
+    this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+    this.requestSync();
+    this.options.onSync?.("local");
+    return true;
+  }
+
   private handleLocal(oldState: EditorState, newState: EditorState, change: LocalDocChange | null): boolean {
     const oldDoc = oldState.doc;
     const newDoc = newState.doc;
@@ -724,6 +859,17 @@ export class MarkdownBinding {
         endA += overlap;
         endB += overlap;
       }
+    }
+
+    const authorizedChange =
+      change && change.before === oldDoc && change.after === newDoc
+        ? change.authorization === undefined
+          ? this.authorizeLocalChange(change)
+          : change
+        : null;
+    const authorization = authorizedChange?.authorization ?? null;
+    if (authorizedChange && authorization && !this.authorizationIsCurrent(authorization)) {
+      return this.reconcileStaleLocalChange(authorization);
     }
 
     const N = oldDoc.childCount;
@@ -810,7 +956,8 @@ export class MarkdownBinding {
     const op = ops.length === 1 ? ops[0] : null;
     const sourceOldTo = op ? op.index + op.deleteCount : -1;
     const sourceNewTo = op ? op.index + op.insert.length : -1;
-    const previousMap = this.mapCache?.text === fullText && this.phantoms.size === 0 ? this.mapCache.map : null;
+    const previousMap =
+      authorization?.map ?? (this.mapCache?.text === fullText && this.phantoms.size === 0 ? this.mapCache.map : null);
     const sourceChange = op
       ? {
           oldFrom: op.index,
@@ -831,8 +978,8 @@ export class MarkdownBinding {
       newTo === k + 1 &&
       chunks.length === 1 &&
       !chunks[0].phantom &&
-      oldDoc.child(k)?.type === schema.nodes.paragraph &&
-      newDoc.child(k)?.type === schema.nodes.paragraph &&
+      hasUnambiguousPlainTextOwnership(oldDoc, change.start, change.endA) &&
+      hasUnambiguousPlainTextOwnership(newDoc, change.start, change.endB) &&
       !containsHardBreak(oldDoc.child(k)) &&
       !containsHardBreak(newDoc.child(k)) &&
       !changeContainsLineEnding &&
@@ -841,6 +988,7 @@ export class MarkdownBinding {
       sourceNewTo - op.index === change.endB - change.start &&
       previousMap &&
       sourceChange &&
+      authorization &&
       hasLinearUnmarkedMapping(previousMap, oldDoc, newDoc, change, sourceChange);
 
     // Verify that the new text, together with its neighbouring blocks, parses back into
@@ -877,6 +1025,9 @@ export class MarkdownBinding {
       this.requestSync();
       this.options.onSync?.("local");
       return true;
+    }
+    if (simpleParagraphChange && authorization && !this.authorizationIsCurrent(authorization)) {
+      return this.reconcileStaleLocalChange(authorization);
     }
     if (ops.length > 0) this.ydoc.transact(() => applyOps(this.ytext, ops), this);
 
@@ -924,6 +1075,7 @@ export class MarkdownBinding {
     }
     this.currentDoc = newDoc;
     this.currentText = nextFullText;
+    this.currentTextGeneration = this.sourceGeneration;
     this.cancelVerify();
     const onePlainTextBlock =
       simpleParagraphChange &&
@@ -975,6 +1127,7 @@ export class MarkdownBinding {
     }
     this.phantoms.clear();
     this.currentText = text;
+    this.currentTextGeneration = this.sourceGeneration;
     this.mapCache = null;
     this.headingsCache = null;
     this.requestSync();
@@ -1042,6 +1195,7 @@ export class MarkdownBinding {
     const text = this.ytext.toString();
     const built = this.buildDoc(text);
     this.currentText = text;
+    this.currentTextGeneration = this.sourceGeneration;
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
     this.currentDoc = built.doc;
@@ -1082,7 +1236,8 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
         if (tr.getMeta("appendedTransaction")) {
           return tr.docChanged ? { remote: value.remote, localChange: null } : value;
         }
-        return { remote: false, localChange: localDocChange(tr, oldState.doc, newState.doc) };
+        const change = localDocChange(tr, oldState.doc, newState.doc);
+        return { remote: false, localChange: change ? binding.authorizeLocalChange(change) : null };
       },
     },
     view(view) {

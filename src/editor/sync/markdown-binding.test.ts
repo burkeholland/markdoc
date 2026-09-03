@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import * as Y from "yjs";
-import { EditorState, TextSelection } from "prosemirror-state";
+import { EditorState, Plugin, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { splitBlock, setBlockType } from "prosemirror-commands";
@@ -83,6 +83,19 @@ function expectCanonicalBinding(binding: MarkdownBinding, view: EditorView, sour
   expect(binding.getHeadings().find((heading) => heading.text === "H")?.line).toBe(headingLine);
 }
 
+function expectCompleteCanonicalMap(binding: MarkdownBinding, view: EditorView, source: string) {
+  const canonical = parseMarkdown(source);
+  const map = binding.getSourceMap();
+  expect(map.blocks).toEqual(canonical.map.blocks);
+  expect(map.segments).toEqual(canonical.map.segments);
+  for (let offset = 0; offset <= source.length; offset++) {
+    expect(map.srcToPm(offset), `source offset ${offset}`).toBe(canonical.map.srcToPm(offset));
+  }
+  for (let pos = 0; pos <= view.state.doc.content.size; pos++) {
+    expect(map.pmToSrc(pos), `rich position ${pos}`).toBe(canonical.map.pmToSrc(pos));
+  }
+}
+
 describe("diffOps", () => {
   it("produces minimal operations", () => {
     expect(diffOps("hello world", "hello brave world", 10)).toEqual([{ index: 16, deleteCount: 0, insert: "brave " }]);
@@ -157,22 +170,32 @@ describe("MarkdownBinding", () => {
     expect(updates.length).toBe(1);
   });
 
-  it("uses the optimized path without a binding-owned scan, parse, or map rebuild for a plain-text edit", () => {
-    const source = Array.from({ length: 1_000 }, (_, index) => `Paragraph ${index} keeps long document typing responsive.`).join("\n\n");
+  it.each([
+    ["first", 0],
+    ["middle", 500],
+    ["last", 999],
+  ])("uses the optimized path without full-document work at the %s paragraph", (_label, paragraphIndex) => {
+    const source = Array.from(
+      { length: 1_000 },
+      (_, index) => `Paragraph ${index} keeps long document typing ${index % 2 === 0 ? "**responsive**" : "[responsive](https://example.com)"} today.`,
+    ).join("\n\n");
     ytext.insert(0, source);
     const binding = new MarkdownBinding(ytext);
     bindings.push(binding);
     const before = EditorState.create({ doc: binding.initialDoc() });
-    binding.getSourceMap();
-    const tr = before.tr.insertText("x", before.doc.content.size - 1);
+    const map = binding.getSourceMap();
+    const paragraph = `Paragraph ${paragraphIndex}`;
+    const sourceOffset = source.indexOf(paragraph) + paragraph.length;
+    const position = map.srcToPm(sourceOffset);
+    const tr = before.tr.insertText("x", position);
     const after = before.apply(tr);
     const change = localDocChange(tr, before.doc, after.doc);
     expect(change).toMatchObject({
       before: before.doc,
       after: after.doc,
-      start: before.doc.content.size - 1,
-      endA: before.doc.content.size - 1,
-      endB: before.doc.content.size,
+      start: position,
+      endA: position,
+      endB: position + 1,
     });
 
     const fragment = Object.getPrototypeOf(before.doc.content) as {
@@ -181,20 +204,168 @@ describe("MarkdownBinding", () => {
     };
     const findDiffStart = vi.spyOn(fragment, "findDiffStart");
     const findDiffEnd = vi.spyOn(fragment, "findDiffEnd");
+    const materialize = vi.spyOn(ytext as unknown as { toString: () => string }, "toString");
     const parse = vi.fn(binding["parse"].bind(binding));
     const buildDoc = vi.fn(binding["buildDoc"].bind(binding));
     binding["parse"] = parse;
     binding["buildDoc"] = buildDoc;
     expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
-    expect(ytext.toString()).toBe(source + "x");
     const mapped = binding.getSourceMap();
     expect(findDiffStart).not.toHaveBeenCalled();
     expect(findDiffEnd).not.toHaveBeenCalled();
+    expect(materialize).not.toHaveBeenCalled();
     expect(parse).not.toHaveBeenCalled();
     expect(buildDoc).not.toHaveBeenCalled();
     expect(binding["mapCache"]?.map).toBe(mapped);
+    materialize.mockRestore();
+    expect(ytext.toString()).toBe(source.slice(0, sourceOffset) + "x" + source.slice(sourceOffset));
     findDiffStart.mockRestore();
     findDiffEnd.mockRestore();
+  });
+
+  it("revalidates a local fast-path authorization after an intervening remote generation", async () => {
+    ytext.insert(0, "a\n\nb");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText("x", 2);
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+    expect(change.authorization).not.toBeNull();
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(remote.getText("content").length, "R");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe("a\n\nbR");
+
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("ax\n\nbR");
+    const canonical = parseMarkdown("ax\n\nbR");
+    expect(binding["currentDoc"]?.toJSON()).toEqual(canonical.doc.toJSON());
+    expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, "ax\n\nbR");
+    remote.destroy();
+  });
+
+  it.each([
+    [">", "\\>a\n\nbR"],
+    ["# ", "\\# a\n\nbR"],
+    ["- ", "\\- a\n\nbR"],
+    ["*", "\\*a\n\nbR"],
+    ["`", "\\`a\n\nbR"],
+  ])("replays a stale local %j insertion with canonical Markdown escaping", async (insert, expected) => {
+    ytext.insert(0, "a\n\nb");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText(insert, 1);
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+    expect(change.authorization).not.toBeNull();
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(remote.getText("content").length, "R");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    remote.destroy();
+  });
+
+  it("preserves local and remote edits when an earlier plugin appends during the same view update", async () => {
+    ytext.insert(0, "a\n\nb");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendRemote = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(remote.getText("content").length, "R");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.insertText("R", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({ doc: initial, plugins: [appendRemote, markdownBindingPlugin(binding)] });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("ax\n\nbR");
+    const canonical = parseMarkdown("ax\n\nbR");
+    expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+    expect(binding["currentDoc"]?.toJSON()).toEqual(canonical.doc.toJSON());
+    remote.destroy();
+  });
+
+  it("keeps metadata-only appended transactions on the authorized plain-text path", () => {
+    ytext.insert(0, "a\n\nb");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    let appended = false;
+    const appendMetadata = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.setMeta("metadata-only", true);
+      },
+    });
+    const state = EditorState.create({ doc: initial, plugins: [appendMetadata, markdownBindingPlugin(binding)] });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+
+    expect(ytext.toString()).toBe("ax\n\nb");
+    expect(binding["mapCache"]).not.toBeNull();
+    expectCompleteCanonicalMap(binding, view, "ax\n\nb");
+  });
+
+  it("keeps generations current across undo, redo, and a later joined-client edit", () => {
+    ytext.insert(0, "alpha\n\nomega");
+    const { view, binding } = editor();
+    const undo = new Y.UndoManager(ytext, { trackedOrigins: new Set([binding]) });
+    binding.getSourceMap();
+
+    view.dispatch(view.state.tr.insertText("X", 3));
+    expect(ytext.toString()).toBe("alXpha\n\nomega");
+    undo.stopCapturing();
+    undo.undo();
+    expect(ytext.toString()).toBe("alpha\n\nomega");
+    undo.redo();
+    expect(ytext.toString()).toBe("alXpha\n\nomega");
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(remote.getText("content").length, "R");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    binding.getSourceMap();
+    view.dispatch(view.state.tr.insertText("Y", 4));
+
+    expect(ytext.toString()).toBe("alXYpha\n\nomegaR");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(ytext.toString()).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, ytext.toString());
+    undo.destroy();
+    remote.destroy();
   });
 
   it("keeps mapped source positions exact through repeated plain-paragraph edits", () => {
@@ -234,6 +405,52 @@ describe("MarkdownBinding", () => {
     for (const pos of pmPositions) expect(mapped.pmToSrc(pos)).toBe(authoritative.pmToSrc(pos));
     expect(mapped.blocks).toEqual(authoritative.blocks);
     expect(mapped.segments).toEqual(authoritative.segments);
+  });
+
+  it.each([
+    ["after an empty-alt image", "![](x)a", 2, "![](x)Xa"],
+    ["before an empty-alt image", "a![](x)", 2, "aX![](x)"],
+    ["after linked text", "[a](x)b", 2, "[a](x)Xb"],
+    ["before linked text", "a[b](x)", 2, "aX[b](x)"],
+    ["after strong text", "**a**b", 2, "**a**Xb"],
+    ["before strong text", "a**b**", 2, "aX**b**"],
+    ["between adjacent images", "![](x)![](y)", 2, "![](x)X![](y)"],
+  ])("falls back at the inline ownership boundary %s", async (_label, source, position, expected) => {
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    binding.getSourceMap();
+
+    view.dispatch(view.state.tr.replaceWith(position, position, schema.text("X")));
+    expect(binding["mapCache"]).toBeNull();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, expected);
+  });
+
+  it("keeps image segment ownership exact when following text receives an insertion", async () => {
+    ytext.insert(0, "![](x)a");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+
+    view.dispatch(view.state.tr.insertText("X", 2, 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(binding.getSourceMap().segments[0]).toEqual({ pmFrom: 1, pmTo: 2, srcFrom: 0, srcTo: 6 });
+    expectCompleteCanonicalMap(binding, view, "![](x)Xa");
+  });
+
+  it("keeps surrogate-pair offsets exact on the plain-text fast path", () => {
+    ytext.insert(0, "😀a");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+
+    view.dispatch(view.state.tr.insertText("X", 3, 3));
+
+    expect(ytext.toString()).toBe("😀Xa");
+    expect(binding["mapCache"]).not.toBeNull();
+    expectCompleteCanonicalMap(binding, view, "😀Xa");
   });
 
   it("invalidates the mapped source map when an equivalent repeated-character diff starts elsewhere", () => {

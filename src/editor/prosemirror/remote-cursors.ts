@@ -154,13 +154,13 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
     },
     view(view) {
       const refresh = () => scheduleRefresh(view);
-      let sessionSignature = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}`;
+      let sessionSignature = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}:${session.relativePositionVersion}`;
       const onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
         if ([...added, ...updated, ...removed].some((id) => id !== session.ydoc.clientID)) refresh();
       };
       session.awareness.on("change", onAwareness);
       const unsubscribe = session.subscribe(() => {
-        const next = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}`;
+        const next = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}:${session.relativePositionVersion}`;
         if (next === sessionSignature) return;
         sessionSignature = next;
         refresh();
