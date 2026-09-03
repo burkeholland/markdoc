@@ -4,12 +4,22 @@ Newest first. Each entry is one merged feature or fix on `main`; test-only and w
 
 ## 2026-09-02
 
+### Writing
+
+- The table toolbar stays inside the visible editor pane when classic scrollbars narrow a 1024 px split layout, so opening it no longer creates a horizontal scrollbar; wide layouts are unchanged (2044bb1)
+- The editor shows its server-rendered chrome and document preview immediately, then loads the 924 kB editor stack without a layout jump: first-paint scripts fell from 15 / 1,498,165 B to 7 / 464,810 B, and the tablet hydration shift fell from 0.129 to zero (64fb3d1)
+
+### Look
+
+- The phone editor reserves its signed-in header controls before the HTML parser reaches them, eliminating the measured 80–120 px first-paint growth; *View options* also has its accessible name before hydration, while desktop layout is unchanged (401cfa1)
+
 ### Reliability
 
 - A client disconnecting mid-request or mid-response no longer becomes an uncaught server error or restarts Markdoc: expected disconnect codes stay quiet, while unexpected stream errors write one redacted `[http]` line (994d037)
 
 ### Build, ops and tests
 
+- Next.js, `@next/env` and `eslint-config-next` move together to 16.3.3 for two upstream critical unauthenticated RCE fixes (3f72d33); the operator reference now covers all 34 production log prefixes, unprefixed startup/build diagnostics, request/response stream errors and recursive metadata routes, and the README records Azure's 300-line tail cap and JSON-only system-log retrieval (30648c0); the preceding daily sweep documented every first-parent merge through the client-disconnect guards (568fb99)
 - Runtime-image payloads gain their final ownership as they are copied and production dependencies install as the unprivileged user, removing a 144,061,740 B (21.0 %) compressed copy-up layer — 684,568,023 B fell to 540,506,283 B (990c208); `[http]` route shapes preserve `opengraph-image` instead of redacting it as `:x`, and the route census now includes Next metadata file routes (d98be74); internal editor state and shared keys live in leaf modules instead of importing through features that consume them, removing two module cycles without changing behaviour (1f518b7)
 
 ## 2026-09-01
