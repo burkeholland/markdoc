@@ -283,6 +283,8 @@ export const TOKEN_RETRY_DELAY_MS = 2_000;
 
 /** Cut off for this long with unsaved edits: the pill says the edits are kept on this device. */
 export const OFFLINE_PROLONGED_MS = 30_000;
+/** Quiet period used to collapse per-keystroke shell updates into one update after a typing burst. */
+export const TYPING_NOTIFY_IDLE_MS = 500;
 
 /** Whether a failed collaboration-token fetch was a refusal (no access) rather than a server that did not answer. */
 export function isAccessRefusal(err: unknown): boolean {
@@ -425,6 +427,13 @@ export class CollabSession {
   private sectionCache: { headings: HeadingInfo[]; byOffset: Map<number, string | null> } | null = null;
   private listeners = new Set<Listener>();
   private notifyScheduled = false;
+  private afterPaintNotify: {
+    frame: number | null;
+    timer: ReturnType<typeof setTimeout> | null;
+    cooling: boolean;
+    dirty: boolean;
+    typing: boolean;
+  } | null = null;
   private destroyed = false;
 
   constructor(readonly options: CollabSessionOptions) {
@@ -551,11 +560,11 @@ export class CollabSession {
         }
         if (number === 0 && this.synced) perfMark("markdoc:sync-acked");
         this.updateRecovery();
-        this.notify();
+        this.notifyAfterPaint(number > 0);
       },
       onAwarenessChange: () => {
         this.checkFollowedPresence();
-        this.notify();
+        this.notifyAfterPaint();
       },
       onStateless: ({ payload }) => {
         let message: { type?: string } | null = null;
@@ -590,16 +599,17 @@ export class CollabSession {
     });
     this.comments = new CommentsModel(this.ydoc, this.ytext);
     this.suggestions = new SuggestionsModel(this.ydoc, this.ytext);
-    this.binding = new MarkdownBinding(this.ytext, { onSync: () => this.notify() });
+    this.binding = new MarkdownBinding(this.ytext, {
+      onSync: (direction) => (direction === "local" ? this.notifyAfterPaint(true) : this.notify()),
+    });
     // Coalesce the text the local copy and the server deliver into one rich-pane rebuild (released on the first sync).
     this.binding.holdRemoteSync();
     this.undoManager.addTrackedOrigin(this.binding);
-    this.undoManager.on("stack-item-added", this.notify);
+    this.undoManager.on("stack-item-added", () => this.notifyAfterPaint(true));
     this.undoManager.on("stack-item-popped", this.onUndoStackItemPopped);
     this.undoManager.on("stack-cleared", this.notify);
-    this.comments.subscribe(this.notify);
     this.comments.ymap.observeDeep(this.onCommentsChanged);
-    this.suggestions.subscribe(this.notify);
+    this.suggestions.ymap.observe(this.notify);
     this.meta.observe(this.notify);
     this.commentSuggestionTransitions.observe(this.notify);
     this.ytext.observe(this.onTextChanged);
@@ -846,7 +856,7 @@ export class CollabSession {
   setLocalCursor(surface: Surface, source: number | null) {
     if (this.localCursor[surface] === source) return;
     this.localCursor = { ...this.localCursor, [surface]: source };
-    this.notify();
+    this.notifyAfterPaint();
   }
 
   /** Source offset of the caret in the active pane (the outline highlights the section it is in). */
@@ -1237,6 +1247,56 @@ export class CollabSession {
     });
   };
 
+  /** Show the first typing update after paint, then coalesce shell churn until the user pauses. */
+  private notifyAfterPaint = (typing = false) => {
+    if (this.destroyed) return;
+    const current = this.afterPaintNotify;
+    if (current) {
+      if (typing && !current.typing) {
+        current.typing = true;
+        if (current.cooling) {
+          if (current.timer) clearTimeout(current.timer);
+          this.afterPaintNotify = null;
+          this.notifyAfterPaint(true);
+          return;
+        }
+      }
+      if (current.cooling) {
+        current.dirty = true;
+        if (current.timer) clearTimeout(current.timer);
+        current.timer = setTimeout(() => {
+          if (this.afterPaintNotify !== current) return;
+          this.afterPaintNotify = null;
+          if (current.dirty) this.notify();
+        }, TYPING_NOTIFY_IDLE_MS);
+      }
+      return;
+    }
+    const pending = {
+      frame: null as number | null,
+      timer: null as ReturnType<typeof setTimeout> | null,
+      cooling: false,
+      dirty: false,
+      typing,
+    };
+    this.afterPaintNotify = pending;
+    const run = () => {
+      pending.frame = null;
+      pending.timer = setTimeout(() => {
+        if (this.afterPaintNotify !== pending) return;
+        pending.cooling = true;
+        this.notify();
+        pending.timer = setTimeout(() => {
+          if (this.afterPaintNotify !== pending) return;
+          this.afterPaintNotify = null;
+          if (pending.dirty) this.notify();
+        }, TYPING_NOTIFY_IDLE_MS);
+      }, 0);
+    };
+    if (typeof requestAnimationFrame === "function") pending.frame = requestAnimationFrame(run);
+    else run();
+  };
+
   private onUndoStackItemPopped = (event: { stackItem: { meta: Map<unknown, unknown> }; type: "undo" | "redo" }) => {
     const meta = event.stackItem.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined;
     if (meta) {
@@ -1274,15 +1334,18 @@ export class CollabSession {
       const transition = this.readStoredCommentSuggestionTransition();
       if (transition) this.invalidateCommentSuggestionTransition(transition.id);
     }
-    this.notify();
+    if (transaction.origin === this.binding) this.notifyAfterPaint(true);
+    else this.notify();
   };
 
   private onCommentsChanged = (_events: Y.YEvent<Y.AbstractType<unknown>>[], transaction: Y.Transaction) => {
-    if (!transaction.local) return;
-    const transition = this.readStoredCommentSuggestionTransition();
-    if (transition?.phase === "undone" && !this.isCommentSuggestionTransitionCurrent(transition, "undone")) {
-      this.invalidateCommentSuggestionTransition(transition.id);
+    if (transaction.local) {
+      const transition = this.readStoredCommentSuggestionTransition();
+      if (transition?.phase === "undone" && !this.isCommentSuggestionTransitionCurrent(transition, "undone")) {
+        this.invalidateCommentSuggestionTransition(transition.id);
+      }
     }
+    this.notify();
   };
 
   private readStoredCommentSuggestionTransition(): CommentSuggestionTransition | null {
@@ -1427,6 +1490,12 @@ export class CollabSession {
     if (this.recoveredTimer) clearTimeout(this.recoveredTimer);
     if (this.flashTimer) clearTimeout(this.flashTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    const pendingNotify = this.afterPaintNotify;
+    if (pendingNotify?.frame !== null && pendingNotify?.frame !== undefined && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(pendingNotify.frame);
+    }
+    if (pendingNotify?.timer) clearTimeout(pendingNotify.timer);
+    this.afterPaintNotify = null;
     this.disarmConnectWatchdog();
     this.clearProlongedOffline();
     this.unregisterWindowListeners();
@@ -1434,6 +1503,7 @@ export class CollabSession {
     this.commentSuggestionTransitions.unobserve(this.notify);
     this.ytext.unobserve(this.onTextChanged);
     this.comments.ymap.unobserveDeep(this.onCommentsChanged);
+    this.suggestions.ymap.unobserve(this.notify);
     this.binding.destroy();
     this.comments.destroy();
     this.suggestions.destroy();

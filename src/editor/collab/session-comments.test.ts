@@ -16,7 +16,7 @@ vi.mock("@hocuspocus/provider", async () => {
 });
 
 import { DecidedSuggestionEditError, type CommentReply, type CommentThread } from "./comments";
-import { CollabSession } from "./session";
+import { CollabSession, TYPING_NOTIFY_IDLE_MS } from "./session";
 import { makeCollabUser } from "./shared";
 
 const TEXT = "The quick brown fox jumps.";
@@ -113,6 +113,34 @@ describe("CollabSession accepted comment suggestion undo", () => {
   afterEach(() => {
     session?.destroy();
     session = null;
+  });
+
+  it("coalesces local typing notifications until the user pauses", async () => {
+    vi.useFakeTimers();
+    try {
+      const current = open();
+      await vi.advanceTimersByTimeAsync(TYPING_NOTIFY_IDLE_MS + 1);
+      const listener = vi.fn();
+      current.subscribe(listener);
+
+      current.setLocalCursor("rich", 0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      current.ydoc.transact(() => current.ytext.insert(0, "a"), current.binding);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listener).toHaveBeenCalledTimes(2);
+
+      for (let index = 0; index < 100; index++) {
+        current.ydoc.transact(() => current.ytext.insert(current.ytext.length, "x"), current.binding);
+      }
+      await vi.advanceTimersByTimeAsync(TYPING_NOTIFY_IDLE_MS - 1);
+      expect(listener).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listener).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reconstructs root Undo and Redo across repeated serialized Y.Doc reloads", () => {

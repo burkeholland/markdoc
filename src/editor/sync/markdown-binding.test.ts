@@ -4,7 +4,15 @@ import * as Y from "yjs";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { splitBlock, setBlockType } from "prosemirror-commands";
-import { MarkdownBinding, markdownBindingPlugin, minimalReplaceTransaction, isStructuralChange, VERIFY_TRUST_AFTER, VERIFY_EVERY_NTH_WINDOW } from "./markdown-binding";
+import {
+  MarkdownBinding,
+  markdownBindingPlugin,
+  minimalReplaceTransaction,
+  isStructuralChange,
+  localDocChange,
+  VERIFY_TRUST_AFTER,
+  VERIFY_EVERY_NTH_WINDOW,
+} from "./markdown-binding";
 import { schema } from "../markdown/schema";
 import { parseMarkdown } from "../markdown/parse";
 import { insertHardBreak } from "../prosemirror/commands";
@@ -97,6 +105,116 @@ describe("MarkdownBinding", () => {
       { from: 9, to: 22 },
     ]);
     expect(updates.length).toBe(1);
+  });
+
+  it("uses the transaction range instead of scanning every block for a plain-text edit", () => {
+    const source = Array.from({ length: 1_000 }, (_, index) => `Paragraph ${index} keeps long document typing responsive.`).join("\n\n");
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const before = EditorState.create({ doc: binding.initialDoc() });
+    const tr = before.tr.insertText("x", before.doc.content.size - 1);
+    const after = before.apply(tr);
+    const change = localDocChange(tr, before.doc, after.doc);
+    expect(change).toMatchObject({
+      before: before.doc,
+      after: after.doc,
+      start: before.doc.content.size - 1,
+      endA: before.doc.content.size - 1,
+      endB: before.doc.content.size,
+    });
+
+    const fragment = Object.getPrototypeOf(before.doc.content) as {
+      findDiffStart: (...args: unknown[]) => unknown;
+      findDiffEnd: (...args: unknown[]) => unknown;
+    };
+    const findDiffStart = vi.spyOn(fragment, "findDiffStart");
+    const findDiffEnd = vi.spyOn(fragment, "findDiffEnd");
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    expect(ytext.toString()).toBe(source + "x");
+    expect(findDiffStart).not.toHaveBeenCalled();
+    expect(findDiffEnd).not.toHaveBeenCalled();
+    findDiffStart.mockRestore();
+    findDiffEnd.mockRestore();
+  });
+
+  it("keeps mapped source positions exact through repeated plain-paragraph edits", () => {
+    let source = "# Heading\n\nAlpha paragraph.\n\nMiddle paragraph text.\n\nTail **bold**.";
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    binding.getSourceMap();
+
+    const replaceSource = (from: number, to: number, text: string) => {
+      const map = binding.getSourceMap();
+      view.dispatch(view.state.tr.insertText(text, map.srcToPm(from), map.srcToPm(to)));
+      source = source.slice(0, from) + text + source.slice(to);
+      expect(ytext.toString()).toBe(source);
+    };
+
+    const middle = source.indexOf("Middle");
+    replaceSource(middle, middle, "A quick ");
+    const paragraph = source.indexOf("paragraph", middle);
+    replaceSource(paragraph, paragraph + "paragraph".length, "section");
+    const textEnd = source.indexOf(" text.", middle) + " text".length;
+    replaceSource(textEnd, textEnd, "!");
+
+    const mapped = binding.getSourceMap();
+    const authoritative = parseMarkdown(source).map;
+    const sourcePositions = [
+      source.indexOf("Alpha") + 2,
+      source.indexOf("quick") + 2,
+      source.indexOf("section") + 3,
+      source.indexOf("Tail") + 2,
+      source.length,
+    ];
+    for (const offset of sourcePositions) {
+      expect(mapped.srcToPm(offset)).toBe(authoritative.srcToPm(offset));
+      expect(mapped.pmToSrc(mapped.srcToPm(offset))).toBe(offset);
+    }
+    const pmPositions = sourcePositions.map((offset) => authoritative.srcToPm(offset));
+    for (const pos of pmPositions) expect(mapped.pmToSrc(pos)).toBe(authoritative.pmToSrc(pos));
+    expect(mapped.blocks).toEqual(authoritative.blocks);
+    expect(mapped.segments).toEqual(authoritative.segments);
+  });
+
+  it("invalidates the mapped source map when an equivalent repeated-character diff starts elsewhere", () => {
+    const source = "qxyz";
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    binding.getSourceMap();
+
+    typeText(view, "x", 2);
+
+    const mapped = binding.getSourceMap();
+    const authoritative = parseMarkdown("qxxyz").map;
+    for (let offset = 0; offset <= ytext.length; offset++) {
+      expect(mapped.srcToPm(offset)).toBe(authoritative.srcToPm(offset));
+    }
+    for (let pos = 0; pos <= view.state.doc.content.size; pos++) {
+      expect(mapped.pmToSrc(pos)).toBe(authoritative.pmToSrc(pos));
+    }
+  });
+
+  it("falls back at inline Markdown boundaries instead of retaining a stale rich document or source map", async () => {
+    ytext.insert(0, "~~strike~~ tail");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+    typeText(view, " ", 1);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const strikeExpected = parseMarkdown(ytext.toString()).doc;
+    expect(view.state.doc.eq(strikeExpected)).toBe(true);
+
+    ytext.delete(0, ytext.length);
+    ytext.insert(0, "hello **bold** tail");
+    binding.getSourceMap();
+    view.dispatch(view.state.tr.insertText("x", 5, 7));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const authoritative = parseMarkdown(ytext.toString());
+    expect(view.state.doc.eq(authoritative.doc)).toBe(true);
+    const mapped = binding.getSourceMap();
+    for (let pos = 0; pos <= view.state.doc.content.size; pos++) {
+      expect(mapped.pmToSrc(pos)).toBe(authoritative.map.pmToSrc(pos));
+    }
   });
 
   it("reflects text changes in the rich editor while preserving the selection", () => {
@@ -585,4 +703,3 @@ describe("MarkdownBinding", () => {
     });
   });
 });
-

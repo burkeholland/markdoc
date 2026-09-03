@@ -105,12 +105,14 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     const from = Math.min(head, anchor);
     const to = Math.max(head, anchor);
     if (to > from) {
-      decorations.push(Decoration.inline(from, to, { class: "md-remote-selection", style: `background-color: ${colorLight}` }));
+      decorations.push(
+        Decoration.inline(from, to, { class: "md-remote-selection", style: `background-color: ${colorLight}` }, { inclusiveEnd: true }),
+      );
     }
     decorations.push(
       Decoration.widget(head, () => caretWidget(session, color, name, flags), {
         key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}`,
-        side: head >= anchor ? 1 : -1,
+        side: 1,
         ignoreSelection: true,
       }),
     );
@@ -152,11 +154,17 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
     },
     view(view) {
       const refresh = () => scheduleRefresh(view);
+      let sessionSignature = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}`;
       const onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
         if ([...added, ...updated, ...removed].some((id) => id !== session.ydoc.clientID)) refresh();
       };
       session.awareness.on("change", onAwareness);
-      const unsubscribe = session.subscribe(refresh);
+      const unsubscribe = session.subscribe(() => {
+        const next = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}`;
+        if (next === sessionSignature) return;
+        sessionSignature = next;
+        refresh();
+      });
 
       const publish = () => {
         if (!view.hasFocus()) return;

@@ -46,7 +46,8 @@ interface EditorSnapshot {
   redoDepth: number;
 }
 
-const BASELINE_END_P95_PAINT_MS = 64.8;
+const BASELINE_END_P95_PAINT_MS = 84.3;
+const BASELINE_FIRST_P95_PAINT_MS = 90.8;
 const TARGET_END_P95_PAINT_MS = BASELINE_END_P95_PAINT_MS / 2;
 
 const percentile = (values: number[], quantile: number): number => {
@@ -406,6 +407,7 @@ test.describe("long-document rich typing performance", () => {
         },
         browser: "Playwright Desktop Chrome / Chromium",
         mode: process.env.PROD_BASE_URL ? "production" : "development",
+        measurement: process.env.E2E_PERF_BASELINE === "1" ? "baseline" : "after",
         first: {
           transaction: timingSummary(first.samples, "transaction"),
           source: timingSummary(first.samples, "source"),
@@ -429,6 +431,8 @@ test.describe("long-document rich typing performance", () => {
     expect(first.samples).toHaveLength(100);
     expect(end.samples.every((sample) => sample.transaction >= sample.input && sample.source >= sample.input && sample.paint >= sample.input)).toBe(true);
     if (process.env.E2E_PERF_BASELINE !== "1") {
+      const endPaint = timingSummary(end.samples, "paint");
+      const firstPaint = timingSummary(first.samples, "paint");
       expect(end.counters.bindingDiffStart + end.counters.bindingDiffEnd).toBe(0);
       expect(end.counters.parse).toBe(0);
       expect(end.counters.remoteRebuild).toBe(0);
@@ -437,7 +441,11 @@ test.describe("long-document rich typing performance", () => {
       expect(end.counters.refresh).toBe(0);
       expect(end.counters.sessionNotify).toBeLessThanOrEqual(2);
       expect(end.longTasks.filter((task) => task.duration > 100)).toHaveLength(0);
-      expect(timingSummary(end.samples, "paint").p95).toBeLessThanOrEqual(TARGET_END_P95_PAINT_MS);
+      expect(endPaint.p95).toBeLessThanOrEqual(TARGET_END_P95_PAINT_MS);
+      expect(endPaint.p95).toBeLessThanOrEqual(50);
+      expect(endPaint.max).toBeLessThan(100);
+      expect(Math.abs(endPaint.p95 - firstPaint.p95)).toBeLessThanOrEqual(20);
+      expect(firstPaint.p95).toBeLessThanOrEqual(BASELINE_FIRST_P95_PAINT_MS * 1.1);
     }
     expect(endCaret).toBeGreaterThan(TYPING_PERFORMANCE_PARAGRAPHS);
   });

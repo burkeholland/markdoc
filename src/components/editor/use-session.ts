@@ -146,12 +146,15 @@ export function useDebouncedSessionValue<T>(
       setValue((prev) => (latest.current.isEqual(prev, next) ? prev : next));
     };
     update();
-    const unsubscribe = session.subscribe(() => {
+    const schedule = () => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(update, delayMs);
-    });
+    };
+    const unsubscribe = session.subscribe(schedule);
+    session.ytext.observe(schedule);
     return () => {
       unsubscribe();
+      session.ytext.unobserve(schedule);
       if (timer) clearTimeout(timer);
     };
   }, [session, delayMs]);

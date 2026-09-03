@@ -7,11 +7,25 @@ import { parseMarkdown, type HeadingInfo, type ParseResult } from "../markdown/p
 import { reparseRange, textChangeSpan, type ChangeSpan } from "../markdown/incremental";
 import { serializeBlocks } from "../markdown/serialize";
 import { schema } from "../markdown/schema";
-import type { BlockRange, SourceMap } from "../markdown/sourcemap";
+import type { BlockRange, Segment, SourceMap } from "../markdown/sourcemap";
 import { diffOps, applyOps, type TextOp } from "./text-diff";
 import { perfMark } from "../collab/shared";
 
-export const markdownBindingKey = new PluginKey<{ remote: boolean }>("markdownBinding");
+export interface LocalDocChange {
+  before: PMNode;
+  after: PMNode;
+  mapping: Transaction["mapping"];
+  start: number;
+  endA: number;
+  endB: number;
+}
+
+interface MarkdownBindingState {
+  remote: boolean;
+  localChange: LocalDocChange | null;
+}
+
+export const markdownBindingKey = new PluginKey<MarkdownBindingState>("markdownBinding");
 
 /** Quiet time after the last incremental parse before it is verified against a full parse. */
 const VERIFY_QUIET_MS = 1000;
@@ -104,17 +118,114 @@ function blockIndexAtStart(starts: number[], docSize: number, pos: number): numb
   return lo;
 }
 
-/** Index of the top-level block in which a change *ends* (boundary positions belong to the preceding block). */
-function blockIndexAtEnd(starts: number[], pos: number): number {
+/** The changed range when one transaction map describes the complete old-to-new document change. */
+export function localDocChange(tr: Transaction, before: PMNode, after: PMNode): LocalDocChange | null {
+  if (!tr.docChanged || tr.mapping.maps.length !== 1) return null;
+  let start = Number.POSITIVE_INFINITY;
+  let endA = -1;
+  let endB = -1;
+  tr.mapping.maps[0].forEach((oldStart, oldEnd, _newStart, newEnd) => {
+    start = Math.min(start, oldStart);
+    endA = Math.max(endA, oldEnd);
+    endB = Math.max(endB, newEnd);
+  });
+  return Number.isFinite(start) ? { before, after, mapping: tr.mapping, start, endA, endB } : null;
+}
+
+/** Top-level block containing a change start; a boundary belongs to the following block. */
+function blockIndexAtResolvedStart(doc: PMNode, pos: number): number {
+  if (pos >= doc.content.size) return doc.childCount;
+  return doc.resolve(Math.max(0, pos)).index(0);
+}
+
+/** Top-level block containing a change end; a boundary belongs to the preceding block. */
+function blockIndexAtResolvedEnd(doc: PMNode, pos: number): number {
   if (pos <= 0) return -1;
-  let lo = 0;
-  let hi = starts.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (starts[mid] < pos) lo = mid;
-    else hi = mid - 1;
+  const $pos = doc.resolve(Math.min(doc.content.size, pos));
+  return $pos.depth === 0 ? $pos.index(0) - 1 : $pos.index(0);
+}
+
+interface SourceChange {
+  oldFrom: number;
+  oldTo: number;
+  newTo: number;
+}
+
+/** Whether the edited PM and Markdown spans are unmarked and map one-to-one at both boundaries. */
+function hasLinearUnmarkedMapping(old: SourceMap, oldDoc: PMNode, newDoc: PMNode, change: LocalDocChange, source: SourceChange): boolean {
+  if (
+    old.srcToPm(source.oldFrom) !== change.start ||
+    old.srcToPm(source.oldTo) !== change.endA ||
+    old.pmToSrc(change.start) !== source.oldFrom ||
+    old.pmToSrc(change.endA) !== source.oldTo
+  ) {
+    return false;
   }
-  return lo;
+  let unmarked = true;
+  if (change.endA > change.start) {
+    oldDoc.nodesBetween(change.start, change.endA, (node) => {
+      if (node.isText && node.marks.length > 0) unmarked = false;
+    });
+  }
+  if (change.endB > change.start) {
+    newDoc.nodesBetween(change.start, change.endB, (node) => {
+      if (node.isText && node.marks.length > 0) unmarked = false;
+    });
+  }
+  return unmarked;
+}
+
+/**
+ * Carry an already-current source map through a simple text replacement. The changed source and
+ * ProseMirror spans have equal lengths here, so positions inside the edit map directly; positions
+ * outside it go through the transaction mapping and the previous map. Segments are materialized
+ * only for diagnostics -- editor position lookups use the bounded mapping functions.
+ */
+function mapSourceMap(old: SourceMap, blocks: BlockRange[], doc: PMNode, change: LocalDocChange, source: SourceChange): SourceMap {
+  const inverse = change.mapping.invert();
+  const sourceDelta = source.newTo - source.oldTo;
+  const sourceNewLength = source.newTo - source.oldFrom;
+  const pmNewLength = change.endB - change.start;
+  let segments: Segment[] | null = null;
+  const sourceAfter = (offset: number, assoc: -1 | 1): number => {
+    if (offset < source.oldFrom || (offset === source.oldFrom && assoc < 0)) return offset;
+    if (offset > source.oldTo || (offset === source.oldTo && assoc > 0)) return offset + sourceDelta;
+    return assoc < 0 ? source.oldFrom : source.newTo;
+  };
+  const sourceBefore = (offset: number, assoc: -1 | 1): number => {
+    if (offset < source.oldFrom || (offset === source.oldFrom && assoc < 0)) return offset;
+    if (offset > source.newTo || (offset === source.newTo && assoc > 0)) return offset - sourceDelta;
+    return assoc < 0 ? source.oldFrom : source.oldTo;
+  };
+  return {
+    blocks,
+    get segments() {
+      segments ??= old.segments.map((segment) => ({
+        pmFrom: change.mapping.map(segment.pmFrom, -1),
+        pmTo: change.mapping.map(segment.pmTo, 1),
+        srcFrom: sourceAfter(segment.srcFrom, -1),
+        srcTo: sourceAfter(segment.srcTo, 1),
+      }));
+      return segments;
+    },
+    srcToPm(offset) {
+      if (offset >= source.oldFrom && offset <= source.newTo) {
+        return change.start + Math.min(pmNewLength, Math.max(0, offset - source.oldFrom));
+      }
+      return change.mapping.map(old.srcToPm(sourceBefore(offset, offset < source.oldFrom ? -1 : 1)), offset < source.oldFrom ? -1 : 1);
+    },
+    pmToSrc(pos) {
+      if (pos >= change.start && pos <= change.endB) {
+        return source.oldFrom + Math.min(sourceNewLength, Math.max(0, pos - change.start));
+      }
+      const before = inverse.map(pos, pos < change.start ? -1 : 1);
+      return sourceAfter(old.pmToSrc(before), pos < change.start ? -1 : 1);
+    },
+    blockIndexAt(pos) {
+      if (pos >= doc.content.size) return Math.max(0, doc.childCount - 1);
+      return doc.resolve(Math.max(0, pos)).index(0);
+    },
+  };
 }
 
 /**
@@ -175,10 +286,13 @@ export class MarkdownBinding {
   /** Source range of every top-level block of the current ProseMirror document. */
   blocks: BlockRange[] = [];
   private phantoms = new Map<number, PhantomRecord>();
-  /** The ProseMirror document that locks describes. */
+  /** The ProseMirror document that blocks describes. */
   private currentDoc: PMNode | null = null;
+  /** Markdown represented by currentDoc; avoids materializing the complete Y.Text for local lookups. */
+  private currentText = "";
   private mapCache: { text: string; phantomKey: string; map: SourceMap } | null = null;
   private parseCache: { text: string; result: ParseResult } | null = null;
+  private headingsCache: { text: string; headings: HeadingInfo[] } | null = null;
   private verifyHandle:
     | { idle: number }
     | { timer: ReturnType<typeof setTimeout> }
@@ -330,7 +444,9 @@ export class MarkdownBinding {
     this.phantoms.clear();
     this.verifiedStreak = 0;
     this.skippedWindows = 0;
-    const built = this.buildDoc(this.ytext.toString());
+    const text = this.ytext.toString();
+    const built = this.buildDoc(text);
+    this.currentText = text;
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
     this.currentDoc = built.doc;
@@ -366,6 +482,10 @@ export class MarkdownBinding {
       this.structuralEdit = false;
     }
     this.parseCache = { text, result };
+    this.headingsCache = { text, headings: result.headings };
+    if (text === this.currentText && this.currentDoc?.eq(result.doc) && this.phantoms.size === 0) {
+      this.mapCache = { text, phantomKey: "", map: { ...result.map, blocks: this.blocks } };
+    }
     return result;
   }
 
@@ -449,6 +569,7 @@ export class MarkdownBinding {
       full.map.blocks.length === cache.result.map.blocks.length &&
       full.map.blocks.every((b, i) => b.from === cache.result.map.blocks[i].from && b.to === cache.result.map.blocks[i].to);
     this.parseCache = { text: cache.text, result: full };
+    this.headingsCache = { text: cache.text, headings: full.headings };
     this.mapCache = null;
     if (same) {
       this.verifiedStreak++;
@@ -479,13 +600,14 @@ export class MarkdownBinding {
    * task ({@link scheduleHeldParse}) and the session notified, so the outline fills in right after.
    */
   getHeadings(): HeadingInfo[] {
-    const text = this.ytext.toString();
+    const text = this.heldSync ? this.ytext.toString() : this.currentText;
     if (this.heldSync) {
       const cache = this.parseCache;
       if (cache && cache.text === text) return cache.result.headings;
       this.scheduleHeldParse();
       return cache ? cache.result.headings : NO_HEADINGS;
     }
+    if (this.headingsCache?.text === text) return this.headingsCache.headings;
     return this.parse(text).headings;
   }
 
@@ -494,7 +616,7 @@ export class MarkdownBinding {
    * walk the tree (the linter) get it without a second parse of the document.
    */
   getTree(): { text: string; tree: Md.Root } {
-    const text = this.ytext.toString();
+    const text = this.currentText;
     return { text, tree: this.parse(text).tree };
   }
 
@@ -505,7 +627,7 @@ export class MarkdownBinding {
   getSourceMap(): SourceMap {
     // While a remote change is held (initial load) the live document still describes the previous
     // text: map against that, not against the new text, whose full parse runs in its own task.
-    const text = this.heldSync ? (this.parseCache?.text ?? "") : this.ytext.toString();
+    const text = this.heldSync ? (this.parseCache?.text ?? "") : this.currentText;
     const phantomKey = Array.from(this.phantoms.keys()).join(",");
     if (this.mapCache && this.mapCache.text === text && this.mapCache.phantomKey === phantomKey) {
       return this.mapCache.map;
@@ -558,11 +680,11 @@ export class MarkdownBinding {
   }
 
   /** Called by the plugin. Handles a state change produced by the user in the rich editor. */
-  handleLocalTransaction(oldState: EditorState, newState: EditorState): boolean {
+  handleLocalTransaction(oldState: EditorState, newState: EditorState, change: LocalDocChange | null = null): boolean {
     if (this.destroyed) return false;
     this.inLocalHandler = true;
     try {
-      return this.handleLocal(oldState, newState);
+      return this.handleLocal(oldState, newState, change);
     } finally {
       this.inLocalHandler = false;
       if (this.pendingSync) {
@@ -574,27 +696,33 @@ export class MarkdownBinding {
     }
   }
 
-  private handleLocal(oldState: EditorState, newState: EditorState): boolean {
+  private handleLocal(oldState: EditorState, newState: EditorState, change: LocalDocChange | null): boolean {
     const oldDoc = oldState.doc;
     const newDoc = newState.doc;
-    if (oldDoc.eq(newDoc)) return false;
-
-    const start = oldDoc.content.findDiffStart(newDoc.content);
-    const end = oldDoc.content.findDiffEnd(newDoc.content);
-    if (start == null || end == null) return false;
-    let { a: endA, b: endB } = end;
-    const overlap = start - Math.min(endA, endB);
-    if (overlap > 0) {
-      endA += overlap;
-      endB += overlap;
+    let start: number;
+    let endA: number;
+    let endB: number;
+    if (change && change.before === oldDoc && change.after === newDoc) {
+      ({ start, endA, endB } = change);
+    } else {
+      if (oldDoc.eq(newDoc)) return false;
+      const diffStart = oldDoc.content.findDiffStart(newDoc.content);
+      const diffEnd = oldDoc.content.findDiffEnd(newDoc.content);
+      if (diffStart == null || diffEnd == null) return false;
+      start = diffStart;
+      ({ a: endA, b: endB } = diffEnd);
+      const overlap = start - Math.min(endA, endB);
+      if (overlap > 0) {
+        endA += overlap;
+        endB += overlap;
+      }
     }
 
-    const oldStarts = blockStarts(oldDoc);
     const N = oldDoc.childCount;
     const M = newDoc.childCount;
     if (this.blocks.length !== N) return this.fallbackReplaceAll(newDoc);
-    const k = blockIndexAtStart(oldStarts, oldDoc.content.size, start);
-    const endIdx = blockIndexAtEnd(oldStarts, endA);
+    const k = blockIndexAtResolvedStart(oldDoc, start);
+    const endIdx = blockIndexAtResolvedEnd(oldDoc, endA);
     const t = N - 1 - Math.max(endIdx, k - 1);
     const oldTo = N - t;
     const newTo = M - t;
@@ -666,18 +794,47 @@ export class MarkdownBinding {
       newText = chunkText;
     }
 
-    const fullText = this.ytext.toString();
+    const fullText = this.currentText;
     const delta = newText.length - (srcTo - srcFrom);
+    const nextFullText = fullText.slice(0, srcFrom) + newText + fullText.slice(srcTo);
+    const oldText = fullText.slice(srcFrom, srcTo);
+    const ops = diffOps(oldText, newText, srcFrom);
+    const op = ops.length === 1 ? ops[0] : null;
+    const sourceOldTo = op ? op.index + op.deleteCount : -1;
+    const sourceNewTo = op ? op.index + op.insert.length : -1;
+    const previousMap = this.mapCache?.text === fullText && this.phantoms.size === 0 ? this.mapCache.map : null;
+    const sourceChange = op
+      ? {
+          oldFrom: op.index,
+          oldTo: sourceOldTo,
+          newTo: sourceNewTo,
+        }
+      : null;
+    const simpleParagraphChange =
+      change &&
+      oldTo === k + 1 &&
+      newTo === k + 1 &&
+      chunks.length === 1 &&
+      !chunks[0].phantom &&
+      oldDoc.child(k)?.type === schema.nodes.paragraph &&
+      newDoc.child(k)?.type === schema.nodes.paragraph &&
+      op &&
+      sourceOldTo - op.index === change.endA - change.start &&
+      sourceNewTo - op.index === change.endB - change.start &&
+      previousMap &&
+      sourceChange &&
+      hasLinearUnmarkedMapping(previousMap, oldDoc, newDoc, change, sourceChange);
 
     // Verify that the new text, together with its neighbouring blocks, parses back into
     // exactly the blocks of the rich document. Neighbours matter because Markdown merges
     // adjacent constructs (two lists, for example).
     let chunkBlocks: BlockRange[] = [];
-    if (chunkText) {
-      const newFull = fullText.slice(0, srcFrom) + newText + fullText.slice(srcTo);
+    if (simpleParagraphChange) {
+      chunkBlocks = [{ from: 0, to: chunkText.length }];
+    } else if (chunkText) {
       const vFrom = prevReal ? prevReal.from : srcFrom;
       const vTo = nextReal ? nextReal.to + delta : srcFrom + newText.length;
-      const parsed = parseMarkdown(newFull.slice(vFrom, vTo));
+      const parsed = parseMarkdown(nextFullText.slice(vFrom, vTo));
       const expected: PMNode[] = [];
       if (prevReal) expected.push(oldDoc.child(prevRealIdx));
       newBlocks.forEach((n, i) => {
@@ -695,8 +852,6 @@ export class MarkdownBinding {
       }));
     }
 
-    const oldText = fullText.slice(srcFrom, srcTo);
-    const ops = diffOps(oldText, newText, srcFrom);
     if (ops.length > 0 && this.options.interceptor?.(ops, this.ytext, this)) {
       // The interceptor wrote the text its own way, so block ranges are rebuilt from the text by
       // the sync. Phantoms the edit turned into real blocks must not be re-inserted by that rebuild.
@@ -708,41 +863,74 @@ export class MarkdownBinding {
     if (ops.length > 0) this.ydoc.transact(() => applyOps(this.ytext, ops), this);
 
     // Update block ranges: [0,k) unchanged, new chunk ranges, [oldTo,N) shifted.
-    const updated: BlockRange[] = [];
-    const newPhantoms = new Map<number, PhantomRecord>();
-    for (let i = 0; i < k; i++) {
-      updated.push(this.blocks[i]);
-      if (this.blocks[i].phantom) newPhantoms.set(i, this.phantoms.get(i) ?? { after: null });
-    }
-    const base = srcFrom + chunkOffset;
-    let chunkIdx = 0;
-    let phantomPos = prevReal ? prevReal.to : 0;
-    for (let i = 0; i < chunks.length; i++) {
-      if (chunks[i].phantom) {
-        newPhantoms.set(updated.length, {
-          after: phantomPos > 0 ? Y.createRelativePositionFromTypeIndex(this.ytext, phantomPos, -1) : null,
-        });
-        updated.push({ from: phantomPos, to: phantomPos, phantom: true });
-      } else {
-        const range = chunkBlocks[chunkIdx++];
-        updated.push({ from: base + range.from, to: base + range.to });
-        phantomPos = base + range.to;
+    if (simpleParagraphChange && this.phantoms.size === 0) {
+      this.blocks[k] = { from: srcFrom, to: srcFrom + newText.length };
+      for (let i = k + 1; i < this.blocks.length; i++) {
+        const block = this.blocks[i];
+        this.blocks[i] = { from: block.from + delta, to: block.to + delta };
       }
-    }
-    for (let i = oldTo; i < N; i++) {
-      const b = this.blocks[i];
-      if (b.phantom) {
-        newPhantoms.set(updated.length, this.phantoms.get(i) ?? { after: null });
-        updated.push({ from: phantomPos, to: phantomPos, phantom: true });
-      } else {
-        updated.push({ from: b.from + delta, to: b.to + delta });
-        phantomPos = b.to + delta;
+    } else {
+      const updated: BlockRange[] = [];
+      const newPhantoms = new Map<number, PhantomRecord>();
+      for (let i = 0; i < k; i++) {
+        updated.push(this.blocks[i]);
+        if (this.blocks[i].phantom) newPhantoms.set(i, this.phantoms.get(i) ?? { after: null });
       }
+      const base = srcFrom + chunkOffset;
+      let chunkIdx = 0;
+      let phantomPos = prevReal ? prevReal.to : 0;
+      for (let i = 0; i < chunks.length; i++) {
+        if (chunks[i].phantom) {
+          newPhantoms.set(updated.length, {
+            after: phantomPos > 0 ? Y.createRelativePositionFromTypeIndex(this.ytext, phantomPos, -1) : null,
+          });
+          updated.push({ from: phantomPos, to: phantomPos, phantom: true });
+        } else {
+          const range = chunkBlocks[chunkIdx++];
+          updated.push({ from: base + range.from, to: base + range.to });
+          phantomPos = base + range.to;
+        }
+      }
+      for (let i = oldTo; i < N; i++) {
+        const b = this.blocks[i];
+        if (b.phantom) {
+          newPhantoms.set(updated.length, this.phantoms.get(i) ?? { after: null });
+          updated.push({ from: phantomPos, to: phantomPos, phantom: true });
+        } else {
+          updated.push({ from: b.from + delta, to: b.to + delta });
+          phantomPos = b.to + delta;
+        }
+      }
+      this.blocks = updated;
+      this.phantoms = newPhantoms;
     }
-    this.blocks = updated;
-    this.phantoms = newPhantoms;
     this.currentDoc = newDoc;
-    this.mapCache = null;
+    this.currentText = nextFullText;
+    this.cancelVerify();
+    const onePlainTextBlock =
+      simpleParagraphChange &&
+      previousMap &&
+      this.phantoms.size === 0 &&
+      op &&
+      sourceChange;
+    if (onePlainTextBlock) {
+      this.mapCache = {
+        text: nextFullText,
+        phantomKey: "",
+        map: mapSourceMap(previousMap, this.blocks, newDoc, change, sourceChange),
+      };
+      if (this.headingsCache?.text === fullText) {
+        this.headingsCache = {
+          text: nextFullText,
+          headings: this.headingsCache.headings.map((heading) =>
+            heading.from >= sourceOldTo ? { ...heading, from: heading.from + delta } : heading,
+          ),
+        };
+      }
+    } else {
+      this.mapCache = null;
+      this.headingsCache = null;
+    }
 
     if (process.env.NODE_ENV !== "production") this.assertConsistent(newDoc);
     this.options.onSync?.("local");
@@ -763,11 +951,14 @@ export class MarkdownBinding {
       .map((b) => serializeBlocks([b]))
       .filter((t) => t.trim() !== "")
       .join("\n\n");
-    const ops = diffOps(this.ytext.toString(), text, 0);
+    const ops = diffOps(this.currentText, text, 0);
     if (ops.length > 0 && !this.options.interceptor?.(ops, this.ytext, this)) {
       this.ydoc.transact(() => applyOps(this.ytext, ops), this);
     }
     this.phantoms.clear();
+    this.currentText = text;
+    this.mapCache = null;
+    this.headingsCache = null;
     this.requestSync();
     this.options.onSync?.("local");
     return ops.length > 0;
@@ -830,7 +1021,9 @@ export class MarkdownBinding {
     }
     perfMark("markdoc:rebuild-start");
     const view = this.view;
-    const built = this.buildDoc(this.ytext.toString());
+    const text = this.ytext.toString();
+    const built = this.buildDoc(text);
+    this.currentText = text;
     this.blocks = built.blocks;
     this.phantoms = built.phantoms;
     this.currentDoc = built.doc;
@@ -863,13 +1056,15 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
   return new Plugin({
     key: markdownBindingKey,
     state: {
-      init: () => ({ remote: false }),
-      apply: (tr, value) => {
+      init: (): MarkdownBindingState => ({ remote: false, localChange: null }),
+      apply: (tr, value, oldState, newState): MarkdownBindingState => {
         // Transactions appended by other plugins (e.g. table normalization) inherit the
         // remote flag of the transaction they were appended to.
-        if (tr.getMeta(markdownBindingKey)) return { remote: true };
-        if (tr.getMeta("appendedTransaction")) return value;
-        return { remote: false };
+        if (tr.getMeta(markdownBindingKey)) return { remote: true, localChange: null };
+        if (tr.getMeta("appendedTransaction")) {
+          return tr.docChanged ? { remote: value.remote, localChange: null } : value;
+        }
+        return { remote: false, localChange: localDocChange(tr, oldState.doc, newState.doc) };
       },
     },
     view(view) {
@@ -879,7 +1074,7 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
           const meta = markdownBindingKey.getState(view.state);
           if (meta?.remote || binding.syncing) return;
           if (view.state.doc === prevState.doc) return;
-          binding.handleLocalTransaction(prevState, view.state);
+          binding.handleLocalTransaction(prevState, view.state, meta?.localChange ?? null);
         },
         destroy() {
           binding.view = null;
@@ -888,6 +1083,3 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
     },
   });
 }
-
-
-
