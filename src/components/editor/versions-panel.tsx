@@ -481,7 +481,7 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
     <div className="flex h-full min-h-0 flex-col outline-none" data-testid="version-diff" ref={rootRef} tabIndex={0} onKeyDown={onKeyDown}>
       <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-6 py-2">
         <span className="pane-label">Comparing</span>
-        <span className="text-sm text-ink-2" data-testid="diff-header">
+        <span className="min-w-0 break-words text-sm text-ink-2" data-testid="diff-header">
           {newSide ? (
             <>
               {versionLabel(oldSide.version)} → {versionLabel(newSide.version)}{" "}

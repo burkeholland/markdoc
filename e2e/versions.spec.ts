@@ -1,11 +1,17 @@
 import { test, expect } from "./fixtures";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, codeText, focusCodeEnd } from "./helpers";
 
 const V1 = "# Compare\n\nIntro stays the same in every version.\n\nFirst body line.\n\n\n\nClosing words stay put.\n\nAlpha paragraph carries distinct wording that is long enough to count.\n";
 const V2 = "# Compare\n\nIntro stays the same in every version.\n\nAlpha paragraph carries distinct wording that is long enough to count.\n\nSecond body line.\n\n\n\nClosing words stay put.\n\nBrand new tail.\n";
 // v3 moves the Alpha paragraph from the top to the bottom, nothing else changes.
 const V3 = "# Compare\n\nIntro stays the same in every version.\n\nSecond body line.\n\n\n\nClosing words stay put.\n\nBrand new tail.\n\nAlpha paragraph carries distinct wording that is long enough to count.\n";
+const LONG_VERSION_TITLE = `https://example.test/${"a".repeat(179)}`;
+const COMPARE_VIEWPORTS = [
+  { width: 1024, height: 640 },
+  { width: 1280, height: 720 },
+  { width: 1440, height: 900 },
+] as const;
 
 async function saveNamed(page: Page, id: string, content: string, message: string) {
   const res = await page.request.put(`/api/documents/${id}/content`, { data: { content, message } });
@@ -19,6 +25,24 @@ async function openHistory(page: Page) {
 }
 
 const row = (page: Page, title: string) => page.getByTestId("version-item").filter({ hasText: title });
+
+async function expectInsideViewport(locator: Locator, label: string) {
+  const metrics = await locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+    };
+  });
+  expect(metrics.left, `${label} left edge`).toBeGreaterThanOrEqual(0);
+  expect(metrics.top, `${label} top edge`).toBeGreaterThanOrEqual(0);
+  expect(metrics.right, `${label} right edge`).toBeLessThanOrEqual(metrics.innerWidth + 1);
+  expect(metrics.bottom, `${label} bottom edge`).toBeLessThanOrEqual(metrics.innerHeight + 1);
+}
 
 test.describe("name current version", () => {
   test("dialog opens with focus in the name field; typing + Enter names the version (#110)", async ({ browser }) => {
@@ -48,6 +72,86 @@ test.describe("name current version", () => {
 });
 
 test.describe("version compare", () => {
+  test("long unbroken version title keeps comparison controls inside desktop viewports", async ({ browser }) => {
+    const user = await signIn(browser, "vera-long-title");
+    const { page } = user;
+    const id = await createDocument(page, "# Compare\n");
+    await saveNamed(page, id, V1, LONG_VERSION_TITLE);
+    await saveNamed(page, id, V3, "After");
+    await openDocument(page, id);
+    await openHistory(page);
+
+    const longVersion = row(page, LONG_VERSION_TITLE);
+    const afterVersion = row(page, "After");
+    const longNumber = Number(await longVersion.getAttribute("data-version-number"));
+    const afterNumber = Number(await afterVersion.getAttribute("data-version-number"));
+    await longVersion.getByTestId("version-compare").check();
+    await afterVersion.getByTestId("version-compare").check();
+
+    const diff = page.getByTestId("version-diff");
+    const header = page.getByTestId("diff-header");
+    const swap = page.getByTestId("diff-swap");
+    const previous = page.getByTestId("diff-prev");
+    const next = page.getByTestId("diff-next");
+    const counter = page.getByTestId("diff-counter");
+    let swapped = false;
+
+    for (const viewport of COMPARE_VIEWPORTS) {
+      const size = `${viewport.width}x${viewport.height}`;
+      await page.setViewportSize(viewport);
+      await expect(diff).toBeVisible();
+      await expect(header).toContainText(
+        swapped
+          ? `v${afterNumber} ‘After’ → v${longNumber} ‘${LONG_VERSION_TITLE}’`
+          : `v${longNumber} ‘${LONG_VERSION_TITLE}’ → v${afterNumber} ‘After’`,
+      );
+
+      const widths = await diff.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const pageRoot = document.scrollingElement!;
+        return {
+          right: rect.right,
+          innerWidth: window.innerWidth,
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+          pageOverflow: pageRoot.scrollWidth - pageRoot.clientWidth,
+        };
+      });
+      expect(widths.right, `${size} comparison right edge`).toBeLessThanOrEqual(widths.innerWidth + 1);
+      expect(widths.scrollWidth, `${size} comparison intrinsic overflow`).toBeLessThanOrEqual(widths.clientWidth + 1);
+      expect(widths.pageOverflow, `${size} page horizontal overflow`).toBe(0);
+
+      await expect(swap).toBeVisible();
+      await expect(swap).toBeEnabled();
+      await expect(previous).toBeVisible();
+      await expect(previous).toBeDisabled();
+      await expect(next).toBeVisible();
+      await expect(next).toBeEnabled();
+      await expectInsideViewport(swap, `${size} Swap`);
+      await expectInsideViewport(previous, `${size} previous`);
+      await expectInsideViewport(next, `${size} next`);
+
+      await swap.click();
+      swapped = !swapped;
+      await expect(header).toContainText(
+        swapped
+          ? `v${afterNumber} ‘After’ → v${longNumber} ‘${LONG_VERSION_TITLE}’`
+          : `v${longNumber} ‘${LONG_VERSION_TITLE}’ → v${afterNumber} ‘After’`,
+      );
+
+      await expect(counter).toHaveText(/^1 of \d+ changes$/);
+      const total = Number((await counter.innerText()).match(/of (\d+)/)![1]);
+      expect(total, `${size} change count`).toBeGreaterThanOrEqual(2);
+      await next.click();
+      await expect(counter).toHaveText(`2 of ${total} changes`);
+      await expect(previous).toBeEnabled();
+      await previous.click();
+      await expect(counter).toHaveText(`1 of ${total} changes`);
+    }
+
+    await user.context.close();
+  });
+
   test("compare two versions, swap, navigate hunks, moved paragraph, rename, copy as new document", async ({ browser }) => {
     const user = await signIn(browser, "vera");
     const { page } = user;
@@ -156,4 +260,3 @@ test.describe("version compare", () => {
     await user.context.close();
   });
 });
-
