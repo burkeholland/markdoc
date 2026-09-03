@@ -49,6 +49,11 @@ function rawLineFixture(before: number, after: number, separator = ""): string {
   ].join("\n\n");
 }
 
+function expectParagraphFastPathRejected(binding: MarkdownBinding) {
+  expect(binding["mapCache"]).toBeNull();
+  expect(binding["headingsCache"]).toBeNull();
+}
+
 function expectCanonicalBinding(binding: MarkdownBinding, view: EditorView, source: string, headingLine: number) {
   const canonical = parseMarkdown(source);
   expect(binding.ytext.toString()).toBe(source);
@@ -304,6 +309,7 @@ describe("MarkdownBinding", () => {
     }
 
     view.dispatch(view.state.tr.insertText("\n", pmOffset).setMeta("composition", 1));
+    expectParagraphFastPathRejected(binding);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     expectCanonicalBinding(binding, view, rawLineFixture(before, after, "\n"), before * 2 + 4);
@@ -319,6 +325,7 @@ describe("MarkdownBinding", () => {
     const pmOffset = binding.getSourceMap().srcToPm(2);
 
     view.dispatch(view.state.tr.insertText(separator, pmOffset).setMeta("composition", 1));
+    expectParagraphFastPathRejected(binding);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     expectCanonicalBinding(binding, view, rawLineFixture(0, 0, separator), headingLine);
@@ -343,6 +350,7 @@ describe("MarkdownBinding", () => {
     const pmOffset = binding.getSourceMap().srcToPm(source.indexOf("pl\nain text") + 2);
 
     view.dispatch(view.state.tr.insertText("", pmOffset, pmOffset + 1).setMeta("composition", 1));
+    expectParagraphFastPathRejected(binding);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     expectCanonicalBinding(binding, view, rawLineFixture(before, after), before * 2 + 3);
