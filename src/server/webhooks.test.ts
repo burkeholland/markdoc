@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { hostname, networkInterfaces } from "node:os";
 import { eq } from "drizzle-orm";
+import { collectPressureGauges } from "@/server/pressure-gauges";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -40,6 +41,14 @@ function waitFor(check: () => boolean, timeout = 5000): Promise<void> {
   });
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 async function createUser(login: string, name: string): Promise<TestActor> {
   const db = await getDb();
   const [user] = await db.insert(schema.users).values({ name, login, email: `${login}@example.com` }).returning();
@@ -51,6 +60,7 @@ describe("outbound webhooks", () => {
   let receiverUrl: string;
   /** What the receiver answers next; reset to 200 after each request when `once` is set. */
   let respondWith = 200;
+  let responseGate: Promise<void> | null = null;
   const received: Received[] = [];
   let alice: TestActor;
   let bob: TestActor;
@@ -71,8 +81,9 @@ describe("outbound webhooks", () => {
     receiver = createServer((req, res) => {
       let body = "";
       req.on("data", (c) => (body += c));
-      req.on("end", () => {
+      req.on("end", async () => {
         received.push({ headers: req.headers, body, json: body ? (JSON.parse(body) as Record<string, unknown>) : {} });
+        await responseGate;
         res.statusCode = respondWith;
         res.end();
       });
@@ -384,6 +395,41 @@ describe("outbound webhooks", () => {
     await deleteWebhook(alice.id, hook.id);
   });
 
+  it(
+    "balances delivery gauges across success and timeout",
+    async () => {
+      received.length = 0;
+      respondWith = 200;
+      const created = await createWebhook(alice, { url: receiverUrl, events: ["mention"] });
+      const db = await getDb();
+      const [hook] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+      const payload = { type: "test" as const, documentId: null, documentTitle: null, cursor: null, actor: null, at: new Date().toISOString() };
+
+      const successGate = deferred();
+      responseGate = successGate.promise;
+      const successful = deliverWebhook(hook, payload);
+      await waitFor(() => received.length === 1);
+      expect(collectPressureGauges(false).gauges).toMatchObject({ webhook_inflight: 1, webhook_retries: 0 });
+      successGate.resolve();
+      await expect(successful).resolves.toMatchObject({ ok: true, status: 200 });
+      expect(collectPressureGauges(false).gauges).toMatchObject({ webhook_inflight: 0, webhook_retries: 0 });
+
+      setWebhookRetryDelays([]);
+      const timeoutGate = deferred();
+      responseGate = timeoutGate.promise;
+      const timedOut = deliverWebhook(hook, payload);
+      await waitFor(() => received.length === 2);
+      expect(collectPressureGauges(false).gauges.webhook_inflight).toBe(1);
+      await expect(timedOut).resolves.toMatchObject({ ok: false, status: 0 });
+      expect(collectPressureGauges(false).gauges).toMatchObject({ webhook_inflight: 0, webhook_retries: 0 });
+      timeoutGate.resolve();
+      responseGate = null;
+      setWebhookRetryDelays([20, 20, 20]);
+      await deleteWebhook(alice.id, hook.id);
+    },
+    10_000,
+  );
+
   it("sends a test event once, without retries, and resets the failure count on success", async () => {
     received.length = 0;
     respondWith = 200;
@@ -411,5 +457,21 @@ describe("outbound webhooks", () => {
     expect(await pruneDeliveries()).toBe(1);
     const rest = await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.webhookId, created.id));
     expect(rest).toHaveLength(1);
+  });
+
+  it("cancels pending retries on dispatcher shutdown without changing balanced inflight state", async () => {
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["mention"] });
+    const db = await getDb();
+    const [hook] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    const payload = { type: "test" as const, documentId: null, documentTitle: null, cursor: null, actor: null, at: new Date().toISOString() };
+    setWebhookRetryDelays([60_000]);
+
+    await expect(deliverWebhook(hook, payload)).resolves.toMatchObject({ ok: false, status: 0 });
+    expect(collectPressureGauges(false).gauges).toMatchObject({ webhook_inflight: 0, webhook_retries: 1 });
+    await stopWebhookDispatcher();
+    expect(collectPressureGauges(false).gauges).toMatchObject({ webhook_inflight: 0, webhook_retries: 0 });
+    await stopWebhookDispatcher();
+    expect(collectPressureGauges(false).gauges).toMatchObject({ webhook_inflight: 0, webhook_retries: 0 });
+    await deleteWebhook(alice.id, hook.id);
   });
 });

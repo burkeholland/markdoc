@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { collectPressureGauges } from "@/server/pressure-gauges";
 
 /**
  * The shared-browser slot in `pdf.ts` (`let browserPromise`) may only be emptied by the browser it holds
@@ -80,6 +81,7 @@ describe("shared browser handle", () => {
   afterEach(async () => {
     // Clears the idle timer and closes whatever the slot still holds when a test failed midway.
     await pdf.closePdfBrowser();
+    expect(collectPressureGauges(false).gauges).toMatchObject({ pdf_queue: 0, pdf_inflight: 0 });
   });
 
   it("keeps the replacement browser when the superseded browser's close finishes (regression)", async () => {
@@ -144,16 +146,21 @@ describe("shared browser handle", () => {
     const first = pdf.renderPdf("<p>a</p>").catch((error: unknown) => error);
     await launchAStarted.promise;
     expect(launch).toHaveBeenCalledTimes(1);
+    expect(collectPressureGauges(false).gauges.pdf_inflight).toBe(1);
 
     // Drops A's pending launch from the slot and waits for it to settle before closing it.
     const closing = pdf.closePdfBrowser();
 
-    await pdf.renderPdf("<p>b</p>");
+    const second = pdf.renderPdf("<p>b</p>");
+    expect(collectPressureGauges(false).gauges.pdf_inflight).toBe(2);
+    await second;
+    expect(collectPressureGauges(false).gauges.pdf_inflight).toBe(1);
     expect(launch).toHaveBeenCalledTimes(2);
 
     // A's launch fails now, while B owns the slot.
     launchA.reject(new Error("chromium missing"));
     expect(await first).toBeInstanceOf(pdf.PdfUnavailableError);
+    expect(collectPressureGauges(false).gauges.pdf_inflight).toBe(0);
     await closing;
 
     await pdf.renderPdf("<p>c</p>");

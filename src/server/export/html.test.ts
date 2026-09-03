@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll } from "vitest";
 import { eq } from "drizzle-orm";
+import { collectPressureGauges } from "@/server/pressure-gauges";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
@@ -22,6 +23,24 @@ const render = (markdown: string, extra: Partial<Parameters<typeof renderDocumen
   renderDocumentHtml({ title: "Test <Doc>", markdown, assetBaseUrl: BASE, ...extra });
 
 describe("renderDocumentHtml", () => {
+  it("balances render queue and inflight gauges across queued work", async () => {
+    const first = render("# First");
+    const second = render("# Second");
+    expect(collectPressureGauges(false).gauges).toMatchObject({
+      render_queue: 1,
+      render_inflight: 1,
+    });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.stringContaining('<h1 id="first">First</h1>'),
+      expect.stringContaining('<h1 id="second">Second</h1>'),
+    ]);
+    expect(collectPressureGauges(false).gauges).toMatchObject({
+      render_queue: 0,
+      render_inflight: 0,
+    });
+  });
+
   it("produces a full standalone document with a title and embedded styles", async () => {
     const html = await render("# Hello");
     expect(html.startsWith("<!DOCTYPE html>")).toBe(true);
@@ -203,7 +222,9 @@ describe("renderDocumentHtml", () => {
       // ask for an impossible budget. The worker is terminated and a fresh one serves the next render.
       const md = Array.from({ length: 50 }, () => "[".repeat(900) + "a" + "]".repeat(900)).join("\n\n");
       await expect(render(md, { timeoutMs: 1 })).rejects.toMatchObject({ reason: "timeout" });
+      expect(collectPressureGauges(false).gauges).toMatchObject({ render_queue: 0, render_inflight: 0 });
       expect(await render("# After")).toContain('<h1 id="after">After</h1>');
+      expect(collectPressureGauges(false).gauges).toMatchObject({ render_queue: 0, render_inflight: 0 });
     });
   });
 });

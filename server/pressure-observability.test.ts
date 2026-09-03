@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { Server } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   durationBucketIndex,
   MAX_HTTP_SERIES,
@@ -202,6 +202,7 @@ describe("pressure gauges and cadence", () => {
     try {
       const first = collectPressureGauges();
       expect(first.gauges).toMatchObject({ pg_total: 4, pg_checkout_max_ms: 13, pdf_inflight: 0 });
+      expect(Object.keys(first.gauges)).toHaveLength(12);
       expect(first.failures).toBe(1);
       const output = harness().pressure.flush(true).join("\n");
       expect(output).toContain('"gauge_failures":1');
@@ -252,12 +253,153 @@ describe("pressure gauges and cadence", () => {
     expect(delay.resets).toBe(2);
   });
 
-  it("can count a TCP-only side listener without claiming its upgrade sockets", () => {
+  it("owns one listener per event across duplicate attachment and removes only its listeners on stop", () => {
+    const { pressure, writes } = harness();
+    const server = new EventEmitter();
+    const tcp = new EventEmitter();
+    const upgrade = new EventEmitter();
+    const otherConnection = vi.fn();
+    const otherUpgrade = vi.fn();
+    server.on("connection", otherConnection);
+    server.on("upgrade", otherUpgrade);
+
+    pressure.attachServer(server as Server);
+    pressure.attachServer(server as Server);
+    expect(server.listenerCount("connection")).toBe(2);
+    expect(server.listenerCount("upgrade")).toBe(2);
+
+    server.emit("connection", tcp);
+    server.emit("upgrade", request("/collab"), upgrade, Buffer.alloc(0));
+    expect(gauges(pressure.flush(true))).toMatchObject({
+      tcp_open: 1,
+      tcp_accepted: 1,
+      upgrades_open: 1,
+      upgrades_accepted: 1,
+    });
+    expect(otherConnection).toHaveBeenCalledTimes(1);
+    expect(otherUpgrade).toHaveBeenCalledTimes(1);
+
+    tcp.emit("close");
+    upgrade.emit("close");
+    pressure.stop(false);
+    expect(server.listeners("connection")).toEqual([otherConnection]);
+    expect(server.listeners("upgrade")).toEqual([otherUpgrade]);
+    const writesAfterStop = writes.length;
+    expect(pressure.detachServer(server as Server)).toBe(false);
+    expect(() => pressure.stop(false)).not.toThrow();
+    expect(writes).toHaveLength(writesAfterStop);
+    expect(gauges(pressure.flush(true))).toMatchObject({
+      tcp_open: 0,
+      tcp_accepted: 0,
+      upgrades_open: 0,
+      upgrades_accepted: 0,
+    });
+  });
+
+  it("keeps main and TCP-only standby tracking separate and rejects contradictory reattachment", () => {
     const { pressure } = harness();
+    const main = new EventEmitter();
     const standby = new EventEmitter();
+    pressure.attachServer(main as Server);
     pressure.attachServer(standby as Server, { trackUpgrades: false });
+    pressure.attachServer(standby as Server, { trackUpgrades: false });
+    expect(main.listenerCount("connection")).toBe(1);
+    expect(main.listenerCount("upgrade")).toBe(1);
     expect(standby.listenerCount("connection")).toBe(1);
     expect(standby.listenerCount("upgrade")).toBe(0);
+
+    expect(() => pressure.attachServer(main as Server, { trackUpgrades: false })).toThrow(
+      "already attached to this server with trackUpgrades=true",
+    );
+    expect(() => pressure.attachServer(standby as Server)).toThrow(
+      "already attached to this server with trackUpgrades=false",
+    );
+    expect(main.listenerCount("connection")).toBe(1);
+    expect(main.listenerCount("upgrade")).toBe(1);
+    expect(standby.listenerCount("connection")).toBe(1);
+    expect(standby.listenerCount("upgrade")).toBe(0);
+
+    const mainSocket = new EventEmitter();
+    const standbySocket = new EventEmitter();
+    const mainUpgrade = new EventEmitter();
+    main.emit("connection", mainSocket);
+    standby.emit("connection", standbySocket);
+    main.emit("upgrade", request("/collab"), mainUpgrade, Buffer.alloc(0));
+    expect(standby.emit("upgrade", request("/collab"), standbySocket, Buffer.alloc(0))).toBe(false);
+    expect(gauges(pressure.flush(true))).toMatchObject({
+      tcp_open: 2,
+      tcp_accepted: 2,
+      upgrades_open: 1,
+      upgrades_accepted: 1,
+    });
+
+    pressure.stop(false);
+    expect(main.listenerCount("connection")).toBe(0);
+    expect(main.listenerCount("upgrade")).toBe(0);
+    expect(standby.listenerCount("connection")).toBe(0);
+    expect(standby.listenerCount("upgrade")).toBe(0);
+    mainSocket.emit("close");
+    standbySocket.emit("close");
+    mainUpgrade.emit("close");
+  });
+
+  it("does not resurrect listeners on restart and permits an explicit fresh attachment", () => {
+    vi.useFakeTimers();
+    try {
+      const { pressure, delay } = harness();
+      const server = new EventEmitter();
+      pressure.attachServer(server as Server);
+      pressure.start();
+      pressure.start();
+      expect(vi.getTimerCount()).toBe(1);
+      expect(delay.enabled).toBe(true);
+
+      pressure.stop(false);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(delay.enabled).toBe(false);
+      expect(server.listenerCount("connection")).toBe(0);
+      expect(server.listenerCount("upgrade")).toBe(0);
+
+      pressure.start();
+      expect(vi.getTimerCount()).toBe(1);
+      expect(server.listenerCount("connection")).toBe(0);
+      expect(server.listenerCount("upgrade")).toBe(0);
+      pressure.attachServer(server as Server);
+      expect(server.listenerCount("connection")).toBe(1);
+      expect(server.listenerCount("upgrade")).toBe(1);
+      pressure.stop(false);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps open socket accounting exact across detach, flush, shutdown, and repeated close", () => {
+    const { pressure } = harness();
+    const server = new EventEmitter();
+    const socket = new EventEmitter();
+    pressure.attachServer(server as Server);
+    server.emit("connection", socket);
+    server.emit("upgrade", request("/collab"), socket, Buffer.alloc(0));
+
+    expect(pressure.detachServer(server as Server)).toBe(true);
+    expect(pressure.detachServer(server as Server)).toBe(false);
+    expect(gauges(pressure.flush(true))).toMatchObject({
+      tcp_open: 1,
+      tcp_accepted: 1,
+      upgrades_open: 1,
+      upgrades_accepted: 1,
+    });
+
+    pressure.stop(false);
+    socket.emit("close");
+    socket.emit("close");
+    expect(gauges(pressure.flush(true))).toMatchObject({
+      tcp_open: 0,
+      tcp_accepted: 0,
+      upgrades_open: 0,
+      upgrades_accepted: 0,
+    });
   });
 });
 

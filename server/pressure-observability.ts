@@ -1,4 +1,5 @@
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { Duplex } from "node:stream";
 import { collectPressureGauges, type PressureGaugeCollection } from "@/server/pressure-gauges";
@@ -32,6 +33,12 @@ interface ActiveRequest {
   method: PressureMethod;
   route: string;
   startedAt: number;
+}
+
+interface ServerAttachment {
+  trackUpgrades: boolean;
+  connection: (socket: Socket) => void;
+  upgrade: ((req: IncomingMessage, socket: Duplex, head: Buffer) => void) | null;
 }
 
 export type PressureRequest = Pick<IncomingMessage, "method" | "url" | "headers">;
@@ -119,6 +126,7 @@ export class PressureObservability {
   private readonly collectGauges: (resetIntervalMaximum: boolean) => PressureGaugeCollection;
   private readonly eventLoopDelay: EventLoopDelayMonitor;
   private readonly active = new Map<number, ActiveRequest>();
+  private readonly serverAttachments = new Map<Server, ServerAttachment>();
   private readonly upgradedSockets = new WeakSet<object>();
   private series = new Map<string, HttpSeries>();
   private nextRequestId = 0;
@@ -147,14 +155,31 @@ export class PressureObservability {
   }
 
   stop(flush = true): void {
+    const wasStarted = this.timer !== null;
+    if (!wasStarted && this.serverAttachments.size === 0) return;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    if (flush) this.flush(true);
-    this.eventLoopDelay.disable();
+    for (const server of [...this.serverAttachments.keys()]) this.detachServer(server);
+    try {
+      if (flush) this.flush(true);
+    } finally {
+      if (wasStarted) this.eventLoopDelay.disable();
+    }
   }
 
   attachServer(server: Server, options: { trackUpgrades?: boolean } = {}): void {
-    server.on("connection", (socket) => {
+    const trackUpgrades = options.trackUpgrades !== false;
+    const attached = this.serverAttachments.get(server);
+    if (attached) {
+      if (attached.trackUpgrades !== trackUpgrades) {
+        throw new Error(
+          `Pressure observability already attached to this server with trackUpgrades=${attached.trackUpgrades}`,
+        );
+      }
+      return;
+    }
+
+    const connection = (socket: Socket) => {
       this.openTcp++;
       this.tcpAccepted++;
       let open = true;
@@ -163,17 +188,34 @@ export class PressureObservability {
         open = false;
         this.openTcp = Math.max(0, this.openTcp - 1);
       });
-    });
-    if (options.trackUpgrades === false) return;
-    server.on("upgrade", (_req, socket: Duplex) => {
-      this.upgradesAccepted++;
-      if (this.upgradedSockets.has(socket)) return;
-      this.upgradedSockets.add(socket);
-      this.openUpgrades++;
-      socket.once("close", () => {
-        this.openUpgrades = Math.max(0, this.openUpgrades - 1);
-      });
-    });
+    };
+    const upgrade = trackUpgrades
+      ? (_req: IncomingMessage, socket: Duplex) => {
+          this.upgradesAccepted++;
+          if (this.upgradedSockets.has(socket)) return;
+          this.upgradedSockets.add(socket);
+          this.openUpgrades++;
+          let open = true;
+          socket.once("close", () => {
+            if (!open) return;
+            open = false;
+            this.openUpgrades = Math.max(0, this.openUpgrades - 1);
+          });
+        }
+      : null;
+
+    server.on("connection", connection);
+    if (upgrade) server.on("upgrade", upgrade);
+    this.serverAttachments.set(server, { trackUpgrades, connection, upgrade });
+  }
+
+  detachServer(server: Server): boolean {
+    const attached = this.serverAttachments.get(server);
+    if (!attached) return false;
+    server.off("connection", attached.connection);
+    if (attached.upgrade) server.off("upgrade", attached.upgrade);
+    this.serverAttachments.delete(server);
+    return true;
   }
 
   attachRequest(req: PressureRequest, res: PressureResponse): void {

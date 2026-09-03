@@ -5,6 +5,7 @@ import WebSocket from "ws";
 import * as Y from "yjs";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import { and, eq, isNull } from "drizzle-orm";
+import { collectPressureGauges } from "@/server/pressure-gauges";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -346,10 +347,12 @@ describe("agent events (watch)", () => {
     const started = Date.now();
     const waiting = asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${cursor}&wait=20`), params(docId)));
     await sleep(150);
+    expect(collectPressureGauges(false).gauges.long_polls).toBe(1);
     const add = await asHuman(() => POST_COMMENTS(req(`/api/documents/${docId}/comments`, { action: "add", quote: "First paragraph", body: "Is this right, @olive?" }), params(docId)));
     expect(add.status).toBe(200);
     const { id: threadId } = (await add.json()) as { id: string };
     const page = (await (await waiting).json()) as { cursor: string; events: { type: string; threadId?: string; body?: string; author?: string }[] };
+    expect(collectPressureGauges(false).gauges.long_polls).toBe(0);
     expect(Date.now() - started).toBeLessThan(5000);
     expect(page.events.map((e) => e.type)).toContain("comment.added");
     expect(page.events.find((e) => e.type === "comment.added")).toMatchObject({ threadId, author: "Olive", body: "Is this right, @olive?" });
@@ -425,9 +428,12 @@ describe("agent events (watch)", () => {
   it("times out with no events when nothing happens", async () => {
     const { cursor } = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events`), params(docId)))).json()) as { cursor: string };
     const t = Date.now();
-    const page = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${cursor}&wait=1`), params(docId)))).json()) as { events: unknown[] };
+    const waiting = asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events?since=${cursor}&wait=1`), params(docId)));
+    await waitFor(() => collectPressureGauges(false).gauges.long_polls === 1);
+    const page = (await (await waiting).json()) as { events: unknown[] };
     expect(page.events).toEqual([]);
     expect(Date.now() - t).toBeGreaterThanOrEqual(900);
+    expect(collectPressureGauges(false).gauges.long_polls).toBe(0);
   });
 
   it("cross-document watch wakes on a request in any document the user can see", async () => {
