@@ -1031,6 +1031,63 @@ interface MergedAppendedText {
   operations: TextOp[];
 }
 
+function sourceOperationsForRebasedAppendedDoc(
+  currentText: string,
+  currentDoc: PMNode,
+  targetDoc: PMNode,
+): MergedAppendedText | null {
+  const parsed = parseMarkdown(currentText);
+  const current = withoutEmptyBlocks(currentDoc);
+  const target = withoutEmptyBlocks(targetDoc);
+  if (!parsed.doc.eq(current)) return null;
+
+  let prefix = 0;
+  while (
+    prefix < current.childCount &&
+    prefix < target.childCount &&
+    current.child(prefix).eq(target.child(prefix))
+  ) {
+    prefix++;
+  }
+  let suffix = 0;
+  while (
+    suffix < current.childCount - prefix &&
+    suffix < target.childCount - prefix &&
+    current
+      .child(current.childCount - suffix - 1)
+      .eq(target.child(target.childCount - suffix - 1))
+  ) {
+    suffix++;
+  }
+
+  const currentChangedTo = current.childCount - suffix;
+  const targetChangedTo = target.childCount - suffix;
+  const from =
+    prefix === 0 ? 0 : parsed.map.blocks[prefix - 1]?.to;
+  const to =
+    currentChangedTo === current.childCount
+      ? currentText.length
+      : parsed.map.blocks[currentChangedTo]?.from;
+  if (from === undefined || to === undefined || to < from) return null;
+
+  const targetBlocks: PMNode[] = [];
+  for (let index = prefix; index < targetChangedTo; index++) {
+    targetBlocks.push(target.child(index));
+  }
+  let replacement = targetBlocks
+    .map((block) => serializeBlocks([block]))
+    .join("\n\n");
+  if (replacement && prefix > 0) replacement = `\n\n${replacement}`;
+  if (replacement && suffix > 0) replacement += "\n\n";
+  if (!replacement && prefix > 0 && suffix > 0) replacement = "\n\n";
+
+  const operations = diffOps(currentText.slice(from, to), replacement, from);
+  const text = applyTextOperations(currentText, operations);
+  return parseMarkdown(text).doc.eq(target)
+    ? { text, operations }
+    : null;
+}
+
 function baseTextOperations(
   before: string,
   after: string,
@@ -1398,6 +1455,27 @@ function mergeAppendedText(
     }
   }
   return { text: merged, operations };
+}
+
+function appendedMergeHasSemanticProof(
+  appendedBaseDoc: PMNode,
+  staleAppendedDoc: PMNode,
+  mergedDoc: PMNode,
+  appendedText: string,
+  localCursor?: number,
+): boolean {
+  const semanticMerge = mergeAppendedText(
+    serializeDocument(appendedBaseDoc),
+    serializeDocument(staleAppendedDoc),
+    serializeDocument(mergedDoc),
+    localCursor,
+  );
+  return (
+    semanticMerge !== null &&
+    parseMarkdown(appendedText).doc.eq(
+      parseMarkdown(semanticMerge.text).doc,
+    )
+  );
 }
 
 function appendedTextMirrorsJoinedChange(
@@ -2033,6 +2111,32 @@ export class MarkdownBinding {
     );
   }
 
+  private mergeAppendedText(
+    baseText: string,
+    appendedText: string,
+    joinedText: string,
+    localCursor?: number,
+    exactRemoteOperations?: ReadonlyArray<BaseTextOperation> | null,
+    exactLocalOperations?: ReadonlyArray<BaseTextOperation> | null,
+  ): MergedAppendedText | null {
+    return mergeAppendedText(
+      baseText,
+      appendedText,
+      joinedText,
+      localCursor,
+      exactRemoteOperations,
+      exactLocalOperations,
+    );
+  }
+
+  private rebaseAppendedTransactions(
+    initialDoc: PMNode,
+    rebasedDoc: PMNode,
+    transactions: ReadonlyArray<AppendedLocalTransaction>,
+  ): RebasedAppendedTransactions | null {
+    return rebaseAppendedTransactions(initialDoc, rebasedDoc, transactions);
+  }
+
   private handleCurrentComposedChange(
     oldState: EditorState,
     change: LocalDocChange,
@@ -2332,7 +2436,7 @@ export class MarkdownBinding {
         appendedTransactions,
         emptyBlockPlaceholder,
       );
-      const appendedMerge = mergeAppendedText(
+      const appendedMerge = this.mergeAppendedText(
         appendedBaseText,
         staleAppendedText,
         candidateText,
@@ -2340,51 +2444,74 @@ export class MarkdownBinding {
         exactRemoteOperations,
         exactLocalOperations,
       );
-      if (appendedMerge !== null) {
-        let appendedText = appendedMerge.text;
-        const appendedOperations = [...appendedMerge.operations];
-        let useMergedOperations = true;
-        if (hasEmptyAppendedBlock) {
-          const withoutPlaceholders = removeEmptyBlockPlaceholders(
-            appendedText,
-            emptyBlockPlaceholder,
-          );
-          appendedText = withoutPlaceholders.text;
-          appendedOperations.push(...withoutPlaceholders.operations);
-        }
-        const rebasedAppended = rebaseAppendedTransactions(
-          appendedTransactions[0].before,
-          mergedDoc,
-          appendedTransactions,
+      const rebasedAppended = this.rebaseAppendedTransactions(
+        appendedTransactions[0].before,
+        mergedDoc,
+        appendedTransactions,
+      );
+      let appendedText = appendedMerge?.text ?? null;
+      let appendedOperations = appendedMerge
+        ? [...appendedMerge.operations]
+        : null;
+      if (appendedText !== null && hasEmptyAppendedBlock) {
+        const withoutPlaceholders = removeEmptyBlockPlaceholders(
+          appendedText,
+          emptyBlockPlaceholder,
         );
-        if (rebasedAppended) {
-          const appendedDoc = rebasedAppended.doc;
-          const realAppendedDoc = withoutEmptyBlocks(appendedDoc);
-          if (
-            !parseMarkdown(appendedText).doc.eq(realAppendedDoc) &&
-            rebasedAppended.semanticSafe
-          ) {
-            const mappedText = serializeDocument(appendedDoc);
-            if (parseMarkdown(mappedText).doc.eq(realAppendedDoc)) {
-              appendedText = mappedText;
-              useMergedOperations = false;
-            }
-          }
-          if (
-            hasEmptyAppendedBlock &&
-            appendedDoc.childCount > realAppendedDoc.childCount &&
-            parseMarkdown(appendedText).doc.eq(realAppendedDoc)
-          ) {
-            rebasedPhantomDoc = appendedDoc;
-          }
-        }
-        ops.push(
-          ...(useMergedOperations
-            ? appendedOperations
-            : diffOps(candidateText, appendedText)),
-        );
-        candidateText = appendedText;
+        appendedText = withoutPlaceholders.text;
+        appendedOperations!.push(...withoutPlaceholders.operations);
       }
+
+      if (rebasedAppended) {
+        const appendedDoc = rebasedAppended.doc;
+        const realAppendedDoc = withoutEmptyBlocks(appendedDoc);
+        if (
+          appendedText === null ||
+          !parseMarkdown(appendedText).doc.eq(realAppendedDoc)
+        ) {
+          if (!rebasedAppended.semanticSafe) {
+            if (appendedText === null) {
+              this.requestSync();
+              return false;
+            }
+          } else {
+            const projected = sourceOperationsForRebasedAppendedDoc(
+              candidateText,
+              mergedDoc,
+              appendedDoc,
+            );
+            if (!projected) {
+              this.requestSync();
+              return false;
+            }
+            appendedText = projected.text;
+            appendedOperations = projected.operations;
+          }
+        }
+        if (
+          hasEmptyAppendedBlock &&
+          appendedDoc.childCount > realAppendedDoc.childCount &&
+          parseMarkdown(appendedText).doc.eq(realAppendedDoc)
+        ) {
+          rebasedPhantomDoc = appendedDoc;
+        }
+      } else if (
+        appendedText === null ||
+        hasEmptyAppendedBlock ||
+        !appendedMergeHasSemanticProof(
+          appendedBaseDoc,
+          staleAppendedDoc,
+          mergedDoc,
+          appendedText,
+          appendedCursor,
+        )
+      ) {
+        this.requestSync();
+        return false;
+      }
+
+      ops.push(...appendedOperations!);
+      candidateText = appendedText;
     }
 
     this.currentText = currentText;
@@ -2925,7 +3052,20 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
           const meta = markdownBindingKey.getState(view.state);
           if (meta?.remote || binding.syncing) return;
           if (view.state.doc === prevState.doc) return;
-          binding.handleLocalTransaction(prevState, view.state, meta?.localChange ?? null);
+          const localChange = meta?.localChange ?? null;
+          try {
+            binding.handleLocalTransaction(
+              prevState,
+              view.state,
+              localChange,
+            );
+          } finally {
+            // Plugin state can advance through a nested dispatch while the handler runs.
+            // Clear only the exact record this update consumed.
+            if (localChange && meta?.localChange === localChange) {
+              meta.localChange = null;
+            }
+          }
         },
         destroy() {
           if (view.dispatch === guardedDispatch) view.dispatch = dispatch;
