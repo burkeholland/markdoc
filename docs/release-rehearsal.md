@@ -94,7 +94,7 @@ steps:
     timeout: 540
 ```
 
-`run.sh` — POSIX `sh` (the image is Alpine: BusyBox `wget`, `date`, `du`). The environment is the smallest set the server starts with; there is no `DATABASE_URL`, so the server uses PGlite at the image's `PGLITE_DATA_DIR` (`/app/.data/pglite`). `AUTH_SECRET` is a throw-away literal typed into the script — never a value from Key Vault or `.env.local`, and the script prints variable **names** only:
+`run.sh` — POSIX `sh` (the image is Alpine: BusyBox `wget`, `date`, `du`). The environment is the smallest set the server starts with; there is no `DATABASE_URL`, so the script sets `MARKDOC_PRODUCTION_PGLITE=local-rehearsal-only`, the exact opt-in that permits this isolated production-image rehearsal to use PGlite at the image's `PGLITE_DATA_DIR` (`/app/.data/pglite`). `PGLITE_DATA_DIR` alone never permits production PGlite, and the opt-in must never be added to the deployed container. `AUTH_SECRET` is a throw-away literal typed into the script — never a value from Key Vault or `.env.local`, and the script prints variable **names** only:
 
 ```sh
 #!/bin/sh
@@ -118,6 +118,7 @@ echo "ENV_NAMES $(env | cut -d= -f1 | sort | tr '\n' ' ')"   # names only, never
 export AUTH_SECRET='<any 32+ random characters, not a real secret>'
 export AUTH_URL=http://127.0.0.1:3000
 export MARKDOC_URL=http://127.0.0.1:3000
+export MARKDOC_PRODUCTION_PGLITE=local-rehearsal-only
 export AUTH_DEV_LOGIN=force
 export PORT=3000
 echo "--- server start $(date -u +%H:%M:%S)"
