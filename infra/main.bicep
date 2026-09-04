@@ -235,10 +235,8 @@ var postgresBaseSecurityRules = [
       destinationPortRange: '443'
     }
   }
-]
-var postgresPackageSetupRules = (configureDatabase || configureRecovery) ? [
   {
-    name: 'AllowApprovedPackageSetup'
+    name: 'AllowAppHttpsEgress'
     properties: {
       priority: 250
       access: 'Allow'
@@ -247,10 +245,22 @@ var postgresPackageSetupRules = (configureDatabase || configureRecovery) ? [
       sourceAddressPrefix: '*'
       sourcePortRange: '*'
       destinationAddressPrefix: 'Internet'
-      destinationPortRanges: [
-        '80'
-        '443'
-      ]
+      destinationPortRange: '443'
+    }
+  }
+]
+var postgresPackageSetupRules = (configureDatabase || configureRecovery) ? [
+  {
+    name: 'AllowApprovedPackageSetup'
+    properties: {
+      priority: 255
+      access: 'Allow'
+      direction: 'Outbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: '*'
+      sourcePortRange: '*'
+      destinationAddressPrefix: 'Internet'
+      destinationPortRange: '80'
     }
   }
 ] : []
@@ -346,8 +356,7 @@ resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' =
   name: postgresSubnetName
   properties: {
     addressPrefix: postgresSubnetPrefix
-    // The Azure Monitor private endpoint (postgres-private-egress.bicep) lives here; Enabled would apply postgresNsg's DenyAllInbound to it (docs/postgres-egress.md, section 3).
-    privateEndpointNetworkPolicies: 'Disabled'
+    privateEndpointNetworkPolicies: 'Enabled'
     serviceEndpoints: [
       {
         service: 'Microsoft.Storage'
@@ -991,23 +1000,6 @@ resource postgresMonitorAgent 'Microsoft.Compute/virtualMachines/extensions@2024
     postgresRecovery
     postgresMonitorAssociation
   ]
-}
-
-// Private Azure Monitor path for the VM agent (AMPLS + private endpoint + private DNS zones,
-// and the configurationAccessEndpoint association next to the rule association above).
-// Together with the subnet's Storage and Key Vault service endpoints this is the only egress the
-// template declares: the retired egress gateway <name>-pg-egress and its public IP are gone from it
-// (docs/postgres-egress.md §5-§7: detached 2026-08-30, 24 h check passed, Phase 5 deletes them by hand).
-module postgresPrivateEgress './postgres-private-egress.bicep' = {
-  name: '${name}-postgres-private-egress'
-  params: {
-    name: name
-    location: location
-    vnetName: vnet.name
-    subnetName: postgresSubnet.name
-    logAnalyticsWorkspaceName: logs.name
-    postgresVmName: postgresVm.name
-  }
 }
 
 resource postgresAlertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
