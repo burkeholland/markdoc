@@ -3,7 +3,7 @@
  * releases", step 3): health, the liveness probe, the JSON `/api/*` 404 catch-all, the MCP liveness card, the
  * HTTP→HTTPS redirect, the baseline security headers, the `/login` chunks byte for byte against a local build
  * of the same SHA, every other local chunk by name, brotli and gzip negotiation, the Tailwind stylesheet rule
- * by rule, a `localhost` leak scan and the unauthenticated `/collab` rejection.
+ * by rule, a `localhost` leak scan, the bare `/collab` deadline and invalid-token rejection.
  * Everything that touches the network or the disk is injected (`ReleaseVerifyIo`) so the checks are unit
  * tested without a server; the CLI (`scripts/release-verify.mts`) supplies fetch, node:https, node:fs and
  * @hocuspocus/provider. Nothing here writes anywhere: the script only issues GETs and one WebSocket connect.
@@ -14,7 +14,7 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 export type CheckStatus = "pass" | "fail" | "warn" | "skipped";
 
 export interface Check {
-  /** Stable id: `health`, `health:live`, `api:404`, `mcp:alive`, `redirect`, `headers`, `login`, `chunks:identity`, `chunks:all`, `css:rules`, `brotli`, `gzip`, `leak:localhost`, `collab:reject`, `flip`. */
+  /** Stable id: `health`, `health:live`, `api:404`, `mcp:alive`, `redirect`, `headers`, `login`, `chunks:identity`, `chunks:all`, `css:rules`, `brotli`, `gzip`, `leak:localhost`, `collab:idle`, `collab:reject`, `flip`. */
   name: string;
   status: CheckStatus;
   /** The numbers; never an environment value, token or connection string. */
@@ -51,6 +51,11 @@ export type CollabOutcome =
   | { outcome: "closed"; code?: number; ms: number }
   | { outcome: "error"; message: string };
 
+export type BareCollabOutcome =
+  | { outcome: "closed"; opened: boolean; code?: number; reason?: string; ms: number }
+  | { outcome: "timeout"; opened: boolean }
+  | { outcome: "error"; opened: boolean; message: string };
+
 export interface ReleaseVerifyIo {
   /** GET, body decoded as text. Redirects are never followed unless `redirect: "follow"` is asked for. */
   fetchText(url: string, init?: { redirect?: "manual" | "follow" }): Promise<TextResponse>;
@@ -62,6 +67,8 @@ export interface ReleaseVerifyIo {
   readLocal?: LocalDist;
   /** Open an unauthenticated Hocuspocus connection and report how the server answered. */
   connectCollab(url: string, timeoutMs: number): Promise<CollabOutcome>;
+  /** Upgrade `/collab` without sending an application frame and report its server-side deadline. */
+  connectBareCollab(url: string, timeoutMs: number): Promise<BareCollabOutcome>;
   /** Milliseconds since the epoch, injectable for the flip timing. */
   now(): number;
   /** Wait between `--wait-flip` samples; defaults to a real timer. */
@@ -73,7 +80,7 @@ export interface ReleaseVerifyOptions {
   base: string;
   /** Expected `APP_VERSION`: the full 40-hex SHA, or a 7+ hex prefix compared as a prefix. */
   sha: string;
-  /** Per-request budget; also the `collab:reject` wait. */
+  /** Per-request budget; also caps the collaboration waits. */
   timeoutMs?: number;
   /** When set, sample `/api/health` until `version` matches or this many seconds have passed. */
   waitFlipSeconds?: number;
@@ -927,6 +934,33 @@ export async function runReleaseVerify(options: ReleaseVerifyOptions, io: Releas
     if (total === 0) return { name: "leak:localhost", status: "pass", detail: summary };
     if (originLike > 0) return { name: "leak:localhost", status: "fail", detail: `${summary}, ${originLike} as an origin (//localhost or localhost:<port>): ${listNames(hits)}` };
     return { name: "leak:localhost", status: "warn", detail: `${summary}, none as an origin (bare token, e.g. a URL parser's file: host rule): ${listNames(hits)}` };
+  });
+
+  await guarded("collab:idle", async () => {
+    const url = `${base.protocol === "https:" ? "wss" : "ws"}://${base.host}/collab`;
+    const deadlineMs = Math.min(timeoutMs, 5_000);
+    const outcome = await io.connectBareCollab(url, deadlineMs);
+    switch (outcome.outcome) {
+      case "closed":
+        if (!outcome.opened) {
+          return { name: "collab:idle", status: "fail", detail: `${url}: WebSocket closed before the 101 upgrade completed` };
+        }
+        if (outcome.code !== 4401 || outcome.reason !== "Unauthorized") {
+          return {
+            name: "collab:idle",
+            status: "fail",
+            detail: `${url}: bare 101 upgrade closed after ${outcome.ms} ms with code ${outcome.code ?? "absent"} and reason ${JSON.stringify(outcome.reason ?? "")}; expected 4401 "Unauthorized"`,
+          };
+        }
+        if (outcome.ms >= 5_000) {
+          return { name: "collab:idle", status: "fail", detail: `${url}: bare 101 upgrade closed unauthorized after ${outcome.ms} ms; expected less than 5000 ms` };
+        }
+        return { name: "collab:idle", status: "pass", detail: `${url}: bare 101 upgrade closed 4401 "Unauthorized" after ${outcome.ms} ms without an application frame` };
+      case "timeout":
+        return { name: "collab:idle", status: "fail", detail: `${url}: bare ${outcome.opened ? "101 upgrade" : "connection"} stayed open for ${deadlineMs} ms without authentication` };
+      default:
+        return { name: "collab:idle", status: "fail", detail: `${url}: bare connection failed${outcome.opened ? " after the 101 upgrade" : " before the 101 upgrade"}: ${outcome.message}` };
+    }
   });
 
   await guarded("collab:reject", async () => {

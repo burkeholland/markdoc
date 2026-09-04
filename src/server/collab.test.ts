@@ -71,6 +71,7 @@ describe("collaboration server", () => {
   let server: Server;
   let url: string;
   let hocuspocus: ReturnType<typeof createCollabServer>;
+  let collabAttachment: ReturnType<typeof attachCollab>;
   let userId: string;
   let docId: string;
 
@@ -89,7 +90,7 @@ describe("collaboration server", () => {
       res.statusCode = 404;
       res.end();
     });
-    attachCollab(server, hocuspocus, { path: "/collab" });
+    collabAttachment = attachCollab(server, hocuspocus, { path: "/collab" });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     const { port } = server.address() as AddressInfo;
     url = `ws://127.0.0.1:${port}/collab`;
@@ -113,6 +114,20 @@ describe("collaboration server", () => {
     });
     provider.attach();
     return { ydoc, provider, socket, received };
+  }
+
+  async function rejectedConnection(token: string, name = docId) {
+    const client = connect(token, name);
+    const failure = new Promise<string>((resolve) => {
+      client.provider.on("authenticationFailed", ({ reason }: { reason: string }) => resolve(reason));
+    });
+    const closed = new Promise<number>((resolve) => {
+      client.socket.on("close", ({ event }: { event: { code: number } }) => resolve(event.code));
+    });
+    const [reason, code] = await withTimeout(Promise.all([failure, closed]), 1_000);
+    client.provider.destroy();
+    client.socket.destroy();
+    return { reason, code };
   }
 
   it("loads the document from the database and syncs two clients", async () => {
@@ -159,6 +174,81 @@ describe("collaboration server", () => {
     await waitFor(() => failed2);
     mismatch.provider.destroy();
     mismatch.socket.destroy();
+  });
+
+  it("binds the real attachment: bare upgrades close before five seconds, valid clients join, and invalid auth stays 4401", async () => {
+    const baseline = {
+      documents: hocuspocus.getDocumentsCount(),
+      connections: hocuspocus.getConnectionsCount(),
+      sockets: collabAttachment.clients.size,
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const started = Date.now();
+      const bare = new WebSocket(url);
+      let messages = 0;
+      bare.on("message", () => messages++);
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          bare.once("open", resolve);
+          bare.once("error", reject);
+        }),
+      );
+      const bareClose = await withTimeout(
+        new Promise<{ code: number; reason: string }>((resolve, reject) => {
+          bare.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+          bare.once("error", reject);
+        }),
+        5_000,
+      );
+      expect(bareClose).toEqual({ code: 4401, reason: "Unauthorized" });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(messages).toBe(0);
+      expect(hocuspocus.getDocumentsCount()).toBe(baseline.documents);
+      expect(hocuspocus.getConnectionsCount()).toBe(baseline.connections);
+      await waitFor(() => collabAttachment.clients.size === baseline.sockets);
+      expect(collabAttachment.clients.size).toBe(baseline.sockets);
+
+      const valid = connect(
+        await signCollabToken({ userId, docId, role: "owner", name: "Alice", login: "alice", avatar: null }),
+      );
+      await waitFor(() => valid.provider.isSynced);
+      expect(hocuspocus.getConnectionsCount()).toBe(baseline.connections + 1);
+      valid.provider.destroy();
+      valid.socket.destroy();
+      await waitFor(() => hocuspocus.getConnectionsCount() === baseline.connections);
+      await waitFor(() => collabAttachment.clients.size === baseline.sockets);
+
+      expect(await rejectedConnection("not-a-token")).toEqual({ reason: "permission-denied", code: 4401 });
+      await waitFor(() => hocuspocus.getDocumentsCount() === baseline.documents);
+      await waitFor(() => hocuspocus.getConnectionsCount() === baseline.connections);
+      await waitFor(() => collabAttachment.clients.size === baseline.sockets);
+      expect(unhandled).toEqual([]);
+    } finally {
+      error.mockRestore();
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("closes validly signed authentication for missing and forbidden documents with 4401", async () => {
+    const db = await getDb();
+    const [other] = await db.insert(schema.users).values({ name: "Private owner", login: "private-owner", email: "private-owner@example.com" }).returning();
+    const privateDocument = await createDocument({ ownerId: other.id, content: "Private" });
+    const missingId = "missing-doc";
+    const missing = await signCollabToken({ userId, docId: missingId, role: "owner", name: "Alice", login: "alice", avatar: null });
+    const forbidden = await signCollabToken({ userId, docId: privateDocument.id, role: "editor", name: "Alice", login: "alice", avatar: null });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      expect(await rejectedConnection(missing, missingId)).toEqual({ reason: "Unauthorized", code: 4401 });
+      expect(await rejectedConnection(forbidden, privateDocument.id)).toEqual({ reason: "Unauthorized", code: 4401 });
+    } finally {
+      error.mockRestore();
+    }
   });
 
   describe("token failure reasons in the server log (task #988)", () => {
