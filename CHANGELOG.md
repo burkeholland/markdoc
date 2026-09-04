@@ -2,6 +2,12 @@
 
 Newest first. Each entry is one merged feature or fix on `main`; test-only and work-in-progress commits are folded into the feature they belong to. Short hashes point at the merge or squash commit.
 
+## 2026-09-03
+
+### Build, ops and tests
+
+- The preceding daily sweep documented every first-parent merge through Next 16.3.3, refreshed the README's unit and browser suite counts, and corrected the operator references to Next 16.3.3 (8717d91)
+
 ## 2026-09-02
 
 ### Writing
