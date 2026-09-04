@@ -3,7 +3,7 @@
 # azure-safety.ps1 from a script whose param() block declares $Name and $ResourceGroup: the helpers resolve both
 # through PowerShell's dynamic scope exactly as they did inside azure.ps1, so the call sites there are unchanged
 # and both scripts share one definition of "steady state" (rule 260 DenyOtherInternetEgress present, temporary
-# rule 250 AllowApprovedPackageSetup absent, no public IP on the NIC, bootstrap public IP deleted).
+# rule 255 AllowApprovedPackageSetup absent, the Markdoc web IP attached, bootstrap public IP deleted).
 # Every helper is idempotent and safe to rerun as a cleanup action; each throws instead of leaving egress open.
 
 function Remove-BootstrapPublicIp([string]$PublicIpName) {
@@ -62,6 +62,37 @@ function Remove-BootstrapPublicIp([string]$PublicIpName) {
   if (-not [string]::IsNullOrWhiteSpace($publicIpId)) {
     az network public-ip delete --resource-group $ResourceGroup --name $PublicIpName --only-show-errors
     if ($LASTEXITCODE) { throw 'Could not delete the PostgreSQL bootstrap public IP.' }
+  }
+}
+
+function Restore-MarkdocWebPublicIp([string]$PublicIpName = "$Name-web-ip") {
+  $publicIpId = az network public-ip show `
+    --resource-group $ResourceGroup `
+    --name $PublicIpName `
+    --query id `
+    --output tsv `
+    --only-show-errors
+  if ($LASTEXITCODE -or [string]::IsNullOrWhiteSpace($publicIpId)) {
+    throw "Could not resolve the Markdoc web public IP $PublicIpName."
+  }
+
+  az network nic ip-config update `
+    --resource-group $ResourceGroup `
+    --nic-name "$Name-pg-nic" `
+    --name 'primary' `
+    --public-ip-address $PublicIpName `
+    --output none `
+    --only-show-errors
+  if ($LASTEXITCODE) { throw 'Could not attach the Markdoc web public IP.' }
+
+  $attached = az network nic show `
+    --resource-group $ResourceGroup `
+    --name "$Name-pg-nic" `
+    --query 'ipConfigurations[0].publicIPAddress.id' `
+    --output tsv `
+    --only-show-errors
+  if ($LASTEXITCODE -or $attached -notmatch "/publicIPAddresses/$([regex]::Escape($PublicIpName))$") {
+    throw 'The Markdoc web public IP is not attached to the primary NIC configuration.'
   }
 }
 

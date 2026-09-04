@@ -1,4 +1,4 @@
-# Manual deployment to Azure Container Apps. Never runs on its own.
+# Manual deployment to the existing Markdoc VM. Never runs on its own.
 #
 # One-time setup:
 #  1. Run deploy/azure.ps1 -InitializeDatabase -ConfigureRecovery once locally.
@@ -6,7 +6,7 @@
 #     Contributor + AcrPush on the resource group. Add repository secrets:
 #       AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
 #     and repository variables:
-#       AZURE_RESOURCE_GROUP (e.g. markdoc-rg), AZURE_ACR_NAME (from the Bicep output), AZURE_APP_NAME (markdoc)
+#       AZURE_RESOURCE_GROUP (e.g. markdoc-rg), AZURE_ACR_NAME (from the Bicep output)
 name: Deploy to Azure (manual)
 
 on:
@@ -44,13 +44,20 @@ jobs:
           DIGEST=$(az acr manifest list-metadata -r "${{ vars.AZURE_ACR_NAME }}" -n markdoc --query "[?tags != null && contains(tags, '$GITHUB_SHA')] | [0].digest" -o tsv)
           test -n "$DIGEST"
           echo "IMAGE=$(az acr show -n "${{ vars.AZURE_ACR_NAME }}" --query loginServer -o tsv)/markdoc@$DIGEST" >> "$GITHUB_ENV"
-      - name: Roll the Container App
+      - name: Roll the VM-hosted application
         run: |
-          az containerapp update -n "${{ vars.AZURE_APP_NAME }}" -g "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --image "$IMAGE" --set-env-vars "APP_VERSION=$GITHUB_SHA"
-          FQDN=$(az containerapp show -n "${{ vars.AZURE_APP_NAME }}" -g "${{ vars.AZURE_RESOURCE_GROUP }}" --query properties.configuration.ingress.fqdn -o tsv)
+          REGISTRY=$(az acr show -n "${{ vars.AZURE_ACR_NAME }}" --query loginServer -o tsv)
+          RESULT=$(az vm run-command invoke \
+            -g "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            -n markdoc-pg \
+            --command-id RunShellScript \
+            --scripts @infra/deploy-vm-image.sh \
+            --parameters "$REGISTRY" "$IMAGE" "$GITHUB_SHA" "${{ secrets.AZURE_TENANT_ID }}" \
+            --query "value[0].message" -o tsv)
+          printf '%s\n' "$RESULT"
+          grep -q 'markdoc-vm-image-ready' <<<"$RESULT"
+          FQDN=$(az network public-ip show -n markdoc-web-ip -g "${{ vars.AZURE_RESOURCE_GROUP }}" --query dnsSettings.fqdn -o tsv)
           echo "Deployed https://$FQDN"
-          sleep 20
           HEALTH=$(curl -fsS "https://$FQDN/api/health")
-          test "$(jq -r '.ok and .db' <<<"$HEALTH")" = true
+          test "$(jq -r '.ok and .db and .collab' <<<"$HEALTH")" = true
           test "$(jq -r '.version' <<<"$HEALTH")" = "$GITHUB_SHA"

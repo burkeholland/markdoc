@@ -1,5 +1,11 @@
 # Custom domain cutover
 
+> **Retired path:** production moved from Container Apps to
+> `https://markdoc-burkeholland.eastus2.cloudapp.azure.com` on September 4,
+> 2026. No `fledglinggame.com` DNS record is used for Markdoc. This document is
+> retained only as the rollback/history record for the former Container Apps
+> custom-domain design.
+
 How to move production Markdoc from its Container App default name to a bought domain without breaking sign-in. Steps marked **human** need Burke (DNS console, GitHub OAuth app); steps marked **agent** are Azure CLI work anyone with `Contributor` on `markdoc-rg` can run. Everything below was prepared before the domain existed: replace `<host>` with the real name (for example `markdoc.example.com`, or an apex such as `example.com`) and run the steps in order. Nothing here is executed by the repo automatically.
 
 Facts in this document were read from Azure on 2026-08-28 with read-only `az … show` / `list` calls. Re-read them (the commands are given) if the deployment changed since; none of them is a secret — all three DNS values are meant to be published.
