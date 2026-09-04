@@ -183,10 +183,12 @@ function runRestartComposition(
   let outputLookups = 0;
   let outputInvocations = 0;
   const writes: string[] = [];
-  let pressure: PressureObservability;
+  const pressureRef: { current: PressureObservability | null } = { current: null };
 
   const hit = (boundary: string): boolean => {
     if (!armed || fired || boundary !== target) return false;
+    const pressure = pressureRef.current;
+    if (pressure === null) throw new Error("pressure fixture is not initialized");
     fired = true;
     if (terminal) pressure.start();
     else {
@@ -261,12 +263,13 @@ function runRestartComposition(
     if (!called || terminal) writes.push(line);
   };
 
-  pressure = new PressureObservability({
+  const pressure = new PressureObservability({
     now: readNow,
     eventLoopDelay: delay,
     collectGauges: readGauges,
     write,
   });
+  pressureRef.current = pressure;
   Object.defineProperties(pressure, {
     now: {
       configurable: true,
@@ -808,19 +811,22 @@ describe("pressure teardown ownership and failure containment", () => {
     const delay = new FakeDelay();
     const written: string[] = [];
     let stopInFirstOutput = true;
-    let pressure: PressureObservability;
-    pressure = new PressureObservability({
+    const pressureRef: { current: PressureObservability | null } = { current: null };
+    const pressure = new PressureObservability({
       now: () => now,
       eventLoopDelay: delay,
       write: (line) => {
         written.push(line);
         if (stopInFirstOutput) {
+          const pressure = pressureRef.current;
+          if (pressure === null) throw new Error("pressure fixture is not initialized");
           stopInFirstOutput = false;
           pressure.stop(true);
           pressure.start();
         }
       },
     });
+    pressureRef.current = pressure;
     pressure.start();
     const res = response();
     pressure.attachRequest(request("/api/health"), res);
@@ -854,24 +860,24 @@ describe("pressure teardown ownership and failure containment", () => {
 
   it("retains a collector failure recorded reentrantly during gauge collection", () => {
     let collectCalls = 0;
-    let pressure: PressureObservability;
-    pressure = new PressureObservability({
+    const pressureRef: { current: PressureObservability | null } = { current: null };
+    const brokenResponse = response();
+    vi.spyOn(brokenResponse, "once").mockImplementation(() => {
+      throw new Error("listener failure");
+    });
+    const pressure = new PressureObservability({
       eventLoopDelay: new FakeDelay(),
       collectGauges: () => {
         if (collectCalls++ === 0) {
-          pressure.attachRequest(request("/api/health"), {
-            writableFinished: false,
-            getHeader: () => undefined,
-            once: () => {
-              throw new Error("listener failure");
-            },
-            off: () => undefined,
-          });
+          const pressure = pressureRef.current;
+          if (pressure === null) throw new Error("pressure fixture is not initialized");
+          pressure.attachRequest(request("/api/health"), brokenResponse);
         }
         return { gauges: emptyPressureGaugeSnapshot(), failures: 0 };
       },
       write: () => {},
     });
+    pressureRef.current = pressure;
 
     expect(gauges(pressure.flush(true))).toMatchObject({ collector_failures: 1 });
     const next = pressure.flush(true);
