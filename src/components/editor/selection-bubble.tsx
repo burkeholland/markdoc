@@ -1,23 +1,44 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
 import { cn } from "@/lib/utils";
-import { clampToViewport } from "@/lib/viewport";
+import type { Box, Insets } from "@/lib/viewport";
 import { isCoarsePointer } from "@/lib/viewport-hooks";
+import {
+  placeSelectionBubble,
+  selectionBubbleBounds,
+  selectionClientBox,
+  type SelectionBubblePosition,
+  type VisualViewportBox,
+} from "./selection-bubble-geometry";
 
-interface Position {
-  left: number;
-  top: number;
-  /** Place below the selection when there is no room above. */
-  below: boolean;
+const cssPixels = (style: CSSStyleDeclaration, property: string): number => {
+  const value = Number.parseFloat(style.getPropertyValue(property));
+  return Number.isFinite(value) ? value : 0;
+};
+
+const clientBox = ({ left, top, width, height }: Pick<DOMRect, "left" | "top" | "width" | "height">): Box => ({ left, top, width, height });
+const caretBox = ({ left, right, top, bottom }: Pick<DOMRect, "left" | "right" | "top" | "bottom">): Box => ({
+  left,
+  top,
+  width: Math.max(0, right - left),
+  height: Math.max(0, bottom - top),
+});
+
+function safeAreaInsets(): Insets {
+  const style = getComputedStyle(document.documentElement);
+  return {
+    top: cssPixels(style, "--safe-area-inset-top"),
+    right: cssPixels(style, "--safe-area-inset-right"),
+    bottom: cssPixels(style, "--safe-area-inset-bottom"),
+    left: cssPixels(style, "--safe-area-inset-left"),
+  };
 }
-
-const BUBBLE_WIDTH = 232;
-const BUBBLE_HEIGHT = 40;
 
 function BubbleButton({
   label,
@@ -35,7 +56,7 @@ function BubbleButton({
   return (
     <button
       type="button"
-      className={cn("flex h-8 w-8 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white disabled:opacity-30", active && "bg-white/20 text-white")}
+      className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white disabled:opacity-30", active && "bg-white/20 text-white")}
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
       aria-label={label}
@@ -68,10 +89,11 @@ export function SelectionBubble({
   onComment: () => void;
   onLink: () => void;
 }) {
-  const [pos, setPos] = useState<Position | null>(null);
+  const [pos, setPos] = useState<SelectionBubblePosition | null>(null);
   const [visible, setVisible] = useState(false);
   const pointerDown = useRef(false);
   const raf = useRef<number | null>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
 
   const compute = useCallback(() => {
     const container = containerRef.current;
@@ -80,7 +102,8 @@ export function SelectionBubble({
       return;
     }
     const { from, to, empty } = view.state.selection;
-    const canShow = !empty && view.hasFocus() && session.activeSurface === "rich" && (session.canEdit || session.canComment);
+    const ownsFocus = view.hasFocus() || Boolean(document.activeElement && bubbleRef.current?.contains(document.activeElement));
+    const canShow = !empty && ownsFocus && session.activeSurface === "rich" && (session.canEdit || session.canComment);
     if (!canShow || pointerDown.current) {
       setVisible(false);
       return;
@@ -89,110 +112,152 @@ export function SelectionBubble({
       const start = view.coordsAtPos(from);
       const end = view.coordsAtPos(to, -1);
       const host = container.getBoundingClientRect();
-      const topEdge = Math.min(start.top, end.top);
-      const bottomEdge = Math.max(start.bottom, end.bottom);
-      const centerX = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2;
-      const visibleTop = Math.max(host.top, 0);
-      const visibleBottom = Math.min(host.bottom, window.innerHeight);
-      // Do not clamp an inactive selection's toolbar to a screen edge after its text scrolls away.
-      if (bottomEdge <= visibleTop || topEdge >= visibleBottom) {
+      const visualViewport: VisualViewportBox | null = window.visualViewport
+        ? {
+            offsetLeft: window.visualViewport.offsetLeft,
+            offsetTop: window.visualViewport.offsetTop,
+            width: window.visualViewport.width,
+            height: window.visualViewport.height,
+          }
+        : null;
+      const bounds = selectionBubbleBounds({
+        host: clientBox(host),
+        layoutViewport: {
+          left: 0,
+          top: 0,
+          width: document.documentElement.clientWidth || window.innerWidth,
+          height: document.documentElement.clientHeight || window.innerHeight,
+        },
+        visualViewport,
+        safeArea: safeAreaInsets(),
+      });
+      const next = placeSelectionBubble(
+        selectionClientBox(caretBox(start), caretBox(end)),
+        bounds,
+        isCoarsePointer(),
+      );
+      if (!next) {
+        setPos(null);
         setVisible(false);
         return;
       }
-      // Touch devices draw the OS selection toolbar above the selection; sit below it there.
-      let below = isCoarsePointer() || topEdge - host.top - BUBBLE_HEIGHT - 10 < 4;
-      const viewport = { width: window.innerWidth, height: window.innerHeight };
-      let box = clampToViewport(
-        { left: centerX - BUBBLE_WIDTH / 2, top: below ? bottomEdge + 10 : topEdge - BUBBLE_HEIGHT - 10, width: BUBBLE_WIDTH, height: BUBBLE_HEIGHT },
-        viewport,
-      );
-      if (below && box.top + box.height > viewport.height - 8 && topEdge - BUBBLE_HEIGHT - 10 >= 8) {
-        // No room under the selection after all: flip back above.
-        below = false;
-        box = clampToViewport({ ...box, top: topEdge - BUBBLE_HEIGHT - 10 }, viewport);
-      }
-      // The bubble is absolutely positioned inside the scrolling container.
-      const left = Math.max(8, Math.min(host.width - BUBBLE_WIDTH - 8, box.left - host.left));
-      const top = box.top - host.top + container.scrollTop;
-      setPos({ left, top, below });
+      setPos(next);
       setVisible(true);
     } catch {
+      setPos(null);
       setVisible(false);
     }
   }, [view, session, containerRef]);
 
   const schedule = useCallback(() => {
-    if (raf.current) cancelAnimationFrame(raf.current);
-    raf.current = requestAnimationFrame(compute);
+    if (raf.current !== null) return;
+    raf.current = requestAnimationFrame(() => {
+      raf.current = null;
+      compute();
+    });
   }, [compute]);
 
-  // Track mouse state so the bubble doesn't flicker while dragging a selection.
-  useEffect(() => {
-    const down = () => {
+  useLayoutEffect(() => {
+    const scroller = containerRef.current;
+    if (!view || !scroller) {
+      schedule();
+      return () => {
+        if (raf.current !== null) cancelAnimationFrame(raf.current);
+        raf.current = null;
+      };
+    }
+    const visualViewport = window.visualViewport;
+    const onPointerDown = () => {
       pointerDown.current = true;
     };
-    const up = () => {
+    const onPointerUp = () => {
       pointerDown.current = false;
       schedule();
     };
-    window.addEventListener("mousedown", down);
-    window.addEventListener("mouseup", up);
-    return () => {
-      window.removeEventListener("mousedown", down);
-      window.removeEventListener("mouseup", up);
+    const onBlur = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && bubbleRef.current?.contains(event.relatedTarget)) return;
+      setVisible(false);
     };
-  }, [schedule]);
-
-  // Recompute whenever the selection/format changes (format is derived from the selection).
-  useLayoutEffect(() => {
-    schedule();
-  }, [schedule, format]);
-
-  useEffect(() => {
-    if (!view) return;
-    const scroller = containerRef.current;
-    const onScroll = () => schedule();
-    scroller?.addEventListener("scroll", onScroll, { passive: true });
-    const onBlur = () => setVisible(false);
+    scroller.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("scroll", schedule, { capture: true, passive: true });
+    window.addEventListener("resize", schedule, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.addEventListener("selectionchange", schedule);
+    visualViewport?.addEventListener("resize", schedule, { passive: true });
+    visualViewport?.addEventListener("scroll", schedule, { passive: true });
     view.dom.addEventListener("blur", onBlur);
+    const resizeObserver = new ResizeObserver(schedule);
+    resizeObserver.observe(scroller);
+    const mutationObserver = new MutationObserver(schedule);
+    mutationObserver.observe(view.dom, { childList: true, characterData: true, subtree: true });
+    schedule();
     return () => {
-      scroller?.removeEventListener("scroll", onScroll);
+      scroller.removeEventListener("scroll", schedule);
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.removeEventListener("selectionchange", schedule);
+      visualViewport?.removeEventListener("resize", schedule);
+      visualViewport?.removeEventListener("scroll", schedule);
       view.dom.removeEventListener("blur", onBlur);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      if (raf.current !== null) cancelAnimationFrame(raf.current);
+      raf.current = null;
     };
   }, [view, schedule, containerRef]);
+
+  // Format changes carry every editor selection update into the shared geometry scheduler.
+  useLayoutEffect(schedule, [schedule, format]);
 
   if (!visible || !pos) return null;
   const canEdit = session.canEdit;
 
-  return (
+  return createPortal(
     <div
-      className="touch-target absolute z-30 flex items-center gap-0.5 rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
-      style={{ left: pos.left, top: pos.top, width: BUBBLE_WIDTH }}
+      ref={bubbleRef}
+      className="touch-target fixed z-30 rounded-lg bg-inverse shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
+      style={{ left: pos.left, top: pos.top, width: pos.width }}
       data-testid="selection-bubble"
       data-below={pos.below || undefined}
-      role="toolbar"
-      aria-label="Selection"
     >
-      <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} onClick={() => actions.toggleMark("strong")}>
-        <Bold size={16} strokeWidth={2.6} />
-      </BubbleButton>
-      <BubbleButton label="Italic" active={format.em} disabled={!canEdit} onClick={() => actions.toggleMark("em")}>
-        <Italic size={16} />
-      </BubbleButton>
-      <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} onClick={() => actions.toggleMark("strike")}>
-        <Strikethrough size={16} />
-      </BubbleButton>
-      <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} onClick={() => actions.toggleMark("code")}>
-        <Code size={16} />
-      </BubbleButton>
-      <BubbleButton label="Link" active={format.link} disabled={!canEdit} onClick={onLink}>
-        <LinkIcon size={16} />
-      </BubbleButton>
-      <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <BubbleButton label="Comment" disabled={!session.canComment} onClick={onComment}>
-        <MessageSquarePlus size={16} />
-      </BubbleButton>
-      <span className={cn("absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-inverse", pos.below ? "-top-1" : "-bottom-1")} aria-hidden />
-    </div>
+      <div
+        className="selection-bubble-scroll flex items-center gap-0.5 overflow-x-auto overflow-y-hidden rounded-lg px-1 py-1"
+        tabIndex={0}
+        role="toolbar"
+        aria-label="Selection"
+        aria-orientation="horizontal"
+      >
+        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} onClick={() => actions.toggleMark("strong")}>
+          <Bold size={16} strokeWidth={2.6} />
+        </BubbleButton>
+        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} onClick={() => actions.toggleMark("em")}>
+          <Italic size={16} />
+        </BubbleButton>
+        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} onClick={() => actions.toggleMark("strike")}>
+          <Strikethrough size={16} />
+        </BubbleButton>
+        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} onClick={() => actions.toggleMark("code")}>
+          <Code size={16} />
+        </BubbleButton>
+        <BubbleButton label="Link" active={format.link} disabled={!canEdit} onClick={onLink}>
+          <LinkIcon size={16} />
+        </BubbleButton>
+        <span className="mx-0.5 h-5 w-px shrink-0 bg-white/20" />
+        <BubbleButton label="Comment" disabled={!session.canComment} onClick={onComment}>
+          <MessageSquarePlus size={16} />
+        </BubbleButton>
+      </div>
+      <span
+        className={cn("absolute h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-inverse", pos.below ? "-top-1" : "-bottom-1")}
+        style={{ left: pos.arrowLeft }}
+        aria-hidden
+      />
+    </div>,
+    document.body,
   );
 }

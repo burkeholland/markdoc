@@ -30,6 +30,10 @@
 
 :root {
   color-scheme: light;
+  --safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --safe-area-inset-right: env(safe-area-inset-right, 0px);
+  --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-inset-left: env(safe-area-inset-left, 0px);
   /* Raw palette ("Ink & teal", Burke #1205 / tasks #398 + #416). @theme inline above maps --color-* onto
      these so Tailwind utilities re-resolve when [data-theme] changes. Warm stone inks, a deep teal accent,
      a faintly warm paper behind the preview. Every pair below is WCAG AA (src/app/tokens-contrast.test.ts,
@@ -211,6 +215,12 @@
   width: auto;
 }
 .tb-divider {
+  display: none;
+}
+.selection-bubble-scroll {
+  scrollbar-width: none;
+}
+.selection-bubble-scroll::-webkit-scrollbar {
   display: none;
 }
 .rich-column {
@@ -1082,14 +1092,14 @@ body {
 
 /* Notch / home-indicator insets (viewport-fit=cover in src/app/layout.tsx). */
 .safe-top {
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: var(--safe-area-inset-top);
 }
 .safe-bottom {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: var(--safe-area-inset-bottom);
 }
 .safe-x {
-  padding-left: max(var(--safe-pad, 0.75rem), env(safe-area-inset-left, 0px));
-  padding-right: max(var(--safe-pad, 0.75rem), env(safe-area-inset-right, 0px));
+  padding-left: max(var(--safe-pad, 0.75rem), var(--safe-area-inset-left));
+  padding-right: max(var(--safe-pad, 0.75rem), var(--safe-area-inset-right));
 }
 
 /* Horizontal toolbar strip on phones: no wrap, no scrollbar, faded edges hint at more items. */
