@@ -27,7 +27,7 @@ import {
 export { hydrateDoc, META_KEY, TEXT_KEY };
 
 export interface CollabPreAuthentication {
-  accepted(): void;
+  accepted(): boolean;
   rejected(): void;
 }
 
@@ -95,8 +95,8 @@ export function createCollabServer() {
         if (claims.docId !== documentName) throw new Error("Token does not match document");
         const current = await resolveStableCollabAccess(claims);
         if (!current) throw unauthorizedCollabError();
+        if (context.preAuthentication && !context.preAuthentication.accepted()) throw unauthorizedCollabError();
         connectionConfig.readOnly = !canEdit(current.role);
-        context.preAuthentication?.accepted();
         return current;
       } catch (error) {
         context.preAuthentication?.rejected();

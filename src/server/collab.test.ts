@@ -101,9 +101,13 @@ describe("collaboration server", () => {
     await new Promise<void>((r) => server.close(() => r()));
   });
 
-  function connect(token: string, name = docId) {
+  function connect(token: string, name = docId, targetUrl = url) {
     const ydoc = new Y.Doc();
-    const socket = new HocuspocusProviderWebsocket({ url, WebSocketPolyfill: WebSocket as unknown as typeof globalThis.WebSocket });
+    const socket = new HocuspocusProviderWebsocket({
+      url: targetUrl,
+      autoConnect: false,
+      WebSocketPolyfill: WebSocket as unknown as typeof globalThis.WebSocket,
+    });
     const received: { type: string; bytes: number }[] = [];
     const provider = new HocuspocusProvider({
       websocketProvider: socket,
@@ -113,6 +117,7 @@ describe("collaboration server", () => {
       onMessage: ({ message }) => received.push(describeMessage((message as unknown as { data: ArrayBuffer | Uint8Array }).data)),
     });
     provider.attach();
+    void socket.connect();
     return { ydoc, provider, socket, received };
   }
 
@@ -231,6 +236,48 @@ describe("collaboration server", () => {
     } finally {
       error.mockRestore();
       process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("keeps a valid database-backed exact-document client open beyond the pre-authentication deadline", async () => {
+    const document = await createDocument({ ownerId: userId, content: "Held collaboration" });
+    const heldHocuspocus = createCollabServer();
+    const heldServer = createServer();
+    const heldAttachment = attachCollab(heldServer, heldHocuspocus, { path: "/collab" });
+    await new Promise<void>((resolve) => heldServer.listen(0, "127.0.0.1", resolve));
+    const heldUrl = `ws://127.0.0.1:${(heldServer.address() as AddressInfo).port}/collab`;
+    const client = connect(
+      await signCollabToken({
+        userId,
+        docId: document.id,
+        role: "owner",
+        name: "Alice",
+        login: "alice",
+        avatar: null,
+      }),
+      document.id,
+      heldUrl,
+    );
+
+    try {
+      await waitFor(() => client.provider.isSynced);
+      await sleep(3_650);
+
+      expect(client.provider.isSynced).toBe(true);
+      expect(heldHocuspocus.getDocumentsCount()).toBe(1);
+      expect(heldHocuspocus.getConnectionsCount()).toBe(1);
+      expect(heldAttachment.clients.size).toBe(1);
+      expect(heldAttachment.getPendingAuthenticationCount()).toBe(0);
+    } finally {
+      client.provider.destroy();
+      client.socket.destroy();
+      await waitFor(() => heldHocuspocus.getConnectionsCount() === 0);
+      await waitFor(() => heldAttachment.clients.size === 0);
+      await waitFor(() => heldHocuspocus.getDocumentsCount() === 0);
+      await shutdownCollab(heldHocuspocus);
+      await new Promise<void>((resolve) => heldAttachment.close(() => resolve()));
+      await new Promise<void>((resolve) => heldServer.close(() => resolve()));
+      expect(heldAttachment.getPendingAuthenticationCount()).toBe(0);
     }
   });
 
