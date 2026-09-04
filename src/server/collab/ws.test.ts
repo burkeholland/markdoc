@@ -208,7 +208,7 @@ describe("collaboration pre-authentication deadline", () => {
     timeoutMs?: number;
     closeGraceMs?: number;
     now?: () => number;
-    reportError?: (operation: "close" | "terminate") => void;
+    reportError?: (operation: "close" | "terminate" | "abort") => void;
   } = {}) {
     const socket = new FakeSocket();
     const request = new EventEmitter();
@@ -401,6 +401,208 @@ describe("collaboration pre-authentication deadline", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([
+    {
+      owner: "deadline close failure only",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.closeError = new Error("deadline close detail");
+      },
+      trigger: () => vi.advanceTimersByTime(COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS),
+      operations: ["close"],
+      closeAttempts: 1,
+      terminationAttempts: 1,
+    },
+    {
+      owner: "deadline callback",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.closeError = new Error("deadline close detail");
+        subject.socket.terminateError = new Error("deadline terminate detail");
+      },
+      trigger: (subject: ReturnType<typeof deadline>) => {
+        vi.advanceTimersByTime(COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS);
+        return subject.lifecycle.accepted();
+      },
+      operations: ["close", "terminate"],
+      closeAttempts: 1,
+      terminationAttempts: 1,
+    },
+    {
+      owner: "late authorization completion",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.closeError = new Error("late close detail");
+        subject.socket.terminateError = new Error("late terminate detail");
+      },
+      trigger: (subject: ReturnType<typeof deadline>) => subject.lifecycle.accepted(),
+      operations: ["close", "terminate"],
+      closeAttempts: 1,
+      terminationAttempts: 1,
+      now: COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS,
+    },
+    {
+      owner: "explicit rejection",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.closeError = new Error("rejection close detail");
+        subject.socket.terminateError = new Error("rejection terminate detail");
+      },
+      trigger: (subject: ReturnType<typeof deadline>) => {
+        subject.lifecycle.rejected();
+        vi.runOnlyPendingTimers();
+      },
+      operations: ["close", "terminate"],
+      closeAttempts: 1,
+      terminationAttempts: 1,
+    },
+    {
+      owner: "socket close",
+      configure: () => {},
+      trigger: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.readyState = WebSocket.CLOSED;
+        subject.socket.emit("close", 1000, Buffer.alloc(0));
+      },
+      operations: [],
+      closeAttempts: 0,
+      terminationAttempts: 0,
+    },
+    {
+      owner: "socket error",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.terminateError = new Error("socket error termination detail");
+      },
+      trigger: (subject: ReturnType<typeof deadline>) =>
+        subject.socket.emit("error", new Error("socket event detail")),
+      operations: ["terminate"],
+      closeAttempts: 0,
+      terminationAttempts: 1,
+    },
+    {
+      owner: "request abort",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.terminateError = new Error("request termination detail");
+      },
+      trigger: (subject: ReturnType<typeof deadline>) => subject.request.emit("aborted"),
+      operations: ["terminate"],
+      closeAttempts: 0,
+      terminationAttempts: 1,
+    },
+    {
+      owner: "binding abort",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.terminateError = new Error("binding termination detail");
+      },
+      trigger: (subject: ReturnType<typeof deadline>) => subject.lifecycle.abort(),
+      operations: ["terminate"],
+      closeAttempts: 0,
+      terminationAttempts: 1,
+    },
+    {
+      owner: "close grace",
+      configure: (subject: ReturnType<typeof deadline>) => {
+        subject.socket.terminateError = new Error("grace termination detail");
+      },
+      trigger: () =>
+        vi.advanceTimersByTime(
+          COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS + COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
+        ),
+      operations: ["terminate"],
+      closeAttempts: 1,
+      terminationAttempts: 1,
+    },
+  ])(
+    "contains a throwing diagnostic sink for $owner",
+    ({ configure, trigger, operations, closeAttempts, terminationAttempts, now }) => {
+      let clock = 0;
+      const reported: string[] = [];
+      const subject = deadline({
+        now: () => clock,
+        reportError: (operation) => {
+          reported.push(operation);
+          throw new Error(`reporter rejected ${operation}`);
+        },
+      });
+      clock = now ?? 0;
+      configure(subject);
+
+      expect(() => trigger(subject)).not.toThrow();
+      expect(() => vi.runAllTimers()).not.toThrow();
+
+      expect(reported).toEqual(operations);
+      expect(subject.socket.closeAttempts).toBe(closeAttempts);
+      expect(subject.socket.terminationAttempts).toBe(terminationAttempts);
+      expect(subject.settled).toHaveBeenCalledTimes(1);
+      expect(subject.socket.listenerCount("close")).toBe(0);
+      expect(subject.socket.listenerCount("error")).toBe(0);
+      expect(subject.request.listenerCount("aborted")).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("contains a throwing default console diagnostic and still hard-terminates after close failure", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("stderr unavailable");
+    });
+    try {
+      const socket = new FakeSocket();
+      const request = new EventEmitter();
+      const settled = vi.fn();
+      socket.closeError = new Error("close detail");
+      socket.terminateError = new Error("terminate detail");
+      createCollabPreAuthenticationDeadline(asSocket(socket), {
+        request: asRequest(request),
+        onSettled: settled,
+      });
+
+      expect(() => vi.advanceTimersByTime(COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS)).not.toThrow();
+      expect(socket.closeAttempts).toBe(1);
+      expect(socket.terminationAttempts).toBe(1);
+      expect(settled).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("reports only sanitized operation labels to a non-throwing injected sink", () => {
+    const reported: string[] = [];
+    const subject = deadline({ reportError: (operation) => reported.push(operation) });
+    subject.socket.closeError = new Error("credential user document request socket fixture");
+    subject.socket.terminateError = new Error("second sensitive failure");
+
+    vi.advanceTimersByTime(COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS);
+
+    expect(reported).toEqual(["close", "terminate"]);
+    expect(JSON.stringify(reported)).not.toMatch(
+      /credential|user|document|request|socket|fixture|sensitive/,
+    );
+  });
+
+  it("ignores duplicate and reordered terminal callbacks after a throwing reporter settles once", () => {
+    const subject = deadline({
+      reportError: () => {
+        throw new Error("diagnostic failure");
+      },
+    });
+    subject.socket.terminateError = new Error("termination failure");
+
+    expect(() => {
+      subject.lifecycle.rejected();
+      subject.lifecycle.abort();
+      subject.lifecycle.accepted();
+      subject.lifecycle.rejected();
+      subject.lifecycle.abort();
+      subject.socket.emit("close", 1000, Buffer.alloc(0));
+      vi.runAllTimers();
+    }).not.toThrow();
+
+    expect(subject.socket.closeAttempts).toBe(0);
+    expect(subject.socket.terminationAttempts).toBe(1);
+    expect(subject.settled).toHaveBeenCalledTimes(1);
+    expect(subject.socket.listenerCount("close")).toBe(0);
+    expect(subject.socket.listenerCount("error")).toBe(0);
+    expect(subject.request.listenerCount("aborted")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each(["invalid token", "missing document", "forbidden document"])(
     "clears the deadline and closes 4401 after Hocuspocus rejects a %s",
     async () => {
@@ -493,8 +695,16 @@ describe("collaboration pre-authentication deadline", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("releases all ownership state after 25,000 deterministic lifecycle cases", () => {
-    const reports = { close: 0, terminate: 0 };
+  it("releases all ownership state after 30,000 deterministic lifecycle and boundary cases", () => {
+    const boundaryPlans = [
+      { elapsed: 2_999, timerFirst: false, accepted: true },
+      { elapsed: 2_999, timerFirst: true, accepted: true },
+      { elapsed: 3_000, timerFirst: false, accepted: false },
+      { elapsed: 3_000, timerFirst: true, accepted: false },
+      { elapsed: 3_001, timerFirst: false, accepted: false },
+      { elapsed: 3_001, timerFirst: true, accepted: false },
+    ] as const;
+    let reportInvocations = 0;
     let cases = 0;
     let wrongAcceptance = 0;
     let retainedListeners = 0;
@@ -502,9 +712,8 @@ describe("collaboration pre-authentication deadline", () => {
     let doubleTermination = 0;
     let postSettlementChanges = 0;
 
-    for (let batch = 0; batch < 10; batch++) {
-      const subjects = Array.from({ length: 2_500 }, (_, offset) => {
-        const index = batch * 2_500 + offset;
+    for (let batch = 0; batch < 12; batch++) {
+      const subjects = Array.from({ length: 2_500 }, () => {
         const socket = new FakeSocket();
         const request = new EventEmitter();
         let settlements = 0;
@@ -514,48 +723,58 @@ describe("collaboration pre-authentication deadline", () => {
           closeGraceMs: COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
           now: () => now,
           onSettled: () => settlements++,
-          reportError: (operation) => reports[operation]++,
+          reportError: () => {
+            reportInvocations++;
+            throw new Error("injected diagnostic failure");
+          },
         });
-
-        switch (index % 10) {
-          case 0:
-            now = COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS - 1;
-            if (!lifecycle.accepted()) wrongAcceptance++;
-            break;
-          case 1:
-            now = COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS;
-            if (lifecycle.accepted()) wrongAcceptance++;
-            break;
-          case 2:
-            socket.readyState = WebSocket.CLOSED;
-            socket.emit("close", 1000, Buffer.alloc(0));
-            break;
-          case 3:
-            lifecycle.abort();
-            break;
-          case 4:
-            socket.acknowledgeClose = true;
-            lifecycle.rejected();
-            break;
-          case 5:
-            break;
-          case 6:
-            socket.emit("error", new Error("injected socket error"));
-            break;
-          case 7:
-            request.emit("aborted");
-            break;
-          case 8:
-            socket.closeError = new Error("injected close error");
-            break;
-          case 9:
-            socket.closeError = new Error("injected close error");
-            socket.terminateError = new Error("injected terminate error");
-            break;
-        }
-        return { socket, request, lifecycle, settlements: () => settlements };
+        return {
+          socket,
+          request,
+          lifecycle,
+          settlements: () => settlements,
+          setNow: (value: number) => {
+            now = value;
+          },
+        };
       });
 
+      const boundary = boundaryPlans[batch];
+      if (boundary) {
+        for (const subject of subjects) subject.setNow(boundary.elapsed);
+        if (boundary.timerFirst) vi.advanceTimersByTime(boundary.elapsed);
+        for (const subject of subjects) {
+          if (subject.lifecycle.accepted() !== boundary.accepted) wrongAcceptance++;
+        }
+      } else {
+        for (const subject of subjects) {
+          switch (batch) {
+            case 6:
+              subject.socket.readyState = WebSocket.CLOSED;
+              subject.socket.emit("close", 1000, Buffer.alloc(0));
+              break;
+            case 7:
+              subject.lifecycle.abort();
+              break;
+            case 8:
+              subject.socket.terminateError = new Error("injected socket-error termination");
+              subject.socket.emit("error", new Error("injected socket error"));
+              break;
+            case 9:
+              subject.socket.terminateError = new Error("injected request-abort termination");
+              subject.request.emit("aborted");
+              break;
+            case 10:
+              subject.socket.acknowledgeClose = true;
+              subject.lifecycle.rejected();
+              break;
+            case 11:
+              subject.socket.closeError = new Error("injected close error");
+              subject.socket.terminateError = new Error("injected terminate error");
+              break;
+          }
+        }
+      }
       vi.runAllTimers();
       expect(vi.getTimerCount()).toBe(0);
       cases += subjects.length;
@@ -586,17 +805,49 @@ describe("collaboration pre-authentication deadline", () => {
       }
     }
 
-    expect(cases).toBe(25_000);
+    expect(cases).toBe(30_000);
     expect(wrongAcceptance).toBe(0);
     expect(retainedListeners).toBe(0);
     expect(wrongSettlements).toBe(0);
     expect(doubleTermination).toBe(0);
     expect(postSettlementChanges).toBe(0);
-    expect(reports).toEqual({ close: 5_000, terminate: 2_500 });
+    expect(reportInvocations).toBe(10_000);
   });
 });
 
 describe("collaboration attachment shutdown", () => {
+  it("settles a connection emitted after attachment stop when termination and reporting throw", () => {
+    const server = createServer();
+    const hocuspocus = new Hocuspocus({ quiet: true });
+    const shutdown = new AbortController();
+    shutdown.abort();
+    let reportInvocations = 0;
+    const attachment = attachCollab(server, hocuspocus, {
+      signal: shutdown.signal,
+      preAuthenticationErrorReporter: () => {
+        reportInvocations++;
+        throw new Error("injected diagnostic failure");
+      },
+    });
+    const socket = new FakeSocket();
+    const request = new EventEmitter();
+    socket.terminateError = new Error("injected termination failure");
+
+    expect(() =>
+      attachment.emit(
+        "connection",
+        asSocket(socket),
+        request as unknown as IncomingMessage,
+      )).not.toThrow();
+
+    expect(socket.terminationAttempts).toBe(1);
+    expect(reportInvocations).toBe(1);
+    expect(attachment.getPendingAuthenticationCount()).toBe(0);
+    expect(socket.listenerCount("close")).toBe(0);
+    expect(socket.listenerCount("error")).toBe(0);
+    expect(request.listenerCount("aborted")).toBe(0);
+  });
+
   it("destroys a bare upgraded socket when server shutdown starts", async () => {
     const server = createServer();
     const hocuspocus = new Hocuspocus({ quiet: true });
@@ -643,25 +894,40 @@ describe("collaboration attachment shutdown", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it("continues binding shutdown across 50 pending sockets whose termination throws", async () => {
+  it("continues wrapped shutdown across 100 pending sockets when termination, reporting and abort throw", async () => {
     const server = createServer();
     const hocuspocus = new Hocuspocus({ quiet: true });
-    const shutdown = new AbortController();
-    const attachment = attachCollab(server, hocuspocus, { signal: shutdown.signal });
-    const serverSockets: { socket: WebSocket; terminate: () => void }[] = [];
+    const lifecycles: Array<{ abort(): void }> = [];
+    const originalHandleConnection = hocuspocus.handleConnection.bind(hocuspocus);
+    vi.spyOn(hocuspocus, "handleConnection").mockImplementation((socket, request, context) => {
+      const lifecycle = (context as { preAuthentication?: { abort(): void } }).preAuthentication;
+      if (lifecycle) lifecycles.push(lifecycle);
+      return originalHandleConnection(socket, request, context);
+    });
+    let reportInvocations = 0;
+    const attachment = attachCollab(server, hocuspocus, {
+      preAuthenticationErrorReporter: () => {
+        reportInvocations++;
+        throw new Error("injected diagnostic failure");
+      },
+    });
+    const serverSockets: { socket: WebSocket; terminate: () => void; attempts: number }[] = [];
     attachment.on("connection", (socket) => {
-      serverSockets.push({ socket, terminate: socket.terminate.bind(socket) });
+      const record = { socket, terminate: socket.terminate.bind(socket), attempts: 0 };
+      serverSockets.push(record);
       socket.terminate = () => {
+        record.attempts++;
+        record.terminate();
         throw new Error("injected termination failure");
       };
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/collab`;
-    const clients = Array.from({ length: 50 }, () => new WebSocket(url));
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const clients = Array.from({ length: 100 }, () => new WebSocket(url));
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
+    let attachmentClosed = false;
 
     try {
       await Promise.all(
@@ -673,18 +939,39 @@ describe("collaboration attachment shutdown", () => {
             }),
         ),
       );
-      expect(attachment.getPendingAuthenticationCount()).toBe(50);
+      expect(attachment.getPendingAuthenticationCount()).toBe(100);
+      expect(lifecycles).toHaveLength(100);
+      let abortsVisited = 0;
+      for (const lifecycle of lifecycles) {
+        const abort = lifecycle.abort.bind(lifecycle);
+        lifecycle.abort = () => {
+          abortsVisited++;
+          abort();
+          throw new Error("unexpected post-cleanup abort failure");
+        };
+      }
+      const clientCloses = clients.map(
+        (client) =>
+          new Promise<void>((resolve) => {
+            client.once("close", () => resolve());
+          }),
+      );
+      let closePromise!: Promise<void>;
 
-      expect(() => shutdown.abort()).not.toThrow();
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(() => {
+        closePromise = new Promise<void>((resolve, reject) => {
+          attachment.close((error) => error ? reject(error) : resolve());
+        });
+      }).not.toThrow();
+      await Promise.all([closePromise, ...clientCloses]);
+      attachmentClosed = true;
 
+      expect(abortsVisited).toBe(100);
+      expect(serverSockets.every((record) => record.attempts === 1)).toBe(true);
+      expect(reportInvocations).toBe(200);
       expect(attachment.getPendingAuthenticationCount()).toBe(0);
-      expect(
-        error.mock.calls.filter(
-          (call) => call[0] === "[collab] pre-authentication socket terminate failed",
-        ),
-      ).toHaveLength(50);
-      expect(serverSockets).toHaveLength(50);
+      expect(attachment.clients.size).toBe(0);
+      expect(serverSockets).toHaveLength(100);
       expect(unhandled).toEqual([]);
     } finally {
       for (const { socket, terminate } of serverSockets) {
@@ -695,17 +982,17 @@ describe("collaboration attachment shutdown", () => {
         if (client.readyState !== WebSocket.CLOSED) client.terminate();
       }
       await waitFor(() => attachment.clients.size === 0);
-      const final = {
+      if (!attachmentClosed) {
+        await new Promise<void>((resolve) => attachment.close(() => resolve()));
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      process.off("unhandledRejection", onUnhandled);
+      expect({
         clients: attachment.clients.size,
         pending: attachment.getPendingAuthenticationCount(),
         documents: hocuspocus.getDocumentsCount(),
         connections: hocuspocus.getConnectionsCount(),
-      };
-      error.mockRestore();
-      await new Promise<void>((resolve) => attachment.close(() => resolve()));
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      process.off("unhandledRejection", onUnhandled);
-      expect(final).toEqual({ clients: 0, pending: 0, documents: 0, connections: 0 });
+      }).toEqual({ clients: 0, pending: 0, documents: 0, connections: 0 });
       expect(unhandled).toEqual([]);
     }
   });
@@ -912,7 +1199,7 @@ describe("collaboration attachment first frames", () => {
     }
   });
 
-  it("physically reclaims 100 silent, malformed-token, document-mismatch and revoked-token peers", async () => {
+  it("physically reclaims 150 silent, malformed-token, document-mismatch and revoked-token peers", async () => {
     const site = await startAttachment({
       timeoutMs: COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS,
       closeGraceMs: COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
@@ -938,7 +1225,7 @@ describe("collaboration attachment first frames", () => {
     try {
       for (const hostileClass of classes) {
         const results = await Promise.all(
-          Array.from({ length: 100 }, (_, index) =>
+          Array.from({ length: 150 }, (_, index) =>
             nonCooperativeRawPeer(site.url, hostileClass.frame(index)),
           ),
         );

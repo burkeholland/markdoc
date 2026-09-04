@@ -9,6 +9,24 @@ export const COLLAB_PATH = "/collab";
 export const COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS = 3_000;
 export const COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS = 500;
 const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" } as const;
+type CollabPreAuthenticationErrorOperation = "close" | "terminate" | "abort";
+type CollabPreAuthenticationErrorReporter = (operation: CollabPreAuthenticationErrorOperation) => void;
+
+const defaultPreAuthenticationErrorReporter: CollabPreAuthenticationErrorReporter = (operation) => {
+  const target = operation === "abort" ? "lifecycle" : "socket";
+  console.error(`[collab] pre-authentication ${target} ${operation} failed`);
+};
+
+function reportPreAuthenticationError(
+  reporter: CollabPreAuthenticationErrorReporter,
+  operation: CollabPreAuthenticationErrorOperation,
+): void {
+  try {
+    reporter(operation);
+  } catch {
+    // Diagnostics must never become lifecycle control flow.
+  }
+}
 
 export function toWebRequest(req: IncomingMessage, fallbackHost = "localhost"): Request {
   const host = req.headers.host ?? fallbackHost;
@@ -31,6 +49,8 @@ export interface AttachOptions {
   preAuthenticationTimeoutMs?: number;
   /** Test-only override; production uses `COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS`. */
   preAuthenticationCloseGraceMs?: number;
+  /** Test-only error sink; production reports sanitized operation labels to stderr. */
+  preAuthenticationErrorReporter?: CollabPreAuthenticationErrorReporter;
 }
 
 type UpgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
@@ -47,7 +67,7 @@ interface DeadlineOptions {
   /** Test-only monotonic clock; production uses `performance.now()`. */
   now?: () => number;
   /** Test-only error sink; production reports a sanitized event to stderr. */
-  reportError?: (operation: "close" | "terminate") => void;
+  reportError?: CollabPreAuthenticationErrorReporter;
 }
 
 /**
@@ -61,11 +81,7 @@ export function createCollabPreAuthenticationDeadline(
   const timeoutMs = options.timeoutMs ?? COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS;
   const now = options.now ?? (() => performance.now());
   const expiresAt = now() + timeoutMs;
-  const reportError =
-    options.reportError ??
-    ((operation: "close" | "terminate") => {
-      console.error(`[collab] pre-authentication socket ${operation} failed`);
-    });
+  const reportError = options.reportError ?? defaultPreAuthenticationErrorReporter;
   let socket: WebSocket | null = initialSocket;
   let request = options.request;
   let onSettled = options.onSettled;
@@ -119,7 +135,7 @@ export function createCollabPreAuthenticationDeadline(
     try {
       if (current.readyState !== WebSocket.CLOSED) current.terminate();
     } catch {
-      reportError("terminate");
+      reportPreAuthenticationError(reportError, "terminate");
     } finally {
       finish();
     }
@@ -143,7 +159,7 @@ export function createCollabPreAuthenticationDeadline(
       try {
         current.close(UNAUTHORIZED.code, UNAUTHORIZED.reason);
       } catch {
-        reportError("close");
+        reportPreAuthenticationError(reportError, "close");
         terminate();
         return;
       }
@@ -230,6 +246,7 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
       request: req,
       timeoutMs: options.preAuthenticationTimeoutMs,
       closeGraceMs: options.preAuthenticationCloseGraceMs,
+      reportError: options.preAuthenticationErrorReporter,
       onSettled: (settled) => pendingAuthentication.delete(settled),
     });
     pendingAuthentication.add(deadline);
@@ -283,7 +300,17 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
     server.off("close", stop);
     wss.off("close", stop);
     options.signal?.removeEventListener("abort", stop);
-    for (const deadline of [...pendingAuthentication]) deadline.abort();
+    for (const deadline of [...pendingAuthentication]) {
+      try {
+        deadline.abort();
+      } catch {
+        pendingAuthentication.delete(deadline);
+        reportPreAuthenticationError(
+          options.preAuthenticationErrorReporter ?? defaultPreAuthenticationErrorReporter,
+          "abort",
+        );
+      }
+    }
   };
 
   server.on("upgrade", onUpgrade);
