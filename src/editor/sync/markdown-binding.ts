@@ -1,6 +1,7 @@
 import { EditorState, Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
+import type { Step } from "prosemirror-transform";
 import type * as Md from "mdast";
 import * as Y from "yjs";
 import { parseMarkdown, type HeadingInfo, type ParseResult } from "../markdown/parse";
@@ -19,6 +20,15 @@ export interface LocalDocChange {
   endA: number;
   endB: number;
   authorization?: LocalChangeAuthorization | null;
+  rejectedAuthorizationGeneration?: number;
+  appendedTransactions?: ReadonlyArray<AppendedLocalTransaction>;
+}
+
+interface AppendedLocalTransaction {
+  before: PMNode;
+  after: PMNode;
+  steps: readonly Step[];
+  change: LocalDocChange | null;
 }
 
 interface LocalChangeAuthorization {
@@ -39,6 +49,9 @@ interface LocalChangeAuthorization {
     to: Y.RelativePosition;
   }>;
   richInsert: string;
+  sourceFrom: number;
+  sourceTo: number;
+  sourceInsert: string;
 }
 
 /** Current plus historical ProseMirror documents reachable through the cached source map. */
@@ -174,6 +187,99 @@ function serializeDocument(doc: PMNode): string {
     .map((block) => serializeBlocks([block]))
     .filter((text) => text.trim() !== "")
     .join("\n\n");
+}
+
+function serializeDocumentForMerge(
+  doc: PMNode,
+  emptyBlockPlaceholder: string,
+): string {
+  const blocks: string[] = [];
+  doc.forEach((child) => {
+    blocks.push(
+      isEmptyBlock(child)
+        ? emptyBlockPlaceholder
+        : serializeBlocks([child]),
+    );
+  });
+  return blocks.join("\n\n");
+}
+
+function removeEmptyBlockPlaceholders(
+  text: string,
+  placeholder: string,
+): { text: string; operations: TextOp[] } {
+  let result = text;
+  const operations: TextOp[] = [];
+  let index = result.indexOf(placeholder);
+  while (index >= 0) {
+    const after = index + placeholder.length;
+    const startsBlock =
+      index === 0 || result.slice(index - 2, index) === "\n\n";
+    const endsBlock =
+      after === result.length || result.slice(after, after + 2) === "\n\n";
+    if (startsBlock && endsBlock && after < result.length) {
+      let separatorFrom = after;
+      while (
+        result.slice(separatorFrom + 2, separatorFrom + 4) === "\n\n"
+      ) {
+        separatorFrom += 2;
+      }
+      operations.push({
+        index,
+        deleteCount: placeholder.length,
+        insert: "",
+      });
+      result = result.slice(0, index) + result.slice(after);
+      separatorFrom -= placeholder.length;
+      operations.push({
+        index: separatorFrom,
+        deleteCount: 2,
+        insert: "",
+      });
+      result =
+        result.slice(0, separatorFrom) +
+        result.slice(separatorFrom + 2);
+    } else if (startsBlock && endsBlock && index > 0) {
+      let separatorFrom = index - 2;
+      while (
+        separatorFrom >= 2 &&
+        result.slice(separatorFrom - 2, separatorFrom) === "\n\n"
+      ) {
+        separatorFrom -= 2;
+      }
+      operations.push({
+        index,
+        deleteCount: placeholder.length,
+        insert: "",
+      });
+      result = result.slice(0, index) + result.slice(after);
+      operations.push({
+        index: separatorFrom,
+        deleteCount: 2,
+        insert: "",
+      });
+      result =
+        result.slice(0, separatorFrom) +
+        result.slice(separatorFrom + 2);
+    } else {
+      operations.push({
+        index,
+        deleteCount: placeholder.length,
+        insert: "",
+      });
+      result = result.slice(0, index) + result.slice(after);
+    }
+    index = result.indexOf(placeholder);
+  }
+  return { text: result, operations };
+}
+
+function withoutEmptyBlocks(doc: PMNode): PMNode {
+  const blocks: PMNode[] = [];
+  doc.forEach((child) => {
+    if (!isEmptyBlock(child)) blocks.push(child);
+  });
+  return doc.type.create(doc.attrs, blocks);
 }
 
 function blockStarts(doc: PMNode): number[] {
@@ -388,6 +494,931 @@ export function minimalReplaceTransaction(state: EditorState, newDoc: PMNode): T
   return state.tr.replaceWith(0, oldDoc.content.size, newDoc.content);
 }
 
+function authorizedOperations(
+  operations: readonly TextOp[],
+  ranges: ReadonlyArray<{ from: number; to: number }>,
+  insertionAnchor: number,
+  authorizationBlocks: ReadonlyArray<{ from: number; to: number }> = [],
+): TextOp[] {
+  const authorizedFrom = Math.min(
+    insertionAnchor,
+    ...ranges.map((range) => range.from),
+  );
+  const authorizedTo = Math.max(
+    insertionAnchor,
+    ...ranges.map((range) => range.to),
+  );
+  const authorized: TextOp[] = [];
+  let sourceShift = 0;
+  let authorizedShift = 0;
+  for (const operation of operations) {
+    const originalFrom = operation.index - sourceShift;
+    const originalTo = originalFrom + operation.deleteCount;
+    sourceShift += operation.insert.length - operation.deleteCount;
+    const deletionIsAuthorized =
+      operation.deleteCount === 0 ||
+      ranges.some(
+        (range) => range.from <= originalFrom && range.to >= originalTo,
+      );
+    const insertionIsAuthorized =
+      !operation.insert ||
+      (originalFrom >= authorizedFrom && originalFrom <= authorizedTo) ||
+      authorizationBlocks.some(
+        (block) => block.from <= originalFrom && originalFrom <= block.to,
+      );
+    if (!deletionIsAuthorized || !insertionIsAuthorized) continue;
+    authorized.push({
+      ...operation,
+      index: originalFrom + authorizedShift,
+    });
+    authorizedShift += operation.insert.length - operation.deleteCount;
+  }
+  return authorized;
+}
+
+function blocksCoveringAuthorization(
+  blocks: ReadonlyArray<{ from: number; to: number }>,
+  ranges: ReadonlyArray<{ from: number; to: number }>,
+  insertionAnchor: number,
+): Array<{ from: number; to: number }> {
+  return blocks.filter(
+    (block) =>
+      (block.from <= insertionAnchor && insertionAnchor <= block.to) ||
+      ranges.some(
+        (range) => range.from < block.to && block.from < range.to,
+      ),
+  );
+}
+
+function changedSourceBlocks(
+  blocks: ReadonlyArray<{ from: number; to: number }>,
+  currentDoc: PMNode,
+  targetDoc: PMNode,
+): Array<{ from: number; to: number }> {
+  let prefix = 0;
+  while (
+    prefix < currentDoc.childCount &&
+    prefix < targetDoc.childCount &&
+    currentDoc.child(prefix).eq(targetDoc.child(prefix))
+  ) {
+    prefix++;
+  }
+  let suffix = 0;
+  while (
+    suffix < currentDoc.childCount - prefix &&
+    suffix < targetDoc.childCount - prefix &&
+    currentDoc
+      .child(currentDoc.childCount - suffix - 1)
+      .eq(targetDoc.child(targetDoc.childCount - suffix - 1))
+  ) {
+    suffix++;
+  }
+  return blocks.slice(prefix, currentDoc.childCount - suffix);
+}
+
+function applyTextOperations(text: string, operations: readonly TextOp[]): string {
+  let result = text;
+  for (const operation of operations) {
+    result =
+      result.slice(0, operation.index) +
+      operation.insert +
+      result.slice(operation.index + operation.deleteCount);
+  }
+  return result;
+}
+
+type TextOperationSegment =
+  | { originalFrom: number; originalTo: number }
+  | { insert: string };
+
+function normalizeTextOperations(
+  text: string,
+  operations: readonly TextOp[],
+): TextOp[] {
+  const segments: TextOperationSegment[] = [
+    { originalFrom: 0, originalTo: text.length },
+  ];
+  const segmentLength = (segment: TextOperationSegment) =>
+    "insert" in segment
+      ? segment.insert.length
+      : segment.originalTo - segment.originalFrom;
+  const splitAt = (position: number): number => {
+    if (position < 0) throw new RangeError("Text operation starts before the document");
+    let offset = 0;
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index];
+      const length = segmentLength(segment);
+      if (position === offset) return index;
+      if (position < offset + length) {
+        const localOffset = position - offset;
+        if ("insert" in segment) {
+          segments.splice(
+            index,
+            1,
+            { insert: segment.insert.slice(0, localOffset) },
+            { insert: segment.insert.slice(localOffset) },
+          );
+        } else {
+          segments.splice(
+            index,
+            1,
+            {
+              originalFrom: segment.originalFrom,
+              originalTo: segment.originalFrom + localOffset,
+            },
+            {
+              originalFrom: segment.originalFrom + localOffset,
+              originalTo: segment.originalTo,
+            },
+          );
+        }
+        return index + 1;
+      }
+      offset += length;
+    }
+    if (position === offset) return segments.length;
+    throw new RangeError("Text operation ends after the document");
+  };
+
+  for (const operation of operations) {
+    const from = splitAt(operation.index);
+    const to = splitAt(operation.index + operation.deleteCount);
+    segments.splice(
+      from,
+      to - from,
+      ...(operation.insert ? [{ insert: operation.insert }] : []),
+    );
+  }
+
+  const normalized: TextOp[] = [];
+  const append = (operation: TextOp) => {
+    const previous = normalized.at(-1);
+    if (
+      previous &&
+      previous.index === operation.index &&
+      !previous.insert
+    ) {
+      previous.deleteCount += operation.deleteCount;
+      previous.insert = operation.insert;
+      return;
+    }
+    normalized.push(operation);
+  };
+  let originalOffset = 0;
+  let currentOffset = 0;
+  for (const segment of segments) {
+    if ("insert" in segment) {
+      append({
+        index: currentOffset,
+        deleteCount: 0,
+        insert: segment.insert,
+      });
+      currentOffset += segment.insert.length;
+      continue;
+    }
+    if (segment.originalFrom < originalOffset) {
+      throw new RangeError("Text operations reorder original content");
+    }
+    if (segment.originalFrom > originalOffset) {
+      append({
+        index: currentOffset,
+        deleteCount: segment.originalFrom - originalOffset,
+        insert: "",
+      });
+    }
+    currentOffset += segment.originalTo - segment.originalFrom;
+    originalOffset = segment.originalTo;
+  }
+  if (originalOffset < text.length) {
+    append({
+      index: currentOffset,
+      deleteCount: text.length - originalOffset,
+      insert: "",
+    });
+  }
+  return normalized;
+}
+
+function textOperationsFromYDelta(
+  delta: ReadonlyArray<{
+    insert?: string | object;
+    delete?: number;
+    retain?: number;
+  }>,
+): TextOp[] | null {
+  const operations: TextOp[] = [];
+  let index = 0;
+  for (const part of delta) {
+    if (part.retain) index += part.retain;
+    if (part.delete) {
+      operations.push({
+        index,
+        deleteCount: part.delete,
+        insert: "",
+      });
+    }
+    if (part.insert !== undefined) {
+      if (typeof part.insert !== "string") return null;
+      operations.push({
+        index,
+        deleteCount: 0,
+        insert: part.insert,
+      });
+      index += part.insert.length;
+    }
+  }
+  return operations;
+}
+
+function operationsOverlap(
+  left: BaseTextOperation,
+  right: BaseTextOperation,
+): boolean {
+  return (
+    left.to > left.from &&
+    right.to > right.from &&
+    left.from < right.to &&
+    right.from < left.to
+  );
+}
+
+function subtractOverlappingDeletion(
+  local: BaseTextOperation,
+  remote: BaseTextOperation,
+): BaseTextOperation[] | null {
+  if (
+    !operationsOverlap(local, remote) ||
+    (local.from === remote.from && local.to === remote.to)
+  ) {
+    return null;
+  }
+  const beforeTo = Math.min(local.to, remote.from);
+  const afterFrom = Math.max(local.from, remote.to);
+  const residual: BaseTextOperation[] = [];
+  if (beforeTo > local.from) {
+    residual.push({ from: local.from, to: beforeTo, insert: "" });
+  }
+  if (local.insert) {
+    if (remote.insert && local.insert.includes(remote.insert)) {
+      const mirrorAt = local.insert.indexOf(remote.insert);
+      const prefix = local.insert.slice(0, mirrorAt);
+      const suffix = local.insert.slice(mirrorAt + remote.insert.length);
+      if (prefix) {
+        residual.push({
+          from: remote.from,
+          to: remote.from,
+          insert: prefix,
+          association: -1,
+        });
+      }
+      if (suffix) {
+        residual.push({
+          from: remote.to,
+          to: remote.to,
+          insert: suffix,
+          association: 1,
+        });
+      }
+    } else if (!remote.insert.includes(local.insert)) {
+      const insertionAt =
+        beforeTo > local.from
+          ? beforeTo
+          : afterFrom < local.to
+            ? afterFrom
+            : remote.from;
+      residual.push({
+        from: insertionAt,
+        to: insertionAt,
+        insert: local.insert,
+        association: insertionAt === remote.from ? -1 : 1,
+      });
+    }
+  }
+  if (local.to > afterFrom) {
+    residual.push({ from: afterFrom, to: local.to, insert: "" });
+  }
+  return residual;
+}
+
+function mirroredReplacementResiduals(
+  local: BaseTextOperation,
+  remoteOperations: ReadonlyArray<BaseTextOperation>,
+): BaseTextOperation[] | null {
+  if (!local.insert || local.from === local.to) return null;
+  const mirrors: Array<{
+    operation: BaseTextOperation;
+    payloadFrom: number;
+    payloadTo: number;
+  }> = [];
+  let payloadCursor = 0;
+  for (const remote of remoteOperations) {
+    if (!remote.insert || !operationsOverlap(local, remote)) continue;
+    const payloadFrom = local.insert.indexOf(remote.insert, payloadCursor);
+    if (payloadFrom < 0) continue;
+    const payloadTo = payloadFrom + remote.insert.length;
+    mirrors.push({ operation: remote, payloadFrom, payloadTo });
+    payloadCursor = payloadTo;
+  }
+  if (mirrors.length === 0) return null;
+
+  const residuals: BaseTextOperation[] = [];
+  let from = 0;
+  for (const mirror of mirrors) {
+    const insert = local.insert.slice(from, mirror.payloadFrom);
+    if (insert) {
+      residuals.push({
+        from: mirror.operation.from,
+        to: mirror.operation.from,
+        insert,
+        association: -1,
+      });
+    }
+    from = mirror.payloadTo;
+  }
+  const suffix = local.insert.slice(from);
+  if (suffix) {
+    const last = mirrors.at(-1)!.operation;
+    residuals.push({
+      from: last.to,
+      to: last.to,
+      insert: suffix,
+      association: 1,
+    });
+  }
+  return residuals;
+}
+
+interface RebasedAppendedTransactions {
+  doc: PMNode;
+  semanticSafe: boolean;
+}
+
+function stepIsFullyMirrored(
+  originalDoc: PMNode,
+  nextOriginalDoc: PMNode,
+  currentDoc: PMNode,
+  localCursor?: number,
+): boolean {
+  const originalText = serializeDocument(originalDoc);
+  const nextOriginalText = serializeDocument(nextOriginalDoc);
+  if (originalText === nextOriginalText) return false;
+  if (
+    baseTextOperations(originalText, nextOriginalText).every(
+      (operation) => !operation.insert,
+    )
+  ) {
+    return false;
+  }
+  const merged = mergeAppendedText(
+    originalText,
+    nextOriginalText,
+    serializeDocument(currentDoc),
+    localCursor,
+  );
+  return (
+    merged !== null &&
+    parseMarkdown(merged.text).doc.eq(withoutEmptyBlocks(currentDoc))
+  );
+}
+
+function stepPartiallyMirrorsJoinedChange(
+  originalDoc: PMNode,
+  nextOriginalDoc: PMNode,
+  currentDoc: PMNode,
+  localCursor?: number,
+): boolean {
+  const originalText = serializeDocument(originalDoc);
+  const localOperations = baseTextOperations(
+    originalText,
+    serializeDocument(nextOriginalDoc),
+    localCursor,
+  );
+  const remoteOperations = baseTextOperations(
+    originalText,
+    serializeDocument(currentDoc),
+  );
+  return (
+    appendedTextMirrorsJoinedChange(
+      originalText,
+      serializeDocument(nextOriginalDoc),
+      serializeDocument(currentDoc),
+    ) ||
+    localOperations.some((local) =>
+      remoteOperations.some(
+        (remote) =>
+          operationsOverlap(local, remote) ||
+          (local.from < local.to &&
+            remote.from === remote.to &&
+            local.from <= remote.from &&
+            remote.from <= local.to),
+      ),
+    )
+  );
+}
+
+function stepSourceCursor(
+  doc: PMNode,
+  step: Step,
+  emptyBlockPlaceholder?: string,
+): number | undefined {
+  let oldEnd = -1;
+  step.getMap().forEach((_oldStart, mappedOldEnd) => {
+    oldEnd = Math.max(oldEnd, mappedOldEnd);
+  });
+  if (oldEnd < 0) return undefined;
+  if (emptyBlockPlaceholder) {
+    let pmFrom = 0;
+    let sourceFrom = 0;
+    for (let index = 0; index < doc.childCount; index++) {
+      const child = doc.child(index);
+      const blockText = isEmptyBlock(child)
+        ? emptyBlockPlaceholder
+        : serializeBlocks([child]);
+      const pmTo = pmFrom + child.nodeSize;
+      if (oldEnd <= pmTo) {
+        if (isEmptyBlock(child)) {
+          return sourceFrom + emptyBlockPlaceholder.length;
+        }
+        const parsedBlock = parseMarkdown(blockText);
+        return (
+          sourceFrom +
+          parsedBlock.map.pmToSrc(
+            Math.max(0, Math.min(child.nodeSize, oldEnd - pmFrom)),
+          )
+        );
+      }
+      pmFrom = pmTo;
+      sourceFrom += blockText.length + 2;
+    }
+  }
+  const parsed = parseMarkdown(serializeDocument(doc));
+  return parsed.doc.eq(withoutEmptyBlocks(doc))
+    ? parsed.map.pmToSrc(oldEnd)
+    : undefined;
+}
+
+function rebaseAppendedTransactions(
+  initialDoc: PMNode,
+  rebasedDoc: PMNode,
+  transactions: ReadonlyArray<AppendedLocalTransaction>,
+): RebasedAppendedTransactions | null {
+  let originalDoc = initialDoc;
+  let currentDoc = rebasedDoc;
+  let semanticSafe = true;
+  let mapping = minimalReplaceTransaction(EditorState.create({ doc: originalDoc }), currentDoc).mapping;
+
+  for (const transaction of transactions) {
+    if (!transaction.before.eq(originalDoc)) return null;
+    for (const step of transaction.steps) {
+      const originalResult = step.apply(originalDoc);
+      if (originalResult.failed || !originalResult.doc) return null;
+      const nextOriginalDoc = originalResult.doc;
+      const localCursor = stepSourceCursor(originalDoc, step);
+
+      if (
+        stepIsFullyMirrored(
+          originalDoc,
+          nextOriginalDoc,
+          currentDoc,
+          localCursor,
+        )
+      ) {
+        originalDoc = nextOriginalDoc;
+        mapping = minimalReplaceTransaction(
+          EditorState.create({ doc: originalDoc }),
+          currentDoc,
+        ).mapping;
+        continue;
+      }
+      if (
+        stepPartiallyMirrorsJoinedChange(
+          originalDoc,
+          nextOriginalDoc,
+          currentDoc,
+          localCursor,
+        )
+      ) {
+        semanticSafe = false;
+      }
+
+      const mapped = step.map(mapping);
+      if (!mapped) return null;
+      const rebasedResult = mapped.apply(currentDoc);
+      if (rebasedResult.failed || !rebasedResult.doc) return null;
+
+      originalDoc = nextOriginalDoc;
+      currentDoc = rebasedResult.doc;
+      mapping = minimalReplaceTransaction(
+        EditorState.create({ doc: originalDoc }),
+        currentDoc,
+      ).mapping;
+    }
+    if (!transaction.after.eq(originalDoc)) return null;
+  }
+
+  return { doc: currentDoc, semanticSafe };
+}
+
+interface BaseTextOperation {
+  from: number;
+  to: number;
+  insert: string;
+  association?: -1 | 1;
+}
+
+interface MergedAppendedText {
+  text: string;
+  operations: TextOp[];
+}
+
+function baseTextOperations(
+  before: string,
+  after: string,
+  cursor?: number,
+): BaseTextOperation[] {
+  let shift = 0;
+  return diffOps(before, after, 0, cursor).map((operation) => {
+    const from = operation.index - shift;
+    shift += operation.insert.length - operation.deleteCount;
+    return {
+      from,
+      to: from + operation.deleteCount,
+      insert: operation.insert,
+    };
+  });
+}
+
+function textOperationsToBase(
+  operations: ReadonlyArray<TextOp>,
+): BaseTextOperation[] {
+  let shift = 0;
+  const base: BaseTextOperation[] = [];
+  for (const operation of operations) {
+    const from = operation.index - shift;
+    shift += operation.insert.length - operation.deleteCount;
+    const converted = {
+      from,
+      to: from + operation.deleteCount,
+      insert: operation.insert,
+    };
+    const previous = base.at(-1);
+    if (
+      previous &&
+      previous.from === converted.from &&
+      (previous.from === previous.to ||
+        converted.from === converted.to)
+    ) {
+      previous.to = Math.max(previous.to, converted.to);
+      previous.insert += converted.insert;
+    } else {
+      base.push(converted);
+    }
+  }
+  return base;
+}
+
+function exactAppendedBaseOperations(
+  initialDoc: PMNode,
+  transactions: ReadonlyArray<AppendedLocalTransaction>,
+  emptyBlockPlaceholder?: string,
+): BaseTextOperation[] | null {
+  const serialize = (doc: PMNode) =>
+    emptyBlockPlaceholder
+      ? serializeDocumentForMerge(doc, emptyBlockPlaceholder)
+      : serializeDocument(doc);
+  const initialText = serialize(initialDoc);
+  const operations: TextOp[] = [];
+  let currentDoc = initialDoc;
+  let currentText = initialText;
+  for (const transaction of transactions) {
+    if (!transaction.before.eq(currentDoc)) return null;
+    for (const step of transaction.steps) {
+      const result = step.apply(currentDoc);
+      if (result.failed || !result.doc) return null;
+      const nextText = serialize(result.doc);
+      operations.push(
+        ...diffOps(
+          currentText,
+          nextText,
+          0,
+          stepSourceCursor(
+            currentDoc,
+            step,
+            emptyBlockPlaceholder,
+          ),
+        ),
+      );
+      currentDoc = result.doc;
+      currentText = nextText;
+    }
+    if (!transaction.after.eq(currentDoc)) return null;
+  }
+  const normalized = normalizeTextOperations(initialText, operations);
+  return applyTextOperations(initialText, normalized) === currentText
+    ? textOperationsToBase(normalized)
+    : null;
+}
+
+function applyBaseTextOperations(
+  text: string,
+  operations: ReadonlyArray<BaseTextOperation>,
+): string {
+  let result = text;
+  for (let index = operations.length - 1; index >= 0; index--) {
+    const operation = operations[index];
+    result =
+      result.slice(0, operation.from) +
+      operation.insert +
+      result.slice(operation.to);
+  }
+  return result;
+}
+
+function remoteOperationsAfterLocalChange(
+  authorization: LocalChangeAuthorization,
+  remoteOperations: ReadonlyArray<TextOp>,
+  localText: string,
+  joinedText: string,
+): BaseTextOperation[] | null {
+  const normalized = normalizeTextOperations(
+    authorization.text,
+    remoteOperations,
+  );
+  const remoteBase = textOperationsToBase(normalized);
+  const localDelta =
+    authorization.sourceInsert.length -
+    (authorization.sourceTo - authorization.sourceFrom);
+  const transformed: BaseTextOperation[] = [];
+  for (const remote of remoteBase) {
+    if (
+      remote.from < authorization.sourceTo &&
+      authorization.sourceFrom < remote.to
+    ) {
+      return null;
+    }
+    if (
+      remote.from === remote.to &&
+      remote.from > authorization.sourceFrom &&
+      remote.from < authorization.sourceTo
+    ) {
+      return null;
+    }
+    const coincidentInsertions =
+      authorization.sourceFrom === authorization.sourceTo &&
+      remote.from === remote.to &&
+      remote.from === authorization.sourceFrom;
+    const shift =
+      remote.from > authorization.sourceTo ||
+      (remote.from === authorization.sourceTo &&
+        !coincidentInsertions)
+        ? localDelta
+        : 0;
+    transformed.push({
+      ...remote,
+      from: remote.from + shift,
+      to: remote.to + shift,
+    });
+  }
+  return applyBaseTextOperations(localText, transformed) === joinedText
+    ? transformed
+    : null;
+}
+
+function mergeAppendedText(
+  baseText: string,
+  appendedText: string,
+  joinedText: string,
+  localCursor?: number,
+  exactRemoteOperations?: ReadonlyArray<BaseTextOperation> | null,
+  exactLocalOperations?: ReadonlyArray<BaseTextOperation> | null,
+): MergedAppendedText | null {
+  const localOperations =
+    exactLocalOperations ??
+    baseTextOperations(baseText, appendedText, localCursor);
+  const remoteOperations =
+    exactRemoteOperations ?? baseTextOperations(baseText, joinedText);
+  const pending: BaseTextOperation[] = [];
+  for (const local of localOperations) {
+    const mirroredInsertions = mirroredReplacementResiduals(
+      local,
+      remoteOperations,
+    );
+    let residuals: BaseTextOperation[] = [
+      {
+        ...local,
+        insert: mirroredInsertions ? "" : local.insert,
+      },
+    ];
+    for (const remote of remoteOperations) {
+      residuals = residuals.flatMap((residual) => {
+        if (
+          residual.from === residual.to &&
+          residual.insert &&
+          remote.from < remote.to &&
+          residual.from > remote.from &&
+          residual.from < remote.to
+        ) {
+          return [
+            {
+              from: remote.to,
+              to: remote.to,
+              insert: residual.insert,
+              association: 1,
+            },
+          ];
+        }
+        const deletionResidual = subtractOverlappingDeletion(
+          residual,
+          remote,
+        );
+        if (deletionResidual) return deletionResidual;
+        if (
+          residual.from !== remote.from ||
+          residual.to !== remote.to
+        ) {
+          return [residual];
+        }
+        if (residual.insert === remote.insert) return [];
+        if (
+          remote.insert &&
+          residual.insert.includes(remote.insert)
+        ) {
+          const mirrorAt = residual.insert.indexOf(remote.insert);
+          const prefix = residual.insert.slice(0, mirrorAt);
+          const suffix = residual.insert.slice(
+            mirrorAt + remote.insert.length,
+          );
+          const before: BaseTextOperation[] = prefix
+            ? [
+                {
+                  from: residual.from,
+                  to: residual.from,
+                  insert: prefix,
+                  association: -1,
+                },
+              ]
+            : [];
+          const after: BaseTextOperation[] = suffix
+            ? [
+                {
+                  from: residual.to,
+                  to: residual.to,
+                  insert: suffix,
+                  association: 1,
+                },
+              ]
+            : [];
+          return [...before, ...after];
+        }
+        if (
+          residual.insert &&
+          remote.insert.includes(residual.insert)
+        ) {
+          return [];
+        }
+        if (residual.from < residual.to) {
+          return residual.insert
+            ? [
+                {
+                  from: remote.to,
+                  to: remote.to,
+                  insert: residual.insert,
+                  association: 1,
+                },
+              ]
+            : [];
+        }
+        return [residual];
+      });
+    }
+    pending.push(
+      ...residuals.filter(
+        (residual) => residual.from !== residual.to || residual.insert,
+      ),
+      ...(mirroredInsertions ?? []),
+    );
+  }
+  pending.sort(
+    (left, right) =>
+      left.from - right.from ||
+      Number(left.from < left.to) - Number(right.from < right.to),
+  );
+
+  for (const local of pending) {
+    for (const remote of remoteOperations) {
+      const localDeletes = local.to > local.from;
+      const remoteDeletes = remote.to > remote.from;
+      if (
+        localDeletes &&
+        remoteDeletes &&
+        local.from < remote.to &&
+        remote.from < local.to
+      ) {
+        return null;
+      }
+      if (
+        !localDeletes &&
+        remoteDeletes &&
+        local.from > remote.from &&
+        local.from < remote.to
+      ) {
+        return null;
+      }
+    }
+  }
+
+  const mapOffset = (offset: number, association: -1 | 1): number | null => {
+    let delta = 0;
+    for (const remote of remoteOperations) {
+      if (remote.from === remote.to) {
+        if (
+          remote.from < offset ||
+          (remote.from === offset && association > 0)
+        ) {
+          delta += remote.insert.length;
+        }
+        continue;
+      }
+      if (offset < remote.from) break;
+      if (offset > remote.to || offset === remote.to) {
+        delta += remote.insert.length - (remote.to - remote.from);
+        continue;
+      }
+      if (offset === remote.from) {
+        return remote.from + delta + (association > 0 ? remote.insert.length : 0);
+      }
+      return null;
+    }
+    return offset + delta;
+  };
+
+  let merged = joinedText;
+  const operations: TextOp[] = [];
+  for (let operationIndex = pending.length - 1; operationIndex >= 0; operationIndex--) {
+    const operation = pending[operationIndex];
+    const insertionAt = mapOffset(
+      operation.to,
+      operation.from === operation.to
+        ? (operation.association ?? 1)
+        : -1,
+    );
+    if (insertionAt == null) return null;
+    if (operation.insert) {
+      operations.push({
+        index: insertionAt,
+        deleteCount: 0,
+        insert: operation.insert,
+      });
+      merged =
+        merged.slice(0, insertionAt) +
+        operation.insert +
+        merged.slice(insertionAt);
+    }
+
+    const splitPoints = remoteOperations
+      .filter(
+        (remote) =>
+          remote.from === remote.to &&
+          remote.from > operation.from &&
+          remote.from < operation.to,
+      )
+      .map((remote) => remote.from);
+    const boundaries = [operation.from, ...splitPoints, operation.to];
+    for (let index = boundaries.length - 2; index >= 0; index--) {
+      if (boundaries[index] === boundaries[index + 1]) continue;
+      const from = mapOffset(boundaries[index], 1);
+      const to = mapOffset(boundaries[index + 1], -1);
+      if (from == null || to == null || to < from) return null;
+      operations.push({
+        index: from,
+        deleteCount: to - from,
+        insert: "",
+      });
+      merged = merged.slice(0, from) + merged.slice(to);
+    }
+  }
+  return { text: merged, operations };
+}
+
+function appendedTextMirrorsJoinedChange(
+  baseText: string,
+  appendedText: string,
+  joinedText: string,
+): boolean {
+  const localOperations = baseTextOperations(baseText, appendedText);
+  const remoteOperations = baseTextOperations(baseText, joinedText);
+  return localOperations.some((local) =>
+    remoteOperations.some(
+      (remote) =>
+        local.from === remote.from &&
+        local.to === remote.to &&
+        (local.insert === remote.insert ||
+          (!!remote.insert && local.insert.includes(remote.insert)) ||
+          (!!local.insert && remote.insert.includes(local.insert))),
+    ),
+  );
+}
+
 /**
  * Two-way binding between a ProseMirror document and a Y.Text that holds
  * Markdown source.
@@ -442,7 +1473,10 @@ export class MarkdownBinding {
   private inLocalHandler = false;
   /** A valid local authorization exists in the ProseMirror transaction currently being dispatched. */
   private localAuthorizationPending = false;
+  private deferredRemoteOperations: TextOp[] | null = [];
+  private deferredRemoteOperationUnits = 0;
   private pendingSync = false;
+  private collectingLocalOperations: TextOp[] | null = null;
   /** True while a remote sync is being dispatched to the view. */
   syncing = false;
   private destroyed = false;
@@ -477,7 +1511,8 @@ export class MarkdownBinding {
 
   destroy() {
     this.destroyed = true;
-    this.localAuthorizationPending = false;
+    this.settleLocalAuthorization();
+    this.pendingSync = false;
     this.cancelVerify();
     if (this.heldTimer) clearTimeout(this.heldTimer);
     this.heldTimer = null;
@@ -598,6 +1633,24 @@ export class MarkdownBinding {
       this.initialDoc();
       this.syncFromText();
     }
+  }
+
+  private settleLocalAuthorization() {
+    if (this.localAuthorizationPending) this.localAuthorizationPending = false;
+  }
+
+  abortLocalTransaction(recover = false) {
+    this.settleLocalAuthorization();
+    if (!recover && !this.pendingSync) return;
+    this.pendingSync = false;
+    queueMicrotask(() => {
+      if (!this.destroyed) this.syncFromText();
+    });
+  }
+
+  detach(view: EditorView) {
+    if (this.view === view) this.view = null;
+    this.abortLocalTransaction();
   }
 
   private parse(text: string): ParseResult {
@@ -722,10 +1775,29 @@ export class MarkdownBinding {
     return false;
   }
 
-  private onTextChange = (_event: Y.YTextEvent, tr: Y.Transaction) => {
+  private onTextChange = (event: Y.YTextEvent, tr: Y.Transaction) => {
     this.sourceGeneration++;
     if (this.destroyed || tr.origin === this) return;
     if (this.localAuthorizationPending) {
+      if (this.deferredRemoteOperations) {
+        const operations = textOperationsFromYDelta(event.delta);
+        const units = operations?.reduce(
+          (total, operation) =>
+            total + operation.deleteCount + operation.insert.length,
+          0,
+        );
+        if (
+          !operations ||
+          units === undefined ||
+          this.deferredRemoteOperationUnits + units >
+            STALE_OPERATION_MAX_SOURCE_UNITS
+        ) {
+          this.deferredRemoteOperations = null;
+        } else {
+          this.deferredRemoteOperations.push(...operations);
+          this.deferredRemoteOperationUnits += units;
+        }
+      }
       this.pendingSync = true;
       return;
     }
@@ -845,7 +1917,7 @@ export class MarkdownBinding {
       return this.handleLocal(oldState, newState, change);
     } finally {
       this.inLocalHandler = false;
-      this.localAuthorizationPending = false;
+      this.settleLocalAuthorization();
       if (this.pendingSync) {
         this.pendingSync = false;
         queueMicrotask(() => {
@@ -861,7 +1933,7 @@ export class MarkdownBinding {
    * the view plugin applies it.
    */
   authorizeLocalChange(change: LocalDocChange): LocalDocChange {
-    this.localAuthorizationPending = false;
+    this.settleLocalAuthorization();
     if (
       this.currentDoc !== change.before ||
       this.currentTextGeneration !== this.sourceGeneration ||
@@ -890,7 +1962,12 @@ export class MarkdownBinding {
     const oldBlock = this.currentText.slice(block.from, block.to);
     const newBlock = serializeBlocks([change.after.child(newIndex)]);
     if (serializeBlocks([change.before.child(oldIndex)]) !== oldBlock) return { ...change, authorization: null };
-    const ops = diffOps(oldBlock, newBlock, block.from);
+    const ops = diffOps(
+      oldBlock,
+      newBlock,
+      block.from,
+      map.pmToSrc(change.endA) - block.from,
+    );
     const op = ops.length === 1 ? ops[0] : null;
     if (!op) return { ...change, authorization: null };
     const sourceFrom = op.index;
@@ -912,7 +1989,14 @@ export class MarkdownBinding {
       originalLength > STALE_OPERATION_MAX_SOURCE_UNITS ||
       richInsert.length > STALE_OPERATION_MAX_SOURCE_UNITS
     ) {
-      return { ...change, authorization: null };
+      this.deferredRemoteOperations = null;
+      this.deferredRemoteOperationUnits = 0;
+      this.localAuthorizationPending = true;
+      return {
+        ...change,
+        authorization: null,
+        rejectedAuthorizationGeneration: this.sourceGeneration,
+      };
     }
     const originalUnits = Array.from({ length: originalLength }, (_, offset) => ({
       from: Y.createRelativePositionFromTypeIndex(this.ytext, sourceFrom + offset),
@@ -927,7 +2011,12 @@ export class MarkdownBinding {
       to,
       originalUnits,
       richInsert,
+      sourceFrom,
+      sourceTo,
+      sourceInsert: op.insert,
     };
+    this.deferredRemoteOperations = [];
+    this.deferredRemoteOperationUnits = 0;
     this.localAuthorizationPending = true;
     return {
       ...change,
@@ -944,7 +2033,120 @@ export class MarkdownBinding {
     );
   }
 
-  private reconcileStaleLocalChange(authorization: LocalChangeAuthorization): boolean {
+  private handleCurrentComposedChange(
+    oldState: EditorState,
+    change: LocalDocChange,
+    transactions: ReadonlyArray<AppendedLocalTransaction>,
+  ): boolean {
+    const beforeText = this.currentText;
+    const operations: TextOp[] = [];
+    this.collectingLocalOperations = operations;
+    let changed = false;
+    try {
+      const rootAfter = transactions[0].before;
+      const rootChange: LocalDocChange = {
+        ...change,
+        after: rootAfter,
+        appendedTransactions: undefined,
+      };
+      changed = this.handleLocal(
+        oldState,
+        EditorState.create({ doc: rootAfter }),
+        rootChange,
+      );
+      for (const transaction of transactions) {
+        changed =
+          this.handleLocal(
+            EditorState.create({ doc: transaction.before }),
+            EditorState.create({ doc: transaction.after }),
+            transaction.change,
+          ) || changed;
+      }
+    } finally {
+      this.collectingLocalOperations = null;
+    }
+    const finalDoc = transactions.at(-1)!.after;
+    const plannedHasPhantoms = this.phantoms.size > 0;
+    const normalizedOperations = normalizeTextOperations(
+      beforeText,
+      operations,
+    );
+    if (
+      applyTextOperations(beforeText, normalizedOperations) !==
+      this.currentText
+    ) {
+      throw new Error(
+        "Collected text operations did not produce the composed source",
+      );
+    }
+
+    if (
+      normalizedOperations.length > 0 &&
+      this.options.interceptor?.(normalizedOperations, this.ytext, this)
+    ) {
+      if (
+        plannedHasPhantoms &&
+        !this.retainRebasedPhantoms(finalDoc, this.ytext.toString())
+      ) {
+        this.phantoms.clear();
+      }
+      this.requestSync();
+      this.options.onSync?.("local");
+      return true;
+    }
+    if (normalizedOperations.length > 0) {
+      this.ydoc.transact(
+        () => applyOps(this.ytext, normalizedOperations),
+        this,
+      );
+      this.currentTextGeneration = this.sourceGeneration;
+    }
+    if (
+      plannedHasPhantoms &&
+      !this.retainRebasedPhantoms(finalDoc, this.currentText)
+    ) {
+      this.phantoms.clear();
+    }
+    this.options.onSync?.("local");
+    return changed;
+  }
+
+  private retainRebasedPhantoms(doc: PMNode, text: string): boolean {
+    const parsed = parseMarkdown(text);
+    const phantoms = new Map<number, PhantomRecord>();
+    let realIndex = 0;
+    let previousSourceEnd = 0;
+    for (let index = 0; index < doc.childCount; index++) {
+      const child = doc.child(index);
+      if (isEmptyBlock(child)) {
+        phantoms.set(index, {
+          after:
+            previousSourceEnd > 0
+              ? Y.createRelativePositionFromTypeIndex(
+                  this.ytext,
+                  previousSourceEnd,
+                  -1,
+                )
+              : null,
+        });
+        continue;
+      }
+      if (realIndex >= parsed.doc.childCount) return false;
+      const canonical = parsed.doc.child(realIndex);
+      if (!canonical.eq(child)) return false;
+      previousSourceEnd = parsed.map.blocks[realIndex].to;
+      realIndex++;
+    }
+    if (realIndex !== parsed.doc.childCount) return false;
+    this.phantoms = phantoms;
+    return true;
+  }
+
+  private reconcileAuthorizedLocalChange(
+    authorization: LocalChangeAuthorization,
+    appendedTransactions: ReadonlyArray<AppendedLocalTransaction> = [],
+  ): boolean {
+    const joinedGeneration = !this.authorizationIsCurrent(authorization);
     const resolve = (position: Y.RelativePosition) =>
       Y.createAbsolutePositionFromRelativePosition(position, this.ydoc, false);
     const from = resolve(authorization.from);
@@ -1001,23 +2203,6 @@ export class MarkdownBinding {
       authorization.richInsert.length === 0
         ? rebased.doc
         : tr.insertText(authorization.richInsert, insertionPosition).doc;
-    let sourceInsert = "";
-    if (authorization.richInsert.length > 0) {
-      const contextualOps = diffOps(serializeDocument(rebased.doc), serializeDocument(mergedDoc));
-      if (contextualOps.length !== 1 || contextualOps[0].deleteCount !== 0) {
-        this.currentText = currentText;
-        return this.fallbackReplaceAll(mergedDoc);
-      }
-      sourceInsert = contextualOps[0].insert;
-    }
-
-    const candidateText =
-      rebasedText.slice(0, insertionIndex) + sourceInsert + rebasedText.slice(insertionIndex);
-    if (!parseMarkdown(candidateText).doc.eq(mergedDoc)) {
-      this.currentText = currentText;
-      return this.fallbackReplaceAll(mergedDoc);
-    }
-
     const ops: TextOp[] = [];
     let shift = 0;
     for (const range of ranges) {
@@ -1028,7 +2213,58 @@ export class MarkdownBinding {
       });
       shift -= range.to - range.from;
     }
-    if (sourceInsert) {
+
+    let sourceInsert = "";
+    let candidateText = rebasedText;
+    if (authorization.richInsert.length > 0) {
+      const contextualOps = diffOps(serializeDocument(rebased.doc), serializeDocument(mergedDoc));
+      if (contextualOps.length === 1 && contextualOps[0].deleteCount === 0) {
+        sourceInsert = contextualOps[0].insert;
+        candidateText =
+          rebasedText.slice(0, insertionIndex) +
+          sourceInsert +
+          rebasedText.slice(insertionIndex);
+      }
+    }
+
+    if (!parseMarkdown(candidateText).doc.eq(mergedDoc)) {
+      if (!joinedGeneration) {
+        return this.fallbackReplaceAll(
+          appendedTransactions.at(-1)?.after ?? mergedDoc,
+        );
+      }
+      const joinedText = serializeDocument(mergedDoc);
+      const joinedOps = diffOps(currentText, joinedText);
+      const currentParsed = parseMarkdown(currentText);
+      const authorizationBlocks = [
+        ...blocksCoveringAuthorization(
+          currentParsed.map.blocks,
+          ranges,
+          insertionAnchor,
+        ),
+        ...changedSourceBlocks(
+          currentParsed.map.blocks,
+          currentParsed.doc,
+          withoutEmptyBlocks(mergedDoc),
+        ),
+      ];
+      const safeJoinedOps = authorizedOperations(
+        joinedOps,
+        ranges,
+        insertionAnchor,
+        authorizationBlocks,
+      );
+      const safeJoinedText = applyTextOperations(
+        currentText,
+        safeJoinedOps,
+      );
+      if (!parseMarkdown(safeJoinedText).doc.eq(withoutEmptyBlocks(mergedDoc))) {
+        this.requestSync();
+        return false;
+      }
+      ops.splice(0, ops.length, ...safeJoinedOps);
+      candidateText = safeJoinedText;
+    } else if (sourceInsert) {
       const previous = ops.at(-1);
       if (previous && previous.index === insertionIndex && previous.insert === "") {
         previous.insert = sourceInsert;
@@ -1037,16 +2273,145 @@ export class MarkdownBinding {
       }
     }
 
+    let rebasedPhantomDoc: PMNode | null = null;
+    if (appendedTransactions.length > 0) {
+      const appendedBaseDoc = appendedTransactions[0].before;
+      const staleAppendedDoc = appendedTransactions.at(-1)!.after;
+      const hasEmptyAppendedBlock = Array.from(
+        { length: staleAppendedDoc.childCount },
+        (_, index) => staleAppendedDoc.child(index),
+      ).some(isEmptyBlock);
+      let emptyBlockPlaceholder = "\u0000";
+      while (
+        candidateText.includes(emptyBlockPlaceholder) ||
+        serializeDocument(appendedBaseDoc).includes(
+          emptyBlockPlaceholder,
+        ) ||
+        serializeDocument(staleAppendedDoc).includes(
+          emptyBlockPlaceholder,
+        )
+      ) {
+        emptyBlockPlaceholder += "\u0000";
+      }
+      const appendedBaseText = hasEmptyAppendedBlock
+        ? serializeDocumentForMerge(
+            appendedBaseDoc,
+            emptyBlockPlaceholder,
+          )
+        : serializeDocument(appendedBaseDoc);
+      const staleAppendedText = hasEmptyAppendedBlock
+        ? serializeDocumentForMerge(
+            staleAppendedDoc,
+            emptyBlockPlaceholder,
+          )
+        : serializeDocument(staleAppendedDoc);
+      const onlyAppendedChange =
+        appendedTransactions.length === 1
+          ? appendedTransactions[0].change
+          : null;
+      const canonicalAppendedBase = serializeDocument(appendedBaseDoc);
+      const appendedBaseParsed = parseMarkdown(canonicalAppendedBase);
+      const appendedCursor =
+        onlyAppendedChange &&
+        appendedBaseText === canonicalAppendedBase &&
+        appendedBaseParsed.doc.eq(withoutEmptyBlocks(appendedBaseDoc))
+          ? appendedBaseParsed.map.pmToSrc(onlyAppendedChange.endA)
+          : undefined;
+      const exactRemoteOperations =
+        this.deferredRemoteOperations &&
+        appendedBaseText === canonicalAppendedBase
+          ? remoteOperationsAfterLocalChange(
+              authorization,
+              this.deferredRemoteOperations,
+              appendedBaseText,
+              candidateText,
+            )
+          : null;
+      const exactLocalOperations = exactAppendedBaseOperations(
+        appendedBaseDoc,
+        appendedTransactions,
+        emptyBlockPlaceholder,
+      );
+      const appendedMerge = mergeAppendedText(
+        appendedBaseText,
+        staleAppendedText,
+        candidateText,
+        appendedCursor,
+        exactRemoteOperations,
+        exactLocalOperations,
+      );
+      if (appendedMerge !== null) {
+        let appendedText = appendedMerge.text;
+        const appendedOperations = [...appendedMerge.operations];
+        let useMergedOperations = true;
+        if (hasEmptyAppendedBlock) {
+          const withoutPlaceholders = removeEmptyBlockPlaceholders(
+            appendedText,
+            emptyBlockPlaceholder,
+          );
+          appendedText = withoutPlaceholders.text;
+          appendedOperations.push(...withoutPlaceholders.operations);
+        }
+        const rebasedAppended = rebaseAppendedTransactions(
+          appendedTransactions[0].before,
+          mergedDoc,
+          appendedTransactions,
+        );
+        if (rebasedAppended) {
+          const appendedDoc = rebasedAppended.doc;
+          const realAppendedDoc = withoutEmptyBlocks(appendedDoc);
+          if (
+            !parseMarkdown(appendedText).doc.eq(realAppendedDoc) &&
+            rebasedAppended.semanticSafe
+          ) {
+            const mappedText = serializeDocument(appendedDoc);
+            if (parseMarkdown(mappedText).doc.eq(realAppendedDoc)) {
+              appendedText = mappedText;
+              useMergedOperations = false;
+            }
+          }
+          if (
+            hasEmptyAppendedBlock &&
+            appendedDoc.childCount > realAppendedDoc.childCount &&
+            parseMarkdown(appendedText).doc.eq(realAppendedDoc)
+          ) {
+            rebasedPhantomDoc = appendedDoc;
+          }
+        }
+        ops.push(
+          ...(useMergedOperations
+            ? appendedOperations
+            : diffOps(candidateText, appendedText)),
+        );
+        candidateText = appendedText;
+      }
+    }
+
     this.currentText = currentText;
-    if (this.options.interceptor?.(ops, this.ytext, this)) {
+    const normalizedOps = normalizeTextOperations(currentText, ops);
+    if (applyTextOperations(currentText, normalizedOps) !== candidateText) {
+      throw new Error("Composed text operations did not produce the merged source");
+    }
+    if (this.options.interceptor?.(normalizedOps, this.ytext, this)) {
+      if (rebasedPhantomDoc) {
+        this.retainRebasedPhantoms(rebasedPhantomDoc, candidateText);
+      }
       this.requestSync();
       this.options.onSync?.("local");
       return true;
     }
-    if (ops.length > 0) this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+    if (normalizedOps.length > 0) {
+      this.ydoc.transact(
+        () => applyOps(this.ytext, normalizedOps),
+        this,
+      );
+    }
+    if (rebasedPhantomDoc) {
+      this.retainRebasedPhantoms(rebasedPhantomDoc, candidateText);
+    }
     this.requestSync();
     this.options.onSync?.("local");
-    return ops.length > 0;
+    return normalizedOps.length > 0;
   }
 
   private handleLocal(oldState: EditorState, newState: EditorState, change: LocalDocChange | null): boolean {
@@ -1057,8 +2422,8 @@ export class MarkdownBinding {
       this.localAuthorizationPending &&
       this.currentTextGeneration !== this.sourceGeneration
     ) {
-      this.currentText = this.ytext.toString();
-      return this.fallbackReplaceAll(newDoc);
+      this.requestSync();
+      return false;
     }
     let start: number;
     let endA: number;
@@ -1086,8 +2451,36 @@ export class MarkdownBinding {
           : change
         : null;
     const authorization = authorizedChange?.authorization ?? null;
-    if (authorizedChange && authorization && !this.authorizationIsCurrent(authorization)) {
-      return this.reconcileStaleLocalChange(authorization);
+    const appendedTransactions = authorizedChange?.appendedTransactions ?? [];
+    if (
+      authorizedChange?.rejectedAuthorizationGeneration !== undefined &&
+      authorizedChange.rejectedAuthorizationGeneration !==
+        this.sourceGeneration
+    ) {
+      this.requestSync();
+      return false;
+    }
+    if (
+      authorizedChange &&
+      authorization &&
+      appendedTransactions.length > 0 &&
+      this.authorizationIsCurrent(authorization)
+    ) {
+      return this.handleCurrentComposedChange(
+        oldState,
+        authorizedChange,
+        appendedTransactions,
+      );
+    }
+    if (
+      authorizedChange &&
+      authorization &&
+      !this.authorizationIsCurrent(authorization)
+    ) {
+      return this.reconcileAuthorizedLocalChange(
+        authorization,
+        appendedTransactions,
+      );
     }
 
     const N = oldDoc.childCount;
@@ -1147,7 +2540,7 @@ export class MarkdownBinding {
         else if (prevReal) srcFrom = prevReal.to;
         else {
           srcFrom = 0;
-          srcTo = this.ytext.length;
+          srcTo = this.currentText.length;
         }
       }
     } else if (!chunkText) {
@@ -1162,7 +2555,7 @@ export class MarkdownBinding {
       newText = chunkText + "\n\n";
     } else {
       srcFrom = 0;
-      srcTo = this.ytext.length;
+      srcTo = this.currentText.length;
       newText = chunkText;
     }
 
@@ -1170,12 +2563,18 @@ export class MarkdownBinding {
     const delta = newText.length - (srcTo - srcFrom);
     const nextFullText = fullText.slice(0, srcFrom) + newText + fullText.slice(srcTo);
     const oldText = fullText.slice(srcFrom, srcTo);
-    const ops = diffOps(oldText, newText, srcFrom);
+    const previousMap =
+      authorization?.map ??
+      (this.mapCache?.text === fullText && this.phantoms.size === 0
+        ? this.mapCache.map
+        : null);
+    const oldCursor = change && previousMap
+      ? previousMap.pmToSrc(change.endA) - srcFrom
+      : undefined;
+    const ops = diffOps(oldText, newText, srcFrom, oldCursor);
     const op = ops.length === 1 ? ops[0] : null;
     const sourceOldTo = op ? op.index + op.deleteCount : -1;
     const sourceNewTo = op ? op.index + op.insert.length : -1;
-    const previousMap =
-      authorization?.map ?? (this.mapCache?.text === fullText && this.phantoms.size === 0 ? this.mapCache.map : null);
     const sourceChange = op
       ? {
           oldFrom: op.index,
@@ -1236,7 +2635,11 @@ export class MarkdownBinding {
       }));
     }
 
-    if (ops.length > 0 && this.options.interceptor?.(ops, this.ytext, this)) {
+    if (
+      !this.collectingLocalOperations &&
+      ops.length > 0 &&
+      this.options.interceptor?.(ops, this.ytext, this)
+    ) {
       // The interceptor wrote the text its own way, so block ranges are rebuilt from the text by
       // the sync. Phantoms the edit turned into real blocks must not be re-inserted by that rebuild.
       if (chunks.every((c) => !c.phantom)) for (let i = k; i < oldTo; i++) this.phantoms.delete(i);
@@ -1245,9 +2648,15 @@ export class MarkdownBinding {
       return true;
     }
     if (simpleParagraphChange && authorization && !this.authorizationIsCurrent(authorization)) {
-      return this.reconcileStaleLocalChange(authorization);
+      return this.reconcileAuthorizedLocalChange(authorization);
     }
-    if (ops.length > 0) this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+    if (ops.length > 0) {
+      if (this.collectingLocalOperations) {
+        this.collectingLocalOperations.push(...ops);
+      } else {
+        this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+      }
+    }
 
     // Update block ranges: [0,k) unchanged, new chunk ranges, [oldTo,N) shifted.
     if (simpleParagraphChange && this.phantoms.size === 0) {
@@ -1340,7 +2749,7 @@ export class MarkdownBinding {
     }
 
     if (process.env.NODE_ENV !== "production") this.assertConsistent(newDoc);
-    this.options.onSync?.("local");
+    if (!this.collectingLocalOperations) this.options.onSync?.("local");
     return ops.length > 0;
   }
 
@@ -1350,11 +2759,14 @@ export class MarkdownBinding {
   }
 
   private fallbackReplaceAll(newDoc: PMNode): boolean {
-    this.localAuthorizationPending = false;
     const text = serializeDocument(newDoc);
     const ops = diffOps(this.currentText, text, 0);
-    if (ops.length > 0 && !this.options.interceptor?.(ops, this.ytext, this)) {
-      this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+    if (ops.length > 0) {
+      if (this.collectingLocalOperations) {
+        this.collectingLocalOperations.push(...ops);
+      } else if (!this.options.interceptor?.(ops, this.ytext, this)) {
+        this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+      }
     }
     this.phantoms.clear();
     this.currentText = text;
@@ -1362,7 +2774,7 @@ export class MarkdownBinding {
     this.mapCache = null;
     this.headingsCache = null;
     this.requestSync();
-    this.options.onSync?.("local");
+    if (!this.collectingLocalOperations) this.options.onSync?.("local");
     return ops.length > 0;
   }
 
@@ -1415,7 +2827,7 @@ export class MarkdownBinding {
       this.pendingSync = true;
       return;
     }
-    this.localAuthorizationPending = false;
+    this.settleLocalAuthorization();
     // Any rebuild covers a held remote change too.
     this.heldSync = false;
     if (this.heldTimer) {
@@ -1466,7 +2878,31 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
         // remote flag of the transaction they were appended to.
         if (tr.getMeta(markdownBindingKey)) return { remote: true, localChange: null };
         if (tr.getMeta("appendedTransaction")) {
-          return tr.docChanged ? { remote: value.remote, localChange: null } : value;
+          if (!tr.docChanged || value.remote) return value;
+          if (!value.localChange?.authorization) {
+            return { remote: false, localChange: null };
+          }
+          const appendedChange = localDocChange(
+            tr,
+            oldState.doc,
+            newState.doc,
+          );
+          return {
+            remote: false,
+            localChange: {
+              ...value.localChange,
+              after: newState.doc,
+              appendedTransactions: [
+                ...(value.localChange.appendedTransactions ?? []),
+                {
+                  before: oldState.doc,
+                  after: newState.doc,
+                  steps: tr.steps.slice(),
+                  change: appendedChange,
+                },
+              ],
+            },
+          };
         }
         const change = localDocChange(tr, oldState.doc, newState.doc);
         return { remote: false, localChange: change ? binding.authorizeLocalChange(change) : null };
@@ -1474,6 +2910,16 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
     },
     view(view) {
       binding.attach(view);
+      const dispatch = view.dispatch;
+      const guardedDispatch = (transaction: Transaction) => {
+        try {
+          dispatch(transaction);
+        } catch (error) {
+          binding.abortLocalTransaction(true);
+          throw error;
+        }
+      };
+      view.dispatch = guardedDispatch;
       return {
         update(view, prevState) {
           const meta = markdownBindingKey.getState(view.state);
@@ -1482,7 +2928,8 @@ export function markdownBindingPlugin(binding: MarkdownBinding): Plugin {
           binding.handleLocalTransaction(prevState, view.state, meta?.localChange ?? null);
         },
         destroy() {
-          binding.view = null;
+          if (view.dispatch === guardedDispatch) view.dispatch = dispatch;
+          binding.detach(view);
         },
       };
     },

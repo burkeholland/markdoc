@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import * as Y from "yjs";
-import { EditorState, Plugin, TextSelection } from "prosemirror-state";
+import { EditorState, Plugin, TextSelection, type Transaction } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import { splitBlock, setBlockType } from "prosemirror-commands";
@@ -35,6 +35,16 @@ function typeText(view: EditorView, text: string, at?: number) {
   if (at !== undefined) tr.setSelection(TextSelection.create(tr.doc, at));
   tr.insertText(text);
   view.dispatch(tr);
+}
+
+function lastBlockTextRange(state: EditorState) {
+  const last = state.doc.lastChild!;
+  const blockFrom = state.doc.content.size - last.nodeSize;
+  return {
+    blockFrom,
+    from: blockFrom + 1,
+    to: blockFrom + 1 + last.textContent.length,
+  };
 }
 
 const RAW_LINE_POSITIONS = [
@@ -85,6 +95,22 @@ const STALE_MATRIX_CASES = ["insert", "delete", "replace"].flatMap((localOperati
               ],
       })),
     ),
+  ),
+);
+const APPENDED_STALE_MATRIX_CASES = ["insert", "delete", "replace"].flatMap((localOperation) =>
+  [
+    { label: "before", offset: 1 },
+    { label: "start", offset: 2 },
+    { label: "interior", offset: 3 },
+    { label: "end", offset: 4 },
+    { label: "after", offset: 5 },
+  ].flatMap((remote) =>
+    [1, 2].map((appenderCount) => ({
+      label: `${localOperation}/${remote.label}/${appenderCount}-appender`,
+      localOperation,
+      remoteOffset: remote.offset,
+      appenderCount,
+    })),
   ),
 );
 
@@ -661,10 +687,2065 @@ describe("MarkdownBinding", () => {
 
     expect(seen).toEqual([
       { index: 1, deleteCount: 1, insert: "" },
-      { index: 7, deleteCount: 1, insert: "LOCAL" },
+      { index: 7, deleteCount: 0, insert: "LOCAL" },
+      { index: 12, deleteCount: 1, insert: "" },
     ]);
     expect(ytext.toString()).toBe("aREMOTELOCALd");
     expect(view.state.doc.toJSON()).toEqual(parseMarkdown(ytext.toString()).doc.toJSON());
+    remote.destroy();
+  });
+
+  it("preserves remote identity when a document-changing appender follows a stale local replacement", async () => {
+    ytext.insert(0, "abcd\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const intercepted: Array<Array<{ index: number; deleteCount: number; insert: string }>> = [];
+    binding.setInterceptor((ops, text, origin) => {
+      intercepted.push(ops.map((op) => ({ ...op })));
+      text.doc!.transact(() => applyOps(text, ops), origin);
+      return true;
+    });
+    const localUndo = new Y.UndoManager(ytext, {
+      trackedOrigins: new Set([binding]),
+    });
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const remoteText = remote.getText("content");
+    const remoteOrigin = {};
+    const remoteUndo = new Y.UndoManager(remoteText, {
+      trackedOrigins: new Set([remoteOrigin]),
+    });
+    let appended = false;
+    const appendLocal = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => remoteText.insert(2, "REMOTE"), remoteOrigin);
+        remoteUndo.stopCapturing();
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.insertText("!", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendLocal, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(
+      view.state.tr
+        .setSelection(TextSelection.create(view.state.doc, 2, 4))
+        .insertText("LOCAL"),
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    localUndo.stopCapturing();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    const expected = "aREMOTELOCALd\n\nsecond!";
+    expect(ytext.toString()).toBe(expected);
+    expect(remoteText.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(view.state.selection.head).toBe(
+      binding.getSourceMap().srcToPm("aREMOTELOCAL".length),
+    );
+    expectCompleteCanonicalMap(binding, view, expected);
+    expect(intercepted).toEqual([
+      [
+        { index: 1, deleteCount: 1, insert: "" },
+        { index: 7, deleteCount: 0, insert: "LOCAL" },
+        { index: 12, deleteCount: 1, insert: "" },
+        { index: 21, deleteCount: 0, insert: "!" },
+      ],
+    ]);
+
+    let vector = Y.encodeStateVector(ydoc);
+    remoteUndo.undo();
+    expect(remoteText.toString()).toBe("aLOCALd\n\nsecond!");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe("aLOCALd\n\nsecond!");
+
+    vector = Y.encodeStateVector(ydoc);
+    remoteUndo.redo();
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe(expected);
+
+    vector = Y.encodeStateVector(remote);
+    localUndo.undo();
+    expect(ytext.toString()).toBe("abREMOTEcd\n\nsecond");
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc, vector));
+    expect(remoteText.toString()).toBe("abREMOTEcd\n\nsecond");
+
+    vector = Y.encodeStateVector(remote);
+    localUndo.redo();
+    expect(ytext.toString()).toBe(expected);
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc, vector));
+    expect(remoteText.toString()).toBe(expected);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+
+    localUndo.destroy();
+    remoteUndo.destroy();
+    remote.destroy();
+  });
+
+  it.each(APPENDED_STALE_MATRIX_CASES)(
+    "preserves composed intent for $label",
+    async ({ localOperation, remoteOffset, appenderCount }) => {
+      const source = "0abcd9\n\nsecond";
+      ytext.insert(0, source);
+      const binding = new MarkdownBinding(ytext);
+      bindings.push(binding);
+      const initial = binding.initialDoc();
+      const map = binding.getSourceMap();
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+      const remoteText = remote.getText("content");
+
+      const oracleLocal = new Y.Doc();
+      Y.applyUpdate(oracleLocal, Y.encodeStateAsUpdate(ydoc));
+      oracleLocal.clientID = ydoc.clientID;
+      const oracleRemote = new Y.Doc();
+      Y.applyUpdate(oracleRemote, Y.encodeStateAsUpdate(ydoc));
+      oracleRemote.clientID = remote.clientID;
+      const oracleRemoteVector = Y.encodeStateVector(oracleRemote);
+      const oracleLocalText = oracleLocal.getText("content");
+      const oracleAnchor = Y.createRelativePositionFromTypeIndex(
+        oracleLocalText,
+        localOperation === "insert" ? 3 : 4,
+        localOperation === "insert" ? 0 : -1,
+      );
+      const oracleUnits =
+        localOperation === "insert"
+          ? []
+          : Array.from({ length: 2 }, (_, offset) => ({
+              from: Y.createRelativePositionFromTypeIndex(
+                oracleLocalText,
+                2 + offset,
+              ),
+              to: Y.createRelativePositionFromTypeIndex(
+                oracleLocalText,
+                3 + offset,
+                -1,
+              ),
+            }));
+      oracleRemote.getText("content").insert(remoteOffset, "REMOTE");
+      Y.applyUpdate(
+        oracleLocal,
+        Y.encodeStateAsUpdate(oracleRemote, oracleRemoteVector),
+      );
+      oracleLocal.transact(() => {
+        const ranges = oracleUnits
+          .map((unit) => {
+            const from = Y.createAbsolutePositionFromRelativePosition(
+              unit.from,
+              oracleLocal,
+              false,
+            )!.index;
+            const to = Y.createAbsolutePositionFromRelativePosition(
+              unit.to,
+              oracleLocal,
+              false,
+            )!.index;
+            return { from: Math.min(from, to), to: Math.max(from, to) };
+          })
+          .filter((range) => range.to > range.from)
+          .sort((left, right) => right.from - left.from);
+        for (const range of ranges) {
+          oracleLocalText.delete(range.from, range.to - range.from);
+        }
+        if (localOperation !== "delete") {
+          const absolute = Y.createAbsolutePositionFromRelativePosition(
+            oracleAnchor,
+            oracleLocal,
+            false,
+          )!;
+          oracleLocalText.insert(absolute.index, "LOCAL");
+        }
+      });
+      Y.applyUpdate(oracleRemote, Y.encodeStateAsUpdate(oracleLocal));
+      const expected =
+        oracleLocalText.toString() + (appenderCount === 2 ? "!?" : "!");
+
+      let remoteApplied = false;
+      const appendFirst = new Plugin({
+        appendTransaction(transactions, _oldState, newState) {
+          if (remoteApplied || !transactions.some((transaction) => transaction.docChanged)) {
+            return null;
+          }
+          remoteApplied = true;
+          const vector = Y.encodeStateVector(ydoc);
+          remoteText.insert(remoteOffset, "REMOTE");
+          Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+          return newState.tr.insertText("!", newState.doc.content.size - 1);
+        },
+      });
+      let secondApplied = false;
+      const appendSecond = new Plugin({
+        appendTransaction(transactions, _oldState, newState) {
+          if (
+            appenderCount !== 2 ||
+            secondApplied ||
+            !transactions.some((transaction) => transaction.docChanged)
+          ) {
+            return null;
+          }
+          secondApplied = true;
+          return newState.tr.insertText("?", newState.doc.content.size - 1);
+        },
+      });
+      const state = EditorState.create({
+        doc: initial,
+        plugins: [appendFirst, appendSecond, markdownBindingPlugin(binding)],
+      });
+      const view = new EditorView(document.createElement("div"), { state });
+      views.push(view);
+      const tr =
+        localOperation === "insert"
+          ? view.state.tr.insertText("LOCAL", map.srcToPm(3))
+          : view.state.tr.insertText(
+              localOperation === "replace" ? "LOCAL" : "",
+              map.srcToPm(2),
+              map.srcToPm(4),
+            );
+
+      view.dispatch(tr);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+      expect(ytext.toString()).toBe(expected);
+      expect(remoteText.toString()).toBe(expected);
+      expect(expected.match(/REMOTE/g)).toHaveLength(1);
+      if (localOperation !== "delete") {
+        expect(expected.match(/LOCAL/g)).toHaveLength(1);
+      }
+      expect(expected.endsWith(appenderCount === 2 ? "!?" : "!")).toBe(true);
+      expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+      expectCompleteCanonicalMap(binding, view, expected);
+      expect(binding["localAuthorizationPending"]).toBe(false);
+
+      remote.destroy();
+      oracleLocal.destroy();
+      oracleRemote.destroy();
+    },
+  );
+
+  it("covers five remote boundaries, three stale operations, and one or two appenders", () => {
+    expect(APPENDED_STALE_MATRIX_CASES).toHaveLength(30);
+  });
+
+  it.each([
+    {
+      label: "a strong mark",
+      expected: "**second**",
+      append: (state: EditorState): Transaction => {
+        const { from, to } = lastBlockTextRange(state);
+        return state.tr.addMark(from, to, schema.marks.strong.create());
+      },
+    },
+    {
+      label: "a link",
+      expected: "[second](x)",
+      append: (state: EditorState): Transaction => {
+        const { from, to } = lastBlockTextRange(state);
+        return state.tr.addMark(from, to, schema.marks.link.create({ href: "x" }));
+      },
+    },
+    {
+      label: "an image atom",
+      expected: "second![](x)",
+      append: (state: EditorState): Transaction => {
+        const { to } = lastBlockTextRange(state);
+        return state.tr.insert(to, schema.nodes.image.create({ src: "x", alt: "" }));
+      },
+    },
+    {
+      label: "a surrogate pair",
+      expected: "second😀",
+      append: (state: EditorState): Transaction => {
+        const { to } = lastBlockTextRange(state);
+        return state.tr.insertText("😀", to);
+      },
+    },
+    {
+      label: "inline code",
+      expected: "`second`",
+      append: (state: EditorState): Transaction => {
+        const { from, to } = lastBlockTextRange(state);
+        return state.tr.addMark(from, to, schema.marks.code.create());
+      },
+    },
+    {
+      label: "a hard break",
+      expected: "sec\\\nond",
+      append: (state: EditorState): Transaction => {
+        const { from } = lastBlockTextRange(state);
+        return state.tr.insert(from + 3, schema.nodes.hard_break.create());
+      },
+    },
+    {
+      label: "a block type change",
+      expected: "## second",
+      append: (state: EditorState): Transaction => {
+        const { blockFrom } = lastBlockTextRange(state);
+        return state.tr.setNodeMarkup(blockFrom, schema.nodes.heading, { level: 2 });
+      },
+    },
+  ])("rebases appended semantic intent for $label", async ({ label, expected, append }) => {
+    ytext.insert(0, "abcd\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const intercepted: Array<{
+      before: string;
+      operations: Array<{ index: number; deleteCount: number; insert: string }>;
+    }> = [];
+    binding.setInterceptor((operations, text, origin) => {
+      intercepted.push({
+        before: text.toString(),
+        operations: operations.map((operation) => ({ ...operation })),
+      });
+      text.doc!.transact(() => applyOps(text, operations), origin);
+      return true;
+    });
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendSemanticChange = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        expect(binding["localAuthorizationPending"]).toBe(true);
+        expect(binding["sourceGeneration"]).toBe(
+          binding["currentTextGeneration"],
+        );
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        expect(binding["localAuthorizationPending"]).toBe(true);
+        expect(binding["sourceGeneration"]).toBe(
+          binding["currentTextGeneration"] + 1,
+        );
+        return append(newState);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendSemanticChange, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("LOCAL", 2, 4));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    const expectedSource = `aREMOTELOCALd\n\n${expected}`;
+    if (label === "a strong mark") {
+      expect(intercepted).toEqual([
+        {
+          before: "abREMOTEcd\n\nsecond",
+          operations: [
+            { index: 1, deleteCount: 1, insert: "" },
+            { index: 7, deleteCount: 0, insert: "LOCAL" },
+            { index: 12, deleteCount: 1, insert: "" },
+            { index: 15, deleteCount: 0, insert: "**" },
+            { index: 23, deleteCount: 0, insert: "**" },
+          ],
+        },
+      ]);
+    }
+    expect(ytext.toString()).toBe(expectedSource);
+    expect(remote.getText("content").toString()).toBe(expectedSource);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expectedSource).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, expectedSource);
+    remote.destroy();
+  });
+
+  it("keeps a concurrent end insertion outside an appended mark", async () => {
+    ytext.insert(0, "a\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendStrongMark = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(
+          remote.getText("content").length,
+          "R",
+        );
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const { from, to } = lastBlockTextRange(newState);
+        return newState.tr.addMark(from, to, schema.marks.strong.create());
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendStrongMark, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\n**second**R";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, expected);
+    remote.destroy();
+  });
+
+  it("keeps local residue from one broad step that also mirrors remote content", async () => {
+    ytext.insert(0, "abcd\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendBroadReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const target = parseMarkdown("aREMOTELOCALd\n\nsecond!").doc;
+        return newState.tr.replaceWith(
+          0,
+          newState.doc.content.size,
+          target.content,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendBroadReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("LOCAL", 2, 4));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    const expected = "aREMOTELOCALd\n\nsecond!";
+    expect(ytext.toString()).toBe(expected);
+    expect(remote.getText("content").toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, expected);
+    remote.destroy();
+  });
+
+  it.each([
+    ["a suffix", "R!"],
+    ["content on both sides", "xRy"],
+  ])("keeps %s from a partially mirrored remote replacement", async (_label, appendedReplacement) => {
+    ytext.insert(0, "a\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendBroadReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => {
+          const text = remote.getText("content");
+          text.delete(3, "second".length);
+          text.insert(3, "R");
+        });
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const target = parseMarkdown(`ax\n\n${appendedReplacement}`).doc;
+        return newState.tr.replaceWith(
+          0,
+          newState.doc.content.size,
+          target.content,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendBroadReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    const expected = `ax\n\n${appendedReplacement}`;
+    expect(ytext.toString()).toBe(expected);
+    expect(remote.getText("content").toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    remote.destroy();
+  });
+
+  it("keeps non-overlapping residue from a partially concurrent appended deletion", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendOverlappingDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").delete(5, 2);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart + 1,
+          secondBlockStart + 5,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendOverlappingDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\naf";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps replacement intent when a remote deletion partially overlaps it", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendOverlappingReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").delete(4, 2);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.insertText(
+          "X",
+          secondBlockStart,
+          secondBlockStart + 2,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendOverlappingReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nXdef";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves unrelated spelling through a partially overlapping replacement", async () => {
+    const source = "_item_\n\na\n\nabcdef";
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendOverlappingReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").delete(source.indexOf("cd"), 2);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const thirdBlockStart =
+          newState.doc.child(0).nodeSize +
+          newState.doc.child(1).nodeSize +
+          1;
+        return newState.tr.insertText(
+          "X",
+          thirdBlockStart + 1,
+          thirdBlockStart + 5,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendOverlappingReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    const secondBlockEnd =
+      view.state.doc.child(0).nodeSize +
+      1 +
+      view.state.doc.child(1).textContent.length;
+    view.dispatch(view.state.tr.insertText("x", secondBlockEnd));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "_item_\n\nax\n\naXf";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("does not duplicate a mirrored payload in a partially overlapping replacement", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendOverlappingReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => {
+          const text = remote.getText("content");
+          text.delete(4, 2);
+          text.insert(4, "R");
+        });
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.insertText(
+          "RX",
+          secondBlockStart,
+          secondBlockStart + 3,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendOverlappingReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nRXdef";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves a remote insertion inside an appended deletion", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendInteriorDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(4, "R");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(secondBlockStart, secondBlockStart + 2);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendInteriorDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nRcdef";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves remote insertions at both appended deletion boundaries", async () => {
+    ytext.insert(0, "a\n\nabcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let startFrom: Y.RelativePosition | null = null;
+    let startTo: Y.RelativePosition | null = null;
+    let endFrom: Y.RelativePosition | null = null;
+    let endTo: Y.RelativePosition | null = null;
+    let appended = false;
+    const appendBoundaryDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => {
+          const text = remote.getText("content");
+          text.insert(5, "R");
+          text.insert(3, "S");
+          startFrom = Y.createRelativePositionFromTypeIndex(text, 3);
+          startTo = Y.createRelativePositionFromTypeIndex(text, 4, -1);
+          endFrom = Y.createRelativePositionFromTypeIndex(text, 6);
+          endTo = Y.createRelativePositionFromTypeIndex(text, 7, -1);
+        });
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(secondBlockStart, secondBlockStart + 2);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendBoundaryDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const start = Y.createAbsolutePositionFromRelativePosition(
+      startFrom!,
+      ydoc,
+    );
+    const startEnd = Y.createAbsolutePositionFromRelativePosition(
+      startTo!,
+      ydoc,
+    );
+    const end = Y.createAbsolutePositionFromRelativePosition(endFrom!, ydoc);
+    const endEnd = Y.createAbsolutePositionFromRelativePosition(endTo!, ydoc);
+    const expected = "ax\n\nSRcd";
+    expect(ytext.toString()).toBe(expected);
+    expect((startEnd?.index ?? 0) - (start?.index ?? 0)).toBe(1);
+    expect((endEnd?.index ?? 0) - (end?.index ?? 0)).toBe(1);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps an appended insertion inside a concurrent remote deletion", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendInteriorInsertion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").delete(3, 2);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.insertText("L", secondBlockStart + 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendInteriorInsertion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nLcdef";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps a replacement payload when the remote deletion exactly matches it", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendExactReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").delete(3, 1);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.insertText(
+          "L",
+          secondBlockStart,
+          secondBlockStart + 1,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendExactReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nLbcdef";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("deduplicates every mirrored payload in one broad appended replacement", async () => {
+    ytext.insert(0, "a\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendBroadReplacement = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => {
+          const text = remote.getText("content");
+          text.delete(7, 1);
+          text.insert(7, "S");
+          text.delete(4, 1);
+          text.insert(4, "R");
+        });
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.insertText(
+          "RSL",
+          secondBlockStart,
+          secondBlockStart + 6,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendBroadReplacement, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nRSL";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("rebases unrelated appended semantics after a different appender mirrors remote text", async () => {
+    ytext.insert(0, "a\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let mirrored = false;
+    const appendMirroredStart = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (mirrored || !transactions.some((transaction) => transaction.docChanged)) return null;
+        mirrored = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => {
+          const text = remote.getText("content");
+          text.insert(text.length, "R");
+          text.insert(0, "Q");
+        });
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.insertText("Q", 1);
+      },
+    });
+    let marked = false;
+    const appendStrongMark = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (marked || !transactions.some((transaction) => transaction.docChanged)) return null;
+        marked = true;
+        const { from, to } = lastBlockTextRange(newState);
+        return newState.tr.addMark(from, to, schema.marks.strong.create());
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [
+        appendMirroredStart,
+        appendStrongMark,
+        markdownBindingPlugin(binding),
+      ],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "Qax\n\n**second**R";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("retains an appended empty block as a phantom after stale replay", async () => {
+    ytext.insert(0, "abcd\n\nsecond");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendEmptyBlock = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const { to } = lastBlockTextRange(newState);
+        return newState.tr.split(to);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendEmptyBlock, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("LOCAL", 2, 4));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("aREMOTELOCALd\n\nsecond");
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.lastChild?.content.size).toBe(0);
+    expect(binding.blocks[2]).toEqual({
+      from: ytext.length,
+      to: ytext.length,
+      phantom: true,
+    });
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps a remote insertion in a paragraph emptied by an appender", async () => {
+    ytext.insert(0, "a\n\nabcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendDeleteParagraph = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(3, "R");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart,
+          secondBlockStart + 4,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteParagraph, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nR";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps an interior remote insertion in a paragraph emptied by an appender", async () => {
+    ytext.insert(0, "a\n\nabcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendDeleteParagraph = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(4, "R");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart,
+          secondBlockStart + 4,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteParagraph, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nR";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps both separators around remote text in an emptied middle paragraph", async () => {
+    ytext.insert(0, "a\n\nabcd\n\nthird");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendDeleteParagraph = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(4, "R");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart,
+          secondBlockStart + 4,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteParagraph, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "ax\n\nR\n\nthird";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves remote separator identity when an appender empties its block", async () => {
+    ytext.insert(0, "a\n\nabcd\n\nz");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const remoteText = remote.getText("content");
+    const remoteOrigin = {};
+    const remoteUndo = new Y.UndoManager(remoteText, {
+      trackedOrigins: new Set([remoteOrigin]),
+    });
+    let appended = false;
+    const appendDeleteParagraph = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => remoteText.insert(5, "\n\n"), remoteOrigin);
+        remoteUndo.stopCapturing();
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart,
+          secondBlockStart + 4,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteParagraph, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    expect(ytext.toString()).toBe("ax\n\n\n\nz");
+    expect(remoteText.toString()).toBe("ax\n\n\n\nz");
+
+    const vector = Y.encodeStateVector(ydoc);
+    remoteUndo.undo();
+    expect(remoteText.toString()).toBe("ax\n\nz");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe("ax\n\nz");
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.child(1).content.size).toBe(0);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remoteUndo.destroy();
+    remote.destroy();
+  });
+
+  it("preserves a trailing remote separator when an appender empties its block", async () => {
+    ytext.insert(0, "a\n\nabcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const remoteText = remote.getText("content");
+    const remoteOrigin = {};
+    const remoteUndo = new Y.UndoManager(remoteText, {
+      trackedOrigins: new Set([remoteOrigin]),
+    });
+    let appended = false;
+    const appendDeleteParagraph = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => remoteText.insert(5, "\n\n"), remoteOrigin);
+        remoteUndo.stopCapturing();
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart,
+          secondBlockStart + 4,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteParagraph, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    expect(ytext.toString()).toBe("ax\n\n");
+    expect(remoteText.toString()).toBe("ax\n\n");
+
+    const vector = Y.encodeStateVector(ydoc);
+    remoteUndo.undo();
+    expect(remoteText.toString()).toBe("ax");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe("ax");
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remoteUndo.destroy();
+    remote.destroy();
+  });
+
+  it("preserves a leading remote separator when an appender empties its block", async () => {
+    ytext.insert(0, "abcd\n\nz");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const remoteText = remote.getText("content");
+    const remoteOrigin = {};
+    const remoteUndo = new Y.UndoManager(remoteText, {
+      trackedOrigins: new Set([remoteOrigin]),
+    });
+    let appended = false;
+    const appendDeleteParagraph = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.transact(() => remoteText.insert(4, "\n\n"), remoteOrigin);
+        remoteUndo.stopCapturing();
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.delete(1, 5);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteParagraph, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+    const secondBlockEnd =
+      view.state.doc.child(0).nodeSize +
+      1 +
+      view.state.doc.child(1).textContent.length;
+
+    view.dispatch(view.state.tr.insertText("x", secondBlockEnd));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    expect(ytext.toString()).toBe("\n\nzx");
+    expect(remoteText.toString()).toBe("\n\nzx");
+
+    const vector = Y.encodeStateVector(ydoc);
+    remoteUndo.undo();
+    expect(remoteText.toString()).toBe("zx");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(ytext.toString()).toBe("zx");
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remoteUndo.destroy();
+    remote.destroy();
+  });
+
+  it("retains a stale appended phantom without normalizing source spelling", async () => {
+    const source = "_item_\n\nabcd";
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    const map = binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendEmptyBlock = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(source.indexOf("c"), "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const { to } = lastBlockTextRange(newState);
+        return newState.tr.split(to);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendEmptyBlock, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(
+      view.state.tr.insertText(
+        "LOCAL",
+        map.srcToPm(source.indexOf("b")),
+        map.srcToPm(source.indexOf("d")),
+      ),
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "_item_\n\naREMOTELOCALd";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.lastChild?.content.size).toBe(0);
+    expect(binding.blocks[2]?.phantom).toBe(true);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps current-generation document appenders on incremental binding paths", () => {
+    const paragraphCount = 1_000;
+    const source = Array.from(
+      { length: paragraphCount },
+      (_, index) => `Paragraph ${index} plain text.`,
+    ).join("\n\n");
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    const map = binding.getSourceMap();
+    let appended = false;
+    const appendAtEnd = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.insertText("!", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendAtEnd, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+    const materialize = vi.spyOn(
+      ytext as unknown as { toString: () => string },
+      "toString",
+    );
+    const parse = vi.fn(binding["parse"].bind(binding));
+    const buildDoc = vi.fn(binding["buildDoc"].bind(binding));
+    binding["parse"] = parse;
+    binding["buildDoc"] = buildDoc;
+
+    view.dispatch(view.state.tr.insertText("x", map.srcToPm(12)));
+
+    expect(materialize).not.toHaveBeenCalled();
+    expect(parse).not.toHaveBeenCalled();
+    expect(buildDoc).not.toHaveBeenCalled();
+    expect(binding["mapCache"]).not.toBeNull();
+    materialize.mockRestore();
+    expect(ytext.toString()).toBe(
+      source.slice(0, 12) + "x" + source.slice(12) + "!",
+    );
+    expectCompleteCanonicalMap(binding, view, ytext.toString());
+  });
+
+  it("reanchors a current-generation appended phantom after collected operations apply", () => {
+    ytext.insert(0, "a\n\nb\n\nthird");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    let appended = false;
+    const appendEmptyBlock = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const secondBlockStart = newState.doc.child(0).nodeSize;
+        const secondBlockEnd =
+          secondBlockStart + 1 + newState.doc.child(1).textContent.length;
+        return newState.tr.split(secondBlockEnd);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendEmptyBlock, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x".repeat(20), 2));
+    expect(view.state.doc.childCount).toBe(4);
+    expect(view.state.doc.child(2).content.size).toBe(0);
+    expect(view.state.doc.child(3).textContent).toBe("third");
+
+    ytext.insert(0, "Q");
+
+    expect(view.state.doc.childCount).toBe(4);
+    expect(view.state.doc.child(2).content.size).toBe(0);
+    expect(view.state.doc.child(3).textContent).toBe("third");
+    expect(binding.blocks[2]?.phantom).toBe(true);
+  });
+
+  it("offers current-generation root and appended intent to an interceptor once", async () => {
+    ytext.insert(0, "a");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const intercepted: Array<
+      Array<{ index: number; deleteCount: number; insert: string }>
+    > = [];
+    binding.setInterceptor((operations, text, origin) => {
+      intercepted.push(operations.map((operation) => ({ ...operation })));
+      text.doc!.transact(() => applyOps(text, operations), origin);
+      return true;
+    });
+    let appended = false;
+    const appendAtEnd = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.insertText("!", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendAtEnd, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(intercepted).toEqual([
+      [
+        { index: 1, deleteCount: 0, insert: "x" },
+        { index: 2, deleteCount: 0, insert: "!" },
+      ],
+    ]);
+    expect(ytext.toString()).toBe("ax!");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown("ax!").doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("normalizes backward current-generation appender operations before interception", async () => {
+    const source = "abcdefghijklm";
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    const map = binding.getSourceMap();
+    const intercepted: Array<
+      Array<{ index: number; deleteCount: number; insert: string }>
+    > = [];
+    binding.setInterceptor((operations, text, origin) => {
+      intercepted.push(operations.map((operation) => ({ ...operation })));
+      text.doc!.transact(() => applyOps(text, operations), origin);
+      return true;
+    });
+    let appended = false;
+    const appendAtStart = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.insertText("Q", 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendAtStart, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(
+      view.state.tr.delete(map.srcToPm(10), map.srcToPm(11)),
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(intercepted).toEqual([
+      [
+        { index: 0, deleteCount: 0, insert: "Q" },
+        { index: 11, deleteCount: 1, insert: "" },
+      ],
+    ]);
+    expect(ytext.toString()).toBe("Qabcdefghijlm");
+    expect(view.state.doc.toJSON()).toEqual(
+      parseMarkdown("Qabcdefghijlm").doc.toJSON(),
+    );
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("uses virtual source length when an appender empties a composed edit", async () => {
+    ytext.insert(0, "a");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    let appended = false;
+    const appendDeleteAll = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.delete(1, newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteAll, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("LONG", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("");
+    expect(view.state.doc.childCount).toBe(1);
+    expect(view.state.doc.firstChild?.content.size).toBe(0);
+    expect(binding["currentText"]).toBe("");
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("targets the selected repeated character in current composed operations", async () => {
+    ytext.insert(0, "a\n\naaaa");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const intercepted: Array<
+      Array<{ index: number; deleteCount: number; insert: string }>
+    > = [];
+    binding.setInterceptor((operations, text, origin) => {
+      intercepted.push(operations.map((operation) => ({ ...operation })));
+      text.doc!.transact(() => applyOps(text, operations), origin);
+      return true;
+    });
+    let appended = false;
+    const appendRepeatedDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart + 1,
+          secondBlockStart + 2,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRepeatedDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(intercepted).toEqual([
+      [
+        { index: 1, deleteCount: 0, insert: "x" },
+        { index: 5, deleteCount: 1, insert: "" },
+      ],
+    ]);
+    expect(ytext.toString()).toBe("ax\n\naaa");
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("preserves root repeated-character identity when an appender follows", async () => {
+    ytext.insert(0, "aaaa");
+    const selectedFrom = Y.createRelativePositionFromTypeIndex(ytext, 1);
+    const selectedTo = Y.createRelativePositionFromTypeIndex(ytext, 2, -1);
+    const lastFrom = Y.createRelativePositionFromTypeIndex(ytext, 3);
+    const lastTo = Y.createRelativePositionFromTypeIndex(ytext, 4, -1);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    let appended = false;
+    const appendAtEnd = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.insertText("x", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendAtEnd, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.delete(2, 3));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const selectedStart = Y.createAbsolutePositionFromRelativePosition(
+      selectedFrom,
+      ydoc,
+    );
+    const selectedEnd = Y.createAbsolutePositionFromRelativePosition(
+      selectedTo,
+      ydoc,
+    );
+    const lastStart = Y.createAbsolutePositionFromRelativePosition(
+      lastFrom,
+      ydoc,
+    );
+    const lastEnd = Y.createAbsolutePositionFromRelativePosition(lastTo, ydoc);
+    expect(ytext.toString()).toBe("aaax");
+    expect(selectedStart?.index).toBe(selectedEnd?.index);
+    expect((lastEnd?.index ?? 0) - (lastStart?.index ?? 0)).toBe(1);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("preserves repeated-character identity through stale appended deletion", async () => {
+    ytext.insert(0, "a\n\naaaa");
+    const selectedFrom = Y.createRelativePositionFromTypeIndex(ytext, 4);
+    const selectedTo = Y.createRelativePositionFromTypeIndex(ytext, 5, -1);
+    const lastFrom = Y.createRelativePositionFromTypeIndex(ytext, 6);
+    const lastTo = Y.createRelativePositionFromTypeIndex(ytext, 7, -1);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendRepeatedDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(
+          remote.getText("content").length,
+          "R",
+        );
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart + 1,
+          secondBlockStart + 2,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRepeatedDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("x", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const selectedStart = Y.createAbsolutePositionFromRelativePosition(
+      selectedFrom,
+      ydoc,
+    );
+    const selectedEnd = Y.createAbsolutePositionFromRelativePosition(
+      selectedTo,
+      ydoc,
+    );
+    const lastStart = Y.createAbsolutePositionFromRelativePosition(
+      lastFrom,
+      ydoc,
+    );
+    const lastEnd = Y.createAbsolutePositionFromRelativePosition(lastTo, ydoc);
+    expect(ytext.toString()).toBe("ax\n\naaaR");
+    expect(selectedStart?.index).toBe(selectedEnd?.index);
+    expect((lastEnd?.index ?? 0) - (lastStart?.index ?? 0)).toBe(1);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps distinct local and remote repeated-character deletions", async () => {
+    ytext.insert(0, "z\n\naaaa");
+    const thirdFrom = Y.createRelativePositionFromTypeIndex(ytext, 5);
+    const thirdTo = Y.createRelativePositionFromTypeIndex(ytext, 6, -1);
+    const fourthFrom = Y.createRelativePositionFromTypeIndex(ytext, 6);
+    const fourthTo = Y.createRelativePositionFromTypeIndex(ytext, 7, -1);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendFourthDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").delete(5, 1);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(
+          secondBlockStart + 3,
+          secondBlockStart + 4,
+        );
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendFourthDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("q", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const thirdStart = Y.createAbsolutePositionFromRelativePosition(
+      thirdFrom,
+      ydoc,
+    );
+    const thirdEnd = Y.createAbsolutePositionFromRelativePosition(
+      thirdTo,
+      ydoc,
+    );
+    const fourthStart = Y.createAbsolutePositionFromRelativePosition(
+      fourthFrom,
+      ydoc,
+    );
+    const fourthEnd = Y.createAbsolutePositionFromRelativePosition(
+      fourthTo,
+      ydoc,
+    );
+    expect(ytext.toString()).toBe("zq\n\naa");
+    expect(thirdStart?.index).toBe(thirdEnd?.index);
+    expect(fourthStart?.index).toBe(fourthEnd?.index);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves an insertion inside a repeated-text appended deletion", async () => {
+    ytext.insert(0, "z\n\naaaa");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let remoteFrom: Y.RelativePosition | null = null;
+    let remoteTo: Y.RelativePosition | null = null;
+    let appended = false;
+    const appendRepeatedDeletion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        const text = remote.getText("content");
+        text.insert(4, "R");
+        remoteFrom = Y.createRelativePositionFromTypeIndex(text, 4);
+        remoteTo = Y.createRelativePositionFromTypeIndex(text, 5, -1);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const secondBlockStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr.delete(secondBlockStart, secondBlockStart + 2);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRepeatedDeletion, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("q", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const remoteStart = Y.createAbsolutePositionFromRelativePosition(
+      remoteFrom!,
+      ydoc,
+    );
+    const remoteEnd = Y.createAbsolutePositionFromRelativePosition(
+      remoteTo!,
+      ydoc,
+    );
+    const expected = "zq\n\nRaa";
+    expect(ytext.toString()).toBe(expected);
+    expect((remoteEnd?.index ?? 0) - (remoteStart?.index ?? 0)).toBe(1);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves repeated-character identity through a multi-step appender", async () => {
+    ytext.insert(0, "z\n\naaaaaa");
+    const spans = Array.from({ length: 6 }, (_, index) => ({
+      from: Y.createRelativePositionFromTypeIndex(ytext, 3 + index),
+      to: Y.createRelativePositionFromTypeIndex(
+        ytext,
+        4 + index,
+        -1,
+      ),
+    }));
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendRepeatedDeletions = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(
+          remote.getText("content").length,
+          "R",
+        );
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const textStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr
+          .delete(textStart + 1, textStart + 2)
+          .delete(textStart + 3, textStart + 4);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRepeatedDeletions, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("q", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const lengths = spans.map(({ from, to }) => {
+      const start = Y.createAbsolutePositionFromRelativePosition(from, ydoc);
+      const end = Y.createAbsolutePositionFromRelativePosition(to, ydoc);
+      return (end?.index ?? 0) - (start?.index ?? 0);
+    });
+    expect(ytext.toString()).toBe("zq\n\naaaaR");
+    expect(lengths).toEqual([1, 0, 1, 1, 0, 1]);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves repeated identity when a multi-step appender creates an empty block", async () => {
+    ytext.insert(0, "z\n\naaaaaa");
+    const spans = Array.from({ length: 6 }, (_, index) => ({
+      from: Y.createRelativePositionFromTypeIndex(ytext, 3 + index),
+      to: Y.createRelativePositionFromTypeIndex(
+        ytext,
+        4 + index,
+        -1,
+      ),
+    }));
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendDeleteAndSplit = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(
+          remote.getText("content").length,
+          "R",
+        );
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const textStart = newState.doc.child(0).nodeSize + 1;
+        const transaction = newState.tr.delete(
+          textStart + 1,
+          textStart + 2,
+        );
+        return transaction.split(transaction.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendDeleteAndSplit, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("q", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const lengths = spans.map(({ from, to }) => {
+      const start = Y.createAbsolutePositionFromRelativePosition(from, ydoc);
+      const end = Y.createAbsolutePositionFromRelativePosition(to, ydoc);
+      return (end?.index ?? 0) - (start?.index ?? 0);
+    });
+    expect(ytext.toString()).toBe("zq\n\naaaaaR");
+    expect(lengths).toEqual([1, 0, 1, 1, 1, 1]);
+    expect(view.state.doc.lastChild?.content.size).toBe(0);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("preserves repeated identity through a transient appended empty block", async () => {
+    ytext.insert(0, "z\n\naaaaaa");
+    const spans = Array.from({ length: 6 }, (_, index) => ({
+      from: Y.createRelativePositionFromTypeIndex(ytext, 3 + index),
+      to: Y.createRelativePositionFromTypeIndex(
+        ytext,
+        4 + index,
+        -1,
+      ),
+    }));
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendThroughEmptyBlock = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(
+          remote.getText("content").length,
+          "R",
+        );
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const textStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr
+          .split(textStart)
+          .delete(textStart + 3, textStart + 4)
+          .join(textStart + 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendThroughEmptyBlock, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("q", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const lengths = spans.map(({ from, to }) => {
+      const start = Y.createAbsolutePositionFromRelativePosition(from, ydoc);
+      const end = Y.createAbsolutePositionFromRelativePosition(to, ydoc);
+      return (end?.index ?? 0) - (start?.index ?? 0);
+    });
+    expect(ytext.toString()).toBe("zq\n\naaaaaR");
+    expect(lengths).toEqual([1, 0, 1, 1, 1, 1]);
+    expect(view.state.doc.childCount).toBe(2);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("rejoins a transient appended split after an interior deletion", async () => {
+    ytext.insert(0, "z\n\nabcdef");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendSplitDeleteJoin = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(
+          remote.getText("content").length,
+          "X",
+        );
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        const textStart = newState.doc.child(0).nodeSize + 1;
+        return newState.tr
+          .split(textStart + 1)
+          .delete(textStart + 3, textStart + 4)
+          .join(textStart + 2);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendSplitDeleteJoin, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("q", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "zq\n\nacdefX";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(view.state.doc.childCount).toBe(2);
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps remote identity when coincident insertions have identical text", async () => {
+    ytext.insert(0, "xx");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const remoteText = remote.getText("content");
+    let remoteFrom: Y.RelativePosition | null = null;
+    let remoteTo: Y.RelativePosition | null = null;
+    let appended = false;
+    const appendDeleteLocalInsertion = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remoteText.insert(1, "a");
+        remoteFrom = Y.createRelativePositionFromTypeIndex(remoteText, 1);
+        remoteTo = Y.createRelativePositionFromTypeIndex(remoteText, 2, -1);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.delete(2, 3);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [
+        appendDeleteLocalInsertion,
+        markdownBindingPlugin(binding),
+      ],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("a", 2));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const remoteStart = Y.createAbsolutePositionFromRelativePosition(
+      remoteFrom!,
+      ydoc,
+    );
+    const remoteEnd = Y.createAbsolutePositionFromRelativePosition(
+      remoteTo!,
+      ydoc,
+    );
+    expect(ytext.toString()).toBe("xax");
+    expect((remoteEnd?.index ?? 0) - (remoteStart?.index ?? 0)).toBe(1);
+    expect(binding["localAuthorizationPending"]).toBe(false);
     remote.destroy();
   });
 
@@ -776,25 +2857,94 @@ describe("MarkdownBinding", () => {
     const { binding } = editor();
     const before = EditorState.create({ doc: binding.initialDoc() });
     binding.getSourceMap();
+    const withinMinusOne = before.tr.delete(
+      1,
+      STALE_OPERATION_MAX_SOURCE_UNITS,
+    );
+    const withinMinusOneAfter = before.apply(withinMinusOne);
+    const withinMinusOneChange = binding.authorizeLocalChange(
+      localDocChange(
+        withinMinusOne,
+        before.doc,
+        withinMinusOneAfter.doc,
+      )!,
+    );
+    expect(withinMinusOneChange.authorization?.originalUnits).toHaveLength(
+      4_095,
+    );
+
     const within = before.tr.delete(2, 2 + STALE_OPERATION_MAX_SOURCE_UNITS);
     const withinAfter = before.apply(within);
     const withinChange = binding.authorizeLocalChange(
       localDocChange(within, before.doc, withinAfter.doc)!,
     );
     expect(withinChange.authorization?.originalUnits).toHaveLength(
-      STALE_OPERATION_MAX_SOURCE_UNITS,
+      4_096,
     );
 
     const beyond = before.tr.delete(1, 2 + STALE_OPERATION_MAX_SOURCE_UNITS);
     const beyondAfter = before.apply(beyond);
+    const beyondLocalChange = localDocChange(
+      beyond,
+      before.doc,
+      beyondAfter.doc,
+    )!;
     const beyondChange = binding.authorizeLocalChange(
-      localDocChange(beyond, before.doc, beyondAfter.doc)!,
+      beyondLocalChange,
     );
     expect(beyondChange.authorization).toBeNull();
+    expect(beyondLocalChange.endA - beyondLocalChange.start).toBe(4_097);
     expect(
       Object.keys(binding).some((key) => /originalUnits/i.test(key)),
     ).toBe(false);
+    expect(beyondChange.rejectedAuthorizationGeneration).toBe(
+      binding["sourceGeneration"],
+    );
+    expect(binding["localAuthorizationPending"]).toBe(true);
+  });
+
+  it("fails closed when Yjs advances during an oversized local replacement", async () => {
+    const selected = "b".repeat(STALE_OPERATION_MAX_SOURCE_UNITS + 1);
+    const source = `a${selected}z`;
+    ytext.insert(0, source);
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendAfterRemote = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "R");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.insertText("!", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendAfterRemote, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(
+      view.state.tr.insertText(
+        "L",
+        2,
+        2 + STALE_OPERATION_MAX_SOURCE_UNITS + 1,
+      ),
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = `${source.slice(0, 2)}R${source.slice(2)}`;
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
     expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
   });
 
   it.each([
@@ -996,7 +3146,40 @@ describe("MarkdownBinding", () => {
     },
   );
 
-  it("preserves local and remote edits when an earlier plugin appends during the same view update", async () => {
+  it("does not canonicalize unrelated source while filtering a stale fallback", async () => {
+    const source = "za\n\n-plain";
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    const map = binding.getSourceMap();
+    const before = view.state;
+    const position = map.srcToPm(1);
+    const transaction = before.tr.insertText(">", position);
+    const after = before.apply(transaction);
+    const change = binding.authorizeLocalChange(
+      localDocChange(transaction, before.doc, after.doc)!,
+    );
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.transact(() => {
+      const text = remote.getText("content");
+      text.delete(0, 2);
+      text.insert(0, "# H");
+    });
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const expected = "# >H\n\n-plain";
+    expect(ytext.toString()).toBe(expected);
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("keeps a remote-mirroring appender and a later unrelated appender exactly once", async () => {
     ytext.insert(0, "a\n\nb");
     const binding = new MarkdownBinding(ytext);
     bindings.push(binding);
@@ -1015,15 +3198,34 @@ describe("MarkdownBinding", () => {
         return newState.tr.insertText("R", newState.doc.content.size - 1);
       },
     });
-    const state = EditorState.create({ doc: initial, plugins: [appendRemote, markdownBindingPlugin(binding)] });
+    let unrelatedAppended = false;
+    const appendUnrelated = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (
+          unrelatedAppended ||
+          !transactions.some((transaction) => transaction.docChanged)
+        ) {
+          return null;
+        }
+        unrelatedAppended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(0, "Q");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.insertText("!", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRemote, appendUnrelated, markdownBindingPlugin(binding)],
+    });
     const view = new EditorView(document.createElement("div"), { state });
     views.push(view);
 
     view.dispatch(view.state.tr.insertText("x", 2));
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
-    expect(ytext.toString()).toBe("ax\n\nbR");
-    const canonical = parseMarkdown("ax\n\nbR");
+    expect(ytext.toString()).toBe("Qax\n\nbR!");
+    const canonical = parseMarkdown("Qax\n\nbR!");
     expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
     expect(binding["currentDoc"]?.toJSON()).toEqual(canonical.doc.toJSON());
     remote.destroy();
@@ -1052,6 +3254,165 @@ describe("MarkdownBinding", () => {
     expect(ytext.toString()).toBe("ax\n\nb");
     expect(binding["mapCache"]).not.toBeNull();
     expectCompleteCanonicalMap(binding, view, "ax\n\nb");
+  });
+
+  it("settles authorization when the root transaction is rejected", () => {
+    ytext.insert(0, "abcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const rejectRoot = new Plugin({
+      filterTransaction(transaction) {
+        return transaction.getMeta("reject-root") !== true;
+      },
+    });
+    const state = EditorState.create({
+      doc: binding.initialDoc(),
+      plugins: [rejectRoot, markdownBindingPlugin(binding)],
+    });
+    binding.getSourceMap();
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(
+      view.state.tr.insertText("LOCAL", 2, 4).setMeta("reject-root", true),
+    );
+
+    expect(ytext.toString()).toBe("abcd");
+    expect(view.state.doc.textContent).toBe("abcd");
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("keeps the authorized root when a stale appended transaction is rejected", async () => {
+    ytext.insert(0, "abcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendRejected = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.insertText("!", newState.doc.content.size - 1).setMeta("reject-appended", true);
+      },
+    });
+    const rejectAppended = new Plugin({
+      filterTransaction(transaction) {
+        return transaction.getMeta("reject-appended") !== true;
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRejected, rejectAppended, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("LOCAL", 2, 4));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("aREMOTELOCALd");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown("aREMOTELOCALd").doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("fails closed and settles authorization when an appender throws", async () => {
+    ytext.insert(0, "abcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let failed = false;
+    const failingAppender = new Plugin({
+      appendTransaction(transactions) {
+        if (failed || !transactions.some((transaction) => transaction.docChanged)) return null;
+        failed = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        throw new Error("appender failed");
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [failingAppender, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    expect(() => view.dispatch(view.state.tr.insertText("LOCAL", 2, 4))).toThrow(
+      "appender failed",
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("abREMOTEcd");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown("abREMOTEcd").doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    remote.destroy();
+  });
+
+  it("resynchronizes rich state when a current-generation interceptor throws", async () => {
+    ytext.insert(0, "a");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    binding.setInterceptor(() => {
+      throw new Error("interceptor failed");
+    });
+    let appended = false;
+    const appendAtEnd = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        return newState.tr.insertText("!", newState.doc.content.size - 1);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendAtEnd, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    expect(() => view.dispatch(view.state.tr.insertText("x", 2))).toThrow(
+      "interceptor failed",
+    );
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("a");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown("a").doc.toJSON());
+    expect(binding["localAuthorizationPending"]).toBe(false);
+  });
+
+  it("settles deferred remote synchronization when the view is destroyed mid-transaction", async () => {
+    ytext.insert(0, "abcd");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+    const transaction = view.state.tr.insertText("LOCAL", 2, 4);
+    view.state.apply(transaction);
+    expect(binding["localAuthorizationPending"]).toBe(true);
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(2, "REMOTE");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    view.destroy();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(binding["localAuthorizationPending"]).toBe(false);
+    expect(binding["currentDoc"]?.toJSON()).toEqual(parseMarkdown("abREMOTEcd").doc.toJSON());
+    expect(ytext.toString()).toBe("abREMOTEcd");
+    remote.destroy();
   });
 
   it("keeps generations current across undo, redo, and a later joined-client edit", () => {
