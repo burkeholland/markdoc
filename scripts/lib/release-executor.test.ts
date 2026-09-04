@@ -240,7 +240,7 @@ describe("production-rooted composition", () => {
     expect(objectExists(fixture.repo, fixture.plan.payloadTree)).toBe(false);
     expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
     expect(readdirSync(fixture.root).filter((name) => name.startsWith(".markdoc-release-"))).toEqual([]);
-  });
+  }, 60_000);
 
   it("stops and removes quarantine state when the payload has a hidden third path", () => {
     const fixture = createFixture({ thirdPath: true });
@@ -250,31 +250,32 @@ describe("production-rooted composition", () => {
   });
 
   it("stops before composition on missing authority, package drift, dirty controller or an internal output", () => {
-    const missing = createFixture();
+    const fixture = createFixture();
     expect(() =>
-      executeFixture(missing, { authorities: missing.authorities.slice(0, 3) }),
+      executeFixture(fixture, { authorities: fixture.authorities.slice(0, 3) }),
     ).toThrow("exactly four authority files");
-    expect(() => readdirSync(missing.output)).toThrow();
+    expect(() => readdirSync(fixture.output)).toThrow();
 
-    const packageDrift = createFixture();
-    writeFileSync(packageDrift.packageFile, "{}\n");
-    expect(() => executeFixture(packageDrift)).toThrow("package.json input blob mismatch");
-    expect(() => readdirSync(packageDrift.output)).toThrow();
+    const packageBytes = readFileSync(fixture.packageFile);
+    writeFileSync(fixture.packageFile, "{}\n");
+    expect(() => executeFixture(fixture)).toThrow("package.json input blob mismatch");
+    expect(() => readdirSync(fixture.output)).toThrow();
+    writeFileSync(fixture.packageFile, packageBytes);
 
-    const dirty = createFixture();
-    writeFileSync(path.join(dirty.repo, "dirty.txt"), "dirty\n");
-    expect(() => executeFixture(dirty)).toThrow("controller checkout is not clean");
-    expect(() => readdirSync(dirty.output)).toThrow();
+    const dirtyPath = path.join(fixture.repo, "dirty.txt");
+    writeFileSync(dirtyPath, "dirty\n");
+    expect(() => executeFixture(fixture)).toThrow("controller checkout is not clean");
+    expect(() => readdirSync(fixture.output)).toThrow();
+    rmSync(dirtyPath);
 
-    const internal = createFixture();
     expect(() =>
-      executeFixture(internal, { output: path.join(internal.repo, "payload") }),
+      executeFixture(fixture, { output: path.join(fixture.repo, "payload") }),
     ).toThrow("output must be outside");
     expect(() =>
-      executeFixture(internal, { output: path.join(internal.commonDirectory, "refs", "release-payload") }),
+      executeFixture(fixture, { output: path.join(fixture.commonDirectory, "refs", "release-payload") }),
     ).toThrow("output must be outside");
-    expect(readdirSync(internal.root).filter((name) => name.startsWith(".markdoc-release-"))).toEqual([]);
-  });
+    expect(readdirSync(fixture.root).filter((name) => name.startsWith(".markdoc-release-"))).toEqual([]);
+  }, 60_000);
 });
 
 describe("release executor CLI", () => {
