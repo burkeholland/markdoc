@@ -332,7 +332,7 @@ body {
     @apply absolute left-0.5 h-4 w-4 rounded-full bg-surface shadow-sm transition-transform;
   }
   .switch[aria-checked="true"]::after {
-    @apply translate-x-6;
+    @apply translate-x-[22px];
   }
   /* Skip-to-content link: off-screen until it receives keyboard focus. */
   .skip-link {
