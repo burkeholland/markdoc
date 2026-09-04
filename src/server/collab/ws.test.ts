@@ -913,7 +913,10 @@ describe("collaboration attachment first frames", () => {
   });
 
   it("physically reclaims 100 silent, malformed-token, document-mismatch and revoked-token peers", async () => {
-    const site = await startAttachment({ timeoutMs: 100, closeGraceMs: 100 });
+    const site = await startAttachment({
+      timeoutMs: COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS,
+      closeGraceMs: COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
+    });
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const classes = [
       { name: "silent", frame: () => undefined },
