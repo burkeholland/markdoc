@@ -12,6 +12,7 @@ import {
   isStructuralChange,
   localDocChange,
   SOURCE_MAP_MAX_RETAINED_DOCUMENTS,
+  STALE_OPERATION_MAX_SOURCE_UNITS,
   VERIFY_TRUST_AFTER,
   VERIFY_EVERY_NTH_WINDOW,
 } from "./markdown-binding";
@@ -41,6 +42,51 @@ const RAW_LINE_POSITIONS = [
   { label: "middle", before: 500, after: 500 },
   { label: "late", before: 1_000, after: 0 },
 ] as const;
+
+const STALE_MATRIX_BLOCK = "0abcdefgh9 **bold** [link](x) ![](i) `code` 😀";
+const STALE_MATRIX_MARKERS = [
+  ">",
+  "# ",
+  "- ",
+  "* ",
+  "1. ",
+  "```",
+  "---",
+  "[x](y)",
+  "![](x)",
+  "**",
+  "`x`",
+  "😀",
+] as const;
+const STALE_MATRIX_LOCATIONS = [
+  { label: "before", offset: 1 },
+  { label: "at-start", offset: 2 },
+  { label: "inside-start", offset: 3 },
+  { label: "middle", offset: 5 },
+  { label: "inside-end", offset: 7 },
+  { label: "at-end", offset: 8 },
+  { label: "after", offset: 9 },
+] as const;
+const STALE_MATRIX_CASES = ["insert", "delete", "replace"].flatMap((localOperation, localIndex) =>
+  ["insert", "delete", "replace"].flatMap((remoteOperation, remoteIndex) =>
+    ["first", "middle", "last"].flatMap((block, blockIndex) =>
+      STALE_MATRIX_LOCATIONS.map((location, locationIndex) => ({
+        label: `${localOperation}/${remoteOperation}/${location.label}/${block}`,
+        localOperation,
+        remoteOperation,
+        blockIndex,
+        remoteOffset: location.offset,
+        localInsert:
+          localOperation === "delete"
+            ? ""
+            : STALE_MATRIX_MARKERS[
+                (localIndex * 63 + remoteIndex * 21 + blockIndex * 7 + locationIndex) %
+                  STALE_MATRIX_MARKERS.length
+              ],
+      })),
+    ),
+  ),
+);
 
 function rawLineFixture(before: number, after: number, separator = ""): string {
   return [
@@ -251,6 +297,504 @@ describe("MarkdownBinding", () => {
     expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
     expectCompleteCanonicalMap(binding, view, "ax\n\nbR");
     remote.destroy();
+  });
+
+  it.each([
+    ["delete", ""],
+    ["replace", "LOCAL"],
+  ])(
+    "preserves a concurrent interior insert when a stale local %s removes only original items",
+    async (_label, localInsert) => {
+      ytext.insert(0, "abcd");
+      const { view, binding } = editor();
+      binding.getSourceMap();
+      const before = view.state;
+      const tr = before.tr.insertText(localInsert, 2, 4);
+      const after = before.apply(tr);
+      const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+      expect(change.authorization).not.toBeNull();
+
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+      const oracleLocal = new Y.Doc();
+      Y.applyUpdate(oracleLocal, Y.encodeStateAsUpdate(ydoc));
+      oracleLocal.clientID = ydoc.clientID;
+      const oracleRemote = new Y.Doc();
+      Y.applyUpdate(oracleRemote, Y.encodeStateAsUpdate(ydoc));
+      oracleRemote.clientID = remote.clientID;
+      const oracleLocalVector = Y.encodeStateVector(oracleLocal);
+      const oracleRemoteVector = Y.encodeStateVector(oracleRemote);
+      oracleLocal.transact(() => {
+        const text = oracleLocal.getText("content");
+        text.delete(1, 2);
+        if (localInsert) text.insert(1, localInsert);
+      });
+      oracleRemote.getText("content").insert(2, "REMOTE");
+      Y.applyUpdate(oracleLocal, Y.encodeStateAsUpdate(oracleRemote, oracleRemoteVector));
+      Y.applyUpdate(oracleRemote, Y.encodeStateAsUpdate(oracleLocal, oracleLocalVector));
+      const oracle = oracleLocal.getText("content").toString();
+      expect(oracleRemote.getText("content").toString()).toBe(oracle);
+
+      const remoteVector = Y.encodeStateVector(ydoc);
+      remote.getText("content").insert(2, "REMOTE");
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, remoteVector));
+      expect(ytext.toString()).toBe("abREMOTEcd");
+      const observedBindingWrites: string[] = [];
+      const observer = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+        if (transaction.origin === binding) observedBindingWrites.push(ytext.toString());
+      };
+      ytext.observe(observer);
+
+      expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+      expect(oracle).toBe(localInsert ? "aREMOTELOCALd" : "aREMOTEd");
+      expect(observedBindingWrites).toEqual([oracle]);
+      expect(ytext.toString()).toBe(oracle);
+      expect(remote.getText("content").toString()).toBe(oracle);
+      expect(oracle.match(/REMOTE/g)).toHaveLength(1);
+      if (localInsert) expect(oracle.match(/LOCAL/g)).toHaveLength(1);
+      expect(oracle).not.toContain("b");
+      expect(oracle).not.toContain("c");
+      const canonical = parseMarkdown(oracle);
+      expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+      expect(binding["currentDoc"]?.toJSON()).toEqual(canonical.doc.toJSON());
+      expect(binding.blocks).toEqual(canonical.map.blocks);
+      expectCompleteCanonicalMap(binding, view, oracle);
+      ytext.unobserve(observer);
+      remote.destroy();
+      oracleLocal.destroy();
+      oracleRemote.destroy();
+    },
+  );
+
+  it.each(STALE_MATRIX_CASES)(
+    "preserves exact ownership for stale $label",
+    async ({ localOperation, remoteOperation, blockIndex, remoteOffset, localInsert }) => {
+      const source = [STALE_MATRIX_BLOCK, STALE_MATRIX_BLOCK, STALE_MATRIX_BLOCK].join("\n\n");
+      ytext.insert(0, source);
+      const { view, binding } = editor();
+      const map = binding.getSourceMap();
+      const blockStart = blockIndex * (STALE_MATRIX_BLOCK.length + 2);
+      const rangeFrom = blockStart + 2;
+      const rangeTo = blockStart + 8;
+      const localFrom = map.srcToPm(rangeFrom);
+      const localTo =
+        localOperation === "insert" ? localFrom : map.srcToPm(rangeTo);
+      const before = view.state;
+      const tr =
+        localOperation !== "insert" && remoteOffset % 2 === 1
+          ? before.tr
+              .setSelection(TextSelection.create(before.doc, localTo, localFrom))
+              .insertText(localInsert)
+          : before.tr.insertText(localInsert, localFrom, localTo);
+      const after = before.apply(tr);
+      const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+      expect(change.authorization, `authorization for ${localOperation}`).not.toBeNull();
+
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+      const oracleSeed = new Y.Doc();
+      Y.applyUpdate(oracleSeed, Y.encodeStateAsUpdate(ydoc));
+      const oracleLocal = new Y.Doc();
+      Y.applyUpdate(oracleLocal, Y.encodeStateAsUpdate(oracleSeed));
+      oracleLocal.clientID = ydoc.clientID;
+      const oracleRemote = new Y.Doc();
+      Y.applyUpdate(oracleRemote, Y.encodeStateAsUpdate(oracleSeed));
+      oracleRemote.clientID = remote.clientID;
+      const oracleRemoteVector = Y.encodeStateVector(oracleRemote);
+      const oracleText = oracleLocal.getText("content");
+      const oracleAnchor = Y.createRelativePositionFromTypeIndex(
+        oracleText,
+        localOperation === "insert" ? rangeFrom : rangeTo,
+        localOperation === "insert" ? 0 : -1,
+      );
+      const oracleUnits =
+        localOperation === "insert"
+          ? []
+          : Array.from({ length: rangeTo - rangeFrom }, (_, offset) => ({
+              from: Y.createRelativePositionFromTypeIndex(
+                oracleText,
+                rangeFrom + offset,
+              ),
+              to: Y.createRelativePositionFromTypeIndex(
+                oracleText,
+                rangeFrom + offset + 1,
+                -1,
+              ),
+            }));
+      oracleRemote.transact(() => {
+        const text = oracleRemote.getText("content");
+        const position = blockStart + remoteOffset;
+        if (remoteOperation !== "insert") text.delete(position, 1);
+        if (remoteOperation !== "delete") text.insert(position, "REMOTE");
+      });
+      Y.applyUpdate(
+        oracleLocal,
+        Y.encodeStateAsUpdate(oracleRemote, oracleRemoteVector),
+      );
+      oracleLocal.transact(() => {
+        const ranges = oracleUnits
+          .map((unit) => {
+            const from = Y.createAbsolutePositionFromRelativePosition(
+              unit.from,
+              oracleLocal,
+              false,
+            )!.index;
+            const to = Y.createAbsolutePositionFromRelativePosition(
+              unit.to,
+              oracleLocal,
+              false,
+            )!.index;
+            return { from: Math.min(from, to), to: Math.max(from, to) };
+          })
+          .filter((range) => range.to > range.from)
+          .sort((left, right) => right.from - left.from);
+        for (const range of ranges) {
+          oracleText.delete(range.from, range.to - range.from);
+        }
+        if (localInsert) {
+          const absolute = Y.createAbsolutePositionFromRelativePosition(
+            oracleAnchor,
+            oracleLocal,
+            false,
+          );
+          expect(absolute).not.toBeNull();
+          oracleText.insert(absolute!.index, localInsert);
+        }
+      });
+      Y.applyUpdate(oracleRemote, Y.encodeStateAsUpdate(oracleLocal));
+      const oracleSource = oracleLocal.getText("content").toString();
+      expect(oracleRemote.getText("content").toString()).toBe(oracleSource);
+      const expectedTargetText = oracleSource.slice(
+        blockStart,
+        oracleSource.indexOf(" **bold**", blockStart),
+      );
+
+      const remoteVector = Y.encodeStateVector(ydoc);
+      remote.transact(() => {
+        const text = remote.getText("content");
+        const position = blockStart + remoteOffset;
+        if (remoteOperation !== "insert") text.delete(position, 1);
+        if (remoteOperation !== "delete") text.insert(position, "REMOTE");
+      });
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, remoteVector));
+      const observedBindingWrites: string[] = [];
+      const observer = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+        if (transaction.origin === binding) observedBindingWrites.push(ytext.toString());
+      };
+      ytext.observe(observer);
+
+      binding.handleLocalTransaction(before, after, change);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+      const finalSource = ytext.toString();
+      const canonical = parseMarkdown(finalSource);
+      const target = view.state.doc.child(blockIndex);
+      expect(
+        target.textContent.startsWith(expectedTargetText),
+        JSON.stringify({ expectedTargetText, actualTargetText: target.textContent }),
+      ).toBe(true);
+      expect(remote.getText("content").toString()).toBe(finalSource);
+      if (remoteOperation !== "delete") {
+        expect(target.textContent.match(/REMOTE/g)).toHaveLength(1);
+      }
+      expect(observedBindingWrites).toHaveLength(1);
+      if (observedBindingWrites.length > 0) {
+        expect(parseMarkdown(observedBindingWrites[0]).doc.toJSON()).toEqual(
+          canonical.doc.toJSON(),
+        );
+      }
+      expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+      expect(binding["currentDoc"]?.toJSON()).toEqual(canonical.doc.toJSON());
+      expect(binding.blocks).toEqual(canonical.map.blocks);
+      expectCompleteCanonicalMap(binding, view, finalSource);
+      ytext.unobserve(observer);
+      remote.destroy();
+      oracleSeed.destroy();
+      oracleLocal.destroy();
+      oracleRemote.destroy();
+    },
+  );
+
+  it("covers at least 120 deterministic stale operation combinations", () => {
+    expect(STALE_MATRIX_CASES).toHaveLength(189);
+  });
+
+  it.each([
+    ["delete after remote deletion", "", ""],
+    ["replace after remote deletion", "", "LOCAL"],
+    ["delete after remote replacement", "REMOTE", ""],
+    ["replace after remote replacement", "REMOTE", "LOCAL"],
+  ])(
+    "preserves remote content when original selected items are absent: %s",
+    async (_label, remoteInsert, localInsert) => {
+      ytext.insert(0, "abcd");
+      const { view, binding } = editor();
+      binding.getSourceMap();
+      const before = view.state;
+      const tr = before.tr.insertText(localInsert, 2, 4);
+      const after = before.apply(tr);
+      const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+      const vector = Y.encodeStateVector(ydoc);
+      remote.transact(() => {
+        const text = remote.getText("content");
+        text.delete(1, 2);
+        if (remoteInsert) text.insert(1, remoteInsert);
+      });
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+
+      binding.handleLocalTransaction(before, after, change);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+      const finalSource = ytext.toString();
+      const canonical = parseMarkdown(finalSource);
+      if (remoteInsert) expect(finalSource.match(/REMOTE/g)).toHaveLength(1);
+      if (localInsert) expect(finalSource.match(/LOCAL/g)).toHaveLength(1);
+      expect(finalSource).not.toContain("b");
+      expect(finalSource).not.toContain("c");
+      expect(remote.getText("content").toString()).toBe(finalSource);
+      expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+      expectCompleteCanonicalMap(binding, view, finalSource);
+      remote.destroy();
+    },
+  );
+
+  it("keeps selective stale replacement as one undo step around remote history", async () => {
+    ytext.insert(0, "abcd");
+    const { view, binding } = editor();
+    const undo = new Y.UndoManager(ytext, { trackedOrigins: new Set([binding]) });
+    binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText("LOCAL", 2, 4);
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(2, "REMOTE");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(ytext.toString()).toBe("aREMOTELOCALd");
+
+    undo.stopCapturing();
+    undo.undo();
+    expect(ytext.toString()).toBe("abREMOTEcd");
+    undo.redo();
+    expect(ytext.toString()).toBe("aREMOTELOCALd");
+    vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(remote.getText("content").length, "Q");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+
+    expect(ytext.toString()).toBe("aREMOTELOCALdQ");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(ytext.toString()).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, ytext.toString());
+    undo.destroy();
+    remote.destroy();
+  });
+
+  it("retains the collaborator's original Yjs insertion identity", async () => {
+    ytext.insert(0, "abcd");
+    const { view, binding } = editor();
+    binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText("LOCAL", 2, 4);
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const remoteOrigin = {};
+    const remoteUndo = new Y.UndoManager(remote.getText("content"), {
+      trackedOrigins: new Set([remoteOrigin]),
+    });
+    const vector = Y.encodeStateVector(ydoc);
+    remote.transact(() => remote.getText("content").insert(2, "REMOTE"), remoteOrigin);
+    remoteUndo.stopCapturing();
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    expect(remote.getText("content").toString()).toBe("aREMOTELOCALd");
+
+    const bindingVector = Y.encodeStateVector(ydoc);
+    remoteUndo.undo();
+    expect(remote.getText("content").toString()).toBe("aLOCALd");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, bindingVector));
+
+    expect(ytext.toString()).toBe("aLOCALd");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown("aLOCALd").doc.toJSON());
+    remoteUndo.destroy();
+    remote.destroy();
+  });
+
+  it("passes selective stale operations to interceptors without consuming remote inserts", async () => {
+    ytext.insert(0, "abcd");
+    const { view, binding } = editor();
+    const seen: Array<{ index: number; deleteCount: number; insert: string }> = [];
+    binding.setInterceptor((ops, text, origin) => {
+      seen.push(...ops);
+      text.doc!.transact(() => applyOps(text, ops), origin);
+      return true;
+    });
+    binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText("LOCAL", 2, 4);
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(2, "REMOTE");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(seen).toEqual([
+      { index: 1, deleteCount: 1, insert: "" },
+      { index: 7, deleteCount: 1, insert: "LOCAL" },
+    ]);
+    expect(ytext.toString()).toBe("aREMOTELOCALd");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(ytext.toString()).doc.toJSON());
+    remote.destroy();
+  });
+
+  it("preserves an interior remote insert when a metadata-only transaction is appended", async () => {
+    ytext.insert(0, "abcd");
+    const binding = new MarkdownBinding(ytext);
+    bindings.push(binding);
+    const initial = binding.initialDoc();
+    binding.getSourceMap();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    let appended = false;
+    const appendRemote = new Plugin({
+      appendTransaction(transactions, _oldState, newState) {
+        if (appended || !transactions.some((transaction) => transaction.docChanged)) return null;
+        appended = true;
+        const vector = Y.encodeStateVector(ydoc);
+        remote.getText("content").insert(2, "REMOTE");
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+        return newState.tr.setMeta("remote-inserted", true);
+      },
+    });
+    const state = EditorState.create({
+      doc: initial,
+      plugins: [appendRemote, markdownBindingPlugin(binding)],
+    });
+    const view = new EditorView(document.createElement("div"), { state });
+    views.push(view);
+
+    view.dispatch(view.state.tr.insertText("LOCAL", 2, 4));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("aREMOTELOCALd");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(ytext.toString()).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, ytext.toString());
+    remote.destroy();
+  });
+
+  it("selectively rebases across a hard break and a surrogate pair", async () => {
+    const source = "abcdefgh\\\ntail 😀";
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    const map = binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText("LOCAL", map.srcToPm(1), map.srcToPm(7));
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+    expect(change.authorization).not.toBeNull();
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.getText("content").insert(4, "REMOTE");
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(ytext.toString()).toBe("aREMOTELOCALh\\\ntail 😀");
+    expect(view.state.doc.toJSON()).toEqual(parseMarkdown(ytext.toString()).doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, ytext.toString());
+    remote.destroy();
+  });
+
+  it("keeps local and remote intent when the surrounding block is structurally replaced", async () => {
+    const source = "before\n\nabcdefgh\n\nafter";
+    ytext.insert(0, source);
+    const { view, binding } = editor();
+    const map = binding.getSourceMap();
+    const before = view.state;
+    const tr = before.tr.insertText("LOCAL", map.srcToPm(9), map.srcToPm(15));
+    const after = before.apply(tr);
+    const change = binding.authorizeLocalChange(localDocChange(tr, before.doc, after.doc)!);
+    expect(change.authorization).not.toBeNull();
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const vector = Y.encodeStateVector(ydoc);
+    remote.transact(() => {
+      const text = remote.getText("content");
+      text.delete(8, 8);
+      text.insert(8, "# Remote");
+    });
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote, vector));
+    const observedBindingWrites: string[] = [];
+    const observer = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+      if (transaction.origin === binding) observedBindingWrites.push(ytext.toString());
+    };
+    ytext.observe(observer);
+
+    expect(binding.handleLocalTransaction(before, after, change)).toBe(true);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+
+    const finalSource = ytext.toString();
+    const canonical = parseMarkdown(finalSource);
+    expect(canonical.doc.textContent.match(/Remote/g)).toHaveLength(1);
+    expect(canonical.doc.textContent.match(/LOCAL/g)).toHaveLength(1);
+    expect(observedBindingWrites).toEqual([finalSource]);
+    expect(remote.getText("content").toString()).toBe(finalSource);
+    expect(view.state.doc.toJSON()).toEqual(canonical.doc.toJSON());
+    expectCompleteCanonicalMap(binding, view, finalSource);
+    ytext.unobserve(observer);
+    remote.destroy();
+  });
+
+  it("bounds original-unit authorization without retaining a session history", () => {
+    const source = `b${"a".repeat(STALE_OPERATION_MAX_SOURCE_UNITS)}c`;
+    ytext.insert(0, source);
+    const { binding } = editor();
+    const before = EditorState.create({ doc: binding.initialDoc() });
+    binding.getSourceMap();
+    const within = before.tr.delete(2, 2 + STALE_OPERATION_MAX_SOURCE_UNITS);
+    const withinAfter = before.apply(within);
+    const withinChange = binding.authorizeLocalChange(
+      localDocChange(within, before.doc, withinAfter.doc)!,
+    );
+    expect(withinChange.authorization?.originalUnits).toHaveLength(
+      STALE_OPERATION_MAX_SOURCE_UNITS,
+    );
+
+    const beyond = before.tr.delete(1, 2 + STALE_OPERATION_MAX_SOURCE_UNITS);
+    const beyondAfter = before.apply(beyond);
+    const beyondChange = binding.authorizeLocalChange(
+      localDocChange(beyond, before.doc, beyondAfter.doc)!,
+    );
+    expect(beyondChange.authorization).toBeNull();
+    expect(
+      Object.keys(binding).some((key) => /originalUnits/i.test(key)),
+    ).toBe(false);
+    expect(binding["localAuthorizationPending"]).toBe(false);
   });
 
   it.each([
@@ -579,10 +1123,10 @@ describe("MarkdownBinding", () => {
   });
 
   it(
-    "bounds source-map history through 10,000 marked-document edits",
+    "bounds source-map and local-intent history through 50,000 marked-document edits",
     () => {
       const paragraphCount = 1_000;
-      const editCount = 10_000;
+      const editCount = 50_000;
       const targetIndexes = [0, 500, 999] as const;
       const source = Array.from(
         { length: paragraphCount },
@@ -606,6 +1150,7 @@ describe("MarkdownBinding", () => {
       binding["parse"] = parse;
       binding["buildDoc"] = buildDoc;
       const inserted = [0, 0, 0];
+      let maxAuthorizedOriginalUnits = 0;
 
       for (let edit = 0; edit < editCount; edit++) {
         const target = edit % targetIndexes.length;
@@ -619,13 +1164,21 @@ describe("MarkdownBinding", () => {
         const next = state.apply(tr);
         const change = localDocChange(tr, state.doc, next.doc);
         expect(change).not.toBeNull();
-        expect(binding.handleLocalTransaction(state, next, change)).toBe(true);
+        const authorized = binding.authorizeLocalChange(change!);
+        maxAuthorizedOriginalUnits = Math.max(
+          maxAuthorizedOriginalUnits,
+          authorized.authorization?.originalUnits.length ?? 0,
+        );
+        expect(binding.handleLocalTransaction(state, next, authorized)).toBe(true);
         expect(binding["mapCache"]).not.toBeNull();
         state = next;
         inserted[target]++;
       }
 
       const expectedCompactions = Math.floor(editCount / SOURCE_MAP_MAX_RETAINED_DOCUMENTS);
+      expect(expectedCompactions).toBeGreaterThanOrEqual(390);
+      expect(maxAuthorizedOriginalUnits).toBe(0);
+      expect(binding["localAuthorizationPending"]).toBe(false);
       expect(SOURCE_MAP_MAX_RETAINED_DOCUMENTS).toBeGreaterThan(120);
       expect(findDiffStart).not.toHaveBeenCalled();
       expect(findDiffEnd).not.toHaveBeenCalled();
@@ -686,7 +1239,7 @@ describe("MarkdownBinding", () => {
       findDiffStart.mockRestore();
       findDiffEnd.mockRestore();
     },
-    120_000,
+    180_000,
   );
 
   it.each([

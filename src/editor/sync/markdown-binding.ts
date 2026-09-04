@@ -26,13 +26,25 @@ interface LocalChangeAuthorization {
   sourceGeneration: number;
   text: string;
   map: SourceMap;
+  /** Right-associated start for collapsed inserts and ownership checks. */
   from: Y.RelativePosition;
+  /**
+   * Left-associated end for replacements: inserts at start/interior stay before the local
+   * replacement, while inserts at the range end stay after it.
+   */
   to: Y.RelativePosition;
+  /** One left/right anchor pair per removable original UTF-16 source unit. */
+  originalUnits: ReadonlyArray<{
+    from: Y.RelativePosition;
+    to: Y.RelativePosition;
+  }>;
   richInsert: string;
 }
 
 /** Current plus historical ProseMirror documents reachable through the cached source map. */
 export const SOURCE_MAP_MAX_RETAINED_DOCUMENTS = 128;
+/** Maximum original source units retained by one in-flight stale-edit authorization. */
+export const STALE_OPERATION_MAX_SOURCE_UNITS = 4_096;
 const SOURCE_MAP_MAX_WRAPPER_DEPTH = SOURCE_MAP_MAX_RETAINED_DOCUMENTS - 1;
 const sourceMapWrapperDepth = new WeakMap<SourceMap, number>();
 
@@ -151,6 +163,17 @@ function containsHardBreak(node: PMNode | null | undefined): boolean {
 
 function containsLineEnding(text: string): boolean {
   return text.includes("\n") || text.includes("\r");
+}
+
+function serializeDocument(doc: PMNode): string {
+  const blocks: PMNode[] = [];
+  doc.forEach((child) => {
+    if (!isEmptyBlock(child)) blocks.push(child);
+  });
+  return blocks
+    .map((block) => serializeBlocks([block]))
+    .filter((text) => text.trim() !== "")
+    .join("\n\n");
 }
 
 function blockStarts(doc: PMNode): number[] {
@@ -417,6 +440,8 @@ export class MarkdownBinding {
     maxCompactionSegments: 0,
   };
   private inLocalHandler = false;
+  /** A valid local authorization exists in the ProseMirror transaction currently being dispatched. */
+  private localAuthorizationPending = false;
   private pendingSync = false;
   /** True while a remote sync is being dispatched to the view. */
   syncing = false;
@@ -452,6 +477,7 @@ export class MarkdownBinding {
 
   destroy() {
     this.destroyed = true;
+    this.localAuthorizationPending = false;
     this.cancelVerify();
     if (this.heldTimer) clearTimeout(this.heldTimer);
     this.heldTimer = null;
@@ -699,6 +725,10 @@ export class MarkdownBinding {
   private onTextChange = (_event: Y.YTextEvent, tr: Y.Transaction) => {
     this.sourceGeneration++;
     if (this.destroyed || tr.origin === this) return;
+    if (this.localAuthorizationPending) {
+      this.pendingSync = true;
+      return;
+    }
     if (this.holding) {
       this.holdSync();
       return;
@@ -815,6 +845,7 @@ export class MarkdownBinding {
       return this.handleLocal(oldState, newState, change);
     } finally {
       this.inLocalHandler = false;
+      this.localAuthorizationPending = false;
       if (this.pendingSync) {
         this.pendingSync = false;
         queueMicrotask(() => {
@@ -830,6 +861,7 @@ export class MarkdownBinding {
    * the view plugin applies it.
    */
   authorizeLocalChange(change: LocalDocChange): LocalDocChange {
+    this.localAuthorizationPending = false;
     if (
       this.currentDoc !== change.before ||
       this.currentTextGeneration !== this.sourceGeneration ||
@@ -874,17 +906,32 @@ export class MarkdownBinding {
     }
     const from = Y.createRelativePositionFromTypeIndex(this.ytext, sourceFrom);
     const to = sourceFrom === sourceTo ? from : Y.createRelativePositionFromTypeIndex(this.ytext, sourceTo, -1);
+    const richInsert = change.after.textBetween(change.start, change.endB, "", "");
+    const originalLength = sourceTo - sourceFrom;
+    if (
+      originalLength > STALE_OPERATION_MAX_SOURCE_UNITS ||
+      richInsert.length > STALE_OPERATION_MAX_SOURCE_UNITS
+    ) {
+      return { ...change, authorization: null };
+    }
+    const originalUnits = Array.from({ length: originalLength }, (_, offset) => ({
+      from: Y.createRelativePositionFromTypeIndex(this.ytext, sourceFrom + offset),
+      to: Y.createRelativePositionFromTypeIndex(this.ytext, sourceFrom + offset + 1, -1),
+    }));
+    const authorization: LocalChangeAuthorization = {
+      doc: this.currentDoc,
+      sourceGeneration: this.sourceGeneration,
+      text: this.currentText,
+      map,
+      from,
+      to,
+      originalUnits,
+      richInsert,
+    };
+    this.localAuthorizationPending = true;
     return {
       ...change,
-      authorization: {
-        doc: this.currentDoc,
-        sourceGeneration: this.sourceGeneration,
-        text: this.currentText,
-        map,
-        from,
-        to,
-        richInsert: change.after.textBetween(change.start, change.endB, "", ""),
-      },
+      authorization,
     };
   }
 
@@ -898,34 +945,121 @@ export class MarkdownBinding {
   }
 
   private reconcileStaleLocalChange(authorization: LocalChangeAuthorization): boolean {
-    const from = Y.createAbsolutePositionFromRelativePosition(authorization.from, this.ydoc);
-    const to = Y.createAbsolutePositionFromRelativePosition(authorization.to, this.ydoc);
+    const resolve = (position: Y.RelativePosition) =>
+      Y.createAbsolutePositionFromRelativePosition(position, this.ydoc, false);
+    const from = resolve(authorization.from);
+    const to = resolve(authorization.to);
     if (!from || !to || from.type !== this.ytext || to.type !== this.ytext) {
       this.requestSync();
       return false;
     }
-    const sourceFrom = Math.min(from.index, to.index);
-    const sourceTo = Math.max(from.index, to.index);
     const currentText = this.ytext.toString();
-    const parsed = parseMarkdown(currentText);
-    const pmFrom = parsed.map.srcToPm(sourceFrom);
-    const pmTo = parsed.map.srcToPm(sourceTo);
-    if (pmFrom > pmTo) {
-      this.requestSync();
-      return false;
+    const resolvedUnits: Array<{ from: number; to: number }> = [];
+    for (const unit of authorization.originalUnits) {
+      const unitFrom = resolve(unit.from);
+      const unitTo = resolve(unit.to);
+      if (!unitFrom || !unitTo || unitFrom.type !== this.ytext || unitTo.type !== this.ytext) {
+        this.requestSync();
+        return false;
+      }
+      const start = Math.min(unitFrom.index, unitTo.index);
+      const end = Math.max(unitFrom.index, unitTo.index);
+      if (end - start > 1) {
+        this.requestSync();
+        return false;
+      }
+      if (end > start) resolvedUnits.push({ from: start, to: end });
     }
-    const tr = EditorState.create({ doc: parsed.doc }).tr;
+
+    resolvedUnits.sort((left, right) => left.from - right.from || left.to - right.to);
+    const ranges: Array<{ from: number; to: number }> = [];
+    for (const unit of resolvedUnits) {
+      const previous = ranges.at(-1);
+      if (previous && unit.from <= previous.to) previous.to = Math.max(previous.to, unit.to);
+      else ranges.push({ ...unit });
+    }
+
+    let rebasedText = currentText;
+    for (let index = ranges.length - 1; index >= 0; index--) {
+      const range = ranges[index];
+      rebasedText = rebasedText.slice(0, range.from) + rebasedText.slice(range.to);
+    }
+    const insertionAnchor = authorization.originalUnits.length === 0 ? from.index : to.index;
+    let insertionIndex = insertionAnchor;
+    for (const range of ranges) {
+      if (range.to > insertionAnchor) {
+        this.requestSync();
+        return false;
+      }
+      insertionIndex -= range.to - range.from;
+    }
+
+    const rebased = parseMarkdown(rebasedText);
+    const insertionPosition = rebased.map.srcToPm(insertionIndex);
+    const tr = EditorState.create({ doc: rebased.doc }).tr;
     const mergedDoc =
       authorization.richInsert.length === 0
-        ? tr.delete(pmFrom, pmTo).doc
-        : tr.replaceWith(pmFrom, pmTo, schema.text(authorization.richInsert)).doc;
+        ? rebased.doc
+        : tr.insertText(authorization.richInsert, insertionPosition).doc;
+    let sourceInsert = "";
+    if (authorization.richInsert.length > 0) {
+      const contextualOps = diffOps(serializeDocument(rebased.doc), serializeDocument(mergedDoc));
+      if (contextualOps.length !== 1 || contextualOps[0].deleteCount !== 0) {
+        this.currentText = currentText;
+        return this.fallbackReplaceAll(mergedDoc);
+      }
+      sourceInsert = contextualOps[0].insert;
+    }
+
+    const candidateText =
+      rebasedText.slice(0, insertionIndex) + sourceInsert + rebasedText.slice(insertionIndex);
+    if (!parseMarkdown(candidateText).doc.eq(mergedDoc)) {
+      this.currentText = currentText;
+      return this.fallbackReplaceAll(mergedDoc);
+    }
+
+    const ops: TextOp[] = [];
+    let shift = 0;
+    for (const range of ranges) {
+      ops.push({
+        index: range.from + shift,
+        deleteCount: range.to - range.from,
+        insert: "",
+      });
+      shift -= range.to - range.from;
+    }
+    if (sourceInsert) {
+      const previous = ops.at(-1);
+      if (previous && previous.index === insertionIndex && previous.insert === "") {
+        previous.insert = sourceInsert;
+      } else {
+        ops.push({ index: insertionIndex, deleteCount: 0, insert: sourceInsert });
+      }
+    }
+
     this.currentText = currentText;
-    return this.fallbackReplaceAll(mergedDoc);
+    if (this.options.interceptor?.(ops, this.ytext, this)) {
+      this.requestSync();
+      this.options.onSync?.("local");
+      return true;
+    }
+    if (ops.length > 0) this.ydoc.transact(() => applyOps(this.ytext, ops), this);
+    this.requestSync();
+    this.options.onSync?.("local");
+    return ops.length > 0;
   }
 
   private handleLocal(oldState: EditorState, newState: EditorState, change: LocalDocChange | null): boolean {
     const oldDoc = oldState.doc;
     const newDoc = newState.doc;
+    if (
+      !change &&
+      this.localAuthorizationPending &&
+      this.currentTextGeneration !== this.sourceGeneration
+    ) {
+      this.currentText = this.ytext.toString();
+      return this.fallbackReplaceAll(newDoc);
+    }
     let start: number;
     let endA: number;
     let endB: number;
@@ -1216,14 +1350,8 @@ export class MarkdownBinding {
   }
 
   private fallbackReplaceAll(newDoc: PMNode): boolean {
-    const blocks: PMNode[] = [];
-    newDoc.forEach((child) => {
-      if (!isEmptyBlock(child)) blocks.push(child);
-    });
-    const text = blocks
-      .map((b) => serializeBlocks([b]))
-      .filter((t) => t.trim() !== "")
-      .join("\n\n");
+    this.localAuthorizationPending = false;
+    const text = serializeDocument(newDoc);
     const ops = diffOps(this.currentText, text, 0);
     if (ops.length > 0 && !this.options.interceptor?.(ops, this.ytext, this)) {
       this.ydoc.transact(() => applyOps(this.ytext, ops), this);
@@ -1287,6 +1415,7 @@ export class MarkdownBinding {
       this.pendingSync = true;
       return;
     }
+    this.localAuthorizationPending = false;
     // Any rebuild covers a held remote change too.
     this.heldSync = false;
     if (this.heldTimer) {
