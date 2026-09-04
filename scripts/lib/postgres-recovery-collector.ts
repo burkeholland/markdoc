@@ -1,6 +1,49 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import path from "node:path";
+import {
+  RECOVERY_CAPTURE_OPERATION,
+  RECOVERY_PRODUCTION_BINDING_SUBJECT,
+  RECOVERY_PROJECTION_FILES,
+  RECOVERY_SCRATCH_SUBJECT,
+  RecoveryCustodyError,
+  canonicalJson,
+  isCanonicalUtcTimestamp,
+  withAuthenticatedRecoveryInput,
+  type AuthenticatedRecoveryInput,
+  type RecoveryAcquisitionHooks,
+  type RecoveryAuthorityRoots,
+  type RecoveryCustodyReason,
+  type RecoveryProjectionName,
+} from "./postgres-recovery-custody";
+
+export {
+  RECOVERY_ACCEPTED_AUTHORITY_REFERENCE_SCHEMA,
+  RECOVERY_CAPTURE_AUTHORITY_SCHEMA,
+  RECOVERY_CAPTURE_MANIFEST_SCHEMA,
+  RECOVERY_CAPTURE_OPERATION,
+  RECOVERY_POLICY_AUTHORITY_SCHEMA,
+  RECOVERY_PRODUCTION_BINDING_SUBJECT,
+  RECOVERY_PROJECTION_FILES,
+  RECOVERY_SCRATCH_AUTHORITY_SCHEMA,
+  RECOVERY_SCRATCH_SUBJECT,
+  canonicalJson,
+  parseCanonicalJsonBytes,
+} from "./postgres-recovery-custody";
+export type {
+  AcceptedAuthorityReference,
+  AcceptedFileIdentity,
+  AcceptedInputRootIdentity,
+  AuthenticatedRecoveryInput,
+  RecoveryAcquisitionBoundary,
+  RecoveryAcquisitionHookContext,
+  RecoveryAcquisitionHooks,
+  RecoveryAuthorityRoots,
+  RecoveryCaptureAuthority,
+  RecoveryCaptureManifest,
+  RecoveryFileClaim,
+  RecoveryPolicyAuthority,
+  RecoveryProjectionName,
+  RecoveryScratchAuthority,
+} from "./postgres-recovery-custody";
 
 export const RECOVERY_INPUT_SCHEMA = "markdoc-postgres-recovery-projections/v1";
 export const RECOVERY_RECEIPT_SCHEMA = "markdoc-postgres-recovery-compatibility/v1";
@@ -14,26 +57,10 @@ export const RECOVERY_POLICY = Object.freeze({
   maximum_scratch_restore_age_seconds: 604_800,
 });
 
-export const RECOVERY_PROJECTION_FILES = Object.freeze({
-  pg_version: "pg-version.json",
-  active_binary_version: "active-binary-version.json",
-  installed_package_version: "installed-package-version.json",
-  control_data: "control-data.json",
-  pgbackrest_info: "pgbackrest-info.json",
-  archive_configuration: "archive-configuration.json",
-  archive_state: "archive-state.json",
-  backup_health: "backup-health.json",
-  scratch_restore: "scratch-restore.json",
-  production_binding: "production-binding.json",
-  observation_clock: "observation-clock.json",
-  rpo_policy: "rpo-policy.json",
-  vm_recovery: "vm-recovery.json",
-});
-
-export type RecoveryProjectionName = keyof typeof RECOVERY_PROJECTION_FILES;
 export type RecoveryDecision = "STOP" | "MALFORMED";
 
 export type RecoveryReason =
+  | RecoveryCustodyReason
   | "ACTIVE_PACKAGE_VERSION_MISMATCH"
   | "ARCHIVE_CONFIGURATION_FUTURE"
   | "ARCHIVE_CONFIGURATION_MISMATCH"
@@ -53,17 +80,11 @@ export type RecoveryReason =
   | "BINDING_COUNT_INVALID"
   | "BINDING_STATE_INVALID"
   | "BINDING_TYPE_MISMATCH"
-  | "COLLECTOR_EXECUTION_AUTHORITY_ABSENT"
   | "DATA_BINARY_MAJOR_MISMATCH"
   | "ENGINE_CHANGE_FUTURE"
   | "HISTORY_AMBIGUOUS"
   | "HISTORY_ABSENT"
-  | "INPUT_FIELD_INVALID"
-  | "INPUT_FILE_MISSING"
-  | "INPUT_FILE_UNEXPECTED"
-  | "INPUT_JSON_INVALID"
-  | "INPUT_ROOT_INVALID"
-  | "INPUT_ROOT_NOT_ABSOLUTE"
+  | "HELD_NON_OPERATIONAL"
   | "INPUT_SCHEMA_INVALID"
   | "INPUT_UNKNOWN_FIELD"
   | "MIXED_REPOSITORY"
@@ -187,6 +208,7 @@ interface ScratchRestoreProjection {
 
 interface ProductionBindingProjection {
   schema: "markdoc-recovery-production-binding/v1";
+  subject: typeof RECOVERY_PRODUCTION_BINDING_SUBJECT | "other";
   kind: "production-postgresql-vm" | "other";
   state: "active" | "changed" | "deleted";
   binding_count: number;
@@ -302,13 +324,12 @@ class ProjectionError extends Error {
     >,
   ) {
     super(reason);
+    this.name = "ProjectionError";
   }
 }
 
 type JsonObject = Record<string, unknown>;
 
-const MAX_PROJECTION_BYTES = 1_048_576;
-const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const MAJOR = /^[1-9]\d{0,2}$/;
 const FULL_VERSION = /^[1-9]\d{0,2}\.\d+(?:\.\d+)?$/;
 const HISTORY_VERSION = /^[1-9]\d{0,2}(?:\.\d+){0,2}$/;
@@ -317,7 +338,7 @@ const SYSTEM_IDENTIFIER = /^\d{10,32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-function malformedReceipt(reason: RecoveryReason): RecoveryReceipt {
+function emptyReceipt(reason: RecoveryReason, decision: RecoveryDecision): RecoveryReceipt {
   return {
     schema: RECOVERY_RECEIPT_SCHEMA,
     observed_at: null,
@@ -352,15 +373,17 @@ function malformedReceipt(reason: RecoveryReason): RecoveryReceipt {
       fresh_after_engine_change: null,
       within_drill_age: null,
     },
-    decision: "MALFORMED",
+    decision,
     reasons: [reason],
   };
 }
 
-function stoppedForMissingFile(): RecoveryReceipt {
-  const receipt = malformedReceipt("INPUT_FILE_MISSING");
-  receipt.decision = "STOP";
-  return receipt;
+function malformedReceipt(reason: RecoveryReason): RecoveryReceipt {
+  return emptyReceipt(reason, "MALFORMED");
+}
+
+function stoppedReceipt(reason: RecoveryReason): RecoveryReceipt {
+  return emptyReceipt(reason, "STOP");
 }
 
 function asObject(value: unknown): JsonObject {
@@ -424,8 +447,8 @@ function arrayField(object: JsonObject, key: string, maximum = 10_000): unknown[
 }
 
 function timestampField(object: JsonObject, key: string): string {
-  const value = stringField(object, key, ISO_UTC);
-  if (!Number.isFinite(Date.parse(value))) throw new ProjectionError("INPUT_FIELD_INVALID");
+  const value = stringField(object, key);
+  if (!isCanonicalUtcTimestamp(value)) throw new ProjectionError("INPUT_FIELD_INVALID");
   return value;
 }
 
@@ -594,10 +617,11 @@ function parseScratchRestore(value: unknown): ScratchRestoreProjection {
 
 function parseProductionBinding(value: unknown): ProductionBindingProjection {
   const object = asObject(value);
-  exactKeys(object, ["schema", "kind", "state", "binding_count"]);
+  exactKeys(object, ["schema", "subject", "kind", "state", "binding_count"]);
   schema(object, "markdoc-recovery-production-binding/v1");
   return {
     schema: "markdoc-recovery-production-binding/v1",
+    subject: enumField(object, "subject", [RECOVERY_PRODUCTION_BINDING_SUBJECT, "other"] as const),
     kind: enumField(object, "kind", ["production-postgresql-vm", "other"] as const),
     state: enumField(object, "state", ["active", "changed", "deleted"] as const),
     binding_count: numberField(object, "binding_count", { min: 0, max: 1_000 }),
@@ -708,62 +732,8 @@ const PARSERS: {
   vm_recovery: parseVmRecovery,
 };
 
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const object = value as JsonObject;
-  return `{${Object.keys(object)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
-    .join(",")}}`;
-}
-
 export function recoveryPolicySha256(policy: RecoveryPolicyPayload): string {
   return createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex");
-}
-
-export async function readRecoveryInputRoot(inputRoot: string): Promise<
-  | { ok: true; projections: RecoveryProjectionSet }
-  | { ok: false; receipt: RecoveryReceipt }
-> {
-  if (!path.isAbsolute(inputRoot)) return { ok: false, receipt: malformedReceipt("INPUT_ROOT_NOT_ABSOLUTE") };
-
-  try {
-    const rootStat = await lstat(inputRoot);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-      return { ok: false, receipt: malformedReceipt("INPUT_ROOT_INVALID") };
-    }
-    const canonicalRoot = await realpath(inputRoot);
-    const entries = await readdir(canonicalRoot, { withFileTypes: true });
-    const expectedFiles = new Set(Object.values(RECOVERY_PROJECTION_FILES));
-    if (entries.some((entry) => !expectedFiles.has(entry.name as (typeof RECOVERY_PROJECTION_FILES)[RecoveryProjectionName]))) {
-      return { ok: false, receipt: malformedReceipt("INPUT_FILE_UNEXPECTED") };
-    }
-    if (entries.length !== expectedFiles.size || Object.values(RECOVERY_PROJECTION_FILES).some((file) => !entries.some((entry) => entry.name === file))) {
-      return { ok: false, receipt: stoppedForMissingFile() };
-    }
-
-    const parsed = {} as RecoveryProjectionSet;
-    for (const name of Object.keys(RECOVERY_PROJECTION_FILES) as RecoveryProjectionName[]) {
-      const filePath = path.join(canonicalRoot, RECOVERY_PROJECTION_FILES[name]);
-      const fileStat = await lstat(filePath);
-      if (!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size > MAX_PROJECTION_BYTES) {
-        return { ok: false, receipt: malformedReceipt("INPUT_ROOT_INVALID") };
-      }
-      const raw = await readFile(filePath, "utf8");
-      let json: unknown;
-      try {
-        json = JSON.parse(raw);
-      } catch {
-        return { ok: false, receipt: malformedReceipt("INPUT_JSON_INVALID") };
-      }
-      (parsed[name] as RecoveryProjectionSet[typeof name]) = PARSERS[name](json);
-    }
-    return { ok: true, projections: parsed };
-  } catch (error) {
-    if (error instanceof ProjectionError) return { ok: false, receipt: malformedReceipt(error.reason) };
-    return { ok: false, receipt: malformedReceipt("INPUT_ROOT_INVALID") };
-  }
 }
 
 interface SelectedBackup {
@@ -775,9 +745,11 @@ function selectBackupAscending(info: PgBackRestInfoProjection): SelectedBackup {
   const candidates = info.backups
     .filter((backup) => backup.status === "complete" && backup.error_code === 0)
     .toSorted((left, right) => Date.parse(right.timestamp.stop) - Date.parse(left.timestamp.stop));
+  const ambiguous = candidates.length > 1
+    && epoch(candidates[0].timestamp.stop) === epoch(candidates[1].timestamp.stop);
   return {
-    backup: candidates[0] ?? null,
-    ambiguous: candidates.length > 1 && candidates[0].timestamp.stop === candidates[1].timestamp.stop,
+    backup: ambiguous ? null : candidates[0] ?? null,
+    ambiguous,
   };
 }
 
@@ -790,11 +762,11 @@ function selectBackupByReduction(info: PgBackRestInfoProjection): SelectedBackup
     if (!newest || Date.parse(backup.timestamp.stop) > Date.parse(newest.timestamp.stop)) {
       newest = backup;
       ambiguous = false;
-    } else if (backup.timestamp.stop === newest.timestamp.stop) {
+    } else if (epoch(backup.timestamp.stop) === epoch(newest.timestamp.stop)) {
       ambiguous = true;
     }
   }
-  return { backup: newest, ambiguous };
+  return { backup: ambiguous ? null : newest, ambiguous };
 }
 
 interface EvaluationFacts {
@@ -815,9 +787,10 @@ interface EvaluationFacts {
   oldestPendingAge: number;
   healthAge: number;
   healthFresh: boolean;
+  observationCurrent: boolean;
   archiveHealthy: boolean;
   unarchivedBound: number | null;
-  scratchAge: number;
+  scratchAgeMilliseconds: number;
   scratchFreshAfterChange: boolean;
   scratchWithinDrillAge: boolean;
 }
@@ -832,7 +805,16 @@ function majorOf(version: string): number {
   return Number(version.split(".")[0]);
 }
 
-function buildFacts(input: RecoveryProjectionSet, selected: SelectedBackup): EvaluationFacts {
+function conservativeAgeSeconds(milliseconds: number): number {
+  return milliseconds >= 0
+    ? Math.ceil(milliseconds / 1_000)
+    : Math.floor(milliseconds / 1_000);
+}
+
+function buildFacts(
+  input: RecoveryProjectionSet,
+  selected: SelectedBackup,
+): EvaluationFacts {
   const matchedHistory = selected.backup
     ? input.pgbackrest_info.history.filter(
         (row) => row.id === selected.backup?.database.id && row.repo_key === selected.backup.database.repo_key,
@@ -841,7 +823,8 @@ function buildFacts(input: RecoveryProjectionSet, selected: SelectedBackup): Eva
   const policyEntry = input.rpo_policy.policies.length === 1 ? input.rpo_policy.policies[0] : null;
   const observedMs = epoch(input.observation_clock.observed_at);
   const decisionMs = epoch(input.observation_clock.decision_at);
-  const healthAge = Math.floor((observedMs - epoch(input.backup_health.observed_at)) / 1_000);
+  const healthAgeMilliseconds = observedMs - epoch(input.backup_health.observed_at);
+  const healthAge = conservativeAgeSeconds(healthAgeMilliseconds);
   const pendingCount = input.archive_state.pending_ready.length;
   const oldestPendingAge = pendingCount === 0
     ? 0
@@ -859,26 +842,15 @@ function buildFacts(input: RecoveryProjectionSet, selected: SelectedBackup): Eva
     && input.archive_configuration.archive_mode === "on"
     && input.archive_configuration.archive_command_kind === "pgbackrest-archive-push"
     && input.archive_configuration.archive_timeout_seconds === 240;
-  const healthFresh = healthAge >= 0 && healthAge <= RECOVERY_POLICY.maximum_observation_age_seconds;
-  const archiveHealthy = repositoryHealthy
-    && repositoryMatches
-    && configMatches
-    && input.archive_state.status_directory_present
-    && input.archive_state.spool_error_count === 0
-    && !input.archive_state.unresolved_failure
-    && input.backup_health.status === "ok"
-    && input.backup_health.repository_healthy
-    && input.backup_health.archive_healthy
-    && input.backup_health.operation_complete
-    && healthFresh;
-  const unarchivedBound = archiveHealthy
-    ? input.archive_configuration.archive_timeout_seconds + oldestPendingAge
-    : null;
+  const observationCurrent = observedMs <= decisionMs
+    && decisionMs - observedMs <= RECOVERY_POLICY.maximum_observation_age_seconds * 1_000;
+  const healthFresh = healthAgeMilliseconds >= 0
+    && healthAgeMilliseconds <= RECOVERY_POLICY.maximum_observation_age_seconds * 1_000;
   const latestChange = Math.max(
     epoch(input.installed_package_version.changed_at),
     epoch(input.archive_configuration.changed_at),
   );
-  const scratchAge = Math.floor((observedMs - epoch(input.scratch_restore.completed_at)) / 1_000);
+  const scratchAgeMilliseconds = observedMs - epoch(input.scratch_restore.completed_at);
   const scratchFreshAfterChange = epoch(input.scratch_restore.completed_at) >= latestChange;
   const policyValid = policyEntry !== null
     && policyEntry.policy.subject === RECOVERY_POLICY_SUBJECT
@@ -896,9 +868,25 @@ function buildFacts(input: RecoveryProjectionSet, selected: SelectedBackup): Eva
     && epoch(policyEntry.authentication.authenticated_at) <= observedMs
     && observedMs - epoch(policyEntry.authentication.authenticated_at) <= RECOVERY_POLICY.maximum_observation_age_seconds * 1_000
     && epoch(policyEntry.authentication.valid_until) >= decisionMs;
+  const archiveHealthy = repositoryHealthy
+    && repositoryMatches
+    && configMatches
+    && epoch(input.archive_configuration.changed_at) <= observedMs
+    && input.archive_state.status_directory_present
+    && input.archive_state.spool_error_count === 0
+    && !input.archive_state.unresolved_failure
+    && input.backup_health.status === "ok"
+    && input.backup_health.repository_healthy
+    && input.backup_health.archive_healthy
+    && input.backup_health.operation_complete
+    && healthFresh
+    && observationCurrent;
+  const unarchivedBound = archiveHealthy && policyValid
+    ? input.archive_configuration.archive_timeout_seconds + oldestPendingAge
+    : null;
   const scratchWithinDrillAge = policyValid
-    && scratchAge >= 0
-    && scratchAge <= policyEntry.policy.maximum_scratch_restore_age_seconds;
+    && scratchAgeMilliseconds >= 0
+    && scratchAgeMilliseconds <= policyEntry.policy.maximum_scratch_restore_age_seconds * 1_000;
 
   return {
     input,
@@ -918,15 +906,17 @@ function buildFacts(input: RecoveryProjectionSet, selected: SelectedBackup): Eva
     oldestPendingAge,
     healthAge,
     healthFresh,
+    observationCurrent,
     archiveHealthy,
     unarchivedBound,
-    scratchAge,
+    scratchAgeMilliseconds,
     scratchFreshAfterChange,
     scratchWithinDrillAge,
   };
 }
 
 const checkBinding: Check = ({ input }, reasons) => {
+  if (input.production_binding.subject !== RECOVERY_PRODUCTION_BINDING_SUBJECT) reasons.add("BINDING_TYPE_MISMATCH");
   if (input.production_binding.binding_count !== 1) reasons.add("BINDING_COUNT_INVALID");
   if (input.production_binding.kind !== "production-postgresql-vm") reasons.add("BINDING_TYPE_MISMATCH");
   if (input.production_binding.state !== "active") reasons.add("BINDING_STATE_INVALID");
@@ -991,11 +981,11 @@ const checkBackup: Check = ({ input, selected, matchedHistory, observedMs }, rea
   if (input.pgbackrest_info.incomplete_operation_count > 0) reasons.add("BACKUP_INCOMPLETE");
   if (input.pgbackrest_info.backups.some((backup) => backup.status === "incomplete")) reasons.add("BACKUP_INCOMPLETE");
   if (input.pgbackrest_info.backups.some((backup) => backup.error_code !== 0)) reasons.add("BACKUP_ERROR");
+  if (selected.ambiguous) reasons.add("BACKUP_SELECTION_AMBIGUOUS");
   if (!selected.backup) {
-    reasons.add("BACKUP_ABSENT");
+    if (!selected.ambiguous) reasons.add("BACKUP_ABSENT");
     return;
   }
-  if (selected.ambiguous) reasons.add("BACKUP_SELECTION_AMBIGUOUS");
   if (epoch(selected.backup.timestamp.stop) > observedMs || epoch(selected.backup.timestamp.start) > epoch(selected.backup.timestamp.stop)) {
     reasons.add("BACKUP_TIMESTAMP_FUTURE");
   }
@@ -1041,17 +1031,28 @@ const checkArchive: Check = ({ input, configMatches, repositoryHealthy, reposito
   if (!healthFresh && healthAge >= 0) reasons.add("BACKUP_HEALTH_STALE");
 };
 
-const checkScratch: Check = ({ input, scratchAge, scratchFreshAfterChange, scratchWithinDrillAge, policyValid }, reasons) => {
+const checkScratch: Check = ({
+  input,
+  scratchAgeMilliseconds,
+  scratchFreshAfterChange,
+  scratchWithinDrillAge,
+  policyValid,
+}, reasons) => {
   if (input.scratch_restore.status !== "succeeded") reasons.add("SCRATCH_RESTORE_FAILED");
   if (!input.scratch_restore.isolated) reasons.add("SCRATCH_NOT_ISOLATED");
   if (!input.scratch_restore.cleanup_complete) reasons.add("SCRATCH_CLEANUP_INCOMPLETE");
   if (input.scratch_restore.authorization !== "verified-separate") reasons.add("SCRATCH_AUTHORIZATION_INVALID");
-  if (scratchAge < 0) reasons.add("SCRATCH_RESTORE_FUTURE");
+  if (scratchAgeMilliseconds < 0) reasons.add("SCRATCH_RESTORE_FUTURE");
   if (!scratchFreshAfterChange) reasons.add("SCRATCH_NOT_FRESH_AFTER_CHANGE");
-  if (policyValid && scratchAge > RECOVERY_POLICY.maximum_scratch_restore_age_seconds) {
+  if (
+    policyValid
+    && scratchAgeMilliseconds > RECOVERY_POLICY.maximum_scratch_restore_age_seconds * 1_000
+  ) {
     reasons.add("SCRATCH_RESTORE_STALE");
   }
-  if (policyValid && !scratchWithinDrillAge && scratchAge >= 0) reasons.add("SCRATCH_RESTORE_STALE");
+  if (policyValid && !scratchWithinDrillAge && scratchAgeMilliseconds >= 0) {
+    reasons.add("SCRATCH_RESTORE_STALE");
+  }
 };
 
 const checkObjective: Check = ({ policyValid, unarchivedBound }, reasons) => {
@@ -1150,9 +1151,7 @@ function evaluate(
   const reasons = new Set<RecoveryReason>();
   for (const check of checks) check(facts, reasons);
 
-  // This v1 artifact validates caller-captured files only. It deliberately has no input or
-  // code path that can grant the future one-shot guest execution authority.
-  reasons.add("COLLECTOR_EXECUTION_AUTHORITY_ABSENT");
+  reasons.add("HELD_NON_OPERATIONAL");
 
   const fullVersionsEqual = input.active_binary_version.full_version
     === input.installed_package_version.upstream_full_version;
@@ -1175,11 +1174,15 @@ function evaluate(
     && facts.scratchWithinDrillAge
     && ![...reasons].some((reason) => PHYSICAL_COMPATIBILITY_BLOCKERS.has(reason));
   const objectiveSeconds = facts.policyValid
+    && facts.observationCurrent
     ? facts.policyEntry?.policy.maximum_unarchived_data_seconds ?? null
     : null;
   const meetsObjective = objectiveSeconds !== null && facts.unarchivedBound !== null
     ? facts.unarchivedBound <= objectiveSeconds
     : null;
+  const vmRecoveryValid = facts.observationCurrent
+    && input.vm_recovery.kind === "discrete-filesystem-consistent"
+    && epoch(input.vm_recovery.recovery_point_utc) <= facts.observedMs;
 
   return {
     schema: RECOVERY_RECEIPT_SCHEMA,
@@ -1207,33 +1210,116 @@ function evaluate(
       meets_objective: meetsObjective,
     },
     vm_recovery: {
-      kind: input.vm_recovery.kind === "discrete-filesystem-consistent"
-        ? "discrete-filesystem-consistent"
-        : null,
+      kind: vmRecoveryValid ? "discrete-filesystem-consistent" : null,
       pitr: false,
-      recovery_point_utc: input.vm_recovery.recovery_point_utc,
+      recovery_point_utc: vmRecoveryValid ? input.vm_recovery.recovery_point_utc : null,
     },
     scratch_restore: {
       fresh_after_engine_change: facts.scratchFreshAfterChange,
-      within_drill_age: facts.policyValid ? facts.scratchWithinDrillAge : null,
+      within_drill_age: facts.policyValid && facts.observationCurrent ? facts.scratchWithinDrillAge : null,
     },
     decision: "STOP",
     reasons: [...reasons].sort(),
   };
 }
 
-export function evaluateRecoveryProjectionSet(input: RecoveryProjectionSet): RecoveryReceipt {
-  return evaluate(input, selectBackupAscending, FORWARD_CHECKS);
+export function evaluateRecoveryProjectionSet(): RecoveryReceipt {
+  return stoppedReceipt("CAPTURE_AUTHORITY_ABSENT");
 }
 
-export function evaluateRecoveryProjectionSetReverse(input: RecoveryProjectionSet): RecoveryReceipt {
-  return evaluate(input, selectBackupByReduction, REVERSE_CHECKS);
+export function evaluateRecoveryProjectionSetReverse(): RecoveryReceipt {
+  return stoppedReceipt("CAPTURE_AUTHORITY_ABSENT");
+}
+
+function parseProjectionSet(values: AuthenticatedRecoveryInput["projections"]): RecoveryProjectionSet {
+  const parsed = {} as RecoveryProjectionSet;
+  for (const name of Object.keys(RECOVERY_PROJECTION_FILES) as RecoveryProjectionName[]) {
+    (parsed[name] as RecoveryProjectionSet[typeof name]) = PARSERS[name](values[name]);
+  }
+  return parsed;
+}
+
+function assertAuthorityRelations(
+  acquired: AuthenticatedRecoveryInput,
+  input: RecoveryProjectionSet,
+): void {
+  const observedMs = epoch(input.observation_clock.observed_at);
+  const decisionMs = epoch(input.observation_clock.decision_at);
+  const captureAcceptedMs = epoch(acquired.capture_authority.accepted_at);
+  if (
+    acquired.manifest.production_binding_subject !== input.production_binding.subject
+    || acquired.manifest.capture_operation_identity !== RECOVERY_CAPTURE_OPERATION
+    || acquired.manifest.observation_nonce !== input.observation_clock.observation_nonce
+    || acquired.manifest.observed_at !== input.observation_clock.observed_at
+    || acquired.capture_authority.observation_nonce !== input.observation_clock.observation_nonce
+  ) {
+    throw new RecoveryCustodyError("CAPTURE_AUTHORITY_INVALID");
+  }
+  if (
+    captureAcceptedMs > observedMs
+    || observedMs - captureAcceptedMs > RECOVERY_POLICY.maximum_observation_age_seconds * 1_000
+    || epoch(acquired.capture_authority.valid_until) < decisionMs
+    || epoch(acquired.manifest.valid_until) < decisionMs
+  ) {
+    throw new RecoveryCustodyError("CAPTURE_AUTHORITY_STALE");
+  }
+
+  if (
+    acquired.policy_authority.subject !== RECOVERY_POLICY_SUBJECT
+    || acquired.policy_authority.observation_nonce !== input.observation_clock.observation_nonce
+    || acquired.policy_authority.use_count !== 1
+    || epoch(acquired.policy_authority.authenticated_at) > observedMs
+    || observedMs - epoch(acquired.policy_authority.authenticated_at)
+      > RECOVERY_POLICY.maximum_observation_age_seconds * 1_000
+    || epoch(acquired.policy_authority.valid_until) < decisionMs
+  ) {
+    throw new RecoveryCustodyError("POLICY_AUTHORITY_ROOT_INVALID");
+  }
+
+  if (
+    acquired.scratch_authority.subject !== RECOVERY_SCRATCH_SUBJECT
+    || acquired.scratch_authority.observation_nonce !== input.observation_clock.observation_nonce
+    || acquired.scratch_authority.completed_at !== input.scratch_restore.completed_at
+    || acquired.scratch_authority.isolated !== input.scratch_restore.isolated
+    || acquired.scratch_authority.cleanup_complete !== input.scratch_restore.cleanup_complete
+    || acquired.scratch_authority.use_count !== 1
+    || epoch(acquired.scratch_authority.authenticated_at) < epoch(input.scratch_restore.completed_at)
+    || epoch(acquired.scratch_authority.authenticated_at) > observedMs
+    || epoch(acquired.scratch_authority.valid_until) < decisionMs
+  ) {
+    throw new RecoveryCustodyError("SCRATCH_AUTHORITY_ROOT_INVALID");
+  }
 }
 
 export async function collectRecoveryReceipt(
   inputRoot: string,
-  evaluator: (input: RecoveryProjectionSet) => RecoveryReceipt = evaluateRecoveryProjectionSet,
+  authorities?: RecoveryAuthorityRoots,
+  hooks?: RecoveryAcquisitionHooks,
+  evaluationOrder: "forward" | "reverse" = "forward",
 ): Promise<RecoveryReceipt> {
-  const result = await readRecoveryInputRoot(inputRoot);
-  return result.ok ? evaluator(result.projections) : result.receipt;
+  if (evaluationOrder !== "forward" && evaluationOrder !== "reverse") {
+    return malformedReceipt("INPUT_FIELD_INVALID");
+  }
+  try {
+    return await withAuthenticatedRecoveryInput(
+      inputRoot,
+      authorities,
+      (acquired) => {
+        const input = parseProjectionSet(acquired.projections);
+        assertAuthorityRelations(acquired, input);
+        return evaluationOrder === "forward"
+          ? evaluate(input, selectBackupAscending, FORWARD_CHECKS)
+          : evaluate(input, selectBackupByReduction, REVERSE_CHECKS);
+      },
+      hooks,
+    );
+  } catch (error) {
+    if (error instanceof ProjectionError) return malformedReceipt(error.reason);
+    if (error instanceof RecoveryCustodyError) {
+      return error.decision === "MALFORMED"
+        ? malformedReceipt(error.reason)
+        : stoppedReceipt(error.reason);
+    }
+    return stoppedReceipt("INPUT_CUSTODY_CHANGED");
+  }
 }

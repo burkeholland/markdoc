@@ -114,6 +114,7 @@ export function baseRecoveryProjectionSet(): RecoveryProjectionSet {
     },
     production_binding: {
       schema: "markdoc-recovery-production-binding/v1",
+      subject: "markdoc-production-postgresql",
       kind: "production-postgresql-vm",
       state: "active",
       binding_count: 1,
@@ -157,7 +158,7 @@ const valid = (
 ): RecoveryFixture => ({
   name,
   expectedDecision: "STOP",
-  expectedReason: "COLLECTOR_EXECUTION_AUTHORITY_ABSENT",
+  expectedReason: "HELD_NON_OPERATIONAL",
   compatible: true,
   mutate,
 });
@@ -418,10 +419,10 @@ export const RECOVERY_FIXTURES: RecoveryFixture[] = [
   stopped("scratch restore incomplete", "SCRATCH_RESTORE_FAILED", (input) => {
     input.scratch_restore.status = "incomplete";
   }),
-  stopped("scratch restore not isolated", "SCRATCH_NOT_ISOLATED", (input) => {
+  stopped("scratch restore not isolated", "SCRATCH_AUTHORITY_ROOT_INVALID", (input) => {
     input.scratch_restore.isolated = false;
   }),
-  stopped("scratch cleanup incomplete", "SCRATCH_CLEANUP_INCOMPLETE", (input) => {
+  stopped("scratch cleanup incomplete", "SCRATCH_AUTHORITY_ROOT_INVALID", (input) => {
     input.scratch_restore.cleanup_complete = false;
   }),
   stopped("scratch authorization absent", "SCRATCH_AUTHORIZATION_INVALID", (input) => {
@@ -433,7 +434,7 @@ export const RECOVERY_FIXTURES: RecoveryFixture[] = [
   stopped("scratch restore stale by one second", "SCRATCH_RESTORE_STALE", (input) => {
     input.scratch_restore.completed_at = "2026-08-28T09:19:59Z";
   }),
-  stopped("scratch restore future", "SCRATCH_RESTORE_FUTURE", (input) => {
+  stopped("scratch restore future", "SCRATCH_AUTHORITY_ROOT_INVALID", (input) => {
     input.scratch_restore.completed_at = "2026-09-04T09:20:01Z";
   }),
   stopped("observation stale by one second", "OBSERVATION_STALE", (input) => {
