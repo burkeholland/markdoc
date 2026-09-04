@@ -32,7 +32,10 @@ function migrationsFolder(): string {
 }
 
 async function create(): Promise<Db> {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.DATABASE_URL?.trim();
+  if (!url && process.env.NODE_ENV === "production") {
+    throw new Error("DATABASE_URL is required in production");
+  }
   if (url) {
     const { drizzle } = await import("drizzle-orm/node-postgres");
     const { Pool } = await import("pg");
@@ -96,4 +99,3 @@ export async function closeDb(): Promise<void> {
 }
 
 export { schema };
-
