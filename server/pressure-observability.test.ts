@@ -101,6 +101,18 @@ function gauges(lines: string[]) {
   return lines.map(payload).find((item) => item.kind === "gauges")!;
 }
 
+function captureIntervalCallbacks() {
+  const originalSetInterval = globalThis.setInterval;
+  const callbacks: Array<() => void> = [];
+  const spy = vi.spyOn(globalThis, "setInterval").mockImplementation(
+    ((callback: () => void, delay?: number) => {
+      callbacks.push(callback);
+      return originalSetInterval(() => {}, delay);
+    }) as typeof globalThis.setInterval,
+  );
+  return { callbacks, restore: () => spy.mockRestore() };
+}
+
 describe("pressure normalization and bounds", () => {
   it("allows only fixed HTTP methods and reuses the privacy-safe route shape", () => {
     expect(normalizePressureMethod("get")).toBe("GET");
@@ -467,6 +479,365 @@ describe("pressure privacy", () => {
 });
 
 describe("pressure teardown ownership and failure containment", () => {
+  it("keeps captured timers inert across 1,024 balanced stop and restart compositions", () => {
+    const intervals = captureIntervalCallbacks();
+    let callbackThenStop = 0;
+    let stopThenCallback = 0;
+    let oldGenerationMutations = 0;
+    let oldGenerationOutputs = 0;
+    let newGenerationMismatches = 0;
+    let ownedServerListenerResidue = 0;
+    let collectorFailureCompositions = 0;
+    let outputFailureCompositions = 0;
+    let directFlushCompositions = 0;
+    let timerRolloverCompositions = 0;
+
+    try {
+      for (let shape = 0; shape < 1_024; shape++) {
+        let now = 0;
+        let staleTimer = () => {};
+        let invokeStaleInCollector = false;
+        let invokeStaleInOutput = false;
+        let failCollector = false;
+        let failOutput = false;
+        const attempted: string[] = [];
+        const pressure = new PressureObservability({
+          now: () => now,
+          eventLoopDelay: new FakeDelay(),
+          collectGauges: (reset) => {
+            if (invokeStaleInCollector) staleTimer();
+            if (failCollector) {
+              failCollector = false;
+              throw new Error("injected collector failure");
+            }
+            return collectPressureGauges(reset);
+          },
+          write: (line) => {
+            if (invokeStaleInOutput) staleTimer();
+            attempted.push(line);
+            if (failOutput) {
+              failOutput = false;
+              throw new Error("injected output failure");
+            }
+          },
+        });
+        const firstMain = new EventEmitter();
+        const firstStandby = new EventEmitter();
+        const firstResponse = response();
+
+        pressure.start();
+        staleTimer = intervals.callbacks.at(-1)!;
+        pressure.attachServer(firstMain as Server);
+        pressure.attachServer(firstStandby as Server, { trackUpgrades: false });
+        pressure.attachRequest(request("/api/health"), firstResponse);
+        firstResponse.finish();
+        now = PRESSURE_BUCKET_MS;
+
+        if ((shape & 1) === 0) {
+          staleTimer();
+          pressure.stop(false);
+          callbackThenStop++;
+        } else {
+          pressure.stop(false);
+          const outputsBeforeStale = attempted.length;
+          staleTimer();
+          oldGenerationOutputs += attempted.length - outputsBeforeStale;
+          stopThenCallback++;
+        }
+
+        pressure.start();
+        const currentTimer = intervals.callbacks.at(-1)!;
+        const main = new EventEmitter();
+        const standby = new EventEmitter();
+        const mainSocket = new EventEmitter();
+        const standbySocket = new EventEmitter();
+        const upgradeSocket = new EventEmitter();
+        const res = response();
+        pressure.attachServer(main as Server);
+        pressure.attachServer(standby as Server, { trackUpgrades: false });
+        main.emit("connection", mainSocket);
+        standby.emit("connection", standbySocket);
+        main.emit("upgrade", request("/collab"), upgradeSocket, Buffer.alloc(0));
+        pressure.attachRequest(request("/api/health"), res);
+        res.finish();
+
+        now += PRESSURE_BUCKET_MS;
+        const outputsBeforeStale = attempted.length;
+        staleTimer();
+        oldGenerationOutputs += attempted.length - outputsBeforeStale;
+
+        failCollector = (shape & 2) !== 0;
+        failOutput = (shape & 4) !== 0;
+        if (failCollector) collectorFailureCompositions++;
+        if (failOutput) outputFailureCompositions++;
+        invokeStaleInCollector = true;
+        invokeStaleInOutput = true;
+        const rolloverStart = attempted.length;
+        if ((shape & 8) === 0) {
+          currentTimer();
+          timerRolloverCompositions++;
+        } else {
+          pressure.flush();
+          directFlushCompositions++;
+        }
+        const rollover = attempted.slice(rolloverStart).map(payload);
+        const http = rollover.find((item) => item.kind === "http");
+        const gauge = rollover.find((item) => item.kind === "gauges");
+        const series = (http?.series as Array<Record<string, unknown>> | undefined)?.[0];
+        if (
+          rollover.length !== 2 ||
+          series?.route !== "/api/health" ||
+          series.accepted !== 1 ||
+          series.completed !== 1 ||
+          gauge?.active_requests !== 0 ||
+          gauge.tcp_open !== 2 ||
+          gauge.tcp_accepted !== 2 ||
+          gauge.upgrades_open !== 1 ||
+          gauge.upgrades_accepted !== 1 ||
+          gauge.collector_failures !== ((shape & 2) !== 0 ? 1 : 0) ||
+          gauge.output_failures !== ((shape & 4) !== 0 ? 1 : 0)
+        ) {
+          oldGenerationMutations++;
+          newGenerationMismatches++;
+        }
+
+        const outputsAfterRollover = attempted.length;
+        staleTimer();
+        oldGenerationOutputs += attempted.length - outputsAfterRollover;
+        now += PRESSURE_BUCKET_MS;
+        const outputsBeforeBoundaryStale = attempted.length;
+        staleTimer();
+        oldGenerationOutputs += attempted.length - outputsBeforeBoundaryStale;
+        const currentRolloverStart = attempted.length;
+        currentTimer();
+        const currentRollover = attempted.slice(currentRolloverStart).map(payload);
+        const currentGauge = currentRollover.find((item) => item.kind === "gauges");
+        if (
+          currentRollover.length !== 1 ||
+          currentGauge?.tcp_open !== 2 ||
+          currentGauge.tcp_accepted !== 0 ||
+          currentGauge.upgrades_open !== 1 ||
+          currentGauge.upgrades_accepted !== 0
+        ) {
+          oldGenerationMutations++;
+          newGenerationMismatches++;
+        }
+
+        pressure.stop(false);
+        ownedServerListenerResidue +=
+          main.listenerCount("connection") +
+          main.listenerCount("upgrade") +
+          standby.listenerCount("connection") +
+          standby.listenerCount("upgrade");
+        const outputsAfterStop = attempted.length;
+        staleTimer();
+        currentTimer();
+        oldGenerationOutputs += attempted.length - outputsAfterStop;
+      }
+
+      expect(callbackThenStop).toBe(512);
+      expect(stopThenCallback).toBe(512);
+      expect(intervals.callbacks).toHaveLength(2_048);
+      expect(oldGenerationMutations).toBe(0);
+      expect(oldGenerationOutputs).toBe(0);
+      expect(newGenerationMismatches).toBe(0);
+      expect(ownedServerListenerResidue).toBe(0);
+      expect(collectorFailureCompositions).toBe(512);
+      expect(outputFailureCompositions).toBe(512);
+      expect(directFlushCompositions).toBe(512);
+      expect(timerRolloverCompositions).toBe(512);
+    } finally {
+      intervals.restore();
+    }
+  });
+
+  it("does not let a reporter-stopped timer resume after a synchronous restart", () => {
+    const intervals = captureIntervalCallbacks();
+    let now = 0;
+    let stopAndRestart = false;
+    let reporterStaleTimer = () => {};
+    const attempted: string[] = [];
+    let pressure: PressureObservability;
+
+    try {
+      pressure = new PressureObservability({
+        now: () => now,
+        eventLoopDelay: new FakeDelay(),
+        write: (line) => {
+          attempted.push(line);
+          if (stopAndRestart) {
+            stopAndRestart = false;
+            reporterStaleTimer();
+            pressure.stop(false);
+            pressure.start();
+            reporterStaleTimer();
+            throw new Error("reporter stopped and restarted");
+          }
+        },
+      });
+      pressure.start();
+      const firstTimer = intervals.callbacks.at(-1)!;
+      reporterStaleTimer = firstTimer;
+      pressure.stop(false);
+      pressure.start();
+      const interruptedTimer = intervals.callbacks.at(-1)!;
+      const interruptedMain = new EventEmitter();
+      const interruptedStandby = new EventEmitter();
+      const interruptedResponse = response();
+      pressure.attachServer(interruptedMain as Server);
+      pressure.attachServer(interruptedStandby as Server, { trackUpgrades: false });
+      pressure.attachRequest(request("/api/health"), interruptedResponse);
+      interruptedResponse.finish();
+
+      now = PRESSURE_BUCKET_MS;
+      stopAndRestart = true;
+      interruptedTimer();
+      expect(attempted.map(payload)).toEqual([
+        expect.objectContaining({
+          kind: "http",
+          series: [expect.objectContaining({ route: "/api/health", accepted: 1, completed: 1 })],
+        }),
+      ]);
+      const restartedTimer = intervals.callbacks.at(-1)!;
+      const main = new EventEmitter();
+      const standby = new EventEmitter();
+      const mainSocket = new EventEmitter();
+      const standbySocket = new EventEmitter();
+      const upgradeSocket = new EventEmitter();
+      const res = response();
+      pressure.attachServer(main as Server);
+      pressure.attachServer(standby as Server, { trackUpgrades: false });
+      main.emit("connection", mainSocket);
+      standby.emit("connection", standbySocket);
+      main.emit("upgrade", request("/collab"), upgradeSocket, Buffer.alloc(0));
+      pressure.attachRequest(request("/api/health"), res);
+      res.finish();
+
+      const outputsBeforeStale = attempted.length;
+      firstTimer();
+      interruptedTimer();
+      expect(attempted).toHaveLength(outputsBeforeStale);
+      now += PRESSURE_BUCKET_MS;
+      restartedTimer();
+      const restarted = attempted.slice(outputsBeforeStale).map(payload);
+      expect(restarted.find((item) => item.kind === "http")).toMatchObject({
+        series: [expect.objectContaining({ route: "/api/health", accepted: 1, completed: 1 })],
+      });
+      expect(restarted.find((item) => item.kind === "gauges")).toMatchObject({
+        active_requests: 0,
+        tcp_open: 2,
+        tcp_accepted: 2,
+        upgrades_open: 1,
+        upgrades_accepted: 1,
+        collector_failures: 0,
+        output_failures: 0,
+      });
+      expect(restarted).toHaveLength(2);
+
+      pressure.stop(false);
+      expect(main.listenerCount("connection")).toBe(0);
+      expect(main.listenerCount("upgrade")).toBe(0);
+      expect(standby.listenerCount("connection")).toBe(0);
+      expect(standby.listenerCount("upgrade")).toBe(0);
+      const outputsAfterStop = attempted.length;
+      firstTimer();
+      interruptedTimer();
+      restartedTimer();
+      expect(attempted).toHaveLength(outputsAfterStop);
+      expect(intervals.callbacks).toHaveLength(3);
+    } finally {
+      intervals.restore();
+    }
+  });
+
+  it("does not let a collector-stopped timer resume after a synchronous restart", () => {
+    const intervals = captureIntervalCallbacks();
+    let now = 0;
+    let stopAndRestart = false;
+    let collectorStaleTimer = () => {};
+    const attempted: string[] = [];
+    let pressure: PressureObservability;
+
+    try {
+      pressure = new PressureObservability({
+        now: () => now,
+        eventLoopDelay: new FakeDelay(),
+        collectGauges: (reset) => {
+          if (stopAndRestart) {
+            stopAndRestart = false;
+            collectorStaleTimer();
+            pressure.stop(false);
+            pressure.start();
+            collectorStaleTimer();
+          }
+          return collectPressureGauges(reset);
+        },
+        write: (line) => attempted.push(line),
+      });
+      pressure.start();
+      const firstTimer = intervals.callbacks.at(-1)!;
+      collectorStaleTimer = firstTimer;
+      pressure.stop(false);
+      pressure.start();
+      const interruptedTimer = intervals.callbacks.at(-1)!;
+      const interruptedResponse = response();
+      pressure.attachRequest(request("/api/health"), interruptedResponse);
+      interruptedResponse.finish();
+
+      now = PRESSURE_BUCKET_MS;
+      stopAndRestart = true;
+      interruptedTimer();
+      expect(attempted).toEqual([]);
+      const restartedTimer = intervals.callbacks.at(-1)!;
+      const main = new EventEmitter();
+      const standby = new EventEmitter();
+      const mainSocket = new EventEmitter();
+      const standbySocket = new EventEmitter();
+      const upgradeSocket = new EventEmitter();
+      const res = response();
+      pressure.attachServer(main as Server);
+      pressure.attachServer(standby as Server, { trackUpgrades: false });
+      main.emit("connection", mainSocket);
+      standby.emit("connection", standbySocket);
+      main.emit("upgrade", request("/collab"), upgradeSocket, Buffer.alloc(0));
+      pressure.attachRequest(request("/api/health"), res);
+      res.finish();
+
+      firstTimer();
+      interruptedTimer();
+      expect(attempted).toEqual([]);
+      now += PRESSURE_BUCKET_MS;
+      restartedTimer();
+      expect(httpSeries(attempted)).toEqual([
+        expect.objectContaining({ route: "/api/health", accepted: 1, completed: 1 }),
+      ]);
+      expect(gauges(attempted)).toMatchObject({
+        active_requests: 0,
+        tcp_open: 2,
+        tcp_accepted: 2,
+        upgrades_open: 1,
+        upgrades_accepted: 1,
+        collector_failures: 0,
+        output_failures: 0,
+      });
+      expect(attempted).toHaveLength(2);
+
+      pressure.stop(false);
+      expect(main.listenerCount("connection")).toBe(0);
+      expect(main.listenerCount("upgrade")).toBe(0);
+      expect(standby.listenerCount("connection")).toBe(0);
+      expect(standby.listenerCount("upgrade")).toBe(0);
+      const outputsAfterStop = attempted.length;
+      firstTimer();
+      interruptedTimer();
+      restartedTimer();
+      expect(attempted).toHaveLength(outputsAfterStop);
+      expect(intervals.callbacks).toHaveLength(3);
+    } finally {
+      intervals.restore();
+    }
+  });
+
   it("leaves no owned callback or post-stop mutation across 512 lifecycle compositions", () => {
     let compositions = 0;
     for (let shape = 0; shape < 512; shape++) {

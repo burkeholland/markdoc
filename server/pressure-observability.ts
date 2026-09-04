@@ -156,6 +156,7 @@ export class PressureObservability {
   private openUpgrades = 0;
   private upgradesAccepted = 0;
   private timer: NodeJS.Timeout | null = null;
+  private timerGeneration: symbol | null = null;
   private state: "running" | "stopping" | "stopped" = "running";
   private flushing = false;
   private collectorFailures = 0;
@@ -178,16 +179,25 @@ export class PressureObservability {
       this.windowStartedAt = this.readNow(this.windowStartedAt);
       this.resetEventLoopDelay();
     }
-    if (this.timer) return;
+    if (this.state !== "running") return;
+    if (this.timer || this.timerGeneration) return;
+    const generation = Symbol("pressure-observability-timer");
+    this.timerGeneration = generation;
     try {
       this.eventLoopDelay.enable();
     } catch {
-      this.recordCollectorFailure();
+      this.recordCollectorFailure(generation);
     }
-    this.timer = setInterval(() => {
-      if (this.state === "running") this.flush();
+    if (!this.ownsTimerGeneration(generation)) return;
+    const timer = setInterval(() => {
+      if (this.ownsTimerGeneration(generation)) this.flushInternal(false, "running", generation);
     }, this.windowMs);
-    this.timer.unref();
+    if (!this.ownsTimerGeneration(generation)) {
+      clearInterval(timer);
+      return;
+    }
+    this.timer = timer;
+    timer.unref();
   }
 
   stop(flush = true): void {
@@ -195,16 +205,19 @@ export class PressureObservability {
     if (
       this.state === "stopped" &&
       this.timer === null &&
+      this.timerGeneration === null &&
       this.serverAttachments.size === 0 &&
       this.socketCloseAttachments.size === 0 &&
       this.active.size === 0
     ) {
       return;
     }
-    const wasStarted = this.timer !== null;
-    this.state = "stopping";
-    if (this.timer) clearInterval(this.timer);
+    const wasStarted = this.timer !== null || this.timerGeneration !== null;
+    const timer = this.timer;
+    this.timerGeneration = null;
     this.timer = null;
+    this.state = "stopping";
+    if (timer) clearInterval(timer);
     try {
       if (flush) this.flushInternal(true, "stopping");
     } finally {
@@ -334,23 +347,28 @@ export class PressureObservability {
     return this.flushInternal(force, "running");
   }
 
-  private flushInternal(force: boolean, expectedState: "running" | "stopping"): string[] {
+  private flushInternal(
+    force: boolean,
+    expectedState: "running" | "stopping",
+    timerGeneration?: symbol,
+  ): string[] {
+    if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
     if (this.flushing) return [];
     this.flushing = true;
     try {
-      const now = this.readNow(this.windowStartedAt);
-      if (this.state !== expectedState) return [];
+      const now = this.readNow(this.windowStartedAt, timerGeneration);
+      if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
       const elapsed = Math.max(0, now - this.windowStartedAt);
       if (!force && elapsed < this.windowMs) return [];
 
       const series = [...this.series.values()].sort((a, b) => `${a.method} ${a.route}`.localeCompare(`${b.method} ${b.route}`));
       this.series = new Map();
-      const { gauges, failures } = this.readGauges();
-      if (this.state !== expectedState) return [];
+      const { gauges, failures } = this.readGauges(timerGeneration);
+      if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
       const activeAgeMax = [...this.active.values()].reduce((max, request) => Math.max(max, now - request.startedAt), 0);
-      const loopDelayMs = this.readEventLoopDelay();
-      this.resetEventLoopDelay();
-      if (this.state !== expectedState) return [];
+      const loopDelayMs = this.readEventLoopDelay(timerGeneration);
+      this.resetEventLoopDelay(timerGeneration);
+      if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
       const windowMs = Math.round(elapsed);
       const tcpAccepted = this.tcpAccepted;
       const upgradesAccepted = this.upgradesAccepted;
@@ -363,9 +381,10 @@ export class PressureObservability {
         this.emitLine(
           `${PRESSURE_LOG_PREFIX} ${JSON.stringify({ kind: "http", window_ms: windowMs, series })}`,
           lines,
+          timerGeneration,
         );
       }
-      if (this.state !== expectedState) return lines;
+      if (!this.canContinueFlush(expectedState, timerGeneration)) return lines;
       this.emitLine(
         `${PRESSURE_LOG_PREFIX} ${JSON.stringify({
           kind: "gauges",
@@ -383,66 +402,108 @@ export class PressureObservability {
           ...gauges,
         })}`,
         lines,
+        timerGeneration,
       );
       return lines;
     } catch {
-      this.recordCollectorFailure();
+      this.recordCollectorFailure(timerGeneration);
       return [];
     } finally {
       this.flushing = false;
     }
   }
 
-  private emitLine(line: string, lines: string[]): void {
+  private emitLine(line: string, lines: string[], timerGeneration?: symbol): void {
+    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return;
     lines.push(line);
     try {
       this.write(line);
     } catch {
-      if (this.state !== "stopped") this.outputFailures = incrementBounded(this.outputFailures);
+      if (
+        this.state !== "stopped" &&
+        (timerGeneration === undefined || this.ownsTimerGeneration(timerGeneration))
+      ) {
+        this.outputFailures = incrementBounded(this.outputFailures);
+      }
     }
   }
 
-  private readGauges(): PressureGaugeCollection {
+  private readGauges(timerGeneration?: symbol): PressureGaugeCollection {
     const gauges = emptyPressureGaugeSnapshot();
+    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
+      return { gauges, failures: 0 };
+    }
     try {
       const collected = this.collectGauges(true);
-      for (const name of PRESSURE_GAUGE_NAMES) gauges[name] = nonNegativeInteger(collected.gauges[name]);
+      if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
+        return { gauges, failures: 0 };
+      }
+      for (const name of PRESSURE_GAUGE_NAMES) {
+        if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
+          return { gauges, failures: 0 };
+        }
+        gauges[name] = nonNegativeInteger(collected.gauges[name]);
+      }
+      if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
+        return { gauges, failures: 0 };
+      }
       return { gauges, failures: nonNegativeInteger(collected.failures) };
     } catch {
-      this.recordCollectorFailure();
+      this.recordCollectorFailure(timerGeneration);
       return { gauges, failures: 0 };
     }
   }
 
-  private readEventLoopDelay(): number {
+  private readEventLoopDelay(timerGeneration?: symbol): number {
+    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return 0;
     try {
-      return Number.isFinite(this.eventLoopDelay.max) ? Math.max(0, Math.round(this.eventLoopDelay.max / 1e6)) : 0;
+      const max = this.eventLoopDelay.max;
+      if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return 0;
+      return Number.isFinite(max) ? Math.max(0, Math.round(max / 1e6)) : 0;
     } catch {
-      this.recordCollectorFailure();
+      this.recordCollectorFailure(timerGeneration);
       return 0;
     }
   }
 
-  private resetEventLoopDelay(): void {
+  private resetEventLoopDelay(timerGeneration?: symbol): void {
+    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return;
     try {
       this.eventLoopDelay.reset();
     } catch {
-      this.recordCollectorFailure();
+      this.recordCollectorFailure(timerGeneration);
     }
   }
 
-  private readNow(fallback: number): number {
+  private readNow(fallback: number, timerGeneration?: symbol): number {
+    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return fallback;
     try {
       const value = this.now();
       return Number.isFinite(value) ? value : fallback;
     } catch {
-      this.recordCollectorFailure();
+      this.recordCollectorFailure(timerGeneration);
       return fallback;
     }
   }
 
-  private recordCollectorFailure(): void {
-    if (this.state !== "stopped") this.collectorFailures = incrementBounded(this.collectorFailures);
+  private recordCollectorFailure(timerGeneration?: symbol): void {
+    if (
+      this.state !== "stopped" &&
+      (timerGeneration === undefined || this.ownsTimerGeneration(timerGeneration))
+    ) {
+      this.collectorFailures = incrementBounded(this.collectorFailures);
+    }
+  }
+
+  private ownsTimerGeneration(generation: symbol): boolean {
+    return this.state === "running" && this.timerGeneration === generation;
+  }
+
+  private canContinueFlush(expectedState: "running" | "stopping", timerGeneration?: symbol): boolean {
+    return (
+      this.state === expectedState &&
+      (timerGeneration === undefined || this.timerGeneration === timerGeneration)
+    );
   }
 
   private ownSocketClose(server: Server, socket: Socket | Duplex, kind: "tcp" | "upgrade"): boolean {
