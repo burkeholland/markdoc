@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Monthly OS security patch for the private PostgreSQL VM (docs/postgres-patching.md). Opens the same temporary
-  egress path deploy/azure.ps1 -ConfigureRecovery uses (bootstrap public IP + NSG rule 250), runs infra/patch-os.sh
+  egress path deploy/azure.ps1 -ConfigureRecovery uses (bootstrap public IP + NSG rule 255), runs infra/patch-os.sh
   as the managed run command `patch-os`, closes egress through Invoke-OperationWithGuaranteedCleanup (on success,
   on failure and best-effort on Ctrl-C), reboots only when the guest reports reboot=required, then verifies
   /api/health, Syslog, Heartbeat and the steady-state network. Nothing runs this automatically; a scheduled
@@ -75,19 +75,20 @@ function Get-PowerState {
 }
 
 function Assert-SteadyStateNetwork([string]$When) {
-  $rules = @(Invoke-Az -Arguments @('network', 'nsg', 'rule', 'list', '-g', $ResourceGroup, '--nsg-name', "$Name-pg-nsg", '--query', '[?priority >= `250`].{name: name, priority: priority, access: access, direction: direction, destination: destinationAddressPrefix}', '-o', 'json') -Failure 'Could not list the PostgreSQL network security rules' -Json)
+  $rules = @(Invoke-Az -Arguments @('network', 'nsg', 'rule', 'list', '-g', $ResourceGroup, '--nsg-name', "$Name-pg-nsg", '--query', '[?priority >= `255`].{name: name, priority: priority, access: access, direction: direction, destination: destinationAddressPrefix}', '-o', 'json') -Failure 'Could not list the PostgreSQL network security rules' -Json)
   $attached = Invoke-Az -Arguments @('network', 'nic', 'show', '-g', $ResourceGroup, '-n', "$Name-pg-nic", '--query', 'ipConfigurations[0].publicIPAddress.id', '-o', 'tsv') -Failure 'Could not inspect the PostgreSQL VM network interface'
+  $webPublicIpName = "$Name-web-ip"
   $bootstrap = Invoke-Az -Arguments @('network', 'public-ip', 'list', '-g', $ResourceGroup, '--query', "[?name == '$publicIpName'] | [0].id", '-o', 'tsv') -Failure 'Could not inspect the PostgreSQL bootstrap public IP'
   if ($DryRun) { Write-Host "$When steady state would be asserted from the three read-only calls above."; return }
-  $temporary = @($rules | Where-Object { $_.name -eq 'AllowApprovedPackageSetup' -or $_.priority -eq 250 })
+  $temporary = @($rules | Where-Object { $_.name -eq 'AllowApprovedPackageSetup' })
   $deny = @($rules | Where-Object { $_.name -eq 'DenyOtherInternetEgress' })
-  if ($temporary.Count -ne 0) { throw "$When the temporary egress rule 250 exists; close it with Restore-PostgresSteadyStateEgress (deploy/azure-postgres-network.ps1) first." }
+  if ($temporary.Count -ne 0) { throw "$When the temporary egress rule 255 exists; close it with Restore-PostgresSteadyStateEgress (deploy/azure-postgres-network.ps1) first." }
   if ($deny.Count -ne 1 -or $deny[0].priority -ne 260 -or $deny[0].access -ne 'Deny' -or $deny[0].direction -ne 'Outbound' -or $deny[0].destination -ne 'Internet') {
     throw "$When rule 260 DenyOtherInternetEgress is missing or has unexpected semantics."
   }
-  if ($attached) { throw "$When the PostgreSQL NIC still has a public IP attached ($attached)." }
+  if ($attached -notmatch "/publicIPAddresses/$([regex]::Escape($webPublicIpName))$") { throw "$When the Markdoc web public IP $webPublicIpName is not attached to the PostgreSQL NIC ($attached)." }
   if ($bootstrap) { throw "$When the bootstrap public IP $publicIpName still exists; delete it with Remove-BootstrapPublicIp first." }
-  Write-Host "$When postgres-egress=restricted rule-250=absent rule-260=Deny/Outbound/Internet nic-public-ip=none bootstrap-ip=absent"
+  Write-Host "$When postgres-egress=restricted rule-250=absent rule-260=Deny/Outbound/Internet nic-public-ip=$webPublicIpName bootstrap-ip=absent"
 }
 
 function Assert-BackupFreshness {
@@ -130,13 +131,13 @@ $powerState = Get-PowerState
 if (-not $DryRun -and $powerState -ne 'VM running') { throw "The PostgreSQL VM is '$powerState', not 'VM running'; patch a running VM only." }
 Assert-SteadyStateNetwork 'Before the window,'
 Assert-BackupFreshness
-$fqdn = Invoke-Az -Arguments @('containerapp', 'show', '-g', $ResourceGroup, '-n', $Name, '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv') -Failure 'Could not read the Container App FQDN'
+$fqdn = Invoke-Az -Arguments @('network', 'public-ip', 'show', '-g', $ResourceGroup, '-n', "$Name-web-ip", '--query', 'dnsSettings.fqdn', '-o', 'tsv') -Failure 'Could not read the VM-hosted Markdoc FQDN'
 if ($DryRun) { $fqdn = '<fqdn>'; Write-Host "[read-only] GET https://$fqdn/api/health must report ok=true db=true" }
 elseif (-not (Test-Health $fqdn)) { throw "https://$fqdn/api/health does not report ok=true and db=true; patch a healthy deployment only." }
 else { Write-Host "health=ok db=ok fqdn=$fqdn" }
 
 Step 'Steps 2-4: open egress, patch, close egress (guaranteed cleanup wraps every mutation)'
-Write-Host 'cleanup=registered Restore-PostgresSteadyStateEgress,Remove-BootstrapPublicIp (Invoke-OperationWithGuaranteedCleanup: runs after success, failure and best-effort on Ctrl-C)'
+Write-Host 'cleanup=registered Restore-PostgresSteadyStateEgress,Remove-BootstrapPublicIp,Restore-MarkdocWebPublicIp (Invoke-OperationWithGuaranteedCleanup: runs after success, failure and best-effort on Ctrl-C)'
 $windowCleanup = @(
   @{ Action = {
     if ($DryRun) { Write-Host "[cleanup] Restore-PostgresSteadyStateEgress: az network nsg rule delete -g $ResourceGroup --nsg-name $Name-pg-nsg -n AllowApprovedPackageSetup, verify absent, assert 260 DenyOtherInternetEgress Deny/Outbound/Internet" }
@@ -145,6 +146,10 @@ $windowCleanup = @(
   @{ Action = {
     if ($DryRun) { Write-Host "[cleanup] Remove-BootstrapPublicIp ${publicIpName}: az network nic ip-config update -g $ResourceGroup --nic-name $Name-pg-nic -n primary --remove publicIPAddress, verify detached, az network public-ip delete -g $ResourceGroup -n $publicIpName" }
     else { Remove-BootstrapPublicIp $publicIpName }
+  } },
+  @{ Action = {
+    if ($DryRun) { Write-Host "[cleanup] Restore-MarkdocWebPublicIp ${Name}-web-ip: az network nic ip-config update -g $ResourceGroup --nic-name $Name-pg-nic -n primary --public-ip-address $Name-web-ip" }
+    else { Restore-MarkdocWebPublicIp "$Name-web-ip" }
   } }
 )
 $patchScriptPath = [IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'patch-os.sh')
@@ -166,10 +171,10 @@ try {
         $null = Invoke-Az -Mutation -Arguments @('snapshot', 'create', '-g', $ResourceGroup, '-n', $snapshotName, '--source', "$vmName-os", '--incremental', 'true', '--sku', 'Standard_LRS', '-o', 'none') -Failure 'Could not create the pre-patch OS disk snapshot'
         Write-Host "snapshot=$snapshotName (whole-VM rollback point: the database lives on the OS disk)"
       }
-      # Same specification as infra/main.bicep postgresBootstrapIp and rule 250, so the shared cleanup helpers apply unchanged.
+      # Same specification as infra/main.bicep postgresBootstrapIp and rule 255, so the shared cleanup helpers apply unchanged.
       $null = Invoke-Az -Mutation -Arguments @('network', 'public-ip', 'create', '-g', $ResourceGroup, '-n', $publicIpName, '--sku', 'Standard', '--allocation-method', 'Static', '--version', 'IPv4', '-o', 'none') -Failure 'Could not create the bootstrap public IP'
       $null = Invoke-Az -Mutation -Arguments @('network', 'nic', 'ip-config', 'update', '-g', $ResourceGroup, '--nic-name', "$Name-pg-nic", '-n', 'primary', '--public-ip-address', $publicIpName, '-o', 'none') -Failure 'Could not attach the bootstrap public IP'
-      $null = Invoke-Az -Mutation -Arguments @('network', 'nsg', 'rule', 'create', '-g', $ResourceGroup, '--nsg-name', "$Name-pg-nsg", '-n', 'AllowApprovedPackageSetup', '--priority', '250', '--direction', 'Outbound', '--access', 'Allow', '--protocol', 'Tcp', '--source-address-prefixes', '*', '--destination-address-prefixes', 'Internet', '--destination-port-ranges', '80', '443', '-o', 'none') -Failure 'Could not create the temporary egress rule'
+      $null = Invoke-Az -Mutation -Arguments @('network', 'nsg', 'rule', 'create', '-g', $ResourceGroup, '--nsg-name', "$Name-pg-nsg", '-n', 'AllowApprovedPackageSetup', '--priority', '255', '--direction', 'Outbound', '--access', 'Allow', '--protocol', 'Tcp', '--source-address-prefixes', '*', '--destination-address-prefixes', 'Internet', '--destination-port-ranges', '80', '-o', 'none') -Failure 'Could not create the temporary egress rule'
       $openedAt = [datetime]::UtcNow
       Write-Host "egress=open at=$($openedAt.ToString('HH:mm:ss', $invariant))Z"
 

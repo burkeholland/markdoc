@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Provisions Markdoc on Azure (Container Apps + private PostgreSQL VM + ACR) and deploys the
-  current commit. Builds the image in Azure Container Registry, so no local Docker is needed.
+  Provisions Markdoc's Azure infrastructure. Production application releases run through the
+  manual GitHub workflow and infra/deploy-vm-image.sh on the PostgreSQL VM.
 
   Nothing in this repository runs this automatically. Run it yourself when you are ready to deploy.
 
@@ -12,31 +12,23 @@
   $env:MARKDOC_GITHUB_CLIENT_SECRET = '<oauth app secret>'
   $env:MARKDOC_ALERT_EMAIL = '<production alert receiver>'
   $env:MARKDOC_VM_SSH_PUBLIC_KEY = Get-Content "$HOME\.ssh\id_ed25519.pub" -Raw
-  .\deploy\azure.ps1
+  .\deploy\azure.ps1 -InfraOnly
 
 .EXAMPLE
   # Every property in this CLIXML object must be a DPAPI-encrypted SecureString.
   .\deploy\azure.ps1 -SecretsPath "$env:LOCALAPPDATA\markdoc\azure-production-secrets.clixml" -InitializeDatabase -ConfigureRecovery
 
 .EXAMPLE
-  .\deploy\azure.ps1 -SourceCommit 0123456789abcdef0123456789abcdef01234567
-  .\deploy\azure.ps1 -ImageTag 0123456789abcdef0123456789abcdef01234567
   .\deploy\azure.ps1 -InfraOnly
-  .\deploy\azure.ps1 -RotateDatabasePassword
-  .\deploy\azure.ps1 -RotateDatabasePassword -SimulateDatabaseRotationFailure
-  .\deploy\azure.ps1 -RotateDatabasePassword -SimulatePostChangeDatabaseRotationFailure
-  .\deploy\azure.ps1 -ConfigureRecovery -VerifyRecovery
-  .\deploy\azure.ps1 -ConfigureRecovery -SimulateRecoveryConfigurationFailure
-  .\deploy\azure.ps1 -Small
-  .\deploy\azure.ps1 -ScaleToZero
+  .\deploy\azure.ps1 -InfraOnly -ConfigureRecovery -VerifyRecovery
   .\deploy\azure.ps1 -Destroy
 
 .NOTES
-  GitHub OAuth callback URL for the app: https://<app fqdn>/api/auth/callback/github
-  The first run prints the FQDN; add it to the OAuth App, then rerun (or set MARKDOC_PUBLIC_URL).
-  This script provisions or reconfigures the whole template. An application release to the
-  existing production Container App is an image-only `az containerapp update` (README, "Deploy to
-  Azure" > "Production runbook"); it does not go through this script.
+  GitHub OAuth callback URL:
+  https://markdoc-burkeholland.eastus2.cloudapp.azure.com/api/auth/callback/github
+  This script no longer deploys the application or performs database password rotation. Use the
+  manual GitHub workflow for application releases. Database rotation needs a VM-native replacement
+  for the retired Container App revision compensation flow before it can be re-enabled here.
 #>
 param(
   [string]$Name = 'markdoc',
@@ -83,6 +75,13 @@ try {
     Step "Deleting resource group $ResourceGroup and everything in it"
     az group delete -n $ResourceGroup --yes --no-wait
     return
+  }
+
+  if (-not $InfraOnly) {
+    throw 'Production is VM-hosted. Run deploy/azure.ps1 with -InfraOnly for infrastructure or recovery work; use the manual Deploy to Azure workflow for application releases.'
+  }
+  if ($RotateDatabasePassword -or $SimulateDatabaseRotationFailure -or $SimulatePostChangeDatabaseRotationFailure) {
+    throw 'Database password rotation is temporarily disabled until its retired Container App compensation path is replaced with a VM-native flow.'
   }
 
 function ConvertTo-PlainText([Security.SecureString]$Value) {
@@ -592,7 +591,10 @@ $databaseReadiness = Resolve-DatabaseDeploymentReadiness `
 if ($databaseReadiness.Mode -eq 'AlreadyInitialized') {
   Invoke-AlreadyInitializedDatabaseRefusal `
     -CleanupTemporaryEgress { Restore-PostgresSteadyStateEgress } `
-    -RemoveBootstrapPublicIp { Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip" }
+    -RemoveBootstrapPublicIp {
+      Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip"
+      Restore-MarkdocWebPublicIp "$Name-web-ip"
+    }
 }
 
 $databaseConfigurationToken = if ($InitializeDatabase -or $RotateDatabasePassword) { [guid]::NewGuid().ToString('N') } else { 'unchanged' }
@@ -1006,6 +1008,7 @@ if ($candidateOnlyRotationRecovery) {
   }
   if ($temporaryPublicIp) {
     $initialCleanup += @{ Action = { Remove-BootstrapPublicIp "$Name-pg-bootstrap-ip" } }
+    $initialCleanup += @{ Action = { Restore-MarkdocWebPublicIp "$Name-web-ip" } }
   }
   $outputs = Invoke-OperationWithGuaranteedCleanup `
     -Context 'Initial private infrastructure deployment' `
@@ -1069,6 +1072,7 @@ if ($candidateOnlyRotationRecovery) {
 }
 $appUrl = $outputs.appUrl.value
 Remove-BootstrapPublicIp $outputs.bootstrapPublicIpName.value
+Restore-MarkdocWebPublicIp "$Name-web-ip"
 
 if ($VerifyRecovery -or $ConfigureRecovery) {
   if (-not $ConfigureRecovery) {

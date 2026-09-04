@@ -67,8 +67,20 @@ param vmAdminUsername string = 'markdocops'
 @description('Public URL of the app (for Auth.js callbacks). Leave empty to use the Container App FQDN.')
 param publicUrl string = ''
 
+@description('Legacy escape hatch for restoring the retired Container Apps deployment. Keep false for VM hosting.')
+param deployContainerApp bool = false
+
 @description('Attach a deny-inbound public IP temporarily for approved database or recovery package setup. The deploy script always removes it afterward.')
 param bootstrapPublicIp bool = false
+
+@description('Expose the co-located Markdoc application through a stable public IP when the temporary bootstrap IP is not attached.')
+param enableVmWebHosting bool = true
+
+@description('Globally unique Azure public DNS label for the VM-hosted Markdoc application.')
+param vmWebDnsLabel string = 'markdoc-burkeholland'
+
+@description('Existing AcrPull role-assignment resource name for the PostgreSQL VM managed identity.')
+param postgresAcrPullRoleAssignmentName string = '78c020c7-f08d-4c1b-9c4e-901afb307a93'
 
 @description('Protect the PostgreSQL VM after the deploy script sets the vault to locally redundant storage.')
 param enableVmBackup bool = false
@@ -117,6 +129,7 @@ var postgresVmName = '${name}-pg'
 var postgresNicName = '${postgresVmName}-nic'
 var postgresNsgName = '${postgresVmName}-nsg'
 var postgresBootstrapIpName = '${postgresVmName}-bootstrap-ip'
+var postgresWebIpName = '${name}-web-ip'
 var postgresPrivateIp = '10.42.2.4'
 var postgresAdminLogin = 'markdoc'
 var postgresDatabaseName = 'markdoc'
@@ -155,6 +168,22 @@ var postgresBaseSecurityRules = [
       sourcePortRange: '*'
       destinationAddressPrefix: postgresPrivateIp
       destinationPortRange: '5432'
+    }
+  }
+  {
+    name: 'AllowWebInbound'
+    properties: {
+      priority: 105
+      access: 'Allow'
+      direction: 'Inbound'
+      protocol: 'Tcp'
+      sourceAddressPrefix: 'Internet'
+      sourcePortRange: '*'
+      destinationAddressPrefix: postgresPrivateIp
+      destinationPortRanges: [
+        '80'
+        '443'
+      ]
     }
   }
   {
@@ -300,16 +329,16 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = 
   }
 }
 
-resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (deployContainerApp) {
   name: '${name}-identity'
   location: location
 }
 
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(registry.id, identity.id, 'acrpull')
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployContainerApp) {
+  name: guid(registry.id, identity!.id, 'acrpull')
   scope: registry
   properties: {
-    principalId: identity.properties.principalId
+    principalId: identity!.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
   }
@@ -333,7 +362,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   }
 }
 
-resource appSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
+resource appSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = if (deployContainerApp) {
   parent: vnet
   name: appSubnetName
   properties: {
@@ -386,6 +415,21 @@ resource postgresBootstrapIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = 
   }
 }
 
+resource postgresWebIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = if (enableVmWebHosting) {
+  name: postgresWebIpName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    publicIPAddressVersion: 'IPv4'
+    dnsSettings: {
+      domainNameLabel: vmWebDnsLabel
+    }
+  }
+}
+
 resource postgresNic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   name: postgresNicName
   location: location
@@ -402,6 +446,10 @@ resource postgresNic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
         }, bootstrapPublicIp ? {
           publicIPAddress: {
             id: postgresBootstrapIp.id
+          }
+        } : enableVmWebHosting ? {
+          publicIPAddress: {
+            id: postgresWebIp.id
           }
         } : {})
       }
@@ -504,6 +552,22 @@ resource appDatabaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = i
   }
 }
 
+resource appAuthSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: secretsVault
+  name: 'app-auth-secret'
+  properties: {
+    value: authSecret
+  }
+}
+
+resource appGitHubClientSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: secretsVault
+  name: 'app-github-client-secret'
+  properties: {
+    value: githubClientSecret
+  }
+}
+
 resource postgresPendingPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (rotateDatabasePassword || reconcileDatabasePassword || clearPendingDatabasePassword) {
   parent: secretsVault
   name: postgresPendingPasswordSecretName
@@ -536,11 +600,21 @@ resource postgresSecretReader 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
-resource appSecretReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(secretsVault.id, identity.id, 'key-vault-secrets-user')
+resource postgresAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: postgresAcrPullRoleAssignmentName
+  scope: registry
+  properties: {
+    principalId: postgresVm.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  }
+}
+
+resource appSecretReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployContainerApp) {
+  name: guid(secretsVault.id, identity!.id, 'key-vault-secrets-user')
   scope: secretsVault
   properties: {
-    principalId: identity.properties.principalId
+    principalId: identity!.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
   }
@@ -1211,7 +1285,7 @@ resource backupPolicyRedeployAlertSuppression 'Microsoft.AlertsManagement/action
   }
 }
 
-resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = if (deployContainerApp) {
   name: environmentName
   location: location
   properties: {
@@ -1224,7 +1298,7 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
     }
     vnetConfiguration: {
       internal: false
-      infrastructureSubnetId: appSubnet.id
+      infrastructureSubnetId: appSubnet!.id
     }
     workloadProfiles: [
       {
@@ -1235,15 +1309,15 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
+resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApp && !empty(image)) {
   name: name
   location: location
   identity: {
     type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
+    userAssignedIdentities: { '${identity!.id}': {} }
   }
   properties: {
-    managedEnvironmentId: environment.id
+    managedEnvironmentId: environment!.id
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Single'
@@ -1257,7 +1331,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
       registries: [
         {
           server: registry.properties.loginServer
-          identity: identity.id
+          identity: identity!.id
         }
       ]
       secrets: [
@@ -1266,7 +1340,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
         {
           name: 'database-url'
           keyVaultUrl: databaseUrlSecretUrl
-          identity: identity.id
+          identity: identity!.id
         }
       ]
     }
@@ -1287,7 +1361,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
             { name: 'AUTH_GITHUB_ID', value: githubClientId }
             { name: 'AUTH_GITHUB_SECRET', secretRef: 'github-client-secret' }
             { name: 'AUTH_TRUST_HOST', value: 'true' }
-            { name: 'AUTH_URL', value: empty(publicUrl) ? 'https://${name}.${environment.properties.defaultDomain}' : publicUrl }
+            { name: 'AUTH_URL', value: empty(publicUrl) ? 'https://${name}.${environment!.properties.defaultDomain}' : publicUrl }
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'DATABASE_SSL', value: '1' }
             { name: 'APP_VERSION', value: empty(appVersion) ? last(split(image, ':')) : appVersion }
@@ -1330,7 +1404,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (!empty(image)) {
   ]
 }
 
-output appUrl string = 'https://${name}.${environment.properties.defaultDomain}'
+output appUrl string = enableVmWebHosting ? 'https://${postgresWebIp!.properties.dnsSettings.fqdn}' : (deployContainerApp ? 'https://${name}.${environment!.properties.defaultDomain}' : '')
 output registryLoginServer string = registry.properties.loginServer
 output registryName string = registry.name
 output postgresHost string = postgresPrivateIp
@@ -1339,7 +1413,8 @@ output backupVaultName string = backupVault.name
 output recoveryStorageName string = recoveryStorage.name
 output recoveryContainerName string = recoveryContainer.name
 output bootstrapPublicIpName string = postgresBootstrapIpName
+output vmAppUrl string = enableVmWebHosting ? 'https://${postgresWebIp!.properties.dnsSettings.fqdn}' : ''
 output postgresAlertActionGroupName string = postgresAlertActionGroup.name
-output identityId string = identity.id
+output identityId string = deployContainerApp ? identity!.id : ''
 output secretsVaultName string = secretsVault.name
 output secretsVaultId string = secretsVault.id

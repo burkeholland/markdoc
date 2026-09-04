@@ -14,9 +14,11 @@ co-located Markdoc application require:
   running. Deployment cleanup removes that rule even after failure.
 
 All other Internet egress remains denied. PostgreSQL port 5432 remains reachable
-only from the Container Apps subnet and from the VM's own `10.42.2.4/32`
-address. Public web ingress stays closed until the Markdoc hostname and TLS
-certificate are ready.
+only from the legacy Container Apps subnet and from the VM's own
+`10.42.2.4/32` address. The public application uses `markdoc-web-ip` on the
+primary NIC configuration and the static hostname
+`markdoc-burkeholland.eastus2.cloudapp.azure.com`; ports 80 and 443 are the only
+public inbound paths.
 
 ## Current production state
 
@@ -28,6 +30,9 @@ On September 4, 2026:
   private DNS zones were retired after HTTPS egress was restricted to port 443.
 - Azure Monitor heartbeat and backup-health telemetry were verified after the
   change.
+- Database/recovery maintenance may temporarily replace `markdoc-web-ip` with
+  the bootstrap public IP on the primary NIC configuration. Guaranteed cleanup
+  removes the bootstrap IP and reattaches `markdoc-web-ip`.
 - The recovery storage account still uses its `Microsoft.Storage` service
   endpoint and remains protected by a `CanNotDelete` lock.
 
@@ -68,6 +73,4 @@ az vm run-command invoke -g markdoc-rg -n markdoc-pg `
   --query "value[0].message" -o tsv
 ```
 
-The health response must report `ok`, `db`, and `collab` as `true`. Do not open
-ports 80 or 443 until DNS points the intended hostname to `markdoc-web-ip` and
-TLS has been configured.
+The health response must report `ok`, `db`, and `collab` as `true`.

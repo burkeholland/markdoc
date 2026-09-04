@@ -262,6 +262,16 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 ## Deploy to Azure
 
+> **Current production architecture (September 4, 2026):** Markdoc runs as a
+> resource-limited Docker/systemd service on `markdoc-pg`, behind nginx and
+> Let's Encrypt at
+> `https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. The Container App,
+> Container Apps Job, and managed environment have been retired. Use
+> [`docs/vm-hosting.md`](docs/vm-hosting.md) and the manual
+> `.github/workflows/deploy.yml` workflow for releases. The Container Apps
+> material later in this section is retained only as migration history and must
+> not be used for production operations.
+
 The target is **Azure Container Apps** with PostgreSQL. `infra/main.bicep` describes the whole environment (Container App, ACR, Key Vault, managed identity, Log Analytics, and a private PostgreSQL VM that has no public IP after bootstrap and accepts TLS connections only from the Container Apps subnet); `deploy/azure.ps1` provisions it and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
 
 Two health checks, two probes. `GET /api/health` is the full check — one database round trip, reported as `latencyMs`, plus the collaboration server's counters — and answers `503 { ok: false, error }` when PostgreSQL does not; the **Startup** probe, the release runbook below and the ops scripts wait on its `ok:true, db:true`. `GET /api/health?probe=live` answers `{ ok: true, probe: "live", collab, version }` from the process alone and never opens a database connection; it is the **Liveness** probe (`infra/main.bicep`), so a slow or restarting PostgreSQL cannot make the platform kill a healthy replica (the previous liveness probe was the full check under the platform's default 1 s timeout, and a cold connection to the database VM alone takes ~45 ms plus TLS jitter; both probes now allow `timeoutSeconds: 5`). There is no readiness probe: the app runs one replica. Inside the app, the PostgreSQL pool logs `[db] idle client error: <message>` and carries on when the server drops an idle connection (a restart, `pg_terminate_backend`, VM patching); before, that event was an uncaught exception that took the whole process down and lost the edits still in the collaboration server's debounce window. Failed requests leave one stderr line each, `[http] <status> <METHOD> <route shape> <ms>ms` (`server/request-log.ts`), for every response with a status ≥ 500 and every 4xx except 401 and 404, plus status `0` when the client went away before any header was written; 2xx, 3xx, 101, 401 and 404 log nothing, and the route shape (`server/route-shape.ts`) drops the query string, keeps only known static segments, and replaces ids with `:id` and anything else with `:x` — so `[http] 5` in the console log is every server error by route and duration, and no login, title or token is ever in a line (a *thrown* handler error still logs `[http] request failed` with the stack, followed by its `[http] 500 …` line).

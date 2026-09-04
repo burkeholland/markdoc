@@ -17,6 +17,13 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 $deploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure.ps1') -Raw
 $sharedSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure-postgres-network.ps1') -Raw
+$workflowSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', '.github', 'workflows', 'deploy.yml')) -Raw
+$vmDeploySource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'deploy-vm-image.sh')) -Raw
+Assert-True ($deploymentSource -match "(?s)if \(-not \`$InfraOnly\).*?Production is VM-hosted") 'The legacy full deployment driver must fail closed instead of recreating the retired Container App.'
+Assert-True ($workflowSource -notmatch '\baz containerapp\b' -and $workflowSource -match 'az vm run-command invoke') 'The release workflow must deploy through VM Run Command and must not call Container Apps.'
+Assert-True ($workflowSource -match '--scripts @infra/deploy-vm-image\.sh' -and $workflowSource -match '\$IMAGE') 'The release workflow must send the reviewed VM deployment script and immutable image digest.'
+Assert-True ($vmDeploySource -match 'deployment_succeeded=false' -and $vmDeploySource -match 'markdoc-vm-image-rollback-ready') 'A failed VM image rollout must restore and verify the previous systemd unit and environment.'
+Assert-True ($vmDeploySource -match 'markdoc@sha256:' -and $vmDeploySource -match 'markdoc-vm-image-ready') 'The VM deployment script must require an immutable Markdoc digest and emit an explicit success marker.'
 Assert-True ($deploymentSource -match '\$temporaryPackageEgress = \[bool\]\(\$InitializeDatabase -or \$ConfigureRecovery\)') 'Initialization and recovery must both register temporary-egress cleanup.'
 $temporaryPublicIpAssignment = [regex]::Match(
   $deploymentSource,
@@ -31,7 +38,7 @@ Assert-Equal $true (& $temporaryPublicIpDecision -ConfigureRecovery) 'Recovery c
 Assert-Equal $true (& $temporaryPublicIpDecision -InitializeDatabase) 'Database initialization must attach the temporary bootstrap public IP.'
 Assert-Equal $true (& $temporaryPublicIpDecision -InitializeDatabase -ConfigureRecovery) 'Combined initialization and recovery must attach the temporary bootstrap public IP.'
 Assert-Equal $false (& $temporaryPublicIpDecision) 'Ordinary redeployments must not attach a public IP to the database VM.'
-Assert-True ($deploymentSource -match '(?ms)if \(\$temporaryPublicIp\) \{\s*\$initialCleanup \+= @\{ Action = \{ Remove-BootstrapPublicIp "\$Name-pg-bootstrap-ip" \} \}\s*\}') 'Attaching the temporary bootstrap public IP must register its guaranteed cleanup.'
+Assert-True ($deploymentSource -match '(?ms)if \(\$temporaryPublicIp\) \{.+?Remove-BootstrapPublicIp "\$Name-pg-bootstrap-ip".+?Restore-MarkdocWebPublicIp "\$Name-web-ip".+?\}') 'Attaching the temporary bootstrap public IP must register cleanup that removes it and restores the production web IP.'
 Assert-True ($deploymentSource -match '-BootstrapPublicIp \$temporaryPublicIp `') 'The initial deployment must attach the bootstrap public IP from the shared decision.'
 Assert-True ($deploymentSource -match '(?m)^Remove-BootstrapPublicIp \$outputs\.bootstrapPublicIpName\.value\s*$') 'Every deployment path must detach and delete the bootstrap public IP after the final rollout.'
 $parameterGuards = [regex]::Matches(
@@ -1316,7 +1323,7 @@ Assert-Equal 'commit,verify,clear-candidate' ($events -join ',') 'A terminal cle
 $patchSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'patch-postgres-vm.ps1') -Raw
 $guestSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'patch-os.sh')) -Raw
 $templateSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'main.bicep')) -Raw
-foreach ($helper in 'Remove-BootstrapPublicIp', 'Get-PostgresNetworkRuleNames', 'Restore-PostgresSteadyStateEgress', 'Get-ManagedRunCommandResult') {
+foreach ($helper in 'Remove-BootstrapPublicIp', 'Restore-MarkdocWebPublicIp', 'Get-PostgresNetworkRuleNames', 'Restore-PostgresSteadyStateEgress', 'Get-ManagedRunCommandResult') {
   $definitions = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | Where-Object {
     (Get-Content -LiteralPath $_.FullName -Raw) -match "(?m)^function $([regex]::Escape($helper))\b"
   })
@@ -1362,7 +1369,7 @@ foreach ($mutation in "'public-ip', 'create'", "'ip-config', 'update'", "'rule',
   Assert-True ($index -gt $operationStart -and $index -lt $operationEnd) "The patch window mutation $mutation must sit inside the guarded operation so the registered cleanup always closes egress."
 }
 $windowCleanupBlock = [regex]::Match($patchSource, '(?s)\$windowCleanup = @\((?<actions>.+?)\r?\n\)\r?\n')
-Assert-True ($windowCleanupBlock.Success -and $windowCleanupBlock.Groups['actions'].Value -match 'Restore-PostgresSteadyStateEgress' -and $windowCleanupBlock.Groups['actions'].Value -match 'Remove-BootstrapPublicIp \$publicIpName') 'The patch window cleanup must run both shared helpers: restore restrictive egress and remove the bootstrap public IP.'
+Assert-True ($windowCleanupBlock.Success -and $windowCleanupBlock.Groups['actions'].Value -match 'Restore-PostgresSteadyStateEgress' -and $windowCleanupBlock.Groups['actions'].Value -match 'Remove-BootstrapPublicIp \$publicIpName' -and $windowCleanupBlock.Groups['actions'].Value -match 'Restore-MarkdocWebPublicIp') 'The patch window cleanup must restore restrictive egress, remove the bootstrap public IP, and reattach the Markdoc web IP.'
 Assert-True ($patchSource -match '-CleanupActions \$windowCleanup') 'The patch window must hand its cleanup actions to Invoke-OperationWithGuaranteedCleanup.'
 Assert-True ($vmRestart -gt $operationEnd) 'The VM restart must happen after the guarded window closed egress, so the VM never boots with Internet reachable.'
 Assert-True ($patchSource -match '(?s)elseif \(\$rebootRequired\) \{.+?''vm'', ''restart''') 'The VM restart must be conditional on the guest reporting reboot=required.'
@@ -1386,7 +1393,11 @@ Assert-True ($templateSource -match '(?s)activityLogAlerts@[0-9-]+'' = \{.+?scop
 Assert-Equal 0 ([regex]::Matches($templateSource, 'Microsoft\.Network/natGateways').Count) 'infra/main.bicep must not declare a NAT gateway: an incremental deployment converges on the template and would re-attach the retired gateway to the postgres subnet.'
 Assert-Equal 0 ([regex]::Matches($templateSource, 'natGateway:').Count) 'No subnet in infra/main.bicep may reference a NAT gateway.'
 Assert-Equal 0 ([regex]::Matches($templateSource, 'postgres-private-egress\.bicep').Count) 'The retired Azure Monitor private endpoint must not be recreated.'
+Assert-True ($templateSource -match "param deployContainerApp bool = false") 'Legacy Container Apps resources must remain disabled by default.'
 Assert-Equal 1 ([regex]::Matches($templateSource, "name: 'AllowAppHttpsEgress'").Count) 'The VM must keep one HTTPS-only Internet egress rule for Markdoc, GitHub OAuth, ACR, and public Azure Monitor ingestion.'
+Assert-Equal 1 ([regex]::Matches($templateSource, "name: 'AllowWebInbound'").Count) 'The VM-hosted Markdoc application must keep one HTTP/HTTPS ingress rule.'
+Assert-True ($templateSource -match '(?s)bootstrapPublicIp \? \{.+?postgresBootstrapIp\.id.+?\} : enableVmWebHosting \? \{.+?postgresWebIp\.id') 'The primary NIC configuration must prefer the temporary bootstrap IP and otherwise restore the stable Markdoc web IP.'
+Assert-Equal 1 ([regex]::Matches($templateSource, "domainNameLabel: vmWebDnsLabel").Count) 'The VM web public IP must retain its stable Azure DNS label.'
 Assert-Equal 1 ([regex]::Matches($templateSource, "service: 'Microsoft\.Storage'").Count) 'The postgres subnet must keep exactly one Microsoft.Storage service endpoint: pgBackRest, the backup health uploads and the restore check reach the recovery storage account through it.'
 Assert-Equal 1 ([regex]::Matches($templateSource, "service: 'Microsoft\.KeyVault'").Count) 'The postgres subnet must keep exactly one Microsoft.KeyVault service endpoint: password rotation reads the vault through it.'
 Assert-True ($deploymentSource -notmatch 'postgresNatGatewayName') 'deploy/azure.ps1 must not read the removed postgresNatGatewayName deployment output.'

@@ -1,5 +1,13 @@
 # Infrastructure deployment runbook: `deploy/azure.ps1 -InfraOnly`
 
+> **September 4, 2026 update:** production is VM-hosted at
+> `https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. The Container App,
+> maintenance job, managed environment, generated managed resource group, and
+> delegated `container-apps` subnet were deleted. `deploy/azure.ps1` now refuses
+> non-`-InfraOnly` use; releases run through `.github/workflows/deploy.yml` and
+> `infra/deploy-vm-image.sh`. Counts and Container Apps references below are
+> retained as historical evidence and are not current what-if expectations.
+
 How to change production **infrastructure** in `markdoc-rg` — alert rules, the NSG rule-write tripwire, subnets, network policies, vault or environment shape — by redeploying `infra/main.bicep` through `deploy/azure.ps1 -InfraOnly -SecretsPath <clixml>`, without touching the application image, a Container App revision or the database. The README's *Production runbook: app-only releases* covers the other production mutation; this page is the checked list for this one. It is built from the read-only what-if measurements of task #1381 (the real `-InfraOnly` parameter shape, both passes) and the row classification of task #1333. Line numbers refer to `deploy/azure.ps1`, `deploy/azure-safety.ps1` and `infra/main.bicep` at `a243aa6` (2026-09-01).
 
 Nothing in the repository runs this automatically. The lead orders each run as its own gated task, and that task body is the ship decision.
