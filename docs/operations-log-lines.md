@@ -93,7 +93,7 @@ The route shape (`server/route-shape.ts`) drops the query string and fragment, t
 
 `server/pressure-observability.ts` writes process-local aggregates to stdout every 15 seconds. A window emits one `kind:"gauges"` line and, only when request activity occurred, one `kind:"http"` line. The HTTP line contains at most 24 method/route series; excess series are combined as `OTHER /:overflow`. Methods are limited to `GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|OTHER`, and routes use the same closed, 120-character route shape described above. This bounds both line count and labels without retaining a per-request label.
 
-An HTTP series has `accepted`, `completed` and `aborted` counts. `accepted` is recorded when Node invokes the request callback; `completed` means the response emitted `finish`; `aborted` means it closed first. A request crossing a window boundary therefore contributes `accepted` to its first window and its terminal count to a later one. The three arrays are exact, non-cumulative bucket counts:
+An HTTP series has `accepted`, `completed` and `aborted` counts. `accepted` is recorded when Node invokes the request callback; `completed` means the response emitted `finish`; `aborted` means it closed first. A request crossing a window boundary therefore contributes `accepted` to its first window and its terminal count to a later one. The collector owns and removes its exact response and socket callbacks when they settle. Shutdown invalidates and removes any callbacks still open, clears their active entries, and cannot remove another subsystem's listener; a stale callback invoked after that boundary is a no-op. The three arrays are exact, non-cumulative bucket counts:
 
 | Field | Array indexes |
 | --- | --- |
@@ -116,8 +116,10 @@ Size means a valid non-negative `Content-Length`; chunked or absent lengths are 
 | `long_polls` | agent event requests currently asleep waiting for a wake-up |
 | `webhook_inflight`, `webhook_retries` | outbound webhook HTTP attempts running and retry timers waiting |
 | `gauge_failures` | fixed-name gauge providers that failed to read; their value is reported as zero |
+| `collector_failures` | cumulative, bounded failures in the process-local gauge/event-loop collector; a failed collection reports fixed gauges as zero |
+| `output_failures` | cumulative, bounded stdout sink failures; reporting a failure never recursively writes another line |
 
-No pressure record includes a query string, address, header, cookie, token, user, document or webhook identifier, webhook URL, document content, request/response body, or error. Existing `[http]` failure logging is unchanged.
+Collector and output failures are contained inside this passive diagnostic path: timer and final-shutdown collection cannot throw into server startup, request handling or shutdown. No pressure record includes a query string, address, header, cookie, token, user, document or webhook identifier, webhook URL, document content, request/response body, or error. Existing `[http]` failure logging is unchanged.
 
 ## 4. KQL cheat sheet
 
@@ -197,7 +199,8 @@ ContainerAppConsoleLogs_CL
     render_queue = tolong(p.render_queue), render_inflight = tolong(p.render_inflight),
     pdf_queue = tolong(p.pdf_queue), pdf_inflight = tolong(p.pdf_inflight),
     long_polls = tolong(p.long_polls), webhook_inflight = tolong(p.webhook_inflight),
-    webhook_retries = tolong(p.webhook_retries), gauge_failures = tolong(p.gauge_failures)
+    webhook_retries = tolong(p.webhook_retries), gauge_failures = tolong(p.gauge_failures),
+    collector_failures = tolong(p.collector_failures), output_failures = tolong(p.output_failures)
 | order by minute desc, ContainerGroupName_s asc
 ```
 

@@ -40,14 +40,8 @@ export interface PressureGaugeCollection {
   failures: number;
 }
 
-function integerGauge(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 0;
-  return Math.min(Number.MAX_SAFE_INTEGER, Math.round(value));
-}
-
-/** Read every fixed gauge. A broken provider is surfaced as `failures` and cannot stop the server. */
-export function collectPressureGauges(resetIntervalMaximum = true): PressureGaugeCollection {
-  const gauges: PressureGaugeSnapshot = {
+export function emptyPressureGaugeSnapshot(): PressureGaugeSnapshot {
+  return {
     pg_total: 0,
     pg_idle: 0,
     pg_waiting: 0,
@@ -61,6 +55,16 @@ export function collectPressureGauges(resetIntervalMaximum = true): PressureGaug
     webhook_inflight: 0,
     webhook_retries: 0,
   };
+}
+
+function integerGauge(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.round(value));
+}
+
+/** Read every fixed gauge. A broken provider is surfaced as `failures` and cannot stop the server. */
+export function collectPressureGauges(resetIntervalMaximum = true): PressureGaugeCollection {
+  const gauges = emptyPressureGaugeSnapshot();
   let failures = 0;
   for (const name of PRESSURE_GAUGE_NAMES) {
     const provider = registry.providers.get(name);

@@ -288,12 +288,15 @@ describe("pressure gauges and cadence", () => {
     expect(pressure.detachServer(server as Server)).toBe(false);
     expect(() => pressure.stop(false)).not.toThrow();
     expect(writes).toHaveLength(writesAfterStop);
+    expect(pressure.flush(true)).toEqual([]);
+    pressure.start();
     expect(gauges(pressure.flush(true))).toMatchObject({
       tcp_open: 0,
       tcp_accepted: 0,
       upgrades_open: 0,
       upgrades_accepted: 0,
     });
+    pressure.stop(false);
   });
 
   it("keeps main and TCP-only standby tracking separate and rejects contradictory reattachment", () => {
@@ -385,21 +388,23 @@ describe("pressure gauges and cadence", () => {
     expect(pressure.detachServer(server as Server)).toBe(true);
     expect(pressure.detachServer(server as Server)).toBe(false);
     expect(gauges(pressure.flush(true))).toMatchObject({
-      tcp_open: 1,
+      tcp_open: 0,
       tcp_accepted: 1,
-      upgrades_open: 1,
+      upgrades_open: 0,
       upgrades_accepted: 1,
     });
 
     pressure.stop(false);
     socket.emit("close");
     socket.emit("close");
+    pressure.start();
     expect(gauges(pressure.flush(true))).toMatchObject({
       tcp_open: 0,
       tcp_accepted: 0,
       upgrades_open: 0,
       upgrades_accepted: 0,
     });
+    pressure.stop(false);
   });
 });
 
@@ -431,5 +436,299 @@ describe("pressure privacy", () => {
     }
     expect(output).toContain('"method":"OTHER"');
     expect(output).toContain('"route":"/api/documents/:id/:x"');
+  });
+
+  it("bounds 100,000 requests over 1,000 sensitive variants to 24 sanitized series", () => {
+    const { pressure } = harness();
+    for (let index = 0; index < 100_000; index++) {
+      const variant = index % 1_000;
+      const id = variant.toString(36).padStart(12, "0");
+      const res = response();
+      pressure.attachRequest(
+        request(
+          `/api/documents/${id}/private-${variant}-sensitive?token=credential-${variant}-sensitive`,
+          index % 2 === 0 ? "GET" : "POST",
+        ),
+        res,
+      );
+      res.finish();
+    }
+
+    const lines = pressure.flush(true);
+    const series = httpSeries(lines);
+    expect(series.length).toBeLessThanOrEqual(MAX_HTTP_SERIES);
+    expect(series.reduce((total, item) => total + Number(item.accepted), 0)).toBe(100_000);
+    expect(series.reduce((total, item) => total + Number(item.completed), 0)).toBe(100_000);
+    expect(gauges(lines).active_requests).toBe(0);
+    const output = lines.join("\n");
+    expect(output.match(/(?:private|credential|sensitive)-/g) ?? []).toHaveLength(0);
+    expect(output).not.toContain("?token=");
+  });
+});
+
+describe("pressure teardown ownership and failure containment", () => {
+  it("leaves no owned callback or post-stop mutation across 512 lifecycle compositions", () => {
+    let compositions = 0;
+    for (let shape = 0; shape < 512; shape++) {
+      let now = shape;
+      let failCollector = (shape & 64) !== 0;
+      let failSink = (shape & 128) !== 0;
+      const emitted: string[] = [];
+      const delay = new FakeDelay();
+      const pressure = new PressureObservability({
+        now: () => now,
+        eventLoopDelay: delay,
+        collectGauges: (reset) => {
+          if (failCollector) {
+            failCollector = false;
+            throw new Error(`collector-sensitive-${shape}`);
+          }
+          return collectPressureGauges(reset);
+        },
+        write: (line) => {
+          if (failSink) {
+            failSink = false;
+            throw new Error(`sink-sensitive-${shape}`);
+          }
+          emitted.push(line);
+        },
+      });
+      const main = new EventEmitter();
+      const standby = new EventEmitter();
+      const mainSocket = new EventEmitter();
+      const standbySocket = new EventEmitter();
+      const upgradeSocket = new EventEmitter();
+      const res = response();
+      const unrelated = () => {};
+
+      main.on("connection", unrelated);
+      main.on("upgrade", unrelated);
+      standby.on("connection", unrelated);
+      mainSocket.on("close", unrelated);
+      standbySocket.on("close", unrelated);
+      upgradeSocket.on("close", unrelated);
+      res.on("finish", unrelated);
+      res.on("close", unrelated);
+
+      pressure.attachServer(main as Server);
+      pressure.attachServer(main as Server);
+      pressure.attachServer(standby as Server, { trackUpgrades: false });
+      pressure.attachServer(standby as Server, { trackUpgrades: false });
+      const ownedServerCallbacks = [
+        ...main.listeners("connection").filter((listener) => listener !== unrelated),
+        ...main.listeners("upgrade").filter((listener) => listener !== unrelated),
+        ...standby.listeners("connection").filter((listener) => listener !== unrelated),
+      ];
+      main.emit("connection", mainSocket);
+      standby.emit("connection", standbySocket);
+      main.emit("upgrade", request("/collab"), upgradeSocket, Buffer.alloc(0));
+      pressure.attachRequest(request(`/api/documents/${shape.toString(36).padStart(12, "0")}?secret=value`), res);
+
+      const ownedSocketCallbacks = [mainSocket, standbySocket, upgradeSocket].flatMap((socket) =>
+        socket.listeners("close").filter((listener) => listener !== unrelated),
+      );
+      const ownedResponseCallbacks = [
+        ...res.listeners("finish").filter((listener) => listener !== unrelated),
+        ...res.listeners("close").filter((listener) => listener !== unrelated),
+      ];
+
+      const finishFirst = (shape & 1) === 0;
+      const settleBeforeStop = (shape & 2) !== 0;
+      if (settleBeforeStop) {
+        if (finishFirst) {
+          res.writableFinished = true;
+          res.emit("finish");
+          res.emit("close");
+        } else {
+          res.emit("close");
+          res.writableFinished = true;
+          res.emit("finish");
+        }
+      }
+      if ((shape & 4) !== 0) {
+        mainSocket.emit("close");
+        standbySocket.emit("close");
+        upgradeSocket.emit("close");
+      }
+      if ((shape & (64 | 128)) !== 0) pressure.flush(true);
+
+      pressure.stop(false);
+      expect(main.listeners("connection")).toEqual([unrelated]);
+      expect(main.listeners("upgrade")).toEqual([unrelated]);
+      expect(standby.listeners("connection")).toEqual([unrelated]);
+      for (const socket of [mainSocket, standbySocket, upgradeSocket]) expect(socket.listeners("close")).toEqual([unrelated]);
+      expect(res.listeners("finish")).toEqual([unrelated]);
+      expect(res.listeners("close")).toEqual([unrelated]);
+
+      for (const listener of finishFirst ? ownedResponseCallbacks : [...ownedResponseCallbacks].reverse()) listener();
+      for (const listener of (shape & 8) === 0 ? ownedSocketCallbacks : [...ownedSocketCallbacks].reverse()) listener();
+      for (const listener of (shape & 16) === 0 ? ownedServerCallbacks : [...ownedServerCallbacks].reverse()) {
+        listener(new EventEmitter());
+      }
+      now += PRESSURE_BUCKET_MS;
+      pressure.start();
+      const after = pressure.flush(true);
+      expect(httpSeries(after)).toEqual([]);
+      expect(gauges(after)).toMatchObject({
+        active_requests: 0,
+        tcp_open: 0,
+        tcp_accepted: 0,
+        upgrades_open: 0,
+        upgrades_accepted: 0,
+      });
+      pressure.stop(false);
+      pressure.stop(false);
+      expect(emitted.join("\n")).not.toContain(`sensitive-${shape}`);
+      compositions++;
+    }
+    expect(compositions).toBe(512);
+  });
+
+  it("contains and reports all 341 injected collector and output failure shapes without recursion", () => {
+    let failureShapes = 0;
+    for (let shape = 0; shape < 341; shape++) {
+      const failCollector = shape % 2 === 0;
+      const failureCall = (shape % 5) + 1;
+      const sensitive = `raw-sensitive-failure-${shape}`;
+      let collectCalls = 0;
+      let outputCalls = 0;
+      const emitted: string[] = [];
+      const pressure = new PressureObservability({
+        eventLoopDelay: new FakeDelay(),
+        collectGauges: (reset) => {
+          collectCalls++;
+          if (failCollector && collectCalls === failureCall) throw new Error(sensitive);
+          return collectPressureGauges(reset);
+        },
+        write: (line) => {
+          outputCalls++;
+          if (!failCollector && outputCalls === failureCall) throw new Error(sensitive);
+          emitted.push(line);
+        },
+      });
+
+      for (let call = 0; call < 4; call++) pressure.flush(true);
+      pressure.stop(true);
+      pressure.start();
+      pressure.flush(true);
+      pressure.stop(false);
+
+      expect(collectCalls).toBe(6);
+      expect(outputCalls).toBe(6);
+      const snapshots = emitted.map(payload).filter((item) => item.kind === "gauges");
+      expect(snapshots.at(-1)).toMatchObject(
+        failCollector ? { collector_failures: 1, output_failures: 0 } : { collector_failures: 0, output_failures: 1 },
+      );
+      expect(emitted.join("\n")).not.toContain(sensitive);
+      failureShapes++;
+    }
+    expect(failureShapes).toBe(341);
+  });
+
+  it("contains timer and final-stop collector and sink failures", () => {
+    vi.useFakeTimers();
+    try {
+      let now = 0;
+      let collectFailures = 2;
+      let outputFailures = 2;
+      const emitted: string[] = [];
+      const pressure = new PressureObservability({
+        now: () => now,
+        eventLoopDelay: new FakeDelay(),
+        collectGauges: (reset) => {
+          if (collectFailures-- > 0) throw new Error("collector raw error");
+          return collectPressureGauges(reset);
+        },
+        write: (line) => {
+          if (outputFailures-- > 0) throw new Error("output raw error");
+          emitted.push(line);
+        },
+      });
+      pressure.start();
+      now = PRESSURE_BUCKET_MS;
+      expect(() => vi.advanceTimersByTime(PRESSURE_BUCKET_MS)).not.toThrow();
+      expect(() => pressure.stop(true)).not.toThrow();
+      pressure.start();
+      now += PRESSURE_BUCKET_MS;
+      pressure.flush(true);
+      pressure.stop(false);
+
+      expect(emitted.map(payload).find((item) => item.kind === "gauges")).toMatchObject({
+        collector_failures: 2,
+        output_failures: 2,
+      });
+      expect(emitted.join("\n")).not.toContain("raw error");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not resume a rollover after its collector or sink synchronously stops it", () => {
+    const collectorRef: { current?: PressureObservability } = {};
+    let stopInCollector = true;
+    const collectorWrites: string[] = [];
+    const collectorResponse = response();
+    const collectorPressure = new PressureObservability({
+      eventLoopDelay: new FakeDelay(),
+      collectGauges: (reset) => {
+        if (stopInCollector) {
+          stopInCollector = false;
+          collectorRef.current!.stop(false);
+          throw new Error("collector stopped");
+        }
+        return collectPressureGauges(reset);
+      },
+      write: (line) => collectorWrites.push(line),
+    });
+    collectorRef.current = collectorPressure;
+    collectorPressure.attachRequest(request("/api/health"), collectorResponse);
+    const collectorCallbacks = [
+      ...collectorResponse.listeners("finish"),
+      ...collectorResponse.listeners("close"),
+    ];
+    expect(collectorPressure.flush(true)).toEqual([]);
+    expect(collectorWrites).toEqual([]);
+    expect(collectorResponse.listenerCount("finish")).toBe(0);
+    expect(collectorResponse.listenerCount("close")).toBe(0);
+    for (const callback of collectorCallbacks) callback();
+    collectorPressure.start();
+    expect(gauges(collectorPressure.flush(true))).toMatchObject({
+      active_requests: 0,
+      collector_failures: 0,
+      output_failures: 0,
+    });
+    collectorPressure.stop(false);
+
+    const sinkRef: { current?: PressureObservability } = {};
+    let stopInSink = true;
+    let sinkCalls = 0;
+    const sinkResponse = response();
+    const sinkPressure = new PressureObservability({
+      eventLoopDelay: new FakeDelay(),
+      write: () => {
+        sinkCalls++;
+        if (stopInSink) {
+          stopInSink = false;
+          sinkRef.current!.stop(false);
+          throw new Error("sink stopped");
+        }
+      },
+    });
+    sinkRef.current = sinkPressure;
+    sinkPressure.attachRequest(request("/api/health"), sinkResponse);
+    const sinkCallbacks = [...sinkResponse.listeners("finish"), ...sinkResponse.listeners("close")];
+    expect(sinkPressure.flush(true)).toHaveLength(1);
+    expect(sinkCalls).toBe(1);
+    expect(sinkResponse.listenerCount("finish")).toBe(0);
+    expect(sinkResponse.listenerCount("close")).toBe(0);
+    for (const callback of sinkCallbacks.reverse()) callback();
+    sinkPressure.start();
+    expect(gauges(sinkPressure.flush(true))).toMatchObject({
+      active_requests: 0,
+      collector_failures: 0,
+      output_failures: 0,
+    });
+    sinkPressure.stop(false);
   });
 });
