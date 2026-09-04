@@ -39,7 +39,7 @@ Read-only release checks (README "Production runbook: app-only releases", step 3
   collab:idle      a bare wss://<host>/collab 101 upgrade closes 4401 before five seconds
   collab:reject    an invalid-token Hocuspocus connection reaches authenticationFailed
 
-Only GETs and one WebSocket connection are issued; nothing is written to production and no az call is made.
+Only GETs and two WebSocket connections are issued; nothing is written to production and no az call is made.
 Exit 0 when nothing failed, 1 when a check failed, 2 on a usage error.`;
 
 interface CliOutput {

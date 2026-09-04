@@ -6,7 +6,7 @@
  * by rule, a `localhost` leak scan, the bare `/collab` deadline and invalid-token rejection.
  * Everything that touches the network or the disk is injected (`ReleaseVerifyIo`) so the checks are unit
  * tested without a server; the CLI (`scripts/release-verify.mts`) supplies fetch, node:https, node:fs and
- * @hocuspocus/provider. Nothing here writes anywhere: the script only issues GETs and one WebSocket connect.
+ * @hocuspocus/provider. Nothing here writes anywhere: the script only issues GETs and two WebSocket connects.
  */
 import { createHash, randomInt } from "node:crypto";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";

@@ -6,6 +6,7 @@ import type { CollabContext, CollabPreAuthentication } from "./hocuspocus";
 
 export const COLLAB_PATH = "/collab";
 export const COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS = 3_000;
+export const COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS = 500;
 const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" } as const;
 
 export function toWebRequest(req: IncomingMessage, fallbackHost = "localhost"): Request {
@@ -27,6 +28,8 @@ export interface AttachOptions {
   signal?: AbortSignal;
   /** Test-only override; production uses `COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS`. */
   preAuthenticationTimeoutMs?: number;
+  /** Test-only override; production uses `COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS`. */
+  preAuthenticationCloseGraceMs?: number;
 }
 
 type UpgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
@@ -38,6 +41,7 @@ export interface CollabPreAuthenticationDeadline extends CollabPreAuthentication
 interface DeadlineOptions {
   request?: Pick<IncomingMessage, "off" | "once">;
   timeoutMs?: number;
+  closeGraceMs?: number;
   onSettled?: (deadline: CollabPreAuthenticationDeadline) => void;
 }
 
@@ -52,27 +56,40 @@ export function createCollabPreAuthenticationDeadline(
   let socket: WebSocket | null = initialSocket;
   let request = options.request;
   let onSettled = options.onSettled;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let closeGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  let deferredClose: ReturnType<typeof setImmediate> | undefined;
+  let state: "pending" | "closing" | "settled" = "pending";
 
   const onClose = () => {
-    settle();
+    finish();
   };
   const onError = () => {
-    const current = settle();
-    if (current && current.readyState !== WebSocket.CLOSED) current.terminate();
+    terminate();
   };
   const onAbort = () => {
-    const current = settle();
-    if (current && current.readyState !== WebSocket.CLOSED) current.terminate();
+    terminate();
   };
 
-  const settle = (): WebSocket | null => {
+  const clearDeadline = () => {
+    if (!deadlineTimer) return;
+    clearTimeout(deadlineTimer);
+    deadlineTimer = undefined;
+  };
+
+  const finish = () => {
     const current = socket;
-    if (!current) return null;
+    if (!current) return;
+    state = "settled";
     socket = null;
-    if (timer) {
-      clearTimeout(timer);
-      timer = undefined;
+    clearDeadline();
+    if (closeGraceTimer) {
+      clearTimeout(closeGraceTimer);
+      closeGraceTimer = undefined;
+    }
+    if (deferredClose) {
+      clearImmediate(deferredClose);
+      deferredClose = undefined;
     }
     current.off("close", onClose);
     current.off("error", onError);
@@ -81,33 +98,66 @@ export function createCollabPreAuthenticationDeadline(
     const notify = onSettled;
     onSettled = undefined;
     notify?.(lifecycle);
-    return current;
   };
 
-  const closeUnauthorized = (current: WebSocket) => {
+  const terminate = () => {
+    const current = socket;
+    if (!current) return;
+    try {
+      if (current.readyState !== WebSocket.CLOSED) current.terminate();
+    } finally {
+      finish();
+    }
+  };
+
+  const armCloseGrace = () => {
+    if (!socket || closeGraceTimer) return;
+    closeGraceTimer = setTimeout(terminate, options.closeGraceMs ?? COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS);
+    closeGraceTimer.unref?.();
+  };
+
+  const closeUnauthorized = () => {
+    deferredClose = undefined;
+    const current = socket;
+    if (!current || state !== "closing") return;
+    if (current.readyState === WebSocket.CLOSED) {
+      finish();
+      return;
+    }
     if (current.readyState === WebSocket.OPEN) current.close(UNAUTHORIZED.code, UNAUTHORIZED.reason);
-    else if (current.readyState !== WebSocket.CLOSED) current.terminate();
+    if (current.readyState === WebSocket.CONNECTING) {
+      terminate();
+      return;
+    }
+    armCloseGrace();
+  };
+
+  const reject = (defer: boolean) => {
+    if (state !== "pending") return;
+    state = "closing";
+    clearDeadline();
+    if (!defer) {
+      closeUnauthorized();
+      return;
+    }
+    // Hocuspocus sends permission-denied after the authentication hook rejects.
+    deferredClose = setImmediate(closeUnauthorized);
+    deferredClose.unref?.();
   };
 
   initialSocket.once("close", onClose);
   initialSocket.once("error", onError);
   options.request?.once("aborted", onAbort);
-  timer = setTimeout(() => {
-    const current = settle();
-    if (current) closeUnauthorized(current);
-  }, options.timeoutMs ?? COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS);
-  timer.unref?.();
+  deadlineTimer = setTimeout(() => reject(false), options.timeoutMs ?? COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS);
+  deadlineTimer.unref?.();
 
   const lifecycle: CollabPreAuthenticationDeadline = {
     accepted: () => {
-      settle();
+      if (state !== "pending") return;
+      finish();
     },
     rejected: () => {
-      const current = settle();
-      if (!current) return;
-      // Let Hocuspocus send its permission-denied application frame before the binding closes the socket.
-      const close = setImmediate(() => closeUnauthorized(current));
-      close.unref?.();
+      reject(true);
     },
     abort: onAbort,
   };
@@ -139,8 +189,11 @@ export function protectUpgradePath(server: HttpServer, path = COLLAB_PATH): () =
 /** Route WebSocket upgrades on `path` to the Hocuspocus instance. */
 export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabContext>, options: AttachOptions = {}) {
   const path = options.path ?? COLLAB_PATH;
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   const pendingAuthentication = new Set<CollabPreAuthenticationDeadline>();
+  const wss = Object.assign(
+    new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 }),
+    { getPendingAuthenticationCount: () => pendingAuthentication.size },
+  );
   let stopped = false;
 
   wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
@@ -148,6 +201,7 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
     const deadline = createCollabPreAuthenticationDeadline(socket, {
       request: req,
       timeoutMs: options.preAuthenticationTimeoutMs,
+      closeGraceMs: options.preAuthenticationCloseGraceMs,
       onSettled: (settled) => pendingAuthentication.delete(settled),
     });
     pendingAuthentication.add(deadline);
@@ -203,6 +257,11 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
   server.on("upgrade", onUpgrade);
   server.once("close", stop);
   wss.once("close", stop);
+  const closeWebSocketServer = wss.close.bind(wss);
+  wss.close = (callback?: (error?: Error) => void) => {
+    stop();
+    closeWebSocketServer(callback);
+  };
   if (options.signal?.aborted) stop();
   else options.signal?.addEventListener("abort", stop, { once: true });
 
