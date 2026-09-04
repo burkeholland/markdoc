@@ -13,7 +13,13 @@ import {
   type PressureRequest,
   type PressureResponse,
 } from "./pressure-observability";
-import { collectPressureGauges, registerPressureGauge } from "@/server/pressure-gauges";
+import {
+  collectPressureGauges,
+  emptyPressureGaugeSnapshot,
+  PRESSURE_GAUGE_NAMES,
+  registerPressureGauge,
+  type PressureGaugeCollection,
+} from "@/server/pressure-gauges";
 
 class FakeResponse extends EventEmitter {
   writableFinished = false;
@@ -111,6 +117,324 @@ function captureIntervalCallbacks() {
     }) as typeof globalThis.setInterval,
   );
   return { callbacks, restore: () => spy.mockRestore() };
+}
+
+const RESTART_BOUNDARIES = [
+  "time-lookup",
+  "time-call",
+  "time-throw",
+  "collector-lookup",
+  "collector-call",
+  "collector-throw",
+  "gauge-record",
+  ...PRESSURE_GAUGE_NAMES.map((name) => `gauge-${name}`),
+  "gauge-throw",
+  "gauge-failures",
+  "event-loop-lookup",
+  "event-loop-max",
+  "event-loop-max-throw",
+  "reset-lookup",
+  "reset-call",
+  "reset-throw",
+  "output-lookup-1",
+  "output-call-1",
+  "output-throw-1",
+  "output-lookup-2",
+  "output-call-2",
+  "output-throw-2",
+] as const;
+
+interface RestartCompositionResult {
+  boundariesMissed: number;
+  earlyActivations: number;
+  staleReturnedLines: number;
+  staleResets: number;
+  staleOutputs: number;
+  staleCounterUpdates: number;
+  replacementMismatches: number;
+  replacementSuppressions: number;
+  ownershipClearances: number;
+  residue: number;
+}
+
+function runRestartComposition(
+  shape: number,
+  source: "direct" | "timer" | "terminal",
+  intervalCallbacks: Array<() => void>,
+): RestartCompositionResult {
+  const result: RestartCompositionResult = {
+    boundariesMissed: 0,
+    earlyActivations: 0,
+    staleReturnedLines: 0,
+    staleResets: 0,
+    staleOutputs: 0,
+    staleCounterUpdates: 0,
+    replacementMismatches: 0,
+    replacementSuppressions: 0,
+    ownershipClearances: 0,
+    residue: 0,
+  };
+  const target = RESTART_BOUNDARIES[shape % RESTART_BOUNDARIES.length];
+  const terminal = source === "terminal";
+  let now = 0;
+  let armed = false;
+  let fired = false;
+  let resetInvocations = 0;
+  let outputLookups = 0;
+  let outputInvocations = 0;
+  const writes: string[] = [];
+  let pressure: PressureObservability;
+
+  const hit = (boundary: string): boolean => {
+    if (!armed || fired || boundary !== target) return false;
+    fired = true;
+    if (terminal) pressure.start();
+    else {
+      pressure.stop((shape & 8) !== 0);
+      pressure.start();
+    }
+    if (Reflect.get(pressure, "runningGeneration") !== null) result.earlyActivations++;
+    result.replacementSuppressions += pressure.flush(true).length;
+    return true;
+  };
+
+  const delay = {
+    enabled: false,
+    enable() {
+      this.enabled = true;
+    },
+    disable() {
+      this.enabled = false;
+    },
+    get max() {
+      const triggered = hit("event-loop-max") || hit("event-loop-max-throw");
+      if (triggered && target === "event-loop-max-throw") throw new Error("event-loop max failure");
+      return 7_600_000;
+    },
+    get reset() {
+      hit("reset-lookup");
+      return () => {
+        const triggered = hit("reset-call") || hit("reset-throw");
+        if (triggered && target === "reset-throw") throw new Error("event-loop reset failure");
+        if (!triggered || terminal) resetInvocations++;
+      };
+    },
+  };
+
+  const readNow = () => {
+    const triggered = hit("time-call") || hit("time-throw");
+    if (triggered && target === "time-throw") throw new Error("time failure");
+    return now;
+  };
+  const readGauges = (): PressureGaugeCollection => {
+    const triggered = hit("collector-call") || hit("collector-throw");
+    if (triggered && target === "collector-throw") throw new Error("collector failure");
+    const values = emptyPressureGaugeSnapshot();
+    PRESSURE_GAUGE_NAMES.forEach((name, index) => {
+      values[name] = index + 1;
+    });
+    const gaugeValues = new Proxy(values, {
+      get(targetValues, property, receiver) {
+        if (typeof property === "string") {
+          const propertyTriggered = hit(`gauge-${property}`) || (property === "pg_total" && hit("gauge-throw"));
+          if (propertyTriggered && target === "gauge-throw") throw new Error("gauge failure");
+        }
+        return Reflect.get(targetValues, property, receiver);
+      },
+    });
+    return {
+      get gauges() {
+        hit("gauge-record");
+        return gaugeValues;
+      },
+      get failures() {
+        hit("gauge-failures");
+        return 0;
+      },
+    };
+  };
+  const write = (line: string) => {
+    outputInvocations++;
+    const called = hit(`output-call-${outputInvocations}`);
+    const failed = hit(`output-throw-${outputInvocations}`);
+    if (failed) throw new Error("output failure");
+    if (!called || terminal) writes.push(line);
+  };
+
+  pressure = new PressureObservability({
+    now: readNow,
+    eventLoopDelay: delay,
+    collectGauges: readGauges,
+    write,
+  });
+  Object.defineProperties(pressure, {
+    now: {
+      configurable: true,
+      get() {
+        hit("time-lookup");
+        return readNow;
+      },
+    },
+    collectGauges: {
+      configurable: true,
+      get() {
+        hit("collector-lookup");
+        return readGauges;
+      },
+    },
+    eventLoopDelay: {
+      configurable: true,
+      get() {
+        hit("event-loop-lookup");
+        return delay;
+      },
+    },
+    write: {
+      configurable: true,
+      get() {
+        outputLookups++;
+        hit(`output-lookup-${outputLookups}`);
+        return write;
+      },
+    },
+  });
+
+  const oldMain = new EventEmitter();
+  const oldStandby = new EventEmitter();
+  const oldMainSocket = new EventEmitter();
+  const oldStandbySocket = new EventEmitter();
+  const oldUpgradeSocket = new EventEmitter();
+  const oldResponse = response();
+  pressure.start();
+  const oldTimer = intervalCallbacks.at(-1)!;
+  const timerCountAfterStart = intervalCallbacks.length;
+  pressure.start();
+  if (intervalCallbacks.length !== timerCountAfterStart) result.replacementSuppressions++;
+  pressure.attachServer(oldMain as Server);
+  pressure.attachServer(oldStandby as Server, { trackUpgrades: false });
+  oldMain.emit("connection", oldMainSocket);
+  oldStandby.emit("connection", oldStandbySocket);
+  oldMain.emit("upgrade", request("/collab"), oldUpgradeSocket, Buffer.alloc(0));
+  pressure.attachRequest(request("/api/health"), oldResponse);
+  oldResponse.finish();
+
+  const force = (shape & 1) !== 0;
+  now = source === "direct" && force ? 1 : PRESSURE_BUCKET_MS;
+  armed = true;
+  let oldLines: string[] = [];
+  if (source === "direct") oldLines = pressure.flush(force);
+  else if (source === "timer") oldTimer();
+  else pressure.stop(true);
+
+  if (!fired) result.boundariesMissed++;
+  if (!terminal) result.staleReturnedLines += oldLines.length;
+  if (Reflect.get(pressure, "runningGeneration") === null) result.ownershipClearances++;
+  if (Reflect.get(pressure, "flushOwner") !== null) result.ownershipClearances++;
+  if ((Reflect.get(pressure, "flushFrames") as Set<unknown>).size !== 0) result.ownershipClearances++;
+  for (const emitter of [oldMain, oldStandby]) {
+    result.residue += emitter.listenerCount("connection") + emitter.listenerCount("upgrade");
+  }
+  result.residue +=
+    oldMainSocket.listenerCount("close") +
+    oldStandbySocket.listenerCount("close") +
+    oldUpgradeSocket.listenerCount("close") +
+    oldResponse.listenerCount("finish") +
+    oldResponse.listenerCount("close");
+
+  pressure.start();
+  const replacementTimer = intervalCallbacks.at(-1)!;
+  const replacementTimerCount = intervalCallbacks.length;
+  pressure.start();
+  if (intervalCallbacks.length !== replacementTimerCount) result.replacementSuppressions++;
+  const staleOutputStart = writes.length;
+  const staleResetStart = resetInvocations;
+  oldTimer();
+  result.staleOutputs += writes.length - staleOutputStart;
+  result.staleResets += resetInvocations - staleResetStart;
+
+  const main = new EventEmitter();
+  const standby = new EventEmitter();
+  const mainSocket = new EventEmitter();
+  const standbySocket = new EventEmitter();
+  const upgradeSocket = new EventEmitter();
+  const replacementResponse = response();
+  pressure.attachServer(main as Server);
+  pressure.attachServer(standby as Server, { trackUpgrades: false });
+  main.emit("connection", mainSocket);
+  standby.emit("connection", standbySocket);
+  main.emit("upgrade", request("/collab"), upgradeSocket, Buffer.alloc(0));
+  pressure.attachRequest(request("/api/health"), replacementResponse);
+  replacementResponse.finish();
+
+  const resetStart = resetInvocations;
+  const outputStart = writes.length;
+  now += PRESSURE_BUCKET_MS;
+  let replacementLines: string[];
+  if ((shape & 2) === 0) replacementLines = pressure.flush((shape & 4) !== 0);
+  else {
+    replacementTimer();
+    replacementLines = writes.slice(outputStart);
+  }
+  const replacementSeries = httpSeries(replacementLines);
+  const replacementGauges = gauges(replacementLines);
+  const expectedCollectorFailures =
+    terminal && ["time-throw", "collector-throw", "gauge-throw", "event-loop-max-throw", "reset-throw"].includes(target)
+      ? 1
+      : 0;
+  const expectedOutputFailures = terminal && target.startsWith("output-throw-") ? 1 : 0;
+  if (
+    replacementLines.length !== 2 ||
+    replacementSeries.length !== 1 ||
+    replacementSeries[0]?.route !== "/api/health" ||
+    replacementSeries[0]?.accepted !== 1 ||
+    replacementSeries[0]?.completed !== 1 ||
+    replacementGauges.active_requests !== 0 ||
+    replacementGauges.tcp_open !== 2 ||
+    replacementGauges.tcp_accepted !== 2 ||
+    replacementGauges.upgrades_open !== 1 ||
+    replacementGauges.upgrades_accepted !== 1 ||
+    replacementGauges.event_loop_delay_max_ms !== 8 ||
+    replacementGauges.pg_total !== 1 ||
+    replacementGauges.webhook_retries !== PRESSURE_GAUGE_NAMES.length ||
+    replacementGauges.collector_failures !== expectedCollectorFailures ||
+    replacementGauges.output_failures !== expectedOutputFailures
+  ) {
+    result.replacementMismatches++;
+  }
+  if (resetInvocations - resetStart !== 1) result.replacementMismatches++;
+  if (
+    Number(replacementGauges.collector_failures) !== expectedCollectorFailures ||
+    Number(replacementGauges.output_failures) !== expectedOutputFailures
+  ) {
+    result.staleCounterUpdates++;
+  }
+
+  const secondOutputStart = writes.length;
+  if ((shape & 2) === 0) {
+    if (pressure.flush().length !== 0) result.replacementSuppressions++;
+  } else {
+    replacementTimer();
+    if (writes.length !== secondOutputStart) result.replacementSuppressions++;
+  }
+
+  pressure.stop(false);
+  result.residue +=
+    main.listenerCount("connection") +
+    main.listenerCount("upgrade") +
+    standby.listenerCount("connection") +
+    standby.listenerCount("upgrade") +
+    mainSocket.listenerCount("close") +
+    standbySocket.listenerCount("close") +
+    upgradeSocket.listenerCount("close") +
+    replacementResponse.listenerCount("finish") +
+    replacementResponse.listenerCount("close");
+  for (const field of ["timer", "runningGeneration", "stopGeneration", "flushOwner"]) {
+    if (Reflect.get(pressure, field) !== null) result.residue++;
+  }
+  for (const field of ["flushFrames", "active", "series"]) {
+    if ((Reflect.get(pressure, field) as { size: number }).size !== 0) result.residue++;
+  }
+  return result;
 }
 
 describe("pressure normalization and bounds", () => {
@@ -479,6 +803,175 @@ describe("pressure privacy", () => {
 });
 
 describe("pressure teardown ownership and failure containment", () => {
+  it("hands a claimed output and event-loop reset to a reentrant terminal flush exactly once", () => {
+    let now = 0;
+    const delay = new FakeDelay();
+    const written: string[] = [];
+    let stopInFirstOutput = true;
+    let pressure: PressureObservability;
+    pressure = new PressureObservability({
+      now: () => now,
+      eventLoopDelay: delay,
+      write: (line) => {
+        written.push(line);
+        if (stopInFirstOutput) {
+          stopInFirstOutput = false;
+          pressure.stop(true);
+          pressure.start();
+        }
+      },
+    });
+    pressure.start();
+    const res = response();
+    pressure.attachRequest(request("/api/health"), res);
+    res.finish();
+    now = PRESSURE_BUCKET_MS;
+
+    expect(pressure.flush()).toEqual([]);
+    expect(written.map(payload).map((item) => item.kind)).toEqual(["http", "gauges"]);
+    expect(delay.resets).toBe(2);
+
+    const replacement = response();
+    pressure.attachRequest(request("/api/health"), replacement);
+    replacement.finish();
+    now += PRESSURE_BUCKET_MS;
+    const replacementLines = pressure.flush();
+    expect(httpSeries(replacementLines)).toEqual([
+      expect.objectContaining({ route: "/api/health", accepted: 1, completed: 1 }),
+    ]);
+    expect(gauges(replacementLines)).toMatchObject({
+      collector_failures: 0,
+      output_failures: 0,
+    });
+    expect(written.map(payload).map((item) => item.kind)).toEqual([
+      "http",
+      "gauges",
+      "http",
+      "gauges",
+    ]);
+    pressure.stop(false);
+  });
+
+  it("retains a collector failure recorded reentrantly during gauge collection", () => {
+    let collectCalls = 0;
+    let pressure: PressureObservability;
+    pressure = new PressureObservability({
+      eventLoopDelay: new FakeDelay(),
+      collectGauges: () => {
+        if (collectCalls++ === 0) {
+          pressure.attachRequest(request("/api/health"), {
+            writableFinished: false,
+            getHeader: () => undefined,
+            once: () => {
+              throw new Error("listener failure");
+            },
+            off: () => undefined,
+          });
+        }
+        return { gauges: emptyPressureGaugeSnapshot(), failures: 0 };
+      },
+      write: () => {},
+    });
+
+    expect(gauges(pressure.flush(true))).toMatchObject({ collector_failures: 1 });
+    const next = pressure.flush(true);
+    expect(httpSeries(next)).toEqual([
+      expect.objectContaining({ route: "/api/health", accepted: 1, completed: 0, aborted: 0 }),
+    ]);
+    expect(gauges(next)).toMatchObject({ collector_failures: 1 });
+    pressure.stop(false);
+  });
+
+  it("releases a server attached while stopped on a repeated stop", () => {
+    const { pressure } = harness();
+    const server = new EventEmitter();
+    pressure.stop(false);
+    pressure.attachServer(server as Server);
+    expect(server.listenerCount("connection")).toBe(1);
+    expect(server.listenerCount("upgrade")).toBe(1);
+
+    pressure.stop(false);
+    expect(server.listenerCount("connection")).toBe(0);
+    expect(server.listenerCount("upgrade")).toBe(0);
+  });
+
+  it("isolates 2,048 direct and forced flush restarts at every injected boundary", () => {
+    const intervals = captureIntervalCallbacks();
+    const totals: RestartCompositionResult = {
+      boundariesMissed: 0,
+      earlyActivations: 0,
+      staleReturnedLines: 0,
+      staleResets: 0,
+      staleOutputs: 0,
+      staleCounterUpdates: 0,
+      replacementMismatches: 0,
+      replacementSuppressions: 0,
+      ownershipClearances: 0,
+      residue: 0,
+    };
+    try {
+      for (let shape = 0; shape < 2_048; shape++) {
+        const composition = runRestartComposition(shape, "direct", intervals.callbacks);
+        for (const key of Object.keys(totals) as Array<keyof RestartCompositionResult>) {
+          totals[key] += composition[key];
+        }
+      }
+      expect(totals).toEqual({
+        boundariesMissed: 0,
+        earlyActivations: 0,
+        staleReturnedLines: 0,
+        staleResets: 0,
+        staleOutputs: 0,
+        staleCounterUpdates: 0,
+        replacementMismatches: 0,
+        replacementSuppressions: 0,
+        ownershipClearances: 0,
+        residue: 0,
+      });
+    } finally {
+      intervals.restore();
+    }
+  });
+
+  it("isolates 2,048 timer and terminal overlaps at every injected boundary", () => {
+    const intervals = captureIntervalCallbacks();
+    const totals: RestartCompositionResult = {
+      boundariesMissed: 0,
+      earlyActivations: 0,
+      staleReturnedLines: 0,
+      staleResets: 0,
+      staleOutputs: 0,
+      staleCounterUpdates: 0,
+      replacementMismatches: 0,
+      replacementSuppressions: 0,
+      ownershipClearances: 0,
+      residue: 0,
+    };
+    try {
+      for (let shape = 0; shape < 2_048; shape++) {
+        const source = (shape & 1) === 0 ? "timer" : "terminal";
+        const composition = runRestartComposition(shape, source, intervals.callbacks);
+        for (const key of Object.keys(totals) as Array<keyof RestartCompositionResult>) {
+          totals[key] += composition[key];
+        }
+      }
+      expect(totals).toEqual({
+        boundariesMissed: 0,
+        earlyActivations: 0,
+        staleReturnedLines: 0,
+        staleResets: 0,
+        staleOutputs: 0,
+        staleCounterUpdates: 0,
+        replacementMismatches: 0,
+        replacementSuppressions: 0,
+        ownershipClearances: 0,
+        residue: 0,
+      });
+    } finally {
+      intervals.restore();
+    }
+  });
+
   it("keeps captured timers inert across 1,024 balanced stop and restart compositions", () => {
     const intervals = captureIntervalCallbacks();
     let callbackThenStop = 0;
@@ -1089,7 +1582,7 @@ describe("pressure teardown ownership and failure containment", () => {
     sinkRef.current = sinkPressure;
     sinkPressure.attachRequest(request("/api/health"), sinkResponse);
     const sinkCallbacks = [...sinkResponse.listeners("finish"), ...sinkResponse.listeners("close")];
-    expect(sinkPressure.flush(true)).toHaveLength(1);
+    expect(sinkPressure.flush(true)).toEqual([]);
     expect(sinkCalls).toBe(1);
     expect(sinkResponse.listenerCount("finish")).toBe(0);
     expect(sinkResponse.listenerCount("close")).toBe(0);

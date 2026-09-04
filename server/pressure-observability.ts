@@ -70,6 +70,39 @@ interface EventLoopDelayMonitor {
   reset(): void;
 }
 
+interface FlushAuthority {
+  kind: "running" | "stopping";
+  generation: symbol;
+  seedCollectorFailures?: number;
+  seedOutputFailures?: number;
+  claimedOutputs?: ReadonlySet<PressureOutputKind>;
+  eventLoopResetClaimed?: boolean;
+}
+
+interface FlushOperation extends FlushAuthority {
+  collectorFailures: number;
+  outputFailures: number;
+  outputClaims: Set<PressureOutputKind>;
+  eventLoopResetClaimed: boolean;
+}
+
+type PressureOutputKind = "http" | "gauges";
+
+interface OwnedValue<T> {
+  owned: boolean;
+  value: T;
+}
+
+interface WindowSnapshot {
+  series: Map<string, HttpSeries>;
+  activeRequests: number;
+  activeRequestAgeMaxMs: number;
+  tcpOpen: number;
+  tcpAccepted: number;
+  upgradesOpen: number;
+  upgradesAccepted: number;
+}
+
 export interface PressureObservabilityOptions {
   windowMs?: number;
   maxHttpSeries?: number;
@@ -133,6 +166,54 @@ function emptySeries(method: PressureMethod, route: string): HttpSeries {
   };
 }
 
+function cloneSeries(series: HttpSeries): HttpSeries {
+  return {
+    ...series,
+    duration_ms: [...series.duration_ms],
+    request_bytes: [...series.request_bytes],
+    response_bytes: [...series.response_bytes],
+  };
+}
+
+function subtractSeries(
+  current: Map<string, HttpSeries>,
+  consumed: Map<string, HttpSeries>,
+): Map<string, HttpSeries> {
+  const remaining = new Map<string, HttpSeries>();
+  for (const [key, series] of current) {
+    const snapshot = consumed.get(key);
+    if (!snapshot) {
+      remaining.set(key, cloneSeries(series));
+      continue;
+    }
+    const next: HttpSeries = {
+      method: series.method,
+      route: series.route,
+      accepted: Math.max(0, series.accepted - snapshot.accepted),
+      completed: Math.max(0, series.completed - snapshot.completed),
+      aborted: Math.max(0, series.aborted - snapshot.aborted),
+      duration_ms: series.duration_ms.map((value, index) =>
+        Math.max(0, value - snapshot.duration_ms[index]),
+      ) as DurationBuckets,
+      request_bytes: series.request_bytes.map((value, index) =>
+        Math.max(0, value - snapshot.request_bytes[index]),
+      ) as SizeBuckets,
+      response_bytes: series.response_bytes.map((value, index) =>
+        Math.max(0, value - snapshot.response_bytes[index]),
+      ) as SizeBuckets,
+    };
+    if (
+      next.accepted > 0 ||
+      next.completed > 0 ||
+      next.aborted > 0 ||
+      [...next.duration_ms, ...next.request_bytes, ...next.response_bytes].some((value) => value > 0)
+    ) {
+      remaining.set(key, next);
+    }
+  }
+  return remaining;
+}
+
 /**
  * Process-local, privacy-safe pressure aggregation. It emits at most two lines per window: one
  * capped array of normalized HTTP series (when non-empty), and one fixed-name gauge record.
@@ -156,9 +237,13 @@ export class PressureObservability {
   private openUpgrades = 0;
   private upgradesAccepted = 0;
   private timer: NodeJS.Timeout | null = null;
-  private timerGeneration: symbol | null = null;
+  private runningGeneration: symbol | null = Symbol("pressure-observability-run");
+  private stopGeneration: symbol | null = null;
   private state: "running" | "stopping" | "stopped" = "running";
-  private flushing = false;
+  private flushOwner: FlushOperation | null = null;
+  private readonly flushFrames = new Set<FlushOperation>();
+  private injectedBoundaryDepth = 0;
+  private restartPending = false;
   private collectorFailures = 0;
   private outputFailures = 0;
 
@@ -173,26 +258,34 @@ export class PressureObservability {
   }
 
   start(): void {
-    if (this.state === "stopping") return;
+    if (
+      this.state === "stopping" ||
+      (this.state === "stopped" &&
+        (this.flushFrames.size > 0 || this.injectedBoundaryDepth > 0))
+    ) {
+      this.restartPending = true;
+      return;
+    }
+    let restarted = false;
     if (this.state === "stopped") {
+      restarted = true;
+      this.restartPending = false;
       this.state = "running";
-      this.windowStartedAt = this.readNow(this.windowStartedAt);
-      this.resetEventLoopDelay();
+      this.runningGeneration = Symbol("pressure-observability-run");
     }
-    if (this.state !== "running") return;
-    if (this.timer || this.timerGeneration) return;
-    const generation = Symbol("pressure-observability-timer");
-    this.timerGeneration = generation;
-    try {
-      this.eventLoopDelay.enable();
-    } catch {
-      this.recordCollectorFailure(generation);
+    const generation = this.runningGeneration;
+    if (this.state !== "running" || generation === null) return;
+    if (restarted) {
+      const nowResult = this.readRunningNow(generation, this.windowStartedAt);
+      if (!nowResult.owned) return;
+      this.windowStartedAt = nowResult.value;
+      if (!this.resetRunningEventLoopDelay(generation)) return;
     }
-    if (!this.ownsTimerGeneration(generation)) return;
+    if (this.timer || !this.enableRunningEventLoopDelay(generation)) return;
     const timer = setInterval(() => {
-      if (this.ownsTimerGeneration(generation)) this.flushInternal(false, "running", generation);
+      this.flushInternal(false, { kind: "running", generation });
     }, this.windowMs);
-    if (!this.ownsTimerGeneration(generation)) {
+    if (!this.ownsRunningGeneration(generation)) {
       clearInterval(timer);
       return;
     }
@@ -205,21 +298,38 @@ export class PressureObservability {
     if (
       this.state === "stopped" &&
       this.timer === null &&
-      this.timerGeneration === null &&
+      this.runningGeneration === null &&
       this.serverAttachments.size === 0 &&
       this.socketCloseAttachments.size === 0 &&
       this.active.size === 0
     ) {
+      this.restartPending = false;
       return;
     }
-    const wasStarted = this.timer !== null || this.timerGeneration !== null;
+    const wasStarted = this.timer !== null;
     const timer = this.timer;
-    this.timerGeneration = null;
+    const stopGeneration = Symbol("pressure-observability-stop");
+    const interruptedFlush =
+      this.flushOwner?.kind === "running" && this.ownsFlush(this.flushOwner)
+        ? this.flushOwner
+        : null;
+    this.runningGeneration = null;
+    this.flushOwner = null;
     this.timer = null;
     this.state = "stopping";
+    this.stopGeneration = stopGeneration;
     if (timer) clearInterval(timer);
     try {
-      if (flush) this.flushInternal(true, "stopping");
+      if (flush) {
+        this.flushInternal(true, {
+          kind: "stopping",
+          generation: stopGeneration,
+          seedCollectorFailures: interruptedFlush?.collectorFailures,
+          seedOutputFailures: interruptedFlush?.outputFailures,
+          claimedOutputs: interruptedFlush?.outputClaims,
+          eventLoopResetClaimed: interruptedFlush?.eventLoopResetClaimed,
+        });
+      }
     } finally {
       for (const server of [...this.serverAttachments.keys()]) this.detachServer(server);
       for (const attachment of [...this.socketCloseAttachments]) this.releaseSocketClose(attachment, true);
@@ -227,13 +337,11 @@ export class PressureObservability {
       this.active.clear();
       this.resetWindowState();
       if (wasStarted) {
-        try {
-          this.eventLoopDelay.disable();
-        } catch {
-          this.recordCollectorFailure();
-        }
+        this.disableStoppingEventLoopDelay(stopGeneration);
       }
+      this.stopGeneration = null;
       this.state = "stopped";
+      this.startPendingRestart();
     }
   }
 
@@ -343,167 +451,391 @@ export class PressureObservability {
    * which rate-limits timer drift or accidental duplicate calls.
    */
   flush(force = false): string[] {
-    if (this.state !== "running") return [];
-    return this.flushInternal(force, "running");
+    const generation = this.runningGeneration;
+    if (generation === null) return [];
+    return this.flushInternal(force, { kind: "running", generation });
   }
 
-  private flushInternal(
-    force: boolean,
-    expectedState: "running" | "stopping",
-    timerGeneration?: symbol,
-  ): string[] {
-    if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
-    if (this.flushing) return [];
-    this.flushing = true;
+  private flushInternal(force: boolean, authority: FlushAuthority): string[] {
+    const operation = this.beginFlush(authority);
+    if (operation === null) return [];
+    const lines: string[] = [];
     try {
-      const now = this.readNow(this.windowStartedAt, timerGeneration);
-      if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
+      const nowResult = this.readOwnedNow(operation, this.windowStartedAt);
+      if (!nowResult.owned) return [];
+      const now = nowResult.value;
       const elapsed = Math.max(0, now - this.windowStartedAt);
       if (!force && elapsed < this.windowMs) return [];
 
-      const series = [...this.series.values()].sort((a, b) => `${a.method} ${a.route}`.localeCompare(`${b.method} ${b.route}`));
-      this.series = new Map();
-      const { gauges, failures } = this.readGauges(timerGeneration);
-      if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
-      const activeAgeMax = [...this.active.values()].reduce((max, request) => Math.max(max, now - request.startedAt), 0);
-      const loopDelayMs = this.readEventLoopDelay(timerGeneration);
-      this.resetEventLoopDelay(timerGeneration);
-      if (!this.canContinueFlush(expectedState, timerGeneration)) return [];
-      const windowMs = Math.round(elapsed);
-      const tcpAccepted = this.tcpAccepted;
-      const upgradesAccepted = this.upgradesAccepted;
-      this.tcpAccepted = 0;
-      this.upgradesAccepted = 0;
-      this.windowStartedAt = now;
+      const snapshot = this.snapshotWindow(now);
+      const gaugeResult = this.readOwnedGauges(operation);
+      if (!gaugeResult.owned) return [];
+      const loopDelayResult = this.readOwnedEventLoopDelay(operation);
+      if (!loopDelayResult.owned) return [];
+      if (!operation.eventLoopResetClaimed && !this.resetOwnedEventLoopDelay(operation)) return [];
+      if (!this.ownsFlush(operation)) return [];
 
-      const lines: string[] = [];
-      if (series.length > 0) {
-        this.emitLine(
+      const windowMs = Math.round(elapsed);
+      const series = [...snapshot.series.values()].sort((a, b) =>
+        `${a.method} ${a.route}`.localeCompare(`${b.method} ${b.route}`),
+      );
+      if (
+        series.length > 0 &&
+        !operation.outputClaims.has("http") &&
+        !this.emitOwnedLine(
+          operation,
+          "http",
           `${PRESSURE_LOG_PREFIX} ${JSON.stringify({ kind: "http", window_ms: windowMs, series })}`,
           lines,
-          timerGeneration,
-        );
+        )
+      ) {
+        return [];
       }
-      if (!this.canContinueFlush(expectedState, timerGeneration)) return lines;
-      this.emitLine(
-        `${PRESSURE_LOG_PREFIX} ${JSON.stringify({
-          kind: "gauges",
-          window_ms: windowMs,
-          active_requests: this.active.size,
-          active_request_age_max_ms: Math.round(activeAgeMax),
-          tcp_open: this.openTcp,
-          tcp_accepted: tcpAccepted,
-          upgrades_open: this.openUpgrades,
-          upgrades_accepted: upgradesAccepted,
-          event_loop_delay_max_ms: loopDelayMs,
-          gauge_failures: failures,
-          collector_failures: this.collectorFailures,
-          output_failures: this.outputFailures,
-          ...gauges,
-        })}`,
-        lines,
-        timerGeneration,
-      );
+      if (
+        !operation.outputClaims.has("gauges") &&
+        !this.emitOwnedLine(
+          operation,
+          "gauges",
+          `${PRESSURE_LOG_PREFIX} ${JSON.stringify({
+            kind: "gauges",
+            window_ms: windowMs,
+            active_requests: snapshot.activeRequests,
+            active_request_age_max_ms: Math.round(snapshot.activeRequestAgeMaxMs),
+            tcp_open: snapshot.tcpOpen,
+            tcp_accepted: snapshot.tcpAccepted,
+            upgrades_open: snapshot.upgradesOpen,
+            upgrades_accepted: snapshot.upgradesAccepted,
+            event_loop_delay_max_ms: loopDelayResult.value,
+            gauge_failures: gaugeResult.value.failures,
+            collector_failures: operation.collectorFailures,
+            output_failures: operation.outputFailures,
+            ...gaugeResult.value.gauges,
+          })}`,
+          lines,
+        )
+      ) {
+        return [];
+      }
+      if (!this.commitWindow(operation, snapshot, now)) return [];
       return lines;
     } catch {
-      this.recordCollectorFailure(timerGeneration);
+      if (this.ownsFlush(operation)) {
+        operation.collectorFailures = incrementBounded(operation.collectorFailures);
+        this.collectorFailures = operation.collectorFailures;
+        this.outputFailures = operation.outputFailures;
+      }
       return [];
     } finally {
-      this.flushing = false;
+      this.finishFlush(operation);
     }
   }
 
-  private emitLine(line: string, lines: string[], timerGeneration?: symbol): void {
-    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return;
+  private beginFlush(authority: FlushAuthority): FlushOperation | null {
+    if (!this.ownsFlushAuthority(authority) || this.flushOwner !== null) return null;
+    const operation: FlushOperation = {
+      ...authority,
+      collectorFailures: authority.seedCollectorFailures ?? this.collectorFailures,
+      outputFailures: authority.seedOutputFailures ?? this.outputFailures,
+      outputClaims: new Set(authority.claimedOutputs),
+      eventLoopResetClaimed: authority.eventLoopResetClaimed === true,
+    };
+    this.flushOwner = operation;
+    this.flushFrames.add(operation);
+    return operation;
+  }
+
+  private finishFlush(operation: FlushOperation): void {
+    this.flushFrames.delete(operation);
+    if (this.flushOwner === operation) this.flushOwner = null;
+    this.startPendingRestart();
+  }
+
+  private ownsFlushAuthority(authority: FlushAuthority): boolean {
+    if (authority.kind === "running") {
+      return this.state === "running" && this.runningGeneration === authority.generation;
+    }
+    return this.state === "stopping" && this.stopGeneration === authority.generation;
+  }
+
+  private ownsFlush(operation: FlushOperation): boolean {
+    return this.flushOwner === operation && this.ownsFlushAuthority(operation);
+  }
+
+  private startPendingRestart(): void {
+    if (
+      !this.restartPending ||
+      this.state !== "stopped" ||
+      this.flushFrames.size !== 0 ||
+      this.injectedBoundaryDepth !== 0
+    ) {
+      return;
+    }
+    this.restartPending = false;
+    this.start();
+  }
+
+  private injectedBoundary<T>(callback: () => T): T {
+    this.injectedBoundaryDepth++;
+    try {
+      return callback();
+    } finally {
+      this.injectedBoundaryDepth--;
+      this.startPendingRestart();
+    }
+  }
+
+  private snapshotWindow(now: number): WindowSnapshot {
+    return {
+      series: new Map([...this.series].map(([key, series]) => [key, cloneSeries(series)])),
+      activeRequests: this.active.size,
+      activeRequestAgeMaxMs: [...this.active.values()].reduce(
+        (max, request) => Math.max(max, now - request.startedAt),
+        0,
+      ),
+      tcpOpen: this.openTcp,
+      tcpAccepted: this.tcpAccepted,
+      upgradesOpen: this.openUpgrades,
+      upgradesAccepted: this.upgradesAccepted,
+    };
+  }
+
+  private commitWindow(operation: FlushOperation, snapshot: WindowSnapshot, now: number): boolean {
+    if (!this.ownsFlush(operation)) return false;
+    const remainingSeries = subtractSeries(this.series, snapshot.series);
+    if (!this.ownsFlush(operation)) return false;
+    this.series = remainingSeries;
+    if (!this.ownsFlush(operation)) return false;
+    this.tcpAccepted = Math.max(0, this.tcpAccepted - snapshot.tcpAccepted);
+    if (!this.ownsFlush(operation)) return false;
+    this.upgradesAccepted = Math.max(0, this.upgradesAccepted - snapshot.upgradesAccepted);
+    if (!this.ownsFlush(operation)) return false;
+    this.windowStartedAt = now;
+    if (!this.ownsFlush(operation)) return false;
+    this.collectorFailures = operation.collectorFailures;
+    if (!this.ownsFlush(operation)) return false;
+    this.outputFailures = operation.outputFailures;
+    return true;
+  }
+
+  private emitOwnedLine(
+    operation: FlushOperation,
+    kind: PressureOutputKind,
+    line: string,
+    lines: string[],
+  ): boolean {
+    if (!this.ownsFlush(operation)) return false;
+    let write: (line: string) => void;
+    try {
+      write = this.injectedBoundary(() => this.write);
+    } catch {
+      if (!this.ownsFlush(operation)) return false;
+      operation.outputFailures = incrementBounded(operation.outputFailures);
+      if (!this.ownsFlush(operation)) return false;
+      lines.push(line);
+      return true;
+    }
+    if (!this.ownsFlush(operation)) return false;
+    operation.outputClaims.add(kind);
+    try {
+      this.injectedBoundary(() => Reflect.apply(write, this, [line]));
+    } catch {
+      if (!this.ownsFlush(operation)) return false;
+      operation.outputFailures = incrementBounded(operation.outputFailures);
+    }
+    if (!this.ownsFlush(operation)) return false;
     lines.push(line);
-    try {
-      this.write(line);
-    } catch {
-      if (
-        this.state !== "stopped" &&
-        (timerGeneration === undefined || this.ownsTimerGeneration(timerGeneration))
-      ) {
-        this.outputFailures = incrementBounded(this.outputFailures);
-      }
-    }
+    return true;
   }
 
-  private readGauges(timerGeneration?: symbol): PressureGaugeCollection {
+  private readOwnedGauges(operation: FlushOperation): OwnedValue<PressureGaugeCollection> {
     const gauges = emptyPressureGaugeSnapshot();
-    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
-      return { gauges, failures: 0 };
-    }
+    if (!this.ownsFlush(operation)) return { owned: false, value: { gauges, failures: 0 } };
+    let collect: (resetIntervalMaximum: boolean) => PressureGaugeCollection;
     try {
-      const collected = this.collectGauges(true);
-      if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
-        return { gauges, failures: 0 };
-      }
+      collect = this.injectedBoundary(() => this.collectGauges);
+    } catch {
+      return this.ownedCollectorFallback(operation, { gauges, failures: 0 });
+    }
+    if (!this.ownsFlush(operation)) return { owned: false, value: { gauges, failures: 0 } };
+    let collected: PressureGaugeCollection;
+    try {
+      collected = this.injectedBoundary(() => Reflect.apply(collect, this, [true]));
+    } catch {
+      return this.ownedCollectorFallback(operation, { gauges, failures: 0 });
+    }
+    if (!this.ownsFlush(operation)) return { owned: false, value: { gauges, failures: 0 } };
+    try {
+      const collectedGauges = this.injectedBoundary(() => collected.gauges);
+      if (!this.ownsFlush(operation)) return { owned: false, value: { gauges, failures: 0 } };
       for (const name of PRESSURE_GAUGE_NAMES) {
-        if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
-          return { gauges, failures: 0 };
-        }
-        gauges[name] = nonNegativeInteger(collected.gauges[name]);
+        const value = this.injectedBoundary(() => collectedGauges[name]);
+        if (!this.ownsFlush(operation)) return { owned: false, value: { gauges, failures: 0 } };
+        gauges[name] = nonNegativeInteger(value);
       }
-      if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) {
-        return { gauges, failures: 0 };
+      const failures = this.injectedBoundary(() => collected.failures);
+      if (!this.ownsFlush(operation)) return { owned: false, value: { gauges, failures: 0 } };
+      return { owned: true, value: { gauges, failures: nonNegativeInteger(failures) } };
+    } catch {
+      return this.ownedCollectorFallback(operation, { gauges, failures: 0 });
+    }
+  }
+
+  private readOwnedEventLoopDelay(operation: FlushOperation): OwnedValue<number> {
+    if (!this.ownsFlush(operation)) return { owned: false, value: 0 };
+    try {
+      const monitor = this.injectedBoundary(() => this.eventLoopDelay);
+      if (!this.ownsFlush(operation)) return { owned: false, value: 0 };
+      const max = this.injectedBoundary(() => monitor.max);
+      if (!this.ownsFlush(operation)) return { owned: false, value: 0 };
+      return {
+        owned: true,
+        value: Number.isFinite(max) ? Math.max(0, Math.round(max / 1e6)) : 0,
+      };
+    } catch {
+      return this.ownedCollectorFallback(operation, 0);
+    }
+  }
+
+  private resetOwnedEventLoopDelay(operation: FlushOperation): boolean {
+    if (!this.ownsFlush(operation)) return false;
+    let monitor: EventLoopDelayMonitor;
+    try {
+      monitor = this.injectedBoundary(() => this.eventLoopDelay);
+    } catch {
+      return this.ownedCollectorFallback(operation, true).owned;
+    }
+    if (!this.ownsFlush(operation)) return false;
+    let reset: () => void;
+    try {
+      reset = this.injectedBoundary(() => monitor.reset);
+    } catch {
+      return this.ownedCollectorFallback(operation, true).owned;
+    }
+    if (!this.ownsFlush(operation)) return false;
+    operation.eventLoopResetClaimed = true;
+    try {
+      this.injectedBoundary(() => Reflect.apply(reset, monitor, []));
+    } catch {
+      return this.ownedCollectorFallback(operation, true).owned;
+    }
+    return this.ownsFlush(operation);
+  }
+
+  private readOwnedNow(operation: FlushOperation, fallback: number): OwnedValue<number> {
+    if (!this.ownsFlush(operation)) return { owned: false, value: fallback };
+    let now: () => number;
+    try {
+      now = this.injectedBoundary(() => this.now);
+    } catch {
+      return this.ownedCollectorFallback(operation, fallback);
+    }
+    if (!this.ownsFlush(operation)) return { owned: false, value: fallback };
+    try {
+      const value = this.injectedBoundary(() => Reflect.apply(now, this, []));
+      if (!this.ownsFlush(operation)) return { owned: false, value: fallback };
+      return { owned: true, value: Number.isFinite(value) ? value : fallback };
+    } catch {
+      return this.ownedCollectorFallback(operation, fallback);
+    }
+  }
+
+  private ownedCollectorFallback<T>(operation: FlushOperation, fallback: T): OwnedValue<T> {
+    if (!this.ownsFlush(operation)) return { owned: false, value: fallback };
+    operation.collectorFailures = incrementBounded(operation.collectorFailures);
+    return { owned: this.ownsFlush(operation), value: fallback };
+  }
+
+  private ownsRunningGeneration(generation: symbol): boolean {
+    return this.state === "running" && this.runningGeneration === generation;
+  }
+
+  private readRunningNow(generation: symbol, fallback: number): OwnedValue<number> {
+    if (!this.ownsRunningGeneration(generation)) return { owned: false, value: fallback };
+    let now: () => number;
+    try {
+      now = this.injectedBoundary(() => this.now);
+    } catch {
+      if (!this.ownsRunningGeneration(generation)) return { owned: false, value: fallback };
+      this.recordCollectorFailure();
+      return { owned: true, value: fallback };
+    }
+    if (!this.ownsRunningGeneration(generation)) return { owned: false, value: fallback };
+    try {
+      const value = this.injectedBoundary(() => Reflect.apply(now, this, []));
+      if (!this.ownsRunningGeneration(generation)) return { owned: false, value: fallback };
+      return { owned: true, value: Number.isFinite(value) ? value : fallback };
+    } catch {
+      if (!this.ownsRunningGeneration(generation)) return { owned: false, value: fallback };
+      this.recordCollectorFailure();
+      return { owned: true, value: fallback };
+    }
+  }
+
+  private resetRunningEventLoopDelay(generation: symbol): boolean {
+    if (!this.ownsRunningGeneration(generation)) return false;
+    try {
+      const monitor = this.injectedBoundary(() => this.eventLoopDelay);
+      if (!this.ownsRunningGeneration(generation)) return false;
+      const reset = this.injectedBoundary(() => monitor.reset);
+      if (!this.ownsRunningGeneration(generation)) return false;
+      this.injectedBoundary(() => Reflect.apply(reset, monitor, []));
+      return this.ownsRunningGeneration(generation);
+    } catch {
+      if (!this.ownsRunningGeneration(generation)) return false;
+      this.recordCollectorFailure();
+      return true;
+    }
+  }
+
+  private enableRunningEventLoopDelay(generation: symbol): boolean {
+    if (!this.ownsRunningGeneration(generation)) return false;
+    try {
+      const monitor = this.injectedBoundary(() => this.eventLoopDelay);
+      if (!this.ownsRunningGeneration(generation)) return false;
+      const enable = this.injectedBoundary(() => monitor.enable);
+      if (!this.ownsRunningGeneration(generation)) return false;
+      this.injectedBoundary(() => Reflect.apply(enable, monitor, []));
+      return this.ownsRunningGeneration(generation);
+    } catch {
+      if (!this.ownsRunningGeneration(generation)) return false;
+      this.recordCollectorFailure();
+      return true;
+    }
+  }
+
+  private disableStoppingEventLoopDelay(generation: symbol): void {
+    if (this.state !== "stopping" || this.stopGeneration !== generation) return;
+    try {
+      const monitor = this.injectedBoundary(() => this.eventLoopDelay);
+      if (this.state !== "stopping" || this.stopGeneration !== generation) return;
+      const disable = this.injectedBoundary(() => monitor.disable);
+      if (this.state !== "stopping" || this.stopGeneration !== generation) return;
+      this.injectedBoundary(() => Reflect.apply(disable, monitor, []));
+    } catch {
+      if (this.state === "stopping" && this.stopGeneration === generation) {
+        this.recordCollectorFailure();
       }
-      return { gauges, failures: nonNegativeInteger(collected.failures) };
-    } catch {
-      this.recordCollectorFailure(timerGeneration);
-      return { gauges, failures: 0 };
     }
   }
 
-  private readEventLoopDelay(timerGeneration?: symbol): number {
-    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return 0;
-    try {
-      const max = this.eventLoopDelay.max;
-      if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return 0;
-      return Number.isFinite(max) ? Math.max(0, Math.round(max / 1e6)) : 0;
-    } catch {
-      this.recordCollectorFailure(timerGeneration);
-      return 0;
+  private recordCollectorFailure(): void {
+    if (this.state === "stopped") return;
+    const operation = this.flushOwner;
+    if (operation && this.ownsFlush(operation)) {
+      operation.collectorFailures = incrementBounded(operation.collectorFailures);
+      return;
     }
+    this.collectorFailures = incrementBounded(this.collectorFailures);
   }
 
-  private resetEventLoopDelay(timerGeneration?: symbol): void {
-    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return;
-    try {
-      this.eventLoopDelay.reset();
-    } catch {
-      this.recordCollectorFailure(timerGeneration);
-    }
-  }
-
-  private readNow(fallback: number, timerGeneration?: symbol): number {
-    if (timerGeneration !== undefined && !this.ownsTimerGeneration(timerGeneration)) return fallback;
+  private readNow(fallback: number): number {
     try {
       const value = this.now();
       return Number.isFinite(value) ? value : fallback;
     } catch {
-      this.recordCollectorFailure(timerGeneration);
+      this.recordCollectorFailure();
       return fallback;
     }
-  }
-
-  private recordCollectorFailure(timerGeneration?: symbol): void {
-    if (
-      this.state !== "stopped" &&
-      (timerGeneration === undefined || this.ownsTimerGeneration(timerGeneration))
-    ) {
-      this.collectorFailures = incrementBounded(this.collectorFailures);
-    }
-  }
-
-  private ownsTimerGeneration(generation: symbol): boolean {
-    return this.state === "running" && this.timerGeneration === generation;
-  }
-
-  private canContinueFlush(expectedState: "running" | "stopping", timerGeneration?: symbol): boolean {
-    return (
-      this.state === expectedState &&
-      (timerGeneration === undefined || this.timerGeneration === timerGeneration)
-    );
   }
 
   private ownSocketClose(server: Server, socket: Socket | Duplex, kind: "tcp" | "upgrade"): boolean {
