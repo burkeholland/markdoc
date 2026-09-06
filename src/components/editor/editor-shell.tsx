@@ -13,6 +13,7 @@ import type { CodeApi } from "@/editor/codemirror/api";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
+import { activateHighlight } from "@/editor/highlight-activation";
 import { api, ApiError, apiErrorText, type SyncStatusDto } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -396,15 +397,8 @@ export function EditorShell({
   }, [canDockPanel]);
 
   const onHighlightClick = useCallback(
-    (kind: string, id: string | null) => {
-      if (!id) return;
-      if (kind.startsWith("comment")) {
-        session.setActiveComment(id);
-        openAutomaticComments();
-      } else if (kind.startsWith("suggest")) {
-        session.setActiveSuggestion(id);
-        openAutomaticComments();
-      }
+    (kind: string, id: string | null, sourcePosition: number) => {
+      if (activateHighlight(session, kind, id, sourcePosition)) openAutomaticComments();
     },
     [session, openAutomaticComments],
   );

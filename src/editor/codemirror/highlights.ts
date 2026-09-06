@@ -1,5 +1,6 @@
 import { StateEffect, StateField, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
+import { elementEditorRange, eventHighlightTarget, type HighlightClickHandler } from "../highlight-activation";
 
 /** A highlighted range in source coordinates, shared by both editing surfaces. */
 export interface SourceHighlight {
@@ -81,14 +82,31 @@ export function sourceHighlights(): Extension {
 }
 
 /** Hook for clicks on highlighted ranges (for example to open a comment thread). */
-export function highlightClickHandler(onClick: (kind: string, id: string | null) => void): Extension {
+export function highlightClickHandler(onClick: HighlightClickHandler): Extension {
   return EditorView.domEventHandlers({
-    mousedown(event) {
-      const target = (event.target as HTMLElement).closest("[data-highlight-kind]") as HTMLElement | null;
+    mousedown(event, view) {
+      if (event.button !== 0 || event.ctrlKey) return false;
+      const target = eventHighlightTarget(view.dom, event.target);
       if (!target) return false;
-      const kind = target.getAttribute("data-highlight-kind")!;
-      if (kind === "focus") return false;
-      onClick(kind, target.getAttribute("data-highlight-id"));
+      const sourcePosition = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (sourcePosition === null) return false;
+      const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
+      const current = view.state.field(highlightsField, false);
+      if (!range || !current) return false;
+      let ownsRange = false;
+      current.deco.between(range.from, range.to, (from, to, decoration) => {
+        const attributes = decoration.spec.attributes as Record<string, string> | undefined;
+        if (
+          from <= range.from &&
+          range.to <= to &&
+          attributes?.["data-highlight-kind"] === target.kind &&
+          attributes["data-highlight-id"] === target.id
+        ) {
+          ownsRange = true;
+        }
+      });
+      if (!ownsRange) return false;
+      onClick(target.kind, target.id, sourcePosition);
       return false;
     },
   });

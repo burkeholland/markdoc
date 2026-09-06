@@ -6,6 +6,7 @@ import { markdownBindingKey } from "../sync/markdown-binding";
 import { SUGGESTIONS_ORIGIN } from "../collab/suggestions";
 import type { TextOp } from "../sync/text-diff";
 import type { SourceHighlight } from "../codemirror/highlights";
+import { elementEditorRange, eventHighlightTarget, type HighlightClickHandler } from "../highlight-activation";
 import { isRefresh, refreshNow, scheduleRefresh } from "./refresh";
 
 const key = new PluginKey<DecorationSet>("sourceHighlights");
@@ -82,6 +83,9 @@ function build(session: CollabSession, doc: PMNode, getFocus: () => number | nul
         class: classFor(h),
         "data-highlight-kind": h.kind,
         ...(h.id ? { "data-highlight-id": h.id } : {}),
+      }, {
+        highlightKind: h.kind,
+        highlightId: h.id,
       }),
     );
   }
@@ -117,7 +121,7 @@ function refreshSignature(session: CollabSession, getFocus: () => number | null)
 }
 
 export interface HighlightHandlers {
-  onHighlightClick?: (kind: string, id: string | null) => void;
+  onHighlightClick?: HighlightClickHandler;
   /** Source offset of the code pane's cursor while the code pane is active, for the focus indicator. */
   getFocusSource?: () => number | null;
 }
@@ -139,12 +143,19 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
     },
     props: {
       decorations: (state) => key.getState(state),
-      handleClick(view, _pos, event) {
-        const target = (event.target as HTMLElement).closest("[data-highlight-kind]") as HTMLElement | null;
+      handleClick(view, pos, event) {
+        if (event.button !== 0 || event.ctrlKey) return false;
+        const target = eventHighlightTarget(view.dom, event.target);
         if (!target) return false;
-        const kind = target.getAttribute("data-highlight-kind")!;
-        if (kind === "focus") return false;
-        handlers.onHighlightClick?.(kind, target.getAttribute("data-highlight-id"));
+        const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
+        const ownsRange =
+          range &&
+          key
+            .getState(view.state)
+            ?.find(range.from, range.to, (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id)
+            .some((decoration) => decoration.from <= range.from && range.to <= decoration.to);
+        if (!ownsRange) return false;
+        handlers.onHighlightClick?.(target.kind, target.id, session.binding.getSourceMap().pmToSrc(pos));
         return false;
       },
     },
