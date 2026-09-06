@@ -30,6 +30,23 @@ const inComponentsLayer = (r: Rule) => r.parents.some((p) => /^@layer\s+componen
 const inConditional = (r: Rule) => r.parents.some((p) => /^@(media|supports|container)\b/.test(p));
 const isSelector = (r: Rule) => !r.prelude.startsWith("@") && r.prelude !== "from" && r.prelude !== "to";
 
+function appliedUtilities(selector: string): string[] {
+  const rule = rules.find((candidate) => candidate.prelude === selector);
+  const apply = rule?.body.match(/@apply\s+([^;]+);/);
+  if (!apply) throw new Error(`Missing @apply rule for ${selector}`);
+  return apply[1].split(/\s+/);
+}
+
+function utilityPixels(utilities: string[], prefix: string): number {
+  const token = utilities.find((utility) => utility.startsWith(`${prefix}-`));
+  const value = token?.slice(prefix.length + 1);
+  if (!value) throw new Error(`Missing ${prefix} utility in ${utilities.join(" ")}`);
+  const arbitrary = /^\[(\d+(?:\.\d+)?)px\]$/.exec(value);
+  if (arbitrary) return Number(arbitrary[1]);
+  if (!/^\d+(?:\.\d+)?$/.test(value)) throw new Error(`Unsupported ${prefix} utility: ${token}`);
+  return Number(value) * 4;
+}
+
 function unlayeredComponentRules(list: Rule[]): string[] {
   const out: string[] = [];
   for (const r of list) {
@@ -93,5 +110,35 @@ describe("globals.css cascade layers", () => {
     const parsed = parseRules(sample);
     expect(unlayeredComponentRules(parsed)).toEqual(["line 3: .input", "line 4: .btn-x:hover"]);
     expect(unlayeredApply(parsed)).toEqual(["line 3: .input"]);
+  });
+
+  it("keeps the switch thumb centered at both ends of its 44px track", () => {
+    const track = appliedUtilities(".switch");
+    const thumb = appliedUtilities(".switch::after");
+    const checkedThumb = appliedUtilities('.switch[aria-checked="true"]::after');
+    const geometry = {
+      trackWidth: utilityPixels(track, "w"),
+      trackHeight: utilityPixels(track, "h"),
+      border: track.includes("border") ? 1 : 0,
+      inset: utilityPixels(thumb, "left"),
+      thumbWidth: utilityPixels(thumb, "w"),
+      thumbHeight: utilityPixels(thumb, "h"),
+      translation: utilityPixels(checkedThumb, "translate-x"),
+    };
+    const uncheckedLeftGap = geometry.border + geometry.inset;
+    const checkedRightGap =
+      geometry.trackWidth - geometry.border - geometry.inset - geometry.thumbWidth - geometry.translation;
+
+    expect(geometry).toEqual({
+      trackWidth: 44,
+      trackHeight: 24,
+      border: 1,
+      inset: 2,
+      thumbWidth: 16,
+      thumbHeight: 16,
+      translation: 22,
+    });
+    expect({ uncheckedLeftGap, checkedRightGap }).toEqual({ uncheckedLeftGap: 3, checkedRightGap: 3 });
+    expect(uncheckedLeftGap).toBe(checkedRightGap);
   });
 });
