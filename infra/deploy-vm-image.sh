@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-  echo 'usage: deploy-vm-image.sh <registry> <image-by-digest> <app-version> <tenant-id>' >&2
+if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
+  echo 'usage: deploy-vm-image.sh <registry> <image-by-digest> <app-version> <tenant-id> [operation-id]' >&2
   exit 2
 fi
 
@@ -10,6 +10,14 @@ registry="$1"
 image="$2"
 app_version="$3"
 tenant_id="$4"
+operation_id="${5:-}"
+if [ -n "$operation_id" ]; then
+  if ! [[ "$operation_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo 'operation id must be a UUID' >&2
+    exit 2
+  fi
+  printf 'markdoc-vm-image-operation:%s\n' "$operation_id"
+fi
 
 case "$image" in
   "${registry}/markdoc@sha256:"*) ;;
@@ -48,7 +56,7 @@ cleanup() {
         if [ -n "$health" ] && python3 -c '
 import json, sys
 health = json.loads(sys.argv[1])
-raise SystemExit(0 if health.get("ok") and health.get("db") and health.get("collab") else 1)
+raise SystemExit(0 if all(health.get(key) is True for key in ("ok", "db", "collab")) else 1)
 ' "$health"; then
           rollback_ready=true
           break
@@ -64,6 +72,13 @@ raise SystemExit(0 if health.get("ok") and health.get("db") and health.get("coll
     fi
   fi
   rm -rf "$rollback_dir"
+  if [ "$status" -eq 0 ] && [ "$deployment_succeeded" = true ]; then
+    printf '%s\n' "$health"
+    echo markdoc-vm-image-ready
+    if [ -n "$operation_id" ]; then
+      printf 'markdoc-vm-image-operation-ready:%s\n' "$operation_id"
+    fi
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -150,11 +165,9 @@ for attempt in $(seq 1 40); do
 import json, sys
 health = json.loads(sys.argv[1])
 expected = sys.argv[2]
-raise SystemExit(0 if health.get("ok") and health.get("db") and health.get("collab") and health.get("version") == expected else 1)
+raise SystemExit(0 if all(health.get(key) is True for key in ("ok", "db", "collab")) and health.get("version") == expected else 1)
 ' "$health" "$app_version"; then
-    printf '%s\n' "$health"
     deployment_succeeded=true
-    echo markdoc-vm-image-ready
     exit 0
   fi
   sleep 3
