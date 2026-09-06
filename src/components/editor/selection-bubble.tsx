@@ -3,7 +3,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
-import { Plugin } from "prosemirror-state";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
@@ -134,18 +133,18 @@ export function SelectionBubble({
     let disposed = false;
     let pointerDown = false;
     let frame: number | null = null;
-    let fullscreenWidget: Plugin | null = null;
+    let fullscreenWidget: {
+      decorations: NonNullable<EditorView["props"]["decorations"]>;
+      previous: EditorView["props"]["decorations"];
+    } | null = null;
     const observedContent = new Set<Element>();
 
     const removeFullscreenWidget = () => {
-      if (!fullscreenWidget) return;
-      if (!view.isDestroyed) {
-        const state = view.state;
-        if (state.plugins.includes(fullscreenWidget)) {
-          view.updateState(state.reconfigure({ plugins: state.plugins.filter((plugin) => plugin !== fullscreenWidget) }));
-        }
-      }
+      const owned = fullscreenWidget;
       fullscreenWidget = null;
+      if (owned && !view.isDestroyed && view.props.decorations === owned.decorations) {
+        view.setProps({ decorations: owned.previous });
+      }
     };
     const hide = () => {
       if (disposed) return;
@@ -177,19 +176,20 @@ export function SelectionBubble({
         if (target === editor) {
           // A portal inside editable content must be a widget: otherwise ProseMirror removes
           // its DOM, reparses its contents, and handles the toolbar's keyboard events as edits.
-          fullscreenWidget ??= new Plugin({
-            props: {
-              decorations(state) {
-                if (disposed) return DecorationSet.empty;
-                return DecorationSet.create(state.doc, [
-                  Decoration.widget(0, layer, { side: -1, ignoreSelection: true, stopEvent: () => true }),
-                ]);
-              },
-            },
-          });
-          const state = view.state;
-          if (!state.plugins.includes(fullscreenWidget)) {
-            view.updateState(state.reconfigure({ plugins: [...state.plugins, fullscreenWidget] }));
+          // Changing the plugin array restarts every plugin view, including suggesting,
+          // pending uploads and slash-menu ownership. A direct decoration leaves them intact.
+          if (!fullscreenWidget || view.props.decorations !== fullscreenWidget.decorations) {
+            const previous = view.props.decorations;
+            const decorations: NonNullable<EditorView["props"]["decorations"]> = (state) => {
+              if (disposed || fullscreenWidget?.decorations !== decorations) return DecorationSet.empty;
+              let result = DecorationSet.create(state.doc, [
+                Decoration.widget(0, layer, { side: -1, ignoreSelection: true, stopEvent: () => true }),
+              ]);
+              previous?.call(view, state)?.forEachSet((set) => { result = result.add(state.doc, set.find()); });
+              return result;
+            };
+            fullscreenWidget = { decorations, previous };
+            view.setProps({ decorations });
           }
         } else {
           removeFullscreenWidget();

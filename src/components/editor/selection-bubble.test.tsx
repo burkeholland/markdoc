@@ -5,13 +5,27 @@ import { act, cleanup, fireEvent, render, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import type { SetStateAction } from "react";
 import { EditorState, TextSelection } from "prosemirror-state";
-import { DecorationSet, EditorView } from "prosemirror-view";
-import type { CollabSession } from "@/editor/collab/session";
+import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
+import type * as Y from "yjs";
+import { CollabSession } from "@/editor/collab/session";
+import { makeCollabUser } from "@/editor/collab/shared";
+import { SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
 import { schema } from "@/editor/markdown/schema";
+import { createRichEditorState } from "@/editor/prosemirror/setup";
 import { EditorActions, EMPTY_FORMAT } from "./actions";
 import { SelectionBubble } from "./selection-bubble";
 
 const screen = within(document.documentElement);
+vi.mock("@hocuspocus/provider", async () => {
+  const { Awareness } = await import("y-protocols/awareness");
+  return {
+    HocuspocusProvider: class {
+      awareness: InstanceType<typeof Awareness>;
+      constructor(options: { document: Y.Doc }) { this.awareness = new Awareness(options.document); }
+      destroy() { this.awareness.destroy(); }
+    },
+  };
+});
 const stateWrites = vi.hoisted(() => ({ count: 0 }));
 vi.mock("react", async (original) => {
   const react = await original<typeof import("react")>();
@@ -234,6 +248,83 @@ function fixture() {
   };
 }
 
+function productionFixture() {
+  const source = "alpha beta gamma";
+  const getToken = vi.fn(async (): Promise<string> => { throw new Error("Unexpected connection"); });
+  const session = new CollabSession({
+    docId: "toolbar-lifecycle",
+    user: makeCollabUser("local", "Local"),
+    role: "owner",
+    autoConnect: false,
+    deferLocal: true,
+    getToken,
+  });
+  session.keepAlive();
+  session.binding.releaseRemoteSync();
+  session.ytext.insert(0, source);
+  session.setMode("suggesting");
+  session.setActiveSurface("rich");
+  const state = createRichEditorState(session, {
+    slashMenu: { onState: vi.fn() },
+    uploadImage: async () => { throw new Error("Unexpected upload"); },
+  });
+  const constructors = state.plugins.filter((plugin) => plugin.spec.view).map((plugin) => vi.spyOn(plugin.spec, "view"));
+  const scroller = document.createElement("div");
+  document.body.append(scroller);
+  const decorations = vi.fn((current: EditorState) => DecorationSet.create(current.doc, [
+    Decoration.inline(1, 2, { "data-existing-decoration": "" }),
+  ]));
+  const view = new EditorView(scroller, { state, decorations });
+  const destroys = constructors.flatMap((constructor) => {
+    const pluginView = constructor.mock.results[0].value;
+    return pluginView.destroy ? [vi.spyOn(pluginView, "destroy")] : [];
+  });
+  Object.defineProperty(scroller, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 100, 800, 500) });
+  Object.defineProperty(view.dom, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 0, 800, 600) });
+  vi.spyOn(view, "coordsAtPos").mockImplementation((pos) => ({ left: 100 + pos, right: 100 + pos, top: 200, bottom: 220 }));
+  const origins: unknown[] = [];
+  session.ytext.observe((event) => { origins.push(event.transaction.origin); });
+  const actions = new EditorActions(session, vi.fn());
+  actions.setRichView(view);
+  const props = { view, session, actions, format: EMPTY_FORMAT, containerRef: { current: scroller }, onLink: vi.fn(), onComment: vi.fn() };
+  const select = () => {
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 6, 1)));
+    view.focus();
+  };
+  const edit = async (insert: string, from = session.ytext.length, to = from) => {
+    await act(async () => {
+      const map = session.binding.getSourceMap();
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, map.srcToPm(from), map.srcToPm(to))).insertText(insert));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const cursor = session.binding.getSourceMap().srcToPm(from + insert.length);
+    expect(view.state.selection.anchor, "suggested edit caret anchor").toBe(cursor);
+    expect(view.state.selection.head, "suggested edit caret head").toBe(cursor);
+    expect(view.hasFocus(), "suggested edit retains focus").toBe(true);
+  };
+  const assertTracked = (raw: string) => {
+    expect(session.suggestions.cleanText() === source, "accepted document must remain unchanged").toBe(true);
+    expect(session.ytext.toString() === raw, "exact shared-text character accounting").toBe(true);
+    expect(view.state.doc.textContent === raw, "exact rich-text character accounting").toBe(true);
+    expect(origins.every((origin) => origin === SUGGESTIONS_ORIGIN), "no direct accepted text transactions").toBe(true);
+  };
+  const assertViewsRetained = () => {
+    expect(view.state.plugins).toBe(state.plugins);
+    expect(session.binding.view).toBe(view);
+    for (const constructor of constructors) expect(constructor).toHaveBeenCalledTimes(1);
+    for (const destroy of destroys) expect(destroy).not.toHaveBeenCalled();
+    expect(view.dom.querySelector("[data-existing-decoration]")).not.toBeNull();
+  };
+  const destroy = () => {
+    view.destroy();
+    session.destroy();
+    scroller.remove();
+    expect(getToken).not.toHaveBeenCalled();
+    for (const dispose of destroys) expect(dispose).toHaveBeenCalledTimes(1);
+  };
+  return { props, view, session, source, decorations, select, edit, assertTracked, assertViewsRetained, destroy };
+}
+
 describe("SelectionBubble geometry scheduling", () => {
   it("coalesces all owned signals, observes selected content, and cleans exact replacement owners", () => {
     const env = environment();
@@ -430,8 +521,9 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(view.dom.querySelector("[data-selection-bubble-layer]")).not.toBeNull();
       fireEvent.keyDown(screen.getByRole("button", { name: "Bold" }), { key: "Enter" });
       expect(editorKeydown).not.toHaveBeenCalled();
-      const widgetPlugin = view.state.plugins.find((plugin) => !initialPlugins.includes(plugin))!;
-      expect(widgetPlugin).toBeDefined();
+      const widgetDecorations = view.props.decorations!;
+      expect(widgetDecorations.call(view, view.state)).not.toBe(DecorationSet.empty);
+      expect(view.state.plugins).toBe(initialPlugins);
       env.enterFullscreen(null);
       env.flush();
       expect(view.state.plugins).toEqual(initialPlugins);
@@ -441,10 +533,123 @@ describe("SelectionBubble geometry scheduling", () => {
       rendered.unmount();
       expect(view.state.plugins).toEqual(initialPlugins);
       expect(view.state.doc.eq(initialDoc)).toBe(true);
-      expect(widgetPlugin.props.decorations?.call(widgetPlugin, view.state)).toBe(DecorationSet.empty);
+      expect(widgetDecorations.call(view, view.state)).toBe(DecorationSet.empty);
     } finally {
       rendered.unmount();
       view.destroy();
+    }
+  });
+
+  it("production suggesting survives repeated fullscreen entry/exit and toolbar removal", async () => {
+    // The production binding and every plugin view run with the real editor DOM observer.
+    const f = productionFixture();
+    const env = environment({ popover: true });
+    f.select();
+    const rendered = render(<SelectionBubble {...f.props} />);
+    try {
+      env.flush();
+      await f.edit("!");
+      f.assertTracked(`${f.source}!`);
+      const typingGroup = f.session.suggestions.groups()[0].id;
+      const transition = (target: Element | null) => {
+        f.select();
+        const selection = f.view.state.selection.toJSON();
+        env.enterFullscreen(target);
+        env.flush();
+        expect(f.view.state.selection.toJSON()).toEqual(selection);
+        expect(f.view.hasFocus()).toBe(true);
+        expect(document.querySelector("[data-selection-bubble-layer]")?.parentElement).toBe(target ?? document.documentElement);
+      };
+
+      transition(f.view.dom);
+      await f.edit("B", 6, 10);
+      f.assertTracked("alpha Bbeta gamma!");
+      transition(null);
+      await f.edit("?");
+      f.assertTracked("alpha Bbeta gamma!?");
+      let suffix = "!?";
+      for (const [during, after] of [["1", "a"], ["2", "b"]]) {
+        transition(f.view.dom);
+        await f.edit(during);
+        suffix += during;
+        f.assertTracked(`alpha Bbeta gamma${suffix}`);
+        transition(null);
+        await f.edit(after);
+        suffix += after;
+        f.assertTracked(`alpha Bbeta gamma${suffix}`);
+      }
+      const groups = f.session.suggestions.groups();
+      expect(groups).toHaveLength(3);
+      expect(groups.find((group) => group.id === typingGroup)?.after === suffix, "adjacent typing retains its original review group").toBe(true);
+      expect(groups.filter((group) => group.type === "delete" && group.before === "beta")).toHaveLength(1);
+      expect(groups.filter((group) => group.type === "insert" && group.after === "B")).toHaveLength(1);
+      expect(groups.every((group) => !group.outdated && group.authorId === f.session.user.id)).toBe(true);
+      f.assertViewsRetained();
+
+      transition(f.view.dom);
+      rendered.unmount();
+      expect(f.view.props.decorations).toBe(f.decorations);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+      await f.edit("Z");
+      f.assertTracked(`alpha Bbeta gamma${suffix}Z`);
+      f.assertViewsRetained();
+    } finally {
+      rendered.unmount();
+      f.destroy();
+    }
+  });
+
+  it("production suggesting survives toolbar view replacement and destroyed-view unmount", async () => {
+    const first = productionFixture();
+    const second = productionFixture();
+    const env = environment();
+    first.select();
+    const rendered = render(<SelectionBubble {...first.props} />);
+    try {
+      env.enterFullscreen(first.view.dom);
+      env.flush();
+      await first.edit("1");
+      first.assertTracked(`${first.source}1`);
+      first.select();
+      env.flush();
+      const staleDecorations = first.view.props.decorations!;
+      const staleFrames = [...env.capturedFrames];
+      second.select();
+      env.enterFullscreen(second.view.dom);
+      rendered.rerender(<SelectionBubble {...second.props} />);
+      env.flush();
+      expect(first.view.props.decorations).toBe(first.decorations);
+      expect(staleDecorations.call(first.view, first.view.state)).toBe(DecorationSet.empty);
+      for (const callback of staleFrames) callback(0);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
+      await second.edit("2");
+      second.assertTracked(`${second.source}2`);
+      first.assertViewsRetained();
+      second.assertViewsRetained();
+
+      // An intervening direct-prop owner must not be overwritten by toolbar cleanup.
+      const replacementDecorations = vi.fn(() => DecorationSet.empty);
+      second.view.setProps({ decorations: replacementDecorations });
+      rendered.rerender(<SelectionBubble {...second.props} view={null} />);
+      expect(second.view.props.decorations).toBe(replacementDecorations);
+      await second.edit("3");
+      second.assertTracked(`${second.source}23`);
+
+      second.select();
+      rendered.rerender(<SelectionBubble {...second.props} />);
+      env.flush();
+      const destroyedDecorations = second.view.props.decorations!;
+      second.view.destroy();
+      rendered.unmount();
+      expect(destroyedDecorations.call(second.view, second.view.state)).toBe(DecorationSet.empty);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+      first.select();
+      await first.edit("4");
+      first.assertTracked(`${first.source}14`);
+    } finally {
+      rendered.unmount();
+      first.destroy();
+      second.destroy();
     }
   });
 
