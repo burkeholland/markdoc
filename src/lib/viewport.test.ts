@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampToViewport, defaultLayout, effectiveLayout } from "./viewport";
+import { clampToBox, clampToViewport, defaultLayout, effectiveLayout, insetBox, intersectBoxes } from "./viewport";
 
 describe("clampToViewport", () => {
   const vp = { width: 390, height: 844 };
@@ -30,6 +30,32 @@ describe("clampToViewport", () => {
     const r = clampToViewport({ left: 1000, top: 0, width: 100, height: 20 }, { width: 800, height: 600 }, 20);
     expect(r.left).toBe(800 - 20 - 100);
     expect(r.top).toBe(20);
+  });
+});
+
+describe("client-coordinate boxes", () => {
+  it("intersects and insets boxes without producing negative dimensions", () => {
+    expect(
+      intersectBoxes(
+        { left: 10, top: 20, width: 100, height: 80 },
+        { left: 50, top: 0, width: 100, height: 60 },
+      ),
+    ).toEqual({ left: 50, top: 20, width: 60, height: 40 });
+    expect(
+      insetBox(
+        { left: 10, top: 20, width: 20, height: 10 },
+        { top: 8, right: 15, bottom: 8, left: 15 },
+      ),
+    ).toEqual({ left: 25, top: 28, width: 0, height: 0 });
+  });
+
+  it("clamps position and size inside offset bounds", () => {
+    expect(
+      clampToBox(
+        { left: 0, top: 900, width: 300, height: 100 },
+        { left: 40, top: 100, width: 200, height: 400 },
+      ),
+    ).toEqual({ left: 48, top: 392, width: 184, height: 100 });
   });
 });
 
