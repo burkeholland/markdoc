@@ -1,29 +1,334 @@
-import { InputRule, inputRules, textblockTypeInputRule, wrappingInputRule } from "prosemirror-inputrules";
-import { TextSelection, type Plugin } from "prosemirror-state";
-import type { MarkType } from "prosemirror-model";
+import { InputRule, textblockTypeInputRule, wrappingInputRule } from "prosemirror-inputrules";
+import { Mark, type MarkType } from "prosemirror-model";
+import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from "prosemirror-state";
+import { ReplaceStep } from "prosemirror-transform";
+import type { EditorView } from "prosemirror-view";
 import { schema } from "../markdown/schema";
+import { markdownBindingKey } from "../sync/markdown-binding";
 import { findParentNode } from "./utils";
 
+interface MarkMatch {
+  from: number;
+  text: string;
+  marks?: readonly Mark[];
+  underscoreOrigin?: Omit<UnderscoreOrigin, "from" | "to" | "continuationTo">;
+}
+
+type MarkMatchResolver = (state: EditorState, match: RegExpMatchArray, start: number, end: number) => MarkMatch | null;
+
+interface UnderscoreOrigin {
+  from: number;
+  to: number;
+  continuationTo: number;
+  leadingUnderscores: number;
+}
+
+interface MarkdownInputRuleState {
+  activeOrigin: UnderscoreOrigin | null;
+}
+
+interface RunnableInputRule {
+  match: RegExp;
+  handler: (state: EditorState, match: RegExpMatchArray, start: number, end: number) => Transaction | null;
+  inCode: boolean | "only";
+  inCodeMark: boolean | "only";
+}
+
+interface UnderscoreOriginUpdate {
+  remove?: UnderscoreOrigin;
+  add?: UnderscoreOrigin;
+}
+
+interface LocalTextInput {
+  from: number;
+  to: number;
+  text: string;
+}
+
+const inputRuleKey = new PluginKey<MarkdownInputRuleState>("markdownInputRules");
+const UNDERSCORE_ORIGIN_META = "markdownUnderscoreOrigin";
+const localTextInputKey = new PluginKey<LocalTextInput>("markdownLocalTextInput");
+const MAX_MATCH = 500;
+
 /**
- * Typing Markdown inline syntax applies the mark (task #437): `**bold**`, `*em*`, `~~gone~~` and
+ * Typing Markdown inline syntax applies the mark (task #437): `**bold**`, `*em*`, `_em_`, `~~gone~~` and
  * `` `code` `` become the mark the moment the closing delimiter is typed, instead of staying literal
  * and landing in the source escaped (`\*\*bold\*\*`). The optional first group is the character
- * before the opening delimiter, which must not be another delimiter, so `*` never fires halfway
- * through `**bold**`; the typed text goes on unmarked.
+ * before the opening delimiter; each pattern uses it to exclude invalid boundaries, so `*` never fires
+ * halfway through `**bold**` and `_` does not turn an intraword underscore into emphasis.
  */
-function markInputRule(pattern: RegExp, type: MarkType): InputRule {
+function markInputRule(pattern: RegExp, type: MarkType, resolve?: MarkMatchResolver): InputRule {
   return new InputRule(pattern, (state, match, start, end) => {
-    const $start = state.doc.resolve(start);
+    const found = resolve
+      ? resolve(state, match, start, end)
+      : { text: match[3], from: start + match[0].length - match[2].length };
+    if (!found?.text) return null;
+    const $start = state.doc.resolve(found.from);
     if ($start.parent.type.spec.code) return null;
     // Inside a code span the delimiters are literal.
     if (type !== schema.marks.code && schema.marks.code.isInSet($start.marks())) return null;
-    const text = match[3];
-    if (!text || /^\s|\s$/.test(text)) return null;
-    const from = start + match[0].length - match[2].length;
-    const tr = state.tr.insertText(text, from, end);
-    tr.addMark(from, from + text.length, type.create());
+    if (/^\s|\s$/.test(found.text)) return null;
+    const tr = found.marks
+      ? state.tr.replaceWith(found.from, end, schema.text(found.text, found.marks))
+      : state.tr.insertText(found.text, found.from, end);
+    tr.addMark(found.from, found.from + found.text.length, type.create());
+    if (found.underscoreOrigin) {
+      tr.setMeta(UNDERSCORE_ORIGIN_META, {
+        add: {
+          from: found.from,
+          to: found.from + found.text.length,
+          continuationTo: found.from + found.text.length,
+          ...found.underscoreOrigin,
+        },
+      } satisfies UnderscoreOriginUpdate);
+    }
     return tr.removeStoredMark(type);
   });
+}
+
+const isWhitespace = (character: string | undefined): boolean => character === undefined || /\s/u.test(character);
+const isPunctuationOrSymbol = (character: string | undefined): boolean =>
+  character !== undefined && /[\p{P}\p{S}]/u.test(character);
+
+function uniformMarks(state: EditorState, from: number, to: number): readonly Mark[] | null {
+  let marks: readonly Mark[] | null = null;
+  let valid = true;
+  state.doc.nodesBetween(from, to, (node) => {
+    if (!node.isInline) return;
+    if (marks === null) marks = node.marks;
+    else if (!Mark.sameSet(marks, node.marks)) valid = false;
+  });
+  return valid ? (marks ?? []) : null;
+}
+
+function canOpenUnderscoreRun(text: string, from: number, to: number): boolean {
+  const before = text[from - 1];
+  const after = text[to];
+  const leftFlanking =
+    !isWhitespace(after) && (!isPunctuationOrSymbol(after) || isWhitespace(before) || isPunctuationOrSymbol(before));
+  const rightFlanking =
+    !isWhitespace(before) && (!isPunctuationOrSymbol(before) || isWhitespace(after) || isPunctuationOrSymbol(after));
+  return leftFlanking && (!rightFlanking || isPunctuationOrSymbol(before));
+}
+
+function underscoreMarkMatch(state: EditorState, _match: RegExpMatchArray, start: number): MarkMatch | null {
+  const $cursor = state.doc.resolve(start);
+  if (!$cursor.parent.isTextblock || $cursor.parent.type.spec.code) return null;
+  const before = $cursor.parent.textBetween(0, $cursor.parentOffset, "", "\ufffc");
+  // A second or later closing underscore is either literal or handled by delimiter-run recovery.
+  if (before.endsWith("_")) return null;
+  const source = `${before}_`;
+  const closing = source.length - 1;
+  let closingBackslashes = 0;
+  for (let index = closing - 1; index >= 0 && source[index] === "\\"; index--) closingBackslashes++;
+  if (closingBackslashes % 2 === 1) return null;
+
+  for (let index = closing - 1; index >= 0; ) {
+    if (source[index] !== "_") {
+      index--;
+      continue;
+    }
+    const runTo = index + 1;
+    while (index >= 0 && source[index] === "_") index--;
+    const runFrom = index + 1;
+    let openingBackslashes = 0;
+    for (let slash = runFrom - 1; slash >= 0 && source[slash] === "\\"; slash--) openingBackslashes++;
+    if (openingBackslashes > 0 || !canOpenUnderscoreRun(source, runFrom, runTo)) continue;
+
+    const opener = runTo - 1;
+    const text = source.slice(opener + 1, closing);
+    if (!text || /^\s|\s$/.test(text) || /[\\\r\n\ufffc]/.test(text)) continue;
+    const from = $cursor.start() + opener;
+    const marks = uniformMarks(state, from, start);
+    const cursorMarks = state.storedMarks ?? $cursor.marks();
+    if (!marks || !Mark.sameSet(marks, cursorMarks) || schema.marks.code.isInSet(marks)) return null;
+    return {
+      from,
+      text,
+      marks,
+      underscoreOrigin: { leadingUnderscores: runTo - runFrom - 1 },
+    };
+  }
+  return null;
+}
+
+function originMarks(state: EditorState, origin: UnderscoreOrigin): readonly Mark[] | null {
+  const marks = uniformMarks(state, origin.from, origin.to);
+  if (!marks || !schema.marks.em.isInSet(marks)) return null;
+  return marks;
+}
+
+function recoverDoubleUnderscoreRun(
+  state: EditorState,
+  _match: RegExpMatchArray,
+  start: number,
+  end: number,
+): Transaction | null {
+  const pluginState = inputRuleKey.getState(state);
+  if (!pluginState) return null;
+  const $cursor = state.doc.resolve(start);
+
+  const origin = pluginState.activeOrigin;
+  if (
+    !origin ||
+    (origin.continuationTo !== start && origin.continuationTo !== end) ||
+    state.doc.resolve(origin.from).parent !== $cursor.parent ||
+    !originMarks(state, origin) ||
+    origin.to !== start ||
+    origin.leadingUnderscores === 0
+  ) {
+    return null;
+  }
+  // `__word_` first becomes `_` + em(`word`). If another `_` arrives immediately,
+  // restore both consumed delimiters so the unsupported `__word__` shortcut stays literal.
+  const from = origin.from - origin.leadingUnderscores;
+  const prefix = state.doc.textBetween(from, origin.from, "", "\ufffc");
+  if (prefix !== "_".repeat(origin.leadingUnderscores)) return null;
+  const marked = state.doc.textBetween(origin.from, origin.to, "", "\ufffc");
+  const emMarks = originMarks(state, origin)!;
+  const baseMarks = emMarks.filter((mark) => mark.type !== schema.marks.em);
+  const prefixMarks = uniformMarks(state, from, origin.from);
+  if (!prefixMarks || !Mark.sameSet(prefixMarks, baseMarks)) return null;
+  const literal = `${"_".repeat(origin.leadingUnderscores + 1)}${marked}__`;
+  return state.tr
+    .replaceWith(from, end, schema.text(literal, baseMarks))
+    .removeStoredMark(schema.marks.em)
+    .setMeta(UNDERSCORE_ORIGIN_META, { remove: origin } satisfies UnderscoreOriginUpdate);
+}
+
+function recoverAdjacentUnderscoreRun(
+  state: EditorState,
+  _match: RegExpMatchArray,
+  start: number,
+  end: number,
+): Transaction | null {
+  const pluginState = inputRuleKey.getState(state);
+  if (!pluginState) return null;
+  const $cursor = state.doc.resolve(start);
+
+  const origin = pluginState.activeOrigin;
+  if (
+    !origin ||
+    (origin.continuationTo !== start && origin.continuationTo !== end) ||
+    origin.to >= start ||
+    state.doc.resolve(origin.from).parent !== $cursor.parent ||
+    !originMarks(state, origin)
+  ) {
+    return null;
+  }
+  // `_a_b_` has already converted `_a_` when more body text arrives. Restore
+  // that consumed closer inside the expanded emphasis without touching unrelated text.
+  const suffix = state.doc.textBetween(origin.to, start, "", "\ufffc");
+  const first = suffix[0];
+  if (
+    !/[^_]/.test(suffix) ||
+    !suffix.at(-1) ||
+    isWhitespace(suffix.at(-1)) ||
+    (first !== "_" && (isWhitespace(first) || isPunctuationOrSymbol(first))) ||
+    /[\\\r\n\ufffc]/.test(suffix)
+  ) {
+    return null;
+  }
+  const emMarks = originMarks(state, origin)!;
+  const baseMarks = emMarks.filter((mark) => mark.type !== schema.marks.em);
+  const suffixMarks = uniformMarks(state, origin.to, start);
+  if (!suffixMarks || !Mark.sameSet(suffixMarks, baseMarks)) return null;
+  const marked = state.doc.textBetween(origin.from, origin.to, "", "\ufffc");
+  const text = `${marked}_${suffix}`;
+  const tr = state.tr.replaceWith(origin.from, end, schema.text(text, baseMarks));
+  tr.addMark(origin.from, origin.from + text.length, schema.marks.em.create());
+  return tr
+    .removeStoredMark(schema.marks.em)
+    .setMeta(UNDERSCORE_ORIGIN_META, {
+      remove: origin,
+      add: {
+        ...origin,
+        to: origin.from + text.length,
+        continuationTo: origin.from + text.length,
+      },
+    } satisfies UnderscoreOriginUpdate);
+}
+
+function runInputRules(
+  view: EditorView,
+  from: number,
+  to: number,
+  text: string,
+  rules: readonly InputRule[],
+): boolean {
+  if (view.composing) return false;
+  const { state } = view;
+  const $from = state.doc.resolve(from);
+  const textBefore =
+    $from.parent.textBetween(Math.max(0, $from.parentOffset - MAX_MATCH), $from.parentOffset, null, "\ufffc") + text;
+  for (const rule of rules) {
+    const runnable = rule as unknown as RunnableInputRule;
+    if (!runnable.inCodeMark && $from.marks().some((mark) => mark.type.spec.code)) continue;
+    if ($from.parent.type.spec.code ? !runnable.inCode : runnable.inCode === "only") continue;
+    const match = runnable.match.exec(textBefore);
+    if (!match || match[0].length < text.length) continue;
+    const start = from - (match[0].length - text.length);
+    if (!runnable.inCodeMark) {
+      let hasCodeMark = false;
+      state.doc.nodesBetween(start, $from.pos, (node) => {
+        if (node.isInline && node.marks.some((mark) => mark.type.spec.code)) hasCodeMark = true;
+      });
+      if (hasCodeMark) continue;
+    }
+    const transaction = runnable.handler(state, match, start, to);
+    if (!transaction) continue;
+    view.dispatch(transaction);
+    return true;
+  }
+  return false;
+}
+
+function mapOrigin(origin: UnderscoreOrigin, transaction: Transaction): UnderscoreOrigin {
+  return {
+    ...origin,
+    from: transaction.mapping.map(origin.from, 1),
+    to: transaction.mapping.map(origin.to, -1),
+    continuationTo: transaction.mapping.map(origin.continuationTo, 1),
+  };
+}
+
+function isExactInsertion(transaction: Transaction, position: number, text?: string): boolean {
+  if (transaction.steps.length !== 1 || !(transaction.steps[0] instanceof ReplaceStep)) return false;
+  const step = transaction.steps[0];
+  const insertedSize = step.slice.size;
+  const insertedText = step.slice.content.textBetween(0, step.slice.content.size, "", "\ufffc");
+  const $start = transaction.doc.resolve(position);
+  const $end = transaction.doc.resolve(position + insertedSize);
+  if (
+    step.from !== position ||
+    step.to !== position ||
+    insertedSize === 0 ||
+    insertedText.length !== insertedSize ||
+    !$start.parent.isTextblock ||
+    !$start.sameParent($end) ||
+    !transaction.selection.empty ||
+    transaction.selection.from !== position + insertedSize
+  ) {
+    return false;
+  }
+  return text === undefined || insertedText === text;
+}
+
+function isLocalTextContinuation(transaction: Transaction, origin: UnderscoreOrigin): boolean {
+  const input = transaction.getMeta(localTextInputKey);
+  return Boolean(
+    input &&
+    input.from === origin.continuationTo &&
+    input.to === input.from &&
+    isExactInsertion(transaction, origin.continuationTo, input.text),
+  );
+}
+
+function isCompositionContinuation(transaction: Transaction, origin: UnderscoreOrigin): boolean {
+  return (
+    transaction.getMeta("composition") !== undefined &&
+    isExactInsertion(transaction, origin.continuationTo)
+  );
 }
 
 /**
@@ -69,6 +374,9 @@ export function markdownInputRules(): Plugin {
     textblockTypeInputRule(CODE_FENCE_RULE, schema.nodes.code_block, (match) => ({ language: match[1] || null })),
     markInputRule(/(^|[^*])(\*\*([^*]+)\*\*)$/, schema.marks.strong),
     markInputRule(/(^|[^*])(\*([^*]+)\*)$/, schema.marks.em),
+    new InputRule(/_$/, recoverDoubleUnderscoreRun),
+    markInputRule(/_$/, schema.marks.em, underscoreMarkMatch),
+    new InputRule(/_$/, recoverAdjacentUnderscoreRun),
     markInputRule(/(^|[^~])(~~([^~]+)~~)$/, schema.marks.strikethrough),
     markInputRule(/(^|[^`])(`([^`]+)`)$/, schema.marks.code),
     // Horizontal rule when a paragraph consists of exactly "---", "***" or "___".
@@ -86,5 +394,41 @@ export function markdownInputRules(): Plugin {
       return tr;
     }),
   ];
-  return inputRules({ rules });
+  const plugin = new Plugin<MarkdownInputRuleState>({
+    key: inputRuleKey,
+    state: {
+      init: () => ({ activeOrigin: null }),
+      apply(transaction, value) {
+        const update = transaction.getMeta(UNDERSCORE_ORIGIN_META) as UnderscoreOriginUpdate | undefined;
+        if (transaction.getMeta(markdownBindingKey)?.remote) return { activeOrigin: null };
+        if (update?.add) return { activeOrigin: update.add };
+        if (update?.remove) return { activeOrigin: null };
+        const origin = value.activeOrigin;
+        if (!origin) return value;
+        if (isLocalTextContinuation(transaction, origin) || isCompositionContinuation(transaction, origin)) {
+          const mapped = mapOrigin(origin, transaction);
+          return { activeOrigin: mapped.from < mapped.to ? mapped : null };
+        }
+        return { activeOrigin: null };
+      },
+    },
+    props: {
+      handleTextInput(view, from, to, text, defaultTransaction): boolean {
+        if (runInputRules(view, from, to, text, rules)) return true;
+        const origin = inputRuleKey.getState(view.state)?.activeOrigin;
+        if (!origin || !text || from !== to || from !== origin.continuationTo) return false;
+        view.dispatch(defaultTransaction().setMeta(localTextInputKey, { from, to, text } satisfies LocalTextInput));
+        return true;
+      },
+      handleDOMEvents: {
+        compositionend(view) {
+          setTimeout(() => {
+            const { $cursor } = view.state.selection as TextSelection;
+            if ($cursor) runInputRules(view, $cursor.pos, $cursor.pos, "", rules);
+          });
+        },
+      },
+    },
+  });
+  return plugin;
 }

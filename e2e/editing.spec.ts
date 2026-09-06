@@ -50,6 +50,25 @@ test.describe("single user editing", () => {
     await user.context.close();
   });
 
+  test("typing underscore emphasis in the rich pane keeps intraword underscores literal", async ({ browser }) => {
+    const user = await signIn(browser, "solo");
+    const id = await createDocument(user.page, "");
+    await openDocument(user.page, id);
+    const { page } = user;
+
+    await focusRichEnd(page);
+    await page.keyboard.type("Type _word_ beside snake_case.");
+
+    const paragraph = page.locator(".md-rich p").first();
+    const emphasis = paragraph.locator("em");
+    await expect(emphasis).toHaveCount(1);
+    await expect(emphasis).toHaveText("word");
+    await expect(paragraph).toHaveText("Type word beside snake_case.");
+    expect((await paragraph.innerText()).match(/_/g)).toHaveLength(1);
+    await expect.poll(() => codeText(page)).toMatch(/^Type ([*_])word\1 beside snake_case\.$/);
+    await user.context.close();
+  });
+
   test("typing in the code pane updates the rich preview", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, SAMPLE);
