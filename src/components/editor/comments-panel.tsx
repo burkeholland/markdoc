@@ -1481,7 +1481,7 @@ const ThreadCard = memo(function ThreadCard({
               onCancel={() => setReplying(false)}
             />
           ) : (
-            <button type="button" className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-3 hover:text-accent" onClick={() => setReplying(true)} data-testid="comment-reply">
+            <button type="button" className="inline-flex min-h-6 items-center gap-1.5 text-xs font-medium text-ink-3 hover:text-accent" onClick={() => setReplying(true)} data-testid="comment-reply">
               <Reply size={13} /> Reply
             </button>
           )}

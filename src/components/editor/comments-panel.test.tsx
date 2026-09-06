@@ -402,7 +402,7 @@ describe("CommentsPanel", () => {
   });
 
   describe("card reveal (#992)", () => {
-    const mount = (opts: { removed?: boolean } = {}) => {
+    const mount = (opts: { removed?: boolean; reply?: boolean } = {}) => {
       // jsdom has no scrollIntoView; the active card scrolls itself into view with it.
       Element.prototype.scrollIntoView ??= () => {};
       const user = makeCollabUser("alice", "Alice");
@@ -410,6 +410,7 @@ describe("CommentsPanel", () => {
       session.keepAlive();
       session.ytext.insert(0, "Intro text. The quick brown fox jumps.");
       const threadId = session.comments.add({ from: 16, to: 27, body: "See [the docs](https://example.com) first.", author: user });
+      if (opts.reply) session.comments.reply(threadId, "Following up.", user);
       // A thread whose Y.Map lost its anchor is what the UI renders as "(original text removed)".
       if (opts.removed) session.comments.ymap.get(threadId)!.delete("anchor");
       const onReveal = vi.fn<CommentsPanelProps["onReveal"]>();
@@ -462,6 +463,18 @@ describe("CommentsPanel", () => {
       await userEvent.setup().keyboard("{Enter}");
       expect(screen.getByTestId("comment-submit")).toBeInTheDocument();
       expect(onReveal).not.toHaveBeenCalled();
+    });
+
+    it("sizes only the standalone Reply as a centered 24px target and still opens its composer", () => {
+      mount({ reply: true });
+      const targets = screen.getAllByTestId("comment-reply");
+      const button = targets.find((target) => target.tagName === "BUTTON")!;
+      const replyRow = targets.find((target) => target.hasAttribute("data-reply-id"))!;
+
+      expect(button).toHaveClass("min-h-6", "items-center");
+      expect(replyRow).not.toHaveClass("min-h-6");
+      fireEvent.click(button);
+      expect(screen.getByPlaceholderText("Reply…")).toBeInTheDocument();
     });
 
     it("activates a thread whose text was removed and says why nothing moved", () => {

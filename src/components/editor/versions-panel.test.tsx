@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { VersionSummary } from "@/lib/api";
 
@@ -67,5 +67,41 @@ describe("VersionsPanel · rename a version", () => {
     expect(await screen.findByText("Title must be 1–200 characters")).toBeInTheDocument();
     expect(screen.queryByText("Invalid request")).toBeNull();
     expect(renameVersion).toHaveBeenCalledWith(DOC_ID, "ver-1", "Final");
+  });
+});
+
+describe("VersionsPanel · compare target", () => {
+  it("keeps each compact checkbox inside a labelled 24px target that toggles the intended version", async () => {
+    const older = { ...named, id: "ver-0", number: 0, title: "Earlier" };
+    versions.mockResolvedValueOnce({ versions: [named, older] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: { ...(versionId === named.id ? named : older), content: versionId === named.id ? "# Draft" : "# Earlier" },
+    }));
+    const onPreview = vi.fn();
+    const session = { docId: DOC_ID, role: "owner" } as unknown as CollabSession;
+    render(<VersionsPanel session={session} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+
+    const draft = await screen.findByRole("checkbox", { name: "Compare v1" });
+    const earlier = await screen.findByRole("checkbox", { name: "Compare v0" });
+    for (const checkbox of [draft, earlier]) {
+      expect(checkbox).toHaveClass("h-3.5", "w-3.5");
+      expect(checkbox.closest("label")).toHaveClass("h-6", "w-6");
+    }
+
+    fireEvent.click(draft.closest("label")!);
+    expect(draft).toBeChecked();
+    expect(earlier).not.toBeChecked();
+
+    fireEvent.click(earlier.closest("label")!);
+    expect(draft).toBeChecked();
+    expect(earlier).toBeChecked();
+    await waitFor(() =>
+      expect(onPreview).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          version: expect.objectContaining({ id: named.id }),
+          base: expect.objectContaining({ version: expect.objectContaining({ id: older.id }) }),
+        }),
+      ),
+    );
   });
 });
