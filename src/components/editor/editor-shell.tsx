@@ -1204,7 +1204,7 @@ export function EditorShell({
               </div>
             )}
             {versionPreview ? (
-              <div className="flex h-full min-h-0 flex-col">
+              <div className="flex h-full min-h-0 min-w-0 flex-col">
                 {versionPreview.version.id === "github-remote" && (
                   <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2" data-testid="sync-compare-bar">
                     <span>Comparing GitHub\u2019s copy with this document.</span>
