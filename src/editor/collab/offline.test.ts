@@ -9,6 +9,8 @@ vi.mock("@hocuspocus/provider", async () => {
   class HocuspocusProvider {
     awareness: InstanceType<typeof Awareness>;
     connectCalls = 0;
+    lastRequest: { requestId: string } | null = null;
+    sequence = 0;
     static last: HocuspocusProvider | null = null;
     constructor(readonly opts: {
       document: Y.Doc;
@@ -16,6 +18,7 @@ vi.mock("@hocuspocus/provider", async () => {
       onSynced?: (e: { state: boolean }) => void;
       onUnsyncedChanges?: (e: { number: number }) => void;
       onAuthenticationFailed?: (e: { reason: string }) => void;
+      onStateless?: (e: { payload: string }) => void;
     }) {
       this.awareness = new Awareness(opts.document);
       HocuspocusProvider.last = this;
@@ -23,6 +26,9 @@ vi.mock("@hocuspocus/provider", async () => {
     connect() {
       this.connectCalls++;
       return Promise.resolve();
+    }
+    sendStateless(payload: string) {
+      this.lastRequest = JSON.parse(payload);
     }
     destroy() {
       this.awareness.destroy();
@@ -53,14 +59,28 @@ import {
 
 type FakeProvider = {
   connectCalls: number;
+  lastRequest: { requestId: string } | null;
+  sequence: number;
   opts: {
     onStatus: (e: { status: string }) => void;
     onSynced: (e: { state: boolean }) => void;
     onUnsyncedChanges: (e: { number: number }) => void;
     onAuthenticationFailed: (e: { reason: string }) => void;
+    onStateless: (e: { payload: string }) => void;
   };
 };
 const lastProvider = () => (HocuspocusProvider as unknown as { last: FakeProvider }).last;
+
+function acknowledgePersistence(session: CollabSession) {
+  const provider = lastProvider();
+  provider.opts.onStateless({ payload: JSON.stringify({
+    type: "document-persistence", docId: session.docId, epoch: "test-epoch",
+    sequence: ++provider.sequence, revision: 0, savedRevision: 0, state: "saved", error: null,
+    requestId: provider.lastRequest?.requestId,
+    saved: { docId: session.docId, version: "test-epoch:0", content: session.ytext.toString(), title: session.title, savedAt: new Date().toISOString() },
+    snapshot: Array.from(Y.encodeSnapshot(Y.snapshot(session.ydoc))),
+  }) });
+}
 
 function makeSession(docId = "doc"): CollabSession {
   return new CollabSession({ docId, user: makeCollabUser("a", "Alice"), role: "owner", getToken: async () => "token" });
@@ -686,6 +706,8 @@ describe("save state and reconnect feedback", () => {
     expect(session.saveState).toBe("saving");
     p.onSynced({ state: true });
     p.onUnsyncedChanges({ number: 0 });
+    expect(session.saveState).toBe("pending");
+    acknowledgePersistence(session);
     expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(false);
 
@@ -707,6 +729,7 @@ describe("save state and reconnect feedback", () => {
     p.onUnsyncedChanges({ number: 1 });
     p.onSynced({ state: true });
     p.onUnsyncedChanges({ number: 0 });
+    acknowledgePersistence(session);
     expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(true);
     expect(saveStateLabel("saved", 0, true)).toBe("All changes saved");
@@ -731,6 +754,7 @@ describe("save state and reconnect feedback", () => {
     p.onStatus({ status: "connected" });
     p.onSynced({ state: true });
     p.onUnsyncedChanges({ number: 0 });
+    acknowledgePersistence(session);
     expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(true);
     vi.advanceTimersByTime(RECOVERED_FLASH_MS + 1);
@@ -747,6 +771,7 @@ describe("save state and reconnect feedback", () => {
     p.onUnsyncedChanges({ number: 1 });
     p.onSynced({ state: true });
     p.onUnsyncedChanges({ number: 0 });
+    acknowledgePersistence(session);
     expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(false);
   });
@@ -756,6 +781,7 @@ describe("save state and reconnect feedback", () => {
     p.onStatus({ status: "connected" });
     p.onSynced({ state: true });
     p.onUnsyncedChanges({ number: 0 });
+    acknowledgePersistence(session);
     expect(session.saveState).toBe("saved");
     expect(session.recovered).toBe(false);
   });

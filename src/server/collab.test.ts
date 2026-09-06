@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
@@ -73,6 +73,11 @@ describe("collaboration server", () => {
   let hocuspocus: ReturnType<typeof createCollabServer>;
   let userId: string;
   let docId: string;
+  const warmClientDisposers = new Set<() => void>();
+
+  afterEach(() => {
+    for (const dispose of warmClientDisposers) dispose();
+  });
 
   beforeAll(async () => {
     const db = await getDb();
@@ -776,7 +781,14 @@ describe("collaboration server", () => {
     const localOrigin = { name: "indexeddb mirror" };
     provider.setLocalOrigin(localOrigin);
     const total = (list: { bytes: number }[]) => list.reduce((n, m) => n + m.bytes, 0);
-    return { ydoc, provider, socket, received, sent, localOrigin, total };
+    const dispose = () => {
+      warmClientDisposers.delete(dispose);
+      provider.destroy();
+      socket.destroy();
+      ydoc.destroy();
+    };
+    warmClientDisposers.add(dispose);
+    return { ydoc, provider, socket, received, sent, localOrigin, total, dispose };
   }
 
   it("a client whose local copy is current exchanges state vectors, not the document (issue #189)", async () => {
@@ -793,8 +805,7 @@ describe("collaboration server", () => {
     expect(cold.total(cold.received)).toBeGreaterThan(state.byteLength);
     expect(cold.total(cold.received)).toBeLessThan(state.byteLength * 1.1);
     expect(cold.total(cold.sent)).toBeLessThan(state.byteLength * 0.05);
-    cold.provider.destroy();
-    cold.socket.destroy();
+    cold.dispose();
 
     // Warm open, nothing changed: the mirror restores the state before the socket opens.
     const warm = warmClient(token, doc.id);
@@ -833,6 +844,7 @@ describe("collaboration server", () => {
     await sleep(200);
     expect(edited.total(edited.sent)).toBeLessThan(state.byteLength * 0.05);
     expect(edited.total(edited.received)).toBeLessThan(state.byteLength * 0.05);
+    console.log(`[collab] warm offline edit: recv ${edited.total(edited.received)} B · sent ${edited.total(edited.sent)} B · bound ${state.byteLength * 0.05} B`);
     expect(countBy(edited.sent).update).toBeUndefined();
     expect(countBy(edited.sent)["sync-step2"]).toBe(1);
 
@@ -848,13 +860,13 @@ describe("collaboration server", () => {
     await sleep(200);
     expect(late.total(late.sent)).toBeLessThan(state.byteLength * 0.05);
     expect(late.total(late.received)).toBeLessThan(state.byteLength * 0.05);
+    console.log(`[collab] late mirror edit: recv ${late.total(late.received)} B · sent ${late.total(late.sent)} B · bound ${state.byteLength * 0.05} B`);
     expect(countBy(late.sent).update).toBeUndefined();
     expect(countBy(late.sent)["sync-step1"]).toBe(1);
     expect(countBy(late.sent)["sync-step2"]).toBe(1);
 
     for (const client of [warm, edited, late]) {
-      client.provider.destroy();
-      client.socket.destroy();
+      client.dispose();
     }
   });
 });

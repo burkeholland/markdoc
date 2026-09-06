@@ -1,5 +1,13 @@
 # PostgreSQL VM: monthly OS security patching
 
+> **Pre-VM-app-hosting procedure:** the private-only VM, Container Apps
+> liveness and database-only downtime assumptions below predate September 4.
+> The [current VM hosting record](vm-hosting.md) places the app and PostgreSQL
+> on the same VM with `markdoc-web-ip`; rebooting it also interrupts the app.
+> Do not apply this archived procedure as written or as an app-release step.
+> A separate patch plan must assess the current network, service and recovery
+> state. Historical schedules and estimates are not fresh backup evidence.
+
 How the private PostgreSQL VM `markdoc-pg` (Ubuntu 24.04, Standard_B1ms, no public IP, outbound Internet denied by NSG rule 260) gets its operating-system security updates, why the cadence is what it is, what it costs, how a run is verified and how it is rolled back. The code lives in `deploy/patch-postgres-vm.ps1` (operator side), `infra/patch-os.sh` (in-guest side), the shared helpers in `deploy/azure-postgres-network.ps1`, and the alert lines in `infra/main.bicep`. Nothing in the repository runs it automatically; a scheduled GitHub Actions workflow (first Sunday, `workflow_dispatch` for out-of-band runs, the `deploy.yml` OIDC identity) is a later step, to be added once the first observed run has produced real numbers for the estimates below.
 
 ## Why a separate cadence exists

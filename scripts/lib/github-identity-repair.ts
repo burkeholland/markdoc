@@ -21,6 +21,7 @@ export const REPAIR_SCHEMA_TABLES = [
   "asset",
   "collaborator",
   "document",
+  "gist_auto_update",
   "notification",
   "ownership_transfer",
   "recent",
@@ -43,6 +44,7 @@ export const REPAIR_APPLICATION_TABLES = [
   "asset",
   "collaborator",
   "document",
+  "gist_auto_update",
   "notification",
   "recent",
   "review",
@@ -67,6 +69,8 @@ export const KNOWN_USER_FOREIGN_KEYS = [
 
 export const USER_IDENTITY_CLASSIFICATIONS = [
   ...KNOWN_USER_FOREIGN_KEYS,
+  // Consent stays bound to its original publisher, even when disabled; this is not a user FK.
+  "gist_auto_update.publisher_id",
   "document.last_edited_by",
   "collaborator.added_by",
   "version.created_by",
@@ -86,6 +90,7 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "agent_request.user_id",
   "review.user_id",
   "webhook.user_id",
+  "gist_auto_update.publisher_id",
   "document.last_edited_by",
   "collaborator.added_by",
   "version.created_by",
@@ -94,6 +99,7 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "notification.user_login",
   "notification.actor_login",
   "document.ystate identity metadata",
+  "gist_auto_update.document_id via duplicate-owned document",
   "collaborator.document_id via duplicate-owned document",
   "version.document_id via duplicate-owned document",
   "star.document_id via duplicate-owned document",
@@ -345,6 +351,13 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
                     updated_at::text AS updated_at,
                     deleted_at::text AS deleted_at
                FROM document`,
+  gist_auto_update: `SELECT xmin::text AS row_version,
+                           document_id, publisher_id, gist_id, filename, account_login, is_public,
+                           enabled, generation, queued_version, synced_version, active_version, status,
+                           acknowledged_at::text AS acknowledged_at,
+                           due_at::text AS due_at,
+                           synced_at::text AS synced_at
+                      FROM gist_auto_update`,
   notification: `SELECT xmin::text AS row_version,
                          id, user_login, document_id, kind, actor_login, ref_id,
                          created_at::text AS created_at,
@@ -806,6 +819,7 @@ async function collectApplicationDependencies(
     { label: "agent_request.user_id", query: "SELECT COUNT(*)::text AS count FROM agent_request WHERE user_id = $1", values: [duplicateId] },
     { label: "review.user_id", query: "SELECT COUNT(*)::text AS count FROM review WHERE user_id = $1", values: [duplicateId] },
     { label: "webhook.user_id", query: "SELECT COUNT(*)::text AS count FROM webhook WHERE user_id = $1", values: [duplicateId] },
+    { label: "gist_auto_update.publisher_id", query: "SELECT COUNT(*)::text AS count FROM gist_auto_update WHERE publisher_id = $1", values: [duplicateId] },
     { label: "document.last_edited_by", query: "SELECT COUNT(*)::text AS count FROM document WHERE last_edited_by = $1", values: [duplicateId] },
     { label: "collaborator.added_by", query: "SELECT COUNT(*)::text AS count FROM collaborator WHERE added_by = $1", values: [duplicateId] },
     { label: "version.created_by", query: "SELECT COUNT(*)::text AS count FROM version WHERE created_by = $1", values: [duplicateId] },
@@ -831,6 +845,13 @@ async function collectApplicationDependencies(
       label: "notification.actor_login",
       query: "SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(actor_login)) = $1",
       values: [expectedLogin],
+    },
+    {
+      label: "gist_auto_update.document_id via duplicate-owned document",
+      query: `SELECT COUNT(*)::text AS count
+                FROM gist_auto_update g JOIN document d ON d.id = g.document_id
+               WHERE d.owner_id = $1`,
+      values: [duplicateId],
     },
     {
       label: "collaborator.document_id via duplicate-owned document",

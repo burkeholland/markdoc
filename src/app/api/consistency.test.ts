@@ -143,7 +143,7 @@ describe("GET /api/tokens", () => {
     const minted = await createApiToken(eve.id, "scout-mcp", 30);
     bearer = minted.token;
     try {
-      const res = await tokens.GET();
+      const res = await tokens.GET(jsonReq("/api/tokens", "GET"));
       expect(res.status).toBe(403);
       const body = (await res.json()) as Err;
       expect(body.error).toMatch(/session/);
@@ -151,7 +151,7 @@ describe("GET /api/tokens", () => {
     } finally {
       bearer = null;
     }
-    const ok = await tokens.GET();
+    const ok = await tokens.GET(jsonReq("/api/tokens", "GET"));
     expect(ok.status).toBe(200);
     const list = (await ok.json()) as { tokens: { id: string }[] };
     expect(list.tokens.map((t) => t.id)).toContain(minted.id);

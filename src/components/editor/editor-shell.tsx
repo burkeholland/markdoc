@@ -189,15 +189,21 @@ export function EditorShell({
   const [layout, setLayoutState] = useState<Layout>("split");
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [outlineDrawerOpen, setOutlineDrawerOpen] = useState(false);
-  const [sidePanel, setSidePanel] = useState<SidePanel>(null);
+  const [requestedPanel, setSidePanel] = useState<SidePanel | "automatic-comments">(null);
   const [focusCommentsOnOpen, setFocusCommentsOnOpen] = useState(false);
-  const restoreCommentsToggleRef = useRef(false);
+  const restoreCommentsFocusRef = useRef(false);
   // A request for the comments panel to open a composer on the whole document (#1025): from the
   // toolbar/shortcut with no selection, the palette, the empty state and hint (b) (`mention` pre-types `@`).
   const [documentComposer, setDocumentComposer] = useState<{ mention: boolean; nonce: number } | null>(null);
   const breakpoint = useBreakpoint();
   const isPhone = breakpoint === "phone";
   const isTablet = breakpoint === "tablet";
+  const canDockPanel = breakpoint === "desktop";
+  // Never mount a modal, even for one render, when an automatic desktop panel becomes narrow.
+  const sidePanel: SidePanel = requestedPanel === "automatic-comments" ? (canDockPanel ? "comments" : null) : requestedPanel;
+  useEffect(() => {
+    if (!canDockPanel) setSidePanel((panel) => panel === "automatic-comments" ? null : panel);
+  }, [canDockPanel]);
   // Phones never split: a remembered/initial "split" renders as the preview there.
   const shownLayout: Layout = isPhone && layout === "split" ? "rich" : layout;
   // First load: narrow windows open in the preview unless the user chose Markdown before; tablets
@@ -385,18 +391,22 @@ export function EditorShell({
   const onCodeSelection = useCallback((head: number) => session.setLocalCursor("code", head), [session]);
   const onRichSelection = useCallback((head: number) => session.setLocalCursor("rich", session.binding.getSourceMap().pmToSrc(head)), [session]);
 
+  const openAutomaticComments = useCallback(() => {
+    if (canDockPanel) setSidePanel((panel) => panel === "comments" ? panel : "automatic-comments");
+  }, [canDockPanel]);
+
   const onHighlightClick = useCallback(
     (kind: string, id: string | null) => {
       if (!id) return;
       if (kind.startsWith("comment")) {
         session.setActiveComment(id);
-        setSidePanel("comments");
+        openAutomaticComments();
       } else if (kind.startsWith("suggest")) {
         session.setActiveSuggestion(id);
-        setSidePanel("comments");
+        openAutomaticComments();
       }
     },
-    [session],
+    [session, openAutomaticComments],
   );
 
   /** Comment on the whole document: opens Comments with a zero-width composer at {0,0}; `mention` types `@` for the agent picker. */
@@ -672,12 +682,36 @@ export function EditorShell({
   const toggleComments = useCallback(
     (focusPanel = true) => {
       const closing = sidePanel === "comments";
-      restoreCommentsToggleRef.current = closing;
+      restoreCommentsFocusRef.current = closing;
       setFocusCommentsOnOpen(!closing && focusPanel);
       setSidePanel(closing ? null : "comments");
     },
     [sidePanel],
   );
+
+  const restoreCommentsFocus = useCallback(() => {
+    if (canDockPanel) {
+      document.querySelector<HTMLElement>('[data-testid="comments-toggle"]')?.focus({ preventScroll: true });
+    } else {
+      // Both views retain and map their selection while blurred. Use that live selection, not a
+      // saved offset that could be stale after a collaborative edit or an accepted suggestion.
+      if (shownLayout !== "split" && shownLayout !== session.activeSurface) {
+        const map = session.binding.getSourceMap();
+        const selection = session.activeSurface === "code" ? codeView?.state.selection.main : richView?.state.selection;
+        const range = selection && (session.activeSurface === "code"
+          ? { from: selection.anchor, to: selection.head }
+          : { from: map.pmToSrc(selection.anchor), to: map.pmToSrc(selection.head) });
+        session.setActiveSurface(shownLayout);
+        // A split layout can hide the source pane when resized to a phone. Return to the same
+        // passage in the visible pane rather than focusing the hidden editor or its old caret.
+        if (range) {
+          actions.selectSourceRange(range, { focus: true });
+          return;
+        }
+      }
+      actions.focus();
+    }
+  }, [actions, canDockPanel, codeView, richView, session, shownLayout]);
 
   // Agent requests are made from comments (mention an agent, T2 #379); results come back through the
   // shared document (meta.agentRequests, mirrored by the server) so the presence stack and toast are realtime.
@@ -689,11 +723,11 @@ export function EditorShell({
     setCommentsFocus(null);
     setDocumentComposer(null);
     setFocusCommentsOnOpen(false);
-    if (sidePanel === null && restoreCommentsToggleRef.current) {
-      restoreCommentsToggleRef.current = false;
-      document.querySelector<HTMLElement>('[data-testid="comments-toggle"]')?.focus({ preventScroll: true });
+    if (sidePanel === null && restoreCommentsFocusRef.current) {
+      restoreCommentsFocusRef.current = false;
+      restoreCommentsFocus();
     }
-  }, [sidePanel]);
+  }, [sidePanel, restoreCommentsFocus]);
   const cancelAgentRequest = useCallback(
     (requestId: string) => {
       api.documents
@@ -708,8 +742,10 @@ export function EditorShell({
     // Someone else's agent is "Drew's Copilot CLI"; the owner's display name comes from presence when they are here.
     const who = claimerName(r, session.user.login, (login) => presenceNameOf(session.presence(), login));
     toast(`${who} finished: ${describeResult(r.result)}`, "success");
-    setSidePanel("comments");
-    setCommentsFocus({ tab: r.result?.suggestions ? "suggestions" : "open", nonce: Date.now() });
+    if (canDockPanel || sidePanel === "comments") {
+      openAutomaticComments();
+      setCommentsFocus({ tab: r.result?.suggestions ? "suggestions" : "open", nonce: Date.now() });
+    }
   });
   const goCreateToken = useCallback(() => {
     navigateTo(`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`);
@@ -730,7 +766,7 @@ export function EditorShell({
         setSidePanel("comments");
         return true;
       }
-      if (session.suggestions.list().some((s) => s.id === refId)) {
+      if (session.suggestions.groups().some((s) => s.id === refId || s.members.some((member) => member.id === refId))) {
         session.setActiveSuggestion(refId);
         setSidePanel("comments");
         return true;
@@ -833,6 +869,15 @@ export function EditorShell({
       const mod = e.metaKey || e.ctrlKey;
       // Option-letter on macOS reports a symbol in `key`; fall back to the physical key there.
       const key = isMac && e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
+      if (mod && !e.altKey && !e.shiftKey && key === "s") {
+        e.preventDefault();
+        void session.flushSave().then(
+          () => session.dirty
+            ? toast("Requested changes saved; newer edits are still pending.", "info")
+            : toast("Document saved.", "success"),
+          (error: unknown) => toast(apiErrorText(error, "Could not save document"), "error"),
+        );
+      }
       if (mod && e.altKey && key === "m") {
         e.preventDefault();
         startComment();
@@ -850,7 +895,7 @@ export function EditorShell({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [startComment, openFind]);
+  }, [startComment, openFind, session, toast]);
 
   // Command palette. Captured at the window so Mod-K with a collapsed selection is taken before the
   // editors' own Mod-K (Link) binding; with a selection the event falls through to them.
@@ -986,9 +1031,12 @@ export function EditorShell({
     };
   }, [session, followUserId, richScroller, codeView, richView]);
   const closeSidePanel = useCallback(() => {
-    restoreCommentsToggleRef.current = sidePanel === "comments";
+    restoreCommentsFocusRef.current = sidePanel === "comments";
     setSidePanel(null);
   }, [sidePanel]);
+  const keepCommentsOpen = useCallback(() => {
+    setSidePanel((panel) => panel === "automatic-comments" ? "comments" : panel);
+  }, []);
   const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
   const closeOutlineDrawer = useCallback(() => setOutlineDrawerOpen(false), []);
 
@@ -1241,7 +1289,13 @@ export function EditorShell({
               <Dialog open onOpenChange={(o) => !o && closeSidePanel()}>
                 <DialogPortal>
                   <DialogOverlay className="dialog-overlay animate-fade-in" data-testid="sheet-backdrop" />
-                  <DialogPrimitiveContent className="sheet" aria-describedby={undefined} data-testid="sheet" data-panel={sidePanel}>
+                  <DialogPrimitiveContent
+                    className="sheet"
+                    aria-describedby={undefined}
+                    data-testid="sheet"
+                    data-panel={sidePanel}
+                    onCloseAutoFocus={sidePanel === "comments" ? (event) => event.preventDefault() : undefined}
+                  >
                     <DialogTitle className="sr-only">{panelTitle}</DialogTitle>
                     <span className="sheet-handle" aria-hidden />
                     {panel}
@@ -1255,7 +1309,13 @@ export function EditorShell({
               </div>
             ) : (
               // Desktop: the panel takes the remembered width; the grip on its left edge resizes it.
-              <div className="relative flex shrink-0 [&>aside]:w-full [&>aside]:min-w-0" style={{ width: panelWidth }} data-testid="side-panel">
+              <div
+                className="relative flex shrink-0 [&>aside]:w-full [&>aside]:min-w-0"
+                style={{ width: panelWidth }}
+                data-testid="side-panel"
+                onPointerDownCapture={keepCommentsOpen}
+                onFocusCapture={keepCommentsOpen}
+              >
                 <PanelResizeHandle width={panelWidth} min={PANEL_MIN} max={panelMax} onResize={setPanelWidth} onReset={resetPanelWidth} />
                 {panel}
               </div>
@@ -1280,9 +1340,9 @@ export function EditorShell({
           <>
             {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />}
             {everOpened.publish && (
-              <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} />
+              <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
             )}
-            {everOpened.commit && <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} />}
+            {everOpened.commit && <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
             {everOpened.sync && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
           </>
         )}

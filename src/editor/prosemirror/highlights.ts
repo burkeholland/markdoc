@@ -31,8 +31,8 @@ export function collectHighlights(session: CollabSession, focusRange: { from: nu
       from: s.from,
       to: s.to,
       kind: s.type === "insert" ? "suggest-insert" : "suggest-delete",
-      id: s.id,
-      active: s.id === session.activeSuggestionId,
+      id: s.groupId ?? s.id,
+      active: (s.groupId ?? s.id) === session.activeSuggestionId,
     });
   }
   if (session.find) {
@@ -99,6 +99,23 @@ function build(session: CollabSession, doc: PMNode, getFocus: () => number | nul
   return DecorationSet.create(doc, decorations);
 }
 
+function refreshSignature(session: CollabSession, getFocus: () => number | null): string {
+  const highlights = collectHighlights(session, null);
+  const parts = highlights.map((highlight) => {
+    const rangeMatters =
+      highlight.kind === "find" ||
+      highlight.kind === "find-active" ||
+      highlight.kind === "suggest-insert" ||
+      highlight.kind === "suggest-delete" ||
+      highlight.id === "pending";
+    return `${highlight.kind}:${highlight.id ?? ""}:${highlight.active ? 1 : 0}:${rangeMatters ? `${highlight.from}-${highlight.to}` : ""}`;
+  });
+  parts.push(`identity:${session.relativePositionVersion}:${session.commentRangeVersion}`);
+  parts.push(`held:${session.binding.hasHeldSync ? 1 : 0}`);
+  parts.push(`focus:${getFocus() ?? ""}`);
+  return parts.join("|");
+}
+
 export interface HighlightHandlers {
   onHighlightClick?: (kind: string, id: string | null) => void;
   /** Source offset of the code pane's cursor while the code pane is active, for the focus indicator. */
@@ -132,7 +149,13 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
       },
     },
     view(view) {
-      const unsubscribe = session.subscribe(() => scheduleRefresh(view));
+      let signature = refreshSignature(session, getFocus);
+      const unsubscribe = session.subscribe(() => {
+        const next = refreshSignature(session, getFocus);
+        if (next === signature) return;
+        signature = next;
+        scheduleRefresh(view);
+      });
       return { destroy: unsubscribe };
     },
   });
@@ -195,4 +218,3 @@ export function richSuggestingPlugin(session: CollabSession): Plugin {
     },
   });
 }
-

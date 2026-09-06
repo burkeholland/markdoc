@@ -369,7 +369,7 @@ export function registerTools(server, client) {
     { title: "List suggestions", description: "List pending suggestions (tracked changes) on a document with author and surrounding context.", inputSchema: { id: z.string() }, annotations: READ_ONLY },
     async ({ id }) => {
       const { suggestions } = await api("GET", `/api/documents/${id}/suggestions`);
-      const lines = suggestions.map((s) => `- [${s.id}] ${s.type} by ${s.author}: ${JSON.stringify(s.text)} — context: ${JSON.stringify(s.context)}`);
+      const lines = suggestions.map((s) => `- [${s.id}] ${s.type} by ${s.author}: ${s.type === "replace" ? `${JSON.stringify(s.before)} → ${JSON.stringify(s.after)}` : JSON.stringify(s.text)}${s.outdated ? " (outdated; overlaps a newer edit)" : ""} — context: ${JSON.stringify(s.context)}`);
       return ok(lines.length ? lines.join("\n") : "No pending suggestions.", { suggestions });
     },
   );

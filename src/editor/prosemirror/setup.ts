@@ -17,6 +17,7 @@ import { imageUploadPlugin, type ImageUploader } from "./images";
 import { markdownFileDropPlugin, type MarkdownFileDropHandler } from "./file-drop";
 import { slashMenuPlugin, type SlashMenuHandlers } from "./slash-menu";
 import { editablePlugin, isEditable } from "./editable";
+import { richLinksPlugin } from "./links";
 import type { NoticeAction } from "../markdown/tsv";
 import {
   toggleMark,
@@ -340,6 +341,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     doc: session.binding.initialDoc(),
     plugins: [
       editablePlugin(session.canEdit),
+      richLinksPlugin(),
       tableMenuPlugin(),
       ...(handlers.slashMenu ? [slashMenuPlugin(handlers.slashMenu)] : []),
       markdownBindingPlugin(session.binding),
@@ -366,7 +368,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
             },
           },
           attributes: (state) => ({
-            class: "md-rich" + (state.doc.textContent.length > 0 || state.doc.childCount > 1 ? " md-has-content" : ""),
+            class: "md-rich" + (state.doc.childCount > 1 || state.doc.textContent.length > 0 ? " md-has-content" : ""),
             "data-placeholder": "Start writing…",
             spellcheck: "true",
             role: "textbox",

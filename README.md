@@ -55,13 +55,15 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 
 - Markdown, standalone HTML (images embedded) or a Letter PDF from the header menu or `GET /api/documents/:id/export`.
 - Publish to a GitHub gist or a repository file (a real commit on the branch you choose); import from either.
-- Safe sync with GitHub: the Publish button shows whether the document is in sync, ahead, behind or diverged; publish and pull refuse to overwrite the other side, and the Sync dialog merges three-way (conflicts left as markers the linter flags), keeps yours or takes GitHub's.
+- Sync with GitHub: the Publish button shows whether the document is in sync, ahead, behind or diverged; publish and pull check for known changes before writing, and the Sync dialog merges three-way (conflicts left as markers the linter flags), keeps yours or takes GitHub's. Gist updates do not have a proven atomic revision guard: a preceding read cannot protect against an edit made between that read and the write.
+- **Auto-update gist is off by default, per document.** The owner can enable it for an already published gist after reviewing the exact file, account and visibility and acknowledging that Markdoc is the editing source. Wait for Markdoc to finish saving before enabling, including after a manual publish; unsaved live content must not be replaced by an older saved snapshot. Future saved edits, including collaborator edits, publish after two seconds idle; intermediate saves coalesce. Secret gists are unlisted, not private. Known outside changes pause publishing, but a GitHub edit during the GET/PATCH gap can still be overwritten: this is not two-way sync or safe simultaneous editing on both sites. Failed updates leave Markdoc edits saved and require an explicit retry of the latest saved version; retry never force-overwrites a known conflict. Turning it off cancels pending work, not a request already sent. Manual Update gist is still available; while auto-update is enabled, wait for Markdoc to finish saving first so an older queued snapshot cannot undo the manual update.
 
 ### Agents
 
 - Personal API tokens, a REST API, and an MCP server (`mcp/server.mjs`) so GitHub Copilot, Claude or scripts can create documents, propose tracked changes and answer comments; the app shows who did what. A `2xx` may carry `warnings: string[]` (the change landed, a follow-up record did not). See [docs/agents.md](docs/agents.md).
+- **Tokens & MCP** in Settings, and **Collaborate with an agent** in Share, have two destinations: **Tokens** for your token list and **Connect an MCP client** for setup. Rename changes only metadata. Replacement requires confirmation, preserves scope, document access and expiry, and invalidates the old token only when the replacement succeeds; every client using it needs the new secret. Revocation also requires confirmation. Secrets are shown only at creation or replacement: copy and store them before closing. Setup examples contain `MARKDOC_TOKEN`, never an existing secret, and token management stays available beside the instructions.
 - Copilot CLI as a collaborator: Markdoc serves MCP itself at `/api/mcp` (Streamable HTTP) — paste the config from the Share dialog's *Collaborate with an agent* card and the agent sits in the document with a bot avatar, a status and its own caret (`markdoc_presence`), waits for comments, edits, mentions and requests with `markdoc_watch`, and can be called by name as `@you/Copilot-CLI` from the `@` picker in any comment. See [What an agent session looks like](docs/agents.md#what-an-agent-session-looks-like).
-- Fewer permission prompts: every tool carries MCP annotations (read-only, additive, destructive), so Copilot CLI never asks before a read, and the Share and Connect cards carry a `copilot --allow-tool …` line that pre-allows the safe writes for a session. See [Permissions in Copilot CLI](docs/agents.md#permissions-in-copilot-cli).
+- Fewer permission prompts: every tool carries MCP annotations (read-only, additive, destructive), so Copilot CLI never asks before a read. Expand **Optional Copilot CLI permissions** in client setup for a `copilot --allow-tool …` line that pre-allows the safe writes for a session. See [Permissions in Copilot CLI](docs/agents.md#permissions-in-copilot-cli).
 - **Requests are comments**: select text (or nothing), press **Comment**, @-mention the agent and write the instruction; a row under the box chooses how it should answer (tracked changes, comment only, rewrite). The request waits in an inbox agents read over MCP (`markdoc_list_requests` → `markdoc_claim_request` → work with `requestId` in the comment's thread → `markdoc_complete_request`); the thread carries a chip from *Waiting for an agent* to *Done*, with Cancel, and the people stack in the header tracks it live (a spinner badge on the agent's avatar, or a dashed placeholder while no agent is in the document). The answer lands in the same thread, as suggestions plus a notification. A request is addressed to the agent you mentioned: only that person's token lists, claims and completes it, and by default only its owner may ask it — someone else's agent shows as *Burke's Copilot CLI*, greyed out with a lock in the `@` picker, and the composer refuses to send until the owner turns on **Collaborators may ask this agent** under **Settings → Agents**. Nothing runs server-side — your own Copilot CLI does the work. With no agent connected yet, the `@` picker points to the *Connect an agent* card in Settings with the MCP config for the host you are on. See [Requests](docs/agents.md#requests).
 
 Sign in is GitHub only (OAuth), with a development login for local work.
@@ -262,15 +264,119 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 
 ## Deploy to Azure
 
-> **Current production architecture (September 4, 2026):** Markdoc runs as a
-> resource-limited Docker/systemd service on `markdoc-pg`, behind nginx and
-> Let's Encrypt at
-> `https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. The Container App,
-> Container Apps Job, and managed environment have been retired. Use
-> [`docs/vm-hosting.md`](docs/vm-hosting.md) and the manual
-> `.github/workflows/deploy.yml` workflow for releases. The Container Apps
-> material later in this section is retained only as migration history and must
-> not be used for production operations.
+Markdoc's current hosting route is the existing Linux VM **`markdoc-pg` in
+`markdoc-rg`** (hyphen), serving
+**`https://markdoc-burkeholland.eastus2.cloudapp.azure.com`**. The September 4
+hosting record describes nginx/Let's Encrypt in front of the resource-limited
+Docker/systemd service `markdoc-app.service`, co-located with PostgreSQL. The
+Container App, maintenance job and managed environment are retired; the old
+Container Apps URL is not a fallback.
+
+The [VM hosting runbook](docs/vm-hosting.md) separates repository behavior
+from lead-supplied September 6 platform/guest metadata. The app container and
+nginx were running; the follow-up observed the existing image locally and
+process liveness self-reported version
+`6e251b1d047ed82427717ef595ef6872e95af3b5`, not an image attestation or full
+database health check. PostgreSQL 16.15 has **19 applied ledger rows matching
+`0000` through `0018`**; both **`0019` addressee and `0020` gist** are pending.
+pgBackRest metadata identifies full backup **`20260906-023651F`**, completed
+September 6 at 02:36:59 UTC. That record is not restore, WAL coverage,
+retention or acceptable recovery-point proof; backup recoverability and
+upgrade/old-image compatibility remain unverified.
+
+The lead later retained the exact old image plus protected environment, unit
+and metadata in the same-host [rollback bundle](docs/vm-hosting.md#rollback):
+root-owned directory `0700`, files `0600`. **Do not clean up that bundle.**
+It is not off-host custody or a tested image rollback. At 19:22 UTC a one-CPU
+load guard stopped the first attempt at load 1.55 before any scratch directory,
+restore or scratch PostgreSQL startup. A later authorized attempt at 19:41 UTC
+completed the pinned backup restore (exit 0), but scratch PostgreSQL startup
+failed (exit 1). No readable recovered database or actual `0019` + `0020`
+upgrade was demonstrated; post-02:36:59 UTC WAL/RPO remains unproven.
+The retained rollback bundle was untouched.
+
+At 19:57:26.989 UTC, a separately authorized single diagnostic again restored
+the same pinned artifact (exit 0), but scratch startup failed (exit 1).
+On-host classification before cleanup narrowed the failure to **WAL/checkpoint
+recovery startup**; the exact mechanism remains unknown. It does not distinguish
+archive access, scratch restore-command routing, an invalid checkpoint or
+genuinely absent WAL, and is not evidence of lost/corrupt production data or a
+broken backup. No specific safe setting correction was established, so none
+was applied and no second diagnostic attempt was made. Scratch data/logs were
+removed; the protected rollback bundle and recovery/upgrade limits are unchanged.
+
+<a id="production-runbook-app-only-releases"></a>
+
+### Production runbook: VM application releases
+
+Use [Deploy to Azure (manual)](.github/workflows/deploy.yml). Nothing deploys
+on a push. Dispatching the workflow is itself a production mutation, not a
+readiness check, and is the release owner's action.
+
+1. Accept an exact release commit that includes the requested features and
+   the VM deployment path. This source composition preserves the accepted
+   feature candidate and current main's hosting infrastructure, but **does not
+   establish production acceptance**. The retained historical evidence in
+   [Source selection and schema boundary](docs/vm-hosting.md#source-selection-and-schema-boundary)
+   records the earlier candidate's maximum-latency failure and unmeasured
+   final runtime; recovery/upgrade work remains incomplete. This integration
+   adds no runtime evidence and does not supersede later producer results.
+   Retain the previous immutable image digest and matching full source SHA;
+   the current process's source association remains a self-report.
+2. Resolve the database and recovery requirements first. Both pending migrations
+   `0019` and `0020` must be assessed; the candidate is not schema-neutral.
+   The app runs Drizzle migrations when opening its database, even though the
+   deployment script has no migration command. Match the final accepted
+   migration hashes to the observed ledger and reviewed pending SQL. Additive
+   DDL still takes locks and adds a document-update trigger; unresolved upgrade,
+   rollback or recovery requirements are reasons not to start the candidate,
+   not reasons to reset, reinitialize or migrate data blindly.
+3. Select the accepted ref in the manual workflow and enter `deploy`. It builds
+   that checkout's `GITHUB_SHA` in ACR, pins the image digest, then sends
+   [`infra/deploy-vm-image.sh`](infra/deploy-vm-image.sh) to `markdoc-pg`.
+   The script reuses the protected `/etc/markdoc/markdoc.env`, updates
+   `APP_VERSION`, writes the application unit and restarts the single service.
+   Do not run infrastructure helpers, including `deploy/azure.ps1`, or a repair
+   tool or second writer alongside the release. Current main's infrastructure
+   safeguards are retained: `deploy/azure.ps1` refuses non-`-InfraOnly` use and
+   database password rotation. Internal VM port 3000 is not the retired
+   Windows development server.
+4. Require local and public `/api/health` to report `ok`, `db`, `collab` true
+   and the accepted full SHA as `version`; retain the new digest and outcome.
+   The workflow checks those fields, not feature behavior or data recovery.
+   This is a restart, not a Container Apps revision/traffic swap. The release
+   owner must finish the requested feature checks before reporting success.
+
+[Rollback](docs/vm-hosting.md#rollback) is an application-image operation,
+not a PostgreSQL schema/data rollback. The script attempts recovery on failures
+before local readiness; a subsequent public health failure does not
+automatically restore the old image. Its temporary configuration copies are
+still deleted; the separately retained bundle does not change that behavior.
+The accepted release SHA/new digest, image-load/old-binary compatibility,
+independent custody and artifact-backed recoverability remain to be established.
+Neither the same-host bundle nor the process-reported version proves registry
+availability or an acceptable recovery point. Use
+[bounded nonsecret diagnostics](docs/vm-hosting.md#health-and-safe-diagnostics);
+the script's journal output on failure is not guaranteed safe to copy.
+
+Infrastructure, OS patching, repair and recovery require separate coordinated
+work, never an overlapping release. [Infrastructure scope and historical
+measurements](docs/infra-deploy.md) are not current deployment expectations.
+Do not recreate the retired maintenance job, restart the retired local
+Windows server, or use its PGlite recovery as a production database fallback.
+
+<details>
+<summary>Historical Container Apps deployment notes (not current operating instructions)</summary>
+
+Everything in this collapsed section predates the VM hosting change:
+commands, revision names, timings, image sizes, cost estimates, backup claims
+and line references are historical. Do not execute these procedures against
+current production or treat them as readiness evidence. Current main's
+`deploy/azure.ps1` safeguards and VM infrastructure are preserved; the helper
+refuses non-`-InfraOnly` use and database password rotation. Its presence does
+not authorize an infrastructure operation or make these archived commands
+current. Use the VM runbook above; these notes remain only to explain earlier
+decisions.
 
 The target is **Azure Container Apps** with PostgreSQL. `infra/main.bicep` describes the whole environment (Container App, ACR, Key Vault, managed identity, Log Analytics, and a private PostgreSQL VM that has no public IP after bootstrap and accepts TLS connections only from the Container Apps subnet); `deploy/azure.ps1` provisions it and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
 
@@ -278,7 +384,7 @@ Two health checks, two probes. `GET /api/health` is the full check — one datab
 
 For an immediate read, `az containerapp logs show -n markdoc -g markdoc-rg --tail <n>` accepts at most **300** lines; use the Log Analytics queries in [`docs/operations-log-lines.md`](docs/operations-log-lines.md) for a larger or historical window. System-log retrieval must specify JSON, for example `--type system --format json`; console-log retrieval may use text. On Windows, keep using the UTF-8 Azure CLI invocation in release step 1 when output can contain Next or application glyphs — the `az.cmd` cp1252 failure applies to log reads too.
 
-### Production runbook: app-only releases
+### Historical Container Apps releases
 
 A release never overlaps another mutation on `markdoc-rg` — no `deploy/azure.ps1` run, no NAT gateway or subnet change, no OS patch window at the same time; if one is under way, wait for it to finish before step 2 (building the image in step 1 changes nothing that runs).
 
@@ -412,6 +518,8 @@ What every line in `ContainerAppConsoleLogs_CL` means — each `[prefix]` the se
 
 The collaboration server keeps open documents in memory, so the app runs as a single replica; scaling out would need Hocuspocus's Redis extension.
 
+</details>
+
 ## Project layout
 
 ```text
@@ -471,6 +579,11 @@ infra, deploy                Bicep and deployment script (infrastructure-deploym
 ```
 
 ## Live test server (Burke's :3000)
+
+> **Retired local hosting history:** the Windows/PGlite server and procedures
+> below are not the current production release or recovery path. Do not start,
+> promote or restore it as part of a VM release. Linux VM port 3000 belongs to
+> the current container; see [VM hosting](docs/vm-hosting.md).
 
 Burke's live test server runs `npm run dev` from a pinned sibling worktree `../markdoc-live` (env in that folder's `.env.local`), with PGlite data and the log under the sibling `../markdoc-data`. Both default paths are derived from the repo location; set `FACTORY_ROOT` (or pass `-Root` / `-LogPath`) to point elsewhere — see `Get-FactoryRoot` in `scripts/live/common.ps1` and its Node twin `scripts/lib/factory-root.mjs`. Ops scripts live in `scripts/live/` (Windows PowerShell 5.1 compatible):
 

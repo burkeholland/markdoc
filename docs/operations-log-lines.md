@@ -1,5 +1,12 @@
 # Operator log lines: what the server prints and what it means
 
+> **Historical console/collection reference:** the census below is pinned to
+> September 2 source. Container Apps log tables, revision fields and ingestion
+> timings do not describe the current VM service. Follow the
+> [VM diagnostic guidance](vm-hosting.md#health-and-safe-diagnostics) for bounded
+> nonsecret service/health metadata. Full journals, command results, exceptions
+> and environment/unit dumps are not guaranteed safe to publish.
+
 Every line the production server can write to its console, taken from the code at `568fb99` (2026-09-02). The reproducible source census is:
 
 ```sh

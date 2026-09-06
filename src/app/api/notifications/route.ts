@@ -1,11 +1,8 @@
 import { z } from "zod";
 import { handler, json, requireUser, tokenAllowsDocument } from "@/server/http";
-import { listNotifications, NOTIFICATION_KINDS, type NotificationItem } from "@/server/notifications";
+import { listNotifications, NOTIFICATION_KINDS } from "@/server/notifications";
 import type { NotificationKind } from "@/server/db/schema";
-
-export function toDto(n: NotificationItem) {
-  return { ...n, createdAt: n.createdAt.toISOString(), readAt: n.readAt ? n.readAt.toISOString() : null };
-}
+import { toDto } from "./dto";
 
 const querySchema = z.object({
   unread: z.boolean(),

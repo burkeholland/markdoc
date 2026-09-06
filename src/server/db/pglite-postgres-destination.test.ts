@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  APPLICATION_TABLES,
   CommitOutcomeUnknownError,
   createPostgresClientConfig,
   createPostgresDestination,
@@ -353,7 +354,7 @@ function emptyManifest(): MigrationManifest {
       documents: { count: 0, sha256: emptyHash },
       assets: { count: 0, bytes: 0, sha256: emptyHash },
     },
-    totals: { tables: 18, rows: 0 },
+    totals: { tables: APPLICATION_TABLES.length, rows: 0 },
     sequences: {},
   };
 }

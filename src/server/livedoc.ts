@@ -40,12 +40,11 @@ function summarize(doc: Y.Doc): LiveText {
   const suggestions = new SuggestionsModel(doc, ytext);
   const comments = new CommentsModel(doc, ytext);
   try {
-    const list = suggestions.list();
     return {
       text: ytext.toString(),
       clean: suggestions.cleanText(),
       title: String(doc.getMap("meta").get("title") ?? ""),
-      pendingSuggestions: list.length,
+      pendingSuggestions: suggestions.count,
       openComments: comments.list().filter((c) => !c.resolved).length,
     };
   } finally {

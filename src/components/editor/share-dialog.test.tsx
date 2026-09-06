@@ -72,7 +72,7 @@ async function openDialog(props: Partial<{ isOwner: boolean; doc: DocumentDto }>
 
 async function expandAgentCard() {
   fireEvent.click(screen.getByTestId("share-agent-toggle"));
-  await screen.findByTestId("share-agent-create-token");
+  await waitFor(() => expect(screen.getByTestId("token-add")).toBeEnabled());
 }
 
 beforeEach(() => {
@@ -84,7 +84,7 @@ beforeEach(() => {
   addCollaborator.mockReset();
   tokensList.mockReset().mockResolvedValue({ tokens: [] });
   tokensCreate.mockReset().mockImplementation(async (name: string, _expires: number, options: { scope: string; documentIds: string[] | null }) => ({
-    token: { id: "tok-1", name, token: "mdk_one_time_secret", prefix: "mdk_one_", scope: options.scope, documentIds: options.documentIds },
+    token: { id: "tok-1", name, token: "mdk_one_time_secret", prefix: "mdk_one_", scope: options.scope, documentIds: options.documentIds, createdAt: "2026-09-05T00:00:00.000Z", expiresAt: null },
   }));
   copyText.mockReset().mockResolvedValue(true);
 });
@@ -162,78 +162,73 @@ describe("ShareDialog · add a collaborator", () => {
 });
 
 describe("ShareDialog · collaborate with an agent", () => {
-  it("is collapsed by default and opens into the three steps with the scope picker defaulting to comment, restricted to this document", async () => {
+  it("opens two destinations with management first and creation scoped to this document", async () => {
     await openDialog();
     const toggle = screen.getByTestId("share-agent-toggle");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveAttribute("aria-controls");
-    expect(screen.queryByTestId("share-agent-config")).toBeNull();
+    expect(screen.queryByTestId("token-manager")).toBeNull();
     expect(screen.getByTestId("share-agent-card")).toHaveTextContent("Connect Copilot CLI or any MCP client as a collaborator");
 
     await expandAgentCard();
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toContainElement(screen.getByTestId("share-agent-config"));
-    expect(screen.getByTestId("share-agent-config")).toHaveTextContent("MARKDOC_TOKEN");
-
-    const group = screen.getByRole("radiogroup", { name: "Token scope" });
+    expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toContainElement(screen.getByTestId("token-manager"));
+    expect(within(screen.getByRole("navigation", { name: "Token access" })).getAllByRole("button")).toHaveLength(2);
+    expect(screen.queryByTestId("agent-connect-config")).toBeNull();
+    fireEvent.click(screen.getByTestId("token-add"));
+    const group = screen.getByRole("group", { name: "Scope" });
     const radios = within(group).getAllByRole("radio");
     expect(radios).toHaveLength(3);
-    expect(radios.map((r) => r.getAttribute("data-testid"))).toEqual(["share-agent-scope-read", "share-agent-scope-comment", "share-agent-scope-full"]);
-    expect(screen.getByTestId("share-agent-scope-comment")).toBeChecked();
+    expect(radios.map((r) => r.getAttribute("data-testid"))).toEqual(["token-scope-read", "token-scope-comment", "token-scope-full"]);
+    expect(screen.getByTestId("token-scope-comment")).toBeChecked();
     expect(group).toHaveTextContent("Comment & suggest");
-    expect(screen.getByTestId("share-agent-restrict")).toBeChecked();
-    // Steps in order: token, config, paste.
-    const card = screen.getByTestId("share-agent-card");
-    expect(precedes(screen.getByTestId("share-agent-create-token"), screen.getByTestId("share-agent-config"))).toBe(true);
-    expect(precedes(screen.getByTestId("share-agent-config"), screen.getByTestId("share-agent-setup-link"))).toBe(true);
-    expect(card).toHaveTextContent("/mcp add");
-    expect(screen.getByTestId("share-agent-setup-link")).toHaveAttribute("href", "/settings#tokens");
+    expect(screen.getByTestId("token-restrict")).toBeChecked();
+    expect(screen.getByRole("link", { name: "Open all your tokens in Settings" })).toHaveAttribute("href", `/settings?next=${encodeURIComponent(`/d/${DOC_ID}`)}#tokens`);
   });
 
-  it("mints a full-scope token restricted to this document, inlines it and locks the picker", async () => {
+  it("creates a full-scope token for this document, displays the secret once and never puts it in setup", async () => {
     await openDialog();
     await expandAgentCard();
-    fireEvent.click(screen.getByTestId("share-agent-scope-full"));
-    expect(screen.getByTestId("share-agent-scope-full")).toBeChecked();
-    fireEvent.click(screen.getByTestId("share-agent-create-token"));
-
-    await waitFor(() => expect(screen.getByTestId("share-agent-config")).toHaveTextContent("mdk_one_time_secret"));
+    fireEvent.click(screen.getByTestId("token-add"));
+    fireEvent.click(screen.getByTestId("token-scope-full"));
+    fireEvent.click(screen.getByTestId("token-create"));
+    await screen.findByTestId("token-created");
     expect(tokensCreate).toHaveBeenCalledTimes(1);
     expect(tokensCreate).toHaveBeenCalledWith("GitHub Copilot CLI", 90, { scope: "full", documentIds: [DOC_ID] });
-    expect(screen.queryByTestId("share-agent-create-token")).toBeNull();
+    expect(screen.getByTestId("token-create")).toBeDisabled();
     expect(screen.getByTestId("share-agent-toggle")).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByTestId("share-agent-scope-chip")).toHaveTextContent("full");
-    expect(screen.getByTestId("share-agent-minted-note")).toHaveTextContent("It is full-access: it can do anything you can in this document.");
-    expect(screen.getByTestId("share-agent-minted-note")).not.toHaveTextContent("other documents");
-    for (const scope of ["read", "comment", "full"]) expect(screen.getByTestId(`share-agent-scope-${scope}`)).toBeDisabled();
-    expect(screen.getByTestId("share-agent-restrict")).toBeDisabled();
-    expect(screen.getByTestId("share-agent-restrict")).toBeChecked();
+    expect(screen.getByTestId("token-scope-chip")).toHaveTextContent("full");
+    expect(copyText).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Connect an MCP client" }));
+    expect(screen.getByTestId("agent-connect-config")).toHaveTextContent("MARKDOC_TOKEN");
+    expect(screen.getByTestId("agent-connect-config").textContent?.includes(screen.getByTestId("copy-token").textContent!)).toBe(false);
   });
 
-  it("sends documentIds: null when Only this document is unticked and words the note per scope", async () => {
+  it("keeps explicit unrestricted creation available", async () => {
     await openDialog();
     await expandAgentCard();
-    fireEvent.click(screen.getByTestId("share-agent-restrict"));
-    expect(screen.getByTestId("share-agent-restrict")).not.toBeChecked();
-    fireEvent.click(screen.getByTestId("share-agent-scope-read"));
-    fireEvent.click(screen.getByTestId("share-agent-create-token"));
+    fireEvent.click(screen.getByTestId("token-add"));
+    fireEvent.click(screen.getByTestId("token-restrict"));
+    expect(screen.getByTestId("token-restrict")).not.toBeChecked();
+    fireEvent.click(screen.getByTestId("token-scope-read"));
+    fireEvent.click(screen.getByTestId("token-create"));
 
     await waitFor(() => expect(tokensCreate).toHaveBeenCalledTimes(1));
     expect(tokensCreate).toHaveBeenCalledWith("GitHub Copilot CLI", 90, { scope: "read", documentIds: null });
-    await waitFor(() => expect(screen.getByTestId("share-agent-scope-chip")).toHaveTextContent("read"));
-    expect(screen.getByTestId("share-agent-minted-note")).toHaveTextContent("It is read-only: it can read and follow the document but not comment or edit. It also works in your other documents.");
+    await waitFor(() => expect(screen.getByTestId("token-scope-chip")).toHaveTextContent("read"));
+    expect(screen.getByTestId("token-created")).toHaveTextContent("All documents you can access");
   });
 
   it("keeps the comment default: Create a token with nothing changed mints a comment-scoped token for this document", async () => {
     await openDialog();
     await expandAgentCard();
-    fireEvent.click(screen.getByTestId("share-agent-create-token"));
+    fireEvent.click(screen.getByTestId("token-add"));
+    fireEvent.click(screen.getByTestId("token-create"));
     await waitFor(() => expect(tokensCreate).toHaveBeenCalledWith("GitHub Copilot CLI", 90, { scope: "comment", documentIds: [DOC_ID] }));
-    await waitFor(() => expect(screen.getByTestId("share-agent-scope-chip")).toHaveTextContent("comment"));
-    expect(screen.getByTestId("share-agent-card")).toHaveTextContent("comment-scoped");
+    await waitFor(() => expect(screen.getByTestId("token-scope-chip")).toHaveTextContent("comment"));
   });
 
-  it("names the newest existing token and keeps the placeholder until one is minted here", async () => {
+  it("shows every existing token with management instead of guessing the newest is usable", async () => {
     tokensList.mockResolvedValue({
       tokens: [
         { id: "t-old", name: "Old bot", prefix: "mdk_old_", scope: "read", documentIds: null, createdAt: "2026-01-01T00:00:00.000Z", lastUsedAt: null, lastMcpSeenAt: null, lastMcpCallAt: null, expiresAt: null },
@@ -242,8 +237,11 @@ describe("ShareDialog · collaborate with an agent", () => {
     });
     await openDialog();
     await expandAgentCard();
-    await waitFor(() => expect(screen.getByTestId("share-agent-card")).toHaveTextContent("your token Newer bot (mdk_new_…)"));
-    expect(screen.getByTestId("share-agent-config")).toHaveTextContent("MARKDOC_TOKEN");
-    expect(screen.getByTestId("share-agent-scope-chip")).toHaveTextContent("comment");
+    expect(screen.getAllByTestId("token-row")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Rename Old bot" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Replace Newer bot" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Connect an MCP client" }));
+    expect(screen.getByTestId("agent-connect-config")).toHaveTextContent("MARKDOC_TOKEN");
+    expect(screen.getByRole("button", { name: "Replace Newer bot" })).toBeVisible();
   });
 });

@@ -1,5 +1,6 @@
 import * as Y from "yjs";
 import { createAnchor, newId, resolveAnchor, type CollabUser, type TextAnchor } from "./shared";
+import { retargetReplacementComments, SUGGESTION_ANCHORS_META } from "./replacement-anchors";
 
 export type SuggestionType = "insert" | "delete";
 
@@ -13,11 +14,29 @@ export interface Suggestion {
   createdAt: number;
   /** Snapshot of the suggested text (inserted or to be deleted) for display. */
   text: string;
+  /** Agent replacement identity. Legacy human typing keeps its adjacent-edit behavior. */
+  groupId?: string;
+  groupSize?: number;
 }
 
 export interface ResolvedSuggestion extends Suggestion {
   from: number;
   to: number;
+}
+
+export interface SuggestionGroup extends Omit<ResolvedSuggestion, "type"> {
+  type: SuggestionType | "replace";
+  members: ResolvedSuggestion[];
+  before: string;
+  after: string;
+  outdated: boolean;
+}
+
+export class SuggestionConflictError extends Error {
+  constructor() {
+    super("This suggestion overlaps a newer edit. Review the changed text before deciding it.");
+    this.name = "SuggestionConflictError";
+  }
 }
 
 export const SUGGESTIONS_ORIGIN = { name: "suggestions" };
@@ -37,7 +56,8 @@ export interface EditInput {
  *
  * This keeps the text the single source of truth for both editing surfaces
  * while allowing exact tracked-changes semantics: accept keeps the insertion and
- * drops the deleted text, reject does the reverse, each suggestion independently.
+ * drops the deleted text, reject does the reverse. Agent replacement pairs are
+ * decided atomically; legacy typing suggestions remain independent.
  */
 export class SuggestionsModel {
   readonly ymap: Y.Map<Suggestion>;
@@ -84,7 +104,104 @@ export class SuggestionsModel {
   }
 
   get count(): number {
-    return this.list().length;
+    const groups = new Set<string>();
+    this.ymap.forEach((s, id) => {
+      if (!s.groupId) {
+        const range = resolveAnchor(this.ytext, s.anchor);
+        if (!range || range.to <= range.from) return;
+      }
+      groups.add(JSON.stringify([s.groupId ?? id, s.authorId]));
+    });
+    return groups.size;
+  }
+
+  /** One review/navigation unit per agent operation; legacy suggestions stay independent. */
+  groups(sourceText?: string): SuggestionGroup[] {
+    if (this.ymap.size === 0) return [];
+    const text = sourceText ?? this.ytext.toString();
+    const grouped = new Map<string, SuggestionGroup>();
+    this.ymap.forEach((s, id) => {
+      const range = resolveAnchor(this.ytext, s.anchor);
+      const live = !!range && range.to > range.from;
+      if (!s.groupId && !live) return;
+      const key = JSON.stringify([s.groupId ?? id, s.authorId]);
+      const member = { ...s, id, from: range?.from ?? 0, to: range?.to ?? 0 };
+      let group = grouped.get(key);
+      if (!group) {
+        group = { ...member, id: s.groupId ?? id, members: [], before: "", after: "", outdated: false };
+        grouped.set(key, group);
+      }
+      group.members.push(member);
+      group.from = Math.min(group.from, member.from);
+      group.to = Math.max(group.to, member.to);
+      if (s.groupId && (!live || text.slice(member.from, member.to) !== s.text)) group.outdated = true;
+    });
+    const groups = [...grouped.values()];
+    const owners = new Map<string, SuggestionGroup>();
+    for (const group of groups) {
+      group.members.sort((a, b) => a.from - b.from);
+      for (const member of group.members) {
+        owners.set(member.id, group);
+        const value = member.groupId ? member.text : text.slice(member.from, member.to);
+        if (member.type === "delete") group.before += value;
+        else group.after += value;
+      }
+      group.type = group.members.some((s) => s.type === "insert")
+        ? group.members.some((s) => s.type === "delete") ? "replace" : "insert"
+        : "delete";
+      group.text = group.type === "delete" ? group.before : group.after;
+      if (group.groupId && group.members.length !== group.groupSize) group.outdated = true;
+    }
+    // A newer tracked annotation can overlap without changing the underlying text.
+    // A sweep, rather than a pairwise scan, keeps refreshes bounded.
+    let furthest: ResolvedSuggestion | undefined;
+    for (const member of groups.flatMap((group) => group.members).sort((a, b) => a.from - b.from)) {
+      if (furthest && member.from < furthest.to && owners.get(member.id) !== owners.get(furthest.id)) {
+        for (const id of [member.id, furthest.id]) {
+          const group = owners.get(id)!;
+          if (group.groupId) group.outdated = true;
+        }
+      }
+      if (!furthest || member.to > furthest.to) furthest = member;
+    }
+    return groups.sort((a, b) => a.from - b.from || a.createdAt - b.createdAt);
+  }
+
+  /** A new agent operation never merges into a neighbor, even by the same author. */
+  propose(edit: EditInput, author: CollabUser, origin: object = SUGGESTIONS_ORIGIN): string {
+    return this.proposeEdits([edit], author, origin)[0];
+  }
+
+  /** Original-coordinate operations are preflighted together, then applied atomically. */
+  proposeEdits(edits: EditInput[], author: CollabUser, origin: object = SUGGESTIONS_ORIGIN): string[] {
+    const pending = this.list();
+    const ordered = [...edits].sort((a, b) => a.from - b.from);
+    for (const [index, edit] of ordered.entries()) {
+      if (!Number.isInteger(edit.from) || !Number.isInteger(edit.to) || edit.from < 0 || edit.to < edit.from || edit.to > this.ytext.length) {
+        throw new RangeError("Suggestion range is outside the document");
+      }
+      if (edit.from === edit.to && !edit.insert) throw new Error("Cannot propose an empty edit");
+      if ((index > 0 && ordered[index - 1].to > edit.from) ||
+        pending.some((s) => (edit.from < s.to && edit.to > s.from) || (edit.from === edit.to && edit.from > s.from && edit.from < s.to))) {
+        throw new SuggestionConflictError();
+      }
+    }
+    const created: string[] = [];
+    this.ydoc.transact(() => {
+      for (const edit of ordered.reverse()) {
+        const groupId = newId();
+        const groupSize = Number(edit.to > edit.from) + Number(!!edit.insert);
+        const ids: string[] = [];
+        if (edit.to > edit.from) ids.push(this.create("delete", edit.from, edit.to, author, edit.insert ? newId() : groupId));
+        if (edit.insert) {
+          this.ytext.insert(edit.from, edit.insert);
+          ids.push(this.create("insert", edit.from, edit.from + edit.insert.length, author, groupId));
+        }
+        for (const id of ids) this.ymap.set(id, { ...this.ymap.get(id)!, groupId, groupSize });
+        created.push(groupId);
+      }
+    }, origin);
+    return created.reverse();
   }
 
   /** Remove records whose text no longer exists. */
@@ -92,7 +209,7 @@ export class SuggestionsModel {
     const dead: string[] = [];
     this.ymap.forEach((s, id) => {
       const range = resolveAnchor(this.ytext, s.anchor);
-      if (!range || range.to <= range.from) dead.push(id);
+      if (!s.groupId && (!range || range.to <= range.from)) dead.push(id);
     });
     if (dead.length) this.ydoc.transact(() => dead.forEach((id) => this.ymap.delete(id)), origin);
   }
@@ -103,8 +220,7 @@ export class SuggestionsModel {
     this.ymap.set(id, { ...s, anchor: createAnchor(this.ytext, from, to), text: text ?? this.ytext.toString().slice(from, to) });
   }
 
-  private create(type: SuggestionType, from: number, to: number, author: CollabUser): string {
-    const id = newId();
+  private create(type: SuggestionType, from: number, to: number, author: CollabUser, id = newId()): string {
     this.ymap.set(id, {
       id,
       type,
@@ -127,7 +243,7 @@ export class SuggestionsModel {
   markDeleted(from: number, to: number, author: CollabUser): number {
     if (to <= from) return 0;
     const all = this.list();
-    const ownInserts = all.filter((s) => s.type === "insert" && s.authorId === author.id && s.from < to && s.to > from);
+    const ownInserts = all.filter((s) => !s.groupId && s.type === "insert" && s.authorId === author.id && s.from < to && s.to > from);
     let removedBeforeTo = 0;
     for (const s of [...ownInserts].sort((a, b) => b.from - a.from)) {
       const dFrom = Math.max(from, s.from);
@@ -154,8 +270,8 @@ export class SuggestionsModel {
     for (const seg of segments) {
       if (seg.to <= seg.from) continue;
       kept += seg.to - seg.from;
-      const before = existingDeletes.find((d) => d.authorId === author.id && d.to === seg.from);
-      const after = existingDeletes.find((d) => d.authorId === author.id && d.from === seg.to);
+      const before = existingDeletes.find((d) => !d.groupId && d.authorId === author.id && d.to === seg.from);
+      const after = existingDeletes.find((d) => !d.groupId && d.authorId === author.id && d.from === seg.to);
       if (before && after) {
         this.setRange(before.id, before.from, after.to);
         this.ymap.delete(after.id);
@@ -180,7 +296,7 @@ export class SuggestionsModel {
     if (len <= 0) return;
     const all = this.list();
     // A delete-suggestion that spans the inserted range (it grew when the text was inserted).
-    const spanning = all.find((d) => d.type === "delete" && d.from < pos && d.to > pos + len);
+    const spanning = all.find((d) => !d.groupId && d.type === "delete" && d.from < pos && d.to > pos + len);
     if (spanning) {
       const tailFrom = pos + len;
       const tailTo = spanning.to;
@@ -197,7 +313,7 @@ export class SuggestionsModel {
       this.create("insert", pos, pos + len, author);
       return;
     }
-    const own = all.filter((s) => s.type === "insert" && s.authorId === author.id);
+    const own = all.filter((s) => !s.groupId && s.type === "insert" && s.authorId === author.id);
     const before = own.find((s) => s.to === pos || (s.from < pos && s.to >= pos + len));
     const after = own.find((s) => s.from === pos + len);
     if (before) {
@@ -236,45 +352,44 @@ export class SuggestionsModel {
 
 
   accept(id: string, origin: object = SUGGESTIONS_ORIGIN) {
-    const s = this.list().find((x) => x.id === id);
-    if (!s) {
-      this.ymap.delete(id);
-      return;
-    }
-    this.ydoc.transact(() => {
-      if (s.type === "delete") this.ytext.delete(s.from, s.to - s.from);
-      this.ymap.delete(id);
-    }, origin);
+    return this.decideOne(id, true, origin);
   }
 
   reject(id: string, origin: object = SUGGESTIONS_ORIGIN) {
-    const s = this.list().find((x) => x.id === id);
-    if (!s) {
-      this.ymap.delete(id);
-      return;
-    }
-    this.ydoc.transact(() => {
-      if (s.type === "insert") this.ytext.delete(s.from, s.to - s.from);
-      this.ymap.delete(id);
-    }, origin);
+    return this.decideOne(id, false, origin);
+  }
+
+  private decideOne(id: string, accept: boolean, origin: object): number {
+    const groups = this.groups().filter((group) => group.id === id || group.members.some((s) => s.id === id));
+    if (!groups.length) this.ydoc.transact(() => this.ymap.delete(id), origin);
+    return this.decide(groups, accept, origin);
   }
 
   acceptAll(origin: object = SUGGESTIONS_ORIGIN) {
-    this.ydoc.transact(() => {
-      for (const s of this.list().sort((a, b) => b.from - a.from)) {
-        if (s.type === "delete") this.ytext.delete(s.from, s.to - s.from);
-        this.ymap.delete(s.id);
-      }
-    }, origin);
+    return this.decide(this.groups(), true, origin);
   }
 
   rejectAll(origin: object = SUGGESTIONS_ORIGIN) {
-    this.ydoc.transact(() => {
-      for (const s of this.list().sort((a, b) => b.from - a.from)) {
-        if (s.type === "insert") this.ytext.delete(s.from, s.to - s.from);
+    return this.decide(this.groups(), false, origin);
+  }
+
+  private decide(groups: SuggestionGroup[], accept: boolean, origin: object): number {
+    if (groups.some((group) => group.outdated)) throw new SuggestionConflictError();
+    this.ydoc.transact((transaction) => {
+      const pairs = groups.flatMap((group) => {
+        if (!group.groupId || group.type !== "replace") return [];
+        const removed = group.members.find((s) => s.type === (accept ? "delete" : "insert"))!;
+        const kept = group.members.find((s) => s.type === (accept ? "insert" : "delete"))!;
+        return [{ removed, kept }];
+      });
+      const anchors = retargetReplacementComments(this.ydoc, this.ytext, pairs);
+      if (anchors.length) transaction.meta.set(SUGGESTION_ANCHORS_META, anchors);
+      for (const s of groups.flatMap((group) => group.members).sort((a, b) => b.from - a.from)) {
+        if (s.type === (accept ? "delete" : "insert")) this.ytext.delete(s.from, s.to - s.from);
         this.ymap.delete(s.id);
       }
     }, origin);
+    return groups.length;
   }
 
   /** The text as it would be if every pending suggestion were rejected (for export/publish). */

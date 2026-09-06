@@ -134,7 +134,7 @@ describe("canvas embed handoff", () => {
     requestHeaders = new Headers({ cookie: `${EMBED_SESSION_COOKIE}=${encodeURIComponent(encoded)}` });
     const identity = await GET_ME();
     expect(await identity.json()).toMatchObject({ agent: "Copilot app", scope: "comment", documentIds: [documentId] });
-    expect((await GET_TOKENS()).status).toBe(403);
+    expect((await GET_TOKENS(new Request(`${BASE}/api/tokens`))).status).toBe(403);
     expect(await embeddedDocumentPath(null)).toBe(`/d/${documentId}?embed=1`);
 
     const replay = await GET(frameRequest(nonce), context(nonce));

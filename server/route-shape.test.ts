@@ -51,6 +51,7 @@ describe("routeShape", () => {
 
   it("keeps the static segments of the API tree", () => {
     expect(routeShape(`/api/documents/${DOCUMENT_ID}/collaborators`)).toBe("/api/documents/:id/collaborators");
+    expect(routeShape(`/api/documents/${DOCUMENT_ID}/gist-auto-update?preview=1`)).toBe("/api/documents/:id/gist-auto-update");
     expect(routeShape("/api/notifications/read-all")).toBe("/api/notifications/read-all");
     expect(routeShape("/api/embed/handoff")).toBe("/api/embed/handoff");
     expect(routeShape("/api/mcp")).toBe("/api/mcp");
@@ -65,6 +66,7 @@ describe("routeShape", () => {
     expect(routeShape(`/api/assets/${ASSET_ID}`)).toBe("/api/assets/:id");
     expect(routeShape(`/api/documents/${DOCUMENT_ID}/versions/${DOCUMENT_ID}/copy`)).toBe("/api/documents/:id/versions/:id/copy");
     expect(routeShape(`/api/tokens/${DOCUMENT_ID}`)).toBe("/api/tokens/:id");
+    expect(routeShape(`/api/tokens/${DOCUMENT_ID}/replace`)).toBe("/api/tokens/:id/replace");
     expect(routeShape(`/api/webhooks/${DOCUMENT_ID}/test`)).toBe("/api/webhooks/:id/test");
     expect(routeShape(`/api/mentions/${NEW_ID}/read`)).toBe("/api/mentions/:id/read");
     expect(routeShape(`/api/agent/documents/${DOCUMENT_ID}/presence`)).toBe("/api/agent/documents/:id/presence");

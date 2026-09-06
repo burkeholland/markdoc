@@ -2,16 +2,7 @@ import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { budgetMs, codeText, createDocument, focusRichEnd, openDocument, richText, shareWith, signIn } from "./helpers";
 
-/**
- * The header's save chip while typing (#1282). The provider counts one unsynced change per keystroke and
- * the server acks each within tens of ms, so the raw state (`data-live-state`) alternates saving/saved on
- * every key. The chip itself (`data-state`) must read "Saving…" steadily for as long as you type and flip
- * to "Saved" once, about a second after the last ack; another user's typing must not move your chip at all
- * while their words still arrive live.
- */
-
-/** Mirrors `SAVED_HOLD_MS` in src/components/editor/use-session.ts. */
-const SAVED_HOLD_MS = 1000;
+const CONTENT_IDLE_MS = 1000;
 /** 40 letters at 120 ms each: about five seconds of typing at a normal pace. */
 const TYPED = Array.from({ length: 40 }, (_, i) => String.fromCharCode(97 + (i % 26))).join("");
 const CONTENT = "# Save indicator\n\nA paragraph.\n";
@@ -32,31 +23,46 @@ async function observePill(page: Page) {
     if (!el) throw new Error("save-state pill not found");
     const list: PillChange[] = [];
     w.__pillChanges = list;
-    new MutationObserver((records) => {
+    const previous = new Map<PillChange["attr"], string | null>([
+      ["data-state", el.getAttribute("data-state")],
+      ["data-live-state", el.getAttribute("data-live-state")],
+    ]);
+    new MutationObserver(() => {
+      const current = document.querySelector('[data-testid="save-state"]');
+      if (!current) return;
       const t = performance.now();
-      for (const r of records) {
-        const attr = r.attributeName as PillChange["attr"];
-        const value = el.getAttribute(attr) ?? "<missing>";
-        if (value === r.oldValue) continue;
+      for (const attr of ["data-state", "data-live-state"] as const) {
+        const value = current.getAttribute(attr) ?? "<missing>";
+        if (value === previous.get(attr)) continue;
+        previous.set(attr, value);
         list.push({ attr, value, t });
       }
-    }).observe(el, { attributes: true, attributeOldValue: true, attributeFilter: ["data-state", "data-live-state"] });
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-state", "data-live-state"] });
   });
 }
 
 const pillChanges = (page: Page) => page.evaluate(() => (window as PillWindow).__pillChanges ?? []);
 const now = (page: Page) => page.evaluate(() => performance.now());
 
-test("one user typing: the chip flips twice while the sync still runs per keystroke", async ({ browser }) => {
+async function storedAt(page: Page, docId: string): Promise<string> {
+  const response = await page.request.get(`/api/documents/${docId}`);
+  expect(response.ok()).toBe(true);
+  const body = await response.json() as { document: { updatedAt: string } };
+  return body.document.updatedAt;
+}
+
+test("continuous typing stays dirty until actual trailing-idle persistence", async ({ browser }) => {
   const alice = await signIn(browser, "alice");
   try {
     const docId = await createDocument(alice.page, CONTENT, "Save indicator: one typist");
     await openDocument(alice.page, docId);
     await focusRichEnd(alice.page);
+    const before = await storedAt(alice.page, docId);
     await observePill(alice.page);
 
     await alice.page.keyboard.type(TYPED, { delay: 120 });
     const typedEnd = await now(alice.page);
+    expect(await storedAt(alice.page, docId)).toBe(before);
     const pill = alice.page.getByTestId("save-state");
     await expect(pill).toHaveAttribute("data-state", "saved");
     await expect.poll(() => codeText(alice.page)).toContain(TYPED);
@@ -65,28 +71,26 @@ test("one user typing: the chip flips twice while the sync still runs per keystr
     const live = changes.filter((c) => c.attr === "data-live-state");
     const shown = changes.filter((c) => c.attr === "data-state");
     const settle = shown[shown.length - 1];
-    const lastAck = live[live.length - 1];
+    expect(settle).toBeDefined();
     console.log(
-      `[save-indicator T1] live-state changes ${live.length}, data-state changes ${shown.length} (${shown.map((c) => c.value).join("→")}), ` +
-        `Saved ${Math.round(settle.t - lastAck.t)} ms after the last ack, ${Math.round(settle.t - typedEnd)} ms after the last keystroke`,
+      `[save-indicator T1] live-state changes ${live.length}, durable-state changes ${shown.length}, ` +
+        `Saved ${Math.round(settle.t - typedEnd)} ms after typing`,
     );
 
-    // The sync is untouched: the raw state still moves for (nearly) every key.
-    expect(live.length).toBeGreaterThanOrEqual(10);
-    expect(live[0].value).toBe("saving");
-    expect(lastAck.value).toBe("saved");
-    // The chip moved exactly twice: into Saving… at the first key, back to Saved once after the hold.
-    expect(shown.map((c) => c.value)).toEqual(["saving", "saved"]);
-    expect(settle.t - lastAck.t).toBeGreaterThanOrEqual(SAVED_HOLD_MS - 100);
+    expect(shown.filter((change) => change.value === "saved")).toHaveLength(1);
+    expect(shown.some((change) => change.value === "pending")).toBe(true);
+    expect(live.map((change) => change.value)).toEqual(shown.map((change) => change.value));
+    expect(settle.t - typedEnd).toBeGreaterThanOrEqual(CONTENT_IDLE_MS - 200);
     expect(settle.t - typedEnd).toBeLessThanOrEqual(budgetMs(3_000));
-    // Saving… showed at the first key, not after a delay.
-    expect(shown[0].t).toBeLessThanOrEqual(live[0].t + 200);
+    expect(await storedAt(alice.page, docId)).not.toBe(before);
+    await openDocument(alice.page, docId);
+    await expect.poll(() => codeText(alice.page)).toContain(TYPED);
   } finally {
     await alice.context.close();
   }
 });
 
-test("two users, only one types: the other's chip does not move while the words arrive", async ({ browser }) => {
+test("another user receives edits before the typing burst is persisted", async ({ browser }) => {
   const alice = await signIn(browser, "alice");
   const bob = await signIn(browser, "bob");
   try {
@@ -95,10 +99,15 @@ test("two users, only one types: the other's chip does not move while the words 
     await openDocument(alice.page, docId);
     await openDocument(bob.page, docId);
     const before = await codeText(alice.page);
+    const persistedBefore = await storedAt(alice.page, docId);
     await focusRichEnd(bob.page);
     await observePill(alice.page);
 
-    await bob.page.keyboard.type(TYPED, { delay: 120 });
+    const firstHalf = TYPED.slice(0, 20);
+    await bob.page.keyboard.type(firstHalf, { delay: 120 });
+    await expect.poll(() => codeText(alice.page), { timeout: budgetMs(500) }).toContain(firstHalf);
+    expect(await storedAt(alice.page, docId)).toBe(persistedBefore);
+    await bob.page.keyboard.type(TYPED.slice(20), { delay: 120 });
     await expect(bob.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
     await expect.poll(() => richText(alice.page)).toContain(TYPED);
     await expect.poll(() => codeText(alice.page)).toContain(TYPED);
@@ -109,13 +118,41 @@ test("two users, only one types: the other's chip does not move while the words 
     const after = await codeText(alice.page);
     console.log(`[save-indicator T2] alice data-state changes ${shown.length}, live-state changes ${live.length}, content delivered ${after !== before && after.includes(TYPED)}`);
 
-    expect(shown).toEqual([]);
-    expect(live).toEqual([]);
     await expect(alice.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
     await expect(alice.page.getByTestId("save-state")).toHaveAttribute("data-live-state", "saved");
     expect(after).not.toBe(before);
+    expect(await storedAt(alice.page, docId)).not.toBe(persistedBefore);
   } finally {
     await alice.context.close();
     await bob.context.close();
+  }
+});
+
+test("manual Save flushes the current edit and synthetic composition holds autosave", async ({ browser }) => {
+  const alice = await signIn(browser, "alice");
+  try {
+    const docId = await createDocument(alice.page, CONTENT, "Save indicator: manual and composition");
+    await openDocument(alice.page, docId);
+    await focusRichEnd(alice.page);
+    const before = await storedAt(alice.page, docId);
+    await alice.page.keyboard.type(" manual-save");
+    await alice.page.getByRole("button", { name: "Save document", exact: true }).click();
+    await expect(alice.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+    const manualSaved = await storedAt(alice.page, docId);
+    expect(manualSaved).not.toBe(before);
+
+    await focusRichEnd(alice.page);
+    const rich = alice.page.locator(".md-rich");
+    await rich.dispatchEvent("compositionstart", { data: "" });
+    await alice.page.keyboard.insertText("\u3042");
+    await alice.page.waitForTimeout(CONTENT_IDLE_MS + 500);
+    expect(await storedAt(alice.page, docId)).toBe(manualSaved);
+    await rich.dispatchEvent("compositionend", { data: "\u3042" });
+    await expect(alice.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+    expect(await storedAt(alice.page, docId)).not.toBe(manualSaved);
+    await openDocument(alice.page, docId);
+    await expect.poll(() => codeText(alice.page)).toContain("manual-save\u3042");
+  } finally {
+    await alice.context.close();
   }
 });

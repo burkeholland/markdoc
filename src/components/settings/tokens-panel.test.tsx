@@ -117,7 +117,7 @@ describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () =
     expect(toggle).toHaveAttribute("aria-checked", "true");
   });
 
-  it("does not snap the switch back when a list reload that started before the click lands after the PATCH succeeded (#1538)", async () => {
+  it("preserves newly created rows and successful switch changes when an earlier list reload arrives (#1538)", async () => {
     // Mint a token (POST → reload GET), then turn the new switch on while that GET is still in flight: it started before
     // the click, so what it carries (Off) is older than the PATCH's 200 and must not replace it.
     const stale = deferred();
@@ -129,6 +129,7 @@ describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () =
     render(<TokensPanel origin="https://markdoc.test" userLogin="alice" />);
 
     const toggle = await screen.findByTestId("token-collaborators-may-ask");
+    fireEvent.click(screen.getByTestId("token-add"));
     fireEvent.click(screen.getByTestId("token-create"));
     await screen.findByTestId("token-created");
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -137,8 +138,10 @@ describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () =
     expect(toggle).toHaveAttribute("aria-checked", "true");
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0]).toEqual(["/api/tokens/tok-1", { collaboratorsMayAsk: true }]);
+    await waitFor(() => expect(toggle).toBeEnabled());
 
-    stale.settle(response({ tokens: [token] }));
+    stale.settle(response({ tokens: [token, { ...token, id: "tok-2", name: "New agent" }] }));
+    await waitFor(() => expect(screen.getAllByTestId("token-row")).toHaveLength(2));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
     expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(patches()).toHaveLength(1);
@@ -152,6 +155,7 @@ describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () =
     render(<TokensPanel origin="https://markdoc.test" userLogin="alice" />);
 
     const toggle = await screen.findByTestId("token-collaborators-may-ask");
+    fireEvent.click(screen.getByTestId("token-add"));
     fireEvent.click(screen.getByTestId("token-create"));
     await screen.findByTestId("token-created");
     fireEvent.click(toggle);
@@ -204,6 +208,7 @@ describe("Settings → Agents: the create form shows the validation reason (#148
     render(<TokensPanel origin="https://markdoc.test" userLogin="alice" />);
 
     await screen.findByText("No tokens yet.");
+    fireEvent.click(screen.getByTestId("token-add"));
     fireEvent.click(screen.getByTestId("token-create"));
 
     const alert = await screen.findByRole("alert");

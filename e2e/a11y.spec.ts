@@ -4,6 +4,9 @@ import AxeBuilder from "@axe-core/playwright";
 import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
+// Some scans use minted fixture tokens; capture must not retain their API credentials.
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 /**
  * Accessibility sweep: axe-core (WCAG 2.1 A/AA) on every screen and floating UI, then a
  * keyboard-only walkthrough of the editor. Run with `npx playwright test e2e/a11y.spec.ts`.
@@ -307,8 +310,17 @@ test.describe("axe: pages", () => {
     const { page, context } = await signIn(browser, "a11y-settings");
     await page.goto("/settings");
     await expect(page.getByTestId("theme-row")).toBeVisible();
-    await expect(page.getByTestId("copilot-checklist")).toBeVisible();
-    await scan(page, "settings (with Copilot CLI checklist)");
+    await expect(page.getByTestId("token-manager")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Tokens", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("copilot-checklist")).toHaveCount(0);
+    await scan(page, "settings (token list)");
+    await page.getByTestId("token-add").click();
+    await expect(page.getByTestId("token-name")).toBeVisible();
+    await scan(page, "settings (expanded token form)");
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Connect an MCP client", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("agent-connect-card")).toBeVisible();
+    await scan(page, "settings (MCP client setup)");
     await context.close();
   });
 

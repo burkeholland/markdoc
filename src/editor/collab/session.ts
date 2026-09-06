@@ -4,6 +4,8 @@ import * as Y from "yjs";
 import type { CompleteHocuspocusProviderWebsocketConfiguration, WebSocketStatus } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
 import { MarkdocProvider } from "./provider";
+import { ClientDocumentPersistence, type SavedDocumentVersion } from "./persistence";
+import type { PersistenceMessage } from "@/lib/document-persistence";
 import { CommentsModel, COMMENTS_ORIGIN, type CommentSuggestionSnapshot, type CommentSuggestionTarget } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
@@ -30,6 +32,7 @@ import {
 } from "../find";
 import { ACTIVITY_THROTTLE_MS, followReducer, sectionAt, type FollowEvent } from "./follow";
 import type { HeadingInfo } from "../markdown/parse";
+import { restoreReplacementComments, SUGGESTION_ANCHORS_META, type CommentAnchorChange } from "./replacement-anchors";
 
 export type EditMode = "editing" | "suggesting" | "viewing";
 export type Surface = "code" | "rich";
@@ -283,6 +286,8 @@ export const TOKEN_RETRY_DELAY_MS = 2_000;
 
 /** Cut off for this long with unsaved edits: the pill says the edits are kept on this device. */
 export const OFFLINE_PROLONGED_MS = 30_000;
+/** Quiet period used to collapse per-keystroke shell updates into one update after a typing burst. */
+export const TYPING_NOTIFY_IDLE_MS = 500;
 
 /** Whether a failed collaboration-token fetch was a refusal (no access) rather than a server that did not answer. */
 export function isAccessRefusal(err: unknown): boolean {
@@ -371,6 +376,7 @@ export class CollabSession {
   readonly user: CollabUser;
   readonly role: Role;
   readonly docId: string;
+  readonly persistence: ClientDocumentPersistence;
 
   status: WebSocketStatus | "connecting" = "connecting";
   synced = false;
@@ -420,11 +426,22 @@ export class CollabSession {
   followEnded: { name: string; seq: number } | null = null;
   /** Collaborator whose remote caret is flashing (after "Jump"), if any. */
   flashUserId: string | null = null;
+  /** Y.Text identity changes not produced by the matching rich transaction. */
+  relativePositionVersion = 0;
+  /** Comment-anchor identity changes independent of document text. */
+  commentRangeVersion = 0;
   private flashTimer: ReturnType<typeof setTimeout> | null = null;
   private lastActivityPublish = 0;
   private sectionCache: { headings: HeadingInfo[]; byOffset: Map<number, string | null> } | null = null;
   private listeners = new Set<Listener>();
   private notifyScheduled = false;
+  private afterPaintNotify: {
+    frame: number | null;
+    timer: ReturnType<typeof setTimeout> | null;
+    cooling: boolean;
+    dirty: boolean;
+    typing: boolean;
+  } | null = null;
   private destroyed = false;
 
   constructor(readonly options: CollabSessionOptions) {
@@ -435,6 +452,26 @@ export class CollabSession {
     this.ytext = this.ydoc.getText("content");
     this.meta = this.ydoc.getMap("meta");
     this.commentSuggestionTransitions = this.ydoc.getMap(COMMENT_SUGGESTION_TRANSITIONS);
+    let persistenceState: ClientDocumentPersistence["state"] = "pending";
+    let persistenceError: string | null = null;
+    this.persistence = new ClientDocumentPersistence(
+      this.docId,
+      this.ydoc,
+      (request) => this.provider.sendStateless(JSON.stringify(request)),
+      () => {
+        this.updateRecovery();
+        const nextState = this.persistence.state;
+        const nextError = this.persistence.error;
+        if (nextState !== persistenceState || nextError !== persistenceError) {
+          persistenceState = nextState;
+          persistenceError = nextError;
+          // A durability edge must not wait for an already-active typing cooldown.
+          this.notify();
+        } else {
+          this.notifyAfterPaint();
+        }
+      },
+    );
 
     // Mirror the document into IndexedDB so offline edits survive a refresh. `connect` waits for the
     // mirror (bounded) before opening the socket, so the sync handshake starts from what this device
@@ -487,6 +524,7 @@ export class CollabSession {
         } else {
           // The provider resets its own synced flag on close without emitting; mirror it.
           this.synced = false;
+          this.persistence.disconnected();
           // A drop after being connected, or a first connection that fails while the local copy
           // holds changes (a reload while offline): the next "saved" gets the confirmation flash,
           // and if the outage lasts the pill says the edits are kept on this device.
@@ -507,6 +545,7 @@ export class CollabSession {
           // The first sync ends the coalesced initial load: one rebuild of the rich pane, before
           // the UI learns it is synced (so the stand-in is never swapped for an empty editor).
           this.binding.releaseRemoteSync();
+          this.persistence.synced();
         }
         this.updateRecovery();
         this.notify();
@@ -551,17 +590,21 @@ export class CollabSession {
         }
         if (number === 0 && this.synced) perfMark("markdoc:sync-acked");
         this.updateRecovery();
-        this.notify();
+        this.notifyAfterPaint(number > 0);
       },
       onAwarenessChange: () => {
         this.checkFollowedPresence();
-        this.notify();
+        this.notifyAfterPaint();
       },
       onStateless: ({ payload }) => {
         let message: { type?: string } | null = null;
         try {
           message = JSON.parse(payload) as { type?: string };
         } catch {
+          return;
+        }
+        if (message?.type === "document-persistence") {
+          this.persistence.receive(message as PersistenceMessage);
           return;
         }
         if (message?.type !== "trashed" || this.trashed) return;
@@ -590,16 +633,19 @@ export class CollabSession {
     });
     this.comments = new CommentsModel(this.ydoc, this.ytext);
     this.suggestions = new SuggestionsModel(this.ydoc, this.ytext);
-    this.binding = new MarkdownBinding(this.ytext, { onSync: () => this.notify() });
+    this.undoManager.addToScope(this.suggestions.ymap);
+    this.binding = new MarkdownBinding(this.ytext, {
+      onSync: (direction) => (direction === "local" ? this.notifyAfterPaint(true) : this.notify()),
+    });
     // Coalesce the text the local copy and the server deliver into one rich-pane rebuild (released on the first sync).
     this.binding.holdRemoteSync();
     this.undoManager.addTrackedOrigin(this.binding);
-    this.undoManager.on("stack-item-added", this.notify);
+    this.undoManager.on("stack-item-added", () => this.notifyAfterPaint(true));
     this.undoManager.on("stack-item-popped", this.onUndoStackItemPopped);
     this.undoManager.on("stack-cleared", this.notify);
-    this.comments.subscribe(this.notify);
+    this.ydoc.on("afterTransaction", this.captureSuggestionAnchors);
     this.comments.ymap.observeDeep(this.onCommentsChanged);
-    this.suggestions.subscribe(this.notify);
+    this.suggestions.ymap.observe(this.notify);
     this.meta.observe(this.notify);
     this.commentSuggestionTransitions.observe(this.notify);
     this.ytext.observe(this.onTextChanged);
@@ -747,13 +793,55 @@ export class CollabSession {
     if (this.authError) return "error";
     if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
     if (this.status !== "connected") return "offline";
-    if (!this.synced || this.unsyncedChanges > 0) return "saving";
+    if (!this.synced) return "saving";
+    if (this.persistence.state !== "saved") return this.persistence.state;
+    if (this.unsyncedChanges > 0) return "pending";
     if (!this.savedMarked) {
-      // First "saved" of this open: the server has acked our sync step 2, the header can flip.
+      // First persistence acknowledgement of this open, not merely sync step 2.
       this.savedMarked = true;
       perfMark("markdoc:saved");
     }
     return "saved";
+  }
+
+  get dirty(): boolean {
+    return this.persistence.dirty;
+  }
+
+  get saveError(): string | null {
+    return this.persistence.error;
+  }
+
+  get savedVersion(): SavedDocumentVersion | null {
+    return this.persistence.savedVersion;
+  }
+
+  subscribeSaved = (listener: (saved: SavedDocumentVersion) => void): (() => void) => this.persistence.subscribeSaved(listener);
+
+  flushSave(): Promise<SavedDocumentVersion | null> {
+    if (!this.canEdit) return Promise.reject(new Error("You do not have permission to save this document."));
+    return this.persistence.flush();
+  }
+
+  private contentCompositionOwners = new Set<HTMLElement>();
+
+  /** Composition completion may not create another Yjs update; it still restarts the idle deadline. */
+  bindContentComposition(element: HTMLElement): () => void {
+    const start = () => {
+      this.contentCompositionOwners.add(element);
+      this.persistence.setComposing(true);
+    };
+    const end = () => {
+      this.contentCompositionOwners.delete(element);
+      this.persistence.setComposing(this.contentCompositionOwners.size > 0);
+    };
+    element.addEventListener("compositionstart", start);
+    element.addEventListener("compositionend", end);
+    return () => {
+      element.removeEventListener("compositionstart", start);
+      element.removeEventListener("compositionend", end);
+      end();
+    };
   }
 
   private savedMarked = false;
@@ -846,7 +934,7 @@ export class CollabSession {
   setLocalCursor(surface: Surface, source: number | null) {
     if (this.localCursor[surface] === source) return;
     this.localCursor = { ...this.localCursor, [surface]: source };
-    this.notify();
+    this.notifyAfterPaint();
   }
 
   /** Source offset of the caret in the active pane (the outline highlights the section it is in). */
@@ -870,10 +958,23 @@ export class CollabSession {
   }
 
   setActiveSuggestion(id: string | null) {
+    if (id) id = this.suggestions.ymap.get(id)?.groupId ?? id;
     if (this.activeSuggestionId === id) return;
     this.activeSuggestionId = id;
     if (id) this.activeCommentId = null;
     this.notify();
+  }
+
+  /** Text and annotation decisions share one history step, isolated from nearby typing. */
+  reviewSuggestion(action: "accept" | "reject" | "acceptAll" | "rejectAll", id?: string): number {
+    this.undoManager.stopCapturing();
+    try {
+      if (action === "acceptAll" || action === "rejectAll") return this.suggestions[action]();
+      if (!id) throw new Error("A suggestion id is required");
+      return this.suggestions[action](id);
+    } finally {
+      this.undoManager.stopCapturing();
+    }
   }
 
   setPendingComment(range: { from: number; to: number } | null) {
@@ -1237,7 +1338,65 @@ export class CollabSession {
     });
   };
 
+  /** Show the first typing update after paint, then coalesce shell churn until the user pauses. */
+  private notifyAfterPaint = (typing = false) => {
+    if (this.destroyed) return;
+    const current = this.afterPaintNotify;
+    if (current) {
+      if (typing && !current.typing) {
+        current.typing = true;
+        if (current.cooling) {
+          if (current.timer) clearTimeout(current.timer);
+          this.afterPaintNotify = null;
+          this.notifyAfterPaint(true);
+          return;
+        }
+      }
+      if (current.cooling) {
+        current.dirty = true;
+        if (current.timer) clearTimeout(current.timer);
+        current.timer = setTimeout(() => {
+          if (this.afterPaintNotify !== current) return;
+          this.afterPaintNotify = null;
+          if (current.dirty) this.notify();
+        }, TYPING_NOTIFY_IDLE_MS);
+      }
+      return;
+    }
+    const pending = {
+      frame: null as number | null,
+      timer: null as ReturnType<typeof setTimeout> | null,
+      cooling: false,
+      dirty: false,
+      typing,
+    };
+    this.afterPaintNotify = pending;
+    const run = () => {
+      pending.frame = null;
+      pending.timer = setTimeout(() => {
+        if (this.afterPaintNotify !== pending) return;
+        pending.cooling = true;
+        this.notify();
+        pending.timer = setTimeout(() => {
+          if (this.afterPaintNotify !== pending) return;
+          this.afterPaintNotify = null;
+          if (pending.dirty) this.notify();
+        }, TYPING_NOTIFY_IDLE_MS);
+      }, 0);
+    };
+    if (typeof requestAnimationFrame === "function") pending.frame = requestAnimationFrame(run);
+    else run();
+  };
+
   private onUndoStackItemPopped = (event: { stackItem: { meta: Map<unknown, unknown> }; type: "undo" | "redo" }) => {
+    const anchors = event.stackItem.meta.get(SUGGESTION_ANCHORS_META) as CommentAnchorChange[] | undefined;
+    if (anchors) {
+      this.ydoc.transact(() => {
+        const restored = restoreReplacementComments(this.ydoc, anchors, event.type === "undo");
+        const destination = event.type === "undo" ? this.undoManager.redoStack : this.undoManager.undoStack;
+        destination.at(-1)?.meta.set(SUGGESTION_ANCHORS_META, restored);
+      }, COMMENT_SUGGESTION_REPLAY_ORIGIN);
+    }
     const meta = event.stackItem.meta.get(COMMENT_SUGGESTION_META) as CommentSuggestionMeta | undefined;
     if (meta) {
       const snapshot = event.type === "undo" ? meta.transition.before : meta.transition.after;
@@ -1256,12 +1415,19 @@ export class CollabSession {
           currentRange: createAnchor(this.ytext, range.from, range.to),
           currentComment: snapshot.comment,
         };
+
         const destination = event.type === "undo" ? this.undoManager.redoStack : this.undoManager.undoStack;
         destination.at(-1)?.meta.set(COMMENT_SUGGESTION_META, { transition: updatedTransition } satisfies CommentSuggestionMeta);
         this.writeCommentSuggestionTransition(updatedTransition);
       }, COMMENT_SUGGESTION_HISTORY_ORIGIN);
     }
     this.notify();
+  };
+
+  private captureSuggestionAnchors = (transaction: Y.Transaction) => {
+    if (transaction.origin !== SUGGESTIONS_ORIGIN) return;
+    const anchors = transaction.meta.get(SUGGESTION_ANCHORS_META) as CommentAnchorChange[] | undefined;
+    if (anchors) this.undoManager.undoStack.at(-1)?.meta.set(SUGGESTION_ANCHORS_META, anchors);
   };
 
   private onTextChanged = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
@@ -1274,15 +1440,24 @@ export class CollabSession {
       const transition = this.readStoredCommentSuggestionTransition();
       if (transition) this.invalidateCommentSuggestionTransition(transition.id);
     }
-    this.notify();
+    if (transaction.origin === this.binding) {
+      if (transaction.deleteSet.clients.size > 0) this.relativePositionVersion++;
+      this.notifyAfterPaint(true);
+    } else {
+      this.relativePositionVersion++;
+      this.notify();
+    }
   };
 
   private onCommentsChanged = (_events: Y.YEvent<Y.AbstractType<unknown>>[], transaction: Y.Transaction) => {
-    if (!transaction.local) return;
-    const transition = this.readStoredCommentSuggestionTransition();
-    if (transition?.phase === "undone" && !this.isCommentSuggestionTransitionCurrent(transition, "undone")) {
-      this.invalidateCommentSuggestionTransition(transition.id);
+    this.commentRangeVersion++;
+    if (transaction.local) {
+      const transition = this.readStoredCommentSuggestionTransition();
+      if (transition?.phase === "undone" && !this.isCommentSuggestionTransitionCurrent(transition, "undone")) {
+        this.invalidateCommentSuggestionTransition(transition.id);
+      }
     }
+    this.notify();
   };
 
   private readStoredCommentSuggestionTransition(): CommentSuggestionTransition | null {
@@ -1423,10 +1598,18 @@ export class CollabSession {
 
   destroy() {
     if (this.destroyed) return;
+    this.persistence.destroy(this.canEdit && !this.authError);
+    this.contentCompositionOwners.clear();
     this.destroyed = true;
     if (this.recoveredTimer) clearTimeout(this.recoveredTimer);
     if (this.flashTimer) clearTimeout(this.flashTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    const pendingNotify = this.afterPaintNotify;
+    if (pendingNotify?.frame !== null && pendingNotify?.frame !== undefined && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(pendingNotify.frame);
+    }
+    if (pendingNotify?.timer) clearTimeout(pendingNotify.timer);
+    this.afterPaintNotify = null;
     this.disarmConnectWatchdog();
     this.clearProlongedOffline();
     this.unregisterWindowListeners();
@@ -1434,6 +1617,8 @@ export class CollabSession {
     this.commentSuggestionTransitions.unobserve(this.notify);
     this.ytext.unobserve(this.onTextChanged);
     this.comments.ymap.unobserveDeep(this.onCommentsChanged);
+    this.suggestions.ymap.unobserve(this.notify);
+    this.ydoc.off("afterTransaction", this.captureSuggestionAnchors);
     this.binding.destroy();
     this.comments.destroy();
     this.suggestions.destroy();

@@ -225,21 +225,48 @@ export function readReply(r: StoredReply, reactions: Reactions = {}): CommentRep
 export class CommentsModel {
   readonly ymap: Y.Map<ThreadMap>;
   private listeners = new Set<() => void>();
+  private snapshots = new Map<ThreadMap, { thread: CommentThread; textVersion: number }>();
+  private listed: CommentThread[] | null = null;
+  private textVersion = 0;
+  private transactions = new Set<Y.Transaction>();
 
   constructor(
     readonly ydoc: Y.Doc,
     readonly ytext: Y.Text,
   ) {
     this.ymap = ydoc.getMap<ThreadMap>("comments");
-    this.ymap.observeDeep(this.notify);
-    this.ytext.observe(this.notify);
+    if (ydoc._transaction) this.transactions.add(ydoc._transaction);
+    this.ymap.observeDeep(this.onCommentsChanged);
+    this.ytext.observe(this.onTextChanged);
+    this.ydoc.on("beforeTransaction", this.beforeTransaction);
+    this.ydoc.on("afterTransaction", this.afterTransaction);
   }
 
   destroy() {
-    this.ymap.unobserveDeep(this.notify);
-    this.ytext.unobserve(this.notify);
+    this.ymap.unobserveDeep(this.onCommentsChanged);
+    this.ytext.unobserve(this.onTextChanged);
+    this.ydoc.off("beforeTransaction", this.beforeTransaction);
+    this.ydoc.off("afterTransaction", this.afterTransaction);
+    this.snapshots.clear();
+    this.transactions.clear();
+    this.listed = null;
     this.listeners.clear();
   }
+
+  private beforeTransaction = (transaction: Y.Transaction) => { this.transactions.add(transaction); };
+  private afterTransaction = (transaction: Y.Transaction) => { this.transactions.delete(transaction); };
+
+  private onCommentsChanged = () => {
+    this.snapshots.clear();
+    this.listed = null;
+    this.notify();
+  };
+
+  private onTextChanged = () => {
+    this.textVersion++;
+    this.listed = null;
+    this.notify();
+  };
 
   private notify = () => {
     for (const l of this.listeners) l();
@@ -295,19 +322,43 @@ export class CommentsModel {
     };
   }
 
+  private snapshot(map: ThreadMap): CommentThread {
+    // Observers have not invalidated snapshots during a transaction's body.
+    // Suggestion operations can read their own writes before that body returns.
+    if (this.transactions.size > 0) return this.read(map);
+    const cached = this.snapshots.get(map);
+    if (!cached) {
+      const thread = this.read(map);
+      this.snapshots.set(map, { thread, textVersion: this.textVersion });
+      return thread;
+    }
+    if (cached.textVersion !== this.textVersion) {
+      const range = cached.thread.anchor ? resolveAnchor(this.ytext, cached.thread.anchor) : null;
+      if (range?.from !== cached.thread.range?.from || range?.to !== cached.thread.range?.to) {
+        cached.thread = { ...cached.thread, range };
+      }
+      cached.textVersion = this.textVersion;
+    }
+    return cached.thread;
+  }
+
+  /** Read-only snapshots, shared until their comment data or anchored range changes. */
   list(): CommentThread[] {
+    if (this.transactions.size === 0 && this.listed) return this.listed;
     const out: CommentThread[] = [];
-    this.ymap.forEach((map) => out.push(this.read(map)));
-    return out.sort((a, b) => {
+    this.ymap.forEach((map) => out.push(this.snapshot(map)));
+    out.sort((a, b) => {
       const af = a.range?.from ?? Number.MAX_SAFE_INTEGER;
       const bf = b.range?.from ?? Number.MAX_SAFE_INTEGER;
       return af - bf || a.createdAt - b.createdAt;
     });
+    if (this.transactions.size === 0) this.listed = out;
+    return out;
   }
 
   get(id: string): CommentThread | null {
     const map = this.ymap.get(id);
-    return map ? this.read(map) : null;
+    return map ? this.snapshot(map) : null;
   }
 
   /** Current replacement text for a root or reply suggestion, or null when the target is missing/not a suggestion. */

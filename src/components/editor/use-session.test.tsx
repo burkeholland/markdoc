@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import type { CollabSession, SaveState } from "@/editor/collab/session";
 import { SaveIndicator } from "./header";
 import { SAVED_HOLD_MS, useSettledSaveState } from "./use-session";
@@ -13,6 +13,9 @@ function fakeSession(initial: SaveState = "saved") {
     unsyncedChanges: 0,
     recovered: false,
     prolongedOffline: false,
+    canEdit: true,
+    saveError: null as string | null,
+    flushSave: vi.fn(async () => null),
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => {
@@ -179,7 +182,7 @@ describe("SaveIndicator", () => {
     vi.useRealTimers();
   });
 
-  it("keeps data-state steady through a burst while data-live-state follows every ack", () => {
+  it("shows pending through a burst, saving during the write and saved immediately after persistence acknowledgement", () => {
     const session = fakeSession("saved");
     render(<SaveIndicator session={asSession(session)} />);
     const pill = screen.getByTestId("save-state");
@@ -206,26 +209,24 @@ describe("SaveIndicator", () => {
       sample();
     };
 
-    // Five keystrokes, each acked 40 ms later, 120 ms apart: the raw state flips ten times.
+    // Transport acknowledgements no longer drive the save state.
     for (let i = 0; i < 5; i++) {
-      step(() => session.set("saving"));
-      step(() => vi.advanceTimersByTime(40));
-      step(() => session.set("saved"));
-      step(() => vi.advanceTimersByTime(80));
-      expect(pill).toHaveAttribute("data-state", "saving");
+      step(() => session.set("pending"));
+      step(() => vi.advanceTimersByTime(120));
+      expect(pill).toHaveAttribute("data-state", "pending");
     }
-    expect(pill).toHaveAttribute("data-live-state", "saved");
-    expect(pill).toHaveTextContent("Saving…");
+    expect(pill).toHaveTextContent("Unsaved changes");
 
-    step(() => vi.advanceTimersByTime(SAVED_HOLD_MS - 80 - 1));
+    step(() => vi.advanceTimersByTime(1000));
+    step(() => session.set("saving"));
     expect(pill).toHaveAttribute("data-state", "saving");
-    step(() => vi.advanceTimersByTime(1));
+    step(() => session.set("saved"));
     expect(pill).toHaveAttribute("data-state", "saved");
     expect(pill).toHaveTextContent("Saved");
 
-    expect(liveStates).toHaveLength(11); // initial + 10 flips
-    expect(states).toEqual(["saved", "saving", "saved"]);
-    expect(texts).toEqual(["Saved", "Saving…", "Saved"]);
+    expect(liveStates).toEqual(["saved", "pending", "saving", "saved"]);
+    expect(states).toEqual(liveStates);
+    expect(texts).toEqual(["Saved", "Unsaved changes", "Saving…", "Saved"]);
   });
 
   it("shows warning states and the recovery flash at once", () => {
@@ -248,5 +249,29 @@ describe("SaveIndicator", () => {
     expect(pill).toHaveAttribute("data-recovered", "true");
     expect(pill).toHaveTextContent("All changes saved");
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("offers explicit Save and surfaces a rejected persistence acknowledgement", async () => {
+    const session = fakeSession("pending");
+    session.flushSave.mockRejectedValueOnce(new Error("Store unavailable"));
+    render(<SaveIndicator session={asSession(session)} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save document" })));
+    expect(session.flushSave).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("save-state")).toHaveTextContent("Store unavailable");
+    act(() => session.set("saved"));
+    expect(screen.getByTestId("save-state")).toHaveTextContent("Saved");
+  });
+
+  it("does not show an old document's failed save after switching documents", async () => {
+    const first = fakeSession("pending");
+    let reject!: (error: Error) => void;
+    first.flushSave.mockImplementationOnce(() => new Promise((_resolve, no) => { reject = no; }));
+    const { rerender } = render(<SaveIndicator session={asSession(first)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Save document" }));
+    const second = fakeSession("saved");
+    rerender(<SaveIndicator session={asSession(second)} />);
+    await act(async () => reject(new Error("Old document failed")));
+    expect(screen.getByTestId("save-state")).toHaveTextContent("Saved");
+    expect(screen.getByTestId("save-state")).not.toHaveTextContent("Old document failed");
   });
 });

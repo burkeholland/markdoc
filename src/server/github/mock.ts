@@ -17,18 +17,25 @@ interface FakeFile {
   size: number;
 }
 
-const repos = new Map<string, FakeFile>(); // key: owner/repo@branch:path
-const gists = new Map<string, { files: Map<string, string>; revision: string; description: string | null; updatedAt: string }>();
-let counter = 0;
+interface MockState {
+  repos: Map<string, FakeFile>;
+  gists: Map<string, { files: Map<string, string>; revision: string; description: string | null; updatedAt: string; isPublic: boolean }>;
+  counter: number;
+}
+
+// Next routes and the custom-server worker have separate module graphs in the same process.
+const globalMock = globalThis as typeof globalThis & { __markdocGithubMock?: MockState };
+const state: MockState = globalMock.__markdocGithubMock ??= { repos: new Map(), gists: new Map(), counter: 0 };
+const { repos, gists } = state;
 
 const blobSha = (content: string) => createHash("sha1").update(`blob ${Buffer.byteLength(content)}\0${content}`).digest("hex");
 const repoKey = (owner: string, repo: string, branch: string, path: string) => `${owner}/${repo}@${branch}:${path}`;
-const nextRevision = () => `rev-${++counter}-${Date.now().toString(36)}`;
+const nextRevision = () => `rev-${++state.counter}-${Date.now().toString(36)}`;
 
 export function mockReset() {
   repos.clear();
   gists.clear();
-  counter = 0;
+  state.counter = 0;
 }
 
 export function mockSetRepoFile(owner: string, repo: string, branch: string, path: string, content: string, size?: number) {
@@ -42,7 +49,7 @@ export function mockGetRepoFile(owner: string, repo: string, branch: string, pat
 }
 
 export function mockSetGistFile(gistId: string, filename: string, content: string) {
-  const gist = gists.get(gistId) ?? { files: new Map<string, string>(), revision: nextRevision(), description: null, updatedAt: new Date().toISOString() };
+  const gist = gists.get(gistId) ?? { files: new Map<string, string>(), revision: nextRevision(), description: null, updatedAt: new Date().toISOString(), isPublic: false };
   gist.files.set(filename, content);
   gist.revision = nextRevision();
   gist.updatedAt = new Date().toISOString();
@@ -72,7 +79,7 @@ export const mockGithub = {
       throw new HttpError(409, "The file changed on GitHub since it was last pulled. Pull the latest version first.");
     }
     const file = mockSetRepoFile(input.owner, input.repo, input.branch, input.path, input.content);
-    const commitSha = createHash("sha1").update(`${key}:${file.sha}:${++counter}`).digest("hex");
+    const commitSha = createHash("sha1").update(`${key}:${file.sha}:${++state.counter}`).digest("hex");
     return {
       sha: file.sha,
       commitSha,
@@ -83,24 +90,25 @@ export const mockGithub = {
   async readGistFile(gistId: string, filename?: string) {
     const gist = gists.get(gistId);
     if (!gist) throw new HttpError(404, "Gist file not found");
-    const name = filename && gist.files.has(filename) ? filename : [...gist.files.keys()][0];
-    if (!name) throw new HttpError(404, "Gist file not found");
+    const name = filename ?? [...gist.files.keys()][0];
+    if (!name || !gist.files.has(name)) throw new HttpError(404, "Gist file not found");
     return {
       gistId,
       filename: name,
       content: gist.files.get(name)!,
       description: gist.description,
       htmlUrl: `https://gist.github.com/${gistId}`,
-      isPublic: false,
+      isPublic: gist.isPublic,
       owner: "mock",
       revision: gist.revision,
       updatedAt: gist.updatedAt,
     };
   },
   async createGist(input: { filename: string; content: string; description?: string; isPublic: boolean }) {
-    const gistId = `mockgist${++counter}`;
+    const gistId = `mockgist${++state.counter}`;
     const gist = mockSetGistFile(gistId, input.filename, input.content);
     gist.description = input.description ?? null;
+    gist.isPublic = input.isPublic;
     return { gistId, htmlUrl: `https://gist.github.com/${gistId}`, filename: input.filename };
   },
   async updateGist(gistId: string, filename: string, content: string, description?: string) {

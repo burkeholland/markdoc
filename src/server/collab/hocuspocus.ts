@@ -12,10 +12,11 @@ import { getDb, schema } from "@/server/db";
 import { collabTokenFailureMessage, isVerifiedCollabClaims, verifyCollabToken, type CollabClaims, type VerifiedCollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
 import { addVersion, latestVersion } from "@/server/documents";
-import { boundTitle } from "@/server/document-title";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
 import { publishAgentPresence } from "@/server/agent-presence";
+import { CONTENT_AUTOSAVE_IDLE_MS } from "@/lib/document-persistence";
+import { documentStoreSnapshot, installDocumentAutosave } from "./autosave";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
 import {
@@ -66,8 +67,8 @@ export function createCollabServer() {
   const hocuspocus = new Hocuspocus<CollabContext>({
     name: "markdoc",
     quiet: true,
-    debounce: 1500,
-    maxDebounce: 8000,
+    debounce: CONTENT_AUTOSAVE_IDLE_MS,
+    maxDebounce: Number.POSITIVE_INFINITY,
     unloadImmediately: false,
     // Outgoing fan-out is handled per document by installOriginAwareBroadcast (see collab/broadcast.ts):
     // no buffering here, so every update / awareness change reaches it with its origin still known.
@@ -119,7 +120,7 @@ export function createCollabServer() {
       installOriginAwareBroadcast(document);
       const db = await getDb();
       const [row] = await db
-        .select({ ystate: schema.documents.ystate, content: schema.documents.content, title: schema.documents.title })
+        .select({ ystate: schema.documents.ystate, content: schema.documents.content, title: schema.documents.title, updatedAt: schema.documents.updatedAt })
         .from(schema.documents)
         .where(eq(schema.documents.id, documentName));
       if (!row) throw new Error("Document not found");
@@ -135,6 +136,7 @@ export function createCollabServer() {
           .where(eq(schema.documents.id, documentName));
         freshlySeeded.set(documentName, row.content);
       }
+      autosave.track(document, row.updatedAt, row.title);
       watchDocumentNotifications(document, documentName);
       startActivityWatch(document, documentName);
       publishAgentPresence(document, documentName);
@@ -152,26 +154,32 @@ export function createCollabServer() {
     },
 
     async afterUnloadDocument({ documentName }) {
+      autosave.untrack(documentName);
       freshlySeeded.delete(documentName);
       await stopActivityWatch(documentName);
     },
 
-    async onStoreDocument({ document, documentName, lastContext }: onStoreDocumentPayload<CollabContext>) {
+    async onStateless(payload) {
+      await autosave.onStateless(payload);
+    },
+
+    async onStoreDocument(payload: onStoreDocumentPayload<CollabContext>) {
+      const { documentName, lastContext } = payload;
+      const { content, title, ystate, savedAt } = documentStoreSnapshot(payload);
       const db = await getDb();
-      const content = document.getText(TEXT_KEY).toString();
-      const metaTitle = document.getMap(META_KEY).get("title");
-      const ystate = Y.encodeStateAsUpdate(document);
       const patch: Partial<typeof schema.documents.$inferInsert> = {
         ystate,
         content,
-        updatedAt: new Date(),
+        updatedAt: savedAt,
         lastEditedBy: lastContext?.userId ?? null,
       };
-      if (typeof metaTitle === "string" && metaTitle.trim()) patch.title = boundTitle(metaTitle);
-      await db.update(schema.documents).set(patch).where(eq(schema.documents.id, documentName));
+      if (title) patch.title = title;
+      const stored = await db.update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning();
+      if (stored.length !== 1) throw new Error("Document no longer exists");
       await maybeAutoVersion(documentName, content, lastContext ?? null);
     },
   });
+  const autosave = installDocumentAutosave(hocuspocus);
 
   return hocuspocus;
 }

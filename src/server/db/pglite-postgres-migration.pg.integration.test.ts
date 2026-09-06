@@ -81,7 +81,7 @@ describePostgres("PGlite to PostgreSQL 16 CLI integration", () => {
     assertSecretFree(migration, url);
     expect(migration.exitCode).toBe(0);
     const manifest = JSON.parse(await fs.readFile(migrateManifestPath, "utf8")) as MigrationManifest;
-    expect(manifest.totals).toEqual({ tables: 18, rows: 18 });
+    expect(manifest.totals).toEqual({ tables: APPLICATION_TABLES.length, rows: 18 });
     expect(Object.keys(manifest.tables).sort()).toEqual([...APPLICATION_TABLES]);
     expect(manifest.records).toMatchObject({
       documents: { count: 1 },

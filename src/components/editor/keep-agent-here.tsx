@@ -99,6 +99,10 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, 
         </div>
       )}
       {showSetup && <AgentConnectCard origin={origin} onDismiss={dismiss} onCreateToken={onCreateToken} className="p-3" />}
+      <nav className="flex flex-wrap gap-2" aria-label="Agent setup">
+        <a className="btn btn-outline btn-sm" href={`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`}>Tokens</a>
+        <a className="btn btn-outline btn-sm whitespace-normal" href={`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#connect`}>Connect an MCP client</a>
+      </nav>
       <p className="text-xs leading-5 text-ink-3">Your agent sits in this document and reacts to what people write — requests, @mentions and comments reach it without a trip to the terminal.</p>
       <p className="text-sm font-medium leading-5 text-ink-2" data-testid="keep-agent-hint">
         {KEEP_AGENT_HINT}

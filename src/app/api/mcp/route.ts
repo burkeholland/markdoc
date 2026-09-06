@@ -1,6 +1,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handler, json, HttpError, resolveBearer } from "@/server/http";
-import { recordMcpActivity, type McpActivity } from "@/server/tokens";
+import { recordMcpActivity } from "@/server/tokens";
+import { mcpActivityIn } from "./activity";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { mcpPublicOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "../../../../mcp/tools.mjs";
@@ -27,27 +28,6 @@ function bearerToken(req: Request): string | null {
   const authorization = req.headers.get("authorization");
   if (!authorization?.toLowerCase().startsWith("bearer ")) return null;
   return authorization.slice(7).trim() || null;
-}
-
-/**
- * Which checklist-relevant JSON-RPC methods a POST body carries (single message or batch). Parsed
- * from a clone so the transport still gets the untouched stream; unparseable bodies record nothing.
- */
-export async function mcpActivityIn(req: Request): Promise<McpActivity[]> {
-  if (req.method !== "POST") return [];
-  try {
-    const body: unknown = await req.clone().json();
-    const messages = Array.isArray(body) ? body : [body];
-    const out = new Set<McpActivity>();
-    for (const m of messages) {
-      const method = (m as { method?: unknown } | null)?.method;
-      if (method === "tools/list") out.add("list");
-      else if (method === "tools/call") out.add("call");
-    }
-    return Array.from(out);
-  } catch {
-    return [];
-  }
 }
 
 /** Resolve the caller and hand the request to a fresh MCP server + transport. */

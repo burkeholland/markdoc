@@ -31,6 +31,8 @@ import { localAccess } from "../scripts/lib/dev-origins.mjs";
 import { attachRequestErrorGuards } from "./request-guards";
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
+import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
+import { shutdownServices } from "./shutdown";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -187,6 +189,7 @@ async function main() {
 
   const hocuspocus = createCollabServer();
   registerCollab(hocuspocus);
+  if (standbyPort === 0) startGistAutoUpdateWorker();
   // Install Next's HMR listener before reporting readiness. Next otherwise waits for the first HTTP
   // request, leaving a browser that survived a restart unable to reconnect through WebSockets alone.
   const protectCollabUpgrade = protectUpgradePath(server, COLLAB_PATH);
@@ -217,6 +220,7 @@ async function main() {
     else process.env.PGLITE_DATA_DIR = realDataDir;
     nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: realDataDir ?? "" });
     await getDb();
+    startGistAutoUpdateWorker();
     configureMcpInternalOrigin(port, bindHost);
     const dbMs = Date.now() - t0;
     await listenWithRetry(server, port, bindHost, Date.now() + 15_000);
@@ -278,14 +282,21 @@ async function main() {
     }
   }
 
+  let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`> [exit] ${signal} after ${uptime()}; shutting down, flushing documents...`);
     server.close();
     standby?.close();
+    let exitCode = 0;
     try {
-      await shutdownCollab(hocuspocus);
+      await shutdownServices(stopGistAutoUpdateWorker, () => shutdownCollab(hocuspocus));
+    } catch {
+      exitCode = 1;
+      console.error("> [exit] service shutdown failed; unfinished publishing requires review");
     } finally {
-      process.exit(0);
+      process.exit(exitCode);
     }
   };
   process.on("SIGINT", shutdown);

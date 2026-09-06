@@ -1,14 +1,74 @@
-# Infrastructure deployment runbook: `deploy/azure.ps1 -InfraOnly`
+# Infrastructure deployment scope and historical measurements
 
-> **September 4, 2026 update:** production is VM-hosted at
-> `https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. The Container App,
-> maintenance job, managed environment, generated managed resource group, and
-> delegated `container-apps` subnet were deleted. `deploy/azure.ps1` now refuses
-> non-`-InfraOnly` use; releases run through `.github/workflows/deploy.yml` and
-> `infra/deploy-vm-image.sh`. Counts and Container Apps references below are
-> retained as historical evidence and are not current what-if expectations.
+## Current boundary
 
-How to change production **infrastructure** in `markdoc-rg` — alert rules, the NSG rule-write tripwire, subnets, network policies, vault or environment shape — by redeploying `infra/main.bicep` through `deploy/azure.ps1 -InfraOnly -SecretsPath <clixml>`, without touching the application image, a Container App revision or the database. The README's *Production runbook: app-only releases* covers the other production mutation; this page is the checked list for this one. It is built from the read-only what-if measurements of task #1381 (the real `-InfraOnly` parameter shape, both passes) and the row classification of task #1333. Line numbers refer to `deploy/azure.ps1`, `deploy/azure-safety.ps1` and `infra/main.bicep` at `a243aa6` (2026-09-01).
+Application releases target `markdoc-app.service` on `markdoc-pg` in
+**`markdoc-rg`**, at
+`https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. Follow the
+[README VM release summary](../README.md#production-runbook-vm-application-releases)
+and [VM hosting runbook](vm-hosting.md): the manual
+[deployment workflow](../.github/workflows/deploy.yml) builds a selected
+commit in ACR, pins its digest and invokes
+[`infra/deploy-vm-image.sh`](../infra/deploy-vm-image.sh). It is mutating and
+was not run for this source integration.
+
+This composition retains current main's infrastructure, network cleanup and
+patching sources unchanged. `deploy/azure.ps1` refuses non-`-InfraOnly` use
+and database password rotation; it is not the application release path.
+The earlier feature-only candidate's missing-helper warning no longer
+describes this checkout. The current template keeps VM web hosting enabled
+and Container Apps disabled by default. The NAT gateway and private monitoring
+endpoint remain retired; the cheaper co-located VM arrangement and stable web
+IP are preserved. See [PostgreSQL VM egress](postgres-egress.md) for the current
+network policy, not the archived private-endpoint measurements below.
+The September 4 hosting record reports removal of the Container App,
+maintenance job, managed environment, generated managed resource group and
+delegated `container-apps` subnet. Neither that record nor the old template
+measurements below authorizes applying infrastructure.
+
+Any future infrastructure operation needs the accepted current template,
+fresh nonsecret before/after metadata and a change-specific assessment.
+Protect the existing public IP/NIC association and co-located application as
+well as PostgreSQL; an old "no public IP" or "no app restart" assumption no
+longer applies. Do not overlap it with an app release, OS patch or database
+operation. Do not add initialization, recovery or rotation flags just to
+make an old procedure run.
+
+The [VM evidence record](vm-hosting.md#what-is-known) distinguishes supplied
+platform/guest metadata from remaining unknowns. The follow-up records a
+process-reported version, 19 ledger rows matching `0000` through `0018`, both
+pending migrations `0019`/`0020`, and an identified pgBackRest full backup.
+The protected same-host [rollback bundle](vm-hosting.md#rollback) must be
+retained. After the initial load stop, a later pinned backup restore completed,
+but scratch PostgreSQL startup failed; no readable recovered database or
+upgrade was demonstrated. The retained rollback bundle was unchanged.
+The single 19:57:26.989 UTC diagnostic again restored that artifact but failed
+at scratch startup. On-host classification before cleanup is WAL/checkpoint-related;
+the exact mechanism remains unknown, not a finding of missing/lost/corrupt
+production WAL/data or a broken backup. No specific safe setting correction
+was established, none was applied, and no second diagnostic attempt was made.
+Scratch data/logs were removed; the protected bundle and WAL/RPO limits remain.
+Those observations do not establish image attestation, upgrade compatibility,
+independent custody or backup recoverability. Neither do these historical
+resource counts or a successful health response. Source review is not
+production acceptance: the retained historical record describes the earlier
+candidate's maximum-latency failure and unmeasured final runtime. This source
+integration adds no runtime evidence and does not supersede later producer
+results. There is no current Container Apps endpoint, revision or maintenance-job
+fallback.
+
+## Historical September 1 measurements
+
+<details>
+<summary>Archived infrastructure procedure and observations (not a current run checklist)</summary>
+
+The following is the pre-VM-hosting record. Its "today", "live", "expected",
+line numbers, command examples, backup assertions and § references describe
+that dated template/deployment, not the present one. The measurements remain
+useful history; neither the old counts nor an old successful deployment
+establish current readiness. Do not execute the archived procedure as written.
+
+This record describes the former production **infrastructure** procedure in `markdoc-rg`: alert rules, the NSG rule-write tripwire, subnets, network policies, vault and environment shape. It is built from the what-if measurements of task #1381 (the former `-InfraOnly` parameter shape, both passes) and the row classification of task #1333. Line numbers refer to `deploy/azure.ps1`, `deploy/azure-safety.ps1` and `infra/main.bicep` at `a243aa6` (2026-09-01), not the current hosting source.
 
 Nothing in the repository runs this automatically. The lead orders each run as its own gated task, and that task body is the ship decision.
 
@@ -118,7 +178,7 @@ All read-only. Compare with the before-picture of §2 row 12.
 2. **Tripwire exists.** `az monitor activity-log alert show -g markdoc-rg -n markdoc-postgres-nsg-rule-write --query "{enabled:enabled, scope:scopes[0], op:condition.allOf[?field=='operationName'].equals | [0], actionGroup:actions.actionGroups[0].actionGroupId}" -o json` → `enabled: true`, scope ending in `/networkSecurityGroups/markdoc-pg-nsg`, op `Microsoft.Network/networkSecurityGroups/securityRules/write`, action group ending in `/actionGroups/markdoc-postgres-alerts`.
 3. **Alert clause.** `az monitor scheduled-query show -g markdoc-rg -n markdoc-postgres-backup-failure --query "{enabled:enabled, query:criteria.allOf[0].query}" -o json` → `enabled: true` and a query with four `contains` clauses, the last `SyslogMessage contains "os-patch=failed"`.
 4. **Backup untouched.** `az backup item list -g markdoc-rg -v markdoc-backup --backup-management-type AzureIaasVM --query "[].{name:name, policy:properties.policyName, state:properties.protectionState, status:properties.protectionStatus, lastBackup:properties.lastBackupStatus}" -o table` → exactly one item `VM;iaasvmcontainerv2;markdoc-rg;markdoc-pg`, `daily-7-days`, `Protected`, `Healthy`, `Completed`. A second item is a stop.
-5. **App untouched.** `az containerapp revision list -n markdoc -g markdoc-rg --query "[?properties.active].{name:name, image:properties.template.containers[0].image, created:properties.createdTime}" -o table` → the same single active revision and image as before; no new revision. `curl -s -w " %{http_code}" https://markdoc.delightfulbay-4d29ba6f.eastus2.azurecontainerapps.io/api/health` → a body with `"ok":true`, `"db":true` and the same `version`, then `200`.
+5. **App untouched (historical).** The former check compared the active Container Apps revision/image and its old endpoint. That endpoint is retired, not a fallback. A current operation must instead preserve the VM service/image and use the [current health fields and origin](vm-hosting.md#health-and-safe-diagnostics).
 6. **No NSG rule write.** `az monitor activity-log list -g markdoc-rg --offset 3h --query "[?operationName.value=='Microsoft.Network/networkSecurityGroups/securityRules/write'].{when:eventTimestamp, status:status.value, caller:caller}" -o table` → no rows (`markdoc-pg-nsg` is `NoChange`; the deployment writes no rule), and no `mdpgalerts` e-mail from the new tripwire.
 7. **Nothing else new.** `az resource list -g markdoc-rg --query "length(@)"` → the before-picture count + 1, and `az resource list -g markdoc-rg --resource-type Microsoft.Insights/activityLogAlerts --query "[].name" -o tsv` → `markdoc-postgres-nsg-rule-write` is the only activity-log alert.
 8. **Receiver unchanged.** The §3 action-group check, on screen.
@@ -141,3 +201,5 @@ All read-only. Compare with the before-picture of §2 row 12.
 - It **does** re-PUT every unconditional resource with the same shape (the class A rows), including the `daily-7-days` policy (its built-in Sev0 alert is stripped by the suppression rule) and, in pass 2, the existing protected item (same policy, same VM). That is expected noise, not change.
 
 Sources: task #1381 (what-if with the real `-InfraOnly` shape, both passes, 2026-09-01), task #1333 (row classification), task #1408 (live probes = template, read-only check, 2026-09-01), `deploy/azure.ps1`, `deploy/azure-safety.ps1`, `deploy/azure-postgres-network.ps1` and `infra/main.bicep` at `a243aa6`; README *Production runbook: app-only releases* and *Provisioning a new environment*; `docs/postgres-egress.md` §3, §7, §10.
+
+</details>

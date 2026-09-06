@@ -283,7 +283,7 @@ describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /sug
     const fresh = await call(suggest.POST, "POST", { edits: [{ find: "First", replace: "1st" }], ifContentHash: body.contentHash }, "suggest");
     expect(fresh.status).toBe(200);
     const ok = (await fresh.json()) as { suggestions: number; contentHash: string };
-    expect(ok.suggestions).toBe(2);
+    expect(ok.suggestions).toBe(1);
     // Pending suggestions do not move the clean-text hash.
     expect(ok.contentHash).toBe(body.contentHash);
   });
