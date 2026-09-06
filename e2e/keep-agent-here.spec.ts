@@ -3,6 +3,9 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
 import { codeText, createDocument, devLogin, mintToken, openDocument, type MintedToken } from "./helpers";
 
+// Fixture credentials must not be retained in trace/network artifacts.
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 /**
  * "Keep an agent here" (#1970, #981): the sentence that puts a person's agent into the watch loop for this
  * document lives in one dialog, reached from the presence popover, the command palette and the `/agent` slash
@@ -90,14 +93,20 @@ test.describe("keep an agent here", () => {
     expect(text).toContain("markdoc_presence");
     expect(text).toContain("markdoc_watch");
     await expect(panel.getByTestId("keep-agent-after")).toContainText("within a minute");
-    // Has a token: no setup card in the way.
+    // Has a token: the setup card stays out of the way, but management links remain available.
     await expect(dialog.getByTestId("agent-connect-card")).toHaveCount(0);
+    const setupLinks = panel.getByRole("navigation", { name: "Agent setup" });
+    const settings = `/settings?next=${encodeURIComponent(`/d/${docId}`)}`;
+    await expect(setupLinks.getByRole("link", { name: "Tokens", exact: true })).toBeVisible();
+    await expect(setupLinks.getByRole("link", { name: "Tokens", exact: true })).toHaveAttribute("href", `${settings}#tokens`);
+    await expect(setupLinks.getByRole("link", { name: "Connect an MCP client", exact: true })).toBeVisible();
+    await expect(setupLinks.getByRole("link", { name: "Connect an MCP client", exact: true })).toHaveAttribute("href", `${settings}#connect`);
     await page.screenshot({ path: "test-results/keep-agent-here-dialog.png" });
     if (process.env.SHOT_DIR) await page.screenshot({ path: `${process.env.SHOT_DIR}/keep-agent-here-dialog.png` });
 
     await panel.getByTestId("keep-agent-copy").click();
     await expect(panel.getByTestId("keep-agent-copy")).toHaveText("Copied");
-    expect(await readClipboard(page)).toBe(text);
+    expect((await readClipboard(page)) === text).toBe(true);
 
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);

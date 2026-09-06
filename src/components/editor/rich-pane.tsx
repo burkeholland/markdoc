@@ -59,20 +59,9 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     const view = new EditorView(host.current, {
       state,
       nodeViews: createNodeViews(() => session.canEdit),
-      handleClickOn(view, _pos, node, _nodePos, event) {
-        // Mod+click opens links.
-        if ((event.metaKey || event.ctrlKey) && node.isText) {
-          const link = node.marks.find((m) => m.type.name === "link");
-          if (link) {
-            window.open(link.attrs.href, "_blank", "noopener");
-            return true;
-          }
-        }
-        void view;
-        return false;
-      },
     });
     viewRef.current = view;
+    const unbindComposition = session.bindContentComposition(view.dom);
     onReady(view);
     if (process.env.NODE_ENV !== "production") {
       // Like `__markdocSession`: lets e2e tests wait for ProseMirror's own selection, not just the DOM's.
@@ -80,6 +69,7 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     }
     return () => {
       onReady(null);
+      unbindComposition();
       view.destroy();
       viewRef.current = null;
       if (process.env.NODE_ENV !== "production") delete (window as unknown as { __markdocRichView?: EditorView }).__markdocRichView;
@@ -101,4 +91,3 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
 
   return <div ref={host} className={hidden ? "relative hidden h-full min-h-0 w-full" : "relative h-full min-h-0 w-full"} data-testid="rich-pane" />;
 }
-

@@ -5,7 +5,7 @@ import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { QUICK_REACTIONS, isDocumentRange, type CommentReply, type CommentThread, type Reactions } from "@/editor/collab/comments";
-import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
+import { SuggestionConflictError, type SuggestionGroup } from "@/editor/collab/suggestions";
 import { agentDisplayName, agentMentionLogin, mentionTriggerAt, parseAgentMentions, splitMentions } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
@@ -1163,7 +1163,7 @@ function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMi
 const ThreadCard = memo(function ThreadCard({
   thread,
   session,
-  text,
+  outdated,
   active,
   onReveal,
   ops,
@@ -1176,7 +1176,7 @@ const ThreadCard = memo(function ThreadCard({
 }: {
   thread: CommentThread;
   session: CollabSession;
-  text: string;
+  outdated: boolean;
   active: boolean;
   onReveal: (offset: number) => void;
   ops: ReturnType<typeof useCommentOps>;
@@ -1210,7 +1210,7 @@ const ThreadCard = memo(function ThreadCard({
   }, [active, unread, session.docId, thread.id, replyIds]);
 
   const suggestion = useMemo(() => parseSuggestionBlock(thread.body), [thread.body]);
-  const suggestionState = suggestion ? commentSuggestionState(thread, thread.suggestionState, text) : null;
+  const suggestionState = suggestion ? thread.suggestionState ?? (outdated ? "outdated" : "pending") : null;
   const editingRoot = editing === "root" && !thread.suggestionState;
   // A comment on the whole document (#1025): "Whole document" where the quote would be, no Accept on its
   // suggestions (there is no anchored text to replace; the model refuses too), no "Suggest a change" in its replies.
@@ -1374,7 +1374,7 @@ const ThreadCard = memo(function ThreadCard({
         <div className="mt-3 flex flex-col gap-3 border-l border-line pl-3">
           {thread.replies.map((r) => {
             const block = parseSuggestionBlock(r.body);
-            const state = block ? commentSuggestionState(thread, r.suggestionState, text) : null;
+            const state = block ? r.suggestionState ?? (outdated ? "outdated" : "pending") : null;
             const editingReply = editing === r.id && !r.suggestionState;
             return (
               <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
@@ -1496,13 +1496,23 @@ const ThreadCard = memo(function ThreadCard({
   );
 });
 
-function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestion; session: CollabSession; active: boolean; onReveal: (offset: number) => void }) {
+function SuggestionCard({ s, session, active, onReveal, onToast }: { s: SuggestionGroup; session: CollabSession; active: boolean; onReveal: (offset: number) => void; onToast?: CommentsPanelProps["onToast"] }) {
   const canAct = session.role === "owner" || session.role === "editor";
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (active) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [active]);
-  const text = session.ytext.toString().slice(s.from, s.to);
+  const [error, setError] = useState<string | null>(null);
+  const decide = (action: "accept" | "reject") => {
+    try {
+      if (session.reviewSuggestion(action, s.id)) {
+        onToast?.(`${action === "accept" ? "Accepted" : "Rejected"} suggestion from ${s.authorName}.`, "success", { label: "Undo", onClick: () => session.undo() });
+      }
+    } catch (error) {
+      if (!(error instanceof SuggestionConflictError)) throw error;
+      setError(error.message);
+    }
+  };
   return (
     <div
       ref={ref}
@@ -1523,20 +1533,20 @@ function SuggestionCard({ s, session, active, onReveal }: { s: ResolvedSuggestio
               {relativeTime(s.createdAt)}
             </span>
           </div>
-          <p className="mt-0.5 text-[13px] leading-5 text-ink-2">
-            <span className="font-medium">{s.type === "insert" ? "Add" : "Delete"}:</span>{" "}
-            <span className={cn("rounded px-1", s.type === "insert" ? "bg-green-50 text-green-800 dark:bg-green-950/50 dark:text-green-300" : "bg-red-50 line-through text-red-800 dark:bg-red-950/50 dark:text-red-300")}>
-              {text.length > 120 ? text.slice(0, 120) + "…" : text || "(whitespace)"}
-            </span>
-          </p>
+          <div className="mt-0.5 space-y-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-ink-2">
+            <span className="font-medium">{s.type === "replace" ? "Replace passage" : s.type === "insert" ? "Add" : "Delete"}:</span>
+            {s.before && <del className="block rounded bg-red-50 px-1 text-red-800 dark:bg-red-950/50 dark:text-red-300" data-testid="suggestion-before">{s.before}</del>}
+            {s.after && <ins className="block rounded bg-green-50 px-1 text-green-800 dark:bg-green-950/50 dark:text-green-300" data-testid="suggestion-after">{s.after}</ins>}
+          </div>
         </div>
       </div>
+      {(s.outdated || error) && <p className="mt-2 text-xs text-danger" role="alert">{error ?? "This suggestion overlaps a newer edit. Review the changed text before deciding it."}</p>}
       {canAct && (
-        <div className="mt-2.5 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-          <button type="button" className="btn btn-sm btn-outline gap-1.5 text-success" onClick={() => session.suggestions.accept(s.id)} data-testid="suggestion-accept">
+        <div className="mt-2.5 flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+          <button type="button" className="btn btn-sm btn-outline gap-1.5 text-success" disabled={s.outdated} onClick={() => decide("accept")} data-testid="suggestion-accept">
             <ThumbsUp size={14} /> Accept
           </button>
-          <button type="button" className="btn btn-sm btn-outline gap-1.5 text-danger" onClick={() => session.suggestions.reject(s.id)} data-testid="suggestion-reject">
+          <button type="button" className="btn btn-sm btn-outline gap-1.5 text-danger" disabled={s.outdated} onClick={() => decide("reject")} data-testid="suggestion-reject">
             <ThumbsDown size={14} /> Reject
           </button>
         </div>
@@ -1755,7 +1765,7 @@ export function CommentsPanel({
   const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode, canEdit } = useSessionValue(
     session,
     (s) => ({
-      suggestions: s.suggestions.list(),
+      suggestions: s.suggestions.groups(text),
       activeCommentId: s.activeCommentId,
       activeSuggestionId: s.activeSuggestionId,
       revealSeq: s.revealSeq,
@@ -1961,8 +1971,7 @@ export function CommentsPanel({
   const decideAllSuggestions = async (accept: boolean) => {
     setBulkBusy(true);
     try {
-      if (accept) session.suggestions.acceptAll();
-      else session.suggestions.rejectAll();
+      session.reviewSuggestion(accept ? "acceptAll" : "rejectAll");
       for (const { thread, reply, block, state } of commentSuggestions) {
         if (accept && state === "outdated") continue;
         try {
@@ -1972,6 +1981,9 @@ export function CommentsPanel({
           // Another collaborator may have decided it while this batch was running.
         }
       }
+    } catch (error) {
+      if (!(error instanceof SuggestionConflictError)) throw error;
+      onToast?.(error.message, "error");
     } finally {
       setBulkBusy(false);
     }
@@ -2085,7 +2097,7 @@ export function CommentsPanel({
                 key={t.id}
                 thread={t}
                 session={session}
-                text={text}
+                outdated={isSuggestionOutdated(t, text)}
                 active={t.id === activeCommentId}
                 unread={hasUnread(t)}
                 onReveal={onReveal}
@@ -2114,7 +2126,7 @@ export function CommentsPanel({
                 key={t.id}
                 thread={t}
                 session={session}
-                text={text}
+                outdated={isSuggestionOutdated(t, text)}
                 active={t.id === activeCommentId}
                 unread={hasUnread(t)}
                 onReveal={onReveal}
@@ -2139,26 +2151,26 @@ export function CommentsPanel({
                   <button
                     type="button"
                     className="btn btn-sm btn-ghost text-success"
-                    disabled={bulkBusy || (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))}
+                    disabled={bulkBusy || suggestions.some((s) => s.outdated) || (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))}
                     onClick={() => void decideAllSuggestions(true)}
                     data-testid="accept-all"
                   >
                     Accept all
                   </button>
-                  <button type="button" className="btn btn-sm btn-ghost text-danger" disabled={bulkBusy} onClick={() => void decideAllSuggestions(false)} data-testid="reject-all">
+                  <button type="button" className="btn btn-sm btn-ghost text-danger" disabled={bulkBusy || suggestions.some((s) => s.outdated)} onClick={() => void decideAllSuggestions(false)} data-testid="reject-all">
                     Reject all
                   </button>
                 </div>
               )}
               {suggestions.map((s) => (
-                <SuggestionCard key={s.id} s={s} session={session} active={s.id === activeSuggestionId} onReveal={onReveal} />
+                <SuggestionCard key={s.id} s={s} session={session} active={s.id === activeSuggestionId} onReveal={onReveal} onToast={onToast} />
               ))}
               {commentSuggestionThreads.map((thread) => (
                 <ThreadCard
                   key={`suggestion-${thread.id}`}
                   thread={thread}
                   session={session}
-                  text={text}
+                  outdated={isSuggestionOutdated(thread, text)}
                   active={thread.id === activeCommentId}
                   unread={hasUnread(thread)}
                   onReveal={onReveal}

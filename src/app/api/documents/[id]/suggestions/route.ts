@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName, HttpError } from "@/server/http";
 import { readLiveDoc, mutateLiveDoc } from "@/server/livedoc";
-import { SuggestionsModel } from "@/editor/collab/suggestions";
+import { SuggestionsModel, SuggestionConflictError } from "@/editor/collab/suggestions";
 import { recordAgentActivity } from "@/server/agents";
 import { activityActor, recordActivity } from "@/server/activity";
 import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { notifySuggestionDecision } from "@/server/notifications";
-import type { ResolvedSuggestion } from "@/editor/collab/suggestions";
+import type { SuggestionGroup } from "@/editor/collab/suggestions";
 import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
@@ -19,12 +19,13 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
     const model = new SuggestionsModel(doc, doc.getText(TEXT_KEY));
     try {
       const text = doc.getText(TEXT_KEY).toString();
-      return model.list().map((s) => ({
+      return model.groups().map((s) => ({
         id: s.id,
         type: s.type,
         from: s.from,
         to: s.to,
-        text: text.slice(s.from, s.to),
+        text: s.text,
+        ...(s.groupId ? { before: s.before, after: s.after, outdated: s.outdated } : {}),
         author: s.authorName,
         authorId: s.authorId,
         createdAt: new Date(s.createdAt).toISOString(),
@@ -55,13 +56,13 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const single = body.action === "accept" || body.action === "reject";
   if (single && !body.id) throw new HttpError(400, "`id` is required for accept/reject");
   let count = 0;
-  let decided: ResolvedSuggestion[] = [];
+  let decided: SuggestionGroup[] = [];
   await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
     const model = new SuggestionsModel(doc, doc.getText(TEXT_KEY));
     try {
-      const pending = model.list();
+      const pending = model.groups();
       const before = pending.length;
-      decided = single ? pending.filter((s) => s.id === body.id) : pending;
+      decided = single ? pending.filter((s) => s.id === body.id || s.members.some((member) => member.id === body.id)) : pending;
       // Unknown or already-decided id: leave the document untouched and tell the caller.
       if (single && decided.length === 0) throw new HttpError(404, "Suggestion not found");
       switch (body.action) {
@@ -78,7 +79,10 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           model.rejectAll();
           break;
       }
-      count = Math.max(0, before - model.list().length);
+      count = Math.max(0, before - model.groups().length);
+    } catch (error) {
+      if (error instanceof SuggestionConflictError) throw new HttpError(409, error.message);
+      throw error;
     } finally {
       model.destroy();
     }
@@ -93,7 +97,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), accepted ? "suggestion.accept" : "suggestion.reject", { count }));
     const actor = { login: user!.login ?? null, name: actorName(user) ?? null };
     // One tail per author: a failure for one never skips the rest, and the code is reported once.
-    for (const s of decided) await tail("notification-not-sent", () => notifySuggestionDecision(id, s, accepted, actor));
+    for (const s of decided) await tail("notification-not-sent", () => notifySuggestionDecision(id, { ...s.members[0], id: s.id, text: s.text }, accepted, actor));
   }
   return json(answer({ ok: true, decided: count, ...(single ? { id: body.id } : {}) }));
 });

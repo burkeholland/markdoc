@@ -20,7 +20,12 @@ class FakePool extends EventEmitter {
   }
 }
 
-vi.mock("pg", () => ({ Pool: FakePool }));
+vi.mock("pg", () => ({
+  Pool: FakePool,
+  Client: class {
+    constructor() { throw new Error("Pool-only tests must not open a publication session"); }
+  },
+}));
 vi.mock("drizzle-orm/node-postgres", () => ({ drizzle: (pool: unknown) => ({ $client: pool }) }));
 vi.mock("drizzle-orm/node-postgres/migrator", () => ({ migrate: vi.fn(async () => undefined) }));
 

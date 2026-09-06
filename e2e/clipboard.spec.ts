@@ -2,6 +2,10 @@ import { test, expect } from "./fixtures";
 import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { createDocument, devLogin, openDocument, uniqueLogin } from "./helpers";
 
+// These tests display one-time secrets; do not record the UI, network payloads or failure snapshots.
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 /**
  * Copy buttons on an origin without the async Clipboard API (#993: http://192.168.x.x:3000 is not a
  * secure context, so `navigator.clipboard` is undefined and every Copy used to throw). Playwright
@@ -40,6 +44,8 @@ async function contextWithout(browser: Browser, ...scripts: (() => void)[]): Pro
 /** /settings, hydrated: the tokens list has loaded, so the form's handlers are attached. */
 async function openSettings(page: Page) {
   await page.goto("/settings");
+  await expect(page.getByTestId("token-add")).toBeEnabled();
+  await page.getByTestId("token-add").click();
   await expect(page.getByTestId("token-name")).toBeVisible();
   await expect(page.getByText("Loading…")).toHaveCount(0);
 }
@@ -58,11 +64,12 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     // 1. Share → Collaborate card (collapsed by default) → Copy.
     await page.getByTestId("share-button").click();
     await page.getByTestId("share-agent-toggle").click();
-    await expect(page.getByTestId("share-agent-config")).toContainText('"type": "http"');
-    await page.getByTestId("share-agent-copy").click();
-    await expect(page.getByTestId("share-agent-copy")).toHaveText(COPIED_OR_HINT);
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    await expect(page.getByTestId("agent-connect-config")).toContainText('"type": "http"');
+    await page.getByRole("button", { name: "Copy MCP configuration", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copy MCP configuration", exact: true })).toHaveText(COPIED_OR_HINT);
     // Chromium honours execCommand("copy") inside a click, so this is normally the success branch; record which.
-    test.info().annotations.push({ type: "share-agent-copy", description: await page.getByTestId("share-agent-copy").innerText() });
+    test.info().annotations.push({ type: "agent-config-copy", description: await page.getByRole("button", { name: "Copy MCP configuration", exact: true }).innerText() });
 
     // 2. Copy link under the people list.
     await page.getByTestId("copy-link").click();
@@ -72,13 +79,15 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     // 3. Settings → create a token → Copy on the token card, plus the connect card's config.
     await openSettings(page);
     await page.getByTestId("token-create").click();
-    await expect(page.getByTestId("token-created")).toBeVisible();
+    await expect.poll(() => page.getByTestId("token-created").isVisible()).toBe(true);
     await page.getByTestId("copy-token-button").click();
     await expect(page.getByTestId("copy-token-button")).toHaveText(COPIED_OR_HINT);
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    await expect.poll(async () => (await page.getByTestId("agent-connect-config").innerText()).includes(["Bearer", "MARKDOC_TOKEN"].join(" "))).toBe(true);
     await page.getByRole("button", { name: "Copy MCP configuration" }).click();
     await expect(page.getByRole("button", { name: "Copy MCP configuration" })).toHaveText(COPIED_OR_HINT);
 
-    expect(errors, errors.join("\n")).toEqual([]);
+    expect(errors.length).toBe(0);
     await context.close();
   });
 
@@ -91,15 +100,16 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
 
     await page.getByTestId("share-button").click();
     await page.getByTestId("share-agent-toggle").click();
-    const config = page.getByTestId("share-agent-config");
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    const config = page.getByTestId("agent-connect-config");
     await expect(config).toContainText('"type": "http"');
-    await page.getByTestId("share-agent-copy").click();
-    await expect(page.getByTestId("share-agent-copy")).toHaveText(HINT);
+    await page.getByRole("button", { name: "Copy MCP configuration", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copy MCP configuration", exact: true })).toHaveText(HINT);
     // The <pre> is selected so Ctrl+C finishes the job; the selection is the whole config.
     const selected = await page.evaluate(() => window.getSelection()?.toString() ?? "");
-    expect(selected.trim()).toBe((await config.innerText()).trim());
+    expect(selected.trim() === (await config.innerText()).trim()).toBe(true);
     // The hint is temporary; the button goes back to Copy.
-    await expect(page.getByTestId("share-agent-copy")).toHaveText("Copy", { timeout: 5_000 });
+    await expect(page.getByRole("button", { name: "Copy MCP configuration", exact: true })).toHaveText("Copy", { timeout: 5_000 });
 
     // Copy link has no text of its own: the URL appears in a selected field.
     await page.getByTestId("copy-link").click();
@@ -110,7 +120,7 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     await expect(field).toBeFocused();
     expect(await field.evaluate((el: HTMLInputElement) => (el.selectionEnd ?? 0) - (el.selectionStart ?? 0))).toBe((await field.inputValue()).length);
 
-    expect(errors, errors.join("\n")).toEqual([]);
+    expect(errors.length).toBe(0);
     await context.close();
   });
 
@@ -127,30 +137,31 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
 
     await page.getByTestId("share-button").click();
     await page.getByTestId("share-agent-toggle").click();
-    const config = page.getByTestId("share-agent-config");
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    const config = page.getByTestId("agent-connect-config");
     await expect(config).toContainText('"type": "http"');
     // The Bearer line wraps instead of being clipped: the <pre> is no wider than its card.
     const widths = await config.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
     expect(widths.scroll).toBeLessThanOrEqual(widths.client);
-    await page.getByTestId("share-agent-copy").click();
-    await expect(page.getByTestId("share-agent-copy")).toHaveText("Copied");
-    expect(await readClipboard()).toBe((await config.innerText()).trim());
+    await page.getByRole("button", { name: "Copy MCP configuration", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copy MCP configuration", exact: true })).toHaveText("Copied");
+    expect((await readClipboard()) === (await config.innerText()).trim()).toBe(true);
 
     await page.getByTestId("copy-link").click();
     await expect(page.getByTestId("copy-link")).toHaveText("Copied");
-    expect(await readClipboard()).toBe(`${origin}/d/${id}`);
+    expect((await readClipboard()) === `${origin}/d/${id}`).toBe(true);
     await page.keyboard.press("Escape");
 
     await openSettings(page);
     await page.getByTestId("token-create").click();
-    await expect(page.getByTestId("token-created")).toBeVisible();
+    await expect.poll(() => page.getByTestId("token-created").isVisible()).toBe(true);
     await page.getByTestId("copy-token-button").click();
     await expect(page.getByTestId("copy-token-button")).toHaveText("Copied");
     const token = (await page.getByTestId("copy-token").innerText()).trim();
     expect(token.startsWith("mdk_")).toBeTruthy();
-    expect(await readClipboard()).toBe(token);
+    expect((await readClipboard()) === token).toBe(true);
 
-    expect(errors, errors.join("\n")).toEqual([]);
+    expect(errors.length).toBe(0);
     await context.close();
   });
 });

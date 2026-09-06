@@ -34,6 +34,7 @@ import { remoteCaretInteractions } from "./remote-cursors";
 import type { ImageUploader } from "../prosemirror/images";
 import type { NoticeAction } from "../markdown/tsv";
 import { preserveInactiveUndoScroll } from "./undo-scroll";
+import { sourceLinks } from "./links";
 
 export interface CodeEditorHandlers {
   onFocus?: () => void;
@@ -115,6 +116,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     wrapping.of(EditorView.lineWrapping),
     preserveInactiveUndoScroll(() => session.activeSurface === "code"),
     yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
+    sourceLinks(session),
     remoteCaretInteractions(session),
     sourceHighlights(),
     highlightClickHandler((kind, id) => handlers.onHighlightClick?.(kind, id)),

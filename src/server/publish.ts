@@ -8,13 +8,20 @@ import {
   commitRepoFile,
   readGistFile,
   readRepoFile,
+  currentGitHubLogin,
+  gistContent,
   isGitHubMock,
   GitHubFileTooLargeError,
 } from "@/server/github";
-import { readLiveText, replaceLiveText } from "@/server/livedoc";
+import { cleanTextOf, readLiveText, replaceLiveText } from "@/server/livedoc";
+import { hydrateDoc } from "@/server/collab/seed";
+import * as Y from "yjs";
 import type { CollabContext } from "@/server/collab/hocuspocus";
 import { warnTail, type WarningCode } from "@/server/warnings";
 import { diff3Merge, diffIndices } from "node-diff3";
+import type { GistAutoUpdatePreview } from "@/lib/gist-auto-update";
+import { getDb, schema, withGistPublicationLock } from "@/server/db";
+import { eq } from "drizzle-orm";
 
 export interface PublishResult {
   url: string | null;
@@ -41,11 +48,57 @@ export function githubUrlFor(doc: Pick<LinkedDocument, "storage" | "gistId" | "r
   return null;
 }
 
-async function octokitFor(user: SessionUser) {
-  if (isGitHubMock()) return githubClient("mock");
+async function publishingTokenFor(user: SessionUser) {
+  if (isGitHubMock()) return "mock";
   const token = await getGitHubToken(user.id);
   if (!token) throw new HttpError(400, "Your account has no GitHub token. Sign in with GitHub to use gists and repositories.");
-  return githubClient(token);
+  return token;
+}
+
+async function octokitFor(user: SessionUser, signal?: AbortSignal) {
+  return githubClient(await publishingTokenFor(user), signal);
+}
+
+/** Read-only preparation, not permission to PATCH: a fresh GET cannot close the gist write race. */
+export async function previewGistAutoUpdate(doc: LinkedDocument & { ownerId: string }, user: SessionUser): Promise<GistAutoUpdatePreview & { revision: string }> {
+  if (doc.ownerId !== user.id) throw new HttpError(403, "Only the document owner can configure auto-update.");
+  if (doc.storage !== "gist" || !doc.gistId || !doc.gistFile || !doc.publishedAt) {
+    throw new HttpError(409, "Publish and link this document to a gist before configuring auto-update.", { status: "failed" });
+  }
+  const octokit = await octokitFor(user);
+  let file: Awaited<ReturnType<typeof readGistFile>>;
+  let login: string;
+  try {
+    login = await currentGitHubLogin(octokit);
+    file = await readGistFile(octokit, doc.gistId, doc.gistFile);
+  } catch (err) {
+    const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+    if (status === 404) throw new HttpError(409, "The linked gist or file is missing or inaccessible. Check the connection; auto-update remains off.", { status: "failed" });
+    if (status === 401 || status === 403) throw new HttpError(403, "GitHub access was lost. Sign in with the account that owns the gist; auto-update remains off.", { status: "failed" });
+    if (status === 429) throw new HttpError(429, "GitHub is rate limiting requests. Try checking the destination later; auto-update remains off.", { status: "failed" });
+    if (typeof status === "number" && status >= 500) throw new HttpError(502, "GitHub could not check the destination. Try again later; auto-update remains off.", { status: "failed" });
+    throw new HttpError(502, "The gist destination could not be verified. Check GitHub access and try again; auto-update remains off.", { status: "failed" });
+  }
+  if (file.gistId !== doc.gistId || file.filename !== doc.gistFile) {
+    throw new HttpError(409, "The linked gist destination changed. Review the connection; auto-update remains off.", { status: "conflict" });
+  }
+  if (!file.owner || file.owner.toLowerCase() !== login.toLowerCase()) {
+    throw new HttpError(403, "The connected GitHub account does not own this gist. Auto-update remains off.", { status: "failed" });
+  }
+  const base = await getPublishedContent(doc.id);
+  if (file.truncated || file.contentKnown === false || file.visibilityKnown === false || file.revision === null || base === null || file.content !== gistContent(base) || (doc.githubSha !== null && file.revision !== doc.githubSha)) {
+    throw new HttpError(409, "The gist changed outside Markdoc or its last synced version is unknown. Review it with Sync before publishing; auto-update remains off.", { status: "conflict" });
+  }
+  return {
+    revision: file.revision,
+    destination: {
+      gistId: doc.gistId,
+      filename: doc.gistFile,
+      url: githubUrlFor(doc)!,
+      visibility: file.isPublic ? "public" : "secret",
+      owner: file.owner,
+    },
+  };
 }
 
 function contextFor(user: SessionUser, docId: string): CollabContext {
@@ -66,6 +119,7 @@ export interface RemoteFile {
   revision: string | null;
   url: string | null;
   updatedAt: string | null;
+  gist?: { id: string; filename: string; owner: string | null; isPublic: boolean; truncated: boolean; contentKnown: boolean; visibilityKnown: boolean };
   /**
    * Set when the file exists but Markdoc could not read its text (larger than the 2 MB bound);
    * `content` is null then. Status, pull and a plain publish refuse with `413`; only a force-publish
@@ -94,13 +148,19 @@ export function clearSyncCache(docId?: string) {
   else remoteCache.clear();
 }
 
-async function fetchRemote(doc: LinkedDocument, user: SessionUser): Promise<RemoteFile> {
-  const octokit = await octokitFor(user);
+async function fetchRemote(doc: LinkedDocument, user: SessionUser, client?: Awaited<ReturnType<typeof octokitFor>>): Promise<RemoteFile> {
+  const octokit = client ?? await octokitFor(user);
   try {
     if (doc.storage === "gist") {
       if (!doc.gistId) throw new HttpError(400, "Gist link is incomplete.");
       const file = await readGistFile(octokit, doc.gistId, doc.gistFile ?? undefined);
-      return { content: file.content, revision: file.revision, url: file.htmlUrl, updatedAt: file.updatedAt };
+      return {
+        content: file.content, revision: file.revision, url: file.htmlUrl, updatedAt: file.updatedAt,
+        gist: {
+          id: file.gistId, filename: file.filename, owner: file.owner, isPublic: file.isPublic, truncated: !!file.truncated,
+          contentKnown: file.contentKnown !== false, visibilityKnown: file.visibilityKnown !== false,
+        },
+      };
     }
     if (!doc.repoOwner || !doc.repoName || !doc.repoPath) throw new HttpError(400, "Repository link is incomplete.");
     const file = await readRepoFile(octokit, doc.repoOwner, doc.repoName, doc.repoPath, doc.repoBranch ?? "main");
@@ -233,19 +293,107 @@ export interface PublishOptions {
   force?: boolean;
 }
 
+export interface SavedGistPublish {
+  content: string;
+  baseline: string | null;
+  accountLogin: string;
+  isPublic: boolean;
+  signal?: AbortSignal;
+  /** Last check of the durable opt-in, after all remote reads and immediately before a send. */
+  beforeSend: () => Promise<void>;
+  /** Commit bookkeeping only while the original document/destination generation still matches. */
+  recordPublished: (patch: Partial<Pick<Document, "publishedContent" | "publishedAt" | "githubSha">>) => Promise<void>;
+  /** Serialize the final grant check and request initiation with settings changes. */
+  dispatch: <T>(send: () => Promise<T>) => Promise<T>;
+}
+
+export function savedCleanText(doc: Pick<Document, "ystate" | "content" | "title">): string {
+  const snapshot = new Y.Doc();
+  try {
+    hydrateDoc(snapshot, doc.ystate ?? null, doc.content, doc.title);
+    return cleanTextOf(snapshot);
+  } finally {
+    snapshot.destroy();
+  }
+}
+
+async function assertManualGistSaved(doc: LinkedDocument, content: string) {
+  if (doc.storage !== "gist") return;
+  const db = await getDb();
+  const [current] = await db.select({ job: schema.gistAutoUpdates, doc: schema.documents }).from(schema.gistAutoUpdates)
+    .innerJoin(schema.documents, eq(schema.gistAutoUpdates.documentId, schema.documents.id))
+    .where(eq(schema.gistAutoUpdates.documentId, doc.id));
+  if (current?.job.enabled && savedCleanText(current.doc) !== content) {
+    throw new HttpError(409, "Wait for Markdoc to finish saving before manually updating an auto-updating gist, or turn auto-update off.");
+  }
+}
+
+async function assertGistLinkCurrent(doc: LinkedDocument) {
+  if (doc.storage !== "gist") return;
+  const db = await getDb();
+  const [current] = await db.select({
+    storage: schema.documents.storage, gistId: schema.documents.gistId, gistFile: schema.documents.gistFile, deletedAt: schema.documents.deletedAt,
+  }).from(schema.documents).where(eq(schema.documents.id, doc.id));
+  if (!current || current.deletedAt || current.storage !== "gist" || current.gistId !== doc.gistId || current.gistFile !== doc.gistFile) {
+    throw new HttpError(409, "The gist connection changed. Reopen publishing controls before trying again.");
+  }
+}
+
 /** Commit the document's current clean text to its linked gist or repository file. */
 export async function publishDocument(doc: LinkedDocument, user: SessionUser, messageOrOptions?: string | PublishOptions): Promise<PublishResult> {
+  const run = async (signal?: AbortSignal) => {
+    await assertGistLinkCurrent(doc);
+    return publishWithinLock(doc, user, messageOrOptions, undefined, signal);
+  };
+  if (doc.storage !== "gist" || !doc.gistId || !doc.gistFile) return run();
+  const lock = await withGistPublicationLock(doc.gistId, doc.gistFile, run);
+  if (!lock.acquired) throw new HttpError(409, "A gist update is already in progress. Try again after it finishes.");
+  return lock.value;
+}
+
+/** The queue holds the same destination lock as manual publishing and supplies a persisted snapshot. */
+export function publishSavedGist(doc: LinkedDocument, user: SessionUser, saved: SavedGistPublish): Promise<PublishResult> {
+  return publishWithinLock(doc, user, undefined, saved);
+}
+
+async function publishWithinLock(doc: LinkedDocument, user: SessionUser, messageOrOptions?: string | PublishOptions, saved?: SavedGistPublish, coordinationSignal?: AbortSignal): Promise<PublishResult> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const options: PublishOptions = typeof messageOrOptions === "string" ? { message: messageOrOptions } : (messageOrOptions ?? {});
   const message = options.message;
-  const octokit = await octokitFor(user);
-  const [live, base] = await Promise.all([readLiveText(doc.id), getPublishedContent(doc.id)]);
-  const content = live.clean;
-  const remote = await readRemote(doc, user, true);
+  const token = await publishingTokenFor(user);
+  const signal = saved ? AbortSignal.any([AbortSignal.timeout(15_000), ...(saved.signal ? [saved.signal] : [])]) : coordinationSignal;
+  signal?.throwIfAborted();
+  const octokit = githubClient(token, signal);
+  const [content, base] = saved ? [saved.content, saved.baseline] as const : await Promise.all([
+    readLiveText(doc.id).then((live) => live.clean), getPublishedContent(doc.id),
+  ]);
+  if (!saved) await assertManualGistSaved(doc, content);
+  const remote = saved ? await fetchRemote(doc, user, octokit) : await readRemote(doc, user, true);
+  signal?.throwIfAborted();
+  if (saved) {
+    if (!remote.gist || remote.gist.id !== doc.gistId || remote.gist.filename !== doc.gistFile || remote.content === null) {
+      throw new HttpError(409, "The linked gist file is missing, replaced, or unavailable. Review the connection.", { status: "conflict" });
+    }
+    const login = await currentGitHubLogin(octokit);
+    signal?.throwIfAborted();
+    if (login.toLowerCase() !== saved.accountLogin.toLowerCase() || remote.gist.owner?.toLowerCase() !== login.toLowerCase()) {
+      throw new HttpError(403, "GitHub authorization changed. Reconnect the account that owns the gist.");
+    }
+    if (remote.gist.truncated || !remote.gist.contentKnown || !remote.gist.visibilityKnown || remote.revision === null || remote.unreadable || base === null || remote.content !== gistContent(base) ||
+        (doc.githubSha !== null && remote.revision !== doc.githubSha) || remote.gist.isPublic !== saved.isPublic) {
+      throw new HttpError(409, "The gist changed outside Markdoc or its baseline cannot be verified. Review it with Sync before retrying.", { status: "conflict" });
+    }
+    if (await publishingTokenFor(user) !== token) throw new HttpError(403, "GitHub authorization changed before sending. Reconnect and retry.");
+    await saved.beforeSend();
+    if (gistContent(content) === remote.content) {
+      if (doc.githubSha !== remote.revision) await saved.recordPublished({ githubSha: remote.revision });
+      return { url: githubUrlFor(doc), commitSha: null, publishedAt: (doc.publishedAt ?? new Date()).toISOString(), skipped: true, status: "in-sync" };
+    }
+  }
   if (remote.unreadable) {
     // No remote text to compare with: overwriting an unreadable file is an explicit choice.
     if (!options.force) throw unreadableRemote(remote);
-  } else {
+  } else if (!saved) {
     const status = toStatus(base, content, remote);
     if (!options.force && (status.status === "remote-ahead" || status.status === "diverged")) {
       throw syncConflict("The file changed on GitHub since it was last synced. Pull or merge first, or force-publish to overwrite.", {
@@ -275,8 +423,15 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
   let commitSha: string | null = null;
   let githubSha: string | null = doc.githubSha;
   if (doc.storage === "gist") {
-    if (!doc.gistId || !doc.gistFile) throw new HttpError(400, "Gist link is incomplete.");
-    const result = await updateGist(octokit, doc.gistId, doc.gistFile, content, message);
+    const gistId = doc.gistId;
+    const filename = doc.gistFile;
+    if (!gistId || !filename) throw new HttpError(400, "Gist link is incomplete.");
+    const send = () => {
+      signal?.throwIfAborted();
+      return updateGist(octokit, gistId, filename, content, message);
+    };
+    const result = saved ? await saved.dispatch(send) : await send();
+    signal?.throwIfAborted();
     url = result.htmlUrl;
     githubSha = result.revision;
   } else {
@@ -298,23 +453,35 @@ export async function publishDocument(doc: LinkedDocument, user: SessionUser, me
   const publishedAt = new Date();
   // GitHub has the text from here on: the cache says so even if the base write below fails, so a
   // status read in the next 30 s sees in-sync (texts agree) rather than a stale local-ahead.
-  rememberRemote(doc.id, { content, revision: githubSha, url: url ?? remote.url, updatedAt: publishedAt.toISOString() });
+  if (!saved) rememberRemote(doc.id, { content, revision: githubSha, url: url ?? remote.url, updatedAt: publishedAt.toISOString() });
   // The base record is the state the sync promise is about: it stays fatal. Should it fail, the plain
   // retry above finds local == remote and heals it.
-  await updateDocument(doc.id, { publishedContent: content, publishedAt, githubSha });
+  if (saved) {
+    await saved.recordPublished({ publishedContent: content, publishedAt, githubSha });
+    signal?.throwIfAborted();
+    rememberRemote(doc.id, { content, revision: githubSha, url: url ?? remote.url, updatedAt: publishedAt.toISOString() });
+  } else {
+    await updateDocument(doc.id, { publishedContent: content, publishedAt, githubSha });
+  }
   // The version row is bookkeeping: its failure never fails a publish whose commit and base already stand.
   const { tail, answer } = warnTail("publish");
-  await tail("version-not-saved", () =>
-    addVersion({
-      documentId: doc.id,
-      content,
-      kind: "publish",
-      createdBy: user.id,
-      createdByName: actorName(user),
-      title: options.force ? "Force-published" : message?.trim() || (doc.storage === "gist" ? "Published to gist" : `Committed to ${doc.repoBranch ?? "main"}`),
-      commitSha,
-    }),
-  );
+  await tail("version-not-saved", async () => {
+    try {
+      return await addVersion({
+        documentId: doc.id,
+        content,
+        kind: "publish",
+        createdBy: user.id,
+        createdByName: actorName(user),
+        title: options.force ? "Force-published" : message?.trim() || (doc.storage === "gist" ? "Published to gist" : `Committed to ${doc.repoBranch ?? "main"}`),
+        commitSha,
+      });
+    } catch (error) {
+      // Database errors can embed content parameters; automatic work must not log them.
+      if (saved) throw new Error("Automatic gist version history could not be recorded");
+      throw error;
+    }
+  });
   return answer({ url, commitSha, publishedAt: publishedAt.toISOString(), status: "in-sync" });
 }
 
@@ -345,6 +512,17 @@ export interface PullResult {
  * reads as in-sync, so the plain retry lands in the first branch and records the base.
  */
 export async function pullDocument(doc: LinkedDocument, user: SessionUser, options: PullOptions = {}): Promise<PullResult> {
+  const run = async () => {
+    await assertGistLinkCurrent(doc);
+    return pullWithinLock(doc, user, options);
+  };
+  if (doc.storage !== "gist" || !doc.gistId || !doc.gistFile) return run();
+  const lock = await withGistPublicationLock(doc.gistId, doc.gistFile, run);
+  if (!lock.acquired) throw new HttpError(409, "A gist update is already in progress. Try syncing after it finishes.");
+  return lock.value;
+}
+
+async function pullWithinLock(doc: LinkedDocument, user: SessionUser, options: PullOptions): Promise<PullResult> {
   if (doc.storage === "local") throw new HttpError(400, "This document is not linked to GitHub yet.");
   const remote = await readRemote(doc, user, true);
   // Nothing readable to pull — with or without `force` the live text stays as it is.
@@ -430,6 +608,19 @@ export type LinkResult = Document & { warnings?: WarningCode[] };
 
 /** Link a document to a gist (existing or new) or a repository file, then publish. */
 export async function linkDocument(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<LinkResult> {
+  const run = async () => {
+    await assertGistLinkCurrent(doc);
+    return linkWithinLock(doc, user, input);
+  };
+  if (doc.storage !== "gist" || !doc.gistId || !doc.gistFile) return run();
+  const lock = await withGistPublicationLock(doc.gistId, doc.gistFile, run);
+  if (!lock.acquired) throw new HttpError(409, "A gist update is in progress. Turn off auto-update, then retry disconnecting or changing the connection after it finishes.");
+  return lock.value;
+}
+
+async function linkWithinLock(doc: LinkedDocument, user: SessionUser, input: LinkInput): Promise<LinkResult> {
+  const db = await getDb();
+  await db.update(schema.gistAutoUpdates).set({ enabled: false, status: "off", message: null }).where(eq(schema.gistAutoUpdates.documentId, doc.id));
   if (input.storage === "local") {
     return (await updateDocument(doc.id, {
       storage: "local",
@@ -514,5 +705,3 @@ function slugFile(title: string): string {
     .replace(/^-+|-+$/g, "");
   return slug || "document";
 }
-
-

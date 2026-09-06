@@ -14,6 +14,9 @@ import {
   type User,
 } from "./helpers";
 
+// This suite mints local fixture tokens; never retain their network payloads in traces.
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 /**
  * Agent addressing, the UI half (task #1330 on top of #1296): someone else's agent is named with its owner
  * ("alice's Scribe") wherever it shows, the `@` picker greys out an agent whose owner keeps it to themself and the
@@ -155,6 +158,7 @@ test.describe("agent addressing (UI): owner-labelled names, locked agents, colla
     // The switch is a client handler: a click before hydration is dropped (e2e rule since #1263).
     await waitForHydration(page);
     const tokenRow = page.getByTestId("token-row").filter({ hasText: agentName }).first();
+    await tokenRow.getByText("Details & agent requests", { exact: true }).click();
     const toggle = tokenRow.getByTestId("token-collaborators-may-ask");
     await expect(toggle).toHaveAttribute("role", "switch");
     await expect(toggle).toHaveAttribute("aria-checked", "false");
@@ -176,6 +180,7 @@ test.describe("agent addressing (UI): owner-labelled names, locked agents, colla
     const { tokens } = (await listed.json()) as { tokens: { id: string; collaboratorsMayAsk: boolean }[] };
     expect(tokens.find((t) => t.id === minted.id)?.collaboratorsMayAsk).toBe(true);
     await reloadHydrated(page);
+    await tokenRow.getByText("Details & agent requests", { exact: true }).click();
     await expect(page.getByTestId("token-row").filter({ hasText: agentName }).first().getByTestId("token-collaborators-may-ask")).toHaveAttribute("aria-checked", "true");
     await shot(page, "settings-switch-on");
 

@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName, HttpError } from "@/server/http";
 import { mutateLiveDoc, cleanTextOf, readPrecondition, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
-import { diffOpsWords } from "@/editor/sync/text-diff";
-import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
+import { diffSuggestionEdits, targetedSuggestionEdits, SuggestionPlanError } from "@/editor/sync/suggestion-diff";
+import { SuggestionsModel, SuggestionConflictError } from "@/editor/collab/suggestions";
 import { collabIdentity, recordAgentActivity } from "@/server/agents";
 import { activityActor, recordActivity } from "@/server/activity";
 import { attachWork, requireAttachableRequest } from "@/server/agent-requests";
@@ -64,48 +64,27 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     hashAfter = assertContentUnchanged(id, doc, expected);
     const ytext = doc.getText(TEXT_KEY);
     const current = ytext.toString();
-    let proposed: string;
-    if ("content" in body) {
-      proposed = body.content;
-    } else {
-      proposed = current;
-      for (const edit of body.edits) {
-        const occurrences = proposed.split(edit.find).length - 1;
-        if (occurrences === 0) throw new HttpError(400, `Text not found: ${JSON.stringify(edit.find.slice(0, 80))}`);
-        if (occurrences > 1 && !edit.all) throw new HttpError(400, `Text occurs ${occurrences} times; add "all": true or make it unique: ${JSON.stringify(edit.find.slice(0, 80))}`);
-        proposed = edit.all ? proposed.split(edit.find).join(edit.replace) : proposed.replace(edit.find, edit.replace);
-      }
-    }
-    const ops = diffOpsWords(current, proposed, 0);
-    if (ops.length === 0) return;
-    const model = new SuggestionsModel(doc, ytext);
-    const before = new Set(model.ymap.keys());
-    // Where the first edit ends once applied (insert + kept deletion), so the agent's caret lands there.
-    let firstEnd: number | null = null;
+    let edits;
     try {
-      doc.transact(() => {
-        let shift = 0;
-        for (const op of ops) {
-          const idx = op.index + shift;
-          let kept = 0;
-          if (op.deleteCount > 0) {
-            kept = model.markDeleted(idx, idx + op.deleteCount, author);
-            shift += kept;
-            count++;
-          }
-          if (op.insert) {
-            ytext.insert(idx, op.insert);
-            model.recordInserted(idx, op.insert.length, author);
-            count++;
-          }
-          if (firstEnd === null) firstEnd = idx + (op.insert?.length ?? 0) + kept;
-        }
-      }, SUGGESTIONS_ORIGIN);
-      for (const key of model.ymap.keys()) if (!before.has(key)) created.push(key);
+      edits = "content" in body ? diffSuggestionEdits(current, body.content) : targetedSuggestionEdits(current, body.edits);
+    } catch (error) {
+      if (error instanceof SuggestionPlanError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+    if (edits.length === 0) return;
+    const model = new SuggestionsModel(doc, ytext);
+    const first = edits.reduce((left, edit) => edit.from < left.from ? edit : left);
+    const firstEnd = first.to + first.insert.length;
+    try {
+      created.push(...model.proposeEdits(edits, author));
+      count = created.length;
+    } catch (error) {
+      if (error instanceof SuggestionConflictError) throw new HttpError(409, "Replacement overlaps a pending suggestion; review it before proposing another edit");
+      throw error;
     } finally {
       model.destroy();
     }
-    recordAgentActivity(doc, user!, "suggested", firstEnd === null ? undefined : { from: firstEnd, to: firstEnd });
+    recordAgentActivity(doc, user!, "suggested", { from: firstEnd, to: firstEnd });
     hashAfter = contentHash(cleanTextOf(doc));
   });
 
@@ -120,4 +99,3 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   if (count > 0) await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "suggestion.add", { count, ...(attached ? { requestId: linkedRequest } : {}) }));
   return json(answer({ ok: true, suggestions: count, suggestionIds: created, contentHash: hashAfter }));
 });
-

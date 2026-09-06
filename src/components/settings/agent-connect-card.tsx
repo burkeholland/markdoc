@@ -7,14 +7,14 @@ import { useCopy } from "@/lib/hooks";
 import { AGENT_DOCS_URL, MCP_PATH, type TokenScopeName } from "@/lib/mcp";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
-/** Placeholder shown where the user's token goes until one is inlined. */
+/** Placeholder used in all copyable client setup examples. */
 export const TOKEN_PLACEHOLDER = "MARKDOC_TOKEN";
 export const COPILOT_APP_INSTALL = "mkdir -p ~/.copilot/extensions/markdoc && cp -R extensions/markdoc/. ~/.copilot/extensions/markdoc/";
 const COPILOT_APP_DOCS = "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md#inside-the-copilot-app";
-type ConnectTarget = "copilot-cli" | "mcp-clients" | "copilot-app";
+type ConnectTarget = "copilot-cli" | "mcp-clients" | "other-clients" | "copilot-app";
 
 /**
- * The MCP config for Copilot CLI / VS Code / Claude / Cursor pointing at this server's remote
+ * The MCP config for clients using mcpServers, pointing at this server's remote
  * endpoint (`/api/mcp`, Streamable HTTP). No checkout needed: a URL and a token.
  */
 export function mcpHttpConfigFor(origin: string, token: string = TOKEN_PLACEHOLDER): string {
@@ -34,11 +34,17 @@ export function mcpHttpConfigFor(origin: string, token: string = TOKEN_PLACEHOLD
   );
 }
 
+export function mcpVsCodeConfigFor(origin: string): string {
+  return JSON.stringify({
+    servers: { markdoc: { type: "http", url: `${origin}${MCP_PATH}`, headers: { Authorization: `Bearer ${TOKEN_PLACEHOLDER}` } } },
+  }, null, 2);
+}
+
 /** The stdio alternative: `mcp/server.mjs` from a checkout, for clients that cannot speak HTTP. */
-export function mcpConfigFor(origin: string, token: string = TOKEN_PLACEHOLDER): string {
+export function mcpConfigFor(origin: string, token: string = TOKEN_PLACEHOLDER, root: "mcpServers" | "servers" = "mcpServers"): string {
   return JSON.stringify(
     {
-      mcpServers: {
+      [root]: {
         markdoc: {
           command: "node",
           args: ["/path/to/markdoc/mcp/server.mjs"],
@@ -64,16 +70,16 @@ export function CopyBlock({ value, label, testId, copyTestId }: { value: string;
   const pre = useRef<HTMLPreElement>(null);
   const { copy, label: buttonLabel, copied } = useCopy(value, pre);
   return (
-    <div className="relative">
+    <div className="min-w-0">
       {/* pre-wrap + break-all: the Bearer line wraps instead of being clipped; what is copied is `value`, not this rendering. */}
       <pre
         ref={pre}
-        className="select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 p-3 pr-24 font-mono text-xs leading-5 text-ink-2"
+        className="select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 p-3 font-mono text-xs leading-5 text-ink-2"
         data-testid={testId}
       >
         {value}
       </pre>
-      <button type="button" className="btn btn-outline btn-sm absolute right-2 top-2 gap-1.5" onClick={copy} aria-label={`Copy ${label}`} data-testid={copyTestId}>
+      <button type="button" className="btn btn-outline btn-sm mt-2 h-auto max-w-full gap-1.5 whitespace-normal text-left" onClick={copy} aria-label={`Copy ${label}`} data-testid={copyTestId}>
         {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
         {buttonLabel}
       </button>
@@ -84,34 +90,33 @@ export function CopyBlock({ value, label, testId, copyTestId }: { value: string;
 export interface AgentConnectCardProps {
   /** Server origin to put in the config (window.location.origin in the browser). */
   origin: string;
-  /** A freshly created token to inline instead of the placeholder. */
-  token?: string | null;
   /** That token's scope, printed next to the allow-tool line (and narrowing it). */
   scope?: TokenScopeName | null;
   /** Shown for step 1; when omitted a link to /settings#tokens is rendered. */
   onCreateToken?: () => void;
   /** Renders a close button; the caller remembers the dismissal. */
   onDismiss?: () => void;
-  /** Hide step 1 (the settings page has the token form right below). */
+  /** Hide step 1 when the host already provides token management. */
   hideTokenStep?: boolean;
   className?: string;
 }
 
 /**
  * "Connect an agent" in three steps: a token, the MCP config for this host, and the sentence to say to
- * Copilot. Used by the Keep-an-agent-here dialog (first run) and the Settings › Agents section.
+ * Copilot. Used by the Keep-an-agent-here dialog (first run) and token management.
  */
-export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
-  const base = origin || "http://localhost:3000";
-  const config = mcpHttpConfigFor(base, token ?? undefined);
-  const stdioConfig = mcpConfigFor(base, token ?? undefined);
+export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
+  const base = origin;
   const [target, setTarget] = useState<ConnectTarget>("copilot-cli");
+  const stdioConfig = mcpConfigFor(base, TOKEN_PLACEHOLDER, target === "mcp-clients" ? "servers" : "mcpServers");
   const tabsId = useId();
   const targets: { id: ConnectTarget; label: string }[] = [
     { id: "copilot-cli", label: "Copilot CLI" },
-    { id: "mcp-clients", label: "VS Code / other MCP clients" },
+    { id: "mcp-clients", label: "VS Code" },
+    { id: "other-clients", label: "Other MCP clients" },
     { id: "copilot-app", label: "Copilot app" },
   ];
+  const config = target === "mcp-clients" ? mcpVsCodeConfigFor(base) : mcpHttpConfigFor(base);
   const selectTarget = (next: ConnectTarget, focus = false) => {
     setTarget(next);
     if (focus) document.getElementById(`${tabsId}-${next}`)?.focus();
@@ -127,15 +132,15 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
     selectTarget(targets[next].id, true);
   };
   return (
-    <section className={cn("relative rounded-xl border border-violet-200 bg-violet-50/60 p-4 dark:border-violet-900 dark:bg-violet-950/30", className)} data-testid="agent-connect-card" aria-label="Connect an agent">
+    <section className={cn("relative min-w-0 rounded-xl border border-violet-200 bg-violet-50/60 p-3 dark:border-violet-900 dark:bg-violet-950/30", className)} data-testid="agent-connect-card" aria-label="Connect an MCP client">
       {onDismiss && (
         <button type="button" className="icon-btn absolute right-2 top-2 h-7 w-7" onClick={onDismiss} aria-label="Dismiss setup steps" data-testid="agent-connect-dismiss">
           <X size={14} />
         </button>
       )}
-      <div className={cn("flex items-center justify-between gap-3", onDismiss && "pr-7")}>
+      <div className={cn("flex flex-wrap items-center justify-between gap-3", onDismiss && "pr-7")}>
         <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
-          <Plug size={16} className="text-violet-600" /> Connect an agent
+          <Plug size={16} className="shrink-0 text-violet-600" /> Client setup
         </h3>
         <a className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-accent hover:underline" href={AGENT_DOCS_URL} target="_blank" rel="noreferrer" data-testid="agent-docs-link">
           Agent docs <ExternalLink size={13} aria-hidden="true" />
@@ -182,7 +187,7 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
             </div>
           </li>
         )}
-        <li className="flex gap-3">
+        {base ? <li className="flex gap-3">
           <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-violet-600 text-[11px] font-semibold text-white">{hideTokenStep ? 1 : 2}</span>
           <div className="min-w-0 flex-1">
             {target === "copilot-app" ? (
@@ -205,19 +210,14 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
                       Add Markdoc to Copilot CLI: run <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">/mcp add</code> and paste this, or merge it into{" "}
                       <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">~/.copilot/mcp-config.json</code>.
                     </>
-                  ) : (
+                  ) : target === "mcp-clients" ? (
                     <>
-                      Add this Streamable HTTP server to your client. VS Code puts the same shape under <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">servers</code> in{" "}
+                      Add this Streamable HTTP server under <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">servers</code> in{" "}
                       <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">.vscode/mcp.json</code>.
                     </>
-                  )}{" "}
+                  ) : <>Add this Streamable HTTP server to your client&apos;s MCP configuration.</>}{" "}
                   It connects to this server over HTTP — no checkout needed.
-                  {!token && (
-                    <>
-                      {" "}
-                      Replace <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{TOKEN_PLACEHOLDER}</code> with your token.
-                    </>
-                  )}
+                  {" "}Replace <code className="rounded bg-surface px-1 py-0.5 font-mono text-xs">{TOKEN_PLACEHOLDER}</code> in the Authorization header with your saved token.
                 </div>
                 <CopyBlock value={config} label="MCP configuration" testId="agent-connect-config" />
                 <details className="mt-2 text-xs text-ink-3">
@@ -231,11 +231,14 @@ export function AgentConnectCard({ origin, token, scope, onCreateToken, onDismis
                     <CopyBlock value={stdioConfig} label="stdio MCP configuration" testId="agent-connect-config-stdio" />
                   </div>
                 </details>
-                <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" scope={scope} />
+                {target === "copilot-cli" && <details className="mt-2 text-xs text-ink-3">
+                  <summary className="cursor-pointer">Optional Copilot CLI permissions</summary>
+                  <CopilotPermissionsHint testIdPrefix="agent-connect" className="mt-2" scope={scope} />
+                </details>}
               </div>
             )}
           </div>
-        </li>
+        </li> : <li className="text-sm text-ink-3">Determining this server&apos;s address...</li>}
         <li className="flex gap-3">
           <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-violet-600 text-[11px] font-semibold text-white">{hideTokenStep ? 2 : 3}</span>
           <div className="flex flex-1 flex-wrap items-center gap-2">

@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, beforeEach, vi } from "vitest";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -23,6 +23,7 @@ const { getDb, schema } = await import("@/server/db");
 const { createDocument, upsertCollaborator } = await import("@/server/documents");
 const { recordActivity } = await import("@/server/activity");
 const { notifySuggestionDecision, listNotifications } = await import("@/server/notifications");
+const { apiLimiter } = await import("@/server/rate-limit");
 const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const suggestions = await import("@/app/api/documents/[id]/suggestions/route");
 const activity = await import("@/app/api/documents/[id]/activity/route");
@@ -45,6 +46,7 @@ const quietly = async <T>(fn: () => Promise<T>): Promise<{ result: T; logged: un
 
 describe("POST /api/documents/[id]/suggestions", () => {
   let docId: string;
+  beforeEach(() => apiLimiter.reset());
 
   beforeAll(async () => {
     const db = await getDb();
@@ -59,14 +61,14 @@ describe("POST /api/documents/[id]/suggestions", () => {
   const activityActions = async () =>
     ((await (await activity.GET(new Request(`http://localhost:3700/api/documents/${docId}/activity`), ctx())).json()) as { items: { action: string }[] }).items.map((i) => i.action);
 
-  /** A fresh document with one find → replace proposed on it (a deletion + an insertion). */
+  /** A fresh document with one find -> replace review group (two anchored runs). */
   const freshDoc = async () => {
     const doc = await createDocument({ ownerId: actor!.id, title: "shape", content: "# shape\n\nAlpha.\n" });
     docId = doc.id;
     const res = await post(suggest.POST, "suggest", { edits: [{ find: "Alpha", replace: "Beta" }] });
     expect(res.status).toBe(200);
     const { suggestionIds } = (await res.json()) as { suggestions: number; suggestionIds: string[] };
-    expect(suggestionIds.length).toBe(2);
+    expect(suggestionIds.length).toBe(1);
     return suggestionIds;
   };
 
@@ -77,7 +79,7 @@ describe("POST /api/documents/[id]/suggestions", () => {
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ error: "`id` is required for accept/reject" });
     }
-    expect((await pending()).length).toBe(2);
+    expect((await pending()).length).toBe(1);
     expect(await activityActions()).toEqual(["suggestion.add"]);
   });
 
@@ -88,23 +90,24 @@ describe("POST /api/documents/[id]/suggestions", () => {
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: "Suggestion not found" });
     }
-    expect((await pending()).length).toBe(2);
+    expect((await pending()).length).toBe(1);
     expect(await activityActions()).toEqual(["suggestion.add"]);
   });
 
   it("a valid id decides exactly that suggestion and says so; deciding it again is a 404", async () => {
-    const [first, second] = await freshDoc();
+    const [first] = await freshDoc();
     const res = await post(suggestions.POST, "suggestions", { action: "accept", id: first });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, decided: 1, id: first });
     const left = await pending();
-    expect(left.map((s) => s.id)).toEqual([second]);
+    expect(left).toEqual([]);
     expect(await activityActions()).toEqual(["suggestion.accept", "suggestion.add"]);
 
     const again = await post(suggestions.POST, "suggestions", { action: "accept", id: first });
     expect(again.status).toBe(404);
-    expect((await pending()).length).toBe(1);
+    expect((await pending()).length).toBe(0);
 
+    const [second] = await freshDoc();
     const rejected = await post(suggestions.POST, "suggestions", { action: "reject", id: second });
     expect(rejected.status).toBe(200);
     expect(await rejected.json()).toEqual({ ok: true, decided: 1, id: second });
@@ -115,7 +118,7 @@ describe("POST /api/documents/[id]/suggestions", () => {
     await freshDoc();
     const res = await post(suggestions.POST, "suggestions", { action: "acceptAll" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, decided: 2 });
+    expect(await res.json()).toEqual({ ok: true, decided: 1 });
     expect((await pending()).length).toBe(0);
 
     const nothing = await post(suggestions.POST, "suggestions", { action: "rejectAll" });
@@ -140,8 +143,7 @@ describe("POST /api/documents/[id]/suggestions", () => {
     it("accept with recordActivity failing: 200 { ok, decided: 1, id, warnings: [activity-not-recorded] }, the text changed, the author notified", async () => {
       await freshDoc();
       const before = await pending();
-      const insertion = before.find((s) => s.type === "insert")!.id;
-      const deletion = before.find((s) => s.type === "delete")!.id;
+      const insertion = before.find((s) => s.type === "replace")!.id;
       expect(await clean()).toBe("# shape\n\nAlpha.\n");
       vi.mocked(recordActivity).mockRejectedValueOnce(DB_FAILURE);
       vi.mocked(notifySuggestionDecision).mockClear();
@@ -153,24 +155,24 @@ describe("POST /api/documents/[id]/suggestions", () => {
       expect(JSON.stringify(body)).not.toContain("Failed query");
       expect(logged).toEqual([["[suggestions] activity-not-recorded", expect.any(Error)]]);
 
-      // The insertion is now plain text (it sits before the deleted word); only the deletion is still pending.
-      expect(await clean()).toBe("# shape\n\nBetaAlpha.\n");
-      expect((await pending()).map((s) => s.id)).toEqual([deletion]);
+      // One decision keeps the insertion and removes the old passage.
+      expect(await clean()).toBe("# shape\n\nBeta.\n");
+      expect(await pending()).toEqual([]);
       expect(await activityActions()).toEqual(["suggestion.add"]);
       expect(vi.mocked(notifySuggestionDecision)).toHaveBeenCalledTimes(1);
 
       // Deciding it again is the honest 404 — the caller already got its 200.
       const again = await post(suggestions.POST, "suggestions", { action: "accept", id: insertion });
       expect(again.status).toBe(404);
-      expect((await pending()).length).toBe(1);
+      expect((await pending()).length).toBe(0);
     });
 
-    it("acceptAll with an author's notification failing: 200 { ok, decided: 2, warnings: [notification-not-sent] }, the activity row stands", async () => {
+    it("acceptAll with an author's notification failing: the one group is decided and the activity row stands", async () => {
       await freshDoc();
       vi.mocked(notifySuggestionDecision).mockRejectedValueOnce(DB_FAILURE);
       const { result: res, logged } = await quietly(() => post(suggestions.POST, "suggestions", { action: "acceptAll" }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, decided: 2, warnings: ["notification-not-sent"] });
+      expect(await res.json()).toEqual({ ok: true, decided: 1, warnings: ["notification-not-sent"] });
       expect(logged).toEqual([["[suggestions] notification-not-sent", expect.any(Error)]]);
 
       expect(await clean()).toBe("# shape\n\nBeta.\n");
@@ -184,7 +186,7 @@ describe("POST /api/documents/[id]/suggestions", () => {
 
     it("reject with both failing: 200 with both codes in write order, the suggestion is gone", async () => {
       await freshDoc();
-      const deletion = (await pending()).find((s) => s.type === "delete")!.id;
+      const deletion = (await pending()).find((s) => s.type === "replace")!.id;
       vi.mocked(recordActivity).mockRejectedValueOnce(DB_FAILURE);
       vi.mocked(notifySuggestionDecision).mockRejectedValueOnce(DB_FAILURE);
       const { result: res, logged } = await quietly(() => post(suggestions.POST, "suggestions", { action: "reject", id: deletion }));
@@ -194,7 +196,7 @@ describe("POST /api/documents/[id]/suggestions", () => {
         ["[suggestions] activity-not-recorded", expect.any(Error)],
         ["[suggestions] notification-not-sent", expect.any(Error)],
       ]);
-      expect((await pending()).map((s) => s.id)).toHaveLength(1);
+      expect((await pending()).map((s) => s.id)).toHaveLength(0);
       expect((await post(suggestions.POST, "suggestions", { action: "reject", id: deletion })).status).toBe(404);
     });
 

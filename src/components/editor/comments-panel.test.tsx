@@ -835,6 +835,26 @@ describe("CommentsPanel", () => {
       const SCRIBE = { name: "Scribe", login: "olive/Scribe", ownerLogin: "olive", ownerName: null, present: false, collaboratorsMayAsk: true };
       const chips = () => screen.getAllByTestId("comment-request-chip").map((c) => [c.getAttribute("data-status"), c.getAttribute("data-request-id"), c.textContent]);
 
+      it("does not render unchanged comment cards when document text changes outside their anchors", async () => {
+        const { user } = mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" }, agents: [AGENT, SCRIBE] });
+        const ids = Array.from({ length: 20 }, () => session!.comments.add({ from: 0, to: 5, body: "@olive/Scribe shorter", author: user }));
+        setMirrors(ids.map((threadId, index) => mirror({
+          id: `r${index}`, threadId, status: "claimed", claimedBy: "Scribe", claimedByLogin: "olive", userId: "drew",
+        })));
+        await waitFor(() => expect(chips()).toHaveLength(20));
+        await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+        const before = labelCalls();
+        const original = session!.comments.list();
+        await act(async () => {
+          session!.ytext.insert(session!.ytext.length, "!");
+          session!.setMode("suggesting");
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+        expect(session!.comments.list().every((thread, index) => thread === original[index])).toBe(true);
+        expect(labelCalls() - before).toBe(0);
+        expect(chips()).toHaveLength(20);
+      });
+
       it("a person joining or leaving presence never re-renders a claimed chip; an agent's owner name arriving does", async () => {
         const { user } = mount({ role: "editor", me: { id: "drew", name: "Drew", login: "drew" }, agents: [AGENT, SCRIBE] });
         const first = session!.comments.add({ from: 0, to: 5, body: "@olive/Scribe shorter", author: user });

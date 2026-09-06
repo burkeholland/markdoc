@@ -1,378 +1,369 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bot, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
-import { relativeTime } from "@/lib/utils";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { ArrowLeft, Check, Copy, KeyRound, Loader2, Plus } from "lucide-react";
+import { cn, relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
-import { ApiError, api, apiErrorText, type DocumentSummaryDto } from "@/lib/api";
+import { ApiError, api, apiErrorText, type ApiTokenDto, type CreatedApiTokenDto, type DocumentSummaryDto } from "@/lib/api";
 import { SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
-import { AgentConnectCard, mcpHttpConfigFor, useOrigin } from "@/components/settings/agent-connect-card";
-import { CopilotChecklist } from "@/components/settings/copilot-checklist";
+import { agentMentionSlug } from "@/editor/collab/mentions";
+import { AgentConnectCard, useOrigin } from "@/components/settings/agent-connect-card";
 
-interface TokenRow {
-  id: string;
-  name: string;
-  prefix: string;
-  scope: TokenScopeName;
-  documentIds: string[] | null;
-  createdAt: string;
-  lastUsedAt: string | null;
-  lastMcpSeenAt: string | null;
-  lastMcpCallAt: string | null;
-  expiresAt: string | null;
-  /** Whether people the owner shares documents with may address requests to this agent (#1296); off by default. */
-  collaboratorsMayAsk: boolean;
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
-  const body = await res.text();
-  const data = body ? JSON.parse(body) : null;
-  if (!res.ok) {
-    // Keep the 400's `issues` so the form can show the field's reason, not the bare "Invalid request".
-    const err = (data ?? {}) as { error?: string; issues?: unknown };
-    throw new ApiError(res.status, err.error ?? res.statusText, err.issues);
-  }
-  return data as T;
-}
-
-function CopyField({ value, label }: { value: string; label: string }) {
-  const code = useRef<HTMLElement>(null);
-  const { copy, label: buttonLabel, copied } = useCopy(value, code);
-  return (
-    <div className="flex items-center gap-2">
-      {/* break-all instead of truncate: the whole token is readable and selectable (LAN, no clipboard API). */}
-      <code ref={code} className="min-w-0 flex-1 select-text break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink" data-testid={`copy-${label}`}>
-        {value}
-      </code>
-      <button type="button" className="btn btn-outline btn-sm shrink-0 gap-1.5" onClick={copy} aria-label={`Copy ${label}`} data-testid={`copy-${label}-button`}>
-        {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
-        {buttonLabel}
-      </button>
-    </div>
-  );
-}
-
-/** The scope chip shown in the token list and under the connect cards. */
 export function ScopeChip({ scope, className }: { scope: TokenScopeName; className?: string }) {
   return (
-    <span
-      className={`inline-flex items-center rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-ink-2 ${className ?? ""}`}
-      title={`${TOKEN_SCOPE_LABEL[scope]}: ${TOKEN_SCOPE_SUMMARY[scope]}`}
-      data-testid="token-scope-chip"
-      data-scope={scope}
-    >
+    <span className={cn("inline-flex rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-ink-2", className)}
+      title={`${TOKEN_SCOPE_LABEL[scope]}: ${TOKEN_SCOPE_SUMMARY[scope]}`} data-testid="token-scope-chip" data-scope={scope}>
       {scope}
     </span>
   );
 }
 
-export function TokensPanel({ origin, userLogin, next, hasAgentRequests = false }: { origin: string; userLogin: string; next?: string | null; hasAgentRequests?: boolean }) {
-  const [tokens, setTokens] = useState<TokenRow[] | null>(null);
-  const [name, setName] = useState("GitHub Copilot CLI");
-  const [expires, setExpires] = useState<string>("90");
-  const [scope, setScope] = useState<TokenScopeName>("comment");
-  const [restrict, setRestrict] = useState(false);
-  const [documentIds, setDocumentIds] = useState<string[]>([]);
-  const [documents, setDocuments] = useState<DocumentSummaryDto[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null);
-  const [created, setCreated] = useState<{ token: string; name: string; scope: TokenScopeName; documentIds: string[] | null } | null>(null);
-  const restrictionError = restrict && documentIds.length === 0 ? "Select at least one document when restricting a token." : null;
-  // The browser's origin wins (LAN access, tunnels): the config must point where the user actually is.
-  const liveOrigin = useOrigin(origin);
-  const base = liveOrigin || origin;
-  // Sequence of the newest `load()`; a successful PATCH bumps it too, so a list load that was in flight when the PATCH
-  // completed is dropped when it lands (#1538: a stale GET carrying the old value snapped the switch back).
-  const loadSeq = useRef(0);
-  // Rows with a PATCH in flight → the value the user asked for; one object per click so only the latest click's
-  // PATCH settles the row (two quick clicks must not let the first answer overwrite the second).
-  const pendingFlips = useRef(new Map<string, { value: boolean }>());
-
-  const load = useCallback(async () => {
-    // Loads are ordered: an answer from a load that is no longer the newest is dropped, whenever it lands.
-    const seq = ++loadSeq.current;
-    try {
-      const res = await request<{ tokens: TokenRow[] }>("/api/tokens");
-      if (seq !== loadSeq.current) return;
-      // A row with a PATCH in flight shows the value the user asked for, not what the list carried when it was sent.
-      const flips = pendingFlips.current;
-      setTokens(res.tokens.map((row) => ({ ...row, collaboratorsMayAsk: flips.get(row.id)?.value ?? row.collaboratorsMayAsk })));
-    } catch (e) {
-      if (seq !== loadSeq.current) return;
-      setError(apiErrorText(e, "Failed to load tokens"));
-    }
-  }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  // The document picker lists what the user can see; fetched once it is opened.
-  useEffect(() => {
-    if (!restrict || documents !== null) return;
-    api.documents
-      .list()
-      .then((res) => setDocuments(res.documents))
-      .catch(() => setDocuments([]));
-  }, [restrict, documents]);
-
-  const toggleDocument = (id: string) => setDocumentIds((ids) => (ids.includes(id) ? ids.filter((d) => d !== id) : [...ids, id]));
-
-  const create = async () => {
-    if (restrictionError) {
-      setError(restrictionError);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await request<{ token: { token: string; name: string; scope: TokenScopeName; documentIds: string[] | null } }>("/api/tokens", {
-        method: "POST",
-        body: JSON.stringify({ name, expiresInDays: expires === "never" ? null : Number(expires), scope, documentIds: restrict ? documentIds : null }),
-      });
-      setCreated({ token: res.token.token, name: res.token.name, scope: res.token.scope, documentIds: res.token.documentIds });
-      await load();
-    } catch (e) {
-      setError(apiErrorText(e, "Could not create token"));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revoke = async (t: TokenRow) => {
-    if (!confirm(`Revoke “${t.name}”? Anything using it will stop working immediately.`)) return;
-    await request(`/api/tokens/${t.id}`, { method: "DELETE" });
-    await load();
-  };
-
-  /**
-   * "Collaborators may ask this agent": flips at once, then PATCHes; a refusal puts it back and says why, under the
-   * switch. Part A's `PATCH /api/tokens/:id` (#1296) takes exactly `{ collaboratorsMayAsk }` and answers the updated row,
-   * which becomes this row's truth. A stale list load can no longer undo the flip: one that lands while the PATCH is in
-   * flight shows the wanted value, one that started before the PATCH completed is dropped (#1538).
-   */
-  const setCollaboratorsMayAsk = async (t: TokenRow, collaboratorsMayAsk: boolean) => {
-    const flip = (value: boolean) => setTokens((list) => list?.map((row) => (row.id === t.id ? { ...row, collaboratorsMayAsk: value } : row)) ?? list);
-    flip(collaboratorsMayAsk);
-    setSwitchError(null);
-    const pending = { value: collaboratorsMayAsk };
-    pendingFlips.current.set(t.id, pending);
-    try {
-      const res = await request<{ token: TokenRow }>(`/api/tokens/${t.id}`, { method: "PATCH", body: JSON.stringify({ collaboratorsMayAsk }) });
-      loadSeq.current++;
-      if (pendingFlips.current.get(t.id) === pending) setTokens((list) => list?.map((row) => (row.id === t.id ? { ...row, ...res.token } : row)) ?? list);
-    } catch (e) {
-      flip(!collaboratorsMayAsk);
-      setSwitchError({ id: t.id, message: `Could not update “${t.name}”: ${e instanceof Error ? e.message : "the change was not saved"}` });
-    } finally {
-      if (pendingFlips.current.get(t.id) === pending) pendingFlips.current.delete(t.id);
-    }
-  };
-
-  const mcpConfig = mcpHttpConfigFor(base, created?.token ?? "mdk_…");
-
+function SecretNotice({ created, onDismiss }: { created: CreatedApiTokenDto; onDismiss: () => void }) {
+  const code = useRef<HTMLElement>(null);
+  const { copy, label, copied } = useCopy(created.token, code);
   return (
-    <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="flex items-center gap-2 text-xl font-semibold text-ink">
-          <Bot size={20} className="text-accent" /> Agents &amp; API access
-        </h1>
-        <p className="mt-1 max-w-2xl text-sm leading-6 text-ink-3">
-          Personal access tokens let agents such as GitHub Copilot, scripts, and other tools create and edit your documents, leave comments, and propose
-          suggestions. Everything they do shows up live for collaborators and is attributed to <strong>{userLogin} via &lt;token name&gt;</strong>. A token is never
-          wider than you: pick a <em>Read</em> or <em>Comment &amp; suggest</em> scope, or limit it to a few documents, and it cannot do more.
-        </p>
-        {next && (
-          <a className="btn btn-outline btn-sm mt-3 gap-1.5" href={next} data-testid="settings-back-to-document">
-            <ArrowLeft size={14} /> Back to the document
-          </a>
-        )}
-      </div>
-
-      <CopilotChecklist hasAgentRequests={hasAgentRequests} />
-
-      <AgentConnectCard origin={liveOrigin} token={created?.token ?? null} scope={created?.scope ?? null} hideTokenStep />
-
-      <div className="rounded-2xl border border-line bg-surface p-5" id="tokens">
-        <h2 className="mb-3 text-sm font-semibold text-ink">Create a token</h2>
-        <form
-          className="flex flex-wrap items-end gap-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void create();
-          }}
-        >
-          <label className="flex min-w-56 flex-1 flex-col gap-1 text-xs font-medium text-ink-3">
-            Name (shown as the agent)
-            <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub Copilot CLI" data-testid="token-name" />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">
-            Expires
-            <select className="select" value={expires} onChange={(e) => setExpires(e.target.value)}>
-              <option value="30">30 days</option>
-              <option value="90">90 days</option>
-              <option value="365">1 year</option>
-              <option value="never">Never</option>
-            </select>
-          </label>
-          <button type="submit" className="btn btn-primary gap-2" disabled={busy || !name.trim() || Boolean(restrictionError)} data-testid="token-create">
-            {busy ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />} Create token
-          </button>
-          <fieldset className="flex w-full flex-col gap-1.5" data-testid="token-scope">
-            <legend className="mb-1 text-xs font-medium text-ink-3">Scope</legend>
-            {SCOPES.map((s) => (
-              <label key={s} className="flex cursor-pointer items-start gap-2 text-sm text-ink-2">
-                <input type="radio" name="token-scope" value={s} checked={scope === s} onChange={() => setScope(s)} className="mt-1" data-testid={`token-scope-${s}`} />
-                <span>
-                  <span className="font-medium text-ink">{TOKEN_SCOPE_LABEL[s]}</span>
-                  <span className="text-ink-3"> — {TOKEN_SCOPE_SUMMARY[s]}</span>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="flex w-full flex-col gap-1.5">
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-2">
-              <input
-                type="checkbox"
-                checked={restrict}
-                onChange={(e) => setRestrict(e.target.checked)}
-                aria-invalid={restrictionError ? true : undefined}
-                aria-describedby={`token-document-access${restrictionError ? " token-document-selection-error" : ""}`}
-                data-testid="token-restrict"
-              />
-              <span className="font-medium text-ink">Only these documents</span>
-            </label>
-            <p id="token-document-access" className="text-xs text-ink-3" data-testid="token-document-access">
-              {restrict ? "Every other document answers 404 to this token." : "This token will access all documents."}
-            </p>
-            {restrict && (
-              <>
-                <div className="max-h-48 overflow-y-auto rounded-lg border border-line bg-surface-2 p-2" data-testid="token-documents">
-                  {documents === null ? (
-                    <div className="px-1 py-1 text-xs text-ink-3">Loading your documents…</div>
-                  ) : documents.length === 0 ? (
-                    <div className="px-1 py-1 text-xs text-ink-3">No documents yet.</div>
-                  ) : (
-                    documents.map((d) => (
-                      <label key={d.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm text-ink-2 hover:bg-surface">
-                        <input type="checkbox" checked={documentIds.includes(d.id)} onChange={() => toggleDocument(d.id)} data-testid={`token-document-${d.id}`} />
-                        <span className="truncate">{d.title}</span>
-                      </label>
-                    ))
-                  )}
-                </div>
-                {restrictionError && (
-                  <p id="token-document-selection-error" className="text-xs font-medium text-danger" role="alert" data-testid="token-document-error">
-                    {restrictionError}
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-        </form>
-        {error && (
-          <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
-            {error}
-          </div>
-        )}
-
-        {created && (
-          <div
-            className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/40"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            data-testid="token-created"
-          >
-            <div className="mb-2 flex flex-wrap items-center gap-2 text-sm font-medium text-green-900 dark:text-green-200">
-              <span>Token “{created.name}” created. Copy it now; it will not be shown again.</span>
-              <ScopeChip scope={created.scope} />
-              {created.documentIds?.length ? <span className="text-xs font-normal text-ink-3">{created.documentIds.length === 1 ? "1 document" : `${created.documentIds.length} documents`}</span> : null}
-            </div>
-            <CopyField value={created.token} label="token" />
-            <details className="mt-3 text-sm text-ink-2">
-              <summary className="cursor-pointer select-none font-medium text-ink">How to use it</summary>
-              <div className="mt-3 flex flex-col gap-3">
-                <div>
-                  <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-ink-3">REST</div>
-                  <CopyField value={`curl -H "Authorization: Bearer ${created.token}" ${base}/api/me`} label="curl" />
-                </div>
-                <div>
-                  <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-ink-3">MCP (GitHub Copilot, Claude, Cursor…)</div>
-                  <pre className="select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface p-3 font-mono text-xs text-ink-2">{mcpConfig}</pre>
-                </div>
-              </div>
-            </details>
-          </div>
-        )}
-      </div>
-
-      <div className="rounded-2xl border border-line bg-surface">
-        <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-sm font-semibold text-ink">
-          <KeyRound size={16} className="text-ink-3" /> Your tokens
-        </div>
-        {tokens === null ? (
-          <div className="px-5 py-6 text-sm text-ink-3">Loading…</div>
-        ) : tokens.length === 0 ? (
-          <div className="px-5 py-6 text-sm text-ink-3">No tokens yet.</div>
-        ) : (
-          <ul className="divide-y divide-line">
-            {tokens.map((t) => (
-              <li key={t.id} className="flex flex-col gap-2 px-5 py-3" data-testid="token-row">
-                <div className="flex items-center gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium text-ink">{t.name}</span>
-                      <ScopeChip scope={t.scope} />
-                      <span className="shrink-0 text-xs text-ink-3" data-testid="token-documents-count">
-                        {t.documentIds?.length ? (t.documentIds.length === 1 ? "1 document" : `${t.documentIds.length} documents`) : "all documents"}
-                      </span>
-                    </div>
-                    <div className="truncate font-mono text-xs text-ink-3">{t.prefix}…</div>
-                  </div>
-                  <div className="hidden text-xs text-ink-3 sm:block">
-                    Created {relativeTime(t.createdAt)}
-                    {t.lastUsedAt ? ` · used ${relativeTime(t.lastUsedAt)}` : " · never used"}
-                    {t.expiresAt ? ` · expires ${relativeTime(t.expiresAt)}` : ""}
-                  </div>
-                  <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void revoke(t)} aria-label={`Revoke ${t.name}`} data-testid="token-revoke">
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-                {/* Who may @mention this agent with a request (#1296). Off, the picker greys it out for everyone else. */}
-                <div className="flex items-start gap-2.5">
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={t.collaboratorsMayAsk === true}
-                    aria-labelledby={`token-${t.id}-may-ask-label`}
-                    aria-describedby={`token-${t.id}-may-ask-help`}
-                    className="switch mt-px"
-                    onClick={() => void setCollaboratorsMayAsk(t, t.collaboratorsMayAsk !== true)}
-                    data-testid="token-collaborators-may-ask"
-                  />
-                  <div className="min-w-0 text-xs leading-5">
-                    <span id={`token-${t.id}-may-ask-label`} className="font-medium text-ink-2">
-                      Collaborators may ask this agent
-                    </span>
-                    <span aria-hidden="true" className="text-ink-3">
-                      {" — "}
-                    </span>
-                    <span id={`token-${t.id}-may-ask-help`} className="text-ink-3">
-                      Off: only you can send requests to it. On: people you share documents with can too.
-                    </span>
-                    {switchError?.id === t.id && (
-                      <p className="mt-1 font-medium text-danger" role="alert" aria-atomic="true" data-testid="token-collaborators-may-ask-error">
-                        {switchError.message}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+    <div className="min-w-0 rounded-xl border border-green-200 bg-green-50 p-3 dark:border-green-900 dark:bg-green-950/40"
+      role="status" aria-live="polite" aria-atomic="true" data-testid="token-created">
+      <p className="text-sm font-medium text-green-900 dark:text-green-200">Token “{created.name}” created. Copy it now; it will not be shown again.</p>
+      <p className="mt-1 text-xs text-ink-2">Store it now in a safe place. Only a hash is saved by Markdoc; the secret cannot be recovered or edited.</p>
+      <p className="mt-1 text-xs text-ink-2"><ScopeChip scope={created.scope} /> {created.documentIds ? `${created.documentIds.length} document(s)` : "All documents you can access"}</p>
+      <code ref={code} className="mt-2 block select-text break-all rounded-lg border border-line bg-surface px-3 py-2 font-mono text-xs text-ink" data-testid="copy-token">{created.token}</code>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button type="button" className="btn btn-outline btn-sm h-auto max-w-full gap-1.5 whitespace-normal text-left" onClick={copy} aria-label="Copy token" data-testid="copy-token-button">
+          {copied ? <Check size={14} /> : <Copy size={14} />}{label}
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onDismiss}>I stored it - hide secret</button>
       </div>
     </div>
+  );
+}
+
+function tokenState(token: ApiTokenDto) {
+  return token.revokedAt ? "Revoked" : token.expiresAt && new Date(token.expiresAt).getTime() < Date.now() ? "Expired" : "Active";
+}
+
+interface TokensPanelProps {
+  origin: string;
+  userLogin: string;
+  next?: string | null;
+  documentId?: string;
+  embedded?: boolean;
+  open?: boolean;
+  onClose?: () => void;
+}
+
+/** Closing a host dialog unmounts all transient state, including late creation responses. */
+export function TokensPanel({ open = true, ...props }: TokensPanelProps) {
+  return open ? <TokenManager key={props.documentId ?? "settings"} {...props} /> : null;
+}
+
+function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }: Omit<TokensPanelProps, "open">) {
+  const [tokens, setTokens] = useState<ApiTokenDto[] | null>(null);
+  const [loadError, setLoadError] = useState<{ message: string; permission: boolean } | null>(null);
+  const [destination, setDestination] = useState<"tokens" | "connect">("tokens");
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("GitHub Copilot CLI");
+  const [expires, setExpires] = useState("90");
+  const [scope, setScope] = useState<TokenScopeName>("comment");
+  const [restrict, setRestrict] = useState(Boolean(documentId));
+  const [documentIds, setDocumentIds] = useState<string[]>(documentId ? [documentId] : []);
+  const [documents, setDocuments] = useState<DocumentSummaryDto[] | null>(null);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [conflictName, setConflictName] = useState<string | null>(null);
+  const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null);
+  const [switching, setSwitching] = useState<string[]>([]);
+  const [created, setCreated] = useState<CreatedApiTokenDto | null>(null);
+  const liveOrigin = useOrigin(origin);
+  const id = useId();
+  const tokensButton = useRef<HTMLButtonElement>(null);
+  const alive = useRef(true);
+  const loadSeq = useRef(0);
+  const pendingFlips = useRef(new Map<string, { value: boolean }>());
+  const updatedRows = useRef(new Map<string, ApiTokenDto>());
+  const restrictionError = restrict && documentIds.length === 0 ? "Select at least one document when restricting a token." : null;
+  const managementLink = documentId ? `/settings?next=${encodeURIComponent(`/d/${documentId}`)}#tokens` : "/settings#tokens";
+  const matching = conflictName ? tokens?.find((t) => tokenState(t) === "Active" && agentMentionSlug(t.name).toLowerCase() === agentMentionSlug(conflictName).toLowerCase()) : null;
+
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    updatedRows.current.clear();
+    setLoadError(null);
+    try {
+      const res = await api.tokens.list(true);
+      if (!alive.current || seq !== loadSeq.current) return;
+      // Keep rows added or revoked by this reload without overwriting newer metadata edits.
+      setTokens(res.tokens.map((row) => {
+        const updated = updatedRows.current.get(row.id) ?? row;
+        return { ...updated, collaboratorsMayAsk: pendingFlips.current.get(row.id)?.value ?? updated.collaboratorsMayAsk };
+      }));
+    } catch (e) {
+      if (!alive.current || seq !== loadSeq.current) return;
+      setTokens(null);
+      setLoadError({ message: apiErrorText(e, "Failed to load tokens"), permission: e instanceof ApiError && (e.status === 401 || e.status === 403) });
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!restrict || documentId || documents !== null || documentError) return;
+    let cancelled = false;
+    api.documents.list().then((res) => { if (!cancelled) setDocuments(res.documents); })
+      .catch((e) => { if (!cancelled) setDocumentError(apiErrorText(e, "Could not load documents")); });
+    return () => { cancelled = true; };
+  }, [restrict, documentId, documents, documentError]);
+  useEffect(() => {
+    if (embedded) return;
+    const readHash = () => setDestination(window.location.hash === "#connect" ? "connect" : "tokens");
+    readHash();
+    window.addEventListener("hashchange", readHash);
+    return () => window.removeEventListener("hashchange", readHash);
+  }, [embedded]);
+
+  const create = async () => {
+    if (restrictionError) { setError(restrictionError); return; }
+    setBusy(true);
+    setError(null);
+    setConflictName(null);
+    try {
+      const res = await api.tokens.create(name, expires === "never" ? null : Number(expires), { scope, documentIds: restrict ? documentIds : null });
+      if (!alive.current) return;
+      setCreated(res.token);
+      await load();
+    } catch (e) {
+      if (!alive.current) return;
+      setError(apiErrorText(e, "Could not create token"));
+      if (e instanceof ApiError && e.status === 409) {
+        setConflictName(name);
+        await load();
+      }
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  const changeToken = async (token: ApiTokenDto, action: "rename" | "replace" | "revoke", newName?: string): Promise<boolean> => {
+    if (action === "revoke" && !window.confirm(`Revoke "${token.name}"? Every client using it will stop working immediately.`)) return false;
+    if (action === "replace" && !window.confirm(`Replace "${token.name}"? Once the replacement is created, the old token stops working in every client. Update those clients with the new secret. Scope, documents and expiry stay unchanged. Continue?`)) return false;
+    setPendingAction(token.id);
+    setError(null);
+    try {
+      if (action === "rename") {
+        const res = await api.tokens.update(token.id, { name: newName });
+        if (!alive.current) return false;
+        updatedRows.current.set(token.id, res.token);
+        setTokens((rows) => rows?.map((row) => row.id === token.id ? res.token : row) ?? null);
+        setCreated((value) => value?.id === token.id ? { ...value, name: res.token.name } : value);
+      } else {
+        if (action === "replace") {
+          const res = await api.tokens.replace(token.id);
+          if (!alive.current) return false;
+          setCreated(res.token);
+        } else {
+          await api.tokens.revoke(token.id);
+          if (!alive.current) return false;
+          setCreated((value) => value?.id === token.id ? null : value);
+        }
+        tokensButton.current?.focus();
+        await load();
+      }
+      return true;
+    } catch (e) {
+      if (alive.current) setError(apiErrorText(e, `Could not ${action} token`));
+      return false;
+    } finally {
+      if (alive.current) setPendingAction(null);
+    }
+  };
+
+  const setCollaboratorsMayAsk = async (t: ApiTokenDto, value: boolean) => {
+    const flip = (value: boolean) => setTokens((rows) => rows?.map((row) => row.id === t.id ? { ...row, collaboratorsMayAsk: value } : row) ?? rows);
+    flip(value);
+    setSwitchError(null);
+    const pending = { value };
+    pendingFlips.current.set(t.id, pending);
+    setSwitching((ids) => [...ids, t.id]);
+    try {
+      const res = await api.tokens.update(t.id, { collaboratorsMayAsk: value });
+      if (!alive.current) return;
+      if (pendingFlips.current.get(t.id) === pending) {
+        updatedRows.current.set(t.id, res.token);
+        setTokens((rows) => rows?.map((row) => row.id === t.id ? res.token : row) ?? rows);
+      }
+    } catch (e) {
+      if (!alive.current || pendingFlips.current.get(t.id) !== pending) return;
+      flip(!value);
+      setSwitchError({ id: t.id, message: `Could not update “${t.name}”: ${apiErrorText(e, "The change was not saved")}` });
+    } finally {
+      if (pendingFlips.current.get(t.id) === pending) {
+        pendingFlips.current.delete(t.id);
+        if (alive.current) setSwitching((ids) => ids.filter((id) => id !== t.id));
+      }
+    }
+  };
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4" id={embedded ? undefined : "tokens"} data-testid="token-manager">
+      {!embedded && <div>
+        <h1 className="flex items-center gap-2 text-xl font-semibold text-ink"><KeyRound size={20} /> Tokens &amp; MCP</h1>
+        <p className="mt-1 text-sm text-ink-3">Manage tokens for {userLogin}. Agents can never do more than you can.</p>
+        {next && <a className="btn btn-outline btn-sm mt-3 gap-1.5" href={next} data-testid="settings-back-to-document"><ArrowLeft size={14} /> Back to the document</a>}
+      </div>}
+      <div className={cn("flex flex-wrap items-start gap-2", embedded && "sticky top-0 z-10 bg-surface py-2")}>
+      <nav className="flex min-w-0 flex-wrap gap-2" aria-label="Token access">
+        <button ref={tokensButton} type="button" className={cn("btn btn-sm", destination === "tokens" ? "btn-primary" : "btn-outline")}
+          aria-pressed={destination === "tokens"} onClick={() => setDestination("tokens")}>Tokens</button>
+        <button type="button" className={cn("btn btn-sm whitespace-normal text-left", destination === "connect" ? "btn-primary" : "btn-outline")}
+          aria-pressed={destination === "connect"} onClick={() => setDestination("connect")}>Connect an MCP client</button>
+      </nav>
+      {onClose && <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Close token management</button>}
+      </div>
+      <p className="text-xs leading-5 text-ink-3">Existing secrets cannot be shown again. Rename changes only the name; replace creates a new secret.</p>
+      {error && <p role="alert" aria-atomic="true" className="text-sm text-danger">{error}</p>}
+      {conflictName && <p className="text-sm text-ink-2" data-testid="token-conflict">
+        {matching ? `The matching token "${matching.name}" is in Your tokens below. Rename, replace or revoke it, or choose a different name for a separate token.`
+          : "That name is reserved by an existing token, but it could not be matched to this list. Retry the list or open all your tokens in a signed-in browser session; do not create another until the scope and account are clear."}
+        {!matching && <button type="button" className="btn btn-outline btn-sm mt-2" disabled={busy} onClick={() => void load()}>Refresh token list</button>}
+      </p>}
+      {created && <SecretNotice created={created} onDismiss={() => { setCreated(null); tokensButton.current?.focus(); }} />}
+      <section className="min-w-0 rounded-xl border border-line bg-surface" aria-label="Your tokens">
+        <h2 className="border-b border-line px-3 py-2 text-sm font-semibold text-ink">Your tokens</h2>
+        {loadError ? <div className="p-3 text-sm">
+          <p role="alert" aria-atomic="true" className="text-danger">{loadError.message}</p>
+          <p className="mt-1 text-ink-3">{loadError.permission ? "Token management requires your signed-in browser session, not an agent or embedded session." : "The list could not be loaded. This does not mean you have no tokens."}</p>
+          <button type="button" className="btn btn-outline btn-sm mt-2" onClick={() => void load()}>Retry token list</button>
+        </div> : tokens === null ? <p className="p-3 text-sm text-ink-3">Loading tokens...</p>
+          : tokens.length === 0 ? <p className="p-3 text-sm text-ink-3">No tokens yet.</p>
+            : <ul className="divide-y divide-line">
+              {tokens.map((t) => <TokenRow key={t.id} token={t} documentId={documentId} matching={matching?.id === t.id}
+                disabled={pendingAction !== null || switching.includes(t.id)} replacementDisabled={Boolean(created) || busy}
+                onAction={(action, newName) => changeToken(t, action, newName)}
+                onCollaboratorsChange={() => void setCollaboratorsMayAsk(t, !t.collaboratorsMayAsk)}
+                switchError={switchError?.id === t.id ? switchError.message : null} />)}
+            </ul>}
+      </section>
+      {embedded && <a className="w-fit text-sm font-medium text-accent hover:underline" href={managementLink}>Open all your tokens in Settings</a>}
+      {destination === "connect" ? <div id={embedded ? undefined : "connect"} className="min-w-0">
+        <p className="mb-3 text-sm text-ink-2">Choose a client and copy its setup. Put your saved token in the Authorization header where it says MARKDOC_TOKEN. No connection is needed to read these instructions.</p>
+        <AgentConnectCard origin={liveOrigin} scope={created?.scope} hideTokenStep />
+      </div> : <>
+        <button type="button" className="btn btn-outline w-fit gap-1.5" disabled={busy || tokens === null || Boolean(created) || pendingAction !== null}
+          aria-expanded={showCreate} aria-controls={`${id}-create`} onClick={() => setShowCreate((value) => !value)} data-testid="token-add">
+          <Plus size={16} /> {showCreate ? "Cancel creation" : "Create token"}
+        </button>
+        {showCreate && <form id={`${id}-create`} className="flex min-w-0 flex-col gap-3 rounded-xl border border-line bg-surface p-3"
+          onSubmit={(event) => { event.preventDefault(); void create(); }}>
+          <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3">Name (shown as the agent)
+            <input className="input w-full min-w-0" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} data-testid="token-name" />
+          </label>
+          <fieldset className="flex flex-col gap-1.5" data-testid="token-scope">
+            <legend className="mb-1 text-xs font-medium text-ink-3">Scope</legend>
+            {SCOPES.map((s) => <label key={s} className="flex items-start gap-2 text-sm text-ink-2">
+              <input type="radio" name={`${id}-scope`} checked={scope === s} onChange={() => setScope(s)} className="mt-1" data-testid={`token-scope-${s}`} />
+              <span><span className="font-medium text-ink">{TOKEN_SCOPE_LABEL[s]}</span> — {TOKEN_SCOPE_SUMMARY[s]}</span>
+            </label>)}
+          </fieldset>
+          <label className="flex items-center gap-2 text-sm text-ink-2">
+            <input type="checkbox" checked={restrict} onChange={(e) => setRestrict(e.target.checked)} aria-invalid={Boolean(restrictionError)}
+              aria-describedby={`${id}-access`} data-testid="token-restrict" />
+            {documentId ? "Only this document" : "Only these documents"}
+          </label>
+          <p id={`${id}-access`} className="text-xs text-ink-3" data-testid="token-document-access">{restrict ? "Every other document answers 404 to this token." : "This token will access all documents you can access."}</p>
+          {restrict && !documentId && <div className="max-h-48 overflow-y-auto" data-testid="token-documents">
+            {documentError ? <><p role="alert" className="text-sm text-danger">{documentError}</p><button type="button" className="btn btn-sm btn-outline" onClick={() => setDocumentError(null)}>Retry documents</button></>
+              : documents === null ? <p className="text-xs text-ink-3">Loading your documents...</p>
+                : documents.length === 0 ? <p className="text-xs text-ink-3">No documents yet.</p>
+                  : documents.map((d) => <label key={d.id} className="flex items-start gap-2 text-sm text-ink-2">
+                    <input type="checkbox" checked={documentIds.includes(d.id)} onChange={() => setDocumentIds((ids) => ids.includes(d.id) ? ids.filter((value) => value !== d.id) : [...ids, d.id])} data-testid={`token-document-${d.id}`} />
+                    <span className="min-w-0 break-words">{d.title}</span>
+                  </label>)}
+          </div>}
+          {restrictionError && <p className="text-xs text-danger" role="alert" data-testid="token-document-error">{restrictionError}</p>}
+          <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">Expires
+            <select className="select w-fit" value={expires} onChange={(e) => setExpires(e.target.value)}>
+              <option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="never">Never</option>
+            </select>
+          </label>
+          <button type="submit" className="btn btn-primary w-fit gap-1.5" disabled={busy || pendingAction !== null || Boolean(created) || tokens === null || !name.trim() || Boolean(restrictionError)} data-testid="token-create">
+            {busy && <Loader2 size={16} className="animate-spin" />} Create token
+          </button>
+        </form>}
+      </>}
+    </div>
+  );
+}
+
+function TokenRow({ token: t, documentId, matching, disabled, replacementDisabled, onAction, onCollaboratorsChange, switchError }: {
+  token: ApiTokenDto; documentId?: string; matching: boolean; disabled: boolean; replacementDisabled: boolean;
+  onAction: (action: "rename" | "replace" | "revoke", name?: string) => Promise<boolean>;
+  onCollaboratorsChange: () => void; switchError: string | null;
+}) {
+  const [renaming, setRenaming] = useState(false);
+  const [name, setName] = useState(t.name);
+  const renameButton = useRef<HTMLButtonElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const row = useRef<HTMLLIElement>(null);
+  const returnToRename = useRef(false);
+  const state = tokenState(t);
+  const mismatch = documentId && t.documentIds !== null && !t.documentIds.includes(documentId);
+  useEffect(() => {
+    if (renaming) input.current?.focus();
+    else if (returnToRename.current && !disabled) {
+      renameButton.current?.focus();
+      returnToRename.current = false;
+    }
+  }, [renaming, disabled]);
+  useEffect(() => {
+    if (matching) { row.current?.focus(); row.current?.scrollIntoView?.({ block: "nearest" }); }
+  }, [matching]);
+  const closeRename = () => { returnToRename.current = true; setRenaming(false); };
+  return (
+    <li ref={row} tabIndex={-1} className={cn("flex min-w-0 flex-col gap-2 p-3", matching && "ring-2 ring-inset ring-accent")}
+      data-testid="token-row" data-token-match={matching || undefined}>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="min-w-0 break-all text-sm font-semibold text-ink">{t.name}</span>
+        <ScopeChip scope={t.scope} /><span className="text-xs text-ink-3">{state}</span>
+        <span className="text-xs text-ink-3" data-testid="token-documents-count">{t.documentIds?.length ? `${t.documentIds.length} ${t.documentIds.length === 1 ? "document" : "documents"}` : "all documents"}</span>
+      </div>
+      <p className="text-xs text-ink-3">Created {relativeTime(t.createdAt)}{t.lastUsedAt ? ` · used ${relativeTime(t.lastUsedAt)}` : " · no recorded use"}{t.expiresAt ? ` · expires ${relativeTime(t.expiresAt)}` : " · no expiry"}</p>
+      {mismatch && <p className="text-xs text-ink-2">This token is scoped to other documents, not this one. Replacement keeps that restriction. Create a differently named token for this document.</p>}
+      {state === "Expired" && <p className="text-xs text-ink-3">Create a new token to choose a new expiry.</p>}
+      {!t.revokedAt && <div className="flex flex-wrap gap-2">
+        <button ref={renameButton} type="button" className="btn btn-outline btn-sm" disabled={disabled} onClick={() => { setName(t.name); setRenaming(true); }} aria-label={`Rename ${t.name}`}>Rename</button>
+        <button type="button" className="btn btn-outline btn-sm" disabled={disabled || replacementDisabled || state !== "Active"} onClick={() => void onAction("replace")} aria-label={`Replace ${t.name}`}>Replace</button>
+        <button type="button" className="btn btn-outline btn-sm text-danger" disabled={disabled} onClick={() => void onAction("revoke")} aria-label={`Revoke ${t.name}`} data-testid="token-revoke">Revoke</button>
+      </div>}
+      {renaming && <form className="flex min-w-0 flex-col gap-2" onSubmit={(e) => { e.preventDefault(); void onAction("rename", name).then((ok) => { if (ok) closeRename(); }); }}>
+        <label className="text-xs text-ink-2">Token name<input ref={input} className="input mt-1 w-full min-w-0" value={name} maxLength={80} disabled={disabled} onChange={(e) => setName(e.target.value)} /></label>
+        <p className="text-xs text-ink-3">This changes the agent name and @mention, not its secret or permissions.</p>
+        <div className="flex flex-wrap gap-2">
+          <button type="submit" className="btn btn-primary btn-sm" disabled={disabled || !name.trim()}>Save name</button>
+          <button type="button" className="btn btn-ghost btn-sm" disabled={disabled} onClick={closeRename}>Cancel rename</button>
+        </div>
+      </form>}
+      <details className="min-w-0 text-xs text-ink-3">
+        <summary className="cursor-pointer">Details &amp; agent requests</summary>
+        <div className="mt-2 flex min-w-0 flex-col gap-2 break-words">
+          <p className="break-all">Prefix: {t.prefix}…</p>
+          <p>Created: {t.createdAt}. Last used: {t.lastUsedAt ?? "not recorded"}.</p>
+          <p>Last MCP discovery: {t.lastMcpSeenAt ?? "not recorded"}. Last MCP tool call: {t.lastMcpCallAt ?? "not recorded"}.</p>
+          {t.revokedAt && <p>Revoked: {t.revokedAt}</p>}
+          {t.documentIds && <p className="break-all">Document IDs: {t.documentIds.join(", ")}</p>}
+          {!t.revokedAt && <div className="flex items-start gap-2">
+            <button type="button" role="switch" aria-checked={t.collaboratorsMayAsk === true} aria-labelledby={`token-${t.id}-may-ask-label`}
+              aria-describedby={`token-${t.id}-may-ask-help`} className="switch mt-px" disabled={disabled} onClick={onCollaboratorsChange} data-testid="token-collaborators-may-ask" />
+            <div><span id={`token-${t.id}-may-ask-label`} className="font-medium text-ink-2">Collaborators may ask this agent</span>
+              <p id={`token-${t.id}-may-ask-help`}>Off: only you can send requests to it. On: people you share documents with can too.</p>
+            </div>
+          </div>}
+        </div>
+      </details>
+      {switchError && <p className="text-xs text-danger" role="alert" aria-atomic="true" data-testid="token-collaborators-may-ask-error">{switchError}</p>}
+    </li>
   );
 }

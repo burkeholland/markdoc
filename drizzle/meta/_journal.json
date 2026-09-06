@@ -141,6 +141,13 @@
       "when": 1788219322678,
       "tag": "0019_agent_request_addressee",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788622003570,
+      "tag": "0020_gist_auto_update",
+      "breakpoints": true
     }
   ]
 }

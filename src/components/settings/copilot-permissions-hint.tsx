@@ -23,15 +23,15 @@ export function CopilotPermissionsHint({ testIdPrefix, className, scope }: { tes
         <ShieldCheck size={13} className="text-violet-600" /> Stop the permission prompts
       </div>
       <p className="mt-0.5">Copilot CLI asks before each change. To pre-allow Markdoc&rsquo;s safe tools for a session:</p>
-      <div className="mt-1.5 flex items-start gap-2">
+      <div className="mt-1.5 flex min-w-0 flex-col items-start gap-2">
         <pre
           ref={pre}
-          className="min-w-0 flex-1 select-text overflow-x-auto whitespace-pre-wrap break-all rounded-md border border-line bg-surface-2 px-2 py-1.5 font-mono text-[11px] leading-4 text-ink-2"
+          className="w-full min-w-0 select-text whitespace-pre-wrap break-all rounded-md border border-line bg-surface-2 px-2 py-1.5 font-mono text-[11px] leading-4 text-ink-2"
           data-testid={`${testIdPrefix}-allow-line`}
         >
           {line}
         </pre>
-        <button type="button" className="btn btn-outline btn-sm shrink-0 gap-1.5" onClick={copy} aria-label="Copy the Copilot CLI allow-tool line" data-testid={`${testIdPrefix}-allow-copy`}>
+        <button type="button" className="btn btn-outline btn-sm h-auto max-w-full gap-1.5 whitespace-normal text-left" onClick={copy} aria-label="Copy the Copilot CLI allow-tool line" data-testid={`${testIdPrefix}-allow-copy`}>
           {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
           {label}
         </button>

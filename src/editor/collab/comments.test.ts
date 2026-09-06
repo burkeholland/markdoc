@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { CommentsModel, isDocumentRange } from "./comments";
 import { createAnchor, makeCollabUser } from "./shared";
@@ -14,6 +14,128 @@ function setup() {
   const id = model.add({ from: 6, to: 11, body: "Too dramatic?", author: alice });
   return { ydoc, ytext, model, id };
 }
+
+describe("CommentsModel snapshots", () => {
+  it("decodes each thread once across repeated list/get and selection-only reads", () => {
+    const { ydoc, model, id } = setup();
+    const map = model.ymap.get(id)!;
+    const get = vi.spyOn(map, "get");
+    try {
+      const initial = model.list();
+      get.mockClear();
+      for (let index = 0; index < 100; index++) {
+        expect(model.list()).toBe(initial);
+        expect(model.get(id)).toBe(initial[0]);
+      }
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+      model.destroy();
+      ydoc.destroy();
+    }
+  });
+
+  it("retains unchanged cards and metadata while insert/delete/undo move their ranges", () => {
+    const { ydoc, ytext, model, id } = setup();
+    const undo = new Y.UndoManager(ytext);
+    const original = model.get(id)!;
+    const get = vi.spyOn(model.ymap.get(id)!, "get");
+    try {
+      ytext.insert(ytext.length, "!");
+      expect(model.get(id)).toBe(original);
+      undo.stopCapturing();
+      ytext.insert(0, "__");
+      const moved = model.get(id)!;
+      expect(moved.range).toEqual({ from: 8, to: 13 });
+      expect(moved.replies).toBe(original.replies);
+      expect(original.range).toEqual({ from: 6, to: 11 });
+      expect(get).not.toHaveBeenCalled();
+      undo.undo();
+      expect(model.get(id)!.range).toEqual(original.range);
+      ytext.delete(6, 5);
+      expect(model.get(id)!.range).toEqual({ from: 6, to: 6 });
+    } finally {
+      get.mockRestore();
+      undo.destroy();
+      model.destroy();
+      ydoc.destroy();
+    }
+  });
+
+  it("invalidates remote text identities, reanchors, replies and resolution", () => {
+    const { ydoc, ytext, model, id } = setup();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(ydoc));
+    const other = new CommentsModel(remote, remote.getText("content"));
+    try {
+      const first = model.list();
+      other.ytext.insert(0, "Remote ");
+      other.reply(id, "A reply", bob);
+      other.setResolved(id, true, bob);
+      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(remote));
+      const thread = model.list()[0];
+      expect(thread).not.toBe(first[0]);
+      expect(thread.range).toEqual({ from: 13, to: 18 });
+      expect(thread.replies[0].body).toBe("A reply");
+      expect(thread.resolved).toBe(true);
+      model.ymap.get(id)!.set("anchor", createAnchor(ytext, 0, 6));
+      expect(model.get(id)!.range).toEqual({ from: 0, to: 6 });
+      model.ymap.delete(id);
+      expect(model.list()).toEqual([]);
+      expect(model.get(id)).toBeNull();
+    } finally {
+      other.destroy();
+      remote.destroy();
+      model.destroy();
+      ydoc.destroy();
+    }
+  });
+
+  it("reads successive writes inside a transaction without caching unfinished state", () => {
+    const { ydoc, ytext, model, id } = setup();
+    try {
+      const original = model.list();
+      ydoc.transact(() => {
+        ytext.insert(0, "_");
+        expect(model.get(id)!.range).toEqual({ from: 7, to: 12 });
+        model.ymap.get(id)!.set("body", "Changed");
+        expect(model.list()[0].body).toBe("Changed");
+        ytext.insert(0, "_");
+        expect(model.get(id)!.range).toEqual({ from: 8, to: 13 });
+      });
+      expect(model.get(id)!.body).toBe("Changed");
+      expect(model.get(id)!.range).toEqual({ from: 8, to: 13 });
+      expect(original[0].body).toBe("Too dramatic?");
+    } finally {
+      model.destroy();
+      ydoc.destroy();
+    }
+  });
+
+  it("starts safely inside an existing transaction and releases its observers on destroy", () => {
+    const { ydoc, ytext, model, id } = setup();
+    try {
+      ydoc.transact(() => {
+        const inside = new CommentsModel(ydoc, ytext);
+        try {
+          expect(inside.get(id)!.range).toEqual({ from: 6, to: 11 });
+          ytext.insert(0, "_");
+          expect(inside.get(id)!.range).toEqual({ from: 7, to: 12 });
+          ytext.insert(0, "_");
+          expect(inside.list()[0].range).toEqual({ from: 8, to: 13 });
+        } finally {
+          inside.destroy();
+        }
+      });
+      const initial = model.list();
+      ydoc.transact(() => {});
+      expect(model.list()).toBe(initial);
+    } finally {
+      model.destroy();
+      ydoc.destroy();
+    }
+  });
+});
 
 describe("CommentsModel reactions", () => {
   it("toggles a reaction on and off for one user", () => {

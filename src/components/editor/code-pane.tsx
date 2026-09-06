@@ -69,11 +69,13 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
       parent: host.current,
     });
     viewRef.current = view;
+    const unbindComposition = session.bindContentComposition(view.contentDOM);
     setupRef.current = setup;
     lastHighlights.current = null;
     onReady(view, codeApi);
     return () => {
       onReady(null, null);
+      unbindComposition();
       view.destroy();
       viewRef.current = null;
     };
@@ -116,4 +118,3 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
 
   return <div ref={host} className="h-full min-h-0 w-full" data-testid="code-pane" />;
 }
-

@@ -437,7 +437,7 @@ export async function clearLocalDocument(docId: string): Promise<void> {
   forgetLocalDoc(docId);
 }
 
-export type ConnectionPhase = "saved" | "saving" | "offline" | "connecting" | "reconnecting" | "error";
+export type ConnectionPhase = "saved" | "pending" | "saving" | "offline" | "connecting" | "reconnecting" | "error";
 
 /**
  * Human-readable label for the header's save-state chip. `prolonged` is set once the connection has
@@ -450,6 +450,8 @@ export function saveStateLabel(state: ConnectionPhase, unsyncedChanges: number, 
       return recovered ? "All changes saved" : "Saved";
     case "saving":
       return "Saving…";
+    case "pending":
+      return "Unsaved changes";
     case "connecting":
       return "Connecting…";
     case "reconnecting":

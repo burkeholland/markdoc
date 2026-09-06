@@ -131,31 +131,31 @@ describe("POST /api/documents/[id]/suggest validates requestId before writing", 
     const res = await postSuggest({ edits: EDITS, requestId: request.id });
     expect(res.status).toBe(200);
     const body = (await res.json()) as SuggestBody;
-    expect(body).toMatchObject({ ok: true, suggestions: 2 });
-    expect(body.suggestionIds).toHaveLength(2);
+    expect(body).toMatchObject({ ok: true, suggestions: 1 });
+    expect(body.suggestionIds).toHaveLength(1);
     expect(body.contentHash).toMatch(/^[0-9a-f]{64}$/);
 
     const after = await read();
     expect(after.content).not.toBe(before.content);
     expect(after.content).toContain("Beta");
-    expect(after.pendingSuggestions).toBe(2);
+    expect(after.pendingSuggestions).toBe(1);
     expect(after.contentHash).toBe(body.contentHash);
 
     const added = (await activityItems()).filter((i) => i.action === "suggestion.add");
     expect(added).toHaveLength(1);
-    expect(added[0].detail).toEqual({ count: 2, requestId: request.id });
+    expect(added[0].detail).toEqual({ count: 1, requestId: request.id });
 
     const row = (await listed()).find((r) => r.id === request.id);
     expect(row).toMatchObject({ status: "claimed", claimedBy: "Eve" });
-    expect(row?.result).toMatchObject({ suggestions: 2, comments: 0, suggestionIds: body.suggestionIds });
+    expect(row?.result).toMatchObject({ suggestions: 1, comments: 0, suggestionIds: body.suggestionIds });
   });
 
   it("without requestId: unchanged behaviour, 200 with the suggestions applied", async () => {
     await freshDoc();
     const res = await postSuggest({ edits: EDITS });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, suggestions: 2, suggestionIds: [expect.any(String), expect.any(String)], contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
-    expect((await read()).pendingSuggestions).toBe(2);
+    expect(await res.json()).toEqual({ ok: true, suggestions: 1, suggestionIds: [expect.any(String)], contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect((await read()).pendingSuggestions).toBe(1);
     expect((await activityItems()).map((i) => i.action)).toEqual(["suggestion.add"]);
   });
 
@@ -178,13 +178,13 @@ describe("POST /api/documents/[id]/suggest validates requestId before writing", 
       const { result: res, logged } = await quietly(() => postSuggest({ edits: EDITS, requestId: request.id }));
       expect(res.status).toBe(200);
       const body = (await res.json()) as SuggestBody;
-      expect(body).toMatchObject({ ok: true, suggestions: 2, warnings: ["request-not-attached"] });
-      expect(body.suggestionIds).toHaveLength(2);
+      expect(body).toMatchObject({ ok: true, suggestions: 1, warnings: ["request-not-attached"] });
+      expect(body.suggestionIds).toHaveLength(1);
       expect(logged).toEqual([["[suggest] request-not-attached", expect.any(Error)]]);
 
       const after = await read();
       expect(after.content).toContain("Beta");
-      expect(after.pendingSuggestions).toBe(2);
+      expect(after.pendingSuggestions).toBe(1);
       // Pending suggestions do not move the clean-text hash; the response carries the current one.
       expect(after.contentHash).toBe(body.contentHash);
       expect(after.contentHash).toBe(before.contentHash);
@@ -192,7 +192,7 @@ describe("POST /api/documents/[id]/suggest validates requestId before writing", 
       // request did not count the work. The request itself was not touched.
       const added = (await activityItems()).filter((i) => i.action === "suggestion.add");
       expect(added).toHaveLength(1);
-      expect(added[0].detail).toEqual({ count: 2 });
+      expect(added[0].detail).toEqual({ count: 1 });
       expect((await listed()).find((r) => r.id === request.id)).toMatchObject({ status: "open", claimedBy: null, result: null });
     });
 
@@ -203,16 +203,16 @@ describe("POST /api/documents/[id]/suggest validates requestId before writing", 
       const { result: res, logged } = await quietly(() => postSuggest({ edits: EDITS, requestId: request.id }));
       expect(res.status).toBe(200);
       const body = (await res.json()) as SuggestBody;
-      expect(body).toMatchObject({ ok: true, suggestions: 2, warnings: ["activity-not-recorded"] });
+      expect(body).toMatchObject({ ok: true, suggestions: 1, warnings: ["activity-not-recorded"] });
       // The driver's message (statement + parameters) stays in the log, logged once under the route's code.
       expect(JSON.stringify(body)).not.toContain("Failed query");
       expect(logged).toEqual([["[suggest] activity-not-recorded", expect.any(Error)]]);
 
-      expect((await read()).pendingSuggestions).toBe(2);
+      expect((await read()).pendingSuggestions).toBe(1);
       expect((await activityItems()).map((i) => i.action)).not.toContain("suggestion.add");
       const row = (await listed()).find((r) => r.id === request.id);
       expect(row).toMatchObject({ status: "claimed", claimedBy: "Eve" });
-      expect(row?.result).toMatchObject({ suggestions: 2, comments: 0, suggestionIds: body.suggestionIds });
+      expect(row?.result).toMatchObject({ suggestions: 1, comments: 0, suggestionIds: body.suggestionIds });
     });
 
     it("the residual race — request completed between the pre-check and the write — is request-not-attached on a 200, not a 409 with the suggestions kept", async () => {
@@ -225,14 +225,14 @@ describe("POST /api/documents/[id]/suggest validates requestId before writing", 
       });
       const { result: res, logged } = await quietly(() => postSuggest({ edits: EDITS, requestId: request.id }));
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ ok: true, suggestions: 2, warnings: ["request-not-attached"] });
+      expect(await res.json()).toMatchObject({ ok: true, suggestions: 1, warnings: ["request-not-attached"] });
       expect(logged).toEqual([["[suggest] request-not-attached", expect.any(Error)]]);
-      expect((await read()).pendingSuggestions).toBe(2);
+      expect((await read()).pendingSuggestions).toBe(1);
       expect((await listed()).find((r) => r.id === request.id)).toMatchObject({ status: "done", result: { suggestions: 0 } });
       // The row is written for the feed and the event stream, but claims nothing for the request that refused the work.
       const added = (await activityItems()).filter((i) => i.action === "suggestion.add");
       expect(added).toHaveLength(1);
-      expect(added[0].detail).toEqual({ count: 2 });
+      expect(added[0].detail).toEqual({ count: 1 });
     });
   });
 });

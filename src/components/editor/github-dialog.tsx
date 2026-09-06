@@ -10,6 +10,7 @@ import { api, ApiError, apiErrorText } from "@/lib/api";
 
 import { cn, relativeTime } from "@/lib/utils";
 import { GITHUB_NOT_CONFIGURED } from "./labels";
+import { GistAutoUpdateControl } from "./gist-auto-update";
 
 type Tab = "gist" | "repo";
 
@@ -390,6 +391,7 @@ export const GitHubDialog = memo(function GitHubDialog({
   onDocChange,
   githubAvailable,
   githubConfigured,
+  isOwner,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -397,8 +399,10 @@ export const GitHubDialog = memo(function GitHubDialog({
   onDocChange: (doc: DocumentDto) => void;
   githubAvailable: boolean;
   githubConfigured: boolean;
+  isOwner: boolean;
 }) {
   const [unlinking, setUnlinking] = useState(false);
+  const [unlinkError, setUnlinkError] = useState<string | null>(null);
   const linked = doc.storage !== "local";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -430,9 +434,12 @@ export const GitHubDialog = memo(function GitHubDialog({
               disabled={unlinking}
               onClick={async () => {
                 setUnlinking(true);
+                setUnlinkError(null);
                 try {
                   const res = await api.documents.link(doc.id, { storage: "local" });
                   onDocChange(res.document);
+                } catch (error) {
+                  setUnlinkError(apiErrorText(error, "Could not disconnect the gist."));
                 } finally {
                   setUnlinking(false);
                 }
@@ -442,6 +449,8 @@ export const GitHubDialog = memo(function GitHubDialog({
             </button>
           </div>
         )}
+        {linked && unlinkError && <p role="alert" className="mb-3 text-sm text-danger">{unlinkError}</p>}
+        {open && <GistAutoUpdateControl doc={doc} isOwner={isOwner} />}
         <GitHubPicker
           mode="link"
           doc={doc}
@@ -462,11 +471,13 @@ export const CommitDialog = memo(function CommitDialog({
   onOpenChange,
   doc,
   onCommit,
+  isOwner,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   doc: DocumentDto;
   onCommit: (message: string) => Promise<void>;
+  isOwner: boolean;
 }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -499,6 +510,7 @@ export const CommitDialog = memo(function CommitDialog({
             }
           }}
         >
+          {open && <GistAutoUpdateControl doc={doc} isOwner={isOwner} />}
           <label className="text-sm font-medium text-ink-2">{doc.storage === "gist" ? "Description" : "Commit message"}</label>
           <input className="input" value={message} onChange={(e) => setMessage(e.target.value)} autoFocus data-testid="commit-message" />
           <p className="text-xs text-ink-3">Pending suggestions are not included until they are accepted.</p>
@@ -517,5 +529,3 @@ export const CommitDialog = memo(function CommitDialog({
     </Dialog>
   );
 });
-
-

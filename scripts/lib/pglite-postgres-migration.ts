@@ -47,6 +47,7 @@ export const APPLICATION_TABLES = [
   "asset",
   "collaborator",
   "document",
+  "gist_auto_update",
   "notification",
   "ownership_transfer",
   "recent",

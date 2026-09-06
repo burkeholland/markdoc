@@ -1,5 +1,14 @@
 # Release rehearsal: build and start the candidate image in ACR before a release
 
+> **Historical rehearsal reference:** the figures and examples below describe
+> the September 1 Container Apps-era candidate, not the current release.
+> [VM application releases](../README.md#production-runbook-vm-application-releases)
+> now use the [VM workflow and schema requirements](vm-hosting.md).
+> An ACR rehearsal creates cloud artifacts and runs a container; it is not a
+> read-only documentation check. Fresh PGlite migration success does not prove
+> an upgrade of the existing PostgreSQL schema, previous-image compatibility
+> or backup recoverability. Any new rehearsal requires its own scoped work.
+
 How to prove, the day before or the morning of an app-only release, that the candidate `main` commit builds into an image of the expected size, starts as `node`, applies its migrations on a fresh database, reports its own SHA on `/api/health` and exits cleanly on SIGTERM — without touching production. The README's [*Production runbook: app-only releases*](../README.md#production-runbook-app-only-releases) is the release itself; this page is the pre-release step it points to, and the release spec cites the rehearsal's ACR run ids as its build and start-up evidence. It is built from the two read-only tasks that first did this on 2026-09-01 for candidate `e74e4f39c582ca42ce3e1467e7aa671255fa01c7` (`e74e4f3`): #1501 built and measured the image (ACR run `chr`), #1514 started it once (run `chs`). Their figures are the worked example throughout; a later candidate compares with the *last release's* figures, not with these.
 
 Docker is not installed on the factory machine; both halves run inside Azure Container Registry Tasks (`az acr build`, `az acr run`) and cost ≈ 6 minutes of ACR time in total.

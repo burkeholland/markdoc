@@ -51,7 +51,7 @@ import { api } from "@/lib/api";
 import type { Layout } from "@/lib/viewport";
 
 import { cn, shortcut } from "@/lib/utils";
-import { jsonEqual, useOpenSettled, useSessionValue, useSettledSaveState } from "./use-session";
+import { jsonEqual, useOpenSettled, useSessionValue } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { pendingRequests, useAgentRequests } from "./agent-requests";
@@ -68,22 +68,33 @@ const KeepAgentHereDialog = lazyOnFirstUse(() => import("./keep-agent-here"), (m
 
 export function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
-  const liveUnsynced = useSessionValue(session, (s) => s.unsyncedChanges);
+  const liveUnsynced = useSessionValue(session, (s) => Math.max(s.unsyncedChanges, s.dirty ? 1 : 0));
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
   const liveProlonged = useSessionValue(session, (s) => s.prolongedOffline);
+  const saveError = useSessionValue(session, (s) => s.saveError);
+  const [manualFailure, setManualFailure] = useState<{ session: CollabSession; message: string } | null>(null);
+  const manualError = manualFailure?.session === session ? manualFailure.message : null;
+  const activeSession = useRef<CollabSession | null>(session);
+  useEffect(() => {
+    activeSession.current = session;
+    return () => { activeSession.current = null; };
+  }, [session]);
   // The server renders a fresh session ("Connecting…"); an offline client may already have
   // failed to connect by the time React hydrates. Match the server markup first, then switch.
   const hydrated = useHydrated();
   const raw: SaveState = hydrated ? liveState : "connecting";
-  // The sync still runs per keystroke (`data-live-state`); the chip itself settles about a second
-  // after the last ack instead of flashing Saving…/Saved on every key (#1282).
-  const state = useSettledSaveState(raw);
+  // The session now waits for database acknowledgement; no cosmetic extra debounce is needed.
+  const state = raw;
+  useEffect(() => {
+    if (state === "saved") setManualFailure((current) => current?.session === session ? null : current);
+  }, [state, session]);
   const unsynced = hydrated ? liveUnsynced : 0;
   const recovered = hydrated && liveRecovered;
   const prolonged = hydrated && liveProlonged;
-  const label = saveStateLabel(state, unsynced, recovered, prolonged);
+  const label = state === "error" && saveError ? "Save failed — retry" : saveStateLabel(state, unsynced, recovered, prolonged);
   const map: Record<SaveState, { icon: React.ReactNode; className: string }> = {
     saved: { icon: <Check size={16} strokeWidth={2.5} />, className: "text-success" },
+    pending: { icon: <CloudOff size={16} />, className: "text-ink-3" },
     saving: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
     connecting: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-ink-3" },
     reconnecting: { icon: <Loader2 size={16} className="animate-spin" />, className: "text-warning" },
@@ -102,11 +113,30 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
       data-recovered={flash || undefined}
       data-prolonged={prolonged || undefined}
       role="status"
-      title={compact ? label : undefined}
+      title={manualError ?? saveError ?? (compact ? label : undefined)}
     >
-      {m.icon}
-      {/* Phones show the icon only; below `md` the server markup already hides the label so the chip is 16 px wide from the first paint (#1470). */}
-      <span className={cn(compact ? "sr-only" : "max-md:sr-only")}>{label}</span>
+      <button
+        type="button"
+        className="inline-flex items-center gap-1.5"
+        disabled={!session.canEdit}
+        aria-label="Save document"
+        onClick={() => {
+          void session.flushSave().then(
+            () => {
+              if (activeSession.current === session) setManualFailure(null);
+            },
+            (error: unknown) => {
+              if (activeSession.current === session) {
+                setManualFailure({ session, message: error instanceof Error ? error.message : "Save failed" });
+              }
+            },
+          );
+        }}
+      >
+        {m.icon}
+        {/* Phones show the icon only; the server markup uses the same responsive label. */}
+        <span className={cn(compact ? "sr-only" : "max-md:sr-only")}>{manualError ?? label}</span>
+      </button>
     </span>
   );
 }

@@ -55,13 +55,15 @@ describe("settings result live regions", () => {
     expect(alert).toHaveAttribute("aria-atomic", "true");
   });
 
-  it("announces consecutive token creation failures and keeps focus on the submit button", async () => {
+  it("announces creation conflicts with an actionable list refresh and allows another attempt", async () => {
     fetchMock
       .mockResolvedValueOnce(response({ tokens: [] }))
       .mockResolvedValueOnce(response({ error: "Token name is already in use" }, 409))
+      .mockResolvedValueOnce(response({ tokens: [] }))
       .mockResolvedValueOnce(response({ error: "Token service temporarily unavailable" }, 503));
     renderTokens();
     await screen.findByText("No tokens yet.");
+    fireEvent.click(screen.getByTestId("token-add"));
     const create = screen.getByTestId("token-create");
     create.focus();
 
@@ -69,6 +71,7 @@ describe("settings result live regions", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/^Token name is already in use$/);
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(create).toHaveFocus();
+    expect(screen.getByTestId("token-conflict")).toHaveTextContent("Retry the list or open all your tokens");
 
     fireEvent.click(create);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/^Token service temporarily unavailable$/));
@@ -93,6 +96,7 @@ describe("settings result live regions", () => {
     renderTokens();
     await screen.findByText("No tokens yet.");
 
+    fireEvent.click(screen.getByTestId("token-add"));
     fireEvent.click(screen.getByTestId("token-create"));
 
     const status = await screen.findByRole("status");

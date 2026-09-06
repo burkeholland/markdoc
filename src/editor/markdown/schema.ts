@@ -1,5 +1,6 @@
 import { Schema, type NodeSpec, type MarkSpec, type DOMOutputSpec } from "prosemirror-model";
 import { tableNodes } from "prosemirror-tables";
+import { safeLinkHref } from "../links";
 
 /**
  * ProseMirror schema for GitHub Flavored Markdown.
@@ -253,7 +254,7 @@ const marks: Record<string, MarkSpec> = {
         }),
       },
     ],
-    toDOM: (mark) => ["a", { href: mark.attrs.href, title: mark.attrs.title ?? undefined, rel: "noopener" }, 0],
+    toDOM: (mark) => ["a", { href: safeLinkHref(mark.attrs.href), title: mark.attrs.title ?? undefined, rel: "noopener" }, 0],
   },
   em: {
     parseDOM: [{ tag: "i" }, { tag: "em" }, { style: "font-style=italic" }],

@@ -73,6 +73,7 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "content",
   "duplicate",
   "export",
+  "gist-auto-update",
   "link",
   "publish",
   "pull",
@@ -104,6 +105,8 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "read",
   "read-all",
   "thread-read",
+  // src/app/api/tokens/[id]/*
+  "replace",
   // src/app/api/webhooks/[id]/*
   "test",
   // src/app/api/auth/[...nextauth]: Auth.js actions and the two provider ids (src/auth.ts)

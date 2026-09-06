@@ -17,18 +17,23 @@ export interface EditorUser {
 export function useCollabSession(docId: string, user: EditorUser, role: Role, embed = false): CollabSession {
   // StrictMode (development) runs this initializer twice and keeps one result: the session connects in
   // the effect below, so the twin never opens a socket and frees itself (see CollabSessionOptions.autoConnect).
-  const [session] = useState(
-    () =>
-      new CollabSession({
-        docId,
-        user: makeCollabUser(user.id, user.name, user.image, user.login),
-        role,
-        getToken: async () => (await api.documents.collabToken(docId)).token,
-        deferLocal: true,
-        autoConnect: false,
-        preserveLocalOnAuthFailure: embed,
-      }),
-  );
+  const createSession = () =>
+    new CollabSession({
+      docId,
+      user: makeCollabUser(user.id, user.name, user.image, user.login),
+      role,
+      getToken: async () => (await api.documents.collabToken(docId)).token,
+      deferLocal: true,
+      autoConnect: false,
+      preserveLocalOnAuthFailure: embed,
+    });
+  const [session, setSession] = useState(createSession);
+  if (
+    session.docId !== docId || session.user.id !== user.id || session.role !== role ||
+    !!session.options.preserveLocalOnAuthFailure !== embed
+  ) {
+    setSession(createSession());
+  }
   useEffect(() => {
     // Only after hydration: locally stored content must not change the first client render. The
     // mirror goes first so the socket (opened by `connect` once the mirror is in) syncs the difference.
@@ -146,12 +151,15 @@ export function useDebouncedSessionValue<T>(
       setValue((prev) => (latest.current.isEqual(prev, next) ? prev : next));
     };
     update();
-    const unsubscribe = session.subscribe(() => {
+    const schedule = () => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(update, delayMs);
-    });
+    };
+    const unsubscribe = session.subscribe(schedule);
+    session.ytext.observe(schedule);
     return () => {
       unsubscribe();
+      session.ytext.unobserve(schedule);
       if (timer) clearTimeout(timer);
     };
   }, [session, delayMs]);

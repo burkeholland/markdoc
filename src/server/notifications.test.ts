@@ -317,6 +317,30 @@ describe("notifications", () => {
     doc.destroy();
   });
 
+  it.each(["accept", "reject"] as const)("notifies once for a paired replacement %s", async (action) => {
+    const author = await seedUser(`paired-${action}`, "Paired Author");
+    const docId = `n-paired-${action}`;
+    await seedDocument(docId, "Paired suggestions", author.id);
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, "A synthetic passage.");
+    const stop = watchDocumentNotifications(doc, docId);
+    const model = new SuggestionsModel(doc, ytext);
+    try {
+      const id = model.propose({ from: 2, to: 19, insert: "clearer synthetic paragraph" }, makeCollabUser(author.id, "Paired Author"));
+      const memberIds = model.list().map((s) => s.id);
+      model[action](id, origin(bobId, "Bob"));
+      await until(async () => (await unread(author.login!)).some((item) => item.refId === id));
+      await settle();
+      const notices = (await unread(author.login!)).filter((item) => memberIds.includes(item.refId!));
+      expect(notices.map((item) => [item.kind, item.refId])).toEqual([[`suggestion.${action}`, id]]);
+    } finally {
+      stop();
+      model.destroy();
+      doc.destroy();
+    }
+  });
+
   it("watches a live document: suggestions accepted or rejected notify their author", async () => {
     const doc = new Y.Doc();
     const ytext = doc.getText("content");

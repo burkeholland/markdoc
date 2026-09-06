@@ -17,7 +17,8 @@ vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 
 const { getDb, schema } = await import("@/server/db");
 const { createApiToken, listApiTokens } = await import("@/server/tokens");
-const { GET, POST, DELETE, mcpActivityIn } = await import("./route");
+const { GET, POST, DELETE } = await import("./route");
+const { mcpActivityIn } = await import("./activity");
 const { listToolNames } = await import("../../../../mcp/tools.mjs");
 const { mcpRestOrigin } = await import("@/server/mcp-origin");
 
@@ -95,11 +96,11 @@ describe("/api/mcp records MCP activity on the token (Settings checklist)", () =
     // GET /api/tokens exposes both as ISO strings for the checklist (session only: tokens get 403).
     const { GET: tokensGet } = await import("../tokens/route");
     requestHeaders = new Headers(bearer(fresh.token));
-    expect((await (tokensGet as () => Promise<Response>)()).status).toBe(403);
+    expect((await tokensGet(new Request("http://localhost:3700/api/tokens"))).status).toBe(403);
     requestHeaders = new Headers();
     sessionUser = { id: userId, login: "mia", name: "Mia", image: null };
     try {
-      const list = (await (await (tokensGet as () => Promise<Response>)()).json()) as { tokens: { id: string; lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
+      const list = (await (await tokensGet(new Request("http://localhost:3700/api/tokens"))).json()) as { tokens: { id: string; lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
       const dto = list.tokens.find((t) => t.id === fresh.id)!;
       expect(dto.lastMcpSeenAt).toMatch(/^\d{4}-/);
       expect(dto.lastMcpCallAt).toMatch(/^\d{4}-/);

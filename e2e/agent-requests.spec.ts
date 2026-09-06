@@ -2,6 +2,9 @@ import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, waitForHydration, type MintedToken, type User } from "./helpers";
 
+// This suite mints local fixture tokens; never retain their network payloads in traces.
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 /**
  * Agent requests from comments (task #1024): mentioning an agent in a comment or reply makes the comment a request.
  * The composer grows a mode row (Tracked changes / Comment only / Rewrite directly) while the body names an agent,
@@ -533,7 +536,11 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     // The stdio toggle below is clicked into a freshly navigated /settings: wait for React to hydrate (the `<details open>` hydration warning).
     await waitForHydration(page);
     expect(new URL(page.url()).hash).toBe("#tokens");
+    await expect(page.getByRole("button", { name: "Tokens", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("token-name")).toHaveCount(0);
+    await page.getByTestId("token-add").click();
     await expect(page.getByTestId("token-name")).toBeVisible();
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
     const card = page.getByTestId("agent-connect-card");
     await expect(card).toBeVisible();
     const origin = await page.evaluate(() => window.location.origin);
@@ -545,10 +552,12 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     await expect(page.getByTestId("agent-connect-config-stdio")).toContainText(`"MARKDOC_URL": "${origin}"`);
     await expect(card).toContainText("Check Markdoc for requests");
     // The same "Stop the permission prompts" block as the Share card, with the allow line for the `markdoc` server key.
+    await card.getByText("Optional Copilot CLI permissions", { exact: true }).click();
     await expect(card).toContainText("Stop the permission prompts");
     await expect(page.getByTestId("agent-connect-allow-line")).toContainText("copilot --allow-tool 'markdoc(markdoc_suggest)");
     await expect(page.getByRole("tab", { name: "Copilot CLI" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("tab", { name: "VS Code / other MCP clients" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "VS Code", exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Other MCP clients", exact: true })).toBeVisible();
     await page.getByRole("tab", { name: "Copilot app" }).click();
     await expect(page.getByTestId("agent-connect-app-install")).toContainText("~/.copilot/extensions/markdoc");
     await expect(page.getByRole("link", { name: "Inside the Copilot app setup and limits" })).toHaveAttribute("href", /agents\.md#inside-the-copilot-app$/);

@@ -489,6 +489,9 @@ export function watchDocumentNotifications(doc: Y.Doc, docId: string): () => voi
       if (change.action !== "delete") return;
       const old = change.oldValue as Suggestion | undefined;
       if (!old || typeof old !== "object" || !old.anchor) return;
+      // The primary record is the insertion (or the sole deletion): a paired
+      // replacement produces one decision notification, just like its review card.
+      if (old.groupId && old.groupId !== key) return;
       // Accepting keeps an insertion's text / removes a deletion's; rejecting does the opposite.
       const range = resolveAnchor(ytext, old.anchor);
       const textRemains = !!range && range.to > range.from;

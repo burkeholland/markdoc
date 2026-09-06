@@ -5,7 +5,7 @@ import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mint
 
 /**
  * Task #385 — first-run path: the guided Welcome doc from the empty dashboard, the once-only hint
- * bar under the toolbar (localStorage `markdoc:hints`), and the Copilot CLI setup checklist in Settings.
+ * bar under the toolbar (localStorage `markdoc:hints`), and token/client setup in Settings.
  */
 
 const fresh = (prefix: string) => `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
@@ -217,42 +217,64 @@ test.describe("onboarding: hint bar", () => {
   });
 });
 
-test.describe("onboarding: Settings checklist", () => {
-  test("a minted token and a tools/list over /api/mcp turn the first two items green; a tools/call turns the rest", async ({ browser }) => {
+test.describe("onboarding: Settings token and client setup", () => {
+  test.use({ trace: "off", screenshot: "off", video: "off" });
+
+  test("token metadata records MCP discovery and tool use without a top-level checklist or recovering the secret", async ({ browser }) => {
+    process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
     const user = await signIn(browser, fresh("checklist"));
     const page = user.page;
     await page.goto("/settings");
+    await expect(page.getByRole("button", { name: "Tokens", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("copilot-checklist")).toHaveCount(0);
+    await expect(page.getByTestId("token-manager")).toContainText("No tokens yet.");
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
     const docsLink = page.getByTestId("agent-docs-link");
     await expect(docsLink).toBeVisible();
     await expect(docsLink).toHaveAttribute("href", AGENT_DOCS_URL);
     await expect(docsLink).toHaveAttribute("target", "_blank");
     await expect(docsLink).toHaveAttribute("rel", "noreferrer");
-    const list = page.getByTestId("copilot-checklist");
-    await expect(list).toBeVisible();
-    await expect(list).toHaveAttribute("data-done", "0");
-    for (const id of ["token", "config", "allow", "try"]) await expect(page.getByTestId(`checklist-${id}`)).toHaveAttribute("data-done", "false");
+    await expect(page.getByTestId("agent-connect-card")).toBeVisible();
+    await expect(page.getByTestId("token-manager")).toContainText("No tokens yet.");
 
     const minted = await mintToken(page, "Copilot CLI", { expiresInDays: 30 });
+    const readUsage = async () => (await (await page.request.get("/api/tokens")).json()) as {
+      tokens: { lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[];
+    };
     const headers = { Authorization: ["Bearer", minted.token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
     const listed = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
     expect(listed.ok()).toBeTruthy();
+    await expect.poll(async () => Boolean((await readUsage()).tokens[0]?.lastMcpSeenAt)).toBe(true);
 
-    // The list polls /api/tokens; no reload needed.
-    await expect(page.getByTestId("checklist-token")).toHaveAttribute("data-done", "true", { timeout: 15_000 });
-    await expect(page.getByTestId("checklist-config")).toHaveAttribute("data-done", "true");
-    await expect(page.getByTestId("checklist-allow")).toHaveAttribute("data-done", "false");
-    await expect(page.getByTestId("checklist-try")).toHaveAttribute("data-done", "false");
-    await expect(list).toHaveAttribute("data-done", "2");
+    // The manager intentionally loads on entry rather than polling a checklist.
+    await page.reload();
+    const row = page.getByTestId("token-row").filter({ hasText: "Copilot CLI" });
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText("Active");
+    await row.getByText("Details & agent requests", { exact: true }).click();
+    const discovered = await readUsage();
+    expect(discovered.tokens[0].lastMcpSeenAt).toMatch(/^\d{4}-/);
+    expect(discovered.tokens[0].lastMcpCallAt).toBeNull();
+    await expect(row).toContainText(`Last MCP discovery: ${discovered.tokens[0].lastMcpSeenAt}`);
+    await expect(row).toContainText("Last MCP tool call: not recorded");
+    await expect(page.getByTestId("copy-token")).toHaveCount(0);
 
     const called = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "markdoc_whoami", arguments: {} } } });
     expect(called.ok()).toBeTruthy();
-    await expect(page.getByTestId("checklist-allow")).toHaveAttribute("data-done", "true", { timeout: 15_000 });
-    await expect(page.getByTestId("checklist-try")).toHaveAttribute("data-done", "true");
-    await expect(list).toHaveAttribute("data-done", "4");
-    // Persisted on the token row (not just in this tab's state): what a reload would render.
-    const tokens = (await (await page.request.get("/api/tokens")).json()) as { tokens: { lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[] };
+    await expect.poll(async () => Boolean((await readUsage()).tokens[0]?.lastMcpCallAt)).toBe(true);
+    // Persisted on the token row, not just this tab's state.
+    const tokens = await readUsage();
     expect(tokens.tokens[0].lastMcpSeenAt).toMatch(/^\d{4}-/);
     expect(tokens.tokens[0].lastMcpCallAt).toMatch(/^\d{4}-/);
+    await page.reload();
+    await row.getByText("Details & agent requests", { exact: true }).click();
+    await expect(row).toContainText(`Last MCP discovery: ${tokens.tokens[0].lastMcpSeenAt}`);
+    await expect(row).toContainText(`Last MCP tool call: ${tokens.tokens[0].lastMcpCallAt}`);
+    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    await expect.poll(async () => (await page.getByTestId("agent-connect-config").innerText()).includes(["Bearer", "MARKDOC_TOKEN"].join(" "))).toBe(true);
+    expect((await page.getByTestId("agent-connect-config").innerText()).includes(minted.token)).toBe(false);
+    await expect(page.getByTestId("agent-connect-card")).toContainText("Check Markdoc for requests");
+    await expect(page.getByTestId("copy-token")).toHaveCount(0);
     await minted.revoke();
     await user.context.close();
   });

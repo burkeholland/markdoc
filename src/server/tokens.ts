@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
-import { getDb, schema } from "@/server/db";
+import { getDb, schema, type Db, type Tx } from "@/server/db";
 import type { TokenScope } from "@/server/db/schema";
 import type { SessionUser } from "@/server/documents";
 import { agentMentionSlug } from "@/editor/collab/mentions";
@@ -33,9 +33,30 @@ export interface CreatedToken {
   token: string;
   scope: TokenScope;
   documentIds: string[] | null;
+  collaboratorsMayAsk: boolean;
   createdAt: Date;
   expiresAt: Date | null;
+  revokedAt: Date | null;
 }
+
+const createdTokenFields = {
+  id: schema.apiTokens.id,
+  name: schema.apiTokens.name,
+  prefix: schema.apiTokens.prefix,
+  scope: schema.apiTokens.scope,
+  documentIds: schema.apiTokens.documentIds,
+  collaboratorsMayAsk: schema.apiTokens.collaboratorsMayAsk,
+  createdAt: schema.apiTokens.createdAt,
+  expiresAt: schema.apiTokens.expiresAt,
+  revokedAt: schema.apiTokens.revokedAt,
+};
+
+const tokenMetadataFields = {
+  ...createdTokenFields,
+  lastUsedAt: schema.apiTokens.lastUsedAt,
+  lastMcpSeenAt: schema.apiTokens.lastMcpSeenAt,
+  lastMcpCallAt: schema.apiTokens.lastMcpCallAt,
+};
 
 export const TOKEN_SCOPES: readonly TokenScope[] = ["read", "comment", "full"];
 const SCOPE_RANK: Record<TokenScope, number> = { read: 0, comment: 1, full: 2 };
@@ -60,6 +81,13 @@ export class AgentMentionConflictError extends Error {
   }
 }
 
+export class ApiTokenExpiredError extends Error {
+  constructor() {
+    super("Expired tokens cannot be replaced; create a new token instead");
+    this.name = "ApiTokenExpiredError";
+  }
+}
+
 function constraintName(error: unknown): string | null {
   let current = error;
   for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
@@ -69,57 +97,89 @@ function constraintName(error: unknown): string | null {
   return null;
 }
 
+function rethrowTokenWriteError(error: unknown): never {
+  if (constraintName(error) === "api_token_user_mention_slug_unique") throw new AgentMentionConflictError();
+  if (error && typeof error === "object" && "query" in error && typeof error.query === "string" && "params" in error && Array.isArray(error.params)) {
+    // The shared DB can come from another bundle. Recognize query errors structurally and omit credential-bearing causes.
+    const cause = "cause" in error ? error.cause : null;
+    const code = cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
+    throw new Error(`API token database write failed${code ? ` (SQLSTATE ${code})` : ""}`);
+  }
+  throw error;
+}
+
+function generateToken() {
+  const token = TOKEN_PREFIX + randomSecret();
+  return { token, id: newId(), prefix: token.slice(0, TOKEN_PREFIX.length + 6), tokenHash: hashToken(token) };
+}
+
+async function releaseExpiredMentionSlugs(db: Db | Tx, userId: string) {
+  await db
+    .update(schema.apiTokens)
+    .set({ mentionSlug: null })
+    .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt), lt(schema.apiTokens.expiresAt, sql`clock_timestamp()`)));
+}
+
 export async function createApiToken(userId: string, name: string, options: number | null | CreateTokenOptions = {}): Promise<CreatedToken> {
   const opts: CreateTokenOptions = typeof options === "number" || options === null ? { expiresInDays: options } : options;
   if (Array.isArray(opts.documentIds) && opts.documentIds.length === 0) {
     throw new RangeError("documentIds must contain at least one document when provided");
   }
   const db = await getDb();
-  await db
-    .update(schema.apiTokens)
-    .set({ mentionSlug: null })
-    .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt), lt(schema.apiTokens.expiresAt, new Date())));
-  const token = TOKEN_PREFIX + randomSecret();
-  const prefix = token.slice(0, TOKEN_PREFIX.length + 6);
+  await releaseExpiredMentionSlugs(db, userId);
+  const { token, ...credential } = generateToken();
   const expiresAt = opts.expiresInDays ? new Date(Date.now() + opts.expiresInDays * 86_400_000) : null;
   const scope = opts.scope ?? "full";
   const documentIds = opts.documentIds ? Array.from(new Set(opts.documentIds)) : null;
   const normalizedName = name.trim().slice(0, 80) || "Token";
-  let row: typeof schema.apiTokens.$inferSelect;
   try {
-    [row] = await db
+    const [row] = await db
       .insert(schema.apiTokens)
-      .values({ id: newId(), userId, name: normalizedName, mentionSlug: agentMentionSlug(normalizedName).toLowerCase(), prefix, tokenHash: hashToken(token), expiresAt, scope, documentIds })
+      .values({ ...credential, userId, name: normalizedName, mentionSlug: agentMentionSlug(normalizedName).toLowerCase(), expiresAt, scope, documentIds })
       .returning();
+    return { ...createdTokenMetadata(row), token };
   } catch (error) {
-    if (constraintName(error) === "api_token_user_mention_slug_unique") throw new AgentMentionConflictError();
-    throw error;
+    rethrowTokenWriteError(error);
   }
-  return { id: row.id, name: row.name, prefix: row.prefix, token, scope: row.scope, documentIds: row.documentIds, createdAt: row.createdAt, expiresAt: row.expiresAt };
 }
 
-export async function listApiTokens(userId: string) {
+export async function listApiTokens(userId: string, includeRevoked = false) {
   const db = await getDb();
   return db
-    .select({
-      id: schema.apiTokens.id,
-      name: schema.apiTokens.name,
-      prefix: schema.apiTokens.prefix,
-      scope: schema.apiTokens.scope,
-      documentIds: schema.apiTokens.documentIds,
-      collaboratorsMayAsk: schema.apiTokens.collaboratorsMayAsk,
-      createdAt: schema.apiTokens.createdAt,
-      lastUsedAt: schema.apiTokens.lastUsedAt,
-      lastMcpSeenAt: schema.apiTokens.lastMcpSeenAt,
-      lastMcpCallAt: schema.apiTokens.lastMcpCallAt,
-      expiresAt: schema.apiTokens.expiresAt,
-    })
+    .select(tokenMetadataFields)
     .from(schema.apiTokens)
-    .where(and(eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
+    .where(and(eq(schema.apiTokens.userId, userId), includeRevoked ? undefined : isNull(schema.apiTokens.revokedAt)))
     .orderBy(desc(schema.apiTokens.createdAt));
 }
 
 export type ApiTokenListItem = Awaited<ReturnType<typeof listApiTokens>>[number];
+
+// Both database drivers share the argumentless returning overload; project out credentials here.
+function createdTokenMetadata(row: Omit<CreatedToken, "token">): Omit<CreatedToken, "token"> {
+  const { id, name, prefix, scope, documentIds, collaboratorsMayAsk, createdAt, expiresAt, revokedAt } = row;
+  return { id, name, prefix, scope, documentIds, collaboratorsMayAsk, createdAt, expiresAt, revokedAt };
+}
+
+function tokenMetadata(row: ApiTokenListItem): ApiTokenListItem {
+  return {
+    ...createdTokenMetadata(row),
+    lastUsedAt: row.lastUsedAt,
+    lastMcpSeenAt: row.lastMcpSeenAt,
+    lastMcpCallAt: row.lastMcpCallAt,
+  };
+}
+
+export function serializeApiTokenMetadata(token: ApiTokenListItem) {
+  return {
+    ...tokenMetadata(token),
+    createdAt: token.createdAt.toISOString(),
+    lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
+    lastMcpSeenAt: token.lastMcpSeenAt?.toISOString() ?? null,
+    lastMcpCallAt: token.lastMcpCallAt?.toISOString() ?? null,
+    expiresAt: token.expiresAt?.toISOString() ?? null,
+    revokedAt: token.revokedAt?.toISOString() ?? null,
+  };
+}
 
 /**
  * Flip the owner switch that lets other users address requests to this agent (`@owner/slug`). Returns the
@@ -132,17 +192,99 @@ export async function setCollaboratorsMayAsk(userId: string, tokenId: string, va
     .set({ collaboratorsMayAsk: value })
     .where(and(eq(schema.apiTokens.id, tokenId), eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
     .returning();
-  if (!row) return null;
-  const { id, name, prefix, scope, documentIds, collaboratorsMayAsk, createdAt, lastUsedAt, lastMcpSeenAt, lastMcpCallAt, expiresAt } = row;
-  return { id, name, prefix, scope, documentIds, collaboratorsMayAsk, createdAt, lastUsedAt, lastMcpSeenAt, lastMcpCallAt, expiresAt };
+  return row ? tokenMetadata(row) : null;
+}
+
+export interface UpdateTokenOptions {
+  name?: string;
+  collaboratorsMayAsk?: boolean;
+}
+
+/** Rename and/or change the owner switch without changing the credential or its permissions. */
+export async function updateApiToken(userId: string, tokenId: string, updates: UpdateTokenOptions): Promise<ApiTokenListItem | null> {
+  const name = updates.name?.trim();
+  if (name === undefined) {
+    if (updates.collaboratorsMayAsk === undefined) throw new RangeError("Provide a token name or collaboratorsMayAsk");
+    return setCollaboratorsMayAsk(userId, tokenId, updates.collaboratorsMayAsk);
+  }
+  if (!name || name.length > 80 || name.includes("\0")) throw new RangeError("Token name must contain 1–80 characters and no NUL characters");
+  const db = await getDb();
+  try {
+    return await db.transaction(async (tx) => {
+      await releaseExpiredMentionSlugs(tx, userId);
+      const [row] = await tx
+        .update(schema.apiTokens)
+        .set({
+          name,
+          mentionSlug: sql`case when ${schema.apiTokens.expiresAt} < clock_timestamp() then null else ${agentMentionSlug(name).toLowerCase()} end`,
+          ...(updates.collaboratorsMayAsk === undefined ? {} : { collaboratorsMayAsk: updates.collaboratorsMayAsk }),
+        })
+        .where(and(eq(schema.apiTokens.id, tokenId), eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)))
+        .returning();
+      return row ? tokenMetadata(row) : null;
+    });
+  } catch (error) {
+    rethrowTokenWriteError(error);
+  }
+}
+
+/** Exchange a live token for a new identity and credential, retaining its exact access and expiry. */
+export async function replaceApiToken(userId: string, tokenId: string): Promise<CreatedToken | null> {
+  const db = await getDb();
+  const { token, ...credential } = generateToken();
+  let created: CreatedToken | null;
+  try {
+    created = await db.transaction(async (tx) => {
+      // The conditional write locks the old row and returns the latest name/settings after competing writes.
+      const [old] = await tx
+        .update(schema.apiTokens)
+        .set({ revokedAt: new Date(), mentionSlug: null })
+        .where(and(
+          eq(schema.apiTokens.id, tokenId),
+          eq(schema.apiTokens.userId, userId),
+          isNull(schema.apiTokens.revokedAt),
+          or(isNull(schema.apiTokens.expiresAt), gte(schema.apiTokens.expiresAt, sql`clock_timestamp()`)),
+        ))
+        .returning();
+      if (!old) {
+        const [expired] = await tx
+          .select({ id: schema.apiTokens.id })
+          .from(schema.apiTokens)
+          .where(and(eq(schema.apiTokens.id, tokenId), eq(schema.apiTokens.userId, userId), isNull(schema.apiTokens.revokedAt)));
+        if (expired) throw new ApiTokenExpiredError();
+        return null;
+      }
+      const [replacement] = await tx
+        .insert(schema.apiTokens)
+        .values({
+          ...credential,
+          userId,
+          name: old.name,
+          mentionSlug: agentMentionSlug(old.name).toLowerCase(),
+          scope: old.scope,
+          documentIds: old.documentIds,
+          collaboratorsMayAsk: old.collaboratorsMayAsk,
+          expiresAt: old.expiresAt,
+        })
+        .returning();
+      return { ...createdTokenMetadata(replacement), token };
+    });
+  } catch (error) {
+    rethrowTokenWriteError(error);
+  }
+  if (created) {
+    const { disconnectCollabToken } = await import("@/server/collab/authorization");
+    disconnectCollabToken(tokenId);
+  }
+  return created;
 }
 
 export type McpActivity = "list" | "call";
 
 /**
  * Record that an MCP client used this token: `list` for `tools/list` (the client is connected and
- * discovered the tools), `call` for `tools/call` (permissions were granted and a tool ran). The
- * Settings checklist turns its steps green from these.
+ * discovered the tools), `call` for `tools/call` (permissions were granted and a tool ran).
+ * These timestamps distinguish tool discovery from actual tool use in token metadata.
  */
 export async function recordMcpActivity(tokenId: string, kind: McpActivity, now = new Date()): Promise<void> {
   const db = await getDb();

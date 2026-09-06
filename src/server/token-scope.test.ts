@@ -281,7 +281,7 @@ describe("POST /api/tokens", () => {
     const unseen = await as(null, () => tokens.POST(jsonReq(`/api/tokens`, "POST", { name: "Unseen", documentIds: ["does-not-exist"] })));
     expect(unseen.status).toBe(404);
 
-    const list = (await (await as(null, () => tokens.GET())).json()) as { tokens: { id: string; scope: string; documentIds: string[] | null }[] };
+    const list = (await (await as(null, () => tokens.GET(jsonReq("/api/tokens", "GET")))).json()) as { tokens: { id: string; scope: string; documentIds: string[] | null }[] };
     expect(list.tokens.find((t) => t.id === body.token.id)).toMatchObject({ scope: "comment", documentIds: [d1] });
   });
 

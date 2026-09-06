@@ -119,6 +119,26 @@ export const documents = pgTable(
   (t) => [index("document_owner_idx").on(t.ownerId)],
 );
 
+export const gistAutoUpdates = pgTable("gist_auto_update", {
+  documentId: text("document_id").primaryKey().references(() => documents.id, { onDelete: "cascade" }),
+  /** Consent belongs to this identity, never to a transferee. Owner changes disable it in the save trigger. */
+  publisherId: text("publisher_id").notNull(),
+  gistId: text("gist_id").notNull(),
+  filename: text("filename").notNull(),
+  accountLogin: text("account_login").notNull(),
+  isPublic: boolean("is_public").notNull(),
+  enabled: boolean("enabled").notNull().default(false),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }).notNull(),
+  generation: text("generation").notNull(),
+  queuedVersion: integer("queued_version").notNull().default(1),
+  syncedVersion: integer("synced_version").notNull().default(0),
+  activeVersion: integer("active_version"),
+  dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+  status: text("status").$type<"off" | "pending" | "syncing" | "synced" | "failed" | "conflict">().notNull().default("off"),
+  syncedAt: timestamp("synced_at", { withTimezone: true }),
+  message: text("message"),
+}, (t) => [index("gist_auto_update_due_idx").on(t.enabled, t.status, t.dueAt)]);
+
 export const collaborators = pgTable(
   "collaborator",
   {

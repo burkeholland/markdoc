@@ -2,6 +2,7 @@ import type { DocumentDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
 import type { ActivityAction, NotificationKind, Role, TokenScope } from "@/server/db/schema";
 import type { ReviewDto } from "@/server/reviews";
+import type { GistAutoUpdatePreview, GistAutoUpdateSettings, GistAutoUpdateStatus } from "@/lib/gist-auto-update";
 
 export class ApiError extends Error {
   constructor(
@@ -161,6 +162,18 @@ export interface ApiTokenDto {
   /** Last `tools/call` over /api/mcp with this token (a tool ran). */
   lastMcpCallAt: string | null;
   expiresAt: string | null;
+  revokedAt?: string | null;
+}
+
+export interface CreatedApiTokenDto {
+  id: string;
+  name: string;
+  token: string;
+  prefix: string;
+  scope: TokenScope;
+  documentIds: string[] | null;
+  createdAt: string;
+  expiresAt: string | null;
 }
 
 export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt" | "deletedAt"> & {
@@ -248,6 +261,14 @@ export const api = {
     },
     link: (id: string, body: Record<string, unknown>) =>
       request<{ document: DocumentDto }>(`/api/documents/${id}/link`, { method: "POST", body: JSON.stringify(body) }),
+    gistAutoUpdatePreview: (id: string) =>
+      request<GistAutoUpdatePreview>(`/api/documents/${id}/gist-auto-update?preview=1`),
+    gistAutoUpdate: (id: string) =>
+      request<GistAutoUpdateStatus>(`/api/documents/${id}/gist-auto-update`),
+    setGistAutoUpdate: (id: string, body: GistAutoUpdateSettings) =>
+      request<GistAutoUpdateStatus>(`/api/documents/${id}/gist-auto-update`, { method: "PATCH", body: JSON.stringify(body) }),
+    retryGistAutoUpdate: (id: string) =>
+      request<GistAutoUpdateStatus>(`/api/documents/${id}/gist-auto-update`, { method: "POST" }),
     comment: (id: string, body: Record<string, unknown>) =>
       request<{ id?: string }>(`/api/documents/${id}/comments`, { method: "POST", body: JSON.stringify(body) }),
     reviews: (id: string) => request<{ reviews: ReviewDto[] }>(`/api/documents/${id}/reviews`),
@@ -258,15 +279,17 @@ export const api = {
     cancelRequest: (id: string, rid: string) => request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests/${rid}/cancel`, { method: "POST" }),
   },
   tokens: {
-    list: () => request<{ tokens: ApiTokenDto[] }>("/api/tokens"),
+    list: (includeRevoked = false) => request<{ tokens: ApiTokenDto[] }>(`/api/tokens${includeRevoked ? "?includeRevoked=true" : ""}`, { cache: "no-store" }),
     /** Mint a personal access token (browser sessions only); the secret comes back once. `scope` defaults to `full` server-side. */
     create: (name: string, expiresInDays: number | null = 90, options: { scope?: TokenScope; documentIds?: string[] | null } = {}) =>
-      request<{ token: { id: string; name: string; token: string; prefix: string; scope: TokenScope; documentIds: string[] | null } }>("/api/tokens", {
+      request<{ token: CreatedApiTokenDto }>("/api/tokens", {
         method: "POST",
         body: JSON.stringify({ name, expiresInDays, ...options }),
       }),
-    /** Flip the owner switch that lets other users address requests to this agent (browser sessions only). */
-    update: (id: string, body: { collaboratorsMayAsk: boolean }) => request<{ token: ApiTokenDto }>(`/api/tokens/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    /** Change token metadata without changing its secret or permissions (browser sessions only). */
+    update: (id: string, body: { collaboratorsMayAsk?: boolean; name?: string }) => request<{ token: ApiTokenDto }>(`/api/tokens/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    replace: (id: string) => request<{ token: CreatedApiTokenDto }>(`/api/tokens/${id}/replace`, { method: "POST", body: JSON.stringify({ confirm: true }) }),
+    revoke: (id: string) => request<{ ok: true }>(`/api/tokens/${id}`, { method: "DELETE" }),
   },
   github: {
     gists: () =>

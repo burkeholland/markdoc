@@ -6,10 +6,10 @@ import { GITHUB_FILE_MAX_BYTES, GitHubFileTooLargeError, assertWithinBound } fro
 export { isGitHubMock } from "./mock";
 export { GITHUB_FILE_MAX_BYTES, GitHubFileTooLargeError } from "./limits";
 
-export function githubClient(token: string): Octokit {
+export function githubClient(token: string, signal?: AbortSignal): Octokit {
   // Under GITHUB_MOCK no request ever reaches the network; the client is a placeholder.
   if (isGitHubMock()) return { mock: true } as unknown as Octokit;
-  return new Octokit({ auth: token, userAgent: "markdoc" });
+  return new Octokit({ auth: token, userAgent: "markdoc", request: { signal } });
 }
 
 export interface GistSummary {
@@ -83,7 +83,25 @@ export async function listMarkdownGists(octokit: Octokit): Promise<GistSummary[]
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 }
 
-export async function readGistFile(octokit: Octokit, gistId: string, filename?: string) {
+export interface GistFile {
+  gistId: string;
+  filename: string;
+  content: string;
+  description: string | null;
+  htmlUrl: string;
+  isPublic: boolean;
+  owner: string | null;
+  revision: string | null;
+  updatedAt: string | null;
+  truncated?: boolean;
+  contentKnown?: boolean;
+  visibilityKnown?: boolean;
+}
+
+/** GitHub does not accept an empty gist file; this is the representation used by both write paths. */
+export const gistContent = (content: string): string => content || "\n";
+
+export async function readGistFile(octokit: Octokit, gistId: string, filename?: string): Promise<GistFile> {
   if (isGitHubMock()) return mockGithub.readGistFile(gistId, filename);
   const { data } = await octokit.gists.get({ gist_id: gistId });
   const files = Object.values(data.files ?? {}).filter((f): f is NonNullable<typeof f> => !!f);
@@ -105,6 +123,9 @@ export async function readGistFile(octokit: Octokit, gistId: string, filename?: 
     htmlUrl: data.html_url ?? `https://gist.github.com/${data.id}`,
     isPublic: !!data.public,
     owner: data.owner?.login ?? null,
+    truncated: !!file.truncated,
+    contentKnown: typeof file.content === "string" || !!(file.truncated && file.raw_url),
+    visibilityKnown: typeof data.public === "boolean",
     // Gists have no per-file sha; the latest history entry is the remote revision (stored in `githubSha`).
     revision,
     updatedAt: data.updated_at ?? null,
@@ -116,21 +137,21 @@ function gistRevision(data: { history?: { version?: string }[] | null; updated_a
 }
 
 export async function createGist(octokit: Octokit, input: { filename: string; content: string; description?: string; isPublic: boolean }) {
-  if (isGitHubMock()) return mockGithub.createGist(input);
+  if (isGitHubMock()) return mockGithub.createGist({ ...input, content: gistContent(input.content) });
   const { data } = await octokit.gists.create({
     description: input.description,
     public: input.isPublic,
-    files: { [input.filename]: { content: input.content || "\n" } },
+    files: { [input.filename]: { content: gistContent(input.content) } },
   });
   return { gistId: data.id!, htmlUrl: data.html_url!, filename: input.filename };
 }
 
 export async function updateGist(octokit: Octokit, gistId: string, filename: string, content: string, description?: string) {
-  if (isGitHubMock()) return mockGithub.updateGist(gistId, filename, content, description);
+  if (isGitHubMock()) return mockGithub.updateGist(gistId, filename, gistContent(content), description);
   const { data } = await octokit.gists.update({
     gist_id: gistId,
     description,
-    files: { [filename]: { content: content || "\n" } },
+    files: { [filename]: { content: gistContent(content) } },
   });
   return { htmlUrl: data.html_url!, updatedAt: data.updated_at!, revision: gistRevision(data) };
 }
@@ -246,6 +267,7 @@ export async function commitRepoFile(
 }
 
 export async function currentGitHubLogin(octokit: Octokit): Promise<string> {
+  if (isGitHubMock()) return "mock";
   const { data } = await octokit.users.getAuthenticated();
   return data.login;
 }

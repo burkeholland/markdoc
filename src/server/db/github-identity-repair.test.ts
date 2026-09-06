@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 18, userForeignKeys: 10 },
+        schema: { tables: 19, userForeignKeys: 10 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -113,6 +113,7 @@ describe("GitHub identity repair", () => {
     const manifestPath = await newManifestPath();
     try {
       const beforeCounts = await tableCounts(fixture.database);
+      const beforeGistUpdates = await fixture.database.query(`SELECT * FROM gist_auto_update`);
       const applied = await repairGithubIdentity({
         client: fixture.client,
         expectedLogin: LOGIN,
@@ -155,6 +156,9 @@ describe("GitHub identity repair", () => {
         expect(beforeCounts[table]).toBeGreaterThan(0);
         expect(afterCounts[table]).toBe(beforeCounts[table]);
       }
+      expect((await fixture.database.query(`SELECT * FROM gist_auto_update`)).rows).toEqual(
+        beforeGistUpdates.rows,
+      );
       expect(afterCounts.account).toBe(beforeCounts.account);
       expect(afterCounts.user).toBe(beforeCounts.user - 1);
 
@@ -204,6 +208,9 @@ describe("GitHub identity repair", () => {
         },
       });
       expect(await tableCounts(fixture.database)).toEqual(beforeCounts);
+      expect((await fixture.database.query(`SELECT * FROM gist_auto_update`)).rows).toEqual(
+        beforeGistUpdates.rows,
+      );
       const restored = await identityRows(fixture.database);
       expect(restored.users).toContainEqual(
         expect.objectContaining({
@@ -292,6 +299,18 @@ describe("GitHub identity repair", () => {
                    VALUES ('duplicate-webhook', $1, 'https://example.invalid', 'secret')`,
           values: [DUPLICATE_ID],
           cleanup: `DELETE FROM webhook WHERE id = 'duplicate-webhook'`,
+        },
+        {
+          label: "gist_auto_update.publisher_id (disabled consent)",
+          insert: `INSERT INTO gist_auto_update (
+                     document_id, publisher_id, gist_id, filename, account_login, is_public,
+                     enabled, acknowledged_at, generation, due_at
+                   ) VALUES (
+                     'legacy-document', $1, 'fixture-gist', 'document.md', $2, false,
+                     false, '2026-09-01T00:00:00Z', 'duplicate-generation', '2026-09-01T00:00:02Z'
+                   )`,
+          values: [DUPLICATE_ID, LOGIN],
+          cleanup: `DELETE FROM gist_auto_update WHERE document_id = 'legacy-document'`,
         },
         {
           label: "document.last_edited_by",
@@ -633,6 +652,17 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
   await database.query(
     `UPDATE document SET ystate = $1 WHERE id = 'preserved-document'`,
     [identityYState("comment", LEGACY_ID)],
+  );
+  await database.query(
+    `INSERT INTO gist_auto_update (
+       document_id, publisher_id, gist_id, filename, account_login, is_public, enabled,
+       acknowledged_at, generation, queued_version, synced_version, due_at, synced_at
+     ) VALUES (
+       'preserved-document', $1, 'fixture-gist', 'document.md', $2, false, false,
+       '2026-09-01T00:00:00Z', 'preserved-generation', 3, 2,
+       '2026-09-01T00:00:02Z', '2026-09-01T00:00:01Z'
+     )`,
+    [LEGACY_ID, LOGIN],
   );
   await database.query(
     `INSERT INTO collaborator (document_id, login, added_by)
