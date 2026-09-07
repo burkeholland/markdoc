@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Bot, MessageSquare, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api } from "@/lib/api";
@@ -46,18 +46,42 @@ interface DiscoveryKey {
 }
 
 interface DiscoverySnapshot {
-  key: DiscoveryKey;
+  authority: DiscoveryAuthority;
   collaborators: CollaboratorEvidence | null;
   tokenUsed: boolean | null;
 }
 
-interface DiscoveryCoordinator {
-  key: DiscoveryKey | null;
+type DiscoverySource = "collaborators" | "tokens";
+
+interface DiscoveryAuthority {
+  key: DiscoveryKey;
   collaborators: CollaboratorEvidence | null;
   tokenUsed: boolean | null;
-  collaboratorsInFlight: boolean;
-  tokenInFlight: boolean;
+  visible: boolean;
+  generation: number;
+  retry: DiscoveryRetry | null;
   run: (() => void) | null;
+  visibilityListener: (() => void) | null;
+  retired: boolean;
+}
+
+interface DiscoveryOperation {
+  authority: DiscoveryAuthority;
+  source: DiscoverySource;
+  generation: number;
+  operation: number;
+}
+
+interface DiscoveryRetry {
+  authority: DiscoveryAuthority;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface DiscoveryCoordinator {
+  authority: DiscoveryAuthority | null;
+  collaboratorsOperation: DiscoveryOperation | null;
+  tokenOperation: DiscoveryOperation | null;
+  nextOperation: number;
 }
 
 /**
@@ -102,164 +126,203 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
   const discoveryKey = useMemo<DiscoveryKey>(() => ({ session, documentId }), [session, documentId]);
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const discoveryCoordinator = useRef<DiscoveryCoordinator>({
-    key: null,
-    collaborators: null,
-    tokenUsed: null,
-    collaboratorsInFlight: false,
-    tokenInFlight: false,
-    run: null,
+    authority: null,
+    collaboratorsOperation: null,
+    tokenOperation: null,
+    nextOperation: 0,
   });
   const needsShareInfo = active && settled && !record.dismissed.includes("collab-agent") && !record.agentSeen && !live.agentHere;
-  useEffect(() => {
-    const coordinator = discoveryCoordinator.current;
-    if (coordinator.key !== discoveryKey) {
-      coordinator.key = discoveryKey;
-      coordinator.collaborators = null;
-      coordinator.tokenUsed = null;
-      setDiscovery({ key: discoveryKey, collaborators: null, tokenUsed: null });
+  const retireDiscovery = useCallback((authority: DiscoveryAuthority) => {
+    if (authority.retired) return;
+    authority.retired = true;
+    const retry = authority.retry;
+    if (retry?.authority === authority) {
+      authority.retry = null;
+      if (retry.timer !== null) {
+        clearTimeout(retry.timer);
+        retry.timer = null;
+      }
     }
+    if (authority.visibilityListener !== null) {
+      document.removeEventListener("visibilitychange", authority.visibilityListener);
+      authority.visibilityListener = null;
+    }
+    authority.run = null;
+    if (discoveryCoordinator.current.authority === authority) discoveryCoordinator.current.authority = null;
+  }, []);
+
+  useLayoutEffect(() => {
     if (!needsShareInfo) return;
+    const coordinator = discoveryCoordinator.current;
+    const authority: DiscoveryAuthority = {
+      key: discoveryKey,
+      collaborators: null,
+      tokenUsed: null,
+      visible: false,
+      generation: 0,
+      retry: null,
+      run: null,
+      visibilityListener: null,
+      retired: false,
+    };
+    if (coordinator.authority) retireDiscovery(coordinator.authority);
+    coordinator.authority = authority;
+    return () => retireDiscovery(authority);
+  }, [discoveryKey, needsShareInfo, retireDiscovery]);
 
-    let running = true;
-    let visible = document.visibilityState === "visible";
-    let generation = 0;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  useEffect(() => {
+    if (!needsShareInfo) return;
+    const coordinator = discoveryCoordinator.current;
+    const authority = coordinator.authority;
+    if (!authority || authority.key !== discoveryKey) return;
+    const ownsAuthority = () => !authority.retired && coordinator.authority === authority;
+    if (!ownsAuthority()) return;
+    authority.visible = document.visibilityState === "visible";
 
-    const publish = () => {
+    const operationFor = (source: DiscoverySource) =>
+      source === "collaborators" ? coordinator.collaboratorsOperation : coordinator.tokenOperation;
+    const setOperation = (source: DiscoverySource, operation: DiscoveryOperation | null) => {
+      if (source === "collaborators") coordinator.collaboratorsOperation = operation;
+      else coordinator.tokenOperation = operation;
+    };
+    const ownsOperation = (operation: DiscoveryOperation) =>
+      ownsAuthority() &&
+      authority.visible &&
+      operation.authority === authority &&
+      operation.generation === authority.generation &&
+      operationFor(operation.source) === operation;
+    const publish = (operation: DiscoveryOperation) => {
+      if (!ownsOperation(operation)) return;
       setDiscovery({
-        key: discoveryKey,
-        collaborators: coordinator.collaborators,
-        tokenUsed: coordinator.tokenUsed,
+        authority,
+        collaborators: authority.collaborators,
+        tokenUsed: authority.tokenUsed,
       });
     };
     const clearRetry = () => {
-      if (retryTimer !== null) clearTimeout(retryTimer);
-      retryTimer = null;
+      const retry = authority.retry;
+      if (retry?.authority !== authority) return;
+      authority.retry = null;
+      if (retry.timer !== null) {
+        clearTimeout(retry.timer);
+        retry.timer = null;
+      }
     };
-    const ownsCurrentRun = (requestGeneration: number) =>
-      running &&
-      visible &&
-      requestGeneration === generation &&
-      coordinator.key === discoveryKey &&
-      coordinator.run === run;
-    const agentKnown = () => coordinator.collaborators?.agentKnown === true || coordinator.tokenUsed === true;
+    const agentKnown = () => authority.collaborators?.agentKnown === true || authority.tokenUsed === true;
     const scheduleRetry = () => {
       if (
-        !running ||
-        !visible ||
-        coordinator.key !== discoveryKey ||
+        !ownsAuthority() ||
+        !authority.visible ||
         agentKnown() ||
-        (coordinator.collaborators !== null && coordinator.tokenUsed !== null)
+        (authority.collaborators !== null && authority.tokenUsed !== null)
       ) {
         clearRetry();
         return;
       }
       const retryableSource =
-        (coordinator.collaborators === null && !coordinator.collaboratorsInFlight) ||
-        (coordinator.tokenUsed === null && !coordinator.tokenInFlight);
-      if (!retryableSource || retryTimer !== null) return;
-      retryTimer = setTimeout(() => {
-        retryTimer = null;
+        (authority.collaborators === null && coordinator.collaboratorsOperation === null) ||
+        (authority.tokenUsed === null && coordinator.tokenOperation === null);
+      if (!retryableSource || authority.retry !== null) return;
+      const retry: DiscoveryRetry = { authority, timer: null };
+      retry.timer = setTimeout(() => {
+        if (!ownsAuthority() || authority.retry !== retry) return;
+        authority.retry = null;
+        retry.timer = null;
         run();
       }, COLLAB_HINT_RETRY_MS);
+      authority.retry = retry;
     };
-    const afterSettlement = () => {
-      scheduleRetry();
-    };
-    const finishStaleRequest = () => {
-      coordinator.run?.();
+    const releaseOperation = (operation: DiscoveryOperation) => {
+      if (operation.authority !== authority || operationFor(operation.source) !== operation) return;
+      const currentSettlement = ownsOperation(operation);
+      setOperation(operation.source, null);
+      if (currentSettlement && ownsAuthority()) scheduleRetry();
+      else coordinator.authority?.run?.();
     };
     const requestCollaborators = () => {
-      const requestGeneration = generation;
-      coordinator.collaboratorsInFlight = true;
-      void api.documents.collaborators(documentId).then(
+      if (!ownsAuthority() || !authority.visible || authority.collaborators !== null || coordinator.collaboratorsOperation !== null) return;
+      const operation: DiscoveryOperation = {
+        authority,
+        source: "collaborators",
+        generation: authority.generation,
+        operation: ++coordinator.nextOperation,
+      };
+      coordinator.collaboratorsOperation = operation;
+      void api.documents.collaborators(authority.key.documentId).then(
         (result) => {
-          coordinator.collaboratorsInFlight = false;
-          if (!ownsCurrentRun(requestGeneration)) {
-            finishStaleRequest();
-            return;
-          }
-          coordinator.collaborators = {
+          if (!ownsOperation(operation)) return;
+          authority.collaborators = {
             collaborators: result.collaborators.length,
             agentKnown: result.agents.length > 0,
           };
-          publish();
-          afterSettlement();
+          publish(operation);
         },
         () => {
-          coordinator.collaboratorsInFlight = false;
-          if (!ownsCurrentRun(requestGeneration)) {
-            finishStaleRequest();
-            return;
-          }
-          afterSettlement();
+          if (!ownsOperation(operation)) return;
         },
-      );
+      ).finally(() => releaseOperation(operation));
     };
     const requestTokens = () => {
-      const requestGeneration = generation;
-      coordinator.tokenInFlight = true;
+      if (!ownsAuthority() || !authority.visible || authority.tokenUsed !== null || coordinator.tokenOperation !== null) return;
+      const operation: DiscoveryOperation = {
+        authority,
+        source: "tokens",
+        generation: authority.generation,
+        operation: ++coordinator.nextOperation,
+      };
+      coordinator.tokenOperation = operation;
       void api.tokens.list().then(
         (result) => {
-          coordinator.tokenInFlight = false;
-          if (!ownsCurrentRun(requestGeneration)) {
-            finishStaleRequest();
-            return;
-          }
-          coordinator.tokenUsed = result.tokens.some((token) => !!token.lastUsedAt);
-          publish();
-          afterSettlement();
+          if (!ownsOperation(operation)) return;
+          authority.tokenUsed = result.tokens.some((token) => !!token.lastUsedAt);
+          publish(operation);
         },
         () => {
-          coordinator.tokenInFlight = false;
-          if (!ownsCurrentRun(requestGeneration)) {
-            finishStaleRequest();
-            return;
-          }
-          afterSettlement();
+          if (!ownsOperation(operation)) return;
         },
-      );
+      ).finally(() => releaseOperation(operation));
     };
-    function run() {
-      if (!running || !visible || coordinator.key !== discoveryKey || agentKnown()) return;
+    const run = () => {
+      if (!ownsAuthority() || !authority.visible || agentKnown()) return;
       clearRetry();
-      if (coordinator.collaborators === null && !coordinator.collaboratorsInFlight) requestCollaborators();
-      if (coordinator.tokenUsed === null && !coordinator.tokenInFlight) requestTokens();
-    }
-    coordinator.run = run;
+      requestCollaborators();
+      requestTokens();
+    };
+    authority.run = run;
 
     const onVisibilityChange = () => {
+      if (!ownsAuthority()) return;
       const nextVisible = document.visibilityState === "visible";
-      if (nextVisible === visible) return;
-      visible = nextVisible;
-      if (!visible) {
-        generation++;
+      if (nextVisible === authority.visible) return;
+      authority.visible = nextVisible;
+      if (!authority.visible) {
+        authority.generation++;
         clearRetry();
         return;
       }
       run();
     };
+    authority.visibilityListener = onVisibilityChange;
     document.addEventListener("visibilitychange", onVisibilityChange);
     run();
-    return () => {
-      running = false;
-      generation++;
-      clearRetry();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      if (coordinator.run === run) coordinator.run = null;
-    };
-  }, [discoveryKey, documentId, needsShareInfo]);
+    return () => retireDiscovery(authority);
+  }, [discoveryKey, needsShareInfo, retireDiscovery]);
 
-  const currentDiscovery = discovery?.key === discoveryKey ? discovery : null;
+  const currentDiscovery =
+    needsShareInfo && discovery?.authority.key === discoveryKey && !discovery.authority.retired ? discovery : null;
   const discoveredAgent = currentDiscovery?.collaborators?.agentKnown === true || currentDiscovery?.tokenUsed === true;
 
   // Remember that an agent has been seen so hint (a) stays quiet in future documents.
   useEffect(() => {
-    if (!loaded || record.agentSeen || !(live.agentHere || discoveredAgent)) return;
+    const discoveryStillOwnsVisit =
+      currentDiscovery !== null &&
+      !currentDiscovery.authority.retired &&
+      discoveryCoordinator.current.authority === currentDiscovery.authority;
+    if (!loaded || record.agentSeen || !(live.agentHere || (discoveredAgent && discoveryStillOwnsVisit))) return;
     const next = { ...record, agentSeen: true };
     setRecord(next);
     writeHintsRecord(window.localStorage, next);
-  }, [loaded, live.agentHere, discoveredAgent, record]);
+  }, [loaded, live.agentHere, discoveredAgent, currentDiscovery, record]);
 
   const agentEverConnected = record.agentSeen || live.agentHere || discoveredAgent;
   const agentAbsenceKnown =
@@ -284,13 +347,16 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
   const barRef = useRef<HTMLDivElement>(null);
   const dismiss = useCallback(
     (id: HintId, restoreFocus: boolean) => {
+      if (id === "collab-agent" && discoveryCoordinator.current.authority) {
+        retireDiscovery(discoveryCoordinator.current.authority);
+      }
       const next = withDismissed(record, id);
       setRecord(next);
       writeHintsRecord(window.localStorage, next);
       setPinned(null);
       if (restoreFocus && barRef.current?.contains(document.activeElement)) actions.focus();
     },
-    [record, actions],
+    [record, actions, retireDiscovery],
   );
   const act = useCallback(
     (id: HintId) => {
