@@ -1,6 +1,6 @@
 "use client";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, CloudDownload, GitMerge, Loader2, Scale, UploadCloud } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import { apiErrorText, type SyncStatusDto } from "@/lib/api";
@@ -45,7 +45,7 @@ export const SyncDialog = memo(function SyncDialog({
   const inFlightRef = useRef<ActionOwner | null>(null);
   const successCloseRef = useRef<SuccessClose | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousClose = successCloseRef.current;
     if (previousClose) clearTimeout(previousClose.timer);
     successCloseRef.current = null;

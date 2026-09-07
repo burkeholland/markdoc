@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { pollDocumentSync } from "./use-sync-polling";
@@ -66,6 +67,12 @@ const SECOND_DOC: DocumentDto = {
   githubUrl: "https://github.com/o/r/blob/main/second.md",
 };
 
+const RENAMED_DOC: DocumentDto = {
+  ...DOC,
+  repoPath: "renamed.md",
+  githubUrl: "https://github.com/o/r/blob/main/renamed.md",
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -84,6 +91,30 @@ function syncActions(overrides: Partial<SyncActions> = {}): SyncActions {
     compare: vi.fn(),
     ...overrides,
   };
+}
+
+function SyncBoundary({
+  actions,
+  onOpenChange,
+  doc = DOC,
+  open = true,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  actions: SyncActions;
+  onOpenChange: (open: boolean) => void;
+  doc?: DocumentDto;
+  open?: boolean;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+
+  return present ? <SyncDialog open={open} onOpenChange={onOpenChange} doc={doc} sync={DIVERGED} actions={actions} /> : null;
 }
 
 afterEach(() => {
@@ -282,6 +313,134 @@ describe("Sync dialog action lifecycle", () => {
       currentKeep.resolve();
     });
     expect(screen.getByTestId("sync-done")).toHaveTextContent("Published your version");
+  });
+
+  it.each(["success", "failure"] as const)(
+    "retires an old action %s before a same-id path replacement and cannot let its finalizer unlock newer work",
+    async (outcome) => {
+      const oldMerge = deferred<number>();
+      const currentKeep = deferred<void>();
+      const actions = syncActions({
+        merge: vi.fn(() => oldMerge.promise),
+        keepMine: vi.fn(() => currentKeep.promise),
+      });
+      const onOpenChange = vi.fn();
+      const view = render(<SyncBoundary actions={actions} onOpenChange={onOpenChange} />);
+
+      fireEvent.click(screen.getByTestId("sync-merge"));
+      fireEvent.click(screen.getByTestId("sync-merge"));
+      view.rerender(
+        <SyncBoundary
+          actions={actions}
+          onOpenChange={onOpenChange}
+          doc={RENAMED_DOC}
+          boundary={1}
+          onBoundary={() => {
+            if (outcome === "success") oldMerge.resolve(3);
+            else oldMerge.reject(new ApiError(503, "Obsolete GitHub failure"));
+          }}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("sync-keep-mine"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(actions.merge).toHaveBeenCalledTimes(1);
+      expect(actions.keepMine).toHaveBeenCalledExactlyOnceWith("Update renamed.md");
+      expect(screen.getByTestId("commit-message")).toHaveValue("Update renamed.md");
+      expect(screen.queryByTestId("sync-done")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+      expect(screen.getByTestId("sync-keep-mine").querySelector(".animate-spin")).not.toBeNull();
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      await act(async () => {
+        currentKeep.resolve();
+      });
+      expect(screen.getByTestId("sync-done")).toHaveTextContent("Published your version");
+    },
+  );
+
+  it.each([
+    { label: "close", open: false, present: true, outcome: "success" },
+    { label: "unmount", open: true, present: false, outcome: "failure" },
+  ] as const)("retires a pending action before the parent layout boundary on $label", async ({ open, present, outcome }) => {
+    const pending = deferred<number>();
+    const readMessage = vi.fn(() => "Obsolete GitHub failure");
+    const failure = new Error();
+    Object.defineProperty(failure, "message", { get: readMessage });
+    const actions = syncActions({ merge: vi.fn(() => pending.promise) });
+    const onOpenChange = vi.fn();
+    const view = render(<SyncBoundary actions={actions} onOpenChange={onOpenChange} />);
+
+    fireEvent.click(screen.getByTestId("sync-merge"));
+    view.rerender(
+      <SyncBoundary
+        actions={actions}
+        onOpenChange={onOpenChange}
+        open={open}
+        present={present}
+        boundary={1}
+        onBoundary={() => {
+          if (outcome === "success") pending.resolve(1);
+          else pending.reject(failure);
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => vi.advanceTimersByTime(900));
+
+    expect(actions.merge).toHaveBeenCalledTimes(1);
+    expect(readMessage).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears an old success-close timer before a replacement parent layout and only the newer visit closes", async () => {
+    const currentKeep = deferred<void>();
+    const actions = syncActions({ keepMine: vi.fn(() => currentKeep.promise) });
+    const onOpenChange = vi.fn();
+    const view = render(<SyncBoundary actions={actions} onOpenChange={onOpenChange} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("sync-merge"));
+    });
+    const timersWithOldClose = vi.getTimerCount();
+    expect(timersWithOldClose).toBeGreaterThan(0);
+
+    let timersAtBoundary = -1;
+    view.rerender(
+      <SyncBoundary
+        actions={actions}
+        onOpenChange={onOpenChange}
+        doc={RENAMED_DOC}
+        boundary={1}
+        onBoundary={() => {
+          timersAtBoundary = vi.getTimerCount();
+        }}
+      />,
+    );
+    expect(timersAtBoundary).toBe(timersWithOldClose - 1);
+
+    fireEvent.click(screen.getByTestId("sync-keep-mine"));
+    expect(actions.keepMine).toHaveBeenCalledExactlyOnceWith("Update renamed.md");
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+
+    await act(async () => {
+      currentKeep.resolve();
+    });
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    act(() => vi.advanceTimersByTime(899));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
   });
 
   it("invalidates an old close timer and closes exactly once for the current success", async () => {
