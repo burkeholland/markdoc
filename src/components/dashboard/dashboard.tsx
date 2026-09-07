@@ -187,6 +187,17 @@ interface SearchError {
   message: string;
 }
 
+interface NoticeAuthority {
+  mount: symbol;
+  userId: string;
+}
+
+interface NoticePublication {
+  authority: NoticeAuthority;
+  notice: PendingNotice;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 const FILTERS: { value: Filter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "mine", label: "Owned by me" },
@@ -275,15 +286,74 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [searchingOwner, setSearchingOwner] = useState<SearchRequestOwner | null>(null);
   const [searchError, setSearchError] = useState<SearchError | null>(null);
 
+  const [noticeMount] = useState(() => Symbol("dashboard-notice"));
+  const noticeAuthority = useMemo<NoticeAuthority>(
+    () => ({ mount: noticeMount, userId: user.id }),
+    [noticeMount, user.id],
+  );
+  const noticeAuthorityRef = useRef<NoticeAuthority | null>(null);
+  const pendingNoticeConsumedRef = useRef<NoticeAuthority | null>(null);
+  const noticePublicationRef = useRef<NoticePublication | null>(null);
+  const pendingNoticeTimerRef = useRef<NoticePublication | null>(null);
+  const [noticePublication, setNoticePublication] = useState<NoticePublication | null>(null);
+  const retireNoticeTimer = useCallback((publication: NoticePublication) => {
+    if (publication.timer !== null) {
+      clearTimeout(publication.timer);
+      publication.timer = null;
+    }
+    if (pendingNoticeTimerRef.current === publication) pendingNoticeTimerRef.current = null;
+  }, []);
+  const dismissNotice = useCallback(
+    (publication: NoticePublication) => {
+      if (noticeAuthorityRef.current !== publication.authority || noticePublicationRef.current !== publication) return;
+      retireNoticeTimer(publication);
+      noticePublicationRef.current = null;
+      setNoticePublication((current) => (current === publication ? null : current));
+    },
+    [retireNoticeTimer],
+  );
+  const publishNotice = useCallback(
+    (notice: PendingNotice) => {
+      if (noticeAuthorityRef.current !== noticeAuthority) return null;
+      const publication: NoticePublication = { authority: noticeAuthority, notice, timer: null };
+      noticePublicationRef.current = publication;
+      setNoticePublication(publication);
+      return publication;
+    },
+    [noticeAuthority],
+  );
+
+  useLayoutEffect(() => {
+    noticeAuthorityRef.current = noticeAuthority;
+    if (noticePublicationRef.current?.authority !== noticeAuthority) noticePublicationRef.current = null;
+    setNoticePublication((current) => (current?.authority === noticeAuthority ? current : null));
+    return () => {
+      if (noticeAuthorityRef.current === noticeAuthority) noticeAuthorityRef.current = null;
+      const timerOwner = pendingNoticeTimerRef.current;
+      if (timerOwner?.authority === noticeAuthority) retireNoticeTimer(timerOwner);
+      if (noticePublicationRef.current?.authority === noticeAuthority) noticePublicationRef.current = null;
+    };
+  }, [noticeAuthority, retireNoticeTimer]);
+
   // One-shot message from the page we came from (e.g. the editor after "Move to trash").
-  const [notice, setNotice] = useState<PendingNotice | null>(null);
   useEffect(() => {
+    if (noticeAuthorityRef.current !== noticeAuthority || pendingNoticeConsumedRef.current === noticeAuthority) return;
+    pendingNoticeConsumedRef.current = noticeAuthority;
     const pending = takePendingNotice();
     if (!pending) return;
-    setNotice(pending);
-    const t = setTimeout(() => setNotice(null), 5000);
-    return () => clearTimeout(t);
-  }, []);
+    const publication = publishNotice(pending);
+    if (!publication) return;
+    const timer = setTimeout(() => {
+      if (publication.timer !== timer) return;
+      publication.timer = null;
+      if (pendingNoticeTimerRef.current === publication) pendingNoticeTimerRef.current = null;
+      dismissNotice(publication);
+    }, 5000);
+    publication.timer = timer;
+    pendingNoticeTimerRef.current = publication;
+    return () => retireNoticeTimer(publication);
+  }, [dismissNotice, noticeAuthority, publishNotice, retireNoticeTimer]);
+  const currentNotice = noticePublication?.authority === noticeAuthority ? noticePublication : null;
 
   // The trash is loaded on demand; `initialDocuments` never contains trashed documents.
   const [trash, setTrash] = useState<Doc[] | null>(null);
@@ -396,13 +466,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       trashRef.current = documents;
       setTrash(documents);
       if (kind === "restore") {
-        setNotice({ message: `“${doc.title}” was restored.`, kind: "success" });
+        publishNotice({ message: `“${doc.title}” was restored.`, kind: "success" });
         router.refresh();
       }
     } catch (err) {
       if (!isCurrent()) return;
       console.error(err);
-      setNotice({
+      publishNotice({
         message: apiErrorText(err, kind === "restore" ? "Could not restore the document" : "Could not delete the document"),
         kind: "error",
       });
@@ -411,7 +481,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       trashAction.current = null;
       setTrashBusyOperation((current) => (current === operation ? null : current));
     }
-  }, [router]);
+  }, [publishNotice, router]);
   const restore = useCallback((doc: Doc) => void runTrashAction(doc, "restore"), [runTrashAction]);
   const purge = useCallback(
     (doc: Doc) => {
@@ -458,11 +528,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           if (starRequests.current.get(doc.id) !== request) return;
           starRequests.current.delete(doc.id);
           updateStarState(doc.id, { confirmed, value: confirmed, pending: false });
-          setNotice({ message: apiErrorText(error, next ? "Could not star document" : "Could not unstar document"), kind: "error" });
+          publishNotice({ message: apiErrorText(error, next ? "Could not star document" : "Could not unstar document"), kind: "error" });
         },
       );
     },
-    [updateStarState],
+    [publishNotice, updateStarState],
   );
 
   // Sort is remembered per browser in a cookie the server reads (`initialSort`), so the markup already
@@ -689,14 +759,14 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       } catch (err) {
         if (!isCurrent()) return;
         console.error(err);
-        setNotice({ message: apiErrorText(err, "Could not create the document"), kind: "error" });
+        publishNotice({ message: apiErrorText(err, "Could not create the document"), kind: "error" });
       } finally {
         if (createOperation.current !== operation) return;
         createOperation.current = null;
         setCreateBusyOperation((current) => (current === operation ? null : current));
       }
     },
-    [router, user.id],
+    [publishNotice, router, user.id],
   );
 
   // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
@@ -709,7 +779,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       if (created.length === 1 && failed.length === 0) router.push(`/d/${created[0].id}`);
       else if (created.length > 0) router.refresh();
     },
-    onError: (message) => setNotice({ message, kind: "error" }),
+    onError: (message) => publishNotice({ message, kind: "error" }),
   });
   const pickFile = fileImport.pick;
   useEffect(() => {
@@ -1051,19 +1121,19 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           </DialogContent>
         </Dialog>
 
-        {notice && (
+        {currentNotice && (
           <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
             <div
               className={cn(
                 "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm text-white shadow-xl animate-fade-in",
-                notice.kind === "error" ? "bg-red-600" : "bg-inverse",
+                currentNotice.notice.kind === "error" ? "bg-red-600" : "bg-inverse",
               )}
               role="status"
               data-testid="toast"
-              data-kind={notice.kind}
+              data-kind={currentNotice.notice.kind}
             >
-              <span>{notice.message}</span>
-              <button type="button" className="text-white/60 hover:text-white" onClick={() => setNotice(null)} aria-label="Dismiss">
+              <span>{currentNotice.notice.message}</span>
+              <button type="button" className="text-white/60 hover:text-white" onClick={() => dismissNotice(currentNotice)} aria-label="Dismiss">
                 <X size={14} />
               </button>
             </div>
