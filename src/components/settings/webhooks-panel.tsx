@@ -63,6 +63,7 @@ function deliveryLabel(h: WebhookRow): { text: string; tone: "ok" | "bad" | "mut
   const d = h.lastDelivery;
   const ok = d.status >= 200 && d.status < 300;
   if (ok) return { text: `${d.status} · ${relativeTime(d.at)}`, tone: "ok" };
+  if (h.failures === 0) return { text: `enabled · last attempt ${d.status || "no response"} · ${relativeTime(d.at)}`, tone: "muted" };
   return { text: `failed ×${h.failures}${d.status ? ` · ${d.status}` : " · no response"} · ${relativeTime(d.at)}`, tone: "bad" };
 }
 
@@ -74,7 +75,7 @@ export function WebhooksPanel() {
   const [docs, setDocs] = useState("");
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
-  const [enabling, setEnabling] = useState<string | null>(null);
+  const [enabling, setEnabling] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: string; secret: string; url: string } | null>(null);
 
@@ -136,7 +137,7 @@ export function WebhooksPanel() {
   };
 
   const enable = async (h: WebhookRow) => {
-    setEnabling(h.id);
+    setEnabling((ids) => [...ids, h.id]);
     setError(null);
     try {
       await request<{ webhook: WebhookRow }>(`/api/webhooks/${h.id}/enable`, { method: "POST" });
@@ -144,7 +145,7 @@ export function WebhooksPanel() {
     } catch (e) {
       setError(apiErrorText(e, "Could not enable webhook"));
     } finally {
-      setEnabling(null);
+      setEnabling((ids) => ids.filter((id) => id !== h.id));
     }
   };
 
@@ -237,7 +238,7 @@ export function WebhooksPanel() {
         <ul className="mt-3 divide-y divide-line border-t border-line">
           {hooks.map((h) => {
             const status = deliveryLabel(h);
-            const enablePending = enabling === h.id;
+            const enablePending = enabling.includes(h.id);
             return (
               <li key={h.id} className="flex items-center gap-4 px-5 py-3" data-testid="webhook-row">
                 <div className="min-w-0 flex-1">

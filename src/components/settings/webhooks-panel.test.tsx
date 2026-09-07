@@ -38,6 +38,12 @@ const activeWebhook = {
   lastDelivery: null,
 };
 
+const otherDisabledWebhook = {
+  ...disabledWebhook,
+  id: "other-disabled-hook",
+  url: "https://receiver.example/other-disabled",
+};
+
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
@@ -113,9 +119,51 @@ describe("Settings → Webhooks: enable a disabled webhook", () => {
 
     await act(async () => pending.resolve(response({ webhook: { ...disabledWebhook, active: true, failures: 0 } })));
     await waitFor(() => expect(screen.queryByTestId("webhook-enable")).toBeNull());
-    expect(screen.getByTestId("webhook-status")).toHaveTextContent("failed ×0");
+    expect(screen.getByTestId("webhook-status")).toHaveTextContent("enabled · last attempt 500 ·");
+    expect(screen.getByTestId("webhook-status")).not.toHaveTextContent("failed ×0");
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/webhooks", "/api/webhooks/disabled-hook/enable", "/api/webhooks"]);
     expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  });
+
+  it("keeps both disabled rows locked while overlapping enable requests settle independently", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, otherDisabledWebhook] }))
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, { ...otherDisabledWebhook, active: true, failures: 0 }] }))
+      .mockResolvedValueOnce(response({ webhooks: [{ ...disabledWebhook, active: true, failures: 0 }, { ...otherDisabledWebhook, active: true, failures: 0 }] }));
+    render(<WebhooksPanel />);
+
+    let rows = await screen.findAllByTestId("webhook-row");
+    fireEvent.click(within(rows[0]).getByTestId("webhook-enable"));
+    fireEvent.click(within(rows[1]).getByTestId("webhook-enable"));
+    for (const row of rows) {
+      expect(within(row).getByTestId("webhook-enable")).toBeDisabled();
+      expect(within(row).getByTestId("webhook-test")).toBeDisabled();
+      expect(within(row).getByTestId("webhook-delete")).toBeDisabled();
+    }
+
+    await act(async () => second.resolve(response({ webhook: { ...otherDisabledWebhook, active: true, failures: 0 } })));
+    await waitFor(() => expect(screen.getAllByTestId("webhook-enable")).toHaveLength(1));
+    rows = screen.getAllByTestId("webhook-row");
+    expect(within(rows[0]).getByTestId("webhook-enable")).toBeDisabled();
+    expect(within(rows[0]).getByTestId("webhook-test")).toBeDisabled();
+    expect(within(rows[0]).getByTestId("webhook-delete")).toBeDisabled();
+    expect(within(rows[1]).queryByTestId("webhook-enable")).toBeNull();
+    expect(within(rows[1]).getByTestId("webhook-test")).toBeEnabled();
+    expect(within(rows[1]).getByTestId("webhook-delete")).toBeEnabled();
+
+    await act(async () => first.resolve(response({ webhook: { ...disabledWebhook, active: true, failures: 0 } })));
+    await waitFor(() => expect(screen.queryByTestId("webhook-enable")).toBeNull());
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks/disabled-hook/enable",
+      "/api/webhooks/other-disabled-hook/enable",
+      "/api/webhooks",
+      "/api/webhooks",
+    ]);
   });
 
   it("shows the server reason inline and leaves the disabled row available to retry", async () => {
