@@ -60,7 +60,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-import { GitHubPicker } from "./github-dialog";
+import { GitHubPicker, GitHubSignInPrompt } from "./github-dialog";
 import { GITHUB_NOT_CONFIGURED } from "./labels";
 
 function deferred<T>() {
@@ -131,7 +131,7 @@ beforeEach(() => {
   files.mockReset().mockResolvedValue({ files: [repoFile("README.md")] });
   importDocument.mockReset().mockResolvedValue({ document: { id: "imported", title: "Imported" } });
   linkDocument.mockReset().mockResolvedValue({ document: documentDto() });
-  signIn.mockClear();
+  signIn.mockReset().mockImplementation(() => new Promise<void>(() => {}));
 });
 
 afterEach(cleanup);
@@ -169,6 +169,85 @@ describe("GitHubPicker without a GitHub token", () => {
     expect(screen.getByTestId("github-not-configured")).toHaveTextContent("AUTH_GITHUB_ID");
     expect(screen.queryByRole("button")).toBeNull();
     expect(signIn).not.toHaveBeenCalled();
+  });
+});
+
+describe("GitHubSignInPrompt ownership", () => {
+  it("starts one physical sign-in for two immediate activations", () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    render(<GitHubSignInPrompt githubConfigured redirectTo="/documents/current" />);
+    const button = screen.getByRole("button", { name: /Sign in with GitHub/ });
+
+    act(() => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(signIn).toHaveBeenCalledWith("github", { redirectTo: "/documents/current" });
+    expect(button).toBeDisabled();
+  });
+
+  it("freezes the redirect input when the sign-in is claimed", () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    const view = render(<GitHubSignInPrompt githubConfigured redirectTo="/documents/claimed" />);
+    const button = screen.getByRole("button", { name: /Sign in with GitHub/ });
+
+    fireEvent.click(button);
+    view.rerender(<GitHubSignInPrompt githubConfigured redirectTo="/documents/replacement" />);
+
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(signIn).toHaveBeenCalledWith("github", { redirectTo: "/documents/claimed" });
+    expect(button).toBeDisabled();
+  });
+
+  it("lets the exact current failure release one retry", async () => {
+    const failed = deferred<void>();
+    const retry = deferred<void>();
+    signIn.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    render(<GitHubSignInPrompt githubConfigured redirectTo="/documents/retry" />);
+    const button = screen.getByRole("button", { name: /Sign in with GitHub/ });
+
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    await act(async () => {
+      failed.reject(new Error("GitHub sign-in failed"));
+      await failed.promise.catch(() => undefined);
+    });
+
+    expect(button).toBeEnabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(button);
+    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(signIn).toHaveBeenNthCalledWith(1, "github", { redirectTo: "/documents/retry" });
+    expect(signIn).toHaveBeenNthCalledWith(2, "github", { redirectTo: "/documents/retry" });
+    expect(button).toBeDisabled();
+  });
+
+  it("keeps a replacement prompt owned when the old failure arrives after layout cleanup", async () => {
+    const oldAttempt = deferred<void>();
+    const currentAttempt = deferred<void>();
+    signIn.mockReturnValueOnce(oldAttempt.promise).mockReturnValueOnce(currentAttempt.promise);
+    const view = render(<GitHubSignInPrompt key="old" githubConfigured redirectTo="/documents/old" />);
+    fireEvent.click(screen.getByRole("button", { name: /Sign in with GitHub/ }));
+
+    view.rerender(<GitHubSignInPrompt key="current" githubConfigured redirectTo="/documents/current" />);
+    const currentButton = screen.getByRole("button", { name: /Sign in with GitHub/ });
+    fireEvent.click(currentButton);
+    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(signIn).toHaveBeenNthCalledWith(1, "github", { redirectTo: "/documents/old" });
+    expect(signIn).toHaveBeenNthCalledWith(2, "github", { redirectTo: "/documents/current" });
+
+    await act(async () => {
+      oldAttempt.reject(new Error("Old GitHub sign-in failed"));
+      await oldAttempt.promise.catch(() => undefined);
+    });
+
+    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(currentButton).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
