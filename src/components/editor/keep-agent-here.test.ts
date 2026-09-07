@@ -1,13 +1,83 @@
 // @vitest-environment jsdom
 import { createElement } from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+const listTokens = vi.hoisted(() => vi.fn());
+const copyText = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      tokens: {
+        ...actual.api.tokens,
+        list: (...args: Parameters<typeof actual.api.tokens.list>) => listTokens(...args),
+      },
+    },
+  };
+});
+
+vi.mock("@/lib/clipboard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clipboard")>()),
+  copyText,
+}));
 
 import { AgentConnectCard } from "@/components/settings/agent-connect-card";
-import { AGENT_DOCS_URL } from "@/lib/mcp";
+import { ApiError, api } from "@/lib/api";
+import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { KeepAgentHerePanel, keepAgentPrompt } from "./keep-agent-here";
 
-afterEach(cleanup);
+type TokenListResponse = Awaited<ReturnType<typeof api.tokens.list>>;
+
+const DOC = { id: "doc-1", title: "Plan" };
+
+function tokenResponse(count: number): TokenListResponse {
+  return {
+    tokens: Array.from({ length: count }, (_, index) => ({ id: `token-${index}` })),
+  } as TokenListResponse;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+async function resolve<T>(pending: ReturnType<typeof deferred<T>>, value: T) {
+  await act(async () => {
+    pending.resolve(value);
+    await pending.promise;
+  });
+}
+
+async function reject<T>(pending: ReturnType<typeof deferred<T>>, error: unknown) {
+  await act(async () => {
+    pending.reject(error);
+    await pending.promise.catch(() => undefined);
+  });
+}
+
+function panel(active = true) {
+  return createElement(KeepAgentHerePanel, { doc: DOC, active });
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  listTokens.mockReset().mockResolvedValue(tokenResponse(1));
+  copyText.mockReset().mockResolvedValue(true);
+});
+
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 describe("keepAgentPrompt", () => {
   it("names the document, its id and the two MCP tools of the watch loop", () => {
@@ -34,10 +104,203 @@ describe("agent documentation links", () => {
     expect(screen.getByRole("link", { name: "Inside the Copilot app setup and limits" })).toHaveClass("inline-flex", "min-h-6");
     card.unmount();
 
-    render(createElement(KeepAgentHerePanel, { doc: { id: "doc-1", title: "Plan" }, active: false }));
+    render(panel(false));
     const keepAgentDocs = screen.getByTestId("keep-agent-docs-link");
     expect(keepAgentDocs).toHaveClass("inline-flex", "min-h-6");
     expect(keepAgentDocs).toHaveAttribute("href", `${AGENT_DOCS_URL}#sit-in-a-document`);
     expect(keepAgentDocs).toHaveAttribute("target", "_blank");
+  });
+});
+
+describe("KeepAgentHerePanel token setup check", () => {
+  it("shows one neutral checking status and withholds first-time setup until zero tokens are confirmed", async () => {
+    const initial = deferred<TokenListResponse>();
+    listTokens.mockReset().mockReturnValueOnce(initial.promise);
+
+    render(panel());
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Checking token setup…");
+    expect(status).toHaveClass("text-ink-3");
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+    expect(listTokens).toHaveBeenCalledTimes(1);
+
+    await resolve(initial, tokenResponse(0));
+
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByTestId("agent-connect-card")).toBeInTheDocument();
+  });
+
+  it("replaces a failed first check with the API reason, one alert, and one Retry control", async () => {
+    listTokens.mockReset().mockRejectedValueOnce(
+      new ApiError(400, "Invalid request", [{ path: ["tokens"], message: "Your token list is temporarily unavailable." }]),
+    );
+
+    render(panel());
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Your token list is temporarily unavailable.");
+    expect(screen.queryByText("Invalid request")).toBeNull();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+  });
+
+  it("uses the concise fallback when a failed check has no error message", async () => {
+    listTokens.mockReset().mockRejectedValueOnce("offline");
+
+    render(panel());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not check token setup");
+  });
+
+  it.each([
+    { count: 0, setup: true, label: "zero tokens" },
+    { count: 2, setup: false, label: "existing tokens" },
+  ])("guards a double Retry and recovers with $label", async ({ count, setup }) => {
+    const retry = deferred<TokenListResponse>();
+    listTokens
+      .mockReset()
+      .mockRejectedValueOnce(new ApiError(503, "Token service unavailable."))
+      .mockReturnValueOnce(retry.promise);
+
+    render(panel());
+    await screen.findByRole("alert");
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retryButton);
+    fireEvent.click(retryButton);
+
+    expect(listTokens).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retrying…" })).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+
+    await resolve(retry, tokenResponse(count));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    if (setup) expect(screen.getByTestId("agent-connect-card")).toBeInTheDocument();
+    else expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+  });
+
+  it("keeps setup navigation, the exact prompt, Copy, and documentation usable after failure", async () => {
+    listTokens.mockReset().mockRejectedValueOnce(new ApiError(503, "Token service unavailable."));
+
+    render(panel());
+    await screen.findByRole("alert");
+
+    expect(screen.getByRole("link", { name: "Tokens" })).toHaveAttribute("href", "/settings?next=%2Fd%2Fdoc-1#tokens");
+    expect(screen.getByRole("link", { name: "Connect an MCP client" })).toHaveAttribute("href", "/settings?next=%2Fd%2Fdoc-1#connect");
+    expect(screen.getByTestId("keep-agent-prompt")).toHaveTextContent(keepAgentPrompt(DOC));
+    expect(screen.getByTestId("keep-agent-docs-link")).toHaveAttribute("href", `${AGENT_DOCS_URL}#sit-in-a-document`);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy instruction" }));
+    await waitFor(() => expect(copyText).toHaveBeenCalledWith(keepAgentPrompt(DOC)));
+    expect(screen.getByRole("button", { name: "Copy instruction" })).toHaveTextContent("Copied");
+  });
+
+  it("keeps a persisted setup dismissal after a zero-token Retry", async () => {
+    window.localStorage.setItem(AGENT_CONNECT_DISMISSED_KEY, "1");
+    listTokens
+      .mockReset()
+      .mockRejectedValueOnce(new ApiError(503, "Token service unavailable."))
+      .mockResolvedValueOnce(tokenResponse(0));
+
+    render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(listTokens).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+  });
+
+  it.each([
+    { count: 0, setup: true, label: "zero-token" },
+    { count: 1, setup: false, label: "nonzero-token" },
+  ])("retains the confirmed $label setup decision when a reopen refresh fails", async ({ count, setup }) => {
+    const refresh = deferred<TokenListResponse>();
+    listTokens.mockReset().mockResolvedValueOnce(tokenResponse(count)).mockReturnValueOnce(refresh.promise);
+    const rendered = render(panel());
+    await waitFor(() => expect(listTokens).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    if (setup) expect(screen.getByTestId("agent-connect-card")).toBeInTheDocument();
+    else expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+
+    rendered.rerender(panel(false));
+    rendered.rerender(panel());
+
+    expect(listTokens).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status")).toHaveTextContent("Checking token setup…");
+    if (setup) expect(screen.getByTestId("agent-connect-card")).toBeInTheDocument();
+    else expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+
+    await reject(refresh, new ApiError(503, "Refresh failed."));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Refresh failed.");
+    if (setup) expect(screen.getByTestId("agent-connect-card")).toBeInTheDocument();
+    else expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+  });
+
+  it("isolates stale success, error, and finalizers from a reopened generation and its Retry guard", async () => {
+    const staleSuccess = deferred<TokenListResponse>();
+    const staleError = deferred<TokenListResponse>();
+    const retry = deferred<TokenListResponse>();
+    listTokens
+      .mockReset()
+      .mockReturnValueOnce(staleSuccess.promise)
+      .mockReturnValueOnce(staleError.promise)
+      .mockRejectedValueOnce(new ApiError(503, "Current check failed."))
+      .mockReturnValueOnce(retry.promise);
+    const rendered = render(panel());
+
+    rendered.rerender(panel(false));
+    rendered.rerender(panel());
+    rendered.rerender(panel(false));
+    rendered.rerender(panel());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Current check failed.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(listTokens).toHaveBeenCalledTimes(4);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+    await act(async () => {
+      staleSuccess.resolve(tokenResponse(0));
+      staleError.reject(new ApiError(503, "Stale check failed."));
+      await Promise.allSettled([staleSuccess.promise, staleError.promise]);
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Current check failed.");
+    expect(screen.queryByText("Stale check failed.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retrying…" }));
+    expect(listTokens).toHaveBeenCalledTimes(4);
+
+    await resolve(retry, tokenResponse(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+  });
+
+  it("invalidates pending work on unmount without surfacing a late rejection", async () => {
+    const pending = deferred<TokenListResponse>();
+    const unhandled = vi.fn((event: PromiseRejectionEvent) => event.preventDefault());
+    listTokens.mockReset().mockReturnValueOnce(pending.promise);
+    window.addEventListener("unhandledrejection", unhandled);
+
+    try {
+      const rendered = render(panel());
+      expect(listTokens).toHaveBeenCalledTimes(1);
+      rendered.unmount();
+
+      await reject(pending, new ApiError(503, "Unmounted check failed."));
+
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(listTokens).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("keep-agent-panel")).toBeNull();
+    } finally {
+      window.removeEventListener("unhandledrejection", unhandled);
+    }
   });
 });

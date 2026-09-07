@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, ExternalLink, Radio } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
-import { api } from "@/lib/api";
+import { api, apiErrorText } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { AgentConnectCard, useOrigin } from "@/components/settings/agent-connect-card";
@@ -31,25 +31,64 @@ function readDismissed(): boolean {
   }
 }
 
-/** The user has at least one API token (null while unknown). Same gate as the comment composer's agent row. */
-function useHasTokens(active: boolean): boolean | null {
+interface TokenSetupCheck {
+  hasTokens: boolean | null;
+  pending: boolean;
+  error: string | null;
+  retry: () => void;
+}
+
+/** The user's last confirmed token state, plus the active panel generation's request state. */
+function useHasTokens(active: boolean): TokenSetupCheck {
   const [hasTokens, setHasTokens] = useState<boolean | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const activeRef = useRef(false);
+  const generationRef = useRef(0);
+  const requestRef = useRef<{ generation: number } | null>(null);
+
+  const check = useCallback((generation: number) => {
+    if (!activeRef.current || generation !== generationRef.current || requestRef.current) return;
+    const request = { generation };
+    requestRef.current = request;
+    setPending(true);
+
+    void (async () => {
+      try {
+        const res = await api.tokens.list();
+        if (!activeRef.current || generation !== generationRef.current || requestRef.current !== request) return;
+        setHasTokens(res.tokens.length > 0);
+        setError(null);
+      } catch (reason) {
+        if (!activeRef.current || generation !== generationRef.current || requestRef.current !== request) return;
+        setError(apiErrorText(reason, "Could not check token setup"));
+      } finally {
+        if (!activeRef.current || generation !== generationRef.current || requestRef.current !== request) return;
+        requestRef.current = null;
+        setPending(false);
+      }
+    })();
+  }, []);
+
   useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    api.tokens
-      .list()
-      .then((res) => {
-        if (!cancelled) setHasTokens(res.tokens.length > 0);
-      })
-      .catch(() => {
-        if (!cancelled) setHasTokens(null);
-      });
+    const generation = ++generationRef.current;
+    activeRef.current = active;
+    requestRef.current = null;
+    if (!active) {
+      setPending(false);
+      setError(null);
+      return;
+    }
+    check(generation);
     return () => {
-      cancelled = true;
+      activeRef.current = false;
+      if (generationRef.current === generation) generationRef.current += 1;
+      if (requestRef.current?.generation === generation) requestRef.current = null;
     };
-  }, [active]);
-  return hasTokens;
+  }, [active, check]);
+
+  const retry = useCallback(() => check(generationRef.current), [check]);
+  return { hasTokens, pending, error, retry };
 }
 
 export interface KeepAgentHerePanelProps {
@@ -70,7 +109,7 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, 
   const pre = useRef<HTMLPreElement>(null);
   const { copy, label, copied } = useCopy(prompt, pre);
   const origin = useOrigin();
-  const hasTokens = useHasTokens(active);
+  const { hasTokens, pending: tokenCheckPending, error: tokenCheckError, retry: retryTokenCheck } = useHasTokens(active);
   const [dismissed, setDismissed] = useState(true);
   useEffect(() => {
     if (active) setDismissed(readDismissed());
@@ -96,6 +135,25 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, 
           <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
             <Radio size={15} className="text-violet-600" /> Keep an agent here
           </h3>
+        </div>
+      )}
+      {tokenCheckPending && !tokenCheckError && (
+        <p className="text-xs text-ink-3" role="status" aria-live="polite" aria-atomic="true" data-testid="keep-agent-token-checking">
+          Checking token setup…
+        </p>
+      )}
+      {tokenCheckError && (
+        <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" data-testid="keep-agent-token-error">
+          <span className="min-w-0 flex-1" role="alert" aria-atomic="true">{tokenCheckError}</span>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm shrink-0"
+            onClick={retryTokenCheck}
+            disabled={tokenCheckPending}
+            aria-busy={tokenCheckPending || undefined}
+          >
+            {tokenCheckPending ? "Retrying…" : "Retry"}
+          </button>
         </div>
       )}
       {showSetup && <AgentConnectCard origin={origin} onDismiss={dismiss} onCreateToken={onCreateToken} className="p-3" />}
