@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render } from "@testing-library/react";
-import { useLayoutEffect, type ReactNode } from "react";
+import { useLayoutEffect } from "react";
 import * as Y from "yjs";
 
 vi.mock("@hocuspocus/provider", async () => {
@@ -90,23 +90,16 @@ function ParentLayoutBoundary({
   present = true,
   boundary = 0,
   onBoundary,
-  children,
 }: {
   visit: FollowOptions;
   present?: boolean;
   boundary?: number;
   onBoundary?: () => void;
-  children?: ReactNode;
 }) {
   useLayoutEffect(() => {
     if (boundary > 0) onBoundary?.();
   }, [boundary, onBoundary]);
-  return (
-    <>
-      {present ? <FollowHarness {...visit} /> : null}
-      {children}
-    </>
-  );
+  return present ? <FollowHarness {...visit} /> : null;
 }
 
 function trackFollowTimers(reuseHandle = false) {
@@ -311,6 +304,8 @@ describe("collaborator follow visit ownership", () => {
     expect(timers.pending()).toEqual([currentTimer]);
     expect(currentListeners).toHaveLength(4);
     expect(listeners.active()).toEqual(currentListeners);
+    expect(oldSession.followUserId).toBe("collaborator");
+    expect(currentSession.followUserId).toBe("collaborator");
 
     const runStale = () => {
       timers.fire(oldTimer);
@@ -335,6 +330,7 @@ describe("collaborator follow visit ownership", () => {
     if (order === "stale-current") {
       runStale();
       expect(timers.pending()).toEqual([currentTimer]);
+      expect(currentSession.followUserId).toBe("collaborator");
       runCurrent();
     } else {
       runCurrent();
@@ -350,6 +346,8 @@ describe("collaborator follow visit ownership", () => {
     ]);
     expect(oldActions.scroll).not.toHaveBeenCalled();
     expect(oldDispatch).not.toHaveBeenCalled();
+    expect(oldSession.followUserId).toBe("collaborator");
+    expect(currentSession.followUserId).toBeNull();
 
     rendered.unmount();
     expectBalancedListeners(listeners);
