@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -133,6 +133,12 @@ function reactHandler<T>(element: Element, name: string): T {
   return handler as T;
 }
 
+type StopHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+
+function activateStop(handler: StopHandler, currentTarget: HTMLButtonElement) {
+  handler({ currentTarget } as ReactMouseEvent<HTMLButtonElement>);
+}
+
 interface WorkProbe {
   action: FollowAction;
   sessions: ControlledSession[];
@@ -249,7 +255,7 @@ describe("FollowBanner", () => {
       };
       const view = directRoot(<Boundary session={a} onPassiveCleanup={onPassiveCleanup} />);
       const aStopElement = stopButton(view.host);
-      const staleStop = reactHandler<() => void>(aStopElement, "onClick");
+      const staleStop = reactHandler<StopHandler>(aStopElement, "onClick");
       const sessions = [a];
 
       if (replacement === "session") {
@@ -289,23 +295,27 @@ describe("FollowBanner", () => {
               onBoundary={() => {
                 expect(passiveCleanups).toBe(0);
                 currentStopElement = stopButton(view.host);
-                const currentStop = reactHandler<() => void>(currentStopElement, "onClick");
+                const currentStop = reactHandler<StopHandler>(currentStopElement, "onClick");
                 const currentReads = current.targetReads.mock.calls.length;
                 const currentPresenceReads = current.presence.mock.calls.length;
 
-                if (order === "stale-before-current") expectNoWork(staleStop, probe);
-                currentStop();
+                if (order === "stale-before-current") {
+                  expectNoWork(() => activateStop(staleStop, aStopElement), probe);
+                }
+                activateStop(currentStop, currentStopElement);
                 expect(current.targetReads.mock.calls.length).toBe(currentReads + 1);
                 expect(current.presence.mock.calls.length).toBe(currentPresenceReads + 1);
-                if (order === "current-before-stale") expectNoWork(staleStop, probe);
-                expectNoWork(currentStop, probe);
+                if (order === "current-before-stale") {
+                  expectNoWork(() => activateStop(staleStop, aStopElement), probe);
+                }
+                expectNoWork(() => activateStop(currentStop, currentStopElement), probe);
               }}
             />,
           );
         });
 
         expect(passiveCleanups).toBe(1);
-        expectNoWork(staleStop, probe);
+        expectNoWork(() => activateStop(staleStop, aStopElement), probe);
         expect(action).toHaveBeenCalledExactlyOnceWith(null);
         expect(action.mock.contexts[0]).toBe(current);
         if (replacement === "equal-remount" || replacement === "dom-replacement") {
@@ -330,7 +340,8 @@ describe("FollowBanner", () => {
         passiveCleanups++;
       };
       const view = directRoot(<Boundary session={session} onPassiveCleanup={onPassiveCleanup} />);
-      const staleStop = reactHandler<() => void>(stopButton(view.host), "onClick");
+      const staleStopElement = stopButton(view.host);
+      const staleStop = reactHandler<StopHandler>(staleStopElement, "onClick");
       const probe = probeWork(view.host, action, [session]);
       const focusOwner = document.createElement("button");
       document.body.append(focusOwner);
@@ -351,14 +362,14 @@ describe("FollowBanner", () => {
               onBoundary={() => {
                 expect(passiveCleanups).toBe(0);
                 expect(view.host.querySelector('[data-testid="follow-banner"]')).toBeNull();
-                expectNoWork(staleStop, probe);
+                expectNoWork(() => activateStop(staleStop, staleStopElement), probe);
               }}
             />,
           );
         });
 
         expect(passiveCleanups).toBe(1);
-        expectNoWork(staleStop, probe);
+        expectNoWork(() => activateStop(staleStop, staleStopElement), probe);
         expect(action).not.toHaveBeenCalled();
       } finally {
         focusOwner.remove();
@@ -371,21 +382,23 @@ describe("FollowBanner", () => {
     const action = vi.fn<(userId: string | null) => void>();
     const session = new ControlledSession(BASE_USER.id, [user()], action);
     const view = directRoot(<Boundary session={session} />);
-    const staleStop = reactHandler<() => void>(stopButton(view.host), "onClick");
+    const staleStopElement = stopButton(view.host);
+    const staleStop = reactHandler<StopHandler>(staleStopElement, "onClick");
 
     session.publish(BASE_USER.id, [user({ name: "Grace" })]);
-    staleStop();
+    activateStop(staleStop, staleStopElement);
     expect(action).not.toHaveBeenCalled();
     const readsAfterRejection = session.targetReads.mock.calls.length;
     const presenceAfterRejection = session.presence.mock.calls.length;
-    staleStop();
+    activateStop(staleStop, staleStopElement);
     expect(session.targetReads.mock.calls.length).toBe(readsAfterRejection);
     expect(session.presence.mock.calls.length).toBe(presenceAfterRejection);
 
     act(() => view.root.render(<Boundary session={session} passiveKey={1} />));
-    const continuingStop = reactHandler<() => void>(stopButton(view.host), "onClick");
-    continuingStop();
-    continuingStop();
+    const continuingStopElement = stopButton(view.host);
+    const continuingStop = reactHandler<StopHandler>(continuingStopElement, "onClick");
+    activateStop(continuingStop, continuingStopElement);
+    activateStop(continuingStop, continuingStopElement);
     expect(action).toHaveBeenCalledTimes(1);
 
     session.publish(null, []);
@@ -394,41 +407,95 @@ describe("FollowBanner", () => {
 
     session.publish(BASE_USER.id, [user({ name: "Grace" })]);
     act(() => view.root.render(<Boundary session={session} passiveKey={3} />));
-    const followAgainStop = reactHandler<() => void>(stopButton(view.host), "onClick");
-    followAgainStop();
-    followAgainStop();
+    const followAgainStopElement = stopButton(view.host);
+    const followAgainStop = reactHandler<StopHandler>(followAgainStopElement, "onClick");
+    activateStop(followAgainStop, followAgainStopElement);
+    activateStop(followAgainStop, followAgainStopElement);
     expect(action).toHaveBeenCalledTimes(2);
   });
+
+  const wrongStopSources = ["retired A Stop", "foreign connected button", "detached replacement"] as const;
+  const wrongStopOrders = wrongStopSources.flatMap((source) =>
+    (["wrong-before-current", "current-before-wrong"] as const).map((order) => [source, order] as const),
+  );
+
+  it.each(wrongStopOrders)(
+    "rejects a %s as B's event source and keeps B usable %s",
+    (source, order) => {
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      const view = directRoot(<Boundary session={session} />);
+      const aStopElement = stopButton(view.host);
+
+      act(() => view.root.render(<Boundary session={session} domKey="dom-b" passiveKey={1} />));
+      const bStopElement = stopButton(view.host);
+      const bStop = reactHandler<StopHandler>(bStopElement, "onClick");
+      let wrongTarget: HTMLButtonElement;
+
+      if (source === "retired A Stop") {
+        wrongTarget = aStopElement;
+        document.body.append(wrongTarget);
+      } else if (source === "foreign connected button") {
+        wrongTarget = document.createElement("button");
+        document.body.append(wrongTarget);
+      } else {
+        const replacement = bStopElement.cloneNode(true);
+        if (!(replacement instanceof HTMLButtonElement)) {
+          throw new Error("The Stop replacement was not a button");
+        }
+        wrongTarget = replacement;
+      }
+
+      const probe = probeWork(view.host, action, [session]);
+      try {
+        if (order === "wrong-before-current") {
+          expectNoWork(() => activateStop(bStop, wrongTarget), probe);
+        }
+        activateStop(bStop, bStopElement);
+        if (order === "current-before-wrong") {
+          expectNoWork(() => activateStop(bStop, wrongTarget), probe);
+        }
+        expectNoWork(() => activateStop(bStop, bStopElement), probe);
+        expect(action).toHaveBeenCalledExactlyOnceWith(null);
+        expect(action.mock.contexts[0]).toBe(session);
+      } finally {
+        wrongTarget.remove();
+        releaseProbe(probe);
+      }
+    },
+  );
 
   it("binds the frozen session action and rejects a detached Stop DOM before session work", () => {
     const originalAction = vi.fn<(userId: string | null) => void>();
     const replacementAction = vi.fn<(userId: string | null) => void>();
     const session = new ControlledSession(BASE_USER.id, [user()], originalAction);
     const view = directRoot(<Boundary session={session} />);
-    const originalStop = reactHandler<() => void>(stopButton(view.host), "onClick");
+    const originalStopElement = stopButton(view.host);
+    const originalStop = reactHandler<StopHandler>(originalStopElement, "onClick");
 
     session.follow = replacementAction;
-    originalStop();
+    activateStop(originalStop, originalStopElement);
     expect(originalAction).toHaveBeenCalledExactlyOnceWith(null);
     expect(originalAction.mock.contexts[0]).toBe(session);
     expect(replacementAction).not.toHaveBeenCalled();
 
     act(() => view.root.render(<Boundary session={session} domKey="dom-b" passiveKey={1} />));
     const publishedStop = stopButton(view.host);
-    const staleStop = reactHandler<() => void>(publishedStop, "onClick");
+    const staleStop = reactHandler<StopHandler>(publishedStop, "onClick");
     const clone = publishedStop.cloneNode(true);
     publishedStop.replaceWith(clone);
     const targetReads = session.targetReads.mock.calls.length;
     const presenceReads = session.presence.mock.calls.length;
-    staleStop();
+    activateStop(staleStop, publishedStop);
     expect(session.targetReads.mock.calls.length).toBe(targetReads);
     expect(session.presence.mock.calls.length).toBe(presenceReads);
     expect(originalAction).toHaveBeenCalledTimes(1);
     expect(replacementAction).not.toHaveBeenCalled();
 
     act(() => view.root.render(<Boundary session={session} domKey="dom-c" passiveKey={2} />));
-    const currentStop = reactHandler<() => void>(stopButton(view.host), "onClick");
-    currentStop();
+    const currentStopElement = stopButton(view.host);
+    const currentStop = reactHandler<StopHandler>(currentStopElement, "onClick");
+    activateStop(currentStop, currentStopElement);
     expect(originalAction).toHaveBeenCalledTimes(1);
     expect(replacementAction).toHaveBeenCalledExactlyOnceWith(null);
     expect(replacementAction.mock.contexts[0]).toBe(session);

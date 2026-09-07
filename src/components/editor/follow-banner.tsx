@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { jsonEqual, useSessionValue } from "./use-session";
@@ -65,11 +65,12 @@ export function FollowBanner({ session }: { session: CollabSession }) {
     };
   }, [rendered]);
 
-  const stopFollowing = () => {
+  const stopFollowing = (event: ReactMouseEvent<HTMLButtonElement>) => {
     const publication = authority.current;
     if (
-      !rendered ||
       !publication ||
+      event.currentTarget !== publication.stop ||
+      !rendered ||
       publication.render !== rendered ||
       publication.render.mount !== mount ||
       claimed.current.has(publication) ||
