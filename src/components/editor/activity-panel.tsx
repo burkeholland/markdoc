@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Activity as ActivityIcon, Bot, Loader2, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api, apiErrorText, type ActivityItemDto } from "@/lib/api";
@@ -14,6 +14,24 @@ export interface ActivityPanelProps {
 
 const REFRESH_MS = 30_000;
 const PAGE = 50;
+
+type ActivityVisit = {
+  documentId: string;
+};
+
+type CadenceOperation = {
+  visit: ActivityVisit;
+  timer: ReturnType<typeof setInterval>;
+};
+
+type RefreshOperation = {
+  visit: ActivityVisit;
+  id: number;
+};
+
+type LoadMoreOperation = RefreshOperation & {
+  cursor: string;
+};
 
 function str(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
@@ -135,6 +153,7 @@ export function ActivityPanel(props: ActivityPanelProps) {
 }
 
 function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
+  const visit = useMemo<ActivityVisit>(() => ({ documentId: session.docId }), [session.docId]);
   const [items, setItems] = useState<ActivityItemDto[] | null>(null);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,35 +162,57 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const expanded = useRef(false);
-  const alive = useRef(true);
+  const activeVisit = useRef<ActivityVisit | null>(visit);
+  const cadenceOperation = useRef<CadenceOperation | null>(null);
   const nextBeforeRef = useRef<string | null>(null);
   const refreshSequence = useRef(0);
-  const refreshOperation = useRef<number | null>(null);
+  const refreshOperation = useRef<RefreshOperation | null>(null);
   const loadMoreSequence = useRef(0);
-  const loadMoreOperation = useRef<{ id: number; cursor: string } | null>(null);
+  const loadMoreOperation = useRef<LoadMoreOperation | null>(null);
 
-  const invalidateOperations = useCallback(() => {
-    alive.current = false;
-    refreshOperation.current = null;
-    loadMoreOperation.current = null;
+  const retireVisit = useCallback((owner: ActivityVisit) => {
+    if (activeVisit.current !== owner) return;
+    activeVisit.current = null;
+    const cadence = cadenceOperation.current;
+    if (cadence?.visit === owner) {
+      cadenceOperation.current = null;
+      clearInterval(cadence.timer);
+    }
+    if (refreshOperation.current?.visit === owner) refreshOperation.current = null;
+    if (loadMoreOperation.current?.visit === owner) loadMoreOperation.current = null;
   }, []);
 
-  useEffect(() => {
-    alive.current = true;
-    return invalidateOperations;
-  }, [invalidateOperations]);
+  const ownsVisit = useCallback((owner: ActivityVisit) => activeVisit.current === owner, []);
+  const ownsRefresh = useCallback(
+    (operation: RefreshOperation) => ownsVisit(operation.visit) && refreshOperation.current === operation,
+    [ownsVisit],
+  );
+  const ownsLoadMoreRequest = useCallback(
+    (operation: LoadMoreOperation) => ownsVisit(operation.visit) && loadMoreOperation.current === operation,
+    [ownsVisit],
+  );
+  const ownsLoadMoreSettlement = useCallback(
+    (operation: LoadMoreOperation) =>
+      ownsLoadMoreRequest(operation) && nextBeforeRef.current === operation.cursor,
+    [ownsLoadMoreRequest],
+  );
+
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    return () => retireVisit(visit);
+  }, [retireVisit, visit]);
 
   // Reload the first page; older pages the user has already expanded are kept below it.
   const refresh = useCallback((isRetry = false) => {
-    if (!alive.current || refreshOperation.current !== null) return;
-    const request = ++refreshSequence.current;
-    refreshOperation.current = request;
+    if (!ownsVisit(visit) || refreshOperation.current !== null) return;
+    const operation = { visit, id: ++refreshSequence.current };
+    refreshOperation.current = operation;
     if (isRetry) setRetrying(true);
 
     void (async () => {
       try {
-        const page = await api.documents.activity(session.docId, { limit: PAGE });
-        if (!alive.current || refreshOperation.current !== request) return;
+        const page = await api.documents.activity(visit.documentId, { limit: PAGE });
+        if (!ownsRefresh(operation)) return;
         setItems((prev) => {
           if (!prev || !expanded.current) return page.items;
           const seen = new Set(page.items.map((i) => i.id));
@@ -179,7 +220,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
         });
         if (!expanded.current) {
           const pageOperation = loadMoreOperation.current;
-          if (pageOperation && pageOperation.cursor !== page.nextBefore) {
+          if (pageOperation?.visit === visit && pageOperation.cursor !== page.nextBefore) {
             loadMoreOperation.current = null;
             setLoadingMore(false);
           }
@@ -189,39 +230,45 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
         setListError(null);
         setNow(Date.now());
       } catch (e) {
-        if (!alive.current || refreshOperation.current !== request) return;
+        if (!ownsRefresh(operation)) return;
         setListError(apiErrorText(e, "Failed to load activity"));
       } finally {
-        if (refreshOperation.current !== request) return;
+        if (!ownsRefresh(operation)) return;
         refreshOperation.current = null;
-        if (alive.current && isRetry) setRetrying(false);
+        if (isRetry) setRetrying(false);
       }
     })();
-  }, [session.docId]);
+  }, [ownsRefresh, ownsVisit, visit]);
 
   const retry = useCallback(() => {
     refresh(true);
   }, [refresh]);
 
   useEffect(() => {
+    if (!ownsVisit(visit)) return;
     refresh();
     const timer = setInterval(() => {
       refresh();
     }, REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    const cadence = { visit, timer };
+    cadenceOperation.current = cadence;
+    return () => {
+      clearInterval(timer);
+      if (cadenceOperation.current === cadence) cadenceOperation.current = null;
+    };
+  }, [ownsVisit, refresh, visit]);
 
   const loadMore = () => {
     const cursor = nextBeforeRef.current;
-    if (!alive.current || !cursor || loadMoreOperation.current !== null) return;
-    const operation = { id: ++loadMoreSequence.current, cursor };
+    if (!ownsVisit(visit) || !cursor || loadMoreOperation.current !== null) return;
+    const operation = { visit, id: ++loadMoreSequence.current, cursor };
     loadMoreOperation.current = operation;
     setLoadingMore(true);
 
     void (async () => {
       try {
-        const page = await api.documents.activity(session.docId, { before: cursor, limit: PAGE });
-        if (!alive.current || loadMoreOperation.current !== operation || nextBeforeRef.current !== cursor) return;
+        const page = await api.documents.activity(visit.documentId, { before: cursor, limit: PAGE });
+        if (!ownsLoadMoreSettlement(operation)) return;
         setItems((prev) => {
           const seen = new Set((prev ?? []).map((i) => i.id));
           return [...(prev ?? []), ...page.items.filter((i) => !seen.has(i.id))];
@@ -231,18 +278,18 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
         expanded.current = true;
         setError(null);
       } catch (e) {
-        if (!alive.current || loadMoreOperation.current !== operation || nextBeforeRef.current !== cursor) return;
+        if (!ownsLoadMoreSettlement(operation)) return;
         setError(apiErrorText(e, "Failed to load more"));
       } finally {
-        if (loadMoreOperation.current !== operation) return;
+        if (!ownsLoadMoreRequest(operation)) return;
         loadMoreOperation.current = null;
-        if (alive.current) setLoadingMore(false);
+        setLoadingMore(false);
       }
     })();
   };
 
   const close = () => {
-    invalidateOperations();
+    retireVisit(visit);
     onClose();
   };
 
