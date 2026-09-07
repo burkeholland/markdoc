@@ -184,18 +184,32 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
   );
 }
 
-function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSession; goal: WritingGoal | null; progress: GoalProgress | null; canEdit: boolean }) {
-  const [kind, setKind] = useState<GoalKind>(goal?.kind ?? "words");
-  const [mode, setMode] = useState<GoalMode>(goal?.mode ?? "min");
-  const [value, setValue] = useState<string>(goal ? String(goal.value) : "");
+interface GoalDraft {
+  session: CollabSession;
+  sharedGoal: WritingGoal | null;
+  kind: GoalKind;
+  mode: GoalMode;
+  value: string;
+}
 
-  // Follow the shared goal when a collaborator changes it.
-  useEffect(() => {
-    if (!goal) return;
-    setKind(goal.kind);
-    setMode(goal.mode);
-    setValue(String(goal.value));
-  }, [goal]);
+function goalDraft(session: CollabSession, goal: WritingGoal | null): GoalDraft {
+  return {
+    session,
+    sharedGoal: goal,
+    kind: goal?.kind ?? "words",
+    mode: goal?.mode ?? "min",
+    value: goal ? String(goal.value) : "",
+  };
+}
+
+function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSession; goal: WritingGoal | null; progress: GoalProgress | null; canEdit: boolean }) {
+  const [storedDraft, setDraft] = useState(() => goalDraft(session, goal));
+  let draft = storedDraft;
+  if (draft.session !== session || draft.sharedGoal !== goal) {
+    draft = goalDraft(session, goal);
+    setDraft(draft);
+  }
+  const { kind, mode, value } = draft;
 
   const submit = useCallback(
     (e?: React.FormEvent) => {
@@ -209,7 +223,6 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
   const clear = useCallback(() => {
     if (!canEdit) return;
     setGoal(session, null);
-    setValue("");
   }, [canEdit, session]);
 
   const summary =
@@ -235,7 +248,13 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
       {goal?.setBy && <div className="mt-0.5 text-[11px] text-ink-4">Set by @{goal.setBy}; shared with everyone on this document.</div>}
       {canEdit && (
         <form className="mt-2 flex flex-wrap items-center gap-1.5" onSubmit={submit}>
-          <select className="select h-8 shrink-0 px-1.5 text-[13px]" value={mode} onChange={(e) => setMode(e.target.value as GoalMode)} aria-label="Goal mode" data-testid="goal-mode">
+          <select
+            className="select h-8 shrink-0 px-1.5 text-[13px]"
+            value={mode}
+            onChange={(e) => setDraft({ ...draft, mode: e.target.value as GoalMode })}
+            aria-label="Goal mode"
+            data-testid="goal-mode"
+          >
             <option value="min">At least</option>
             <option value="max">At most</option>
           </select>
@@ -247,11 +266,17 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
             inputMode="numeric"
             placeholder={kind === "words" ? "500" : "5"}
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => setDraft({ ...draft, value: e.target.value })}
             aria-label="Goal value"
             data-testid="goal-value"
           />
-          <select className="select h-8 shrink-0 px-1.5 text-[13px]" value={kind} onChange={(e) => setKind(e.target.value as GoalKind)} aria-label="Goal type" data-testid="goal-kind">
+          <select
+            className="select h-8 shrink-0 px-1.5 text-[13px]"
+            value={kind}
+            onChange={(e) => setDraft({ ...draft, kind: e.target.value as GoalKind })}
+            aria-label="Goal type"
+            data-testid="goal-kind"
+          >
             <option value="words">words</option>
             <option value="minutes">min read</option>
           </select>
