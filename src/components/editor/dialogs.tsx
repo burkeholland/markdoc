@@ -314,32 +314,120 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
   );
 });
 
-export const NameVersionDialog = memo(function NameVersionDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (title: string) => Promise<void> }) {
+export interface NameVersionVisit {
+  id: number;
+  editor: object;
+  documentId: string;
+}
+
+export interface NameVersionSaveOwner {
+  visit: NameVersionVisit;
+  editor: object;
+  documentId: string;
+  operationId: number;
+  title: string;
+}
+
+export const NameVersionDialog = memo(function NameVersionDialog({
+  open,
+  visit,
+  onOpenChange,
+  nextOperationId,
+  onSubmit,
+}: {
+  open: boolean;
+  visit: NameVersionVisit;
+  onOpenChange: (visit: NameVersionVisit, open: boolean) => void;
+  nextOperationId: () => number;
+  onSubmit: (owner: NameVersionSaveOwner) => Promise<void>;
+}) {
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (open) setTitle("");
-  }, [open]);
+  const [error, setError] = useState<string | null>(null);
+  const activeVisit = useRef<NameVersionVisit | null>(null);
+  const activeSave = useRef<NameVersionSaveOwner | null>(null);
+  useLayoutEffect(() => {
+    if (open) {
+      activeVisit.current = visit;
+      activeSave.current = null;
+      setTitle("");
+      setError(null);
+      setBusy(false);
+    } else if (activeVisit.current === visit) {
+      activeVisit.current = null;
+      activeSave.current = null;
+    }
+    return () => {
+      if (activeVisit.current === visit) {
+        activeVisit.current = null;
+        activeSave.current = null;
+      }
+    };
+  }, [open, visit]);
+  const ownsSave = (owner: NameVersionSaveOwner) => activeVisit.current === owner.visit && activeSave.current === owner;
+  const setOpen = (nextOpen: boolean) => {
+    if (!nextOpen && activeVisit.current === visit) {
+      activeVisit.current = null;
+      activeSave.current = null;
+    }
+    onOpenChange(visit, nextOpen);
+  };
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent title="Name this version" description="Named versions stay easy to find in the history.">
         <form
           className="flex flex-col gap-3"
           onSubmit={async (e) => {
             e.preventDefault();
-            if (!title.trim()) return;
+            const currentVisit = activeVisit.current;
+            const submittedTitle = title.trim();
+            if (!currentVisit || activeSave.current || !submittedTitle) return;
+            const owner = {
+              visit: currentVisit,
+              editor: currentVisit.editor,
+              documentId: currentVisit.documentId,
+              operationId: nextOperationId(),
+              title: submittedTitle,
+            };
+            activeSave.current = owner;
+            setError(null);
             setBusy(true);
             try {
-              await onSubmit(title.trim());
-              onOpenChange(false);
+              await onSubmit(owner);
+              if (ownsSave(owner)) setOpen(false);
+            } catch (reason) {
+              if (ownsSave(owner)) setError(apiErrorText(reason, "Could not save version"));
             } finally {
-              setBusy(false);
+              if (ownsSave(owner)) {
+                activeSave.current = null;
+                setBusy(false);
+              }
             }
           }}
         >
-          <input className="input" placeholder="e.g. Draft sent for review" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus data-testid="version-name" />
+          <input
+            className="input"
+            placeholder="e.g. Draft sent for review"
+            value={title}
+            onChange={(e) => {
+              if (!activeSave.current) setTitle(e.target.value);
+            }}
+            disabled={busy}
+            autoFocus
+            data-testid="version-name"
+          />
+          {error && (
+            <div className="text-sm text-danger" role="alert" data-testid="version-name-error">
+              {error}
+            </div>
+          )}
+          {busy && (
+            <div className="text-sm text-ink-3" role="status">
+              Closing this dialog does not cancel the version already being saved.
+            </div>
+          )}
           <div className="flex justify-end gap-2">
-            <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
+            <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={busy || !title.trim()} data-testid="version-name-submit">

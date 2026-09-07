@@ -34,6 +34,7 @@ import { StatusBar, type Layout } from "./status-bar";
 import type { VersionPreview } from "./versions-panel";
 import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY, clampPanelWidth, panelMaxFor, parseStoredPanelWidth } from "./panel-resize-handle";
 import type { SyncActions } from "./sync-dialog";
+import type { NameVersionSaveOwner, NameVersionVisit } from "./dialogs";
 import { useEverTrue } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
 import { emptySync, useSyncPolling } from "./use-sync-polling";
@@ -242,8 +243,13 @@ export function EditorShell({
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [commitOpen, setCommitOpen] = useState(false);
   const [publishingOwner, setPublishingOwner] = useState<PublishPullOwner | null>(null);
+  const [nameVersionVisit, setNameVersionVisit] = useState<NameVersionVisit | null>(null);
   const currentEditorRef = useRef<EditorIdentity | null>(null);
   const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
+  const currentNameVersionVisitRef = useRef<NameVersionVisit | null>(null);
+  const namedVersionOwnerRef = useRef<NameVersionSaveOwner | null>(null);
+  const nameVersionVisitSequence = useRef(0);
+  const namedVersionOperationSequence = useRef(0);
   const [sync, setSync] = useState<SyncStatusDto | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncTick, setSyncTick] = useState(0);
@@ -263,11 +269,26 @@ export function EditorShell({
     currentEditorRef.current = editorIdentity;
     publishPullOwnerRef.current = null;
     setPublishingOwner(null);
+    const previousVisit = currentNameVersionVisitRef.current;
+    if (previousVisit && previousVisit.editor !== editorIdentity) {
+      const replacement = {
+        id: ++nameVersionVisitSequence.current,
+        editor: editorIdentity,
+        documentId: editorIdentity.documentId,
+      };
+      namedVersionOwnerRef.current = null;
+      currentNameVersionVisitRef.current = replacement;
+      setNameVersionVisit(replacement);
+    }
     return () => {
       if (currentEditorRef.current === editorIdentity) currentEditorRef.current = null;
       if (publishPullOwnerRef.current?.editor === editorIdentity) publishPullOwnerRef.current = null;
     };
   }, [editorIdentity]);
+  useLayoutEffect(() => () => {
+    currentNameVersionVisitRef.current = null;
+    namedVersionOwnerRef.current = null;
+  }, []);
   useLayoutEffect(() => {
     setDoc((current) => current.id === initialDoc.id ? current : initialDoc);
   }, [initialDoc]);
@@ -371,7 +392,24 @@ export function EditorShell({
     if (panelWidth > panelMax) setPanelWidth(panelMax);
   }, [panelWidth, panelMax, setPanelWidth]);
 
-  const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
+  const openNameVersion = useCallback(() => {
+    const editor = currentEditorRef.current;
+    if (!editor) return;
+    const visit = {
+      id: ++nameVersionVisitSequence.current,
+      editor,
+      documentId: editor.documentId,
+    };
+    namedVersionOwnerRef.current = null;
+    currentNameVersionVisitRef.current = visit;
+    setNameVersionVisit(visit);
+    setDialog("versionName");
+  }, []);
+  const setEditorDialog = useCallback((kind: DialogKind) => {
+    if (kind === "versionName") openNameVersion();
+    else setDialog(kind);
+  }, [openNameVersion]);
+  const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
   const slashMenu = useSlashMenuController();
   const isOwner = role === "owner";
   useEffect(() => {
@@ -921,7 +959,7 @@ export function EditorShell({
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const openImage = useCallback(() => setDialog("image"), []);
   const openTable = useCallback(() => setDialog("table"), []);
-  const openVersionName = useCallback(() => setDialog("versionName"), []);
+  const openVersionName = openNameVersion;
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
   const publishFromHeader = useCallback(() => {
     if (doc.storage !== "gist") {
@@ -1025,7 +1063,7 @@ export function EditorShell({
     isOwner,
     embed,
     slashWhere: { inTable: format.tablePos >= 0, canComment: session.canComment },
-    setDialog,
+    setDialog: setEditorDialog,
     openLink,
     openImage,
     startComment,
@@ -1078,6 +1116,16 @@ export function EditorShell({
   const changeSyncOpen = useCallback((open: boolean) => {
     if (currentEditorRef.current === editorIdentity) setSyncOpen(open);
   }, [editorIdentity]);
+  const changeNameVersionOpen = useCallback((visit: NameVersionVisit, open: boolean) => {
+    if (currentEditorRef.current !== visit.editor || currentNameVersionVisitRef.current !== visit) return;
+    if (open) {
+      setDialog("versionName");
+      return;
+    }
+    currentNameVersionVisitRef.current = null;
+    if (namedVersionOwnerRef.current?.visit === visit) namedVersionOwnerRef.current = null;
+    setDialog((current) => current === "versionName" ? null : current);
+  }, []);
 
   const authError = useSessionValue(session, (s) => s.authError);
   // Keep the panes covered until either the local copy or the server state is in, so a
@@ -1158,7 +1206,7 @@ export function EditorShell({
   // format change) does not re-render the closed ones.
   const dialogOpenChange = useMemo(() => {
     const make = (kind: Exclude<DialogKind, null>) => (open: boolean) => setDialog(open ? kind : null);
-    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), table: make("table"), versionName: make("versionName"), shortcuts: make("shortcuts") };
+    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), table: make("table"), shortcuts: make("shortcuts") };
   }, []);
   const onPublishDocChange = useCallback((d: DocumentDto) => {
     setDoc(d);
@@ -1170,14 +1218,49 @@ export function EditorShell({
   const insertTable = useCallback((rows: number, cols: number) => actions.insertTable(rows, cols), [actions]);
   const closeFileDrop = useCallback(() => setFileDrop(null), []);
   const fileDropError = useCallback((m: string) => toast(m, "error"), [toast]);
-  const saveNamedVersion = useCallback(
-    async (title: string) => {
-      await api.documents.createVersion(doc.id, title);
-      setVersionsRefresh((n) => n + 1);
-      toast(`Saved version “${title}”.`, "success");
-    },
-    [doc.id, toast],
+  const ownsNamedVersion = useCallback(
+    (owner: NameVersionSaveOwner) =>
+      owner.editor === owner.visit.editor &&
+      owner.documentId === owner.visit.documentId &&
+      currentEditorRef.current === owner.editor &&
+      currentEditorRef.current.documentId === owner.documentId &&
+      currentNameVersionVisitRef.current === owner.visit &&
+      namedVersionOwnerRef.current === owner,
+    [],
   );
+  const saveNamedVersion = useCallback(
+    (owner: NameVersionSaveOwner) => {
+      if (
+        owner.editor !== owner.visit.editor ||
+        owner.documentId !== owner.visit.documentId ||
+        currentEditorRef.current !== owner.editor ||
+        currentEditorRef.current.documentId !== owner.documentId ||
+        currentNameVersionVisitRef.current !== owner.visit ||
+        namedVersionOwnerRef.current
+      ) {
+        return Promise.reject(new Error("This named-version save is no longer current."));
+      }
+      namedVersionOwnerRef.current = owner;
+      let pending: ReturnType<typeof api.documents.createVersion>;
+      try {
+        pending = api.documents.createVersion(owner.documentId, owner.title);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      return (async () => {
+        try {
+          await pending;
+          if (!ownsNamedVersion(owner)) return;
+          setVersionsRefresh((n) => n + 1);
+          toast(`Saved version “${owner.title}”.`, "success");
+        } finally {
+          if (ownsNamedVersion(owner)) namedVersionOwnerRef.current = null;
+        }
+      })();
+    },
+    [ownsNamedVersion, toast],
+  );
+  const nextNamedVersionOperationId = useCallback(() => ++namedVersionOperationSequence.current, []);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const onOutlinePick = useCallback(
     (h: HeadingInfo) => {
@@ -1464,7 +1547,16 @@ export function EditorShell({
         {everOpened.image && <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />}
         {everOpened.fileDrop && <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />}
         {everOpened.table && <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />}
-        {everOpened.versionName && <NameVersionDialog open={dialog === "versionName"} onOpenChange={dialogOpenChange.versionName} onSubmit={saveNamedVersion} />}
+        {everOpened.versionName && nameVersionVisit && (
+          <NameVersionDialog
+            key={`version-name:${operationDialogKey}`}
+            open={dialog === "versionName"}
+            visit={nameVersionVisit}
+            onOpenChange={changeNameVersionOpen}
+            nextOperationId={nextNamedVersionOperationId}
+            onSubmit={saveNamedVersion}
+          />
+        )}
         {everOpened.shortcuts && <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />}
         {everOpened.palette && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />}
 
