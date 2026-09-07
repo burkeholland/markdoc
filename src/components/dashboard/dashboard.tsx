@@ -228,6 +228,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   }, []);
   const [openPicker, setOpenPicker] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
+  const filterRef = useRef<Filter>("all");
   const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<{ query: string; message: string } | null>(null);
@@ -247,20 +248,68 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   // The trash is loaded on demand; `initialDocuments` never contains trashed documents.
   const [trash, setTrash] = useState<Doc[] | null>(null);
   const [trashBusy, setTrashBusy] = useState<string | null>(null);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashError, setTrashError] = useState<string | null>(null);
+  const trashRequestId = useRef(0);
+  const trashRequestPending = useRef(false);
+
+  const loadTrash = useCallback(() => {
+    if (filterRef.current !== "trash" || trashRequestPending.current) return;
+    const requestId = ++trashRequestId.current;
+    trashRequestPending.current = true;
+    setTrashLoading(true);
+    const isCurrent = () => filterRef.current === "trash" && requestId === trashRequestId.current;
+
+    void api.documents
+      .list({ trash: true })
+      .then((res) => {
+        if (!isCurrent()) return;
+        setTrash(res.documents);
+        setTrashError(null);
+      })
+      .catch((err: unknown) => {
+        if (!isCurrent()) return;
+        console.error(err);
+        setTrashError(apiErrorText(err, "Could not load trash"));
+      })
+      .finally(() => {
+        if (!isCurrent()) return;
+        trashRequestPending.current = false;
+        setTrashLoading(false);
+      });
+  }, []);
+
+  const changeFilter = useCallback((next: Filter) => {
+    const leavingTrash = filterRef.current === "trash" && next !== "trash";
+    filterRef.current = next;
+    if (leavingTrash) {
+      trashRequestId.current += 1;
+      trashRequestPending.current = false;
+      setTrashLoading(false);
+      setTrashError(null);
+    }
+    setFilter(next);
+  }, []);
+
   useEffect(() => {
     if (filter !== "trash") return;
-    let cancelled = false;
-    api.documents
-      .list({ trash: true })
-      .then((res) => !cancelled && setTrash(res.documents))
-      .catch((err: unknown) => {
-        console.error(err);
-        if (!cancelled) setTrash([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [filter]);
+    loadTrash();
+  }, [filter, loadTrash]);
+
+  useEffect(
+    () => () => {
+      filterRef.current = "all";
+      trashRequestId.current += 1;
+      trashRequestPending.current = false;
+    },
+    [],
+  );
+
+  const retryTrash = useCallback(() => {
+    if (!trashError) return;
+    loadTrash();
+  }, [trashError, loadTrash]);
+
   const restore = useCallback(
     async (doc: Doc) => {
       setTrashBusy(doc.id);
@@ -474,12 +523,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         },
         recentDocuments: () => listDocs("?limit=8"),
         starredDocuments: () => listDocs("?starred=1"),
-        showTrash: () => setFilter("trash"),
+        showTrash: () => changeFilter("trash"),
         openFile: pickFile,
         navigate: (href) => router.push(href),
         signOut: () => void signOutSafely(),
       }),
-    [create, listDocs, router, pickFile],
+    [create, listDocs, router, pickFile, changeFilter],
   );
 
   return (
@@ -683,7 +732,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     key={f.value}
                     type="button"
                     className={cn("rounded-md px-2.5 py-1", filter === f.value ? "bg-inverse text-white" : "text-ink-3 hover:text-ink")}
-                    onClick={() => setFilter(f.value)}
+                    onClick={() => changeFilter(f.value)}
                     aria-pressed={filter === f.value}
                     data-testid={`filter-${f.value}`}
                   >
@@ -706,7 +755,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           )}
 
           {filter === "trash" ? (
-            <TrashView documents={trash} busy={trashBusy} onRestore={restore} onPurge={purge} />
+            <TrashView documents={trash} busy={trashBusy} loading={trashLoading} error={trashError} onRetry={retryTrash} onRestore={restore} onPurge={purge} />
           ) : filtered.length === 0 && !trimmed && documents.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-8" data-testid="empty-state">
               <div className="mb-5 text-center">
@@ -808,24 +857,49 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   );
 }
 
-/** The caller's trashed documents: not openable; restore or delete forever. `documents` is null while loading. */
-function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] | null; busy: string | null; onRestore: (d: Doc) => void; onPurge: (d: Doc) => void }) {
+/** The caller's trashed documents: not openable; restore or delete forever. `documents` is null until the first successful load. */
+function TrashView({
+  documents,
+  busy,
+  loading,
+  error,
+  onRetry,
+  onRestore,
+  onPurge,
+}: {
+  documents: Doc[] | null;
+  busy: string | null;
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+  onRestore: (d: Doc) => void;
+  onPurge: (d: Doc) => void;
+}) {
   return (
-    <div data-testid="trash-view">
+    <div data-testid="trash-view" aria-busy={loading || undefined}>
       <p className="mb-3 flex items-center gap-1.5 text-xs text-ink-3" data-testid="trash-note">
         <Trash2 size={12} /> Items are deleted forever after {TRASH_RETENTION_DAYS} days.
       </p>
-      {documents === null ? (
+      {error && (
+        <div className="mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="trash-error">
+          <span className="min-w-0 flex-1">{error}</span>
+          <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5" onClick={onRetry} disabled={loading} aria-busy={loading || undefined}>
+            {loading && <Loader2 size={13} className="animate-spin" />}
+            {loading ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
+      {documents === null && !error ? (
         <div className="flex items-center gap-2 py-10 text-sm text-ink-3">
           <Loader2 size={16} className="animate-spin" /> Loading trash…
         </div>
-      ) : documents.length === 0 ? (
+      ) : documents?.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
           <Trash2 className="mx-auto mb-3 text-ink-4" size={28} />
           <p className="text-sm font-medium text-ink-2">The trash is empty</p>
           <p className="mt-1 text-sm text-ink-3">Documents you move to the trash can be restored here for {TRASH_RETENTION_DAYS} days.</p>
         </div>
-      ) : (
+      ) : documents ? (
         <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="trash-list">
           {documents.map((d) => {
             const isBusy = busy === d.id;
@@ -851,8 +925,7 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
             );
           })}
         </ul>
-      )}
+      ) : null}
     </div>
   );
 }
-
