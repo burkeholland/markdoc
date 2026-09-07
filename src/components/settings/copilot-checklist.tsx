@@ -55,6 +55,7 @@ function advanceChecklistState(
  */
 export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 5000 }: CopilotChecklistProps) {
   const settlementGeneration = useRef(0);
+  const requestOwner = useRef<symbol | null>(null);
   const initial = checklistState(initialTokens ?? []);
   const [state, setState] = useState<ChecklistProgress>(() => ({ ...initial, tried: initial.mcpCalled || hasAgentRequests }));
   const steps: { id: string; label: string; detail: React.ReactNode; done: boolean }[] = [
@@ -101,28 +102,28 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
 
   useEffect(() => {
     if (allDone || pollMs <= 0) return;
-    let cancelled = false;
-    let pending = false;
+    let effectRetired = false;
     const load = () => {
-      if (cancelled || pending) return;
-      pending = true;
+      if (effectRetired || requestOwner.current !== null) return;
+      const owner = Symbol("copilot-checklist-poll");
+      requestOwner.current = owner;
       const generation = settlementGeneration.current;
       void api.tokens
         .list()
         .then((r) => {
-          if (!cancelled && generation === settlementGeneration.current) {
+          if (!effectRetired && generation === settlementGeneration.current) {
             setState((current) => advanceChecklistState(current, checklistState(r.tokens)));
           }
         })
         .catch(() => {})
         .finally(() => {
-          if (!cancelled) pending = false;
+          if (requestOwner.current === owner) requestOwner.current = null;
         });
     };
     load();
     const timer = setInterval(load, pollMs);
     return () => {
-      cancelled = true;
+      effectRetired = true;
       clearInterval(timer);
     };
   }, [allDone, pollMs]);
