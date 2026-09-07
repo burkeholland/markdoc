@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "./command-palette";
@@ -46,17 +47,86 @@ function Harness({ items, initiallyOpen = true }: { items: Command[]; initiallyO
   );
 }
 
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
+}
+
+function ControlledPaletteMount({
+  items,
+  onPassiveCleanup,
+}: {
+  items: Command[];
+  onPassiveCleanup: () => void;
+}) {
+  const commands = useCallback(() => items, [items]);
+  return (
+    <>
+      <CommandPalette open onOpenChange={() => {}} commands={commands} />
+      <PassiveCleanupProbe onCleanup={onPassiveCleanup} />
+    </>
+  );
+}
+
+function StatefulPaletteMount({ items, onPassiveCleanup }: { items: Command[]; onPassiveCleanup: () => void }) {
+  return (
+    <>
+      <Harness items={items} initiallyOpen={false} />
+      <PassiveCleanupProbe onCleanup={onPassiveCleanup} />
+    </>
+  );
+}
+
+function PaletteBoundary({
+  instance,
+  items,
+  present = true,
+  stateful = false,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: {
+  instance: string;
+  items: Command[];
+  present?: boolean;
+  stateful?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  if (!present) return null;
+  return stateful ? (
+    <StatefulPaletteMount key={instance} items={items} onPassiveCleanup={onPassiveCleanup} />
+  ) : (
+    <ControlledPaletteMount key={instance} items={items} onPassiveCleanup={onPassiveCleanup} />
+  );
+}
+
 let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
+const unhandledRejections: unknown[] = [];
+const recordUnhandledRejection = (reason: unknown) => {
+  unhandledRejections.push(reason);
+};
 
 beforeEach(() => {
   localStorage.clear();
   originalScrollIntoView = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView = vi.fn();
+  unhandledRejections.length = 0;
+  process.on("unhandledRejection", recordUnhandledRejection);
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await Promise.resolve();
+  process.off("unhandledRejection", recordUnhandledRejection);
   Element.prototype.scrollIntoView = originalScrollIntoView;
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  expect(unhandledRejections).toEqual([]);
 });
 
 describe("CommandPalette child loading", () => {
@@ -201,4 +271,339 @@ describe("CommandPalette child loading", () => {
     await waitFor(() => expect(run).toHaveBeenCalledOnce());
     expect(opener).toHaveFocus();
   });
+
+  it.each(
+    (["replacement", "removal"] as const).flatMap((transition) =>
+      (["resolve", "reject"] as const).map((settlement) => ({ transition, settlement })),
+    ),
+  )(
+    "retires an old child $settlement at the parent-layout $transition boundary while the current visit stays usable",
+    async ({ transition, settlement }) => {
+      vi.useFakeTimers();
+      const oldPending = deferred<Command[]>();
+      const currentPending = deferred<Command[]>();
+      const oldProvider = vi.fn(() => oldPending.promise);
+      const currentProvider = vi.fn(() => currentPending.promise);
+      const oldItems = [childCommand("old-child", "Old child…", oldProvider)];
+      const currentItems = [childCommand("current-child", "Current child…", currentProvider)];
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      focusOwner.textContent = "Persistent focus owner";
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        focusOwner.focus();
+        await act(async () => {
+          root.render(
+            <PaletteBoundary instance="old" items={oldItems} onPassiveCleanup={recordPassiveCleanup} />,
+          );
+        });
+        const oldInput = screen.getByTestId("palette-input");
+        expect(oldInput).toHaveFocus();
+        fireEvent.click(screen.getByTestId("palette-item-old-child"));
+        await act(async () => {});
+        expect(oldProvider).toHaveBeenCalledOnce();
+        expect(screen.getByRole("status")).toHaveTextContent("Loading…");
+
+        let boundaryReached!: () => void;
+        const atBoundary = new Promise<void>((resolve) => {
+          boundaryReached = resolve;
+        });
+        root.render(
+          <PaletteBoundary
+            instance={transition === "replacement" ? "current" : "old"}
+            items={transition === "replacement" ? currentItems : oldItems}
+            present={transition === "replacement"}
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (transition === "removal") focusOwner.focus();
+              if (settlement === "resolve") oldPending.resolve([command("stale-child", "Stale child")]);
+              else oldPending.reject(new Error("Retired child failed"));
+              boundaryReached();
+            }}
+            onPassiveCleanup={recordPassiveCleanup}
+          />,
+        );
+        await atBoundary;
+        await act(async () => {
+          await Promise.allSettled([oldPending.promise]);
+          await Promise.resolve();
+        });
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(oldProvider).toHaveBeenCalledOnce();
+        expect(screen.queryByTestId("palette-item-stale-child")).toBeNull();
+        expect(screen.queryByText("Retired child failed")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+
+        if (transition === "replacement") {
+          expect(screen.getByTestId("palette-item-current-child")).toBeInTheDocument();
+          expect(screen.getByTestId("palette-input")).toHaveFocus();
+        } else {
+          expect(screen.queryByTestId("command-palette")).toBeNull();
+          expect(focusOwner).toHaveFocus();
+          await act(async () => {
+            root.render(
+              <PaletteBoundary
+                instance="current"
+                items={currentItems}
+                boundary={2}
+                onPassiveCleanup={recordPassiveCleanup}
+              />,
+            );
+          });
+        }
+
+        const currentInput = screen.getByTestId("palette-input");
+        expect(currentInput).toHaveFocus();
+        fireEvent.click(screen.getByTestId("palette-item-current-child"));
+        await act(async () => {});
+        expect(oldProvider).toHaveBeenCalledOnce();
+        expect(currentProvider).toHaveBeenCalledOnce();
+        expect(screen.getByRole("status")).toHaveTextContent("Loading…");
+        expect(screen.getByTestId("palette-item-current-child")).toHaveAttribute("aria-disabled", "true");
+        expect(screen.queryByRole("alert")).toBeNull();
+
+        await act(async () => {
+          currentPending.resolve([command("current-result", "Current result")]);
+          await currentPending.promise;
+        });
+        expect(screen.queryByRole("status")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(screen.getByTestId("palette-item-current-result")).toBeInTheDocument();
+        expect(screen.queryByTestId("palette-item-stale-child")).toBeNull();
+        expect(currentInput).toHaveFocus();
+        expect(oldProvider).toHaveBeenCalledOnce();
+        expect(currentProvider).toHaveBeenCalledOnce();
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        focusOwner.remove();
+      }
+    },
+  );
+
+  it("retires a pending Retry at replacement without publishing its result into the current visit", async () => {
+    vi.useFakeTimers();
+    const oldRetry = deferred<Command[]>();
+    const currentPending = deferred<Command[]>();
+    const oldProvider = vi.fn().mockRejectedValueOnce(new Error("Old child failed")).mockReturnValueOnce(oldRetry.promise);
+    const currentProvider = vi.fn(() => currentPending.promise);
+    const oldItems = [childCommand("old-child", "Old child…", oldProvider)];
+    const currentItems = [childCommand("current-child", "Current child…", currentProvider)];
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+    let passiveCleanupsAtBoundary = -1;
+    const recordPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      await act(async () => {
+        root.render(<PaletteBoundary instance="old" items={oldItems} onPassiveCleanup={recordPassiveCleanup} />);
+      });
+      fireEvent.click(screen.getByTestId("palette-item-old-child"));
+      await act(async () => {});
+      expect(screen.getByRole("alert")).toHaveTextContent("Old child failed");
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await act(async () => {});
+      expect(oldProvider).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+      root.render(
+        <PaletteBoundary
+          instance="current"
+          items={currentItems}
+          boundary={1}
+          onBoundary={() => {
+            passiveCleanupsAtBoundary = passiveCleanups;
+            oldRetry.resolve([command("stale-retry", "Stale Retry result")]);
+            boundaryReached();
+          }}
+          onPassiveCleanup={recordPassiveCleanup}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {
+        await oldRetry.promise;
+      });
+
+      expect(passiveCleanupsAtBoundary).toBe(0);
+      expect(oldProvider).toHaveBeenCalledTimes(2);
+      expect(screen.queryByTestId("palette-item-stale-retry")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByTestId("palette-item-current-child")).toBeInTheDocument();
+      expect(screen.getByTestId("palette-input")).toHaveFocus();
+
+      fireEvent.click(screen.getByTestId("palette-item-current-child"));
+      await act(async () => {});
+      expect(currentProvider).toHaveBeenCalledOnce();
+      expect(screen.getByRole("status")).toHaveTextContent("Loading…");
+      await act(async () => {
+        currentPending.resolve([command("current-retry-result", "Current Retry result")]);
+        await currentPending.promise;
+      });
+      expect(screen.getByTestId("palette-item-current-retry-result")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByTestId("palette-input")).toHaveFocus();
+      expect(oldProvider).toHaveBeenCalledTimes(2);
+      expect(currentProvider).toHaveBeenCalledOnce();
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+});
+
+describe("CommandPalette command ownership", () => {
+  it.each(["replacement", "removal"] as const)(
+    "cancels a retired command timer on $transition and runs only the current palette command after focus restoration",
+    async (transition) => {
+      vi.useFakeTimers();
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+      const oldRun = vi.fn();
+      let focusAtCurrentRun: Element | null = null;
+      const currentRun = vi.fn(() => {
+        focusAtCurrentRun = document.activeElement;
+      });
+      const oldItems = [command("old-command", "Old command", oldRun)];
+      const currentItems = [command("current-command", "Current command", currentRun)];
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      focusOwner.textContent = "Persistent focus owner";
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      let timersAtBoundary = -1;
+      let oldTimerClearedAtBoundary = false;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <PaletteBoundary
+              instance="old"
+              items={oldItems}
+              stateful
+              onPassiveCleanup={recordPassiveCleanup}
+            />,
+          );
+        });
+        const oldOpener = screen.getByRole("button", { name: "Open palette" });
+        oldOpener.focus();
+        fireEvent.click(oldOpener);
+        await act(async () => {});
+        expect(screen.getByTestId("palette-input")).toHaveFocus();
+        fireEvent.click(screen.getByTestId("palette-item-old-command"));
+        await act(async () => {});
+        expect(screen.queryByTestId("command-palette")).toBeNull();
+        await act(async () => {
+          await vi.advanceTimersToNextTimerAsync();
+        });
+        expect(oldOpener).toHaveFocus();
+        const oldCommandTimer = setTimeoutSpy.mock.results.at(-1)?.value;
+        const timersBeforeRetirement = vi.getTimerCount();
+        expect(oldCommandTimer).toBeDefined();
+        expect(timersBeforeRetirement).toBeGreaterThanOrEqual(1);
+        expect(oldRun).not.toHaveBeenCalled();
+
+        let boundaryReached!: () => void;
+        const atBoundary = new Promise<void>((resolve) => {
+          boundaryReached = resolve;
+        });
+        root.render(
+          <PaletteBoundary
+            instance={transition === "replacement" ? "current" : "old"}
+            items={transition === "replacement" ? currentItems : oldItems}
+            present={transition === "replacement"}
+            stateful
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              timersAtBoundary = vi.getTimerCount();
+              oldTimerClearedAtBoundary = clearTimeoutSpy.mock.calls.some(([timer]) => timer === oldCommandTimer);
+              focusOwner.focus();
+              boundaryReached();
+            }}
+            onPassiveCleanup={recordPassiveCleanup}
+          />,
+        );
+        await atBoundary;
+        await act(async () => {});
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(oldTimerClearedAtBoundary).toBe(true);
+        expect(timersAtBoundary).toBeLessThan(timersBeforeRetirement);
+        expect(focusOwner).toHaveFocus();
+        await act(async () => {
+          await vi.runAllTimersAsync();
+        });
+        expect(vi.getTimerCount()).toBe(0);
+        expect(oldRun).not.toHaveBeenCalled();
+        expect(currentRun).not.toHaveBeenCalled();
+
+        if (transition === "removal") {
+          await act(async () => {
+            root.render(
+              <PaletteBoundary
+                instance="current"
+                items={currentItems}
+                stateful
+                boundary={2}
+                onPassiveCleanup={recordPassiveCleanup}
+              />,
+            );
+          });
+        }
+
+        const currentOpener = screen.getByRole("button", { name: "Open palette" });
+        currentOpener.focus();
+        fireEvent.click(currentOpener);
+        await act(async () => {});
+        expect(screen.getByTestId("palette-input")).toHaveFocus();
+        fireEvent.click(screen.getByTestId("palette-item-current-command"));
+        await act(async () => {});
+        expect(screen.queryByTestId("command-palette")).toBeNull();
+        await act(async () => {
+          await vi.advanceTimersToNextTimerAsync();
+        });
+        expect(currentOpener).toHaveFocus();
+        expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
+        expect(oldRun).not.toHaveBeenCalled();
+        expect(currentRun).not.toHaveBeenCalled();
+
+        await act(async () => {
+          await vi.runAllTimersAsync();
+        });
+        expect(oldRun).not.toHaveBeenCalled();
+        expect(currentRun).toHaveBeenCalledOnce();
+        expect(focusAtCurrentRun).toBe(currentOpener);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        focusOwner.remove();
+      }
+    },
+  );
 });
