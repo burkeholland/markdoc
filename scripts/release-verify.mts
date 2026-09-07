@@ -5,7 +5,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
+import WebSocket from "ws";
 import {
+  type BareCollabOutcome,
   DEFAULT_TIMEOUT_MS,
   formatReport,
   formatSummary,
@@ -34,9 +36,10 @@ Read-only release checks (README "Production runbook: app-only releases", step 3
   brotli           Accept-Encoding: br on every chunk >= 1 KiB: br, content-length = .br sibling, decompresses to identity
   gzip             one referenced .js with Accept-Encoding: gzip decompresses to the identity bytes
   leak:localhost   no origin-like "localhost" (//localhost, localhost:<port>) in the /login chunks; a bare token warns
-  collab:reject    an unauthenticated wss://<host>/collab connection reaches authenticationFailed
+  collab:idle      a bare wss://<host>/collab 101 upgrade closes 4401 before five seconds
+  collab:reject    an invalid-token Hocuspocus connection reaches authenticationFailed
 
-Only GETs and one WebSocket connection are issued; nothing is written to production and no az call is made.
+Only GETs and two WebSocket connections are issued; nothing is written to production and no az call is made.
 Exit 0 when nothing failed, 1 when a check failed, 2 on a usage error.`;
 
 interface CliOutput {
@@ -130,7 +133,7 @@ const CLOSE_GRACE_MS = 250;
 
 /**
  * The shape `src/server/collab.test.ts` uses: a HocuspocusProvider on its own websocket with an invalid token.
- * The server answers an unauthenticated connection with `authenticationFailed` and closes it with 4401; a
+ * The server answers invalid authentication with `authenticationFailed` and closes it with 4401; a
  * socket that closes without it (a 404 upgrade), a synced document or silence within `timeoutMs` is a failure.
  * Provider and socket are destroyed on every path so nothing keeps the process alive.
  */
@@ -177,6 +180,34 @@ export function connectCollab(url: string, timeoutMs: number): Promise<CollabOut
   });
 }
 
+/** Upgrade the collaboration socket without sending any Hocuspocus frame. */
+export function connectBareCollab(url: string, timeoutMs: number): Promise<BareCollabOutcome> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = new WebSocket(url);
+    let opened = false;
+    let settled = false;
+    const finish = (outcome: BareCollabOutcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => finish({ outcome: "timeout", opened }), timeoutMs);
+    socket.once("open", () => {
+      opened = true;
+    });
+    socket.once("close", (code, reason) => {
+      finish({ outcome: "closed", opened, code, reason: reason.toString(), ms: Date.now() - started });
+    });
+    socket.once("error", (error) => {
+      finish({ outcome: "error", opened, message: error instanceof Error ? error.message : String(error) });
+    });
+  });
+}
+
 export function createIo(options: { timeoutMs: number; dist?: string }): CliIo {
   const { timeoutMs } = options;
   const agents = { http: new http.Agent({ keepAlive: true, maxSockets: 8 }), https: new https.Agent({ keepAlive: true, maxSockets: 8 }) };
@@ -194,6 +225,7 @@ export function createIo(options: { timeoutMs: number; dist?: string }): CliIo {
     fetchRaw: (url, headers) => requestRaw(url, headers, timeoutMs, agents),
     readLocal: options.dist ? createLocalDist(options.dist) : undefined,
     connectCollab,
+    connectBareCollab,
     now: () => Date.now(),
     close: () => {
       agents.http.destroy();

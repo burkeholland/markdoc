@@ -27,7 +27,16 @@ import {
 
 export { hydrateDoc, META_KEY, TEXT_KEY };
 
-export type CollabContext = CollabClaims & { version?: 2; principal?: "user" | "token" };
+export interface CollabPreAuthentication {
+  accepted(): boolean;
+  rejected(): void;
+}
+
+export type CollabContext = CollabClaims & {
+  version?: 2;
+  principal?: "user" | "token";
+  preAuthentication?: CollabPreAuthentication;
+};
 
 /** Interval after which a new automatic version snapshot is taken while editing. */
 export const AUTO_VERSION_INTERVAL_MS = Number(process.env.AUTO_VERSION_INTERVAL_MS ?? 10 * 60 * 1000);
@@ -74,20 +83,28 @@ export function createCollabServer() {
     // no buffering here, so every update / awareness change reaches it with its origin still known.
     flushDelay: false,
 
-    async onAuthenticate({ token, documentName, connectionConfig }: onAuthenticatePayload<CollabContext>) {
-      let claims: VerifiedCollabClaims;
+    async onAuthenticate({ token, documentName, connectionConfig, context }: onAuthenticatePayload<CollabContext>) {
       try {
-        claims = await verifyCollabToken(token);
-      } catch (err) {
-        // Hocuspocus logs this message as `[onAuthenticate] …`; the client only ever receives
-        // `permission-denied` (it then fetches a fresh token), so the reason is for the server log alone.
-        throw new Error(collabTokenFailureMessage(err));
+        let claims: VerifiedCollabClaims;
+        try {
+          claims = await verifyCollabToken(token);
+        } catch (err) {
+          // Hocuspocus logs this message as `[onAuthenticate] …`; the client only ever receives
+          // `permission-denied` (it then fetches a fresh token), so the reason is for the server log alone.
+          throw new Error(collabTokenFailureMessage(err));
+        }
+        if (claims.docId !== documentName) throw new Error("Token does not match document");
+        const current = await resolveStableCollabAccess(claims);
+        if (!current) throw unauthorizedCollabError();
+        if (context.preAuthentication && !context.preAuthentication.accepted()) throw unauthorizedCollabError();
+        connectionConfig.readOnly = !canEdit(current.role);
+        return current;
+      } catch (error) {
+        context.preAuthentication?.rejected();
+        throw error;
+      } finally {
+        delete context.preAuthentication;
       }
-      if (claims.docId !== documentName) throw new Error("Token does not match document");
-      const current = await resolveStableCollabAccess(claims);
-      if (!current) throw unauthorizedCollabError();
-      connectionConfig.readOnly = !canEdit(current.role);
-      return current;
     },
 
     async connected({ connection, context }: connectedPayload<CollabContext>) {

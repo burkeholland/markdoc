@@ -190,13 +190,14 @@ async function main() {
   const hocuspocus = createCollabServer();
   registerCollab(hocuspocus);
   if (standbyPort === 0) startGistAutoUpdateWorker();
+  const collabShutdown = new AbortController();
   // Install Next's HMR listener before reporting readiness. Next otherwise waits for the first HTTP
   // request, leaving a browser that survived a restart unable to reconnect through WebSockets alone.
   const protectCollabUpgrade = protectUpgradePath(server, COLLAB_PATH);
   setupNextWebSocketHandler(app, server);
   protectCollabUpgrade();
   server.off("upgrade", rejectStartupUpgrade);
-  attachCollab(server, hocuspocus, { path: COLLAB_PATH });
+  attachCollab(server, hocuspocus, { path: COLLAB_PATH, signal: collabShutdown.signal });
 
   const purgeTrash = () =>
     purgeTrashOlderThan(TRASH_RETENTION_DAYS)
@@ -287,6 +288,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`> [exit] ${signal} after ${uptime()}; shutting down, flushing documents...`);
+    collabShutdown.abort();
     server.close();
     standby?.close();
     let exitCode = 0;
