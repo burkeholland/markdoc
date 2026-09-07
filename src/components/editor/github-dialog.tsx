@@ -137,6 +137,17 @@ interface ListLoadState<T> {
   pending: boolean;
 }
 
+type ListLoadAuthority =
+  | Readonly<{ kind: "gists"; visit: number }>
+  | Readonly<{ kind: "repositories"; visit: number }>
+  | Readonly<{ kind: "branches"; visit: number; owner: string; repo: string; fullName: string }>
+  | Readonly<{ kind: "files"; visit: number; owner: string; repo: string; fullName: string; branch: string }>;
+
+interface ListRequestOwner {
+  readonly authority: ListLoadAuthority;
+  readonly token: symbol;
+}
+
 function initialListLoadState<T>(): ListLoadState<T> {
   return { items: null, error: null, pending: false };
 }
@@ -146,51 +157,68 @@ function listLoadErrorText(error: unknown, fallback: string): string {
   return reason ? `${fallback} ${reason}` : fallback;
 }
 
-function useListLoad<T>() {
+function useListLoad<T>(authority: ListLoadAuthority | null) {
   const [state, setState] = useState<ListLoadState<T>>(initialListLoadState);
-  const requestSequence = useRef(0);
-  const requestPending = useRef(false);
+  const authorityRef = useRef<ListLoadAuthority | null>(null);
+  const requestOwnerRef = useRef<ListRequestOwner | null>(null);
 
-  useEffect(
-    () => () => {
-      requestSequence.current += 1;
-      requestPending.current = false;
+  useLayoutEffect(() => {
+    authorityRef.current = authority;
+    if (requestOwnerRef.current?.authority !== authority) {
+      requestOwnerRef.current = null;
+      setState((current) => (current.pending ? initialListLoadState<T>() : current));
+    }
+    return () => {
+      if (authorityRef.current === authority) authorityRef.current = null;
+      if (requestOwnerRef.current?.authority === authority) requestOwnerRef.current = null;
+    };
+  }, [authority]);
+
+  const load = useCallback(
+    (request: () => Promise<T[]>, fallback: string) => {
+      if (!authority || authorityRef.current !== authority || requestOwnerRef.current) return;
+      const owner: ListRequestOwner = { authority, token: Symbol(authority.kind) };
+      requestOwnerRef.current = owner;
+      setState((current) => ({ ...current, pending: true }));
+      const ownsRequest = () => authorityRef.current === authority && requestOwnerRef.current === owner;
+
+      let response: Promise<T[]>;
+      try {
+        response = request();
+      } catch (error) {
+        response = Promise.reject(error);
+      }
+
+      void response
+        .then((items) => {
+          if (!ownsRequest()) return;
+          setState({ items, error: null, pending: true });
+        })
+        .catch((error: unknown) => {
+          if (!ownsRequest()) return;
+          setState({ items: null, error: listLoadErrorText(error, fallback), pending: true });
+        })
+        .finally(() => {
+          if (!ownsRequest()) return;
+          requestOwnerRef.current = null;
+          setState((current) => ({ ...current, pending: false }));
+        });
     },
-    [],
+    [authority],
   );
 
-  const load = useCallback((request: () => Promise<T[]>, fallback: string) => {
-    if (requestPending.current) return;
-    requestPending.current = true;
-    const sequence = ++requestSequence.current;
-    setState((current) => ({ ...current, pending: true }));
+  const retire = useCallback(
+    (reset: boolean) => {
+      if (!authority || authorityRef.current !== authority) return;
+      authorityRef.current = null;
+      if (requestOwnerRef.current?.authority === authority) requestOwnerRef.current = null;
+      setState((current) => (reset || current.pending ? initialListLoadState<T>() : current));
+    },
+    [authority],
+  );
 
-    void (async () => {
-      try {
-        const items = await request();
-        if (sequence !== requestSequence.current) return;
-        requestPending.current = false;
-        setState({ items, error: null, pending: false });
-      } catch (error) {
-        if (sequence !== requestSequence.current) return;
-        requestPending.current = false;
-        setState({ items: null, error: listLoadErrorText(error, fallback), pending: false });
-      }
-    })();
-  }, []);
-
-  const invalidate = useCallback(() => {
-    requestSequence.current += 1;
-    requestPending.current = false;
-    setState((current) => (current.pending ? initialListLoadState<T>() : current));
-  }, []);
-
-  const reset = useCallback(() => {
-    requestSequence.current += 1;
-    requestPending.current = false;
-    setState(initialListLoadState<T>());
-  }, []);
-
+  const invalidate = useCallback(() => retire(false), [retire]);
+  const reset = useCallback(() => retire(true), [retire]);
   return { state, load, invalidate, reset };
 }
 
@@ -237,10 +265,6 @@ function GitHubPickerVisit({
   githubConfigured,
 }: GitHubPickerProps) {
   const [tab, setTab] = useState<Tab>("gist");
-  const { state: gistList, load: startGistLoad, invalidate: invalidateGistLoad } = useListLoad<GistItem>();
-  const { state: repoList, load: startRepoLoad, invalidate: invalidateRepoLoad } = useListLoad<RepoItem>();
-  const { state: branchList, load: startBranchLoad, invalidate: invalidateBranchLoad, reset: resetBranchLoad } = useListLoad<string>();
-  const { state: fileList, load: startFileLoad, invalidate: invalidateFileLoad, reset: resetFileLoad } = useListLoad<{ path: string }>();
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState("");
@@ -253,6 +277,32 @@ function GitHubPickerVisit({
   const [branch, setBranch] = useState("");
   const [path, setPath] = useState("");
   const [visit] = useState(() => ++githubPickerVisitSequence);
+  const gistAuthority = useMemo<ListLoadAuthority | null>(
+    () => (githubAvailable && tab === "gist" ? { kind: "gists", visit } : null),
+    [githubAvailable, tab, visit],
+  );
+  const repoAuthority = useMemo<ListLoadAuthority | null>(
+    () => (githubAvailable && tab === "repo" && !repo ? { kind: "repositories", visit } : null),
+    [githubAvailable, repo, tab, visit],
+  );
+  const branchAuthority = useMemo<ListLoadAuthority | null>(
+    () =>
+      githubAvailable && tab === "repo" && repo
+        ? { kind: "branches", visit, owner: repo.owner, repo: repo.name, fullName: repo.fullName }
+        : null,
+    [githubAvailable, repo, tab, visit],
+  );
+  const fileAuthority = useMemo<ListLoadAuthority | null>(
+    () =>
+      githubAvailable && tab === "repo" && repo && branch
+        ? { kind: "files", visit, owner: repo.owner, repo: repo.name, fullName: repo.fullName, branch }
+        : null,
+    [branch, githubAvailable, repo, tab, visit],
+  );
+  const { state: gistList, load: startGistLoad, invalidate: invalidateGistLoad } = useListLoad<GistItem>(gistAuthority);
+  const { state: repoList, load: startRepoLoad, invalidate: invalidateRepoLoad } = useListLoad<RepoItem>(repoAuthority);
+  const { state: branchList, load: startBranchLoad, invalidate: invalidateBranchLoad, reset: resetBranchLoad } = useListLoad<string>(branchAuthority);
+  const { state: fileList, load: startFileLoad, invalidate: invalidateFileLoad, reset: resetFileLoad } = useListLoad<{ path: string }>(fileAuthority);
   const mountedRef = useRef(false);
   const activeOperationRef = useRef<GitHubPickerOperation | null>(null);
   const onLinkedRef = useRef(onLinked);
@@ -272,33 +322,32 @@ function GitHubPickerVisit({
   }, [onImported, onLinked]);
 
   const loadGists = useCallback(() => {
-    if (tab !== "gist") return;
+    if (!gistAuthority) return;
     startGistLoad(async () => (await api.github.gists()).gists, "Could not load gists.");
-  }, [startGistLoad, tab]);
+  }, [gistAuthority, startGistLoad]);
 
   const loadRepos = useCallback(() => {
-    if (tab !== "repo" || repo) return;
+    if (!repoAuthority) return;
     startRepoLoad(async () => (await api.github.repos()).repos, "Could not load repositories.");
-  }, [repo, startRepoLoad, tab]);
+  }, [repoAuthority, startRepoLoad]);
 
   const loadBranches = useCallback(() => {
-    if (tab !== "repo" || !repo) return;
-    const currentRepo = repo;
+    if (!branchAuthority || branchAuthority.kind !== "branches") return;
+    const source = branchAuthority;
     startBranchLoad(
-      async () => (await api.github.branches(currentRepo.owner, currentRepo.name)).branches,
-      `Could not load branches for ${currentRepo.fullName}.`,
+      async () => (await api.github.branches(source.owner, source.repo)).branches,
+      `Could not load branches for ${source.fullName}.`,
     );
-  }, [repo, startBranchLoad, tab]);
+  }, [branchAuthority, startBranchLoad]);
 
   const loadFiles = useCallback(() => {
-    if (tab !== "repo" || !repo || !branch) return;
-    const currentRepo = repo;
-    const currentBranch = branch;
+    if (!fileAuthority || fileAuthority.kind !== "files") return;
+    const source = fileAuthority;
     startFileLoad(
-      async () => (await api.github.files(currentRepo.owner, currentRepo.name, currentBranch)).files,
-      `Could not load files from ${currentRepo.fullName} on ${currentBranch}.`,
+      async () => (await api.github.files(source.owner, source.repo, source.branch)).files,
+      `Could not load files from ${source.fullName} on ${source.branch}.`,
     );
-  }, [branch, repo, startFileLoad, tab]);
+  }, [fileAuthority, startFileLoad]);
 
   useEffect(() => {
     if (!githubAvailable) return;
