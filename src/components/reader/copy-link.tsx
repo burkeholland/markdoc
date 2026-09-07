@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, Link2 } from "lucide-react";
 import { useCopy } from "@/lib/hooks";
 
 /** Copies this document's canonical public URL without pulling the reader shell into the client graph. */
 export function ReaderCopyLink({ docId }: { docId: string }) {
   const [origin, setOrigin] = useState("");
-  const [showFallback, setShowFallback] = useState(false);
   const fallbackRef = useRef<HTMLInputElement>(null);
 
   // The browser's origin is canonical for this visit and keeps proxy headers out of the server render.
@@ -15,16 +14,11 @@ export function ReaderCopyLink({ docId }: { docId: string }) {
   const readerUrl = origin ? `${origin}/p/${docId}` : "";
   const link = useCopy(readerUrl, fallbackRef, "Copy link");
 
-  useEffect(() => {
-    if (link.status === "fallback") setShowFallback(true);
-    else if (link.status === "copied") setShowFallback(false);
-  }, [link.status]);
-
-  useEffect(() => {
-    if (!showFallback) return;
+  useLayoutEffect(() => {
+    if (link.status !== "fallback") return;
     fallbackRef.current?.focus({ preventScroll: true });
     fallbackRef.current?.select();
-  }, [showFallback]);
+  }, [link.status, readerUrl]);
 
   const visibleLabel = link.copied ? "Copied" : "Copy link";
   return (
@@ -42,7 +36,7 @@ export function ReaderCopyLink({ docId }: { docId: string }) {
           {visibleLabel}
         </span>
       </button>
-      {showFallback && (
+      {link.status === "fallback" && (
         <input
           ref={fallbackRef}
           className="input absolute right-0 top-full z-20 mt-2 w-[min(24rem,calc(100vw-2rem))] font-mono text-xs shadow-md"
