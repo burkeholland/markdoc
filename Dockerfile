@@ -68,7 +68,7 @@ COPY --chown=node:node --from=build /app/src/server/og/fonts ./src/server/og/fon
 COPY --chown=node:node --from=build /app/drizzle ./drizzle
 COPY --chown=node:node --from=build /app/next.config.ts ./next.config.ts
 COPY --chown=node:node --from=build /app/scripts/lib/dev-origins.mjs ./scripts/lib/dev-origins.mjs
-# .data is where PGlite writes when no DATABASE_URL is given (mount a volume there to keep it).
+# .data is retained only for explicit local/isolated production-image rehearsals that opt into PGlite.
 # /app itself must belong to node so that `npm ci` can create node_modules. The chown is recursive
 # only over what is here so far (≈ 230 KB, which the chmod re-writes into this layer anyway): the
 # classic builder leaves the parent directories it creates for a directory COPY (src/, src/server/,
@@ -76,8 +76,8 @@ COPY --chown=node:node --from=build /app/scripts/lib/dev-origins.mjs ./scripts/l
 RUN mkdir -p /app/.data && chown -R node:node /app && chmod -R go-w /app
 # Run as the unprivileged user that ships with the image from here on (build steps included).
 USER node
-# Runtime dependencies only. @electric-sql/pglite ships its WASM/data files inside the package, so
-# the embedded database (used when DATABASE_URL is not set) needs nothing else copied. npm's cache
+# Runtime dependencies only. @electric-sql/pglite ships its WASM/data files for those explicit
+# rehearsals; ordinary production requires a nonblank DATABASE_URL. npm's cache
 # lands in /home/node/.npm; the clean empties it in the same layer.
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --chown=node:node --from=build /app/.next ./.next
