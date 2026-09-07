@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Loader2, Plus, Send, Trash2, Webhook } from "lucide-react";
+import { Check, Copy, Loader2, Plus, Power, Send, Trash2, Webhook } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
 import { ApiError, apiErrorText } from "@/lib/api";
@@ -63,6 +63,7 @@ function deliveryLabel(h: WebhookRow): { text: string; tone: "ok" | "bad" | "mut
   const d = h.lastDelivery;
   const ok = d.status >= 200 && d.status < 300;
   if (ok) return { text: `${d.status} · ${relativeTime(d.at)}`, tone: "ok" };
+  if (h.failures === 0) return { text: `enabled · last attempt ${d.status || "no response"} · ${relativeTime(d.at)}`, tone: "muted" };
   return { text: `failed ×${h.failures}${d.status ? ` · ${d.status}` : " · no response"} · ${relativeTime(d.at)}`, tone: "bad" };
 }
 
@@ -74,6 +75,7 @@ export function WebhooksPanel() {
   const [docs, setDocs] = useState("");
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
+  const [enabling, setEnabling] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: string; secret: string; url: string } | null>(null);
 
@@ -134,6 +136,19 @@ export function WebhooksPanel() {
     }
   };
 
+  const enable = async (h: WebhookRow) => {
+    setEnabling((ids) => [...ids, h.id]);
+    setError(null);
+    try {
+      await request<{ webhook: WebhookRow }>(`/api/webhooks/${h.id}/enable`, { method: "POST" });
+      await load();
+    } catch (e) {
+      setError(apiErrorText(e, "Could not enable webhook"));
+    } finally {
+      setEnabling((ids) => ids.filter((id) => id !== h.id));
+    }
+  };
+
   return (
     <div className="rounded-2xl border border-line bg-surface" id="webhooks" data-testid="webhooks-card">
       <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-sm font-semibold text-ink">
@@ -145,7 +160,7 @@ export function WebhooksPanel() {
       <p className="px-5 pt-3 text-sm leading-6 text-ink-3">
         Push the events <code className="text-xs">markdoc_watch</code> returns to an HTTP endpoint instead of long-polling: a GitHub Actions job, a bot, a Slack bridge. Each
         delivery is a JSON <code className="text-xs">POST</code> with <code className="text-xs">X-Markdoc-Event</code>, <code className="text-xs">X-Markdoc-Delivery</code> and{" "}
-        <code className="text-xs">X-Markdoc-Signature: sha256=&lt;HMAC of the body&gt;</code>; failures are retried after 10 s, 1 min and 10 min, and a hook is disabled after 20 in a row.
+        <code className="text-xs">X-Markdoc-Signature: sha256=&lt;HMAC of the body&gt;</code>; failures are retried after 10 s, 1 min and 10 min, and a hook is disabled after 20 in a row. After fixing the receiver, enable the same hook here without changing its signing secret.
       </p>
 
       {adding && (
@@ -223,6 +238,7 @@ export function WebhooksPanel() {
         <ul className="mt-3 divide-y divide-line border-t border-line">
           {hooks.map((h) => {
             const status = deliveryLabel(h);
+            const enablePending = enabling.includes(h.id);
             return (
               <li key={h.id} className="flex items-center gap-4 px-5 py-3" data-testid="webhook-row">
                 <div className="min-w-0 flex-1">
@@ -235,10 +251,15 @@ export function WebhooksPanel() {
                 <div className={`shrink-0 text-xs ${status.tone === "ok" ? "text-success" : status.tone === "bad" ? "text-danger" : "text-ink-3"}`} data-testid="webhook-status">
                   {status.text}
                 </div>
-                <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void test(h)} disabled={testing === h.id} data-testid="webhook-test">
+                {!h.active && (
+                  <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void enable(h)} disabled={enablePending} data-testid="webhook-enable">
+                    {enablePending ? <Loader2 size={14} className="animate-spin" /> : <Power size={14} />} Enable
+                  </button>
+                )}
+                <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void test(h)} disabled={testing === h.id || enablePending} data-testid="webhook-test">
                   {testing === h.id ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Send test
                 </button>
-                <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void remove(h)} aria-label={`Delete webhook ${h.url}`} data-testid="webhook-delete">
+                <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void remove(h)} disabled={enablePending} aria-label={`Delete webhook ${h.url}`} data-testid="webhook-delete">
                   <Trash2 size={15} />
                 </button>
               </li>
