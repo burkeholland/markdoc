@@ -52,6 +52,25 @@ interface TokensPanelProps {
   onClose?: () => void;
 }
 
+type TokenMutationKind = "rename" | "replace" | "revoke" | "collaborators";
+
+interface MountedOperation {
+  mount: symbol;
+}
+
+interface CreateOperation extends MountedOperation {
+  name: string;
+  expires: string;
+  scope: TokenScopeName;
+  restrict: boolean;
+  documentIds: string[];
+}
+
+interface TokenOperation extends MountedOperation {
+  id: string;
+  kind: TokenMutationKind;
+}
+
 /** Closing a host dialog unmounts all transient state, including late creation responses. */
 export function TokensPanel({ open = true, ...props }: TokensPanelProps) {
   return open ? <TokenManager key={props.documentId ?? "settings"} {...props} /> : null;
@@ -69,42 +88,68 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const [documentIds, setDocumentIds] = useState<string[]>(documentId ? [documentId] : []);
   const [documents, setDocuments] = useState<DocumentSummaryDto[] | null>(null);
   const [documentError, setDocumentError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [createPending, setCreatePending] = useState<CreateOperation | null>(null);
+  const [pendingActions, setPendingActions] = useState<Record<string, TokenOperation>>({});
   const [error, setError] = useState<string | null>(null);
   const [conflictName, setConflictName] = useState<string | null>(null);
-  const [switchError, setSwitchError] = useState<{ id: string; message: string } | null>(null);
-  const [switching, setSwitching] = useState<string[]>([]);
+  const [switchErrors, setSwitchErrors] = useState<Record<string, string>>({});
   const [created, setCreated] = useState<CreatedApiTokenDto | null>(null);
   const liveOrigin = useOrigin(origin);
   const id = useId();
   const tokensButton = useRef<HTMLButtonElement>(null);
-  const alive = useRef(true);
+  const mounted = useRef<symbol | null>(null);
+  const createOwner = useRef<CreateOperation | null>(null);
+  const tokenOwners = useRef(new Map<string, TokenOperation>());
+  const latestTokenOperations = useRef(new Map<string, TokenOperation>());
+  const createdRef = useRef<CreatedApiTokenDto | null>(null);
   const loadSeq = useRef(0);
-  const pendingFlips = useRef(new Map<string, { value: boolean }>());
+  const pendingFlips = useRef(new Map<string, { value: boolean; owner: TokenOperation }>());
   const updatedRows = useRef(new Map<string, ApiTokenDto>());
+  const busy = createPending !== null;
+  const secretWorkPending = busy || Object.values(pendingActions).some((operation) => operation.kind === "replace");
+  const blockingTokenActionPending = Object.values(pendingActions).some((operation) => operation.kind !== "collaborators");
   const restrictionError = restrict && documentIds.length === 0 ? "Select at least one document when restricting a token." : null;
   const managementLink = documentId ? `/settings?next=${encodeURIComponent(`/d/${documentId}`)}#tokens` : "/settings#tokens";
   const matching = conflictName ? tokens?.find((t) => tokenState(t) === "Active" && agentMentionSlug(t.name).toLowerCase() === agentMentionSlug(conflictName).toLowerCase()) : null;
 
   useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; };
+    const mount = Symbol("token-manager");
+    const owners = tokenOwners.current;
+    const latestOperations = latestTokenOperations.current;
+    const flips = pendingFlips.current;
+    mounted.current = mount;
+    return () => {
+      if (mounted.current === mount) mounted.current = null;
+      if (createOwner.current?.mount === mount) createOwner.current = null;
+      for (const [tokenId, operation] of owners) {
+        if (operation.mount === mount) owners.delete(tokenId);
+      }
+      for (const [tokenId, operation] of latestOperations) {
+        if (operation.mount === mount) latestOperations.delete(tokenId);
+      }
+      for (const [tokenId, pending] of flips) {
+        if (pending.owner.mount === mount) flips.delete(tokenId);
+      }
+      createdRef.current = null;
+    };
   }, []);
-  const load = useCallback(async () => {
+  const load = useCallback(async (ownerCurrent?: () => boolean) => {
+    const mount = mounted.current;
+    if (!mount || (ownerCurrent && !ownerCurrent())) return;
     const seq = ++loadSeq.current;
     updatedRows.current.clear();
     setLoadError(null);
+    const current = () => mounted.current === mount && seq === loadSeq.current && (!ownerCurrent || ownerCurrent());
     try {
       const res = await api.tokens.list(true);
-      if (!alive.current || seq !== loadSeq.current) return;
+      if (!current()) return;
       // Keep rows added or revoked by this reload without overwriting newer metadata edits.
       setTokens(res.tokens.map((row) => {
         const updated = updatedRows.current.get(row.id) ?? row;
         return { ...updated, collaboratorsMayAsk: pendingFlips.current.get(row.id)?.value ?? updated.collaboratorsMayAsk };
       }));
     } catch (e) {
-      if (!alive.current || seq !== loadSeq.current) return;
+      if (!current()) return;
       setTokens(null);
       setLoadError({ message: apiErrorText(e, "Failed to load tokens"), permission: e instanceof ApiError && (e.status === 401 || e.status === 403) });
     }
@@ -119,91 +164,151 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   }, [restrict, documentId, documents, documentError]);
   useEffect(() => {
     if (embedded) return;
-    const readHash = () => setDestination(window.location.hash === "#connect" ? "connect" : "tokens");
+    const readHash = () => {
+      if (createOwner.current || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace")) return;
+      setDestination(window.location.hash === "#connect" ? "connect" : "tokens");
+    };
     readHash();
     window.addEventListener("hashchange", readHash);
     return () => window.removeEventListener("hashchange", readHash);
   }, [embedded]);
 
+  const isCreateCurrent = (operation: CreateOperation) =>
+    mounted.current === operation.mount && createOwner.current === operation;
+  const isTokenCurrent = (operation: TokenOperation) =>
+    mounted.current === operation.mount && tokenOwners.current.get(operation.id) === operation;
+  const isLatestTokenOperation = (operation: TokenOperation) =>
+    mounted.current === operation.mount && latestTokenOperations.current.get(operation.id) === operation;
+  const hasSecretWork = () =>
+    createOwner.current !== null || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace");
+  const tokenOperationBlocked = (tokenId: string, kind: TokenMutationKind) =>
+    tokenOwners.current.has(tokenId)
+    || (kind === "replace" && (createdRef.current !== null || hasSecretWork()));
+  const beginTokenOperation = (tokenId: string, kind: TokenMutationKind) => {
+    const mount = mounted.current;
+    if (!mount || tokenOperationBlocked(tokenId, kind)) return null;
+    const operation: TokenOperation = { mount, id: tokenId, kind };
+    tokenOwners.current.set(tokenId, operation);
+    latestTokenOperations.current.set(tokenId, operation);
+    setPendingActions((current) => ({ ...current, [tokenId]: operation }));
+    return operation;
+  };
+  const finishTokenOperation = (operation: TokenOperation) => {
+    if (!isTokenCurrent(operation)) return;
+    tokenOwners.current.delete(operation.id);
+    setPendingActions((current) => {
+      if (current[operation.id] !== operation) return current;
+      const next = { ...current };
+      delete next[operation.id];
+      return next;
+    });
+  };
+  const showCreated = (value: CreatedApiTokenDto) => {
+    createdRef.current = value;
+    setCreated(value);
+  };
+  const dismissCreated = () => {
+    createdRef.current = null;
+    setCreated(null);
+  };
+
   const create = async () => {
     if (restrictionError) { setError(restrictionError); return; }
-    setBusy(true);
+    const mount = mounted.current;
+    if (!mount || createOwner.current || createdRef.current || [...tokenOwners.current.values()].some((operation) => operation.kind !== "collaborators")) return;
+    const operation: CreateOperation = { mount, name, expires, scope, restrict, documentIds: [...documentIds] };
+    createOwner.current = operation;
+    setCreatePending(operation);
     setError(null);
     setConflictName(null);
     try {
-      const res = await api.tokens.create(name, expires === "never" ? null : Number(expires), { scope, documentIds: restrict ? documentIds : null });
-      if (!alive.current) return;
-      setCreated(res.token);
-      await load();
+      const res = await api.tokens.create(operation.name, operation.expires === "never" ? null : Number(operation.expires), {
+        scope: operation.scope,
+        documentIds: operation.restrict ? operation.documentIds : null,
+      });
+      if (!isCreateCurrent(operation)) return;
+      showCreated(res.token);
+      await load(() => isCreateCurrent(operation));
     } catch (e) {
-      if (!alive.current) return;
+      if (!isCreateCurrent(operation)) return;
       setError(apiErrorText(e, "Could not create token"));
       if (e instanceof ApiError && e.status === 409) {
-        setConflictName(name);
-        await load();
+        setConflictName(operation.name);
+        await load(() => isCreateCurrent(operation));
       }
     } finally {
-      if (alive.current) setBusy(false);
+      if (isCreateCurrent(operation)) {
+        createOwner.current = null;
+        setCreatePending((current) => current === operation ? null : current);
+      }
     }
   };
 
   const changeToken = async (token: ApiTokenDto, action: "rename" | "replace" | "revoke", newName?: string): Promise<boolean> => {
+    if (tokenOperationBlocked(token.id, action)) return false;
     if (action === "revoke" && !window.confirm(`Revoke "${token.name}"? Every client using it will stop working immediately.`)) return false;
     if (action === "replace" && !window.confirm(`Replace "${token.name}"? Once the replacement is created, the old token stops working in every client. Update those clients with the new secret. Scope, documents and expiry stay unchanged. Continue?`)) return false;
-    setPendingAction(token.id);
+    const operation = beginTokenOperation(token.id, action);
+    if (!operation) return false;
     setError(null);
     try {
       if (action === "rename") {
         const res = await api.tokens.update(token.id, { name: newName });
-        if (!alive.current) return false;
+        if (!isTokenCurrent(operation)) return false;
         updatedRows.current.set(token.id, res.token);
-        setTokens((rows) => rows?.map((row) => row.id === token.id ? res.token : row) ?? null);
-        setCreated((value) => value?.id === token.id ? { ...value, name: res.token.name } : value);
+        setTokens((rows) => isLatestTokenOperation(operation) ? rows?.map((row) => row.id === token.id ? res.token : row) ?? null : rows);
+        if (createdRef.current?.id === token.id) showCreated({ ...createdRef.current, name: res.token.name });
       } else {
         if (action === "replace") {
           const res = await api.tokens.replace(token.id);
-          if (!alive.current) return false;
-          setCreated(res.token);
+          if (!isTokenCurrent(operation)) return false;
+          showCreated(res.token);
         } else {
           await api.tokens.revoke(token.id);
-          if (!alive.current) return false;
-          setCreated((value) => value?.id === token.id ? null : value);
+          if (!isTokenCurrent(operation)) return false;
+          if (createdRef.current?.id === token.id) dismissCreated();
         }
         tokensButton.current?.focus();
-        await load();
+        await load(() => isTokenCurrent(operation));
       }
       return true;
     } catch (e) {
-      if (alive.current) setError(apiErrorText(e, `Could not ${action} token`));
+      if (isTokenCurrent(operation)) setError(apiErrorText(e, `Could not ${action} token`));
       return false;
     } finally {
-      if (alive.current) setPendingAction(null);
+      finishTokenOperation(operation);
     }
   };
 
   const setCollaboratorsMayAsk = async (t: ApiTokenDto, value: boolean) => {
-    const flip = (value: boolean) => setTokens((rows) => rows?.map((row) => row.id === t.id ? { ...row, collaboratorsMayAsk: value } : row) ?? rows);
+    const operation = beginTokenOperation(t.id, "collaborators");
+    if (!operation) return;
+    const flip = (nextValue: boolean) => setTokens((rows) =>
+      isLatestTokenOperation(operation) ? rows?.map((row) => row.id === t.id ? { ...row, collaboratorsMayAsk: nextValue } : row) ?? rows : rows);
     flip(value);
-    setSwitchError(null);
-    const pending = { value };
+    setSwitchErrors((current) => {
+      if (!(t.id in current)) return current;
+      const next = { ...current };
+      delete next[t.id];
+      return next;
+    });
+    const pending = { value, owner: operation };
     pendingFlips.current.set(t.id, pending);
-    setSwitching((ids) => [...ids, t.id]);
     try {
       const res = await api.tokens.update(t.id, { collaboratorsMayAsk: value });
-      if (!alive.current) return;
-      if (pendingFlips.current.get(t.id) === pending) {
+      if (isTokenCurrent(operation) && pendingFlips.current.get(t.id) === pending) {
         updatedRows.current.set(t.id, res.token);
-        setTokens((rows) => rows?.map((row) => row.id === t.id ? res.token : row) ?? rows);
+        setTokens((rows) => isLatestTokenOperation(operation) ? rows?.map((row) => row.id === t.id ? res.token : row) ?? rows : rows);
       }
     } catch (e) {
-      if (!alive.current || pendingFlips.current.get(t.id) !== pending) return;
+      if (!isTokenCurrent(operation) || pendingFlips.current.get(t.id) !== pending) return;
       flip(!value);
-      setSwitchError({ id: t.id, message: `Could not update “${t.name}”: ${apiErrorText(e, "The change was not saved")}` });
+      setSwitchErrors((current) => ({ ...current, [t.id]: `Could not update “${t.name}”: ${apiErrorText(e, "The change was not saved")}` }));
     } finally {
-      if (pendingFlips.current.get(t.id) === pending) {
+      if (isTokenCurrent(operation) && pendingFlips.current.get(t.id) === pending) {
         pendingFlips.current.delete(t.id);
-        if (alive.current) setSwitching((ids) => ids.filter((id) => id !== t.id));
       }
+      finishTokenOperation(operation);
     }
   };
 
@@ -212,16 +317,23 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       {!embedded && <div>
         <h1 className="flex items-center gap-2 text-xl font-semibold text-ink"><KeyRound size={20} /> Tokens &amp; MCP</h1>
         <p className="mt-1 text-sm text-ink-3">Manage tokens for {userLogin}. Agents can never do more than you can.</p>
-        {next && <a className="btn btn-outline btn-sm mt-3 gap-1.5" href={next} data-testid="settings-back-to-document"><ArrowLeft size={14} /> Back to the document</a>}
+        {next && <a className={cn("btn btn-outline btn-sm mt-3 gap-1.5", secretWorkPending && "pointer-events-none opacity-50")}
+          href={next} aria-disabled={secretWorkPending || undefined} tabIndex={secretWorkPending ? -1 : undefined}
+          onClick={(event) => { if (hasSecretWork()) event.preventDefault(); }} data-testid="settings-back-to-document">
+          <ArrowLeft size={14} /> Back to the document
+        </a>}
       </div>}
       <div className={cn("flex flex-wrap items-start gap-2", embedded && "sticky top-0 z-10 bg-surface py-2")}>
       <nav className="flex min-w-0 flex-wrap gap-2" aria-label="Token access">
         <button ref={tokensButton} type="button" className={cn("btn btn-sm", destination === "tokens" ? "btn-primary" : "btn-outline")}
-          aria-pressed={destination === "tokens"} onClick={() => setDestination("tokens")}>Tokens</button>
+         aria-pressed={destination === "tokens"} disabled={secretWorkPending}
+         onClick={() => { if (!hasSecretWork()) setDestination("tokens"); }}>Tokens</button>
         <button type="button" className={cn("btn btn-sm whitespace-normal text-left", destination === "connect" ? "btn-primary" : "btn-outline")}
-          aria-pressed={destination === "connect"} onClick={() => setDestination("connect")}>Connect an MCP client</button>
+         aria-pressed={destination === "connect"} disabled={secretWorkPending}
+         onClick={() => { if (!hasSecretWork()) setDestination("connect"); }}>Connect an MCP client</button>
       </nav>
-      {onClose && <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Close token management</button>}
+      {onClose && <button type="button" className="btn btn-ghost btn-sm" disabled={secretWorkPending}
+       onClick={() => { if (!hasSecretWork()) onClose(); }}>Close token management</button>}
       </div>
       <p className="text-xs leading-5 text-ink-3">Existing secrets cannot be shown again. Rename changes only the name; replace creates a new secret.</p>
       {error && <p role="alert" aria-atomic="true" className="text-sm text-danger">{error}</p>}
@@ -230,7 +342,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
           : "That name is reserved by an existing token, but it could not be matched to this list. Retry the list or open all your tokens in a signed-in browser session; do not create another until the scope and account are clear."}
         {!matching && <button type="button" className="btn btn-outline btn-sm mt-2" disabled={busy} onClick={() => void load()}>Refresh token list</button>}
       </p>}
-      {created && <SecretNotice created={created} onDismiss={() => { setCreated(null); tokensButton.current?.focus(); }} />}
+      {created && <SecretNotice created={created} onDismiss={() => { dismissCreated(); tokensButton.current?.focus(); }} />}
       <section className="min-w-0 rounded-xl border border-line bg-surface" aria-label="Your tokens">
         <h2 className="border-b border-line px-3 py-2 text-sm font-semibold text-ink">Your tokens</h2>
         {loadError ? <div className="p-3 text-sm">
@@ -241,27 +353,29 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
           : tokens.length === 0 ? <p className="p-3 text-sm text-ink-3">No tokens yet.</p>
             : <ul className="divide-y divide-line">
               {tokens.map((t) => <TokenRow key={t.id} token={t} documentId={documentId} matching={matching?.id === t.id}
-                disabled={pendingAction !== null || switching.includes(t.id)} replacementDisabled={Boolean(created) || busy}
+             disabled={Boolean(pendingActions[t.id])} replacementDisabled={Boolean(created) || secretWorkPending}
                 onAction={(action, newName) => changeToken(t, action, newName)}
                 onCollaboratorsChange={() => void setCollaboratorsMayAsk(t, !t.collaboratorsMayAsk)}
-                switchError={switchError?.id === t.id ? switchError.message : null} />)}
+             switchError={switchErrors[t.id] ?? null} />)}
             </ul>}
       </section>
-      {embedded && <a className="w-fit text-sm font-medium text-accent hover:underline" href={managementLink}>Open all your tokens in Settings</a>}
+      {embedded && <a className={cn("w-fit text-sm font-medium text-accent hover:underline", secretWorkPending && "pointer-events-none opacity-50")}
+        href={managementLink} aria-disabled={secretWorkPending || undefined} tabIndex={secretWorkPending ? -1 : undefined}
+        onClick={(event) => { if (hasSecretWork()) event.preventDefault(); }}>Open all your tokens in Settings</a>}
       {destination === "connect" ? <div id={embedded ? undefined : "connect"} className="min-w-0">
         <p className="mb-3 text-sm text-ink-2">Choose a client and copy its setup. Put your saved token in the Authorization header where it says MARKDOC_TOKEN. No connection is needed to read these instructions.</p>
         <AgentConnectCard origin={liveOrigin} scope={created?.scope} hideTokenStep />
       </div> : <>
-        <button type="button" className="btn btn-outline w-fit gap-1.5" disabled={busy || tokens === null || Boolean(created) || pendingAction !== null}
+        <button type="button" className="btn btn-outline w-fit gap-1.5" disabled={busy || tokens === null || Boolean(created) || blockingTokenActionPending}
           aria-expanded={showCreate} aria-controls={`${id}-create`} onClick={() => setShowCreate((value) => !value)} data-testid="token-add">
           <Plus size={16} /> {showCreate ? "Cancel creation" : "Create token"}
         </button>
         {showCreate && <form id={`${id}-create`} className="flex min-w-0 flex-col gap-3 rounded-xl border border-line bg-surface p-3"
           onSubmit={(event) => { event.preventDefault(); void create(); }}>
           <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3">Name (shown as the agent)
-            <input className="input w-full min-w-0" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} data-testid="token-name" />
+           <input className="input w-full min-w-0" value={name} maxLength={80} disabled={busy} onChange={(e) => setName(e.target.value)} data-testid="token-name" />
           </label>
-          <fieldset className="flex flex-col gap-1.5" data-testid="token-scope">
+         <fieldset className="flex flex-col gap-1.5" disabled={busy} data-testid="token-scope">
             <legend className="mb-1 text-xs font-medium text-ink-3">Scope</legend>
             {SCOPES.map((s) => <label key={s} className="flex items-start gap-2 text-sm text-ink-2">
               <input type="radio" name={`${id}-scope`} checked={scope === s} onChange={() => setScope(s)} className="mt-1" data-testid={`token-scope-${s}`} />
@@ -269,27 +383,27 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
             </label>)}
           </fieldset>
           <label className="flex items-center gap-2 text-sm text-ink-2">
-            <input type="checkbox" checked={restrict} onChange={(e) => setRestrict(e.target.checked)} aria-invalid={Boolean(restrictionError)}
+           <input type="checkbox" checked={restrict} disabled={busy} onChange={(e) => setRestrict(e.target.checked)} aria-invalid={Boolean(restrictionError)}
               aria-describedby={`${id}-access`} data-testid="token-restrict" />
             {documentId ? "Only this document" : "Only these documents"}
           </label>
           <p id={`${id}-access`} className="text-xs text-ink-3" data-testid="token-document-access">{restrict ? "Every other document answers 404 to this token." : "This token will access all documents you can access."}</p>
           {restrict && !documentId && <div className="max-h-48 overflow-y-auto" data-testid="token-documents">
-            {documentError ? <><p role="alert" className="text-sm text-danger">{documentError}</p><button type="button" className="btn btn-sm btn-outline" onClick={() => setDocumentError(null)}>Retry documents</button></>
+           {documentError ? <><p role="alert" className="text-sm text-danger">{documentError}</p><button type="button" className="btn btn-sm btn-outline" disabled={busy} onClick={() => setDocumentError(null)}>Retry documents</button></>
               : documents === null ? <p className="text-xs text-ink-3">Loading your documents...</p>
                 : documents.length === 0 ? <p className="text-xs text-ink-3">No documents yet.</p>
                   : documents.map((d) => <label key={d.id} className="flex items-start gap-2 text-sm text-ink-2">
-                    <input type="checkbox" checked={documentIds.includes(d.id)} onChange={() => setDocumentIds((ids) => ids.includes(d.id) ? ids.filter((value) => value !== d.id) : [...ids, d.id])} data-testid={`token-document-${d.id}`} />
+                   <input type="checkbox" checked={documentIds.includes(d.id)} disabled={busy} onChange={() => setDocumentIds((ids) => ids.includes(d.id) ? ids.filter((value) => value !== d.id) : [...ids, d.id])} data-testid={`token-document-${d.id}`} />
                     <span className="min-w-0 break-words">{d.title}</span>
                   </label>)}
           </div>}
           {restrictionError && <p className="text-xs text-danger" role="alert" data-testid="token-document-error">{restrictionError}</p>}
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">Expires
-            <select className="select w-fit" value={expires} onChange={(e) => setExpires(e.target.value)}>
+           <select className="select w-fit" value={expires} disabled={busy} onChange={(e) => setExpires(e.target.value)}>
               <option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="never">Never</option>
             </select>
           </label>
-          <button type="submit" className="btn btn-primary w-fit gap-1.5" disabled={busy || pendingAction !== null || Boolean(created) || tokens === null || !name.trim() || Boolean(restrictionError)} data-testid="token-create">
+          <button type="submit" className="btn btn-primary w-fit gap-1.5" disabled={busy || blockingTokenActionPending || Boolean(created) || tokens === null || !name.trim() || Boolean(restrictionError)} data-testid="token-create">
             {busy && <Loader2 size={16} className="animate-spin" />} Create token
           </button>
         </form>}

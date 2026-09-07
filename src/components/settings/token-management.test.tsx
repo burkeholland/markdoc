@@ -26,8 +26,12 @@ const openCreate = async () => {
 };
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { resolve, promise };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { reject, resolve, promise };
 }
 
 beforeEach(() => {
@@ -223,6 +227,253 @@ describe("visible token management", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: `Revoke ${token.name}` })).toBeNull());
     expect(screen.getByTestId("token-row")).toHaveTextContent("Revoked");
     expect(mutations().every(([, init]) => init?.method === "DELETE")).toBe(true);
+  });
+});
+
+describe("synchronous mutation ownership", () => {
+  it("sends one create request and locks every secret-hiding control through the accepted reload", async () => {
+    const createRequest = deferred<Response>();
+    const reload = deferred<Response>();
+    const created = minted();
+    const onClose = vi.fn();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
+      .mockReturnValueOnce(createRequest.promise)
+      .mockReturnValueOnce(reload.promise);
+    render(<TokensPanel origin="https://markdoc.test" userLogin="alice" embedded onClose={onClose} />);
+    await openCreate();
+
+    const form = screen.getByTestId("token-name").closest("form")!;
+    act(() => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(mutations()).toHaveLength(1);
+    expect(screen.getByTestId("token-name")).toBeDisabled();
+    expect(screen.getByTestId("token-scope-comment")).toBeDisabled();
+    expect(screen.getByTestId("token-restrict")).toBeDisabled();
+    expect(screen.getByLabelText("Expires")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close token management" })).toBeDisabled();
+    expect(screen.getByRole("link", { name: "Open all your tokens in Settings" })).toHaveAttribute("aria-disabled", "true");
+    screen.getByRole("button", { name: "Close token management" }).click();
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => createRequest.resolve(response({ token: created }, 201)));
+    expect(await screen.findByTestId("token-created")).toBeVisible();
+    expect(screen.getByTestId("copy-token").textContent === created.token).toBe(true);
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close token management" })).toBeDisabled();
+    expect(copyText).not.toHaveBeenCalled();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    act(() => reload.resolve(response({ tokens: [token] })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close token management" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "Open all your tokens in Settings" })).not.toHaveAttribute("aria-disabled");
+    expect(fetchMock.mock.calls.filter(([, init]) => !init?.method || init.method === "GET")).toHaveLength(2);
+    screen.getByRole("button", { name: "Close token management" }).click();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the exact create form after failure and lets one retry show one secret and reload once", async () => {
+    const failed = deferred<Response>();
+    const retry = deferred<Response>();
+    const created = minted();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise)
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    renderPanel();
+    await openCreate();
+    fireEvent.change(screen.getByTestId("token-name"), { target: { value: "Retry agent" } });
+    fireEvent.click(screen.getByTestId("token-scope-full"));
+    fireEvent.change(screen.getByLabelText("Expires"), { target: { value: "30" } });
+    const form = screen.getByTestId("token-name").closest("form")!;
+
+    act(() => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(mutations()).toHaveLength(1);
+    act(() => failed.resolve(response({ error: "Create unavailable" }, 503)));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Create unavailable");
+    expect(screen.getByTestId("token-name")).toHaveValue("Retry agent");
+    expect(screen.getByTestId("token-scope-full")).toBeChecked();
+    expect(screen.getByLabelText("Expires")).toHaveValue("30");
+    expect(screen.getByTestId("token-name")).toBeEnabled();
+
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(mutations()).toHaveLength(2);
+    const postBodies = mutations().map(([, init]) => JSON.parse(String(init?.body)));
+    expect(postBodies).toEqual([
+      { name: "Retry agent", expiresInDays: 30, scope: "full", documentIds: null },
+      { name: "Retry agent", expiresInDays: 30, scope: "full", documentIds: null },
+    ]);
+    act(() => retry.resolve(response({ token: created }, 201)));
+    expect(await screen.findByTestId("token-created")).toBeVisible();
+    expect(screen.getByTestId("copy-token").textContent === created.token).toBe(true);
+    await waitFor(() => expect(screen.getByTestId("token-create")).toBeDisabled());
+    expect(fetchMock.mock.calls.filter(([, init]) => !init?.method || init.method === "GET")).toHaveLength(2);
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  it("gives rename one owner that suppresses duplicate and mixed actions for the same token", async () => {
+    const renamed = deferred<Response>();
+    confirmMock.mockReturnValue(true);
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] })).mockReturnValueOnce(renamed.promise);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: `Rename ${token.name}` }));
+    fireEvent.change(screen.getByLabelText("Token name"), { target: { value: "Reviewer" } });
+    const form = screen.getByLabelText("Token name").closest("form")!;
+    const replace = screen.getByRole("button", { name: `Replace ${token.name}` });
+    const revoke = screen.getByRole("button", { name: `Revoke ${token.name}` });
+    const collaborators = screen.getByTestId("token-collaborators-may-ask");
+
+    act(() => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      replace.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      revoke.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      collaborators.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mutations()).toHaveLength(1);
+    expect(mutations()[0][1]?.method).toBe("PATCH");
+    expect(confirmMock).not.toHaveBeenCalled();
+    act(() => renamed.resolve(response({ token: { ...token, name: "Reviewer" } })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rename Reviewer" })).toBeEnabled());
+    expect(screen.queryByTestId("copy-token")).toBeNull();
+  });
+
+  it("sends one replacement request and keeps close and destination locked until its reload settles", async () => {
+    const replaceRequest = deferred<Response>();
+    const reload = deferred<Response>();
+    const replacement = minted();
+    const onClose = vi.fn();
+    confirmMock.mockReturnValue(true);
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(replaceRequest.promise)
+      .mockReturnValueOnce(reload.promise);
+    render(<TokensPanel origin="https://markdoc.test" userLogin="alice" embedded onClose={onClose} />);
+    const replace = await screen.findByRole("button", { name: `Replace ${token.name}` });
+
+    act(() => {
+      replace.click();
+      replace.click();
+    });
+
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(mutations()).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close token management" })).toBeDisabled();
+    act(() => replaceRequest.resolve(response({ token: replacement }, 201)));
+    expect(await screen.findByTestId("token-created")).toBeVisible();
+    expect(screen.getByTestId("copy-token").textContent === replacement.token).toBe(true);
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close token management" })).toBeDisabled();
+    expect(copyText).not.toHaveBeenCalled();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    act(() => reload.resolve(response({ tokens: [{ ...token, revokedAt: "2026-09-05T00:00:00.000Z" }, { ...token, id: replacement.id }] })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close token management" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeEnabled();
+    expect(mutations()).toHaveLength(1);
+  });
+
+  it("sends one revoke request for duplicate activation", async () => {
+    const revokeRequest = deferred<Response>();
+    const reload = deferred<Response>();
+    confirmMock.mockReturnValue(true);
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(revokeRequest.promise)
+      .mockReturnValueOnce(reload.promise);
+    renderPanel();
+    const revoke = await screen.findByRole("button", { name: `Revoke ${token.name}` });
+
+    act(() => {
+      revoke.click();
+      revoke.click();
+    });
+
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(mutations()).toHaveLength(1);
+    expect(mutations()[0][1]?.method).toBe("DELETE");
+    act(() => revokeRequest.resolve(response({ ok: true })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    act(() => reload.resolve(response({ tokens: [{ ...token, revokedAt: "2026-09-05T00:00:00.000Z" }] })));
+    await waitFor(() => expect(screen.queryByRole("button", { name: `Revoke ${token.name}` })).toBeNull());
+    expect(mutations()).toHaveLength(1);
+  });
+
+  it("suppresses a duplicate collaborator switch while another token remains independently usable", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const other = { ...token, id: "token-other", name: "Other agent" };
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token, other] }))
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    renderPanel();
+    const switches = await screen.findAllByTestId("token-collaborators-may-ask");
+
+    act(() => {
+      switches[0].click();
+      switches[0].click();
+    });
+
+    expect(mutations()).toHaveLength(1);
+    expect(switches[0]).toHaveAttribute("aria-checked", "true");
+    expect(switches[0]).toBeDisabled();
+    expect(switches[1]).toBeEnabled();
+    expect(screen.getByTestId("token-add")).toBeEnabled();
+    fireEvent.click(switches[1]);
+    expect(mutations()).toHaveLength(2);
+    expect(switches[1]).toHaveAttribute("aria-checked", "true");
+
+    act(() => second.resolve(response({ token: { ...other, collaboratorsMayAsk: true } })));
+    await waitFor(() => expect(switches[1]).toBeEnabled());
+    expect(switches[0]).toBeDisabled();
+    act(() => first.resolve(response({ token: { ...token, collaboratorsMayAsk: true } })));
+    await waitFor(() => expect(switches[0]).toBeEnabled());
+    expect(mutations()).toHaveLength(2);
+  });
+
+  it.each(["resolve", "reject"] as const)("isolates a stale replacement %s and its finalizer from a newer mounted owner", async (settlement) => {
+    const stale = deferred<Response>();
+    const current = deferred<Response>();
+    const staleReplacement = minted();
+    const currentReplacement = { ...minted(), id: "token-current" };
+    confirmMock.mockReturnValue(true);
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(current.promise)
+      .mockResolvedValueOnce(response({ tokens: [{ ...token, revokedAt: "2026-09-05T00:00:00.000Z" }, { ...token, id: currentReplacement.id }] }));
+    const view = renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: `Replace ${token.name}` }));
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open={false} />);
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open />);
+    const currentButton = await screen.findByRole("button", { name: `Replace ${token.name}` });
+    fireEvent.click(currentButton);
+    expect(mutations()).toHaveLength(2);
+
+    await act(async () => {
+      if (settlement === "resolve") stale.resolve(response({ token: staleReplacement }, 201));
+      else stale.reject(new Error("Late replacement failure"));
+      await Promise.resolve();
+    });
+
+    expect(currentButton).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("copy-token")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    act(() => current.resolve(response({ token: currentReplacement }, 201)));
+    expect(await screen.findByTestId("token-created")).toBeVisible();
+    expect(screen.getByTestId("copy-token").textContent === currentReplacement.token).toBe(true);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    expect(mutations()).toHaveLength(2);
+    expect(copyText).not.toHaveBeenCalled();
   });
 });
 
