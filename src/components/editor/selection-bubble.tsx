@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
@@ -69,24 +69,407 @@ interface BubbleActionAuthority {
   onComment: () => void;
 }
 
+type BubbleControlPermission = "edit" | "comment";
+type BubbleMark = Parameters<EditorActions["toggleMark"]>[0];
+
+interface BubbleControlPublication {
+  identity: symbol;
+  retired: boolean;
+  mount: symbol;
+  geometry: BubbleGeometry;
+  owner: BubbleOwner;
+  authority: BubbleActionAuthority;
+  view: EditorView;
+  editor: HTMLElement;
+  scroller: HTMLElement;
+  session: CollabSession;
+  activeSurface: CollabSession["activeSurface"] | null;
+  actions: EditorActions;
+  toggleMark: EditorActions["toggleMark"];
+  format: FormatState;
+  formatValues: Readonly<Pick<FormatState, "strong" | "em" | "strike" | "code" | "link">>;
+  canEdit: boolean;
+  canComment: boolean;
+  onLink: () => void;
+  onComment: () => void;
+  bubble: HTMLDivElement | null;
+  root: HTMLDivElement | null;
+  controls: Set<BubbleControl>;
+  mouseEvents: WeakSet<object>;
+}
+
+interface BubbleControl {
+  identity: symbol;
+  publication: BubbleControlPublication;
+  permission: BubbleControlPermission;
+  enabled: boolean;
+  element: HTMLButtonElement | null;
+  captureButton: (element: HTMLButtonElement | null) => void;
+  claimed: boolean;
+  invoke: () => void;
+}
+
+interface BubbleControls {
+  bold: BubbleControl;
+  italic: BubbleControl;
+  strike: BubbleControl;
+  code: BubbleControl;
+  link: BubbleControl;
+  comment: BubbleControl;
+}
+
+type BubbleContainerRole = "bubble" | "root";
+
+interface BubbleElementOwner {
+  publication: BubbleControlPublication;
+  publicationIdentity: symbol;
+  role: BubbleContainerRole | "control";
+  control?: BubbleControl;
+  controlIdentity?: symbol;
+}
+
+class BubbleControlCurrent {
+  #geometry: BubbleGeometry | null = null;
+  #owner: BubbleOwner | null = null;
+  #authority: BubbleActionAuthority | null = null;
+  #readContainer: (() => HTMLElement | null) | null = null;
+
+  bindContainer(read: () => HTMLElement | null) {
+    this.#readContainer = read;
+  }
+
+  unbindContainer(read: () => HTMLElement | null) {
+    if (this.#readContainer === read) this.#readContainer = null;
+  }
+
+  publishGeometry(publication: BubbleGeometry) {
+    this.#geometry = publication;
+  }
+
+  retireGeometry(publication: BubbleGeometry) {
+    if (this.#geometry === publication) this.#geometry = null;
+  }
+
+  publishOwner(owner: BubbleOwner) {
+    this.#owner = owner;
+  }
+
+  retireOwner(owner: BubbleOwner | null) {
+    if (this.#owner === owner) this.#owner = null;
+  }
+
+  publishAuthority(authority: BubbleActionAuthority) {
+    this.#authority = authority;
+  }
+
+  retireAuthority(authority: BubbleActionAuthority) {
+    if (this.#authority === authority) this.#authority = null;
+  }
+
+  clear() {
+    this.#geometry = null;
+    this.#owner = null;
+    this.#authority = null;
+    this.#readContainer = null;
+  }
+
+  matches(publication: BubbleControlPublication, geometry: BubbleGeometry | null, mount: symbol) {
+    const values = publication.formatValues;
+    return (
+      publication.mount === mount &&
+      publication.geometry === geometry &&
+      publication.geometry.owner === publication.owner &&
+      publication.geometry.authority === publication.authority &&
+      publication.geometry.layer.isConnected &&
+      this.#geometry === publication.geometry &&
+      this.#owner === publication.owner &&
+      this.#authority === publication.authority &&
+      publication.owner.view === publication.view &&
+      publication.owner.editor === publication.editor &&
+      publication.owner.scroller === publication.scroller &&
+      publication.owner.session === publication.session &&
+      publication.view.dom === publication.editor &&
+      !publication.view.isDestroyed &&
+      publication.editor.isConnected &&
+      publication.scroller.isConnected &&
+      this.#readContainer?.() === publication.scroller &&
+      publication.authority.owner === publication.owner &&
+      publication.authority.view === publication.view &&
+      publication.authority.session === publication.session &&
+      publication.authority.actions === publication.actions &&
+      publication.authority.onLink === publication.onLink &&
+      publication.authority.onComment === publication.onComment &&
+      publication.actions.toggleMark === publication.toggleMark &&
+      publication.format.strong === values.strong &&
+      publication.format.em === values.em &&
+      publication.format.strike === values.strike &&
+      publication.format.code === values.code &&
+      publication.format.link === values.link &&
+      publication.activeSurface === "rich" &&
+      publication.session.activeSurface === publication.activeSurface &&
+      publication.session.canEdit === publication.canEdit &&
+      publication.session.canComment === publication.canComment
+    );
+  }
+}
+
+class BubbleControlCoordinator {
+  #current: BubbleControlPublication | null = null;
+  #elementOwners = new WeakMap<HTMLElement, BubbleElementOwner>();
+
+  publish(publication: BubbleControlPublication) {
+    this.#current = publication;
+  }
+
+  retire(publication: BubbleControlPublication | null) {
+    if (!publication) return;
+    publication.retired = true;
+    if (this.#current === publication) this.#current = null;
+    this.bindContainer(publication, "bubble", null);
+    this.bindContainer(publication, "root", null);
+    for (const control of publication.controls) this.bindControl(control, null);
+  }
+
+  bindContainer(
+    publication: BubbleControlPublication,
+    role: BubbleContainerRole,
+    element: HTMLDivElement | null,
+  ) {
+    const previous = publication[role];
+    if (previous) {
+      const owner = this.#elementOwners.get(previous);
+      if (owner?.publication === publication && owner.publicationIdentity === publication.identity && owner.role === role) {
+        this.#elementOwners.delete(previous);
+      }
+    }
+    publication[role] = null;
+    if (!element || publication.retired) return;
+    this.#elementOwners.set(element, {
+      publication,
+      publicationIdentity: publication.identity,
+      role,
+    });
+    publication[role] = element;
+  }
+
+  bindControl(control: BubbleControl, element: HTMLButtonElement | null) {
+    const previous = control.element;
+    if (previous) {
+      const owner = this.#elementOwners.get(previous);
+      if (
+        owner?.publication === control.publication &&
+        owner.publicationIdentity === control.publication.identity &&
+        owner.control === control &&
+        owner.controlIdentity === control.identity
+      ) {
+        this.#elementOwners.delete(previous);
+      }
+    }
+    control.element = null;
+    if (!element || control.publication.retired) return;
+    this.#elementOwners.set(element, {
+      publication: control.publication,
+      publicationIdentity: control.publication.identity,
+      role: "control",
+      control,
+      controlIdentity: control.identity,
+    });
+    control.element = element;
+  }
+
+  ownsElements(publication: BubbleControlPublication) {
+    const { bubble, root, geometry } = publication;
+    if (!bubble || !root || !bubble.isConnected || !root.isConnected || !geometry.layer.isConnected) return false;
+    const bubbleOwner = this.#elementOwners.get(bubble);
+    const rootOwner = this.#elementOwners.get(root);
+    if (
+      bubbleOwner?.publication !== publication ||
+      bubbleOwner.publicationIdentity !== publication.identity ||
+      bubbleOwner.role !== "bubble" ||
+      rootOwner?.publication !== publication ||
+      rootOwner.publicationIdentity !== publication.identity ||
+      rootOwner.role !== "root"
+    ) {
+      return false;
+    }
+    return bubble.contains(root) && geometry.layer.contains(bubble);
+  }
+
+  canPublish(publication: BubbleControlPublication) {
+    if (publication.retired || publication.controls.size !== 6 || !this.ownsElements(publication)) return false;
+    for (const control of publication.controls) {
+      const element = control.element;
+      const owner = element ? this.#elementOwners.get(element) : null;
+      if (
+        !element ||
+        !element.isConnected ||
+        owner?.publication !== publication ||
+        owner.publicationIdentity !== publication.identity ||
+        owner.control !== control ||
+        owner.controlIdentity !== control.identity ||
+        !publication.root?.contains(element) ||
+        !publication.bubble?.contains(element) ||
+        !publication.geometry.layer.contains(element)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  ownsControl(
+    publication: BubbleControlPublication,
+    control: BubbleControl,
+    element: HTMLButtonElement,
+  ) {
+    if (
+      this.#current !== publication ||
+      publication.retired ||
+      control.claimed ||
+      control.publication !== publication ||
+      !publication.controls.has(control) ||
+      control.element !== element
+    ) {
+      return false;
+    }
+    const owner = this.#elementOwners.get(element);
+    if (
+      owner?.publication !== publication ||
+      owner.publicationIdentity !== publication.identity ||
+      owner.control !== control ||
+      owner.controlIdentity !== control.identity
+    ) {
+      return false;
+    }
+    if (!control.enabled || element.disabled || !element.isConnected || !this.ownsElements(publication)) return false;
+    return publication.root!.contains(element) &&
+      publication.bubble!.contains(element) &&
+      publication.geometry.layer.contains(element);
+  }
+}
+
+function createControlPublication({
+  coordinator,
+  mount,
+  geometry,
+  view,
+  session,
+  activeSurface,
+  actions,
+  format,
+  canEdit,
+  canComment,
+  onLink,
+  onComment,
+}: {
+  coordinator: BubbleControlCoordinator;
+  mount: symbol;
+  geometry: BubbleGeometry;
+  view: EditorView;
+  session: CollabSession;
+  activeSurface: CollabSession["activeSurface"] | null;
+  actions: EditorActions;
+  format: FormatState;
+  canEdit: boolean;
+  canComment: boolean;
+  onLink: () => void;
+  onComment: () => void;
+}): {
+  publication: BubbleControlPublication;
+  controls: BubbleControls;
+  captureBubble: (element: HTMLDivElement | null) => void;
+  captureRoot: (element: HTMLDivElement | null) => void;
+} {
+  const publication: BubbleControlPublication = {
+    identity: Symbol("selection-bubble-control-publication"),
+    retired: false,
+    mount,
+    geometry,
+    owner: geometry.owner,
+    authority: geometry.authority,
+    view,
+    editor: geometry.owner.editor,
+    scroller: geometry.owner.scroller,
+    session,
+    activeSurface,
+    actions,
+    toggleMark: actions.toggleMark,
+    format,
+    formatValues: Object.freeze({
+      strong: format.strong,
+      em: format.em,
+      strike: format.strike,
+      code: format.code,
+      link: format.link,
+    }),
+    canEdit,
+    canComment,
+    onLink,
+    onComment,
+    bubble: null,
+    root: null,
+    controls: new Set<BubbleControl>(),
+    mouseEvents: new WeakSet(),
+  };
+  const control = (
+    permission: BubbleControlPermission,
+    invoke: () => void,
+  ): BubbleControl => {
+    const owned: BubbleControl = {
+      identity: Symbol("selection-bubble-control"),
+      publication,
+      permission,
+      enabled: permission === "edit" ? canEdit : canComment,
+      element: null,
+      captureButton: (element) => coordinator.bindControl(owned, element),
+      claimed: false,
+      invoke,
+    };
+    publication.controls.add(owned);
+    return owned;
+  };
+  const toggleMark = publication.toggleMark;
+  const mark = (value: BubbleMark) =>
+    control("edit", () => toggleMark.call(actions, value));
+
+  return {
+    publication,
+    captureBubble: (element) => coordinator.bindContainer(publication, "bubble", element),
+    captureRoot: (element) => coordinator.bindContainer(publication, "root", element),
+    controls: {
+      bold: mark("strong"),
+      italic: mark("em"),
+      strike: mark("strike"),
+      code: mark("code"),
+      link: control("edit", onLink),
+      comment: control("comment", onComment),
+    },
+  };
+}
+
 function BubbleButton({
   label,
   active,
+  captureButton,
+  onMouseDown,
   onClick,
   children,
   disabled,
 }: {
   label: string;
   active?: boolean;
-  onClick: () => void;
+  captureButton: (element: HTMLButtonElement | null) => void;
+  onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
   disabled?: boolean;
 }) {
   return (
     <button
+      ref={captureButton}
       type="button"
       className={cn("flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white disabled:opacity-30", active && "bg-white/20 text-white")}
-      onMouseDown={(e) => e.preventDefault()}
+      onMouseDown={onMouseDown}
       onClick={onClick}
       aria-label={label}
       title={label}
@@ -122,14 +505,27 @@ export function SelectionBubble({
   const publicationRef = useRef<BubbleGeometry | null>(null);
   const ownerRef = useRef<BubbleOwner | null>(null);
   const authorityRef = useRef<BubbleActionAuthority | null>(null);
+  const [controlMount] = useState(() => Symbol("selection-bubble-controls"));
+  const [controlCoordinator] = useState(() => new BubbleControlCoordinator());
+  const [controlCurrent] = useState(() => new BubbleControlCurrent());
+
+  useLayoutEffect(() => {
+    const readContainer = () => containerRef.current;
+    controlCurrent.bindContainer(readContainer);
+    return () => controlCurrent.unbindContainer(readContainer);
+  }, [containerRef, controlCurrent]);
 
   const retirePublication = (publication: BubbleGeometry) => {
-    if (publicationRef.current === publication) publicationRef.current = null;
+    if (publicationRef.current === publication) {
+      publicationRef.current = null;
+      controlCurrent.retireGeometry(publication);
+    }
     setGeometry((current) => current === publication ? null : current);
   };
   const retireAuthority = (authority: BubbleActionAuthority) => {
     if (authorityRef.current !== authority) return;
     authorityRef.current = null;
+    controlCurrent.retireAuthority(authority);
     const publication = publicationRef.current;
     if (publication?.authority === authority) retirePublication(publication);
   };
@@ -149,7 +545,9 @@ export function SelectionBubble({
         previousAuthority.onComment === onComment
       ) return;
       if (previousAuthority) retireAuthority(previousAuthority);
-      authorityRef.current = { owner: previous, view, session, actions, onLink, onComment };
+      const nextAuthority = { owner: previous, view, session, actions, onLink, onComment };
+      authorityRef.current = nextAuthority;
+      controlCurrent.publishAuthority(nextAuthority);
       previous.schedule();
       return;
     }
@@ -157,6 +555,7 @@ export function SelectionBubble({
     if (previousAuthority) retireAuthority(previousAuthority);
     previous?.dispose();
     ownerRef.current = null;
+    controlCurrent.retireOwner(previous);
     if (!view || !scroller) {
       return;
     }
@@ -311,6 +710,7 @@ export function SelectionBubble({
         if (ownerRef.current !== owner || authorityRef.current !== authority) return;
         const publication = { owner, authority, layer, position, placement };
         publicationRef.current = publication;
+        controlCurrent.publishGeometry(publication);
         setGeometry(publication);
       } catch (error) {
         // A replaced editor DOM can invalidate a range between selection and layout updates.
@@ -407,8 +807,11 @@ export function SelectionBubble({
       layer.remove();
     };
     const owner = { view, editor, scroller, session, schedule, dispose };
+    const authority = { owner, view, session, actions, onLink, onComment };
     ownerRef.current = owner;
-    authorityRef.current = { owner, view, session, actions, onLink, onComment };
+    authorityRef.current = authority;
+    controlCurrent.publishOwner(owner);
+    controlCurrent.publishAuthority(authority);
     owner.schedule();
   });
 
@@ -417,71 +820,117 @@ export function SelectionBubble({
     publicationRef.current = null;
     ownerRef.current?.dispose();
     ownerRef.current = null;
-  }, []);
+    controlCurrent.clear();
+  }, [controlCurrent]);
 
   // Format changes carry every editor selection update into the shared geometry scheduler.
   useLayoutEffect(() => ownerRef.current?.schedule(), [format]);
 
-  if (
-    !geometry ||
-    geometry.owner.view !== view ||
-    geometry.owner.session !== session ||
-    geometry.authority.owner !== geometry.owner ||
-    geometry.authority.view !== view ||
-    geometry.authority.session !== session ||
-    geometry.authority.actions !== actions ||
-    geometry.authority.onLink !== onLink ||
-    geometry.authority.onComment !== onComment
-  ) return null;
-  const { owner, authority } = geometry;
-  const { position: pos, placement, layer } = geometry;
-  const hasActionAuthority = () =>
-    publicationRef.current === geometry &&
-    ownerRef.current === owner &&
-    authorityRef.current === authority;
-  const invokeEdit = (action: () => void) => {
-    if (!hasActionAuthority()) return;
-    if (!authority.session.canEdit) return;
-    action();
+  const geometryIsCurrent = Boolean(
+    geometry &&
+    geometry.owner.view === view &&
+    geometry.owner.session === session &&
+    geometry.authority.owner === geometry.owner &&
+    geometry.authority.view === view &&
+    geometry.authority.session === session &&
+    geometry.authority.actions === actions &&
+    geometry.authority.onLink === onLink &&
+    geometry.authority.onComment === onComment,
+  );
+  const canEdit = geometryIsCurrent ? session.canEdit : false;
+  const canComment = geometryIsCurrent ? session.canComment : false;
+  const activeSurface = geometryIsCurrent ? session.activeSurface : null;
+  const controlSet = geometryIsCurrent && geometry
+    ? createControlPublication({
+        coordinator: controlCoordinator,
+        mount: controlMount,
+        geometry,
+        view: geometry.owner.view,
+        session,
+        activeSurface,
+        actions,
+        format,
+        canEdit,
+        canComment,
+        onLink,
+        onComment,
+      })
+    : null;
+  const controlPublication = controlSet?.publication ?? null;
+
+  useLayoutEffect(() => {
+    if (
+      controlPublication &&
+      controlCoordinator.canPublish(controlPublication) &&
+      controlCurrent.matches(controlPublication, geometry, controlMount)
+    ) {
+      controlCoordinator.publish(controlPublication);
+    }
+    return () => controlCoordinator.retire(controlPublication);
+  }, [controlCoordinator, controlCurrent, controlMount, controlPublication, geometry]);
+
+  if (!controlSet) return null;
+  const { publication, controls, captureBubble, captureRoot } = controlSet;
+  const { position: pos, placement, layer } = publication.geometry;
+  const ownsControl = (
+    control: BubbleControl,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    const element = control.element;
+    if (
+      event.currentTarget !== element ||
+      !element ||
+      !controlCoordinator.ownsControl(publication, control, element) ||
+      !controlCurrent.matches(publication, geometry, controlMount)
+    ) {
+      return false;
+    }
+    return control.permission === "edit" ? publication.canEdit : publication.canComment;
   };
-  const invokeComment = () => {
-    if (!hasActionAuthority()) return;
-    if (!authority.session.canComment) return;
-    authority.onComment();
+  const onMouseDown = (control: BubbleControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (event.currentTarget !== control.element || publication.mouseEvents.has(event) || !ownsControl(control, event)) return;
+    publication.mouseEvents.add(event);
+    event.preventDefault();
   };
-  const canEdit = authority.session.canEdit;
+  const onClick = (control: BubbleControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (!ownsControl(control, event)) return;
+    control.claimed = true;
+    control.invoke();
+  };
 
   return createPortal(
     <div
+      ref={captureBubble}
       className="selection-bubble touch-target absolute z-30 rounded-lg bg-inverse shadow-xl dark:ring-1 dark:ring-white/10"
       style={{ left: placement.left, top: placement.top, width: pos.width, transform: `scale(${placement.scaleX}, ${placement.scaleY})`, transformOrigin: "top left" }}
       data-testid="selection-bubble"
       data-below={pos.below || undefined}
     >
       <div
+        ref={captureRoot}
         className="selection-bubble-scroll flex items-center gap-[2px] overflow-x-auto overflow-y-hidden rounded-lg p-[4px]"
         tabIndex={0}
         role="toolbar"
         aria-label="Selection"
         aria-orientation="horizontal"
       >
-        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("strong"))}>
+        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} captureButton={controls.bold.captureButton} onMouseDown={onMouseDown(controls.bold)} onClick={onClick(controls.bold)}>
           <Bold size={16} strokeWidth={2.6} />
         </BubbleButton>
-        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("em"))}>
+        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} captureButton={controls.italic.captureButton} onMouseDown={onMouseDown(controls.italic)} onClick={onClick(controls.italic)}>
           <Italic size={16} />
         </BubbleButton>
-        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("strike"))}>
+        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} captureButton={controls.strike.captureButton} onMouseDown={onMouseDown(controls.strike)} onClick={onClick(controls.strike)}>
           <Strikethrough size={16} />
         </BubbleButton>
-        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("code"))}>
+        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} captureButton={controls.code.captureButton} onMouseDown={onMouseDown(controls.code)} onClick={onClick(controls.code)}>
           <Code size={16} />
         </BubbleButton>
-        <BubbleButton label="Link" active={format.link} disabled={!canEdit} onClick={() => invokeEdit(authority.onLink)}>
+        <BubbleButton label="Link" active={format.link} disabled={!canEdit} captureButton={controls.link.captureButton} onMouseDown={onMouseDown(controls.link)} onClick={onClick(controls.link)}>
           <LinkIcon size={16} />
         </BubbleButton>
         <span className="mx-[2px] h-[20px] w-px shrink-0 bg-white/20" />
-        <BubbleButton label="Comment" disabled={!authority.session.canComment} onClick={invokeComment}>
+        <BubbleButton label="Comment" disabled={!canComment} captureButton={controls.comment.captureButton} onMouseDown={onMouseDown(controls.comment)} onClick={onClick(controls.comment)}>
           <MessageSquarePlus size={16} />
         </BubbleButton>
       </div>
