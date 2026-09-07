@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 type SearchAnswer = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: "no-github-token" };
 const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<SearchAnswer>>();
@@ -46,6 +46,52 @@ function Harness({ exclude = [], onPick, onSubmit }: { exclude?: string[]; onPic
     </form>
   );
 }
+
+/**
+ * Runs `onBoundary` from the parent's layout effect after a child query replacement or removal.
+ * Promise settlements queued here happen before the retired child's passive cleanup.
+ */
+function BoundaryHarness({
+  value,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  value: string;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <CollaboratorLoginInput value={value} onChange={() => {}} exclude={[]} /> : null;
+}
+
+type PendingSearch = {
+  promise: Promise<SearchAnswer>;
+  resolve: (value: SearchAnswer) => void;
+  reject: (reason?: unknown) => void;
+};
+
+const boundarySettlements: { label: string; settle: (pending: PendingSearch) => void }[] = [
+  {
+    label: "normal success",
+    settle: (pending) => pending.resolve({ users: [user("ocean")], limited: false }),
+  },
+  {
+    label: "limited success",
+    settle: (pending) => pending.resolve({ users: [], limited: true }),
+  },
+  {
+    label: "no-token success",
+    settle: (pending) => pending.resolve({ users: [], limited: false, reason: "no-github-token" }),
+  },
+  {
+    label: "failure",
+    settle: (pending) => pending.reject(new ApiError(503, "Retired failure")),
+  },
+];
 
 const input = () => screen.getByTestId("share-login") as HTMLInputElement;
 const type = (value: string) => {
@@ -165,6 +211,53 @@ describe("CollaboratorLoginInput", () => {
       pending.get("oc")!({ users: [user("ocean"), user("ocelot")], limited: false });
     });
     expect(options()).toEqual(["octocat"]);
+  });
+
+  it.each(boundarySettlements)("retires a pending $label at the query layout boundary", async ({ settle: settlePending }) => {
+    const pending = deferred<SearchAnswer>();
+    const replacement = deferred<SearchAnswer>();
+    searchUsers.mockReturnValueOnce(pending.promise).mockReturnValueOnce(replacement.promise).mockImplementation(() => answer("ocean"));
+    const view = render(<BoundaryHarness value="oc" />);
+    input().focus();
+    await settle();
+    const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+
+    view.rerender(
+      <BoundaryHarness
+        value="octo"
+        boundary={1}
+        onBoundary={() => {
+          expect(retiredSignal?.aborted).toBe(true);
+          settlePending(pending);
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.allSettled([pending.promise]);
+      await Promise.resolve();
+    });
+
+    expect(options()).toEqual([]);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(input()).toHaveAttribute("aria-expanded", "false");
+    expect(input()).not.toHaveAttribute("aria-activedescendant");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading GitHub suggestions for @octo");
+
+    await settle();
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["oc", "octo"]);
+    expect(searchUsers.mock.calls.filter(([q]) => q === "octo")).toHaveLength(1);
+    expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(false);
+
+    await act(async () => {
+      replacement.resolve({ users: [user("octocat")], limited: false });
+    });
+    expect(options()).toEqual(["octocat"]);
+
+    view.rerender(<BoundaryHarness value="oc" boundary={2} />);
+    await settle();
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["oc", "octo", "oc"]);
+    expect(options()).toEqual(["ocean"]);
   });
 
   it("↓/↑ move the active option, Enter picks it into the box without submitting and hands over to onPick", async () => {
@@ -337,7 +430,7 @@ describe("CollaboratorLoginInput", () => {
     expect(input()).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("a superseded no-github-token answer silently aborts the newer lookup and suppresses later requests", async () => {
+  it("ignores a superseded no-github-token answer without suppressing the current or later query", async () => {
     const pending = new Map<string, (r: { users: ReturnType<typeof user>[]; limited: boolean; reason?: "no-github-token" }) => void>();
     searchUsers.mockImplementation((q) => new Promise((resolve) => pending.set(q, resolve)));
     render(<Harness />);
@@ -350,16 +443,16 @@ describe("CollaboratorLoginInput", () => {
     await act(async () => {
       pending.get("oc")!({ users: [], limited: false, reason: "no-github-token" });
     });
-    expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(true);
+    expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(false);
     await act(async () => {
       pending.get("octo")!({ users: [user("octocat")], limited: false });
     });
-    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(options()).toEqual(["octocat"]);
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     type("octoc");
-    await settle(SUGGEST_DEBOUNCE_MS * 2);
-    expect(searchUsers).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(searchUsers).toHaveBeenCalledTimes(3);
   });
 
   it("reuses the answer for a prefix typed again instead of asking twice, and closes when the box empties or loses focus", async () => {
@@ -411,6 +504,52 @@ describe("CollaboratorLoginInput", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Current query failed");
     expect(options()).toEqual([]);
     expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["oc", "oc", "octo"]);
+  });
+
+  it("retires a pending explicit Retry at the query layout boundary", async () => {
+    const retried = deferred<SearchAnswer>();
+    const replacement = deferred<SearchAnswer>();
+    searchUsers
+      .mockRejectedValueOnce(new ApiError(503, "Old query failed"))
+      .mockReturnValueOnce(retried.promise)
+      .mockReturnValueOnce(replacement.promise)
+      .mockImplementation(() => answer("ocean"));
+    const view = render(<BoundaryHarness value="oc" />);
+    input().focus();
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    const retrySignal = searchUsers.mock.calls[1][1]?.signal;
+
+    view.rerender(
+      <BoundaryHarness
+        value="octo"
+        boundary={1}
+        onBoundary={() => {
+          expect(retrySignal?.aborted).toBe(true);
+          retried.resolve({ users: [user("old-retry")], limited: false });
+        }}
+      />,
+    );
+    await act(async () => {
+      await retried.promise;
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(options()).toEqual([]);
+    expect(screen.getByRole("status")).toHaveTextContent("@octo");
+
+    await settle();
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["oc", "oc", "octo"]);
+    expect(searchUsers.mock.calls.filter(([q]) => q === "octo")).toHaveLength(1);
+    await act(async () => {
+      replacement.resolve({ users: [user("octocat")], limited: false });
+    });
+    expect(options()).toEqual(["octocat"]);
+
+    view.rerender(<BoundaryHarness value="oc" boundary={2} />);
+    await settle();
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["oc", "oc", "octo", "oc"]);
+    expect(options()).toEqual(["ocean"]);
   });
 
   it("does not let an answer reopen suggestions after a cached option is picked", async () => {
@@ -486,5 +625,42 @@ describe("CollaboratorLoginInput", () => {
       pending.resolve({ users: [user("octocat")], limited: false });
     });
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("retires before a boundary failure settles during unmount without post-unmount UI work or an unhandled rejection", async () => {
+    const pending = deferred<SearchAnswer>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+    window.addEventListener("unhandledrejection", onUnhandled);
+    searchUsers.mockReturnValue(pending.promise);
+    const view = render(<BoundaryHarness value="octo" />);
+    input().focus();
+    await settle();
+    const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+
+    try {
+      view.rerender(
+        <BoundaryHarness
+          value="octo"
+          present={false}
+          boundary={1}
+          onBoundary={() => {
+            expect(retiredSignal?.aborted).toBe(true);
+            pending.reject(new ApiError(503, "Failure at unmount boundary"));
+          }}
+        />,
+      );
+      await act(async () => {
+        await Promise.allSettled([pending.promise]);
+        await Promise.resolve();
+      });
+      expect(screen.queryByTestId("share-login")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
   });
 });
