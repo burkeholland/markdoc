@@ -3,7 +3,7 @@ import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, M
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -136,9 +136,11 @@ function currentTemplateGridPublication(
   claimed: TemplateGridPublication | null,
   render: TemplateGridRenderPublication,
   entry: TemplateGridEntryPublication,
+  source: HTMLButtonElement,
 ): TemplateGridPublication | null {
   if (!current || current.render !== render || claimed === current || render.busy !== null) return null;
-  if (current.entries[entry.index]?.entry !== entry || current.entries.length !== PICKER_TEMPLATES.length) return null;
+  const sourceEntry = current.entries[entry.index];
+  if (sourceEntry?.entry !== entry || sourceEntry.button !== source || current.entries.length !== PICKER_TEMPLATES.length) return null;
 
   const grid = current.grid;
   if (!grid.isConnected || grid.children.length !== current.entries.length) return null;
@@ -219,8 +221,14 @@ export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) 
           <li key={entry.id} className="min-w-0">
             <button
               type="button"
-              onClick={() => {
-                const committed = currentTemplateGridPublication(activePublication.current, claimedPublication.current, publication, entry);
+              onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                const committed = currentTemplateGridPublication(
+                  activePublication.current,
+                  claimedPublication.current,
+                  publication,
+                  entry,
+                  event.currentTarget,
+                );
                 if (!committed) return;
                 claimedPublication.current = committed;
                 publication.onPick(entry.template);
