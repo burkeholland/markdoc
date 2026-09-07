@@ -455,6 +455,38 @@ describe("ShareDialog · permission actions", () => {
     expect(select).toBeEnabled();
   });
 
+  it("invalidates permission operations synchronously when a close handler runs", async () => {
+    const roleRequest = deferred<unknown>();
+    const linkRequest = deferred<unknown>();
+    addCollaborator.mockReset().mockReturnValueOnce(roleRequest.promise);
+    patchDocument.mockReset().mockReturnValueOnce(linkRequest.promise);
+    const onOpenChange = vi.fn();
+    const onDocChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByTestId("collaborator-row");
+    const roleSelect = within(collaboratorRow("bob")).getByRole("combobox", { name: "Role for bob" });
+    const linkSelect = screen.getByTestId("link-access");
+    fireEvent.change(roleSelect, { target: { value: "viewer" } });
+    fireEvent.change(linkSelect, { target: { value: "view" } });
+    expect(roleSelect).toBeDisabled();
+    expect(linkSelect).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await act(async () => {
+      roleRequest.resolve({});
+      linkRequest.reject(new ApiError(503, "Closed link request failed"));
+      await Promise.allSettled([roleRequest.promise, linkRequest.promise]);
+    });
+
+    expect(within(collaboratorRow("bob")).getByRole("combobox")).toHaveValue("editor");
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("share-action-error")).toBeNull();
+    expect(roleSelect).toBeDisabled();
+    expect(linkSelect).toBeDisabled();
+  });
+
   it("does not let a closed dialog's role success or finalizer affect a reopened same-login Remove", async () => {
     const oldRole = deferred<unknown>();
     const currentRemove = deferred<unknown>();

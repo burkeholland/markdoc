@@ -277,10 +277,18 @@ export const ShareDialog = memo(function ShareDialog({
     }
   };
 
+  const close = () => {
+    permissionContext.current = null;
+    collaboratorPermissionOwners.current.clear();
+    linkPermissionOwner.current = null;
+    permissionFeedbackOwner.current = null;
+    onOpenChange(false);
+  };
+
   const linkOption = LINK_OPTIONS.find((o) => o.value === doc.linkAccess);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => (nextOpen ? onOpenChange(true) : close())}>
       <DialogContent title={`Share “${doc.title}”`} description="Collaborators sign in with GitHub. Add people by their GitHub handle." className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         {isOwner && (
           <form
@@ -459,11 +467,11 @@ export const ShareDialog = memo(function ShareDialog({
         </div>
 
         <div className="mt-5">
-          <AgentCollaborateCard origin={origin} open={open} docId={doc.id} onClose={() => onOpenChange(false)} />
+          <AgentCollaborateCard origin={origin} open={open} docId={doc.id} onClose={close} />
         </div>
 
         <div className="mt-5 flex justify-end" data-testid="share-footer">
-          <button type="button" className="btn btn-primary shrink-0" onClick={() => onOpenChange(false)}>
+          <button type="button" className="btn btn-primary shrink-0" onClick={close}>
             Done
           </button>
         </div>
