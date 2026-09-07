@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect, useLayoutEffect, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
 import type { FailedImport, ImportedDocument, ImportBatch } from "@/lib/import-upload";
 
 const uploadImportBatch = vi.fn();
@@ -18,15 +20,18 @@ function Harness({
   onError,
   onDone,
   captureStart,
+  captureRetry,
 }: {
   label?: string;
   batches: File[][];
   onError: (message: string) => void;
   onDone?: (documents: ImportedDocument[], failed: FailedImport[]) => void;
   captureStart?: (start: ReturnType<typeof useFileImport>["start"]) => void;
+  captureRetry?: (retry: (() => void) | undefined) => void;
 }) {
   const { items, ignored, open, setOpen, start, input } = useFileImport({ onError, onDone });
   captureStart?.(start);
+  captureRetry?.(items.find((item) => item.retry)?.retry);
   return (
     <>
       {input}
@@ -38,6 +43,26 @@ function Harness({
       <ImportDialog open={open} onOpenChange={setOpen} items={items} ignored={ignored} />
     </>
   );
+}
+
+function ImportLayoutBoundary({
+  boundary = 0,
+  onBoundary,
+  children,
+}: {
+  boundary?: number;
+  onBoundary?: () => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return children;
+}
+
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
 }
 
 function deferred<T>() {
@@ -52,6 +77,17 @@ function deferred<T>() {
 
 function dropFiles(files: File[]) {
   fireEvent.drop(window, { dataTransfer: { types: ["Files"], files } });
+}
+
+function dispatchDropFiles(files: File[]) {
+  const event = new Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: { types: ["Files"], files } });
+  window.dispatchEvent(event);
+}
+
+function dispatchPickedFiles(input: HTMLInputElement, files: File[]) {
+  Object.defineProperty(input, "files", { configurable: true, value: files });
+  input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 const unhandledRejections: unknown[] = [];
@@ -354,12 +390,14 @@ describe("useFileImport - retry ownership", () => {
 
 describe("useFileImport - stale and independent operations", () => {
   it.each(["resolve", "reject"] as const)(
-    "ignores a late %s and its finalizer after unmount while a replacement hook is pending",
+    "retires an initial %s at the parent layout boundary without releasing the replacement upload",
     async (outcome) => {
       const oldDocument = new File(["# Old"], "old.md", { type: "text/markdown" });
       const oldImage = new File(["old image"], "old.png", { type: "image/png" });
       const newDocument = new File(["# New"], "new.md", { type: "text/markdown" });
       const newImage = new File(["new image"], "new.png", { type: "image/png" });
+      const duplicatePick = new File(["# Pick"], "duplicate-pick.md", { type: "text/markdown" });
+      const duplicateDrop = new File(["# Drop"], "duplicate-drop.md", { type: "text/markdown" });
       const oldUpload = deferred<ImportBatch>();
       const newUpload = deferred<ImportBatch>();
       const oldOnDone = vi.fn();
@@ -367,60 +405,238 @@ describe("useFileImport - stale and independent operations", () => {
       const newOnDone = vi.fn();
       const newOnError = vi.fn();
       uploadImportBatch.mockReturnValueOnce(oldUpload.promise).mockReturnValueOnce(newUpload.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
 
-      const view = render(
-        <Harness
-          key="old"
-          label="Old"
-          batches={[[oldDocument, oldImage]]}
-          onError={oldOnError}
-          onDone={oldOnDone}
-        />,
-      );
-      fireEvent.click(screen.getByRole("button", { name: "Old batch 1" }));
-      expect(uploadImportBatch).toHaveBeenNthCalledWith(1, [oldDocument], [oldImage]);
+      try {
+        await act(async () => {
+          root.render(
+            <ImportLayoutBoundary>
+              <Harness
+                key="old"
+                label="Old"
+                batches={[[oldDocument, oldImage]]}
+                onError={oldOnError}
+                onDone={oldOnDone}
+              />
+              <Harness
+                key="new"
+                label="New"
+                batches={[[newDocument, newImage]]}
+                onError={newOnError}
+                onDone={newOnDone}
+              />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </ImportLayoutBoundary>,
+          );
+        });
+        const oldBatch = screen.getByRole("button", { name: "Old batch 1" });
+        const newBatch = screen.getByRole("button", { name: "New batch 1" });
+        fireEvent.click(oldBatch);
+        newBatch.click();
+        expect(uploadImportBatch).toHaveBeenNthCalledWith(1, [oldDocument], [oldImage]);
+        expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [newDocument], [newImage]);
 
-      view.rerender(
-        <Harness
-          key="new"
-          label="New"
-          batches={[[newDocument, newImage]]}
-          onError={newOnError}
-          onDone={newOnDone}
-        />,
-      );
-      const newBatch = screen.getByRole("button", { name: "New batch 1" });
-      fireEvent.click(newBatch);
-      expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [newDocument], [newImage]);
+        let boundaryReached!: () => void;
+        const atBoundary = new Promise<void>((resolve) => {
+          boundaryReached = resolve;
+        });
+        root.render(
+          <ImportLayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (outcome === "resolve") {
+                oldUpload.resolve({ documents: [{ id: "doc-old", title: "Old", warnings: [] }], failed: [] });
+              } else {
+                oldUpload.reject(new Error("Late old failure"));
+              }
+              boundaryReached();
+            }}
+          >
+            <Harness
+              key="new"
+              label="New"
+              batches={[[newDocument, newImage]]}
+              onError={newOnError}
+              onDone={newOnDone}
+            />
+          </ImportLayoutBoundary>,
+        );
+        await atBoundary;
 
-      await act(async () => {
-        if (outcome === "resolve") {
-          oldUpload.resolve({ documents: [{ id: "doc-old", title: "Old", warnings: [] }], failed: [] });
-        } else {
-          oldUpload.reject(new Error("Late old failure"));
-        }
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [newDocument], [newImage]);
+        newBatch.click();
+        dispatchPickedFiles(screen.getByTestId("import-file-input") as HTMLInputElement, [duplicatePick]);
+        dispatchDropFiles([duplicateDrop]);
+        expect(uploadImportBatch).toHaveBeenCalledTimes(2);
 
-      expect(oldOnDone).not.toHaveBeenCalled();
-      expect(oldOnError).not.toHaveBeenCalled();
-      expect(newOnDone).not.toHaveBeenCalled();
-      expect(newOnError).not.toHaveBeenCalled();
-      expect(screen.getByTestId("import-item")).toHaveTextContent("new.md");
-      expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "uploading");
-      expect(screen.queryByText("Old")).toBeNull();
-      fireEvent.click(newBatch);
-      fireEvent.click(screen.getByRole("button", { name: "Close" }));
-      expect(uploadImportBatch).toHaveBeenCalledTimes(2);
-      expect(screen.getByTestId("import-dialog")).toBeInTheDocument();
+        await act(async () => {});
+        expect(oldOnDone).toHaveBeenCalledTimes(0);
+        expect(oldOnError).toHaveBeenCalledTimes(0);
+        expect(newOnDone).toHaveBeenCalledTimes(0);
+        expect(newOnError).toHaveBeenCalledTimes(0);
+        expect(screen.getAllByTestId("import-item")).toHaveLength(1);
+        expect(screen.getByTestId("import-item")).toHaveTextContent("new.md");
+        expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "uploading");
+        expect(screen.queryByText("Old")).toBeNull();
+        expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "Close" }));
+        expect(screen.getByTestId("import-dialog")).toBeInTheDocument();
 
-      await act(async () => {
-        newUpload.resolve({ documents: [{ id: "doc-new", title: "New", warnings: [] }], failed: [] });
-      });
-      expect(await screen.findByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-new");
-      expect(newOnDone).toHaveBeenCalledTimes(1);
-      expect(newOnDone).toHaveBeenCalledWith([{ id: "doc-new", title: "New", warnings: [] }], []);
-      expect(unhandledRejections).toEqual([]);
+        await act(async () => {
+          newUpload.resolve({ documents: [{ id: "doc-new", title: "New", warnings: [] }], failed: [] });
+        });
+        expect(await screen.findByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-new");
+        expect(newOnDone).toHaveBeenCalledTimes(1);
+        expect(newOnDone).toHaveBeenCalledWith([{ id: "doc-new", title: "New", warnings: [] }], []);
+        expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "retires a failed-row Retry %s at the parent layout boundary without publishing stale ownership",
+    async (outcome) => {
+      const oldDocument = new File(["# Old"], "old.md", { type: "text/markdown" });
+      const oldImage = new File(["old image"], "old.png", { type: "image/png" });
+      const newDocument = new File(["# New"], "new.md", { type: "text/markdown" });
+      const newImage = new File(["new image"], "new.png", { type: "image/png" });
+      const duplicatePick = new File(["# Pick"], "duplicate-pick.md", { type: "text/markdown" });
+      const duplicateDrop = new File(["# Drop"], "duplicate-drop.md", { type: "text/markdown" });
+      const oldRetryUpload = deferred<ImportBatch>();
+      const newUpload = deferred<ImportBatch>();
+      const oldOnDone = vi.fn();
+      const oldOnError = vi.fn();
+      const newOnDone = vi.fn();
+      const newOnError = vi.fn();
+      let oldRetry: (() => void) | undefined;
+      uploadImportBatch
+        .mockResolvedValueOnce({
+          documents: [],
+          failed: [{ index: 0, name: oldDocument.name, error: "Initial failure" }],
+        })
+        .mockReturnValueOnce(oldRetryUpload.promise)
+        .mockReturnValueOnce(newUpload.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <ImportLayoutBoundary>
+              <Harness
+                key="old"
+                label="Old"
+                batches={[[oldDocument, oldImage]]}
+                onError={oldOnError}
+                onDone={oldOnDone}
+                captureRetry={(retry) => {
+                  oldRetry = retry;
+                }}
+              />
+              <Harness
+                key="new"
+                label="New"
+                batches={[[newDocument, newImage]]}
+                onError={newOnError}
+                onDone={newOnDone}
+              />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </ImportLayoutBoundary>,
+          );
+        });
+        const oldBatch = screen.getByRole("button", { name: "Old batch 1" });
+        const newBatch = screen.getByRole("button", { name: "New batch 1" });
+        fireEvent.click(oldBatch);
+        const retryButton = await screen.findByRole("button", { name: "Retry failed" });
+        expect(oldRetry).toBeTypeOf("function");
+        fireEvent.click(retryButton);
+        expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+        newBatch.click();
+        expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [newDocument], [newImage]);
+        oldOnDone.mockClear();
+        oldOnError.mockClear();
+
+        let boundaryReached!: () => void;
+        const atBoundary = new Promise<void>((resolve) => {
+          boundaryReached = resolve;
+        });
+        root.render(
+          <ImportLayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (outcome === "resolve") {
+                oldRetryUpload.resolve({
+                  documents: [{ id: "doc-old", title: "Old", warnings: [] }],
+                  failed: [],
+                });
+              } else {
+                oldRetryUpload.reject(new Error("Late old Retry failure"));
+              }
+              boundaryReached();
+            }}
+          >
+            <Harness
+              key="new"
+              label="New"
+              batches={[[newDocument, newImage]]}
+              onError={newOnError}
+              onDone={newOnDone}
+            />
+          </ImportLayoutBoundary>,
+        );
+        await atBoundary;
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [newDocument], [newImage]);
+        oldRetry?.();
+        newBatch.click();
+        dispatchPickedFiles(screen.getByTestId("import-file-input") as HTMLInputElement, [duplicatePick]);
+        dispatchDropFiles([duplicateDrop]);
+        expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+
+        await act(async () => {});
+        expect(oldOnDone).toHaveBeenCalledTimes(0);
+        expect(oldOnError).toHaveBeenCalledTimes(0);
+        expect(newOnDone).toHaveBeenCalledTimes(0);
+        expect(newOnError).toHaveBeenCalledTimes(0);
+        expect(screen.getAllByTestId("import-item")).toHaveLength(1);
+        expect(screen.getByTestId("import-item")).toHaveTextContent("new.md");
+        expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "uploading");
+        expect(screen.queryByText("Old")).toBeNull();
+        expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull();
+
+        await act(async () => {
+          newUpload.resolve({ documents: [{ id: "doc-new", title: "New", warnings: [] }], failed: [] });
+        });
+        expect(await screen.findByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-new");
+        expect(newOnDone).toHaveBeenCalledTimes(1);
+        expect(newOnDone).toHaveBeenCalledWith([{ id: "doc-new", title: "New", warnings: [] }], []);
+        expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
     },
   );
 
