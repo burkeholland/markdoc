@@ -110,10 +110,13 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const [retrying, setRetrying] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const contentCache = useRef(new Map<string, string>());
+  const contentRequests = useRef(new Map<string, Promise<string>>());
+  const previewIntent = useRef(0);
   const alive = useRef(true);
   const listRequest = useRef(0);
   const retryPending = useRef(false);
@@ -123,6 +126,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     alive.current = true;
     return () => {
       alive.current = false;
+      previewIntent.current += 1;
       listRequest.current += 1;
     };
   }, []);
@@ -158,9 +162,23 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     async (v: VersionSummary) => {
       const cached = contentCache.current.get(v.id);
       if (cached !== undefined) return cached;
-      const res = await api.documents.version(session.docId, v.id);
-      contentCache.current.set(v.id, res.version.content);
-      return res.version.content;
+      const pending = contentRequests.current.get(v.id);
+      if (pending) return pending;
+
+      const request = api.documents.version(session.docId, v.id).then((res) => {
+        contentCache.current.set(v.id, res.version.content);
+        return res.version.content;
+      });
+      contentRequests.current.set(v.id, request);
+      void request.then(
+        () => {
+          if (contentRequests.current.get(v.id) === request) contentRequests.current.delete(v.id);
+        },
+        () => {
+          if (contentRequests.current.get(v.id) === request) contentRequests.current.delete(v.id);
+        },
+      );
+      return request;
     },
     [session.docId],
   );
@@ -168,32 +186,44 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   /** Two ticked versions → old→new compare; otherwise fall back to the clicked row vs current, or nothing. */
   const showPreview = useCallback(
     async (compareIds: string[], selectedId: string | null) => {
+      const intent = ++previewIntent.current;
       const all = versions ?? [];
       const picked = compareIds.map((id) => all.find((v) => v.id === id)).filter((v): v is VersionSummary => Boolean(v));
+      const pair = picked.length === 2 ? [...picked].sort((a, b) => a.number - b.number) : null;
+      const single = selectedId ? all.find((v) => v.id === selectedId) : undefined;
+      const ownsIntent = () => alive.current && previewIntent.current === intent;
+
+      setError(null);
+      setPreviewBusy(pair ? pair[1].id : single?.id ?? null);
       try {
-        if (picked.length === 2) {
-          const [older, newer] = [...picked].sort((a, b) => a.number - b.number);
-          setBusy(newer.id);
+        if (pair) {
+          const [older, newer] = pair;
           const [oldContent, newContent] = await Promise.all([contentOf(older), contentOf(newer)]);
+          if (!ownsIntent()) return;
           const range = all.filter((v) => v.number > older.number && v.number <= newer.number);
           onPreview({ version: newer, content: newContent, base: { version: older, content: oldContent }, range });
           return;
         }
-        const single = selectedId ? all.find((v) => v.id === selectedId) : undefined;
         if (single) {
-          setBusy(single.id);
-          onPreview({ version: single, content: await contentOf(single) });
+          const content = await contentOf(single);
+          if (!ownsIntent()) return;
+          onPreview({ version: single, content });
           return;
         }
         onPreview(null);
       } catch (e) {
-        setError(apiErrorText(e, "Failed to load version"));
+        if (ownsIntent()) setError(apiErrorText(e, "Failed to load version"));
       } finally {
-        setBusy(null);
+        if (ownsIntent()) setPreviewBusy(null);
       }
     },
     [versions, contentOf, onPreview],
   );
+
+  const invalidatePreview = useCallback(() => {
+    previewIntent.current += 1;
+    setPreviewBusy(null);
+  }, []);
 
   const select = async (v: VersionSummary) => {
     const next = selected === v.id ? null : v.id;
@@ -210,7 +240,8 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
 
   const restore = async (v: VersionSummary) => {
     if (!confirm(`Restore version ${v.number}? The current text is saved as a version first.`)) return;
-    setBusy(v.id);
+    invalidatePreview();
+    setActionBusy(v.id);
     try {
       await api.documents.restoreVersion(session.docId, v.id);
       setSelected(null);
@@ -220,7 +251,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     } catch (e) {
       setError(apiErrorText(e, "Restore failed"));
     } finally {
-      setBusy(null);
+      setActionBusy(null);
     }
   };
 
@@ -237,14 +268,14 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   };
 
   const copyAsNew = async (v: VersionSummary) => {
-    setBusy(v.id);
+    setActionBusy(v.id);
     try {
       const res = await api.documents.copyVersion(session.docId, v.id);
       setPendingNotice(`Created “${res.title}” from version ${v.number}.`, "success");
       router.push(`/d/${res.id}`);
     } catch (e) {
       setError(apiErrorText(e, "Could not copy the version"));
-      setBusy(null);
+      setActionBusy(null);
     }
   };
 
@@ -259,6 +290,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           type="button"
           className="icon-btn h-8 w-8"
           onClick={() => {
+            invalidatePreview();
             onPreview(null);
             onClose();
           }}
@@ -375,7 +407,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                               )}
                             </div>
                           </div>
-                          {busy === v.id && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
+                          {(previewBusy === v.id || actionBusy === v.id) && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
                         </button>
                       </div>
                       {selected === v.id && (

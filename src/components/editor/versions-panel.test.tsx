@@ -7,6 +7,8 @@ import type { VersionSummary } from "@/lib/api";
 const versions = vi.fn();
 const version = vi.fn();
 const renameVersion = vi.fn();
+const restoreVersion = vi.fn();
+const copyVersion = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
   api: {
@@ -14,8 +16,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
       versions: (...args: unknown[]) => versions(...args),
       version: (...args: unknown[]) => version(...args),
       renameVersion: (...args: unknown[]) => renameVersion(...args),
-      restoreVersion: vi.fn(),
-      copyVersion: vi.fn(),
+      restoreVersion: (...args: unknown[]) => restoreVersion(...args),
+      copyVersion: (...args: unknown[]) => copyVersion(...args),
     },
   },
 }));
@@ -43,6 +45,20 @@ function session(docId: string): CollabSession {
   return { docId, role: "owner" } as unknown as CollabSession;
 }
 
+function contentResult(summary: VersionSummary, content: string) {
+  return { version: { ...summary, content } };
+}
+
+function versionItem(title: string): HTMLElement {
+  const item = screen.getByText(title).closest<HTMLElement>('[data-testid="version-item"]');
+  if (!item) throw new Error(`Missing version item for ${title}`);
+  return item;
+}
+
+function spinnerFor(title: string): Element | null {
+  return versionItem(title).querySelector(".animate-spin");
+}
+
 const named: VersionSummary = {
   id: "ver-1",
   number: 1,
@@ -59,10 +75,13 @@ beforeEach(() => {
   versions.mockReset().mockResolvedValue({ versions: [named] });
   version.mockReset().mockResolvedValue({ version: { ...named, content: "# Draft" } });
   renameVersion.mockReset();
+  restoreVersion.mockReset().mockResolvedValue({ ok: true });
+  copyVersion.mockReset().mockResolvedValue({ id: "copy-1", title: "Copy" });
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 describe("VersionsPanel · rename a version", () => {
@@ -207,5 +226,358 @@ describe("VersionsPanel · list recovery", () => {
     await act(async () => {});
     expect(screen.getByText("New document version")).toBeInTheDocument();
     expect(screen.queryByText("Old document version")).toBeNull();
+  });
+});
+
+describe("VersionsPanel · preview intent ownership", () => {
+  it.each([
+    ["older request settles first", "older-first"],
+    ["newer request settles first", "newer-first"],
+  ] as const)("keeps rapid A-then-B selection on B when the %s", async (_label, settlementOrder) => {
+    const docId = `rapid-selection-${settlementOrder}`;
+    const alpha = { ...named, id: `alpha-${settlementOrder}`, number: 1, title: "Alpha" };
+    const beta = { ...named, id: `beta-${settlementOrder}`, number: 2, title: "Beta" };
+    const alphaRequest = deferred<ReturnType<typeof contentResult>>();
+    const betaRequest = deferred<ReturnType<typeof contentResult>>();
+    versions.mockResolvedValueOnce({ versions: [beta, alpha] });
+    version.mockImplementation((_docId: string, versionId: string) => (versionId === alpha.id ? alphaRequest.promise : betaRequest.promise));
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Alpha");
+    fireEvent.click(screen.getByText("Alpha"));
+    fireEvent.click(screen.getByText("Beta"));
+
+    expect(version).toHaveBeenNthCalledWith(1, docId, alpha.id);
+    expect(version).toHaveBeenNthCalledWith(2, docId, beta.id);
+    expect(spinnerFor("Alpha")).toBeNull();
+    expect(spinnerFor("Beta")).not.toBeNull();
+
+    if (settlementOrder === "older-first") {
+      await act(async () => {
+        alphaRequest.resolve(contentResult(alpha, "# Alpha"));
+        await Promise.resolve();
+      });
+      expect(onPreview).not.toHaveBeenCalled();
+      expect(spinnerFor("Beta")).not.toBeNull();
+      await act(async () => {
+        betaRequest.resolve(contentResult(beta, "# Beta"));
+        await Promise.resolve();
+      });
+    } else {
+      await act(async () => {
+        betaRequest.resolve(contentResult(beta, "# Beta"));
+        await Promise.resolve();
+      });
+      expect(onPreview).toHaveBeenCalledOnce();
+      await act(async () => {
+        alphaRequest.resolve(contentResult(alpha, "# Alpha"));
+        await Promise.resolve();
+      });
+    }
+
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    expect(onPreview).toHaveBeenCalledWith({ version: beta, content: "# Beta" });
+    expect(screen.getByTestId("versions-panel").querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("lets a two-version comparison supersede a pending single-version preview", async () => {
+    const docId = "single-to-comparison";
+    const older = { ...named, id: "single-older", number: 1, title: "Comparison older" };
+    const newer = { ...named, id: "single-newer", number: 2, title: "Comparison newer" };
+    const olderRequest = deferred<ReturnType<typeof contentResult>>();
+    const newerRequest = deferred<ReturnType<typeof contentResult>>();
+    versions.mockResolvedValueOnce({ versions: [newer, older] });
+    version.mockImplementation((_docId: string, versionId: string) => (versionId === older.id ? olderRequest.promise : newerRequest.promise));
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Comparison newer");
+    fireEvent.click(screen.getByText("Comparison newer"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v2" }));
+
+    expect(version).toHaveBeenCalledTimes(2);
+    expect(version).toHaveBeenCalledWith(docId, older.id);
+    expect(version).toHaveBeenCalledWith(docId, newer.id);
+    await act(async () => {
+      newerRequest.resolve(contentResult(newer, "# Newer"));
+      await Promise.resolve();
+    });
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(spinnerFor("Comparison newer")).not.toBeNull();
+
+    await act(async () => {
+      olderRequest.resolve(contentResult(older, "# Older"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith({
+      version: newer,
+      content: "# Newer",
+      base: { version: older, content: "# Older" },
+      range: [newer],
+    });
+  });
+
+  it("keeps Clear authoritative over a pending comparison", async () => {
+    const docId = "comparison-clear";
+    const older = { ...named, id: "clear-older", number: 1, title: "Clear older" };
+    const newer = { ...named, id: "clear-newer", number: 2, title: "Clear newer" };
+    const olderRequest = deferred<ReturnType<typeof contentResult>>();
+    const newerRequest = deferred<ReturnType<typeof contentResult>>();
+    versions.mockResolvedValueOnce({ versions: [newer, older] });
+    version.mockImplementation((_docId: string, versionId: string) => (versionId === older.id ? olderRequest.promise : newerRequest.promise));
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Clear older");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    onPreview.mockClear();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v2" }));
+    expect(version).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    expect(screen.getByTestId("versions-panel").querySelector(".animate-spin")).toBeNull();
+
+    await act(async () => {
+      olderRequest.resolve(contentResult(older, "# Older"));
+      newerRequest.reject(new Error("obsolete comparison"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("obsolete comparison")).toBeNull();
+    expect(version).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a pending preview reopen after Close", async () => {
+    const docId = "preview-close";
+    const request = deferred<ReturnType<typeof contentResult>>();
+    const current = { ...named, id: "close-version", title: "Close pending" };
+    versions.mockResolvedValueOnce({ versions: [current] });
+    version.mockReturnValueOnce(request.promise);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={onClose} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Close pending");
+    fireEvent.click(screen.getByText("Close pending"));
+    expect(spinnerFor("Close pending")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    expect(spinnerFor("Close pending")).toBeNull();
+    await act(async () => {
+      request.resolve(contentResult(current, "# Too late"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    expect(version).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Restore busy after the obsolete preview settles", async () => {
+    const docId = "preview-restore";
+    const previewRequest = deferred<ReturnType<typeof contentResult>>();
+    const restoreRequest = deferred<{ ok: boolean }>();
+    const current = { ...named, id: "restore-version", title: "Restore pending" };
+    versions.mockResolvedValue({ versions: [current] });
+    version.mockReturnValueOnce(previewRequest.promise);
+    restoreVersion.mockReturnValueOnce(restoreRequest.promise);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Restore pending");
+    fireEvent.click(screen.getByText("Restore pending"));
+    fireEvent.click(screen.getByTestId("version-restore"));
+
+    expect(restoreVersion).toHaveBeenCalledWith(docId, current.id);
+    expect(spinnerFor("Restore pending")).not.toBeNull();
+    await act(async () => {
+      previewRequest.resolve(contentResult(current, "# Obsolete"));
+      await Promise.resolve();
+    });
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(spinnerFor("Restore pending")).not.toBeNull();
+
+    await act(async () => {
+      restoreRequest.resolve({ ok: true });
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    await waitFor(() => expect(screen.getByTestId("versions-panel").querySelector(".animate-spin")).toBeNull());
+  });
+
+  it("keeps Copy busy when its version preview finishes first", async () => {
+    const docId = "preview-copy";
+    const previewRequest = deferred<ReturnType<typeof contentResult>>();
+    const copyRequest = deferred<{ id: string; title: string }>();
+    const current = { ...named, id: "copy-version", title: "Copy pending" };
+    versions.mockResolvedValueOnce({ versions: [current] });
+    version.mockReturnValueOnce(previewRequest.promise);
+    copyVersion.mockReturnValueOnce(copyRequest.promise);
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Copy pending");
+    fireEvent.click(screen.getByText("Copy pending"));
+    fireEvent.click(screen.getByTestId("version-copy"));
+
+    expect(copyVersion).toHaveBeenCalledWith(docId, current.id);
+    expect(spinnerFor("Copy pending")).not.toBeNull();
+    await act(async () => {
+      previewRequest.resolve(contentResult(current, "# Preview"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(spinnerFor("Copy pending")).not.toBeNull();
+
+    await act(async () => {
+      copyRequest.reject(new Error("copy failed"));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("copy failed")).toBeInTheDocument();
+    expect(spinnerFor("Copy pending")).toBeNull();
+  });
+
+  it("coalesces concurrent reads of the same version", async () => {
+    const docId = "preview-coalescing";
+    const request = deferred<ReturnType<typeof contentResult>>();
+    const current = { ...named, id: "coalesced-version", title: "Coalesced" };
+    versions.mockResolvedValueOnce({ versions: [current] });
+    version.mockReturnValueOnce(request.promise);
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Coalesced");
+    fireEvent.click(screen.getByText("Coalesced"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+
+    expect(version).toHaveBeenCalledOnce();
+    expect(version).toHaveBeenCalledWith(docId, current.id);
+    await act(async () => {
+      request.resolve(contentResult(current, "# Shared"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith({ version: current, content: "# Shared" });
+  });
+
+  it("retries once with a fresh request after the current content read fails", async () => {
+    const docId = "preview-retry";
+    const failedRequest = deferred<ReturnType<typeof contentResult>>();
+    const retryRequest = deferred<ReturnType<typeof contentResult>>();
+    const current = { ...named, id: "retry-version", title: "Retry content" };
+    versions.mockResolvedValueOnce({ versions: [current] });
+    version.mockReturnValueOnce(failedRequest.promise).mockReturnValueOnce(retryRequest.promise);
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Retry content");
+    fireEvent.click(screen.getByText("Retry content"));
+    await act(async () => {
+      failedRequest.reject(new Error("offline"));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("offline")).toBeInTheDocument();
+    expect(version).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    expect(screen.queryByText("offline")).toBeNull();
+    expect(spinnerFor("Retry content")).not.toBeNull();
+    expect(version).toHaveBeenCalledTimes(2);
+    expect(version).toHaveBeenNthCalledWith(2, docId, current.id);
+    await act(async () => {
+      retryRequest.resolve(contentResult(current, "# Recovered"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith({ version: current, content: "# Recovered" });
+    expect(version).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a stale failure without clearing the current preview spinner", async () => {
+    const docId = "stale-preview-failure";
+    const alpha = { ...named, id: "stale-alpha", number: 1, title: "Stale alpha" };
+    const beta = { ...named, id: "stale-beta", number: 2, title: "Current beta" };
+    const alphaRequest = deferred<ReturnType<typeof contentResult>>();
+    const betaRequest = deferred<ReturnType<typeof contentResult>>();
+    versions.mockResolvedValueOnce({ versions: [beta, alpha] });
+    version.mockImplementation((_docId: string, versionId: string) => (versionId === alpha.id ? alphaRequest.promise : betaRequest.promise));
+    const onPreview = vi.fn();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText("Stale alpha");
+    fireEvent.click(screen.getByText("Stale alpha"));
+    fireEvent.click(screen.getByText("Current beta"));
+    await act(async () => {
+      alphaRequest.reject(new Error("obsolete failure"));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("obsolete failure")).toBeNull();
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(spinnerFor("Current beta")).not.toBeNull();
+    await act(async () => {
+      betaRequest.resolve(contentResult(beta, "# Current"));
+      await Promise.resolve();
+    });
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith({ version: beta, content: "# Current" });
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a late content %s after unmount", async (settlement) => {
+    const docId = `preview-unmount-${settlement}`;
+    const request = deferred<ReturnType<typeof contentResult>>();
+    const current = { ...named, id: `unmount-${settlement}`, title: `Unmount ${settlement}` };
+    versions.mockResolvedValueOnce({ versions: [current] });
+    version.mockReturnValueOnce(request.promise);
+    const onPreview = vi.fn();
+
+    const rendered = render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    await screen.findByText(`Unmount ${settlement}`);
+    fireEvent.click(screen.getByText(`Unmount ${settlement}`));
+    rendered.unmount();
+    await act(async () => {
+      if (settlement === "resolve") request.resolve(contentResult(current, "# Too late"));
+      else request.reject(new Error("too late"));
+      await Promise.resolve();
+    });
+
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(version).toHaveBeenCalledOnce();
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores an old document's late content %s after replacement", async (settlement) => {
+    const oldDocId = `preview-old-${settlement}`;
+    const newDocId = `preview-new-${settlement}`;
+    const request = deferred<ReturnType<typeof contentResult>>();
+    const oldVersion = { ...named, id: `old-content-${settlement}`, title: `Old content ${settlement}` };
+    const newVersion = { ...named, id: `new-content-${settlement}`, title: `New content ${settlement}` };
+    versions.mockImplementation((docId: string) => Promise.resolve({ versions: [docId === oldDocId ? oldVersion : newVersion] }));
+    version.mockReturnValueOnce(request.promise);
+    const onPreview = vi.fn();
+    const props = { onClose: vi.fn(), onPreview, refreshKey: 0 };
+
+    const rendered = render(<VersionsPanel {...props} session={session(oldDocId)} />);
+    await screen.findByText(`Old content ${settlement}`);
+    fireEvent.click(screen.getByText(`Old content ${settlement}`));
+    rendered.rerender(<VersionsPanel {...props} session={session(newDocId)} />);
+    expect(await screen.findByText(`New content ${settlement}`)).toBeInTheDocument();
+
+    await act(async () => {
+      if (settlement === "resolve") request.resolve(contentResult(oldVersion, "# Too late"));
+      else request.reject(new Error("too late"));
+      await Promise.resolve();
+    });
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(screen.queryByText("too late")).toBeNull();
+    expect(screen.getByText(`New content ${settlement}`)).toBeInTheDocument();
+    expect(version).toHaveBeenCalledWith(oldDocId, oldVersion.id);
   });
 });
