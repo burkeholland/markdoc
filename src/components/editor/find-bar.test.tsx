@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import type * as Y from "yjs";
 
 // A CollabSession normally opens a WebSocket through Hocuspocus; stand in a provider that only
@@ -22,12 +23,12 @@ vi.mock("@hocuspocus/provider", async () => {
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { TooltipProvider } from "@/components/ui/primitives";
-import { FindBar } from "./find-bar";
+import { FindBar, type FindBarProps } from "./find-bar";
 
 const TEXT = "The cat sat on the mat. The cat ran.";
 
-function makeSession(role: "owner" | "viewer"): CollabSession {
-  const session = new CollabSession({ docId: "doc", user: makeCollabUser("a", "Alice"), role, getToken: async () => "token", autoConnect: false });
+function makeSession(role: "owner" | "viewer", docId = "doc"): CollabSession {
+  const session = new CollabSession({ docId, user: makeCollabUser("a", "Alice"), role, getToken: async () => "token", autoConnect: false });
   session.ytext.insert(0, TEXT);
   session.setFind("cat");
   return session;
@@ -43,8 +44,8 @@ function renderBar(session: CollabSession, replaceVisible: boolean, onReplaceVis
 }
 
 const sessions: CollabSession[] = [];
-const session = (role: "owner" | "viewer") => {
-  const s = makeSession(role);
+const session = (role: "owner" | "viewer", docId?: string) => {
+  const s = makeSession(role, docId);
   sessions.push(s);
   return s;
 };
@@ -52,6 +53,321 @@ const session = (role: "owner" | "viewer") => {
 afterEach(() => {
   cleanup();
   while (sessions.length) sessions.pop()!.destroy();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+function FindBoundary({
+  session,
+  present = true,
+  replaceVisible,
+  focusNonce = 0,
+  boundary = 0,
+  onBoundary,
+  onReplaceVisible,
+  onReveal,
+  onClose,
+}: {
+  session: CollabSession;
+  present?: boolean;
+  replaceVisible: boolean;
+  focusNonce?: number;
+  boundary?: number;
+  onBoundary?: () => void;
+  onReplaceVisible: (visible: boolean) => void;
+  onReveal: FindBarProps["onReveal"];
+  onClose: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? (
+    <TooltipProvider>
+      <FindBar
+        session={session}
+        replaceVisible={replaceVisible}
+        onReplaceVisible={onReplaceVisible}
+        focusNonce={focusNonce}
+        onReveal={onReveal}
+        onClose={onClose}
+      />
+    </TooltipProvider>
+  ) : null;
+}
+
+function frameEnvironment() {
+  let nextFrame = 1;
+  const pending = new Map<number, FrameRequestCallback>();
+  const captured: { id: number; callback: FrameRequestCallback }[] = [];
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const id = nextFrame++;
+    pending.set(id, callback);
+    captured.push({ id, callback });
+    return id;
+  });
+  const cancel = vi.fn((id: number) => pending.delete(id));
+  vi.stubGlobal("requestAnimationFrame", request);
+  vi.stubGlobal("cancelAnimationFrame", cancel);
+  const invoke = (owner: { id: number; callback: FrameRequestCallback }) => {
+    pending.delete(owner.id);
+    owner.callback(0);
+  };
+  const reset = () => {
+    pending.clear();
+    captured.length = 0;
+    request.mockClear();
+    cancel.mockClear();
+  };
+  return { pending, captured, request, cancel, invoke, reset };
+}
+
+function trackFocus() {
+  const focused: string[] = [];
+  const selected: string[] = [];
+  const focus = HTMLElement.prototype.focus;
+  const select = HTMLInputElement.prototype.select;
+  vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+    focused.push(this.dataset.testid ?? this.tagName);
+    focus.call(this, options);
+  });
+  vi.spyOn(HTMLInputElement.prototype, "select").mockImplementation(function (this: HTMLInputElement) {
+    selected.push(this.dataset.testid ?? this.tagName);
+    select.call(this);
+  });
+  return { focused, selected };
+}
+
+function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return handler as T;
+}
+
+type ClickHandler = () => void;
+type ChangeHandler = (event: { target: { value: string } }) => void;
+
+describe("FindBar session ownership", () => {
+  it("focuses once for a same-session nonce and again for a new session with the same nonce before the parent layout boundary", () => {
+    const previous = session("owner", "focus-previous");
+    const current = session("owner", "focus-current");
+    const focus = trackFocus();
+    const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const rendered = render(<FindBoundary session={previous} replaceVisible={false} focusNonce={0} {...callbacks} />);
+
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(1);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(1);
+
+    rendered.rerender(
+      <FindBoundary
+        session={previous}
+        replaceVisible={false}
+        focusNonce={1}
+        boundary={1}
+        onBoundary={() => expect(screen.getByTestId("find-input")).toHaveFocus()}
+        {...callbacks}
+      />,
+    );
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(2);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(2);
+
+    rendered.rerender(
+      <FindBoundary
+        session={current}
+        replaceVisible={false}
+        focusNonce={1}
+        boundary={2}
+        onBoundary={() => expect(screen.getByTestId("find-input")).toHaveFocus()}
+        {...callbacks}
+      />,
+    );
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(3);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(3);
+  });
+
+  it.each(["retired-before-current", "current-before-retired"] as const)(
+    "retires a replacement frame and actions at the session layout boundary (%s)",
+    (order) => {
+      const frames = frameEnvironment();
+      const focus = trackFocus();
+      const previous = session("owner", `replace-previous-${order}`);
+      const current = session("owner", `replace-current-${order}`);
+      const previousSetFind = vi.spyOn(previous, "setFind");
+      const previousStep = vi.spyOn(previous, "stepFind");
+      const previousReplaceOne = vi.spyOn(previous, "replaceActive");
+      const previousReplaceAll = vi.spyOn(previous, "replaceAll");
+      const currentSetFind = vi.spyOn(current, "setFind");
+      const currentStep = vi.spyOn(current, "stepFind");
+      const currentReplaceOne = vi.spyOn(current, "replaceActive");
+      const currentReplaceAll = vi.spyOn(current, "replaceAll");
+      const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+      const rendered = render(<FindBoundary session={previous} replaceVisible={false} {...callbacks} />);
+      frames.reset();
+      const retiredOpen = reactHandler<ClickHandler>(screen.getByTestId("find-toggle-replace"), "onClick");
+
+      act(() => retiredOpen());
+      expect(frames.pending.size).toBe(1);
+      const retiredFrame = frames.captured[0];
+      rendered.rerender(<FindBoundary session={previous} replaceVisible {...callbacks} />);
+      fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "previous draft" } });
+      expect(screen.getByTestId("replace-input")).toHaveValue("previous draft");
+
+      const retiredActions = {
+        replacementChange: reactHandler<ChangeHandler>(screen.getByTestId("replace-input"), "onChange"),
+        queryChange: reactHandler<ChangeHandler>(screen.getByTestId("find-input"), "onChange"),
+        next: reactHandler<ClickHandler>(screen.getByTestId("find-next"), "onClick"),
+        replaceOne: reactHandler<ClickHandler>(screen.getByTestId("replace-one"), "onClick"),
+        replaceAll: reactHandler<ClickHandler>(screen.getByTestId("replace-all"), "onClick"),
+        close: reactHandler<ClickHandler>(screen.getByTestId("find-close"), "onClick"),
+      };
+      callbacks.onReplaceVisible.mockClear();
+      callbacks.onReveal.mockClear();
+      callbacks.onClose.mockClear();
+      let retiredPendingAtBoundary = true;
+
+      rendered.rerender(
+        <FindBoundary
+          session={current}
+          replaceVisible
+          boundary={1}
+          onBoundary={() => {
+            retiredPendingAtBoundary = frames.pending.has(retiredFrame.id);
+            expect(screen.getByTestId("replace-input")).toHaveValue("");
+            expect(screen.getByTestId("find-input")).toHaveFocus();
+          }}
+          {...callbacks}
+        />,
+      );
+
+      expect(retiredPendingAtBoundary).toBe(false);
+      expect(frames.cancel).toHaveBeenCalledWith(retiredFrame.id);
+      act(() => {
+        frames.invoke(retiredFrame);
+        retiredOpen();
+        retiredActions.replacementChange({ target: { value: "late previous draft" } });
+        retiredActions.queryChange({ target: { value: "dog" } });
+        retiredActions.next();
+        retiredActions.replaceOne();
+        retiredActions.replaceAll();
+        retiredActions.close();
+      });
+
+      expect(screen.getByTestId("replace-input")).toHaveValue("");
+      expect(screen.getByTestId("find-input")).toHaveFocus();
+      expect(focus.focused.filter((target) => target === "replace-input")).toHaveLength(0);
+      expect(frames.pending.has(retiredFrame.id)).toBe(false);
+      expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+      expect(callbacks.onReveal).not.toHaveBeenCalled();
+      expect(callbacks.onClose).not.toHaveBeenCalled();
+      expect(previousSetFind).not.toHaveBeenCalled();
+      expect(previousStep).not.toHaveBeenCalled();
+      expect(previousReplaceOne).not.toHaveBeenCalled();
+      expect(previousReplaceAll).not.toHaveBeenCalled();
+      expect(currentSetFind).not.toHaveBeenCalled();
+      expect(currentStep).not.toHaveBeenCalled();
+      expect(currentReplaceOne).not.toHaveBeenCalled();
+      expect(currentReplaceAll).not.toHaveBeenCalled();
+      expect(current.ytext.toString()).toBe(TEXT);
+
+      rendered.rerender(<FindBoundary session={current} replaceVisible={false} {...callbacks} />);
+      const currentOpen = reactHandler<ClickHandler>(screen.getByTestId("find-toggle-replace"), "onClick");
+      act(() => currentOpen());
+      const currentFrame = frames.captured.at(-1);
+      if (!currentFrame || currentFrame === retiredFrame) throw new Error("The current replace focus frame was not scheduled");
+      expect(frames.pending.has(currentFrame.id)).toBe(true);
+      rendered.rerender(<FindBoundary session={current} replaceVisible {...callbacks} />);
+      fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "dog" } });
+
+      act(() => {
+        for (const frame of order === "retired-before-current"
+          ? [retiredFrame, currentFrame]
+          : [currentFrame, retiredFrame]) {
+          frames.invoke(frame);
+        }
+        frames.invoke(currentFrame);
+      });
+
+      expect(frames.pending.has(retiredFrame.id)).toBe(false);
+      expect(frames.pending.has(currentFrame.id)).toBe(false);
+      expect(screen.getByTestId("replace-input")).toHaveFocus();
+      expect(focus.focused.filter((target) => target === "replace-input")).toHaveLength(1);
+      fireEvent.click(screen.getByTestId("replace-one"));
+      expect(currentReplaceOne).toHaveBeenCalledOnce();
+      expect(currentReplaceOne).toHaveBeenCalledWith("dog");
+      fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "fox" } });
+      fireEvent.click(screen.getByTestId("replace-all"));
+      expect(currentReplaceAll).toHaveBeenCalledOnce();
+      expect(currentReplaceAll).toHaveBeenCalledWith("fox");
+      expect(current.ytext.toString()).toBe("The dog sat on the mat. The fox ran.");
+    },
+  );
+
+  it("cancels and retires replacement work before the parent removal layout boundary", () => {
+    const frames = frameEnvironment();
+    const focus = trackFocus();
+    const removed = session("owner", "replace-removed");
+    const setFind = vi.spyOn(removed, "setFind");
+    const step = vi.spyOn(removed, "stepFind");
+    const replaceOne = vi.spyOn(removed, "replaceActive");
+    const replaceAll = vi.spyOn(removed, "replaceAll");
+    const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const rendered = render(<FindBoundary session={removed} replaceVisible={false} {...callbacks} />);
+    frames.reset();
+    const retiredOpen = reactHandler<ClickHandler>(screen.getByTestId("find-toggle-replace"), "onClick");
+
+    act(() => retiredOpen());
+    const retiredFrame = frames.captured[0];
+    rendered.rerender(<FindBoundary session={removed} replaceVisible {...callbacks} />);
+    fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "removed draft" } });
+    const retiredActions = {
+      queryChange: reactHandler<ChangeHandler>(screen.getByTestId("find-input"), "onChange"),
+      next: reactHandler<ClickHandler>(screen.getByTestId("find-next"), "onClick"),
+      replaceOne: reactHandler<ClickHandler>(screen.getByTestId("replace-one"), "onClick"),
+      replaceAll: reactHandler<ClickHandler>(screen.getByTestId("replace-all"), "onClick"),
+      close: reactHandler<ClickHandler>(screen.getByTestId("find-close"), "onClick"),
+    };
+    callbacks.onReplaceVisible.mockClear();
+    let retiredPendingAtBoundary = true;
+
+    rendered.rerender(
+      <FindBoundary
+        session={removed}
+        present={false}
+        replaceVisible
+        boundary={1}
+        onBoundary={() => {
+          retiredPendingAtBoundary = frames.pending.has(retiredFrame.id);
+        }}
+        {...callbacks}
+      />,
+    );
+
+    expect(retiredPendingAtBoundary).toBe(false);
+    expect(frames.cancel).toHaveBeenCalledWith(retiredFrame.id);
+    act(() => {
+      frames.invoke(retiredFrame);
+      retiredOpen();
+      retiredActions.queryChange({ target: { value: "dog" } });
+      retiredActions.next();
+      retiredActions.replaceOne();
+      retiredActions.replaceAll();
+      retiredActions.close();
+    });
+
+    expect(screen.queryByTestId("find-bar")).toBeNull();
+    expect(focus.focused.filter((target) => target === "replace-input")).toHaveLength(0);
+    expect(frames.pending.has(retiredFrame.id)).toBe(false);
+    expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(setFind).not.toHaveBeenCalled();
+    expect(step).not.toHaveBeenCalled();
+    expect(replaceOne).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(removed.ytext.toString()).toBe(TEXT);
+  });
 });
 
 describe("FindBar replace row", () => {

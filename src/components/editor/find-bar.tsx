@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CaseSensitive, ChevronDown, ChevronUp, Regex, Replace, WholeWord, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { compileFindRegex, type FindMatch, type FindOptions } from "@/editor/find";
@@ -19,6 +19,20 @@ export interface FindBarProps {
   onReveal: (match: FindMatch) => void;
   /** Called when the bar wants to close (Escape or the close button). */
   onClose: () => void;
+}
+
+interface FindBarVisit {
+  session: CollabSession;
+}
+
+interface ReplacementDraft {
+  visit: FindBarVisit;
+  value: string;
+}
+
+interface ReplaceFocusOwner {
+  visit: FindBarVisit;
+  frame: number;
 }
 
 function OptionToggle({ label, active, onClick, testId, children }: { label: string; active: boolean; onClick: () => void; testId: string; children: React.ReactNode }) {
@@ -41,75 +55,131 @@ function OptionToggle({ label, active, onClick, testId, children }: { label: str
 }
 
 export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce, onReveal, onClose }: FindBarProps) {
+  const visit = useMemo<FindBarVisit>(() => ({ session }), [session]);
   const find = useSessionValue(session, (s) => s.find);
   const { canEdit, total, active } = useSessionValue(
     session,
     (s) => ({ canEdit: s.canEdit, total: s.find?.matches.length ?? 0, active: s.find?.active ?? -1 }),
     shallowEqual,
   );
-  const [replacement, setReplacement] = useState("");
+  const [replacementDraft, setReplacementDraft] = useState<ReplacementDraft>(() => ({ visit, value: "" }));
   const searchRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
+  const activeVisit = useRef<FindBarVisit | null>(null);
+  const replaceFocusOwner = useRef<ReplaceFocusOwner | null>(null);
+  const replacement = replacementDraft.visit === visit ? replacementDraft.value : "";
 
-  useEffect(() => {
+  const ownsVisit = useCallback((owner: FindBarVisit) => activeVisit.current === owner, []);
+  const cancelReplaceFocus = useCallback((owner: FindBarVisit) => {
+    const focusOwner = replaceFocusOwner.current;
+    if (focusOwner?.visit !== owner) return;
+    replaceFocusOwner.current = null;
+    cancelAnimationFrame(focusOwner.frame);
+  }, []);
+  const retireVisit = useCallback((owner: FindBarVisit) => {
+    if (activeVisit.current === owner) activeVisit.current = null;
+    cancelReplaceFocus(owner);
+  }, [cancelReplaceFocus]);
+
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    return () => retireVisit(visit);
+  }, [retireVisit, visit]);
+
+  useLayoutEffect(() => {
+    if (!ownsVisit(visit)) return;
     const input = searchRef.current;
     if (!input) return;
     input.focus();
     input.select();
-  }, [focusNonce]);
+  }, [focusNonce, ownsVisit, visit]);
 
   const query = find?.query ?? "";
   const options = find?.options;
   const invalidRegex = options ? compileFindRegex(query, options).invalid : false;
+  const showReplace = replaceVisible && canEdit;
+
+  useLayoutEffect(() => {
+    if (!showReplace) cancelReplaceFocus(visit);
+  }, [cancelReplaceFocus, showReplace, visit]);
 
   const update = useCallback(
     (nextQuery: string, nextOptions?: FindOptions) => {
+      if (!ownsVisit(visit)) return;
       session.setFind(nextQuery, nextOptions);
+      if (!ownsVisit(visit)) return;
       const m = session.find?.matches[session.find.active];
       if (m) onReveal(m);
     },
-    [session, onReveal],
+    [ownsVisit, visit, session, onReveal],
   );
 
   const toggle = (key: keyof FindOptions) => {
-    if (!options) return;
+    if (!ownsVisit(visit) || !options) return;
     update(query, { ...options, [key]: !options[key] });
   };
 
   const step = useCallback(
     (dir: 1 | -1) => {
+      if (!ownsVisit(visit)) return;
       const m = session.stepFind(dir);
-      if (m) onReveal(m);
+      if (m && ownsVisit(visit)) onReveal(m);
     },
-    [session, onReveal],
+    [ownsVisit, visit, session, onReveal],
   );
 
   const replaceOne = useCallback(() => {
+    if (!ownsVisit(visit)) return;
     const m = session.replaceActive(replacement);
-    if (m) onReveal(m);
-  }, [session, replacement, onReveal]);
+    if (m && ownsVisit(visit)) onReveal(m);
+  }, [ownsVisit, visit, session, replacement, onReveal]);
 
   const replaceAll = useCallback(() => {
+    if (!ownsVisit(visit)) return;
     session.replaceAll(replacement);
-  }, [session, replacement]);
+  }, [ownsVisit, visit, session, replacement]);
+
+  const close = useCallback(() => {
+    if (!ownsVisit(visit)) return;
+    retireVisit(visit);
+    onClose();
+  }, [ownsVisit, retireVisit, visit, onClose]);
+
+  const toggleReplace = () => {
+    if (!ownsVisit(visit)) return;
+    const nextVisible = !replaceVisible;
+    if (!nextVisible) cancelReplaceFocus(visit);
+    onReplaceVisible(nextVisible);
+    if (!nextVisible || !ownsVisit(visit)) return;
+
+    cancelReplaceFocus(visit);
+    const focusOwner: ReplaceFocusOwner = { visit, frame: -1 };
+    const frame = requestAnimationFrame(() => {
+      if (!ownsVisit(visit) || replaceFocusOwner.current !== focusOwner || focusOwner.frame !== frame) return;
+      replaceFocusOwner.current = null;
+      replaceRef.current?.focus();
+    });
+    focusOwner.frame = frame;
+    replaceFocusOwner.current = focusOwner;
+  };
 
   const onBarKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
+    if (e.key === "Escape" && ownsVisit(visit)) {
       e.preventDefault();
       e.stopPropagation();
-      onClose();
+      close();
     }
   };
 
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && ownsVisit(visit)) {
       e.preventDefault();
       if (!invalidRegex) step(e.shiftKey ? -1 : 1);
     }
   };
 
   const onReplaceKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && ownsVisit(visit)) {
       e.preventDefault();
       if (invalidRegex) return;
       if (e.shiftKey) step(-1);
@@ -122,7 +192,6 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
   const counter = query ? `${total === 0 ? 0 : active + 1} of ${total}` : "";
   const noMatches = total === 0;
   const actionsDisabled = invalidRegex || noMatches;
-  const showReplace = replaceVisible && canEdit;
 
   return (
     <div
@@ -184,10 +253,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
               type="button"
               className={cn("btn btn-ghost h-8 shrink-0 gap-1.5 px-2 text-[13px]", replaceVisible && "bg-surface-3 text-ink")}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                onReplaceVisible(!replaceVisible);
-                if (!replaceVisible) requestAnimationFrame(() => replaceRef.current?.focus());
-              }}
+              onClick={toggleReplace}
               aria-expanded={replaceVisible}
               aria-controls="find-replace-row"
               data-testid="find-toggle-replace"
@@ -202,7 +268,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
         </div>
         {/* Outside the wrapping row so it stays pinned top-right when the controls wrap on phones. */}
         <Tip label="Close" shortcut="Esc">
-          <button type="button" className="icon-btn mt-0.5 h-7 w-7 shrink-0 rounded-md" onClick={onClose} aria-label="Close find" data-testid="find-close">
+          <button type="button" className="icon-btn mt-0.5 h-7 w-7 shrink-0 rounded-md" onClick={close} aria-label="Close find" data-testid="find-close">
             <X size={15} />
           </button>
         </Tip>
@@ -215,7 +281,9 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
               className="input h-8 text-[13px]"
               placeholder="Replace with"
               value={replacement}
-              onChange={(e) => setReplacement(e.target.value)}
+              onChange={(e) => {
+                if (ownsVisit(visit)) setReplacementDraft({ visit, value: e.target.value });
+              }}
               onKeyDown={onReplaceKeyDown}
               spellCheck={false}
               autoComplete="off"
