@@ -48,6 +48,21 @@ import { StatusBar, type StatusBarProps } from "./status-bar";
 
 type ValueHandler<T> = (value: T) => void;
 type ClickHandler = (event: ReactMouseEvent<HTMLElement>) => void;
+type SelectHandler = (event: Event) => void;
+type SourceHandler = (event: { currentTarget: EventTarget | null }) => void;
+type OutsideHandler = (event: CustomEvent<{ originalEvent: Event }>) => void;
+
+interface ValueAction<T> {
+  (value: T): void;
+  raw: ValueHandler<T>;
+  items: Map<string, { element: HTMLElement; select: SelectHandler }>;
+}
+
+interface DirectAction<T> {
+  (event: T): void;
+  raw: (event: T) => void;
+  element: HTMLElement;
+}
 
 interface StatusCallbacks {
   layout: ReturnType<typeof vi.fn<(layout: Layout) => void>>;
@@ -61,14 +76,24 @@ interface StatusCallbacks {
 interface CapturedActions {
   menuOpen: ValueHandler<boolean>;
   issuesOpen?: ValueHandler<boolean>;
-  layout: ValueHandler<string>;
-  wrapping: ValueHandler<boolean | "indeterminate">;
-  syncScroll: ValueHandler<boolean | "indeterminate">;
-  theme?: ValueHandler<string>;
-  compactShortcuts?: ValueHandler<Event>;
-  desktopShortcuts?: ClickHandler;
-  storage?: ClickHandler;
-  issue?: ClickHandler;
+  menuTrigger: HTMLElement;
+  authorizeMenu: SourceHandler;
+  menuContent: HTMLElement;
+  authorizeMenuContent: SourceHandler;
+  authorizeMenuOutside: OutsideHandler;
+  issuesTrigger?: HTMLElement;
+  authorizeIssues?: SourceHandler;
+  issuesContent?: HTMLElement;
+  authorizeIssuesContent?: SourceHandler;
+  authorizeIssuesOutside?: OutsideHandler;
+  layout: ValueAction<string>;
+  wrapping: ValueAction<boolean | "indeterminate">;
+  syncScroll: ValueAction<boolean | "indeterminate">;
+  theme?: ValueAction<string>;
+  compactShortcuts?: DirectAction<Event>;
+  desktopShortcuts?: DirectAction<ReactMouseEvent<HTMLElement>>;
+  storage?: DirectAction<ReactMouseEvent<HTMLElement>>;
+  issue?: DirectAction<ReactMouseEvent<HTMLElement>>;
 }
 
 interface DirectView {
@@ -78,8 +103,10 @@ interface DirectView {
 
 interface ReactFiber {
   alternate?: ReactFiber | null;
+  elementType?: { displayName?: string; name?: string } | string;
   memoizedProps?: Record<string, unknown>;
   return: ReactFiber | null;
+  type?: { displayName?: string; name?: string } | string;
 }
 
 const ISSUE_A: LintIssue = {
@@ -246,21 +273,95 @@ function nearestHandler<T extends (...args: never[]) => unknown>(element: Elemen
     if (typeof handler === "function") return handler as T;
     fiber = fiber.return;
   }
+
   throw new Error(`${name} was not found above ${element.tagName}`);
 }
 
-function reactHandler(element: Element, name = "onClick"): ClickHandler {
+function handlerOwnedBy<T extends (...args: never[]) => unknown>(
+  element: Element,
+  name: string,
+  owner: string,
+): T {
+  let fiber: ReactFiber | null = fiberFor(element);
+  while (fiber) {
+    const type = fiber.elementType;
+    const typeName = typeof type === "string" ? type : type?.displayName ?? type?.name;
+    const handler = fiber.memoizedProps?.[name];
+    if (typeName === owner && typeof handler === "function") return handler as T;
+    fiber = fiber.return;
+  }
+  throw new Error(`${name} owned by ${owner} was not found above ${element.tagName}`);
+}
+
+function reactHandler<T extends (...args: never[]) => unknown = ClickHandler>(element: Element, name = "onClick"): T {
   const key = Object.keys(element).find((candidate) => candidate.startsWith("__reactProps$"));
   if (!key) throw new Error(`React props were not attached to ${element.tagName}`);
   const props = (element as unknown as Record<string, Record<string, unknown>>)[key];
   const handler = props[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
-  return handler as ClickHandler;
+  return handler as T;
+}
+
+function withCurrentTarget<T extends { currentTarget: EventTarget | null }>(
+  event: T,
+  currentTarget: EventTarget | null,
+) {
+  return { ...event, currentTarget } as T;
+}
+
+function directAction<T extends { currentTarget: EventTarget | null }>(
+  element: HTMLElement,
+  handler: (event: T) => void,
+): DirectAction<T> {
+  const action = ((event: T) => handler(withCurrentTarget(event, element))) as DirectAction<T>;
+  action.raw = handler;
+  action.element = element;
+  return action;
+}
+
+function selectEvent(currentTarget: EventTarget | null) {
+  return {
+    currentTarget,
+    preventDefault: vi.fn(),
+    defaultPrevented: false,
+  } as unknown as Event;
+}
+
+function sourceEvent(currentTarget: EventTarget | null) {
+  return {
+    currentTarget,
+    target: currentTarget,
+    key: "Escape",
+    button: 0,
+    ctrlKey: false,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+    isDefaultPrevented: () => false,
+    isPropagationStopped: () => false,
+  };
+}
+
+function valueAction<T>(
+  raw: ValueHandler<T>,
+  items: Map<string, { element: HTMLElement; select: SelectHandler }>,
+  represented: (value: T) => string | null,
+): ValueAction<T> {
+  const action = ((value: T) => {
+    const itemValue = represented(value);
+    const item = itemValue === null ? undefined : items.get(itemValue);
+    if (item) item.select(selectEvent(item.element));
+    else raw(value);
+  }) as ValueAction<T>;
+  action.raw = raw;
+  action.items = items;
+  return action;
 }
 
 async function openDisclosures(compact = false, alreadyOpen = false) {
   const menuTrigger = screen.getByTestId("layout-menu");
   const menuOpen = nearestHandler<ValueHandler<boolean>>(menuTrigger, "onOpenChange");
+  const authorizeMenu = reactHandler<SourceHandler>(menuTrigger, "onPointerDownCapture");
   if (!alreadyOpen && menuTrigger.getAttribute("aria-expanded") !== "true") {
     await act(async () => {
       fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
@@ -268,17 +369,21 @@ async function openDisclosures(compact = false, alreadyOpen = false) {
     });
   }
   let issuesOpen: ValueHandler<boolean> | undefined;
+  let issuesTrigger: HTMLElement | undefined;
+  let authorizeIssues: SourceHandler | undefined;
   if (!compact) {
-    const issuesTrigger = screen.getByTestId("issues-button");
-    issuesOpen = nearestHandler<ValueHandler<boolean>>(issuesTrigger, "onOpenChange");
-    if (!alreadyOpen && issuesTrigger.getAttribute("aria-expanded") !== "true") {
+    const currentIssuesTrigger = screen.getByTestId("issues-button");
+    issuesTrigger = currentIssuesTrigger;
+    issuesOpen = nearestHandler<ValueHandler<boolean>>(currentIssuesTrigger, "onOpenChange");
+    authorizeIssues = reactHandler<SourceHandler>(currentIssuesTrigger, "onClickCapture");
+    if (!alreadyOpen && currentIssuesTrigger.getAttribute("aria-expanded") !== "true") {
       await act(async () => {
-        fireEvent.click(issuesTrigger);
+        fireEvent.click(currentIssuesTrigger);
         await Promise.resolve();
       });
     }
   }
-  return { menuOpen, issuesOpen };
+  return { menuOpen, issuesOpen, menuTrigger, authorizeMenu, issuesTrigger, authorizeIssues };
 }
 
 function elementWithText(selector: string, text: string) {
@@ -304,26 +409,86 @@ async function captureActions({
   const wrapItem = elementWithText('[role="menuitemcheckbox"]', "Wrap long lines");
   const syncItem = screen.getByTestId("sync-scroll-toggle");
   const storageButton = screen.getByTestId("storage-indicator");
+  const layoutItems = new Map([
+    ["code", { element: codeItem, select: nearestHandler<SelectHandler>(codeItem, "onSelect") }],
+    ["rich", (() => {
+      const element = elementWithText('[role="menuitemradio"]', "Preview only");
+      return { element, select: nearestHandler<SelectHandler>(element, "onSelect") };
+    })()],
+  ]);
+  if (!compact) {
+    const element = elementWithText('[role="menuitemradio"]', "Code and preview");
+    layoutItems.set("split", { element, select: nearestHandler<SelectHandler>(element, "onSelect") });
+  }
+  const wrappingItems = new Map([
+    ["change", { element: wrapItem, select: nearestHandler<SelectHandler>(wrapItem, "onSelect") }],
+  ]);
+  const syncItems = new Map([
+    ["change", { element: syncItem, select: nearestHandler<SelectHandler>(syncItem, "onSelect") }],
+  ]);
+  const wrappingNext = wrapItem.getAttribute("aria-checked") !== "true";
+  const syncNext = syncItem.getAttribute("aria-checked") !== "true";
+  const menuContent = screen.getByTestId("status-menu-content");
+  const issueContent = disclosures.issuesTrigger
+    ? screen.getByTestId("status-issues-content")
+    : undefined;
   const actions: CapturedActions = {
     ...disclosures,
-    layout: nearestHandler(codeItem, "onValueChange"),
-    wrapping: nearestHandler(wrapItem, "onCheckedChange"),
-    syncScroll: nearestHandler(syncItem, "onCheckedChange"),
-    storage: storage ? reactHandler(storageButton) : undefined,
+    menuContent,
+    authorizeMenuContent: handlerOwnedBy<SourceHandler>(menuContent, "onPointerDownCapture", "MenuContent"),
+    authorizeMenuOutside: handlerOwnedBy<OutsideHandler>(menuContent, "onPointerDownOutside", "MenuContent"),
+    issuesContent: issueContent,
+    authorizeIssuesContent: issueContent
+      ? handlerOwnedBy<SourceHandler>(issueContent, "onKeyDownCapture", "PopoverContent")
+      : undefined,
+    authorizeIssuesOutside: issueContent
+      ? handlerOwnedBy<OutsideHandler>(issueContent, "onPointerDownOutside", "PopoverContent")
+      : undefined,
+    layout: valueAction(
+      nearestHandler<ValueHandler<string>>(codeItem, "onValueChange"),
+      layoutItems,
+      (value) => layoutItems.has(value) ? value : null,
+    ),
+    wrapping: valueAction(
+      nearestHandler<ValueHandler<boolean | "indeterminate">>(wrapItem, "onCheckedChange"),
+      wrappingItems,
+      (value) => value === wrappingNext ? "change" : null,
+    ),
+    syncScroll: valueAction(
+      nearestHandler<ValueHandler<boolean | "indeterminate">>(syncItem, "onCheckedChange"),
+      syncItems,
+      (value) => value === syncNext ? "change" : null,
+    ),
+    storage: storage
+      ? directAction(storageButton, reactHandler<ClickHandler>(storageButton))
+      : undefined,
   };
   if (compact) {
-    actions.theme = nearestHandler<ValueHandler<string>>(screen.getByTestId("menu-theme-dark"), "onValueChange");
-    actions.compactShortcuts = nearestHandler<ValueHandler<Event>>(
-      elementWithText('[role="menuitem"]', "Help and shortcuts"),
-      "onSelect",
+    const themeItems = new Map(
+      ["light", "dark", "system"].map((theme) => {
+        const element = screen.getByTestId(`menu-theme-${theme}`);
+        return [theme, { element, select: nearestHandler<SelectHandler>(element, "onSelect") }] as const;
+      }),
+    );
+    actions.theme = valueAction(
+      nearestHandler<ValueHandler<string>>(screen.getByTestId("menu-theme-dark"), "onValueChange"),
+      themeItems,
+      (value) => themeItems.has(value) ? value : null,
+    );
+    const compactShortcuts = elementWithText('[role="menuitem"]', "Help and shortcuts");
+    actions.compactShortcuts = directAction(
+      compactShortcuts,
+      nearestHandler<SelectHandler>(compactShortcuts, "onSelect"),
     );
   } else {
     const desktopShortcuts = document.querySelector<HTMLButtonElement>('button[aria-label="Help and shortcuts"]');
     if (!desktopShortcuts) throw new Error("Desktop shortcuts were not rendered");
-    actions.desktopShortcuts = reactHandler(desktopShortcuts);
+    actions.desktopShortcuts = directAction(desktopShortcuts, reactHandler<ClickHandler>(desktopShortcuts));
     const issueButton = [...document.querySelectorAll<HTMLButtonElement>("button")]
       .findLast((button) => button.textContent?.includes(issueMessage ?? ISSUE_A.message));
-    actions.issue = issueButton ? reactHandler(issueButton) : undefined;
+    actions.issue = issueButton
+      ? directAction(issueButton, reactHandler<ClickHandler>(issueButton))
+      : undefined;
   }
   return actions;
 }
@@ -352,6 +517,118 @@ function activateCurrent(actions: CapturedActions, props: StatusBarProps) {
   actions.compactShortcuts?.(new Event("select"));
   actions.storage?.(clickProbe().event);
   actions.theme?.(controlled.themePreference === "dark" ? "light" : "dark");
+}
+
+function invokeWrongSources(actions: CapturedActions) {
+  const foreign = document.createElement("button");
+  const detached = document.createElement("button");
+  document.body.prepend(foreign);
+  const code = actions.layout.items.get("code");
+  const rich = actions.layout.items.get("rich");
+  const wrapping = actions.wrapping.items.get("change");
+  const syncScroll = actions.syncScroll.items.get("change");
+  if (!code || !rich || !wrapping || !syncScroll) throw new Error("Expected status menu controls");
+
+  code.select(selectEvent(rich.element));
+  code.select(selectEvent(foreign));
+  code.select(selectEvent(detached));
+  wrapping.select(selectEvent(syncScroll.element));
+  wrapping.select(selectEvent(foreign));
+  syncScroll.select(selectEvent(wrapping.element));
+  syncScroll.select(selectEvent(detached));
+  actions.issue?.raw(withCurrentTarget(clickProbe().event, actions.storage?.element ?? foreign));
+  actions.desktopShortcuts?.raw(withCurrentTarget(clickProbe().event, actions.issue?.element ?? foreign));
+  actions.compactShortcuts?.raw(selectEvent(actions.theme?.items.get("dark")?.element ?? foreign));
+  actions.storage?.raw(withCurrentTarget(clickProbe().event, actions.desktopShortcuts?.element ?? foreign));
+
+  const dark = actions.theme?.items.get("dark");
+  const light = actions.theme?.items.get("light");
+  if (dark && light) {
+    dark.select(selectEvent(light.element));
+    dark.select(selectEvent(foreign));
+    dark.select(selectEvent(detached));
+  }
+
+  actions.authorizeMenu(sourceEvent(actions.issuesTrigger ?? foreign));
+  actions.menuOpen(false);
+  actions.authorizeMenu(sourceEvent(foreign));
+  actions.menuOpen(false);
+  actions.authorizeMenuContent(sourceEvent(actions.issuesContent ?? foreign));
+  actions.menuOpen(false);
+  actions.authorizeMenuContent(sourceEvent(detached));
+  actions.menuOpen(false);
+  actions.authorizeMenuOutside(sourceEvent(foreign) as unknown as CustomEvent<{ originalEvent: Event }>);
+  actions.menuOpen(false);
+  if (actions.authorizeIssues && actions.issuesOpen) {
+    actions.authorizeIssues(sourceEvent(actions.menuTrigger));
+    actions.issuesOpen(false);
+    actions.authorizeIssues(sourceEvent(foreign));
+    actions.issuesOpen(false);
+    actions.authorizeIssuesContent?.(sourceEvent(actions.menuContent));
+    actions.issuesOpen(false);
+    actions.authorizeIssuesContent?.(sourceEvent(detached));
+    actions.issuesOpen(false);
+    actions.authorizeIssuesOutside?.(sourceEvent(foreign) as unknown as CustomEvent<{ originalEvent: Event }>);
+    actions.issuesOpen(false);
+  }
+
+  foreign.remove();
+}
+
+function invokeCrossPublicationSources(stale: CapturedActions, current: CapturedActions) {
+  const staleCode = stale.layout.items.get("code");
+  const currentCode = current.layout.items.get("code");
+  const staleWrapping = stale.wrapping.items.get("change");
+  const currentWrapping = current.wrapping.items.get("change");
+  const staleSync = stale.syncScroll.items.get("change");
+  const currentSync = current.syncScroll.items.get("change");
+  if (!staleCode || !currentCode || !staleWrapping || !currentWrapping || !staleSync || !currentSync)
+    throw new Error("Expected cross-publication status controls");
+
+  staleCode.select(selectEvent(currentCode.element));
+  currentCode.select(selectEvent(staleCode.element));
+  staleWrapping.select(selectEvent(currentWrapping.element));
+  currentWrapping.select(selectEvent(staleWrapping.element));
+  staleSync.select(selectEvent(currentSync.element));
+  currentSync.select(selectEvent(staleSync.element));
+  if (stale.issue && current.issue) {
+    stale.issue.raw(withCurrentTarget(clickProbe().event, current.issue.element));
+    current.issue.raw(withCurrentTarget(clickProbe().event, stale.issue.element));
+  }
+  if (stale.desktopShortcuts && current.desktopShortcuts) {
+    stale.desktopShortcuts.raw(withCurrentTarget(clickProbe().event, current.desktopShortcuts.element));
+    current.desktopShortcuts.raw(withCurrentTarget(clickProbe().event, stale.desktopShortcuts.element));
+  }
+  if (stale.storage && current.storage) {
+    stale.storage.raw(withCurrentTarget(clickProbe().event, current.storage.element));
+    current.storage.raw(withCurrentTarget(clickProbe().event, stale.storage.element));
+  }
+
+  stale.authorizeMenu(sourceEvent(current.menuTrigger));
+  stale.menuOpen(false);
+  current.authorizeMenu(sourceEvent(stale.menuTrigger));
+  current.menuOpen(false);
+  stale.authorizeMenuContent(sourceEvent(current.menuContent));
+  stale.menuOpen(false);
+  current.authorizeMenuContent(sourceEvent(stale.menuContent));
+  current.menuOpen(false);
+  if (
+    stale.issuesTrigger
+    && current.issuesTrigger
+    && stale.authorizeIssues
+    && current.authorizeIssues
+    && stale.issuesOpen
+    && current.issuesOpen
+  ) {
+    stale.authorizeIssues(sourceEvent(current.issuesTrigger));
+    stale.issuesOpen(false);
+    current.authorizeIssues(sourceEvent(stale.issuesTrigger));
+    current.issuesOpen(false);
+    stale.authorizeIssuesContent?.(sourceEvent(current.issuesContent ?? current.issuesTrigger));
+    stale.issuesOpen(false);
+    current.authorizeIssuesContent?.(sourceEvent(stale.issuesContent ?? stale.issuesTrigger));
+    current.issuesOpen(false);
+  }
 }
 
 function allCallCounts(callbackSets: StatusCallbacks[]) {
@@ -504,6 +781,117 @@ describe("status bar current publications", () => {
     expect(reactHandler.bind(null, storageButton)).toThrow("onClick was not attached");
     expect(screen.queryByTestId("issues-button")).toBeNull();
     expect(screen.queryByTestId("theme-toggle")).toBeNull();
+  });
+
+  it.each([
+    ["desktop, wrong before current", false, true],
+    ["desktop, current before wrong", false, false],
+    ["compact, wrong before current", true, true],
+    ["compact, current before wrong", true, false],
+  ] as const)(
+    "rejects sibling, foreign, and detached event sources without suppressing %s",
+    async (_name, compact, wrongFirst) => {
+      const current = callbacks();
+      const props = statusProps(current, compact ? { compact: true, layout: "code" } : {});
+      const view = await renderDirect(<StatusBoundary props={props} onPassiveCleanup={() => {}} />);
+      const actions = await captureActions({ compact });
+      const beforeWrongHtml = view.host.innerHTML;
+      const beforeWrongFocus = document.activeElement;
+
+      if (!wrongFirst) act(() => activateCurrent(actions, props));
+      const beforeWrong = allCallCounts([current]);
+      invokeWrongSources(actions);
+
+      expect(allCallCounts([current])).toEqual(beforeWrong);
+      expect(view.host.innerHTML).toBe(beforeWrongHtml);
+      expect(document.activeElement).toBe(beforeWrongFocus);
+      expect(actions.menuTrigger).toHaveAttribute("aria-expanded", "true");
+      if (actions.issuesTrigger) expect(actions.issuesTrigger).toHaveAttribute("aria-expanded", "true");
+
+      if (wrongFirst) act(() => activateCurrent(actions, props));
+      expect(current.layout).toHaveBeenCalledOnce();
+      expect(current.wrapping).toHaveBeenCalledOnce();
+      expect(current.syncScroll).toHaveBeenCalledOnce();
+      expect(current.issue).toHaveBeenCalledTimes(compact ? 0 : 1);
+      expect(current.shortcuts).toHaveBeenCalledOnce();
+      expect(current.storage).toHaveBeenCalledOnce();
+      expect(controlled.themeSetter).toHaveBeenCalledTimes(compact ? 1 : 0);
+
+      act(() => {
+        actions.authorizeMenu(sourceEvent(actions.menuTrigger));
+        actions.menuOpen(false);
+      });
+      if (actions.issuesTrigger && actions.authorizeIssues && actions.issuesOpen) {
+        act(() => {
+          fireEvent.click(actions.issuesTrigger!);
+        });
+      }
+      expect(actions.menuTrigger).toHaveAttribute("aria-expanded", "false");
+      if (actions.issuesTrigger) expect(actions.issuesTrigger).toHaveAttribute("aria-expanded", "false");
+
+      const afterClose = allCallCounts([current]);
+      const closedHtml = view.host.innerHTML;
+      invokeWrongSources(actions);
+      expect(allCallCounts([current])).toEqual(afterClose);
+      expect(view.host.innerHTML).toBe(closedHtml);
+    },
+  );
+
+  it("retains current Escape and outside disclosure transitions from exact content events", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    await renderDirect(<StatusBoundary props={props} onPassiveCleanup={() => {}} />);
+    const issuesTrigger = screen.getByTestId("issues-button");
+    await act(async () => {
+      fireEvent.click(issuesTrigger);
+      await Promise.resolve();
+    });
+    expect(issuesTrigger).toHaveAttribute("aria-expanded", "true");
+    const issuesContent = screen.getByTestId("status-issues-content");
+    const issueEscape = handlerOwnedBy<SourceHandler>(
+      issuesContent,
+      "onKeyDownCapture",
+      "PopoverContent",
+    );
+    const issueOpen = nearestHandler<ValueHandler<boolean>>(issuesTrigger, "onOpenChange");
+    issueEscape(sourceEvent(issuesContent));
+    act(() => issueOpen(false));
+    expect(issuesTrigger).toHaveAttribute("aria-expanded", "false");
+
+    const menuTrigger = screen.getByTestId("layout-menu");
+    fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
+    expect(menuTrigger).toHaveAttribute("aria-expanded", "true");
+    const code = elementWithText('[role="menuitemradio"]', "Code only");
+    const menuContent = screen.getByTestId("status-menu-content");
+    const menuEscape = handlerOwnedBy<(event: KeyboardEvent) => void>(
+      menuContent,
+      "onEscapeKeyDown",
+      "MenuContent",
+    );
+    const menuOpen = nearestHandler<ValueHandler<boolean>>(menuTrigger, "onOpenChange");
+    menuContent.ownerDocument.addEventListener("keydown", menuEscape, { once: true });
+    code.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+    act(() => menuOpen(false));
+    expect(menuTrigger).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
+    expect(menuTrigger).toHaveAttribute("aria-expanded", "true");
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    const currentMenuContent = screen.getByTestId("status-menu-content");
+    const menuOutside = handlerOwnedBy<OutsideHandler>(
+      currentMenuContent,
+      "onPointerDownOutside",
+      "MenuContent",
+    );
+    const originalEvent = { target: outside } as unknown as Event;
+    outside.addEventListener("dismissableLayer.pointerDownOutside", menuOutside as EventListener, { once: true });
+    outside.dispatchEvent(new CustomEvent("dismissableLayer.pointerDownOutside", {
+      detail: { originalEvent },
+    }));
+    act(() => nearestHandler<ValueHandler<boolean>>(menuTrigger, "onOpenChange")(false));
+    expect(menuTrigger).toHaveAttribute("aria-expanded", "false");
+    outside.remove();
   });
 });
 
@@ -684,6 +1072,11 @@ describe("status bar replacement authority", () => {
 
     expect(boundaryReached).toBe(true);
     const current = await captureActions();
+    const beforeCrossPublication = allCallCounts([sharedCallbacks]);
+    const html = view.host.innerHTML;
+    invokeCrossPublicationSources(stale, current);
+    expect(allCallCounts([sharedCallbacks])).toEqual(beforeCrossPublication);
+    expect(view.host.innerHTML).toBe(html);
     act(() => activateCurrent(current, sharedProps));
     expect(passiveCleanup).toHaveBeenCalledOnce();
     expect(sharedCallbacks.layout).toHaveBeenCalledOnce();
@@ -692,6 +1085,9 @@ describe("status bar replacement authority", () => {
     expect(sharedCallbacks.issue).toHaveBeenCalledOnce();
     expect(sharedCallbacks.shortcuts).toHaveBeenCalledOnce();
     expect(sharedCallbacks.storage).toHaveBeenCalledOnce();
+    const afterCurrent = allCallCounts([sharedCallbacks]);
+    invokeCrossPublicationSources(stale, current);
+    expect(allCallCounts([sharedCallbacks])).toEqual(afterCurrent);
     expectStaleInert(stale, sharedProps, view, [sharedCallbacks]);
   });
 
