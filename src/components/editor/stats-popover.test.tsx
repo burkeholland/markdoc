@@ -1,8 +1,41 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, type ComponentProps } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as Y from "yjs";
+
+type PopoverOpenChange = (open: boolean) => void;
+
+const capturedPopoverOpenChanges = vi.hoisted(() => [] as PopoverOpenChange[]);
+const publishedPopoverOpenChanges = vi.hoisted(
+  () => [] as { callback: PopoverOpenChange; open: boolean }[],
+);
+
+vi.mock("@/components/ui/primitives", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/ui/primitives")>();
+  const ActualPopover = actual.Popover;
+  return {
+    ...actual,
+    Popover: (props: ComponentProps<typeof ActualPopover>) => {
+      const onOpenChange = props.onOpenChange;
+      if (onOpenChange) capturedPopoverOpenChanges.push(onOpenChange);
+      return (
+        <ActualPopover
+          {...props}
+          onOpenChange={
+            onOpenChange
+              ? (open) => {
+                  publishedPopoverOpenChanges.push({ callback: onOpenChange, open });
+                  onOpenChange(open);
+                }
+              : undefined
+          }
+        />
+      );
+    },
+  };
+});
 
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
@@ -127,6 +160,60 @@ function SelectionBoundary({
   return present ? <SelectionProbe session={session} onSelection={onSelection} /> : null;
 }
 
+function StatsBoundary({
+  session,
+  source = "One two three.",
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: {
+  session: CollabSession;
+  source?: string;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  useEffect(() => () => onPassiveCleanup?.(), [onPassiveCleanup, present, session]);
+  return present ? view(session, source) : null;
+}
+
+type WindowKeyListener = EventListenerOrEventListenerObject;
+
+function trackWindowKeydownListeners() {
+  const added: WindowKeyListener[] = [];
+  const removed: WindowKeyListener[] = [];
+  const active = new Set<WindowKeyListener>();
+  const nativeAdd = window.addEventListener.bind(window);
+  const nativeRemove = window.removeEventListener.bind(window);
+
+  vi.spyOn(window, "addEventListener").mockImplementation((type, listener, options) => {
+    if (type === "keydown") {
+      added.push(listener);
+      active.add(listener);
+    }
+    nativeAdd(type, listener, options);
+  });
+  vi.spyOn(window, "removeEventListener").mockImplementation((type, listener, options) => {
+    if (type === "keydown") {
+      removed.push(listener);
+      active.delete(listener);
+    }
+    nativeRemove(type, listener, options);
+  });
+
+  return { active, added, removed };
+}
+
+function invokeWindowListener(listener: WindowKeyListener, event: KeyboardEvent) {
+  if (typeof listener === "function") listener(event);
+  else listener.handleEvent(event);
+}
+
 const emptySelectionCases: { label: string; select: (session: CollabSession) => void }[] = [
   { label: "missing", select: () => {} },
   { label: "collapsed", select: (session) => setLocalSelection(session, 4, 4) },
@@ -151,6 +238,8 @@ async function updateSharedGoal(session: CollabSession, next: WritingGoal | null
 }
 
 beforeEach(() => {
+  capturedPopoverOpenChanges.length = 0;
+  publishedPopoverOpenChanges.length = 0;
   unhandledRejections.length = 0;
   process.on("unhandledRejection", recordUnhandledRejection);
 });
@@ -310,6 +399,169 @@ describe("StatsPopover local selection authority", () => {
   });
 });
 
+describe("StatsPopover disclosure visit authority", () => {
+  it.each([
+    ["A before B", false],
+    ["B before A", true],
+  ] as const)(
+    "retires A before a replacement parent layout boundary and preserves B when callbacks run %s",
+    (_label, currentFirst) => {
+      const previous = makeSession("stats-previous");
+      const current = makeSession("stats-current");
+      const listeners = trackWindowKeydownListeners();
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+
+      try {
+        act(() => root.render(<StatsBoundary session={previous} onPassiveCleanup={() => passiveCleanups++} />));
+        fireEvent.click(screen.getByTestId("stats-button"));
+        expect(screen.getByTestId("stats-popover")).toBeVisible();
+        expect(listeners.active.size).toBe(1);
+
+        const staleKey = listeners.added[0]!;
+        const staleOpenChange = capturedPopoverOpenChanges[0]!;
+        const staleEvent = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "KeyC",
+          ctrlKey: true,
+          shiftKey: true,
+        });
+        const stalePreventDefault = vi.spyOn(staleEvent, "preventDefault");
+        publishedPopoverOpenChanges.length = 0;
+        focusOwner.focus();
+
+        act(() => {
+          root.render(
+            <StatsBoundary
+              session={current}
+              source="One two three four five."
+              boundary={1}
+              onPassiveCleanup={() => passiveCleanups++}
+              onBoundary={() => {
+                expect(passiveCleanups).toBe(0);
+                expect(screen.queryByTestId("stats-popover")).toBeNull();
+                expect(listeners.added).toHaveLength(2);
+                expect(listeners.removed).toEqual([staleKey]);
+                expect([...listeners.active]).toEqual([listeners.added[1]]);
+
+                const currentOpenChange = capturedPopoverOpenChanges.findLast(
+                  (callback) => callback !== staleOpenChange,
+                )!;
+                const focusBeforeStaleCallbacks = document.activeElement;
+                if (currentFirst) currentOpenChange(true);
+                staleOpenChange(false);
+                invokeWindowListener(staleKey, staleEvent);
+                if (!currentFirst) currentOpenChange(true);
+                expect(document.activeElement).toBe(focusBeforeStaleCallbacks);
+              }}
+            />,
+          );
+        });
+
+        expect(stalePreventDefault).not.toHaveBeenCalled();
+        expect(screen.getByTestId("stats-popover")).toBeVisible();
+        expect(screen.getByTestId("word-count")).toHaveTextContent("5 words");
+        const currentOpenChange = capturedPopoverOpenChanges.findLast(
+          (callback) => callback !== staleOpenChange,
+        )!;
+
+        publishedPopoverOpenChanges.length = 0;
+        fireEvent.click(screen.getByTestId("stats-button"));
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+        expect(
+          publishedPopoverOpenChanges.filter(({ callback }) => callback === currentOpenChange),
+        ).toEqual([{ callback: currentOpenChange, open: false }]);
+
+        const currentEvent = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "KeyC",
+          ctrlKey: true,
+          shiftKey: true,
+        });
+        const currentPreventDefault = vi.spyOn(currentEvent, "preventDefault");
+        act(() => window.dispatchEvent(currentEvent));
+        expect(currentPreventDefault).toHaveBeenCalledOnce();
+        expect(screen.getByTestId("stats-popover")).toBeVisible();
+        expect(listeners.active.size).toBe(1);
+
+        act(() => {
+          staleOpenChange(false);
+          invokeWindowListener(staleKey, staleEvent);
+        });
+        expect(stalePreventDefault).not.toHaveBeenCalled();
+        expect(screen.getByTestId("stats-popover")).toBeVisible();
+        expect([...listeners.active]).toEqual([listeners.added[1]]);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        focusOwner.remove();
+      }
+    },
+  );
+
+  it("retires a removed visit before the parent layout boundary", () => {
+    const session = makeSession("stats-removed");
+    const listeners = trackWindowKeydownListeners();
+    const host = document.createElement("div");
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner, host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+
+    try {
+      act(() => root.render(<StatsBoundary session={session} onPassiveCleanup={() => passiveCleanups++} />));
+      fireEvent.click(screen.getByTestId("stats-button"));
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+
+      const staleKey = listeners.added[0]!;
+      const staleOpenChange = capturedPopoverOpenChanges[0]!;
+      const staleEvent = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyC",
+        metaKey: true,
+        shiftKey: true,
+      });
+      const stalePreventDefault = vi.spyOn(staleEvent, "preventDefault");
+      focusOwner.focus();
+
+      act(() => {
+        root.render(
+          <StatsBoundary
+            session={session}
+            present={false}
+            boundary={1}
+            onPassiveCleanup={() => passiveCleanups++}
+            onBoundary={() => {
+              expect(passiveCleanups).toBe(0);
+              expect(screen.queryByTestId("stats-popover")).toBeNull();
+              expect(listeners.removed).toEqual([staleKey]);
+              expect(listeners.active.size).toBe(0);
+              const focusBeforeStaleCallbacks = document.activeElement;
+              staleOpenChange(true);
+              invokeWindowListener(staleKey, staleEvent);
+              expect(document.activeElement).toBe(focusBeforeStaleCallbacks);
+            }}
+          />,
+        );
+      });
+
+      expect(stalePreventDefault).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(listeners.active.size).toBe(0);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      focusOwner.remove();
+    }
+  });
+});
+
 describe("StatsPopover writing goal draft", () => {
   it("follows a collaborator setting, changing, and clearing every shared goal field", async () => {
     const session = makeSession("doc");
@@ -341,6 +593,8 @@ describe("StatsPopover writing goal draft", () => {
     fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "44" } });
     rendered.rerender(view(second));
 
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+    openPopover();
     expectDraft("words", "min", "");
     expect(screen.getByTestId("goal-summary")).toHaveAttribute("data-state", "none");
   });
@@ -375,6 +629,8 @@ describe("StatsPopover writing goal draft", () => {
     const rendered = render(view(previous));
     openPopover();
     rendered.rerender(view(current));
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+    openPopover();
     fireEvent.change(screen.getByTestId("goal-mode"), { target: { value: "max" } });
     fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "4.6" } });
     fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
