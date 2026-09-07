@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, type ReactNode, type RefObject } from "react";
+import { createRoot, type Root } from "react-dom/client";
 
 const clipboard = vi.hoisted(() => ({
   copyText: vi.fn<(text: string) => Promise<boolean>>(),
@@ -20,9 +21,18 @@ const FIRST_TEXT = "first rendered value";
 const NEXT_TEXT = "next rendered value";
 type CopyResult = ReturnType<typeof useCopy>;
 
-function CopyControl({ text, observe }: { text: string; observe: (copy: CopyResult) => void }) {
-  const copy = useCopy(text);
+interface CopyControlProps {
+  text: string;
+  target?: RefObject<HTMLElement | null>;
+  idleLabel?: string;
+  observe: (copy: CopyResult) => void;
+  onPassiveCleanup?: () => void;
+}
+
+function CopyControl({ text, target, idleLabel, observe, onPassiveCleanup }: CopyControlProps) {
+  const copy = useCopy(text, target, idleLabel);
   observe(copy);
+  useEffect(() => () => onPassiveCleanup?.(), [idleLabel, onPassiveCleanup, target, text]);
   return (
     <button data-testid="copy-control" onClick={copy.copy} aria-label={copy.label}>
       {copy.label}
@@ -32,19 +42,67 @@ function CopyControl({ text, observe }: { text: string; observe: (copy: CopyResu
 
 function CopyBoundary({
   text,
+  target,
+  idleLabel,
+  visitKey = "copy",
+  present = true,
   boundary = 0,
   observe,
   onLayout,
+  onPassiveCleanup,
 }: {
   text: string;
+  target?: RefObject<HTMLElement | null>;
+  idleLabel?: string;
+  visitKey?: string;
+  present?: boolean;
   boundary?: number;
   observe: (copy: CopyResult) => void;
   onLayout?: () => void;
+  onPassiveCleanup?: () => void;
 }) {
   useLayoutEffect(() => {
     if (boundary > 0) onLayout?.();
   }, [boundary, onLayout]);
-  return <CopyControl text={text} observe={observe} />;
+  return present ? (
+    <CopyControl
+      key={visitKey}
+      text={text}
+      target={target}
+      idleLabel={idleLabel}
+      observe={observe}
+      onPassiveCleanup={onPassiveCleanup}
+    />
+  ) : null;
+}
+
+interface DirectRoot {
+  host: HTMLDivElement;
+  root: Root;
+  active: boolean;
+}
+
+const directRoots: DirectRoot[] = [];
+
+function renderDirect(node: ReactNode) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view: DirectRoot = { host, root: createRoot(host), active: true };
+  directRoots.push(view);
+  act(() => view.root.render(node));
+  return {
+    host,
+    root: view.root,
+    rerender(next: ReactNode) {
+      act(() => view.root.render(next));
+    },
+    unmount() {
+      if (!view.active) return;
+      view.active = false;
+      act(() => view.root.unmount());
+      host.remove();
+    },
+  };
 }
 
 function deferred<T>() {
@@ -70,6 +128,18 @@ async function advance(ms: number) {
   });
 }
 
+function staleEffectSnapshot(host: HTMLElement, focusOwner: HTMLElement, clearTimeoutCalls: number) {
+  return {
+    clipboardAttempts: clipboard.copyText.mock.calls.length,
+    timerCount: vi.getTimerCount(),
+    clearTimeoutCalls,
+    fallbackSelections: clipboard.selectContents.mock.calls.length,
+    focusUnchanged: document.activeElement === focusOwner,
+    location: window.location.href,
+    markup: host.innerHTML,
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   clipboard.copyText.mockReset();
@@ -77,6 +147,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const view of directRoots.splice(0)) {
+    if (view.active) act(() => view.root.unmount());
+    view.host.remove();
+  }
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
@@ -97,6 +171,232 @@ describe("useCopy", () => {
     await flush(() => pending.resolve(true));
     expect(result.current.status).toBe("copied");
   });
+
+  it.each([
+    ["text replacement", "text"],
+    ["target-ref replacement", "target"],
+    ["idle-label replacement", "idle-label"],
+    ["equal-value distinct remount", "remount"],
+    ["removal", "removal"],
+  ] as const)(
+    "makes a captured callback inert at and after the parent layout boundary for %s",
+    async (_label, replacement) => {
+      clipboard.copyText.mockResolvedValue(true);
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+      const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+      const firstTarget = { current: document.createElement("pre") };
+      const nextTarget = { current: document.createElement("pre") };
+      const focusOwner = document.createElement("button");
+      focusOwner.textContent = "Persistent focus owner";
+      document.body.append(focusOwner);
+      let latest!: CopyResult;
+      let passiveCleanups = 0;
+      const observe = (copy: CopyResult) => {
+        latest = copy;
+      };
+      const onPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+      const view = renderDirect(
+        <CopyBoundary
+          text={FIRST_TEXT}
+          target={firstTarget}
+          idleLabel="Copy original"
+          visitKey="first"
+          observe={observe}
+          onPassiveCleanup={onPassiveCleanup}
+        />,
+      );
+
+      try {
+        const staleCopy = latest.copy;
+        await flush(() => staleCopy());
+        expect(latest.status).toBe("copied");
+        expect(vi.getTimerCount()).toBe(1);
+        const oldTimerIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 1500);
+        const oldTimer = setTimeoutSpy.mock.results[oldTimerIndex]?.value;
+        expect(oldTimerIndex).toBeGreaterThanOrEqual(0);
+        clipboard.copyText.mockClear();
+        clipboard.selectContents.mockClear();
+        focusOwner.focus();
+
+        const nextText = replacement === "text" ? NEXT_TEXT : FIRST_TEXT;
+        const target = replacement === "target" ? nextTarget : firstTarget;
+        const idleLabel = replacement === "idle-label" ? "Copy current" : "Copy original";
+        const visitKey = replacement === "remount" ? "second" : "first";
+        const present = replacement !== "removal";
+        let passiveCleanupsAtBoundary = -1;
+        let beforeStaleAtBoundary: ReturnType<typeof staleEffectSnapshot> | undefined;
+        let afterStaleAtBoundary: ReturnType<typeof staleEffectSnapshot> | undefined;
+        let statusAtBoundary: CopyStatus | undefined;
+        let labelAtBoundary: string | null | undefined;
+        let reachBoundary!: () => void;
+        const boundaryReached = new Promise<void>((resolve) => {
+          reachBoundary = resolve;
+        });
+
+        view.root.render(
+          <CopyBoundary
+            text={nextText}
+            target={target}
+            idleLabel={idleLabel}
+            visitKey={visitKey}
+            present={present}
+            boundary={1}
+            observe={observe}
+            onPassiveCleanup={onPassiveCleanup}
+            onLayout={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              statusAtBoundary = present ? latest.status : undefined;
+              labelAtBoundary = view.host.querySelector("button")?.getAttribute("aria-label");
+              beforeStaleAtBoundary = staleEffectSnapshot(
+                view.host,
+                focusOwner,
+                clearTimeoutSpy.mock.calls.length,
+              );
+              staleCopy();
+              afterStaleAtBoundary = staleEffectSnapshot(
+                view.host,
+                focusOwner,
+                clearTimeoutSpy.mock.calls.length,
+              );
+              reachBoundary();
+            }}
+          />,
+        );
+        await boundaryReached;
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(afterStaleAtBoundary).toEqual(beforeStaleAtBoundary);
+        expect(clipboard.copyText).not.toHaveBeenCalled();
+        expect(clipboard.selectContents).not.toHaveBeenCalled();
+        expect(clearTimeoutSpy.mock.calls.filter(([timer]) => timer === oldTimer)).toHaveLength(1);
+        if (present) {
+          expect(statusAtBoundary).toBe("idle");
+          expect(labelAtBoundary).toBe(idleLabel);
+        } else {
+          expect(view.host).toBeEmptyDOMElement();
+        }
+
+        await act(async () => {});
+        expect(passiveCleanups).toBe(1);
+        const beforeStaleAfterCleanup = staleEffectSnapshot(
+          view.host,
+          focusOwner,
+          clearTimeoutSpy.mock.calls.length,
+        );
+        act(() => staleCopy());
+        expect(
+          staleEffectSnapshot(view.host, focusOwner, clearTimeoutSpy.mock.calls.length),
+        ).toEqual(beforeStaleAfterCleanup);
+      } finally {
+        view.unmount();
+        focusOwner.remove();
+        setTimeoutSpy.mockRestore();
+        clearTimeoutSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ["stale-first", "success"],
+    ["current-first", "success"],
+    ["stale-first", "failure"],
+    ["current-first", "failure"],
+  ] as const)(
+    "keeps an equal-value remount authoritative with reused timer handles: %s, pending %s",
+    async (order, outcome) => {
+      const current = deferred<boolean>();
+      clipboard.copyText
+        .mockResolvedValueOnce(true)
+        .mockReturnValueOnce(current.promise);
+      const sharedTimer = setTimeout(() => undefined, 60_000);
+      clearTimeout(sharedTimer);
+      const scheduled: { callback: () => void; delay: number | undefined }[] = [];
+      const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay) => {
+        if (typeof callback !== "function") throw new Error("Expected a timeout callback");
+        scheduled.push({ callback: callback as () => void, delay });
+        return sharedTimer;
+      });
+      const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout").mockImplementation(() => undefined);
+      const staleTarget = { current: document.createElement("pre") };
+      const currentTarget = { current: document.createElement("pre") };
+      let latest!: CopyResult;
+      const observe = (copy: CopyResult) => {
+        latest = copy;
+      };
+      const view = renderDirect(
+        <CopyBoundary text={FIRST_TEXT} target={staleTarget} visitKey="first" observe={observe} />,
+      );
+
+      try {
+        const staleCopy = latest.copy;
+        await flush(() => staleCopy());
+        expect(latest.status).toBe("copied");
+        const staleTimer = scheduled.find(({ delay }) => delay === 1500);
+        if (!staleTimer) throw new Error("The stale feedback timer was not scheduled");
+
+        view.rerender(
+          <CopyBoundary text={FIRST_TEXT} target={currentTarget} visitKey="second" observe={observe} />,
+        );
+        expect(latest.status).toBe("idle");
+        expect(clearTimeoutSpy).toHaveBeenCalledExactlyOnceWith(sharedTimer);
+        const currentCopy = latest.copy;
+        clipboard.copyText.mockClear();
+        clipboard.selectContents.mockClear();
+
+        act(() => {
+          if (order === "stale-first") {
+            staleCopy();
+            currentCopy();
+          } else {
+            currentCopy();
+            staleCopy();
+          }
+        });
+        expect(clipboard.copyText).toHaveBeenCalledExactlyOnceWith(FIRST_TEXT);
+        expect(latest.status).toBe("idle");
+
+        await flush(() => {
+          if (outcome === "success") current.resolve(true);
+          else current.reject(new Error("current clipboard failure"));
+        });
+        const expectedStatus = outcome === "success" ? "copied" : "fallback";
+        const expectedDelay = outcome === "success" ? 1500 : 2000;
+        expect(latest.status).toBe(expectedStatus);
+        expect(latest.label).toBe(outcome === "success" ? "Copied" : "Select & press Ctrl+C");
+        expect(clipboard.selectContents).toHaveBeenCalledTimes(outcome === "success" ? 0 : 1);
+        if (outcome === "failure") {
+          expect(clipboard.selectContents).toHaveBeenCalledExactlyOnceWith(currentTarget.current);
+        }
+        expect(clipboard.selectContents.mock.calls.some(([target]) => target === staleTarget.current)).toBe(false);
+        const currentTimer = scheduled.filter(({ delay }) => delay === expectedDelay).at(-1);
+        if (!currentTimer) throw new Error("The current feedback timer was not scheduled");
+        expect(setTimeoutSpy).toHaveReturnedWith(sharedTimer);
+        expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+
+        const currentMarkup = view.host.innerHTML;
+        act(() => {
+          staleTimer.callback();
+          staleCopy();
+        });
+        expect(view.host.innerHTML).toBe(currentMarkup);
+        expect(latest.status).toBe(expectedStatus);
+        expect(clipboard.copyText).toHaveBeenCalledTimes(1);
+        expect(clipboard.selectContents).toHaveBeenCalledTimes(outcome === "success" ? 0 : 1);
+        expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+
+        act(() => currentTimer.callback());
+        expect(latest.status).toBe("idle");
+        expect(latest.label).toBe("Copy");
+        expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        view.unmount();
+        setTimeoutSpy.mockRestore();
+        clearTimeoutSpy.mockRestore();
+      }
+    },
+  );
 
   it("renders replacement text as idle before its parent layout boundary", async () => {
     clipboard.copyText.mockResolvedValue(true);
