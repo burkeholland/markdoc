@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { pollDocumentSync } from "./use-sync-polling";
@@ -73,6 +74,25 @@ const RENAMED_DOC: DocumentDto = {
   githubUrl: "https://github.com/o/r/blob/main/renamed.md",
 };
 
+const UPDATED_SYNC: SyncStatusDto = {
+  ...DIVERGED,
+  localChanged: false,
+  lines: { local: 0, remote: 8 },
+  remote: {
+    ...REMOTE,
+    sha: "987654321",
+    revision: "987654321",
+    updatedAt: "2026-09-07T20:00:00.000Z",
+  },
+};
+
+const UNREADABLE_SYNC: SyncStatusDto = {
+  ...IN_SYNC,
+  status: "remote-unreadable",
+  size: 3_800_000,
+  limit: 2_097_152,
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -93,31 +113,155 @@ function syncActions(overrides: Partial<SyncActions> = {}): SyncActions {
   };
 }
 
+function InitialSyncDialog(props: ComponentProps<typeof SyncDialog>) {
+  return <SyncDialog {...props} />;
+}
+
+function ReplacementSyncDialog(props: ComponentProps<typeof SyncDialog>) {
+  return <SyncDialog {...props} />;
+}
+
 function SyncBoundary({
   actions,
   onOpenChange,
   doc = DOC,
+  sync = DIVERGED,
   open = true,
   present = true,
+  mount = "initial",
+  passiveVisit = 0,
   boundary = 0,
   onBoundary,
+  onPassiveCleanup,
 }: {
   actions: SyncActions;
   onOpenChange: (open: boolean) => void;
   doc?: DocumentDto;
+  sync?: SyncStatusDto | null;
   open?: boolean;
   present?: boolean;
+  mount?: "initial" | "replacement";
+  passiveVisit?: number;
   boundary?: number;
   onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
 }) {
   useLayoutEffect(() => {
     if (boundary > 0) onBoundary?.();
   }, [boundary, onBoundary]);
+  useEffect(() => onPassiveCleanup, [onPassiveCleanup, passiveVisit]);
 
-  return present ? <SyncDialog open={open} onOpenChange={onOpenChange} doc={doc} sync={DIVERGED} actions={actions} /> : null;
+  if (!present) return null;
+  const props = { open, onOpenChange, doc, sync, actions };
+  return mount === "initial" ? <InitialSyncDialog {...props} /> : <ReplacementSyncDialog {...props} />;
+}
+
+interface DirectView {
+  host: HTMLDivElement;
+  root: Root;
+}
+
+const directViews: DirectView[] = [];
+const mutationObservers: MutationObserver[] = [];
+
+function renderDirect(node: ReactNode): DirectView {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { host, root: createRoot(host) };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
+
+function observeMutations(host: HTMLElement): MutationObserver {
+  const observer = new MutationObserver(() => {});
+  observer.observe(host, { attributes: true, characterData: true, childList: true, subtree: true });
+  mutationObservers.push(observer);
+  return observer;
+}
+
+function reactHandler<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return handler as T;
+}
+
+type SyncClickHandler = (event: { currentTarget: HTMLButtonElement; defaultPrevented: boolean }) => void;
+type SyncChangeHandler = (event: { currentTarget: HTMLInputElement }) => void;
+
+interface CapturedSyncCallbacks {
+  mergeElement: HTMLButtonElement | null;
+  merge: SyncClickHandler | null;
+  keepElement: HTMLButtonElement;
+  keep: SyncClickHandler;
+  takeElement: HTMLButtonElement | null;
+  take: SyncClickHandler | null;
+  compareElement: HTMLButtonElement | null;
+  compare: SyncClickHandler | null;
+  inputElement: HTMLInputElement;
+  change: SyncChangeHandler;
+  closeElement: HTMLButtonElement;
+  close: SyncClickHandler;
+}
+
+function optionalClick(testId: string) {
+  const element = screen.queryByTestId(testId) as HTMLButtonElement | null;
+  return {
+    element,
+    handler: element ? reactHandler<SyncClickHandler>(element, "onClick") : null,
+  };
+}
+
+function captureSyncCallbacks(): CapturedSyncCallbacks {
+  const merge = optionalClick("sync-merge");
+  const keepElement = screen.getByTestId("sync-keep-mine") as HTMLButtonElement;
+  const take = optionalClick("sync-take-remote");
+  const compare = optionalClick("sync-compare");
+  const inputElement = screen.getByTestId("commit-message") as HTMLInputElement;
+  const closeElement = screen.getByRole("button", { name: "Close" }) as HTMLButtonElement;
+  return {
+    mergeElement: merge.element,
+    merge: merge.handler,
+    keepElement,
+    keep: reactHandler<SyncClickHandler>(keepElement, "onClick"),
+    takeElement: take.element,
+    take: take.handler,
+    compareElement: compare.element,
+    compare: compare.handler,
+    inputElement,
+    change: reactHandler<SyncChangeHandler>(inputElement, "onChange"),
+    closeElement,
+    close: reactHandler<SyncClickHandler>(closeElement, "onClick"),
+  };
+}
+
+function invokeCapturedCallbacks(callbacks: CapturedSyncCallbacks) {
+  const originalValue = Object.getOwnPropertyDescriptor(callbacks.inputElement, "value");
+  const readValue = vi.fn(() => "stale message");
+  Object.defineProperty(callbacks.inputElement, "value", { configurable: true, get: readValue });
+  try {
+    callbacks.change({ currentTarget: callbacks.inputElement });
+  } finally {
+    if (originalValue) Object.defineProperty(callbacks.inputElement, "value", originalValue);
+    else delete (callbacks.inputElement as unknown as Record<string, unknown>).value;
+  }
+  callbacks.merge?.({ currentTarget: callbacks.mergeElement!, defaultPrevented: false });
+  callbacks.keep({ currentTarget: callbacks.keepElement, defaultPrevented: false });
+  callbacks.take?.({ currentTarget: callbacks.takeElement!, defaultPrevented: false });
+  callbacks.compare?.({ currentTarget: callbacks.compareElement!, defaultPrevented: false });
+  callbacks.close({ currentTarget: callbacks.closeElement, defaultPrevented: false });
+  return readValue;
 }
 
 afterEach(() => {
+  for (const view of directViews.splice(0)) {
+    act(() => view.root.unmount());
+    view.host.remove();
+  }
+  for (const observer of mutationObservers.splice(0)) observer.disconnect();
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -191,6 +335,289 @@ describe("remote-unreadable sync status", () => {
 describe("Sync dialog action lifecycle", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+  });
+
+  it.each([
+    "document-object",
+    "document-facts",
+    "sync-snapshot",
+    "sync-eligibility",
+    "actions-object",
+    "actions-method",
+    "open-callback",
+    "equal-value-remount",
+    "removal",
+  ] as const)("retires every callback publication before the parent layout boundary on %s replacement", async (replacement) => {
+    const currentKeep = deferred<void>();
+    const sharedMerge = vi.fn(async () => 0);
+    const sharedTake = vi.fn(async () => undefined);
+    const sharedCompare = vi.fn();
+    const oldKeep = vi.fn(async () => undefined);
+    const currentKeepAction = vi.fn(() => currentKeep.promise);
+    const actionsA = syncActions({
+      merge: sharedMerge,
+      keepMine: replacement === "actions-method" ? oldKeep : currentKeepAction,
+      takeRemote: sharedTake,
+      compare: sharedCompare,
+    });
+    let actionsB = actionsA;
+    let docB = DOC;
+    let syncB: SyncStatusDto | null = DIVERGED;
+    const onOpenA = vi.fn();
+    let onOpenB = onOpenA;
+    let mount: "initial" | "replacement" = "initial";
+    let present = true;
+
+    switch (replacement) {
+      case "document-object":
+        docB = { ...DOC };
+        break;
+      case "document-facts":
+        docB = RENAMED_DOC;
+        break;
+      case "sync-snapshot":
+        syncB = UPDATED_SYNC;
+        break;
+      case "sync-eligibility":
+        syncB = UNREADABLE_SYNC;
+        break;
+      case "actions-object":
+        actionsB = { ...actionsA };
+        break;
+      case "actions-method":
+        syncB = { ...DIVERGED };
+        break;
+      case "open-callback":
+        onOpenB = vi.fn();
+        break;
+      case "equal-value-remount":
+        mount = "replacement";
+        break;
+      case "removal":
+        present = false;
+        break;
+    }
+
+    let passiveCleanups = 0;
+    const view = renderDirect(
+      <SyncBoundary actions={actionsA} onOpenChange={onOpenA} onPassiveCleanup={() => passiveCleanups++} />,
+    );
+    const stale = captureSyncCallbacks();
+    if (replacement === "actions-method") actionsA.keepMine = currentKeepAction;
+    const staleInput = stale.inputElement;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const observer = observeMutations(document.body);
+    let boundaryValueRead!: ReturnType<typeof vi.fn>;
+    let boundaryTimersBefore = -1;
+    let boundaryTimersAfter = -1;
+    let boundaryMutations = -1;
+    let boundaryFocusBefore = -1;
+    let boundaryFocusAfter = -1;
+
+    act(() => {
+      view.root.render(
+        <SyncBoundary
+          actions={actionsB}
+          onOpenChange={onOpenB}
+          doc={docB}
+          sync={syncB}
+          mount={mount}
+          present={present}
+          passiveVisit={1}
+          boundary={1}
+          onPassiveCleanup={() => passiveCleanups++}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            observer.takeRecords();
+            focus.mockClear();
+            boundaryTimersBefore = vi.getTimerCount();
+            boundaryFocusBefore = focus.mock.calls.length;
+            boundaryValueRead = invokeCapturedCallbacks(stale);
+            boundaryTimersAfter = vi.getTimerCount();
+            boundaryFocusAfter = focus.mock.calls.length;
+            boundaryMutations = observer.takeRecords().length;
+          }}
+        />,
+      );
+    });
+
+    expect(passiveCleanups).toBe(1);
+    expect(boundaryValueRead).not.toHaveBeenCalled();
+    expect(boundaryTimersAfter).toBe(boundaryTimersBefore);
+    expect(boundaryFocusAfter).toBe(boundaryFocusBefore);
+    expect(boundaryMutations).toBe(0);
+    expect(sharedMerge).not.toHaveBeenCalled();
+    expect(sharedTake).not.toHaveBeenCalled();
+    expect(sharedCompare).not.toHaveBeenCalled();
+    expect(oldKeep).not.toHaveBeenCalled();
+    expect(currentKeepAction).not.toHaveBeenCalled();
+    expect(onOpenA).not.toHaveBeenCalled();
+    expect(onOpenB).not.toHaveBeenCalled();
+
+    observer.takeRecords();
+    focus.mockClear();
+    let laterValueRead!: ReturnType<typeof vi.fn>;
+    const laterTimersBefore = vi.getTimerCount();
+    act(() => {
+      laterValueRead = invokeCapturedCallbacks(stale);
+    });
+    expect(laterValueRead).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(observer.takeRecords()).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(laterTimersBefore);
+    expect(sharedMerge).not.toHaveBeenCalled();
+    expect(sharedTake).not.toHaveBeenCalled();
+    expect(sharedCompare).not.toHaveBeenCalled();
+    expect(oldKeep).not.toHaveBeenCalled();
+    expect(currentKeepAction).not.toHaveBeenCalled();
+    expect(onOpenA).not.toHaveBeenCalled();
+    expect(onOpenB).not.toHaveBeenCalled();
+
+    if (!present) {
+      expect(screen.queryByTestId("sync-dialog")).toBeNull();
+      return;
+    }
+
+    const currentInput = screen.getByTestId("commit-message") as HTMLInputElement;
+    if (replacement === "equal-value-remount") expect(currentInput).not.toBe(staleInput);
+    else expect(currentInput).toBe(staleInput);
+    if (replacement === "document-facts") expect(currentInput).toHaveValue("Update renamed.md");
+    if (replacement === "sync-snapshot") {
+      expect(screen.getByTestId("sync-local-lines")).toHaveTextContent("No changes");
+      expect(screen.getByTestId("sync-remote-lines")).toHaveTextContent("8 lines changed");
+      expect(screen.getByText(/updated /)).toBeInTheDocument();
+    }
+    if (replacement === "sync-eligibility") {
+      expect(screen.getByTestId("sync-dialog")).toHaveAttribute("data-status", "remote-unreadable");
+      expect(screen.queryByTestId("sync-merge")).toBeNull();
+      expect(screen.queryByTestId("sync-take-remote")).toBeNull();
+      expect(screen.queryByTestId("sync-compare")).toBeNull();
+    }
+
+    const beforeMessage = captureSyncCallbacks();
+    act(() => {
+      beforeMessage.inputElement.value = "  Current presentation message  ";
+      beforeMessage.change({ currentTarget: beforeMessage.inputElement });
+    });
+    expect(screen.getByTestId("commit-message")).toHaveValue("  Current presentation message  ");
+    const current = captureSyncCallbacks();
+    act(() => {
+      current.keep({ currentTarget: current.keepElement, defaultPrevented: false });
+      current.keep({ currentTarget: current.keepElement, defaultPrevented: false });
+      invokeCapturedCallbacks(stale);
+    });
+
+    expect(currentKeepAction).toHaveBeenCalledExactlyOnceWith("Current presentation message");
+    expect(sharedMerge).not.toHaveBeenCalled();
+    expect(sharedTake).not.toHaveBeenCalled();
+    expect(sharedCompare).not.toHaveBeenCalled();
+    expect(oldKeep).not.toHaveBeenCalled();
+    expect(onOpenA).not.toHaveBeenCalled();
+    expect(onOpenB).not.toHaveBeenCalled();
+    expect(screen.getByTestId("commit-message")).toHaveValue("  Current presentation message  ");
+
+    await act(async () => {
+      currentKeep.resolve();
+    });
+    act(() => vi.advanceTimersByTime(899));
+    expect(onOpenB).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(onOpenB).toHaveBeenCalledExactlyOnceWith(false);
+    if (onOpenA !== onOpenB) expect(onOpenA).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenB).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds message publications to the current input and Keep mine control", () => {
+    const pending = deferred<void>();
+    const keepMine = vi.fn(() => pending.promise);
+    renderDirect(<SyncDialog open onOpenChange={vi.fn()} doc={DOC} sync={DIVERGED} actions={syncActions({ keepMine })} />);
+    const old = captureSyncCallbacks();
+
+    act(() => {
+      old.inputElement.value = "  Fresh message  ";
+      old.change({ currentTarget: old.inputElement });
+    });
+    expect(screen.getByTestId("commit-message")).toHaveValue("  Fresh message  ");
+
+    const readOldValue = invokeCapturedCallbacks({
+      ...old,
+      merge: null,
+      take: null,
+      compare: null,
+      close: () => {},
+    });
+    expect(readOldValue).not.toHaveBeenCalled();
+    expect(keepMine).not.toHaveBeenCalled();
+    expect(screen.getByTestId("commit-message")).toHaveValue("  Fresh message  ");
+
+    const current = captureSyncCallbacks();
+    act(() => {
+      current.keep({ currentTarget: current.keepElement, defaultPrevented: false });
+      current.keep({ currentTarget: current.keepElement, defaultPrevented: false });
+    });
+    expect(keepMine).toHaveBeenCalledExactlyOnceWith("Fresh message");
+  });
+
+  it("claims the exact current Close once and leaves all captured controls inert", () => {
+    const actions = syncActions();
+    const onOpenChange = vi.fn();
+    renderDirect(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    const current = captureSyncCallbacks();
+    const timersBefore = vi.getTimerCount();
+
+    act(() => {
+      fireEvent.click(current.closeElement);
+      current.close({ currentTarget: current.closeElement, defaultPrevented: false });
+      invokeCapturedCallbacks(current);
+    });
+
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(actions.merge).not.toHaveBeenCalled();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(actions.compare).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(timersBefore);
+  });
+
+  it("keeps the current Radix Escape close bound to its presentation", () => {
+    const onOpenChange = vi.fn();
+    renderDirect(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={syncActions()} />);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("claims Compare synchronously, invokes it once, then closes through its frozen callback", () => {
+    const order: string[] = [];
+    const captured: CapturedSyncCallbacks[] = [];
+    const onOpenChange = vi.fn(() => order.push("close"));
+    const compare = vi.fn(() => {
+      const callbacks = captured[0]!;
+      order.push("compare");
+      callbacks.compare?.({ currentTarget: callbacks.compareElement!, defaultPrevented: false });
+      callbacks.close({ currentTarget: callbacks.closeElement, defaultPrevented: false });
+    });
+    const actions = syncActions({ compare });
+    renderDirect(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    captured.push(captureSyncCallbacks());
+    const callbacks = captured[0]!;
+    const timersBefore = vi.getTimerCount();
+
+    act(() => {
+      callbacks.compare?.({ currentTarget: callbacks.compareElement!, defaultPrevented: false });
+      callbacks.compare?.({ currentTarget: callbacks.compareElement!, defaultPrevented: false });
+    });
+
+    expect(order).toEqual(["compare", "close"]);
+    expect(compare).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(actions.merge).not.toHaveBeenCalled();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(timersBefore);
   });
 
   it("synchronously admits only one action and exposes its pending state", () => {
