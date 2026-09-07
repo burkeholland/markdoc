@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiTokenDto } from "@/lib/api";
 import { CopilotChecklist } from "./copilot-checklist";
@@ -41,6 +42,15 @@ function expectProgress(done: number) {
   expect(screen.getByTestId("copilot-checklist-progress")).toHaveTextContent(`${done} of 4`);
 }
 
+function checklistWithBoundary(boundary: string, hasAgentRequests: boolean, pollMs = 1_000) {
+  return (
+    <>
+      <span key={boundary} data-testid={`boundary-${boundary}`} />
+      <CopilotChecklist hasAgentRequests={hasAgentRequests} pollMs={pollMs} />
+    </>
+  );
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   fetchMock.mockReset();
@@ -58,34 +68,97 @@ describe("Copilot setup checklist polling", () => {
   it("uses the initial token milestones and honors disabled polling", async () => {
     render(<CopilotChecklist hasAgentRequests={false} initialTokens={[seenToken]} pollMs={0} />);
     expectProgress(2);
+    expect(vi.getTimerCount()).toBe(0);
 
     await advance(10_000);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("checks immediately, suppresses every tick while pending, and retries failures on cadence", async () => {
-    const first = deferred();
-    fetchMock.mockReturnValueOnce(first.promise).mockResolvedValueOnce(response([])).mockReturnValueOnce(new Promise(() => {}));
-
-    render(<CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+  it("keeps one physical request across pending ticks and newer agent-request facts", async () => {
+    const retired = deferred();
+    const current = deferred();
+    fetchMock.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    const view = render(<CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+    expectProgress(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
 
     await advance(5_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    await settle(() => first.reject(new Error("offline")));
+    view.rerender(<CopilotChecklist hasAgentRequests pollMs={1_000} />);
+    expectProgress(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(2_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await settle(() => retired.resolve(response([calledToken])));
+    expectProgress(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
     await advance(999);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await advance(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    await advance(999);
+    await settle(() => current.resolve(response([calledToken])));
+    expectProgress(4);
+    expect(vi.getTimerCount()).toBe(0);
+    await advance(10_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await advance(1);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps token, MCP, and Try milestones monotonic, then stops when all are done", async () => {
+  it("keeps one physical request across newer initial-token facts and stale failure", async () => {
+    const retired = deferred();
+    const current = deferred();
+    fetchMock.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    const view = render(<CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    view.rerender(<CopilotChecklist hasAgentRequests={false} initialTokens={[seenToken]} pollMs={1_000} />);
+    expectProgress(2);
+    await advance(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await settle(() => retired.reject(new Error("stale offline")));
+    expectProgress(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await advance(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await settle(() => current.resolve(response([])));
+    expectProgress(2);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("retries a current transient failure on the next interval", async () => {
+    const failed = deferred();
+    const retried = deferred();
+    fetchMock.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retried.promise);
+    render(<CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await settle(() => failed.reject(new Error("offline")));
+    expectProgress(0);
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await settle(() => retried.resolve(response([seenToken])));
+    expectProgress(2);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("keeps milestones monotonic and stops its only timer when all are done", async () => {
     fetchMock
       .mockResolvedValueOnce(response([seenToken]))
       .mockResolvedValueOnce(response([]))
@@ -94,9 +167,11 @@ describe("Copilot setup checklist polling", () => {
 
     await settle(() => {});
     expectProgress(2);
+    expect(vi.getTimerCount()).toBe(1);
 
     await advance(1_000);
     expectProgress(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("checklist-token")).toHaveAttribute("data-done", "true");
     expect(screen.getByTestId("checklist-config")).toHaveAttribute("data-done", "true");
 
@@ -109,42 +184,93 @@ describe("Copilot setup checklist polling", () => {
     await advance(1_000);
     expectProgress(4);
     expect(screen.getByTestId("checklist-allow")).toHaveAttribute("data-done", "true");
+    expect(vi.getTimerCount()).toBe(0);
     await advance(10_000);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("invalidates a pending settlement when props change and does not restart retired polling", async () => {
-    const retired = deferred();
-    const current = deferred();
-    fetchMock.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+  it("replaces and disables intervals without overlapping or accepting retired requests", async () => {
+    const oldInterval = deferred();
+    const disabled = deferred();
+    fetchMock.mockReturnValueOnce(oldInterval.promise).mockReturnValueOnce(disabled.promise);
     const view = render(<CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
-    expectProgress(0);
-
-    view.rerender(<CopilotChecklist hasAgentRequests pollMs={1_000} />);
-    expectProgress(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-
-    await settle(() => retired.resolve(response([calledToken])));
-    expectProgress(1);
-    await advance(1_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    await settle(() => current.resolve(response([calledToken])));
-    expectProgress(4);
+    expect(vi.getTimerCount()).toBe(1);
 
     view.rerender(<CopilotChecklist hasAgentRequests={false} pollMs={3_000} />);
-    await advance(12_000);
-    expectProgress(4);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(2_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await settle(() => oldInterval.resolve(response([calledToken])));
+    expectProgress(0);
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    view.rerender(<CopilotChecklist hasAgentRequests={false} pollMs={0} />);
+    expect(vi.getTimerCount()).toBe(0);
+    await settle(() => disabled.resolve(response([calledToken])));
+    expectProgress(0);
+    await advance(10_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores settlements and issues no more calls after unmount", async () => {
+  it.each(["success", "failure"] as const)(
+    "invalidates a stale %s after DOM replacement but before passive effects, then polls once",
+    async (settlement) => {
+      const stale = deferred();
+      const current = deferred();
+      fetchMock.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      await act(async () => root.render(checklistWithBoundary("old", false)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const replaced = new Promise<void>((resolve) => {
+        const observer = new MutationObserver(() => {
+          observer.disconnect();
+          if (settlement === "success") stale.resolve(response([calledToken]));
+          else stale.reject(new Error("stale before passive effects"));
+          resolve();
+        });
+        observer.observe(host, { childList: true });
+      });
+      root.render(checklistWithBoundary("new", true));
+      try {
+        await replaced;
+        await act(async () => {});
+
+        expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("1 of 4");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(1);
+
+        await advance(1_000);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        await settle(() => current.resolve(response([])));
+        expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("1 of 4");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["success", "failure"] as const)("ignores post-unmount %s settlements and issues no more calls", async (settlement) => {
     const pending = deferred();
     fetchMock.mockReturnValueOnce(pending.promise);
     const view = render(<CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
 
     view.unmount();
-    await settle(() => pending.resolve(response([calledToken])));
+    expect(vi.getTimerCount()).toBe(0);
+    await settle(() => {
+      if (settlement === "success") pending.resolve(response([calledToken]));
+      else pending.reject(new Error("unmounted offline"));
+    });
     await advance(10_000);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);

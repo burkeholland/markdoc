@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Check, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, type ApiTokenDto } from "@/lib/api";
@@ -54,7 +54,8 @@ function advanceChecklistState(
  * through (`lastMcpCallAt`, so the permission prompt was answered) or a request was sent from the editor.
  */
 export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 5000 }: CopilotChecklistProps) {
-  const settlementGeneration = useRef(0);
+  const settlementAuthority = useRef({ generation: 0 });
+  const requestOwner = useRef<symbol | null>(null);
   const initial = checklistState(initialTokens ?? []);
   const [state, setState] = useState<ChecklistProgress>(() => ({ ...initial, tried: initial.mcpCalled || hasAgentRequests }));
   const steps: { id: string; label: string; detail: React.ReactNode; done: boolean }[] = [
@@ -88,8 +89,9 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
   ];
   const allDone = steps.every((s) => s.done);
 
-  useEffect(() => {
-    settlementGeneration.current++;
+  useLayoutEffect(() => {
+    const authority = settlementAuthority.current;
+    authority.generation++;
     setState((current) =>
       advanceChecklistState(
         current,
@@ -97,32 +99,36 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
         hasAgentRequests,
       ),
     );
+    return () => {
+      authority.generation++;
+    };
   }, [hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (allDone || pollMs <= 0) return;
-    let cancelled = false;
-    let pending = false;
+    let effectRetired = false;
     const load = () => {
-      if (cancelled || pending) return;
-      pending = true;
-      const generation = settlementGeneration.current;
+      if (effectRetired || requestOwner.current !== null) return;
+      const owner = Symbol("copilot-checklist-poll");
+      requestOwner.current = owner;
+      const authority = settlementAuthority.current;
+      const generation = authority.generation;
       void api.tokens
         .list()
         .then((r) => {
-          if (!cancelled && generation === settlementGeneration.current) {
+          if (!effectRetired && generation === authority.generation) {
             setState((current) => advanceChecklistState(current, checklistState(r.tokens)));
           }
         })
         .catch(() => {})
         .finally(() => {
-          if (!cancelled) pending = false;
+          if (requestOwner.current === owner) requestOwner.current = null;
         });
     };
     load();
     const timer = setInterval(load, pollMs);
     return () => {
-      cancelled = true;
+      effectRetired = true;
       clearInterval(timer);
     };
   }, [allDone, pollMs]);
