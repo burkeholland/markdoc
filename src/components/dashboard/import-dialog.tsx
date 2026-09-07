@@ -1,6 +1,14 @@
 "use client";
 import "./import.css";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import { AlertTriangle, CheckCircle2, FileText, Loader2, XCircle } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
@@ -123,6 +131,136 @@ export interface ImportDialogProps {
   footer?: ReactNode;
 }
 
+interface ImportItemPublication {
+  readonly index: number;
+  readonly source: ImportItem;
+  readonly sourceWarnings: string[];
+  readonly name: string;
+  readonly status: ImportItemStatus;
+  readonly id: string | undefined;
+  readonly title: string | undefined;
+  readonly warnings: readonly string[];
+  readonly error: string | undefined;
+  readonly retry: (() => void) | undefined;
+  readonly href: string | null;
+}
+
+interface IgnoredImportPublication {
+  readonly source: string[];
+  readonly names: readonly string[];
+  readonly text: string | null;
+}
+
+interface ImportResultPublication {
+  readonly mount: symbol;
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly sourceItems: ImportItem[];
+  readonly items: readonly ImportItemPublication[];
+  readonly busy: boolean;
+  readonly retry: (() => void) | undefined;
+  readonly ignored: IgnoredImportPublication;
+  readonly footer: ReactNode;
+}
+
+interface ImportRowElements {
+  item: HTMLLIElement | null;
+  open: HTMLAnchorElement | null;
+}
+
+interface ImportResultPublicationRuntime {
+  active: boolean;
+  dialog: HTMLDivElement | null;
+  root: HTMLDivElement | null;
+  list: HTMLUListElement | null;
+  rows: ImportRowElements[];
+  ignored: HTMLParagraphElement | null;
+  retry: HTMLButtonElement | null;
+}
+
+function ImportResultPublicationBoundary({
+  publication,
+  publish,
+  retire,
+  children,
+}: {
+  publication: ImportResultPublication;
+  publish: (publication: ImportResultPublication) => void;
+  retire: (publication: ImportResultPublication) => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    publish(publication);
+    return () => retire(publication);
+  }, [publication, publish, retire]);
+  return children;
+}
+
+function snapshotImportItem(item: ImportItem, index: number): ImportItemPublication {
+  const id = item.id;
+  return Object.freeze({
+    index,
+    source: item,
+    sourceWarnings: item.warnings,
+    name: item.name,
+    status: item.status,
+    id,
+    title: item.title,
+    warnings: Object.freeze([...item.warnings]),
+    error: item.error,
+    retry: item.retry,
+    href: id ? `/d/${id}` : null,
+  });
+}
+
+function ignoredImportText(names: readonly string[]): string | null {
+  if (names.length === 0) return null;
+  const count = names.length === 1 ? "1 file" : `${names.length} files`;
+  const verb = names.length === 1 ? "is" : "are";
+  const overflow = names.length > 4 ? "…" : "";
+  return `Skipped ${count} that ${verb} not Markdown, text, HTML or an image: ${names.slice(0, 4).join(", ")}${overflow}`;
+}
+
+function importResultFactsAreCurrent(publication: ImportResultPublication): boolean {
+  const { sourceItems, items } = publication;
+  if (sourceItems.length !== items.length) return false;
+
+  for (const row of items) {
+    const item = sourceItems[row.index];
+    if (
+      item !== row.source ||
+      item.name !== row.name ||
+      item.status !== row.status ||
+      item.id !== row.id ||
+      item.title !== row.title ||
+      item.error !== row.error ||
+      item.retry !== row.retry ||
+      item.warnings !== row.sourceWarnings ||
+      item.warnings.length !== row.warnings.length
+    ) {
+      return false;
+    }
+    for (let index = 0; index < row.warnings.length; index++) {
+      if (item.warnings[index] !== row.warnings[index]) return false;
+    }
+  }
+
+  const busy = sourceItems.some((item) => item.status === "uploading");
+  const retry = sourceItems.find((item) => item.retry)?.retry;
+  if (busy !== publication.busy || retry !== publication.retry) return false;
+  if (retry) {
+    if (sourceItems.some((item) => item.retry && item.retry !== retry)) return false;
+    if (!busy && !sourceItems.some((item) => item.status === "error" && item.retry === retry)) return false;
+  }
+
+  const { source, names, text } = publication.ignored;
+  if (source.length !== names.length || text !== ignoredImportText(names)) return false;
+  for (let index = 0; index < names.length; index++) {
+    if (source[index] !== names[index]) return false;
+  }
+  return true;
+}
+
 function StatusIcon({ status }: { status: ImportItemStatus }) {
   if (status === "uploading") return <Loader2 size={16} className="animate-spin text-ink-3" aria-label="Importing" />;
   if (status === "done") return <CheckCircle2 size={16} className="text-emerald-600" aria-label="Imported" />;
@@ -131,52 +269,340 @@ function StatusIcon({ status }: { status: ImportItemStatus }) {
 
 /** Per-file progress and "Open" links for an import batch. */
 export function ImportDialog({ open, onOpenChange, items, ignored, footer }: ImportDialogProps) {
-  const busy = items.some((i) => i.status === "uploading");
-  const retry = items.find((i) => i.retry)?.retry;
+  const [mount] = useState(() => Symbol("import-result-dialog"));
+  const activePublicationRef = useRef<ImportResultPublication | null>(null);
+  const publicationRuntimesRef = useRef(new WeakMap<ImportResultPublication, ImportResultPublicationRuntime>());
+  const claimedOpenPublicationsRef = useRef(new WeakSet<ImportResultPublication>());
+  const claimedRetryPublicationsRef = useRef(new WeakSet<ImportResultPublication>());
+  const publishedItems = Object.freeze(items.map(snapshotImportItem));
+  const ignoredNames = Object.freeze([...ignored]);
+  const publication: ImportResultPublication = Object.freeze({
+    mount,
+    open,
+    onOpenChange,
+    sourceItems: items,
+    items: publishedItems,
+    busy: publishedItems.some((item) => item.status === "uploading"),
+    retry: publishedItems.find((item) => item.retry)?.retry,
+    ignored: Object.freeze({
+      source: ignored,
+      names: ignoredNames,
+      text: ignoredImportText(ignoredNames),
+    }),
+    footer,
+  });
+
+  const runtimeFor = useCallback((candidate: ImportResultPublication) => {
+    const runtimes = publicationRuntimesRef.current;
+    let runtime = runtimes.get(candidate);
+    if (!runtime) {
+      runtime = {
+        active: false,
+        dialog: null,
+        root: null,
+        list: null,
+        rows: candidate.items.map(() => ({ item: null, open: null })),
+        ignored: null,
+        retry: null,
+      };
+      runtimes.set(candidate, runtime);
+    }
+    return runtime;
+  }, []);
+
+  const retirePublication = useCallback((candidate: ImportResultPublication) => {
+    const runtime = publicationRuntimesRef.current.get(candidate);
+    if (runtime) runtime.active = false;
+    if (activePublicationRef.current === candidate) activePublicationRef.current = null;
+  }, []);
+
+  const bindElement = useCallback(
+    <K extends "root" | "list" | "ignored" | "retry">(
+      candidate: ImportResultPublication,
+      kind: K,
+      element: ImportResultPublicationRuntime[K],
+    ) => {
+      const runtime = runtimeFor(candidate);
+      const existing = runtime[kind];
+      if (!element) {
+        runtime[kind] = null;
+        retirePublication(candidate);
+        return;
+      }
+      if (runtime.active && existing && existing !== element) {
+        retirePublication(candidate);
+        return;
+      }
+      runtime[kind] = element;
+    },
+    [retirePublication, runtimeFor],
+  );
+
+  const bindRowElement = useCallback(
+    <K extends keyof ImportRowElements>(
+      candidate: ImportResultPublication,
+      row: ImportItemPublication,
+      kind: K,
+      element: ImportRowElements[K],
+    ) => {
+      const runtime = runtimeFor(candidate);
+      const elements = runtime.rows[row.index];
+      if (!elements || candidate.items[row.index] !== row) {
+        retirePublication(candidate);
+        return;
+      }
+      const existing = elements[kind];
+      if (!element) {
+        elements[kind] = null;
+        retirePublication(candidate);
+        return;
+      }
+      if (runtime.active && existing && existing !== element) {
+        retirePublication(candidate);
+        return;
+      }
+      elements[kind] = element;
+    },
+    [retirePublication, runtimeFor],
+  );
+
+  const publicationDomIsValid = useCallback(
+    (candidate: ImportResultPublication) => {
+      if (candidate.mount !== mount || !candidate.open || !importResultFactsAreCurrent(candidate)) return false;
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      const dialog = runtime?.dialog;
+      const root = runtime?.root;
+      const list = runtime?.list;
+      if (
+        !runtime ||
+        !(dialog instanceof HTMLDivElement) ||
+        !dialog.isConnected ||
+        dialog.getAttribute("role") !== "dialog" ||
+        !(root instanceof HTMLDivElement) ||
+        !root.isConnected ||
+        root.parentElement !== dialog ||
+        dialog.lastElementChild !== root ||
+        !(list instanceof HTMLUListElement) ||
+        !list.isConnected ||
+        list.parentElement !== root ||
+        root.firstElementChild !== list ||
+        list.children.length !== candidate.items.length ||
+        runtime.rows.length !== candidate.items.length
+      ) {
+        return false;
+      }
+
+      let openCount = 0;
+      for (const row of candidate.items) {
+        const elements = runtime.rows[row.index];
+        const item = elements?.item;
+        const anchor = elements?.open;
+        if (
+          !(item instanceof HTMLLIElement) ||
+          !item.isConnected ||
+          item.parentElement !== list ||
+          list.children.item(row.index) !== item ||
+          item.getAttribute("data-status") !== row.status
+        ) {
+          return false;
+        }
+        if (row.href) {
+          openCount++;
+          if (
+            !(anchor instanceof HTMLAnchorElement) ||
+            !anchor.isConnected ||
+            anchor.parentElement !== item ||
+            item.lastElementChild !== anchor ||
+            anchor.getAttribute("href") !== row.href ||
+            item.querySelectorAll('[data-testid="import-open"]').length !== 1
+          ) {
+            return false;
+          }
+        } else if (anchor !== null || item.querySelector('[data-testid="import-open"]')) {
+          return false;
+        }
+      }
+      if (list.querySelectorAll('[data-testid="import-open"]').length !== openCount) return false;
+
+      const ignoredElement = runtime.ignored;
+      if (candidate.ignored.text) {
+        if (
+          !(ignoredElement instanceof HTMLParagraphElement) ||
+          !ignoredElement.isConnected ||
+          ignoredElement.parentElement !== root ||
+          root.children.item(1) !== ignoredElement ||
+          ignoredElement.textContent !== candidate.ignored.text ||
+          root.querySelectorAll('[data-testid="import-ignored"]').length !== 1
+        ) {
+          return false;
+        }
+      } else if (ignoredElement !== null || root.querySelector('[data-testid="import-ignored"]')) {
+        return false;
+      }
+
+      const retryElement = runtime.retry;
+      if (candidate.retry) {
+        const expectedIndex = candidate.ignored.text ? 2 : 1;
+        if (
+          !(retryElement instanceof HTMLButtonElement) ||
+          !retryElement.isConnected ||
+          retryElement.parentElement !== root ||
+          root.children.item(expectedIndex) !== retryElement ||
+          retryElement.disabled !== candidate.busy ||
+          retryElement.textContent?.trim() !== "Retry failed" ||
+          root.querySelectorAll('[data-testid="import-retry"]').length !== 1
+        ) {
+          return false;
+        }
+      } else if (retryElement !== null || root.querySelector('[data-testid="import-retry"]')) {
+        return false;
+      }
+      return true;
+    },
+    [mount],
+  );
+
+  const publicationIsCurrent = useCallback(
+    (candidate: ImportResultPublication) =>
+      activePublicationRef.current === candidate &&
+      publicationRuntimesRef.current.get(candidate)?.active === true &&
+      publicationDomIsValid(candidate),
+    [publicationDomIsValid],
+  );
+
+  const claimOpen = useCallback(
+    (candidate: ImportResultPublication, row: ImportItemPublication, source: HTMLAnchorElement) => {
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      if (
+        claimedOpenPublicationsRef.current.has(candidate) ||
+        candidate.items[row.index] !== row ||
+        row.href === null ||
+        runtime?.rows[row.index]?.open !== source
+      ) {
+        return false;
+      }
+      if (!publicationIsCurrent(candidate)) {
+        retirePublication(candidate);
+        return false;
+      }
+      claimedOpenPublicationsRef.current.add(candidate);
+      return true;
+    },
+    [publicationIsCurrent, retirePublication],
+  );
+
+  const claimRetry = useCallback(
+    (candidate: ImportResultPublication, source: HTMLButtonElement) => {
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      if (
+        !candidate.retry ||
+        candidate.busy ||
+        source.disabled ||
+        claimedRetryPublicationsRef.current.has(candidate) ||
+        runtime?.retry !== source
+      ) {
+        return null;
+      }
+      if (!publicationIsCurrent(candidate)) {
+        retirePublication(candidate);
+        return null;
+      }
+      claimedRetryPublicationsRef.current.add(candidate);
+      return candidate.retry;
+    },
+    [publicationIsCurrent, retirePublication],
+  );
+
+  const publishPublication = useCallback((candidate: ImportResultPublication) => {
+    const existing = activePublicationRef.current;
+    if (existing && existing !== candidate) retirePublication(existing);
+    const runtime = runtimeFor(candidate);
+    const dialog = runtime.root?.parentElement;
+    runtime.dialog = dialog instanceof HTMLDivElement ? dialog : null;
+    if (!publicationDomIsValid(candidate)) {
+      retirePublication(candidate);
+      return;
+    }
+    runtime.active = true;
+    activePublicationRef.current = candidate;
+  }, [publicationDomIsValid, retirePublication, runtimeFor]);
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+    <Dialog open={publication.open} onOpenChange={(next) => !publication.busy && publication.onOpenChange(next)}>
       <DialogContent title="Import files" description="Each file becomes a new document. Images dropped with a Markdown file are attached to it.">
-        <div data-testid="import-dialog">
-          <ul className="import-list" data-testid="import-list">
-            {items.map((item, i) => (
-              <li key={`${item.name}-${i}`} className="import-item" data-testid="import-item" data-status={item.status}>
-                <StatusIcon status={item.status} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <FileText size={14} className="shrink-0 text-ink-4" />
-                    <span className="truncate text-sm text-ink" title={item.name}>
-                      {item.title ?? item.name}
-                    </span>
-                    {item.title && item.title !== item.name && <span className="truncate text-xs text-ink-4">{item.name}</span>}
-                  </div>
-                  {item.error && <div className="mt-0.5 text-xs text-red-600">{item.error}</div>}
-                  {item.warnings.map((w, j) => (
-                    <div key={j} className="import-warning" data-testid="import-warning">
-                      <AlertTriangle size={12} /> {w}
+        <ImportResultPublicationBoundary
+          publication={publication}
+          publish={publishPublication}
+          retire={retirePublication}
+        >
+          <div ref={(element) => bindElement(publication, "root", element)} data-testid="import-dialog">
+            <ul ref={(element) => bindElement(publication, "list", element)} className="import-list" data-testid="import-list">
+              {publication.items.map((item) => (
+                <li
+                  ref={(element) => bindRowElement(publication, item, "item", element)}
+                  key={`${item.name}-${item.index}`}
+                  className="import-item"
+                  data-testid="import-item"
+                  data-status={item.status}
+                >
+                  <StatusIcon status={item.status} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <FileText size={14} className="shrink-0 text-ink-4" />
+                      <span className="truncate text-sm text-ink" title={item.name}>
+                        {item.title ?? item.name}
+                      </span>
+                      {item.title && item.title !== item.name && <span className="truncate text-xs text-ink-4">{item.name}</span>}
                     </div>
-                  ))}
-                </div>
-                {item.id && (
-                  <Link href={`/d/${item.id}`} className="import-open" data-testid="import-open" onClick={() => onOpenChange(false)}>
-                    Open
-                  </Link>
-                )}
-              </li>
-            ))}
-          </ul>
-          {ignored.length > 0 && (
-            <p className="mt-3 text-xs text-ink-3" data-testid="import-ignored">
-              Skipped {ignored.length === 1 ? "1 file" : `${ignored.length} files`} that {ignored.length === 1 ? "is" : "are"} not Markdown, text, HTML or an image: {ignored.slice(0, 4).join(", ")}
-              {ignored.length > 4 ? "…" : ""}
-            </p>
-          )}
-          {retry && (
-            <button type="button" className="btn btn-sm btn-outline mt-4" disabled={busy} onClick={retry}>
-              Retry failed
-            </button>
-          )}
-          {footer}
-        </div>
+                    {item.error && <div className="mt-0.5 text-xs text-red-600">{item.error}</div>}
+                    {item.warnings.map((w, j) => (
+                      <div key={j} className="import-warning" data-testid="import-warning">
+                        <AlertTriangle size={12} /> {w}
+                      </div>
+                    ))}
+                  </div>
+                  {item.href && (
+                    <Link
+                      ref={(element) => bindRowElement(publication, item, "open", element)}
+                      href={item.href}
+                      className="import-open"
+                      data-testid="import-open"
+                      onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+                        if (claimOpen(publication, item, event.currentTarget)) publication.onOpenChange(false);
+                      }}
+                    >
+                      Open
+                    </Link>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {publication.ignored.text && (
+              <p
+                ref={(element) => bindElement(publication, "ignored", element)}
+                className="mt-3 text-xs text-ink-3"
+                data-testid="import-ignored"
+              >
+                {publication.ignored.text}
+              </p>
+            )}
+            {publication.retry && (
+              <button
+                ref={(element) => bindElement(publication, "retry", element)}
+                type="button"
+                className="btn btn-sm btn-outline mt-4"
+                disabled={publication.busy}
+                data-testid="import-retry"
+                onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                  claimRetry(publication, event.currentTarget)?.();
+                }}
+              >
+                Retry failed
+              </button>
+            )}
+            {publication.footer}
+          </div>
+        </ImportResultPublicationBoundary>
       </DialogContent>
     </Dialog>
   );
