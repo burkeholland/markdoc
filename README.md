@@ -328,15 +328,28 @@ pwsh -NoProfile -NonInteractive -File .\deploy\release-vm.ps1
 
 The Board release runner supplies `RELEASE_SHA`; a separately authorized
 operator may supply the same full 40-character value as `-ExpectedCommit`.
-Prerequisites are a clean exact `main` checkout at that commit, including no
-untracked files, and zero-advisory admitted dependencies for which `npm audit`
-has reported `found 0 vulnerabilities`. The schema and recovery decisions must
-also be complete. The latest production ledger observation has 19 applied
-migrations, `0000` through `0018`; **`0019_agent_request_addressee` and
-`0020_gist_auto_update` remain pending**. Starting the candidate can apply both.
-Their SQL, locks, trigger behavior, previous-image compatibility and recovery
-requirements have not been accepted or exercised here. This documentation
-does not grant release permission or report a successful release.
+The configured workflow supplies pinned Node 22 before invoking the command,
+whose policy CLI needs no repository dependency install. Before Azure resource
+validation or any source archive/build, VM, database or production mutation,
+the command binds the working `package-lock.json` to the exact bytes committed
+at the selected SHA, runs one package audit with no retry, rechecks the lock
+and withholds raw output. It accepts only the bounded pass report with an
+empty package list and all blocked, severity, vulnerability, reported and
+omitted counts equal to zero.
+
+The current lock is intentionally blocked because it contains
+`fast-uri@3.1.5` and `qs@6.15.3`. **Do not run the release command until trusted
+replacement integrity is admitted.** Workflow setup, a merge, audit evidence
+or this documentation update neither invokes nor approves a release.
+
+Prerequisites also include a clean exact `main` checkout at that commit,
+including no untracked files, and completed schema and recovery decisions. The
+latest production ledger observation has 19 applied migrations, `0000` through
+`0018`; **`0019_agent_request_addressee` and `0020_gist_auto_update` remain
+pending**. Starting the candidate can apply both. Their SQL, locks, trigger
+behavior, previous-image compatibility and recovery requirements have not been
+accepted or exercised here. This documentation does not grant release
+permission or report a successful release.
 
 The entrypoint performs one bounded attempt:
 
