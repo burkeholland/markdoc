@@ -707,6 +707,66 @@ describe("FindBar exact publication controls", () => {
     expect(laterReplaceAll).not.toHaveBeenCalled();
     expect(onReveal.mock.calls.map(([match]) => match)).toEqual([returnedStep, returnedReplace]);
   });
+
+  it("publishes exact query and option snapshots and reveals only that update's active match", () => {
+    const s = session("owner", "option-snapshots");
+    const setFind = vi.spyOn(s, "setFind");
+    const onReveal = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible={false}
+        onReplaceVisible={vi.fn()}
+        onReveal={onReveal}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("find-match-case"));
+    expect(setFind).toHaveBeenCalledOnce();
+    expect(setFind.mock.calls[0]?.[0]).toBe("cat");
+    expect(setFind.mock.calls[0]?.[1]).toEqual({
+      matchCase: true,
+      wholeWord: false,
+      regex: false,
+    });
+    expect(onReveal).toHaveBeenCalledOnce();
+    expect(onReveal).toHaveBeenCalledWith(s.find?.matches[s.find.active]);
+  });
+
+  it("keeps no-match click controls disabled without suppressing exact keyboard semantics", () => {
+    const s = session("owner", "no-matches");
+    s.setFind("missing");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const onReveal = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={onReveal}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("find-count")).toHaveTextContent("0 of 0");
+    for (const testId of ["find-prev", "find-next", "replace-one", "replace-all"]) {
+      const element = screen.getByTestId(testId) as HTMLButtonElement;
+      expect(element).toBeDisabled();
+      reactHandler<ClickHandler>(element, "onClick")(clickActivation(element));
+    }
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(screen.getByTestId("find-input"), { key: "Enter" });
+    fireEvent.keyDown(screen.getByTestId("replace-input"), { key: "Enter" });
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(replaceActive).toHaveBeenCalledOnce();
+    expect(onReveal).not.toHaveBeenCalled();
+  });
 });
 
 describe("FindBar exact publication inputs", () => {
@@ -714,6 +774,7 @@ describe("FindBar exact publication inputs", () => {
     (["wrong-before-current", "current-before-wrong"] as const).map((order) => [input, order] as const)
   ))("binds %s change to its exact current input (%s)", async (input, order) => {
     const s = session("owner", `input-${input}-${order}`);
+    const representedOptions = s.find!.options;
     const setFind = vi.spyOn(s, "setFind");
     render(
       <FindBoundary
@@ -762,6 +823,7 @@ describe("FindBar exact publication inputs", () => {
     if (input === "search") {
       expect(setFind).toHaveBeenCalledOnce();
       expect(setFind.mock.calls[0]?.[0]).toBe("mat");
+      expect(setFind.mock.calls[0]?.[1]).toBe(representedOptions);
       await waitFor(() => expect(screen.getByTestId("find-input")).toHaveValue("mat"));
       fireEvent.change(screen.getByTestId("find-input"), { target: { value: "cat" } });
       expect(setFind).toHaveBeenCalledTimes(2);
