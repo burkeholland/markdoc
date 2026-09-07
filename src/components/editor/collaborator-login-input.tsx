@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
-import { UserPlus } from "lucide-react";
-import { api, type GitHubUserDto } from "@/lib/api";
+import { useCallback, useEffect, useId, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { Loader2, UserPlus } from "lucide-react";
+import { api, apiErrorText, type GitHubUserDto } from "@/lib/api";
 import { Avatar } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
@@ -19,13 +19,17 @@ export function suggestQuery(value: string): string | null {
   return q.length >= SUGGEST_MIN_CHARS && q.length <= 39 && /^[a-zA-Z0-9-]+$/.test(q) ? q : null;
 }
 
+type LookupState =
+  | { query: string; status: "loading" }
+  | { query: string; status: "error"; message: string; retrying: boolean };
+
 /**
  * The Share dialog's handle box with GitHub-account suggestions: an ARIA combobox over a listbox of
  * up to eight `@login`s that appears once two login characters have settled for 250 ms. ↓/↑ move,
  * Enter picks the active option (with none active it submits the typed handle as before), Escape
  * closes the list (the dialog stays open), a click picks. Picking fills the box and calls `onPick` so
- * the owner lands on the role select and still presses Add. Anything GitHub cannot answer — a
- * rate-limited search, no token, a network error — shows nothing: adding by exact handle never breaks.
+ * the owner lands on the role select and still presses Add. Temporary lookup failures leave exact
+ * handles usable and offer one guarded retry instead of looking like a truthful empty result.
  * A session without a GitHub token (`reason: "no-github-token"`) is remembered for the life of the
  * box: it asks no more and stays a plain text field.
  */
@@ -43,27 +47,106 @@ export function CollaboratorLoginInput({
   onPick?: (login: string) => void;
 }) {
   const listId = useId();
+  const feedbackId = `${listId}-feedback`;
+  const controlRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [options, setOptions] = useState<GitHubUserDto[]>([]);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
+  const [lookup, setLookup] = useState<LookupState | null>(null);
   // Every query change bumps `seq`; a response whose seq is no longer current is dropped.
   const seq = useRef(0);
+  const request = useRef<{ seq: number; query: string; controller: AbortController } | null>(null);
   const cache = useRef(new Map<string, GitHubUserDto[]>());
   // The login a pick just wrote into the box: it is not searched again (its owner is about to press Add).
   const picked = useRef<string | null>(null);
   // Set once the route answered `reason: "no-github-token"`: this session cannot search, so no further request goes out while mounted.
   const noToken = useRef(false);
+  const mounted = useRef(false);
   const query = suggestQuery(value);
 
   useEffect(() => {
-    const current = ++seq.current;
-    const show = (users: GitHubUserDto[]) => {
-      setOptions(users);
-      setActive(-1);
-      // A late answer must not pop the list open under a box that was already left.
-      setOpen(users.length > 0 && document.activeElement === inputRef.current);
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
     };
+  }, []);
+
+  const show = useCallback((users: GitHubUserDto[]) => {
+    setOptions(users);
+    setActive(-1);
+    // A late answer must not pop the list open under a box that was already left.
+    setOpen(users.length > 0 && document.activeElement === inputRef.current);
+  }, []);
+
+  const cancelLookup = useCallback(() => {
+    seq.current += 1;
+    request.current?.controller.abort();
+    request.current = null;
+    setLookup(null);
+  }, []);
+
+  const silenceSuggestions = useCallback(() => {
+    noToken.current = true;
+    seq.current += 1;
+    request.current?.controller.abort();
+    request.current = null;
+    setLookup(null);
+    show([]);
+  }, [show]);
+
+  const runLookup = useCallback(
+    (currentQuery: string, current: number) => {
+      if (noToken.current || seq.current !== current || request.current) return;
+      const controller = new AbortController();
+      const ownership = { seq: current, query: currentQuery, controller };
+      request.current = ownership;
+      api.github
+        .searchUsers(currentQuery, { signal: controller.signal })
+        .then((res) => {
+          // "No token" is true of the session, not of this query: even a superseded answer settles it.
+          if (res.reason === "no-github-token") {
+            if (mounted.current) silenceSuggestions();
+            return;
+          }
+          if (seq.current !== current || request.current !== ownership) return;
+          if (res.limited) {
+            show([]);
+            setLookup({
+              query: currentQuery,
+              status: "error",
+              message: `GitHub suggestions for @${currentQuery} are temporarily unavailable.`,
+              retrying: false,
+            });
+            return;
+          }
+          cache.current.set(currentQuery.toLowerCase(), res.users);
+          show(res.users);
+          setLookup(null);
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted || seq.current !== current || request.current !== ownership) return;
+          const reason = apiErrorText(error, "");
+          show([]);
+          setLookup({
+            query: currentQuery,
+            status: "error",
+            message: reason ? `GitHub suggestions for @${currentQuery}: ${reason}` : `GitHub suggestions for @${currentQuery} are temporarily unavailable.`,
+            retrying: false,
+          });
+        })
+        .finally(() => {
+          if (request.current === ownership) request.current = null;
+        });
+    },
+    [show, silenceSuggestions],
+  );
+
+  useEffect(() => {
+    const current = ++seq.current;
+    request.current?.controller.abort();
+    request.current = null;
+    setLookup(null);
     if (!query || query === picked.current || noToken.current) {
       show([]);
       return;
@@ -73,43 +156,49 @@ export function CollaboratorLoginInput({
       show(cached);
       return;
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      api.github
-        .searchUsers(query, { signal: controller.signal })
-        .then((res) => {
-          // "No token" is true of the session, not of this query: even a superseded answer settles it.
-          if (res.reason === "no-github-token") noToken.current = true;
-          if (seq.current !== current) return;
-          if (noToken.current) {
-            show([]);
-            return;
-          }
-          if (!res.limited) cache.current.set(query.toLowerCase(), res.users);
-          show(res.limited ? [] : res.users);
-        })
-        .catch(() => {
-          if (seq.current === current) show([]);
-        });
-    }, SUGGEST_DEBOUNCE_MS);
+    show([]);
+    setLookup({ query, status: "loading" });
+    const timer = setTimeout(() => runLookup(query, current), SUGGEST_DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
-      controller.abort();
+      if (seq.current === current) seq.current += 1;
+      if (request.current?.seq === current) {
+        request.current.controller.abort();
+        request.current = null;
+      }
     };
-  }, [query]);
+  }, [query, runLookup, show]);
 
   const excluded = new Set(exclude.map((l) => l.toLowerCase()));
   const visible = options.filter((u) => !excluded.has(u.login.toLowerCase())).slice(0, SUGGEST_MAX);
   const expanded = open && visible.length > 0;
   const activeIndex = active < visible.length ? active : -1;
+  const currentLookup = query && lookup?.query === query ? lookup : null;
   const optionId = (i: number) => `${listId}-option-${i}`;
 
   const pick = (user: GitHubUserDto) => {
     picked.current = user.login;
+    cancelLookup();
     onChange(user.login);
     setOpen(false);
     setActive(-1);
     onPick?.(user.login);
+  };
+
+  const retry = () => {
+    if (!query || currentLookup?.status !== "error" || currentLookup.retrying || noToken.current || request.current) return;
+    inputRef.current?.focus();
+    const current = ++seq.current;
+    show([]);
+    setLookup({ ...currentLookup, retrying: true });
+    runLookup(query, current);
+  };
+
+  const leaveControl = (e: FocusEvent<HTMLDivElement>) => {
+    if (e.relatedTarget instanceof Node && controlRef.current?.contains(e.relatedTarget)) return;
+    cancelLookup();
+    setOpen(false);
+    setActive(-1);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -135,7 +224,7 @@ export function CollaboratorLoginInput({
   };
 
   return (
-    <div className="relative flex-1">
+    <div ref={controlRef} className="relative flex-1" onBlur={leaveControl}>
       <UserPlus size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
       <input
         ref={inputRef}
@@ -151,19 +240,36 @@ export function CollaboratorLoginInput({
         onFocus={() => {
           if (visible.length > 0) setOpen(true);
         }}
-        onBlur={() => {
-          setOpen(false);
-          setActive(-1);
-        }}
         role="combobox"
         aria-autocomplete="list"
         aria-expanded={expanded}
         aria-controls={listId}
         aria-activedescendant={expanded && activeIndex >= 0 ? optionId(activeIndex) : undefined}
+        aria-describedby={currentLookup ? feedbackId : undefined}
         autoComplete="off"
         spellCheck={false}
         data-testid="share-login"
       />
+      {currentLookup?.status === "loading" && (
+        <div id={feedbackId} className="mt-1 flex items-center gap-1.5 text-xs text-ink-3" role="status" aria-live="polite" aria-atomic="true" data-testid="share-login-loading">
+          <Loader2 size={12} className="animate-spin" aria-hidden />
+          Loading GitHub suggestions for @{currentLookup.query}…
+        </div>
+      )}
+      {currentLookup?.status === "error" && (
+        <div id={feedbackId} className="mt-1 flex items-center gap-2 text-xs text-danger" role="alert" aria-atomic="true" data-testid="share-login-error">
+          <span className="min-w-0 flex-1">{currentLookup.message}</span>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm h-6 shrink-0 px-2"
+            onClick={retry}
+            disabled={currentLookup.retrying}
+            aria-busy={currentLookup.retrying || undefined}
+          >
+            {currentLookup.retrying ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
       {expanded && (
         <ul id={listId} role="listbox" aria-label="Matching GitHub accounts" className="menu absolute left-0 right-0 top-full mt-1 max-h-80 overflow-y-auto" data-testid="share-login-suggestions">
           {visible.map((u, i) => (

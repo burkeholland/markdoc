@@ -3,13 +3,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 
-const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<{ users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: "no-github-token" }>>();
-vi.mock("@/lib/api", () => ({ api: { github: { searchUsers: (...args: [string, RequestInit?]) => searchUsers(...args) } } }));
+type SearchAnswer = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: "no-github-token" };
+const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<SearchAnswer>>();
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return {
+    ...actual,
+    api: { ...actual.api, github: { ...actual.api.github, searchUsers: (...args: [string, RequestInit?]) => searchUsers(...args) } },
+  };
+});
 
+import { ApiError } from "@/lib/api";
 import { CollaboratorLoginInput, SUGGEST_DEBOUNCE_MS, suggestQuery } from "./collaborator-login-input";
 
 const user = (login: string) => ({ login, name: null, avatarUrl: `https://avatars.githubusercontent.com/${login}?s=40` });
 const answer = (...logins: string[]) => Promise.resolve({ users: logins.map(user), limited: false });
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
 
 /** The dialog's form around the box: controlled value, Enter submits the typed handle unless an option takes it. */
 function Harness({ exclude = [], onPick, onSubmit }: { exclude?: string[]; onPick?: (login: string) => void; onSubmit?: (login: string) => void }) {
@@ -101,6 +118,30 @@ describe("CollaboratorLoginInput", () => {
     expect(listOptions().map((o) => o.textContent)).toEqual(["@octocat", "@octodog"]);
     expect(listOptions().every((o) => o.getAttribute("aria-selected") === "false")).toBe(true);
     expect(input()).not.toHaveAttribute("aria-activedescendant");
+  });
+
+  it("announces the pending debounced query without disabling typing or exact-handle submission", async () => {
+    const pending = deferred<SearchAnswer>();
+    searchUsers.mockReturnValue(pending.promise);
+    const onSubmit = vi.fn();
+    render(<Harness onSubmit={onSubmit} />);
+
+    type("octo");
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Loading GitHub suggestions for @octo");
+    expect(input()).toHaveAttribute("aria-describedby", status.id);
+    expect(input()).not.toBeDisabled();
+    expect(searchUsers).not.toHaveBeenCalled();
+
+    await settle();
+    expect(searchUsers).toHaveBeenCalledTimes(1);
+    expect(fireEvent.keyDown(input(), { key: "Enter" })).toBe(true);
+    fireEvent.submit(input().closest("form")!);
+    expect(onSubmit).toHaveBeenCalledWith("octo");
+
+    type("octopus");
+    expect(input()).toHaveValue("octopus");
+    expect(searchUsers.mock.calls[0][1]?.signal?.aborted).toBe(true);
   });
 
   it("drops the answer to a query that is no longer current, even when it arrives last", async () => {
@@ -218,25 +259,57 @@ describe("CollaboratorLoginInput", () => {
     expect(options()).toEqual(many.slice(0, 8));
   });
 
-  it("shows nothing — and no error — when GitHub is rate-limited or the request fails, and keeps working afterwards", async () => {
-    searchUsers.mockImplementationOnce(() => Promise.resolve({ users: [], limited: true }));
-    render(<Harness />);
+  it("shows the API reason after rejection, keeps exact-handle submission available, and guards one Retry to a real empty result", async () => {
+    const retried = deferred<SearchAnswer>();
+    searchUsers.mockRejectedValueOnce(new ApiError(503, "GitHub account search is unavailable")).mockReturnValueOnce(retried.promise);
+    const onSubmit = vi.fn();
+    render(<Harness onSubmit={onSubmit} />);
+
     type("octo");
     await settle();
     expect(searchUsers).toHaveBeenCalledTimes(1);
-    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("GitHub suggestions for @octo: GitHub account search is unavailable");
+    const retry = within(alert).getByRole("button", { name: "Retry" });
+    expect(retry).not.toBeDisabled();
+    expect(fireEvent.keyDown(input(), { key: "Enter" })).toBe(true);
+    fireEvent.submit(input().closest("form")!);
+    expect(onSubmit).toHaveBeenCalledWith("octo");
+
+    fireEvent.click(retry);
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+    expect(searchUsers.mock.calls[1][0]).toBe("octo");
+    expect(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" }));
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      retried.resolve({ users: [], limited: false });
+    });
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(input().value).toBe("octo");
-
-    searchUsers.mockImplementationOnce(() => Promise.reject(new Error("network")));
-    type("octop");
-    await settle();
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(input().value).toBe("octo");
+  });
 
-    searchUsers.mockImplementation(() => answer("octopus"));
-    type("octopu");
+  it("turns a limited response into truthful feedback and one Retry that restores populated suggestions", async () => {
+    const retried = deferred<SearchAnswer>();
+    searchUsers.mockResolvedValueOnce({ users: [], limited: true }).mockReturnValueOnce(retried.promise);
+    render(<Harness />);
+
+    type("octo");
     await settle();
-    expect(options()).toEqual(["octopus"]);
+    expect(screen.getByRole("alert")).toHaveTextContent("GitHub suggestions for @octo are temporarily unavailable.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octo", "octo"]);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+    await act(async () => {
+      retried.resolve({ users: [user("octocat"), user("octodog")], limited: false });
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(options()).toEqual(["octocat", "octodog"]);
+    expect(input()).toHaveAttribute("aria-expanded", "true");
   });
 
   it("after the route answers reason=no-github-token it asks no more while mounted: one request for a whole share, no hint, the box still types (task #1481)", async () => {
@@ -247,8 +320,9 @@ describe("CollaboratorLoginInput", () => {
     expect(searchUsers).toHaveBeenCalledTimes(1);
     expect(searchUsers.mock.calls[0][0]).toBe("oc");
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
-    // Nothing is said about it: no alert, no rate-limit style hint (the component has none), no stray text.
+    // Nothing is said about it: no alert, pending state, rate-limit hint or stray text.
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText(/limit|token|GitHub/i)).toBeNull();
 
     // Two more settled prefixes — past the debounce each — go nowhere.
@@ -263,7 +337,7 @@ describe("CollaboratorLoginInput", () => {
     expect(input()).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("a superseded no-github-token answer still settles it, and the in-flight later query shows nothing", async () => {
+  it("a superseded no-github-token answer silently aborts the newer lookup and suppresses later requests", async () => {
     const pending = new Map<string, (r: { users: ReturnType<typeof user>[]; limited: boolean; reason?: "no-github-token" }) => void>();
     searchUsers.mockImplementation((q) => new Promise((resolve) => pending.set(q, resolve)));
     render(<Harness />);
@@ -276,10 +350,13 @@ describe("CollaboratorLoginInput", () => {
     await act(async () => {
       pending.get("oc")!({ users: [], limited: false, reason: "no-github-token" });
     });
+    expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(true);
     await act(async () => {
-      pending.get("octo")!({ users: [], limited: false, reason: "no-github-token" });
+      pending.get("octo")!({ users: [user("octocat")], limited: false });
     });
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
     type("octoc");
     await settle(SUGGEST_DEBOUNCE_MS * 2);
     expect(searchUsers).toHaveBeenCalledTimes(2);
@@ -307,5 +384,107 @@ describe("CollaboratorLoginInput", () => {
     await settle();
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     expect(searchUsers).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a newer query error when an aborted Retry for the old query later succeeds", async () => {
+    const oldRetry = deferred<SearchAnswer>();
+    searchUsers
+      .mockRejectedValueOnce(new ApiError(503, "Old query failed"))
+      .mockReturnValueOnce(oldRetry.promise)
+      .mockRejectedValueOnce(new ApiError(503, "Current query failed"));
+    render(<Harness />);
+
+    type("oc");
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+    type("octo");
+    expect(screen.queryByText(/Old query failed/)).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("@octo");
+    expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(true);
+    await settle();
+    expect(screen.getByRole("alert")).toHaveTextContent("Current query failed");
+
+    await act(async () => {
+      oldRetry.resolve({ users: [user("ocean")], limited: false });
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Current query failed");
+    expect(options()).toEqual([]);
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["oc", "oc", "octo"]);
+  });
+
+  it("does not let an answer reopen suggestions after a cached option is picked", async () => {
+    const stale = deferred<SearchAnswer>();
+    const onPick = vi.fn();
+    searchUsers.mockImplementation((q) => (q === "oc" ? answer("ocean") : stale.promise));
+    render(<Harness onPick={onPick} />);
+
+    type("oc");
+    await settle();
+    expect(options()).toEqual(["ocean"]);
+    type("oct");
+    await settle();
+    type("oc");
+    expect(options()).toEqual(["ocean"]);
+    fireEvent.click(screen.getByTestId("share-login-option"));
+    expect(onPick).toHaveBeenCalledWith("ocean");
+    expect(input()).toHaveValue("ocean");
+
+    await act(async () => {
+      stale.resolve({ users: [user("octocat")], limited: false });
+    });
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(input()).toHaveValue("ocean");
+  });
+
+  it("aborts and isolates pending success or failure when focus leaves the control", async () => {
+    const pending = deferred<SearchAnswer>();
+    searchUsers.mockReturnValue(pending.promise);
+    render(<Harness />);
+    type("octo");
+    await settle();
+
+    fireEvent.blur(input());
+    expect(searchUsers.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(screen.queryByRole("status")).toBeNull();
+    await act(async () => {
+      pending.reject(new ApiError(503, "Late failure"));
+      await Promise.allSettled([pending.promise]);
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("invalidates a pending Retry when focus leaves the control", async () => {
+    const retried = deferred<SearchAnswer>();
+    searchUsers.mockRejectedValueOnce(new ApiError(503, "Try later")).mockReturnValueOnce(retried.promise);
+    render(<Harness />);
+    type("octo");
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+    fireEvent.blur(input());
+    expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(true);
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => {
+      retried.resolve({ users: [user("octocat")], limited: false });
+    });
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("aborts and isolates a pending answer on unmount", async () => {
+    const pending = deferred<SearchAnswer>();
+    searchUsers.mockReturnValue(pending.promise);
+    const view = render(<Harness />);
+    type("octo");
+    await settle();
+
+    view.unmount();
+    expect(searchUsers.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    await act(async () => {
+      pending.resolve({ users: [user("octocat")], limited: false });
+    });
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
   });
 });
