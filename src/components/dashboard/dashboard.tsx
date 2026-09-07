@@ -164,7 +164,7 @@ const FILTERS: { value: Filter; label: string }[] = [
 const TRASH_RETENTION_DAYS = 30;
 
 /** Star toggle for a document card; hover-visible unless starred. */
-function StarButton({ starred, onToggle, className }: { starred: boolean; onToggle: () => void; className?: string }) {
+function StarButton({ starred, pending, onToggle, className }: { starred: boolean; pending: boolean; onToggle: () => void; className?: string }) {
   return (
     <button
       type="button"
@@ -173,6 +173,8 @@ function StarButton({ starred, onToggle, className }: { starred: boolean; onTogg
         e.stopPropagation();
         onToggle();
       }}
+      disabled={pending}
+      aria-busy={pending || undefined}
       aria-pressed={starred}
       aria-label={starred ? "Unstar" : "Star"}
       title={starred ? "Unstar" : "Star"}
@@ -341,19 +343,47 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     }
   }, []);
 
-  // Optimistic stars: the server list is the source of truth until the user clicks.
-  const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
-  const documents = useMemo(() => initialDocuments.map((d) => (d.id in starOverrides ? { ...d, starred: starOverrides[d.id] } : d)), [initialDocuments, starOverrides]);
+  // One shared state per id keeps duplicate cards in lockstep and synchronously rejects overlapping writes.
+  const [starStates, setStarStates] = useState<Record<string, { confirmed: boolean; value: boolean; pending: boolean }>>({});
+  const starStatesRef = useRef(starStates);
+  const starRequests = useRef(new Map<string, number>());
+  const starRequestId = useRef(0);
+  const starPropsRef = useRef(initialDocuments);
+  const updateStarState = useCallback((id: string, state: { confirmed: boolean; value: boolean; pending: boolean }) => {
+    const next = { ...starStatesRef.current, [id]: state };
+    starStatesRef.current = next;
+    setStarStates(next);
+  }, []);
+  const documents = useMemo(
+    () => initialDocuments.map((d) => (starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d)),
+    [initialDocuments, starStates],
+  );
   const toggleStar = useCallback(
     (doc: Doc) => {
-      const next = !doc.starred;
-      setStarOverrides((o) => ({ ...o, [doc.id]: next }));
-      (next ? api.documents.star(doc.id) : api.documents.unstar(doc.id)).catch((err: unknown) => {
-        console.error(err);
-        setStarOverrides((o) => ({ ...o, [doc.id]: !next }));
-      });
+      if (starRequests.current.has(doc.id)) return;
+      const current = starStatesRef.current[doc.id];
+      const confirmed = current?.confirmed ?? doc.starred;
+      const next = !(current?.value ?? doc.starred);
+      const request = ++starRequestId.current;
+      starRequests.current.set(doc.id, request);
+      updateStarState(doc.id, { confirmed, value: next, pending: true });
+
+      const update: Promise<{ starred: boolean }> = next ? api.documents.star(doc.id) : api.documents.unstar(doc.id);
+      void update.then(
+        ({ starred }) => {
+          if (starRequests.current.get(doc.id) !== request) return;
+          starRequests.current.delete(doc.id);
+          updateStarState(doc.id, { confirmed: starred, value: starred, pending: false });
+        },
+        (error: unknown) => {
+          if (starRequests.current.get(doc.id) !== request) return;
+          starRequests.current.delete(doc.id);
+          updateStarState(doc.id, { confirmed, value: confirmed, pending: false });
+          setNotice({ message: apiErrorText(error, next ? "Could not star document" : "Could not unstar document"), kind: "error" });
+        },
+      );
     },
-    [],
+    [updateStarState],
   );
 
   // Sort is remembered per browser in a cookie the server reads (`initialSort`), so the markup already
@@ -448,6 +478,33 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   // feels instant while the request is in flight (or for queries too short to send).
   const serverResults = !currentSearchError && results && trimmed.length >= MIN_QUERY_LENGTH && results.query === trimmed ? results.documents : null;
   const pending = trimmed.length >= MIN_QUERY_LENGTH && !serverResults && (searching || serverQuery !== trimmed);
+  useEffect(() => {
+    if (starPropsRef.current !== initialDocuments) {
+      starPropsRef.current = initialDocuments;
+      starRequests.current.clear();
+      starStatesRef.current = {};
+      setStarStates({});
+      return;
+    }
+
+    const currentIds = new Set(initialDocuments.map((doc) => doc.id));
+    for (const doc of serverResults ?? []) currentIds.add(doc.id);
+    const removed = Object.keys(starStatesRef.current).filter((id) => !currentIds.has(id));
+    if (removed.length === 0) return;
+    const next = { ...starStatesRef.current };
+    for (const id of removed) {
+      starRequests.current.delete(id);
+      delete next[id];
+    }
+    starStatesRef.current = next;
+    setStarStates(next);
+  }, [initialDocuments, serverResults]);
+  useEffect(
+    () => () => {
+      starRequests.current.clear();
+    },
+    [],
+  );
   const filtered = useMemo<(Doc & { snippet?: string | null })[]>(() => {
     const matchesFilter = (d: Doc) => {
       if (filter === "mine" && d.ownerId !== user.id) return false;
@@ -456,10 +513,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       return true;
     };
     // Search results keep their relevance order (title matches first); the sort applies to the browsing list.
-    if (serverResults) return serverResults.map((d) => (d.id in starOverrides ? { ...d, starred: starOverrides[d.id] } : d)).filter(matchesFilter);
+    if (serverResults) return serverResults.map((d) => (starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d)).filter(matchesFilter);
     const q = trimmed.toLowerCase();
     return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q))).sort(compareDocs(sort));
-  }, [documents, serverResults, trimmed, filter, sort, user.id, starOverrides]);
+  }, [documents, serverResults, trimmed, filter, sort, user.id, starStates]);
 
   const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
   const showStrip = filter === "all" && !trimmed && starred.length > 0;
@@ -700,7 +757,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       <span className="line-clamp-2 break-words text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
                       <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                     </Link>
-                    <StarButton starred={d.starred} onToggle={() => toggleStar(d)} className="absolute right-1.5 top-1.5" />
+                    <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="absolute right-1.5 top-1.5" />
                   </li>
                 ))}
               </ul>
@@ -821,7 +878,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       )}
                     </div>
                   </Link>
-                  <StarButton starred={d.starred} onToggle={() => toggleStar(d)} className="absolute bottom-3 right-3" />
+                  <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="absolute bottom-3 right-3" />
                 </li>
               ))}
             </ul>
