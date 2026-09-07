@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { startTransition, useState } from "react";
+import { startTransition, useLayoutEffect, useState, type ReactNode } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -38,6 +39,93 @@ function deferred<T>() {
   return { reject, resolve, promise };
 }
 
+interface DirectView {
+  container: HTMLDivElement;
+  root: Root;
+  active: boolean;
+}
+
+interface TokenBoundaryProps {
+  origin: string;
+  userLogin: string;
+  next?: string | null;
+  documentId?: string;
+  embedded?: boolean;
+  onClose?: () => void;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}
+
+const directViews: DirectView[] = [];
+
+function renderDirect(node: ReactNode) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const view: DirectView = { container, root: createRoot(container), active: true };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return {
+    rerender(next: ReactNode) {
+      act(() => view.root.render(next));
+    },
+  };
+}
+
+function TokenBoundary({
+  present = true,
+  boundary = 0,
+  onBoundary,
+  ...props
+}: TokenBoundaryProps) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <TokensPanel {...props} /> : null;
+}
+
+function captureReactCallback<T>(element: Element, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the token control");
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const callback = props?.[name];
+  if (typeof callback !== "function") throw new Error(`The token control has no ${name} callback`);
+  return callback as T;
+}
+
+type WindowHashListener = EventListenerOrEventListenerObject;
+
+function trackHashListeners() {
+  const active = new Set<WindowHashListener>();
+  const added: WindowHashListener[] = [];
+  const removed: WindowHashListener[] = [];
+  const nativeAdd = window.addEventListener.bind(window);
+  const nativeRemove = window.removeEventListener.bind(window);
+
+  vi.spyOn(window, "addEventListener").mockImplementation((type, listener, options) => {
+    if (type === "hashchange") {
+      active.add(listener);
+      added.push(listener);
+    }
+    nativeAdd(type, listener, options);
+  });
+  vi.spyOn(window, "removeEventListener").mockImplementation((type, listener, options) => {
+    if (type === "hashchange") {
+      active.delete(listener);
+      removed.push(listener);
+    }
+    nativeRemove(type, listener, options);
+  });
+
+  return { active, added, removed };
+}
+
+function invokeWindowListener(listener: WindowHashListener) {
+  const event = new HashChangeEvent("hashchange");
+  if (typeof listener === "function") listener(event);
+  else listener.handleEvent(event);
+}
+
 beforeEach(() => {
   fetchMock.mockReset();
   confirmMock.mockReset().mockReturnValue(false);
@@ -46,7 +134,19 @@ beforeEach(() => {
   vi.stubGlobal("confirm", confirmMock);
   window.history.replaceState(null, "", "/");
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  while (directViews.length) {
+    const view = directViews.pop()!;
+    if (view.active) {
+      act(() => view.root.unmount());
+      view.active = false;
+    }
+    view.container.remove();
+  }
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("visible token management", () => {
   it("keeps loading, empty and create disclosure separate, with two primary destinations", async () => {
@@ -478,6 +578,435 @@ describe("synchronous mutation ownership", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
     expect(mutations()).toHaveLength(2);
     expect(copyText).not.toHaveBeenCalled();
+  });
+});
+
+describe("exact token control visits", () => {
+  it("retires account and document controls before the parent layout boundary and keeps the replacement usable", async () => {
+    const listeners = trackHashListeners();
+    const firstClose = vi.fn();
+    const currentClose = vi.fn();
+    fetchMock.mockImplementation(async () => response({ tokens: [] }));
+    const view = renderDirect(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/first"
+        onClose={firstClose}
+      />,
+    );
+    await screen.findByText("No tokens yet.");
+
+    const staleConnect = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Connect an MCP client" }),
+      "onClick",
+    );
+    const staleCreate = captureReactCallback<() => void>(screen.getByTestId("token-add"), "onClick");
+    const staleClose = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Close token management" }),
+      "onClick",
+    );
+    const staleBack = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByTestId("settings-back-to-document"),
+      "onClick",
+    );
+    const staleListener = listeners.added[0];
+    expect(listeners.active).toEqual(new Set([staleListener]));
+
+    const stalePreventDefault = vi.fn();
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="bob"
+        documentId="second"
+        next="/d/second"
+        onClose={currentClose}
+        boundary={1}
+        onBoundary={() => {
+          expect(listeners.active.has(staleListener)).toBe(false);
+          expect(listeners.removed).toContain(staleListener);
+          window.history.replaceState(null, "", "/settings#connect");
+          staleConnect();
+          staleCreate();
+          staleClose();
+          staleBack({ preventDefault: stalePreventDefault });
+          invokeWindowListener(staleListener);
+        }}
+      />,
+    );
+    await screen.findByText("No tokens yet.");
+
+    expect(stalePreventDefault).not.toHaveBeenCalled();
+    expect(firstClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Tokens" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("token-name")).toBeNull();
+    expect(listeners.active).toHaveLength(1);
+    expect(listeners.active.has(staleListener)).toBe(false);
+
+    const currentListener = [...listeners.active][0];
+    act(() => invokeWindowListener(currentListener));
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toHaveAttribute("aria-pressed", "true");
+
+    const currentTokens = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Tokens" }),
+      "onClick",
+    );
+    act(() => currentTokens());
+    expect(screen.getByRole("button", { name: "Tokens" })).toHaveAttribute("aria-pressed", "true");
+
+    const currentCreate = captureReactCallback<() => void>(screen.getByTestId("token-add"), "onClick");
+    act(() => currentCreate());
+    expect(screen.getByTestId("token-name")).toBeVisible();
+    act(() => currentCreate());
+    expect(screen.queryByTestId("token-name")).toBeNull();
+
+    const safeBack = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByTestId("settings-back-to-document"),
+      "onClick",
+    );
+    const safePreventDefault = vi.fn();
+    act(() => safeBack({ preventDefault: safePreventDefault }));
+    expect(safePreventDefault).not.toHaveBeenCalled();
+
+    const close = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Close token management" }),
+      "onClick",
+    );
+    act(() => {
+      close();
+      close();
+    });
+    expect(currentClose).toHaveBeenCalledTimes(1);
+    expect(listeners.active).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mutations()).toHaveLength(0);
+  });
+
+  it("removes the exact listener and makes every captured control inert before removal reaches parent layout", async () => {
+    const listeners = trackHashListeners();
+    const onClose = vi.fn();
+    fetchMock.mockResolvedValue(response({ tokens: [] }));
+    const view = renderDirect(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/first"
+        onClose={onClose}
+      />,
+    );
+    await screen.findByText("No tokens yet.");
+
+    const staleListener = listeners.added[0];
+    const staleConnect = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Connect an MCP client" }),
+      "onClick",
+    );
+    const staleCreate = captureReactCallback<() => void>(screen.getByTestId("token-add"), "onClick");
+    const staleClose = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Close token management" }),
+      "onClick",
+    );
+    const staleBack = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByTestId("settings-back-to-document"),
+      "onClick",
+    );
+    const preventDefault = vi.fn();
+
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/first"
+        onClose={onClose}
+        present={false}
+        boundary={1}
+        onBoundary={() => {
+          expect(listeners.active).toHaveLength(0);
+          expect(listeners.removed).toEqual([staleListener]);
+          staleConnect();
+          staleCreate();
+          staleClose();
+          staleBack({ preventDefault });
+          invokeWindowListener(staleListener);
+        }}
+      />,
+    );
+
+    expect(screen.queryByTestId("token-manager")).toBeNull();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mutations()).toHaveLength(0);
+  });
+
+  it("binds hash and guarded links across next, embedded, and onClose replacements", async () => {
+    const listeners = trackHashListeners();
+    const createRequest = deferred<Response>();
+    const reload = deferred<Response>();
+    const created = minted();
+    const firstClose = vi.fn();
+    const currentClose = vi.fn();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
+      .mockReturnValueOnce(createRequest.promise)
+      .mockReturnValueOnce(reload.promise);
+    const view = renderDirect(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/first"
+        onClose={firstClose}
+      />,
+    );
+    await screen.findByText("No tokens yet.");
+
+    const staleCreate = captureReactCallback<() => void>(screen.getByTestId("token-add"), "onClick");
+    act(() => staleCreate());
+    expect(screen.getByTestId("token-name")).toBeVisible();
+    fireEvent.submit(screen.getByTestId("token-name").closest("form")!);
+    expect(mutations()).toHaveLength(1);
+
+    const firstListener = listeners.added[0];
+    const staleBack = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByTestId("settings-back-to-document"),
+      "onClick",
+    );
+    const currentGuard = vi.fn();
+    act(() => staleBack({ preventDefault: currentGuard }));
+    expect(currentGuard).toHaveBeenCalledTimes(1);
+
+    const staleConnect = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Connect an MCP client" }),
+      "onClick",
+    );
+    const firstStaleGuard = vi.fn();
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/second"
+        onClose={firstClose}
+        boundary={1}
+        onBoundary={() => {
+          expect(listeners.active.has(firstListener)).toBe(false);
+          expect(listeners.removed).toContain(firstListener);
+          window.history.replaceState(null, "", "/settings#connect");
+          staleCreate();
+          staleConnect();
+          staleBack({ preventDefault: firstStaleGuard });
+          invokeWindowListener(firstListener);
+        }}
+      />,
+    );
+
+    expect(firstStaleGuard).not.toHaveBeenCalled();
+    expect(screen.getByTestId("token-name")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Tokens" })).toHaveAttribute("aria-pressed", "true");
+    expect(listeners.active).toHaveLength(1);
+    const secondListener = [...listeners.active][0];
+    expect(secondListener).not.toBe(firstListener);
+
+    const secondBack = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByTestId("settings-back-to-document"),
+      "onClick",
+    );
+    const secondGuard = vi.fn();
+    act(() => secondBack({ preventDefault: secondGuard }));
+    expect(secondGuard).toHaveBeenCalledTimes(1);
+
+    const secondStaleGuard = vi.fn();
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/second"
+        embedded
+        onClose={firstClose}
+        boundary={2}
+        onBoundary={() => {
+          expect(listeners.active).toHaveLength(0);
+          expect(listeners.removed).toContain(secondListener);
+          secondBack({ preventDefault: secondStaleGuard });
+          invokeWindowListener(secondListener);
+        }}
+      />,
+    );
+
+    expect(secondStaleGuard).not.toHaveBeenCalled();
+    expect(listeners.added).toHaveLength(2);
+    expect(listeners.active).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Tokens" })).toHaveAttribute("aria-pressed", "true");
+    const guardedOpenAll = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByRole("link", { name: "Open all your tokens in Settings" }),
+      "onClick",
+    );
+    const embeddedGuard = vi.fn();
+    act(() => guardedOpenAll({ preventDefault: embeddedGuard }));
+    expect(embeddedGuard).toHaveBeenCalledTimes(1);
+
+    await act(async () => createRequest.resolve(response({ token: created }, 201)));
+    expect(await screen.findByTestId("token-created")).toBeVisible();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await act(async () => reload.resolve(response({ tokens: [{ ...token, id: created.id }] })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close token management" })).toBeEnabled());
+
+    const safeOpenAll = captureReactCallback<(event: { preventDefault: () => void }) => void>(
+      screen.getByRole("link", { name: "Open all your tokens in Settings" }),
+      "onClick",
+    );
+    const safeGuard = vi.fn();
+    act(() => safeOpenAll({ preventDefault: safeGuard }));
+    expect(safeGuard).not.toHaveBeenCalled();
+
+    const connect = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Connect an MCP client" }),
+      "onClick",
+    );
+    act(() => connect());
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toHaveAttribute("aria-pressed", "true");
+    const tokens = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Tokens" }),
+      "onClick",
+    );
+    act(() => tokens());
+    expect(screen.getByRole("button", { name: "Tokens" })).toHaveAttribute("aria-pressed", "true");
+
+    const staleClose = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Close token management" }),
+      "onClick",
+    );
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/second"
+        embedded
+        onClose={currentClose}
+        boundary={3}
+        onBoundary={staleClose}
+      />,
+    );
+    expect(firstClose).not.toHaveBeenCalled();
+    const close = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "Close token management" }),
+      "onClick",
+    );
+    act(() => {
+      close();
+      close();
+    });
+    expect(currentClose).toHaveBeenCalledTimes(1);
+    expect(listeners.active).toHaveLength(0);
+    expect(mutations()).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "keeps an equal-looking replacement publication safe in %s dismissal order",
+    async (order) => {
+      const created = minted();
+      const row = { ...token, id: created.id };
+      fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
+        .mockResolvedValueOnce(response({ token: created }, 201))
+        .mockResolvedValueOnce(response({ tokens: [row] }))
+        .mockResolvedValueOnce(response({ token: row }));
+      renderDirect(<TokensPanel origin="https://markdoc.test" userLogin="alice" />);
+      await openCreate();
+      fireEvent.click(screen.getByTestId("token-create"));
+      expect(await screen.findByTestId("token-created")).toBeVisible();
+      await screen.findByRole("button", { name: `Rename ${row.name}` });
+
+      const staleDismiss = captureReactCallback<() => void>(
+        screen.getByRole("button", { name: "I stored it - hide secret" }),
+        "onClick",
+      );
+      fireEvent.click(screen.getByRole("button", { name: `Rename ${row.name}` }));
+      fireEvent.submit(screen.getByLabelText("Token name").closest("form")!);
+      await waitFor(() => expect(screen.getByRole("button", { name: `Rename ${row.name}` })).toHaveFocus());
+
+      const currentDismiss = captureReactCallback<() => void>(
+        screen.getByRole("button", { name: "I stored it - hide secret" }),
+        "onClick",
+      );
+      expect(currentDismiss).not.toBe(staleDismiss);
+      expect(screen.getByTestId("copy-token").textContent === created.token).toBe(true);
+      const tokensButton = screen.getByRole("button", { name: "Tokens" });
+      const focus = vi.spyOn(tokensButton, "focus");
+
+      if (order === "stale-before-current") {
+        act(() => staleDismiss());
+        expect(screen.getByTestId("token-created")).toBeVisible();
+        expect(focus).not.toHaveBeenCalled();
+        act(() => currentDismiss());
+      } else {
+        act(() => currentDismiss());
+        act(() => staleDismiss());
+      }
+
+      expect(screen.queryByTestId("token-created")).toBeNull();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(tokensButton).toHaveFocus();
+      expect(mutations()).toHaveLength(2);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it("requires the exact visit and reused Tokens button for secret dismissal and focus", async () => {
+    const listeners = trackHashListeners();
+    const created = minted();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
+      .mockResolvedValueOnce(response({ token: created }, 201))
+      .mockResolvedValueOnce(response({ tokens: [{ ...token, id: created.id }] }));
+    const view = renderDirect(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/first"
+      />,
+    );
+    await openCreate();
+    fireEvent.click(screen.getByTestId("token-create"));
+    expect(await screen.findByTestId("token-created")).toBeVisible();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const staleListener = listeners.added[0];
+    const staleDismiss = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "I stored it - hide secret" }),
+      "onClick",
+    );
+    const tokensButton = screen.getByRole("button", { name: "Tokens" });
+
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        next="/d/second"
+        boundary={1}
+        onBoundary={() => {
+          expect(listeners.active.has(staleListener)).toBe(false);
+          staleDismiss();
+        }}
+      />,
+    );
+    expect(screen.getByTestId("token-created")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Tokens" })).toBe(tokensButton);
+
+    const currentDismiss = captureReactCallback<() => void>(
+      screen.getByRole("button", { name: "I stored it - hide secret" }),
+      "onClick",
+    );
+    const focus = vi.spyOn(tokensButton, "focus");
+    act(() => {
+      staleDismiss();
+      currentDismiss();
+      staleDismiss();
+    });
+
+    expect(screen.queryByTestId("token-created")).toBeNull();
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(tokensButton).toHaveFocus();
+    expect(listeners.active).toHaveLength(1);
+    expect(mutations()).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
