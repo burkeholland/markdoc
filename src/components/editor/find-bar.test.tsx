@@ -95,12 +95,12 @@ function FindBoundary({
   ) : null;
 }
 
-function frameEnvironment() {
+function frameEnvironment(reuseFrameId = false) {
   let nextFrame = 1;
   const pending = new Map<number, FrameRequestCallback>();
   const captured: { id: number; callback: FrameRequestCallback }[] = [];
   const request = vi.fn((callback: FrameRequestCallback) => {
-    const id = nextFrame++;
+    const id = reuseFrameId ? 1 : nextFrame++;
     pending.set(id, callback);
     captured.push({ id, callback });
     return id;
@@ -146,8 +146,46 @@ function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElem
   return handler as T;
 }
 
-type ClickHandler = () => void;
-type ChangeHandler = (event: { target: { value: string } }) => void;
+type ClickHandler = (event: { currentTarget: HTMLButtonElement; preventDefault: () => void }) => void;
+type ChangeHandler = (event: { currentTarget: HTMLInputElement }) => void;
+type MouseDownHandler = (event: { currentTarget: HTMLButtonElement; preventDefault: () => void }) => void;
+type InputKeyHandler = (event: {
+  currentTarget: HTMLInputElement;
+  target: EventTarget;
+  key: string;
+  shiftKey: boolean;
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}) => void;
+type BarKeyHandler = (event: {
+  currentTarget: HTMLDivElement;
+  target: EventTarget;
+  key: string;
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}) => void;
+
+function clickActivation(currentTarget: HTMLButtonElement) {
+  return { currentTarget, preventDefault: vi.fn() };
+}
+
+function inputKeyActivation(currentTarget: HTMLInputElement, key: string, shiftKey = false) {
+  return {
+    currentTarget,
+    target: currentTarget,
+    key,
+    shiftKey,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+}
+
+function invokeChange(handler: ChangeHandler, currentTarget: HTMLInputElement, value: string) {
+  const previous = currentTarget.value;
+  currentTarget.value = value;
+  handler({ currentTarget });
+  currentTarget.value = previous;
+}
 
 describe("FindBar session ownership", () => {
   it("focuses once for a same-session nonce and again for a new session with the same nonce before the parent layout boundary", () => {
@@ -189,7 +227,7 @@ describe("FindBar session ownership", () => {
 
   it.each(["retired-before-current", "current-before-retired"] as const)(
     "retires a replacement frame and actions at the session layout boundary (%s)",
-    (order) => {
+    async (order) => {
       const frames = frameEnvironment();
       const focus = trackFocus();
       const previous = session("owner", `replace-previous-${order}`);
@@ -205,22 +243,30 @@ describe("FindBar session ownership", () => {
       const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
       const rendered = render(<FindBoundary session={previous} replaceVisible={false} {...callbacks} />);
       frames.reset();
-      const retiredOpen = reactHandler<ClickHandler>(screen.getByTestId("find-toggle-replace"), "onClick");
+      const retiredOpenElement = screen.getByTestId("find-toggle-replace") as HTMLButtonElement;
+      const retiredOpen = reactHandler<ClickHandler>(retiredOpenElement, "onClick");
 
-      act(() => retiredOpen());
-      expect(frames.pending.size).toBe(1);
-      const retiredFrame = frames.captured[0];
+      act(() => retiredOpen(clickActivation(retiredOpenElement)));
+      expect(frames.pending.size).toBe(0);
       rendered.rerender(<FindBoundary session={previous} replaceVisible {...callbacks} />);
+      const retiredFrame = frames.captured[0];
+      expect(frames.pending.has(retiredFrame.id)).toBe(true);
       fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "previous draft" } });
       expect(screen.getByTestId("replace-input")).toHaveValue("previous draft");
 
+      const retiredReplacementInput = screen.getByTestId("replace-input") as HTMLInputElement;
+      const retiredQueryInput = screen.getByTestId("find-input") as HTMLInputElement;
+      const retiredNextElement = screen.getByTestId("find-next") as HTMLButtonElement;
+      const retiredReplaceOneElement = screen.getByTestId("replace-one") as HTMLButtonElement;
+      const retiredReplaceAllElement = screen.getByTestId("replace-all") as HTMLButtonElement;
+      const retiredCloseElement = screen.getByTestId("find-close") as HTMLButtonElement;
       const retiredActions = {
-        replacementChange: reactHandler<ChangeHandler>(screen.getByTestId("replace-input"), "onChange"),
-        queryChange: reactHandler<ChangeHandler>(screen.getByTestId("find-input"), "onChange"),
-        next: reactHandler<ClickHandler>(screen.getByTestId("find-next"), "onClick"),
-        replaceOne: reactHandler<ClickHandler>(screen.getByTestId("replace-one"), "onClick"),
-        replaceAll: reactHandler<ClickHandler>(screen.getByTestId("replace-all"), "onClick"),
-        close: reactHandler<ClickHandler>(screen.getByTestId("find-close"), "onClick"),
+        replacementChange: reactHandler<ChangeHandler>(retiredReplacementInput, "onChange"),
+        queryChange: reactHandler<ChangeHandler>(retiredQueryInput, "onChange"),
+        next: reactHandler<ClickHandler>(retiredNextElement, "onClick"),
+        replaceOne: reactHandler<ClickHandler>(retiredReplaceOneElement, "onClick"),
+        replaceAll: reactHandler<ClickHandler>(retiredReplaceAllElement, "onClick"),
+        close: reactHandler<ClickHandler>(retiredCloseElement, "onClick"),
       };
       callbacks.onReplaceVisible.mockClear();
       callbacks.onReveal.mockClear();
@@ -245,13 +291,13 @@ describe("FindBar session ownership", () => {
       expect(frames.cancel).toHaveBeenCalledWith(retiredFrame.id);
       act(() => {
         frames.invoke(retiredFrame);
-        retiredOpen();
-        retiredActions.replacementChange({ target: { value: "late previous draft" } });
-        retiredActions.queryChange({ target: { value: "dog" } });
-        retiredActions.next();
-        retiredActions.replaceOne();
-        retiredActions.replaceAll();
-        retiredActions.close();
+        retiredOpen(clickActivation(retiredOpenElement));
+        invokeChange(retiredActions.replacementChange, retiredReplacementInput, "late previous draft");
+        invokeChange(retiredActions.queryChange, retiredQueryInput, "dog");
+        retiredActions.next(clickActivation(retiredNextElement));
+        retiredActions.replaceOne(clickActivation(retiredReplaceOneElement));
+        retiredActions.replaceAll(clickActivation(retiredReplaceAllElement));
+        retiredActions.close(clickActivation(retiredCloseElement));
       });
 
       expect(screen.getByTestId("replace-input")).toHaveValue("");
@@ -272,13 +318,14 @@ describe("FindBar session ownership", () => {
       expect(current.ytext.toString()).toBe(TEXT);
 
       rendered.rerender(<FindBoundary session={current} replaceVisible={false} {...callbacks} />);
-      const currentOpen = reactHandler<ClickHandler>(screen.getByTestId("find-toggle-replace"), "onClick");
-      act(() => currentOpen());
+      const currentOpenElement = screen.getByTestId("find-toggle-replace") as HTMLButtonElement;
+      const currentOpen = reactHandler<ClickHandler>(currentOpenElement, "onClick");
+      act(() => currentOpen(clickActivation(currentOpenElement)));
+      expect(frames.pending.size).toBe(0);
+      rendered.rerender(<FindBoundary session={current} replaceVisible {...callbacks} />);
       const currentFrame = frames.captured.at(-1);
       if (!currentFrame || currentFrame === retiredFrame) throw new Error("The current replace focus frame was not scheduled");
       expect(frames.pending.has(currentFrame.id)).toBe(true);
-      rendered.rerender(<FindBoundary session={current} replaceVisible {...callbacks} />);
-      fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "dog" } });
 
       act(() => {
         for (const frame of order === "retired-before-current"
@@ -293,10 +340,13 @@ describe("FindBar session ownership", () => {
       expect(frames.pending.has(currentFrame.id)).toBe(false);
       expect(screen.getByTestId("replace-input")).toHaveFocus();
       expect(focus.focused.filter((target) => target === "replace-input")).toHaveLength(1);
+      fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "dog" } });
       fireEvent.click(screen.getByTestId("replace-one"));
       expect(currentReplaceOne).toHaveBeenCalledOnce();
       expect(currentReplaceOne).toHaveBeenCalledWith("dog");
+      await waitFor(() => expect(screen.getByTestId("find-count")).toHaveTextContent("1 of 1"));
       fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "fox" } });
+      await waitFor(() => expect(screen.getByTestId("replace-input")).toHaveValue("fox"));
       fireEvent.click(screen.getByTestId("replace-all"));
       expect(currentReplaceAll).toHaveBeenCalledOnce();
       expect(currentReplaceAll).toHaveBeenCalledWith("fox");
@@ -315,18 +365,26 @@ describe("FindBar session ownership", () => {
     const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
     const rendered = render(<FindBoundary session={removed} replaceVisible={false} {...callbacks} />);
     frames.reset();
-    const retiredOpen = reactHandler<ClickHandler>(screen.getByTestId("find-toggle-replace"), "onClick");
+    const retiredOpenElement = screen.getByTestId("find-toggle-replace") as HTMLButtonElement;
+    const retiredOpen = reactHandler<ClickHandler>(retiredOpenElement, "onClick");
 
-    act(() => retiredOpen());
-    const retiredFrame = frames.captured[0];
+    act(() => retiredOpen(clickActivation(retiredOpenElement)));
+    expect(frames.pending.size).toBe(0);
     rendered.rerender(<FindBoundary session={removed} replaceVisible {...callbacks} />);
+    const retiredFrame = frames.captured[0];
+    expect(frames.pending.has(retiredFrame.id)).toBe(true);
     fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "removed draft" } });
+    const retiredQueryInput = screen.getByTestId("find-input") as HTMLInputElement;
+    const retiredNextElement = screen.getByTestId("find-next") as HTMLButtonElement;
+    const retiredReplaceOneElement = screen.getByTestId("replace-one") as HTMLButtonElement;
+    const retiredReplaceAllElement = screen.getByTestId("replace-all") as HTMLButtonElement;
+    const retiredCloseElement = screen.getByTestId("find-close") as HTMLButtonElement;
     const retiredActions = {
-      queryChange: reactHandler<ChangeHandler>(screen.getByTestId("find-input"), "onChange"),
-      next: reactHandler<ClickHandler>(screen.getByTestId("find-next"), "onClick"),
-      replaceOne: reactHandler<ClickHandler>(screen.getByTestId("replace-one"), "onClick"),
-      replaceAll: reactHandler<ClickHandler>(screen.getByTestId("replace-all"), "onClick"),
-      close: reactHandler<ClickHandler>(screen.getByTestId("find-close"), "onClick"),
+      queryChange: reactHandler<ChangeHandler>(retiredQueryInput, "onChange"),
+      next: reactHandler<ClickHandler>(retiredNextElement, "onClick"),
+      replaceOne: reactHandler<ClickHandler>(retiredReplaceOneElement, "onClick"),
+      replaceAll: reactHandler<ClickHandler>(retiredReplaceAllElement, "onClick"),
+      close: reactHandler<ClickHandler>(retiredCloseElement, "onClick"),
     };
     callbacks.onReplaceVisible.mockClear();
     let retiredPendingAtBoundary = true;
@@ -348,12 +406,12 @@ describe("FindBar session ownership", () => {
     expect(frames.cancel).toHaveBeenCalledWith(retiredFrame.id);
     act(() => {
       frames.invoke(retiredFrame);
-      retiredOpen();
-      retiredActions.queryChange({ target: { value: "dog" } });
-      retiredActions.next();
-      retiredActions.replaceOne();
-      retiredActions.replaceAll();
-      retiredActions.close();
+      retiredOpen(clickActivation(retiredOpenElement));
+      invokeChange(retiredActions.queryChange, retiredQueryInput, "dog");
+      retiredActions.next(clickActivation(retiredNextElement));
+      retiredActions.replaceOne(clickActivation(retiredReplaceOneElement));
+      retiredActions.replaceAll(clickActivation(retiredReplaceAllElement));
+      retiredActions.close(clickActivation(retiredCloseElement));
     });
 
     expect(screen.queryByTestId("find-bar")).toBeNull();
@@ -367,6 +425,596 @@ describe("FindBar session ownership", () => {
     expect(replaceOne).not.toHaveBeenCalled();
     expect(replaceAll).not.toHaveBeenCalled();
     expect(removed.ytext.toString()).toBe(TEXT);
+  });
+});
+
+const CONTROL_CASES = [
+  ["find-match-case", "setFind"],
+  ["find-whole-word", "setFind"],
+  ["find-regex", "setFind"],
+  ["find-prev", "stepFind"],
+  ["find-next", "stepFind"],
+  ["find-toggle-replace", "onReplaceVisible"],
+  ["find-close", "onClose"],
+  ["replace-one", "replaceActive"],
+  ["replace-all", "replaceAll"],
+] as const;
+
+describe("FindBar exact publication controls", () => {
+  it.each(CONTROL_CASES.flatMap(([testId, destination]) =>
+    (["wrong-before-current", "current-before-wrong"] as const).map((order) => [testId, destination, order] as const)
+  ))("binds %s only to its exact connected element (%s, %s)", (testId, destination, order) => {
+    const s = session("owner", `control-${testId}-${order}`);
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const callbacks = {
+      onReplaceVisible: vi.fn(),
+      onReveal: vi.fn(),
+      onClose: vi.fn(),
+    };
+    render(<FindBoundary session={s} replaceVisible {...callbacks} />);
+
+    const element = screen.getByTestId(testId) as HTMLButtonElement;
+    const handler = reactHandler<ClickHandler>(element, "onClick");
+    const other = screen.getByTestId(testId === "find-close" ? "find-next" : "find-close") as HTMLButtonElement;
+    const foreign = document.createElement("button");
+    document.body.append(foreign);
+    const replacement = document.createElement("button");
+    screen.getByTestId("find-bar").append(replacement);
+    const detached = document.createElement("button");
+    const count = () => {
+      switch (destination) {
+        case "setFind":
+          return setFind.mock.calls.length;
+        case "stepFind":
+          return stepFind.mock.calls.length;
+        case "replaceActive":
+          return replaceActive.mock.calls.length;
+        case "replaceAll":
+          return replaceAll.mock.calls.length;
+        case "onReplaceVisible":
+          return callbacks.onReplaceVisible.mock.calls.length;
+        case "onClose":
+          return callbacks.onClose.mock.calls.length;
+      }
+    };
+
+    act(() => {
+      handler(clickActivation(other));
+      handler(clickActivation(foreign));
+      handler(clickActivation(replacement));
+      handler(clickActivation(detached));
+    });
+    expect(count()).toBe(0);
+
+    const activation = clickActivation(order === "wrong-before-current" ? other : element);
+    act(() => {
+      handler(activation);
+      activation.currentTarget = order === "wrong-before-current" ? element : other;
+      handler(activation);
+      activation.currentTarget = element;
+      handler(activation);
+    });
+    expect(count()).toBe(1);
+
+    foreign.remove();
+    replacement.remove();
+  });
+
+  it("prevents mouse down only for each exact current focus-preserving control", () => {
+    const s = session("owner", "mouse-down-controls");
+    const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    render(<FindBoundary session={s} replaceVisible {...callbacks} />);
+    const ids = [
+      "find-match-case",
+      "find-whole-word",
+      "find-regex",
+      "find-prev",
+      "find-next",
+      "find-toggle-replace",
+    ];
+
+    for (const testId of ids) {
+      const element = screen.getByTestId(testId) as HTMLButtonElement;
+      const wrong = screen.getByTestId(testId === "find-next" ? "find-prev" : "find-next") as HTMLButtonElement;
+      const handler = reactHandler<MouseDownHandler>(element, "onMouseDown");
+      const event = clickActivation(wrong);
+      act(() => {
+        handler(event);
+        event.currentTarget = element;
+        handler(event);
+        handler(event);
+      });
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+    }
+  });
+
+  it.each(["find", "options", "editability", "visibility"] as const)(
+    "retires a same-session %s publication before a reused current DOM can act",
+    async (boundary) => {
+      const s = session("owner", `same-session-${boundary}`);
+      const stepFind = vi.spyOn(s, "stepFind");
+      const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+      const rendered = render(<FindBoundary session={s} replaceVisible {...callbacks} />);
+      const staleElement = screen.getByTestId("find-next") as HTMLButtonElement;
+      const staleHandler = reactHandler<ClickHandler>(staleElement, "onClick");
+
+      if (boundary === "find") {
+        act(() => s.setFind("cat", s.find?.options));
+      } else if (boundary === "options") {
+        act(() => s.setFind("cat", { ...s.find!.options }));
+      } else if (boundary === "editability") {
+        act(() => s.setMode("viewing"));
+      } else {
+        rendered.rerender(<FindBoundary session={s} replaceVisible={false} {...callbacks} />);
+      }
+      await waitFor(() => {
+        const handler = reactHandler<ClickHandler>(screen.getByTestId("find-next"), "onClick");
+        expect(handler).not.toBe(staleHandler);
+      });
+      stepFind.mockClear();
+      callbacks.onReveal.mockClear();
+
+      const currentElement = screen.getByTestId("find-next") as HTMLButtonElement;
+      expect(currentElement).toBe(staleElement);
+      act(() => staleHandler(clickActivation(staleElement)));
+      expect(stepFind).not.toHaveBeenCalled();
+      expect(callbacks.onReveal).not.toHaveBeenCalled();
+
+      fireEvent.click(currentElement);
+      expect(stepFind).toHaveBeenCalledOnce();
+      expect(callbacks.onReveal).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("retires changed callbacks before the parent layout boundary and routes B to B", () => {
+    const s = session("owner", "callback-boundary");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacksA = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const callbacksB = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const rendered = render(<FindBoundary session={s} replaceVisible={false} {...callbacksA} />);
+    const staleElement = screen.getByTestId("find-next") as HTMLButtonElement;
+    const staleHandler = reactHandler<ClickHandler>(staleElement, "onClick");
+
+    rendered.rerender(
+      <FindBoundary
+        session={s}
+        replaceVisible={false}
+        boundary={1}
+        onBoundary={() => staleHandler(clickActivation(staleElement))}
+        {...callbacksB}
+      />,
+    );
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(callbacksA.onReveal).not.toHaveBeenCalled();
+    expect(callbacksB.onReveal).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("find-next"));
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(callbacksA.onReveal).not.toHaveBeenCalled();
+    expect(callbacksB.onReveal).toHaveBeenCalledOnce();
+  });
+
+  it("claims an accepted activation once across the publication it creates", async () => {
+    const s = session("owner", "activation-publication");
+    const stepFind = vi.spyOn(s, "stepFind");
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible={false}
+        onReplaceVisible={vi.fn()}
+        onReveal={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    const element = screen.getByTestId("find-next") as HTMLButtonElement;
+    const handlerA = reactHandler<ClickHandler>(element, "onClick");
+    const activation = clickActivation(element);
+    handlerA(activation);
+    expect(stepFind).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(reactHandler<ClickHandler>(element, "onClick")).not.toBe(handlerA);
+    });
+
+    const handlerB = reactHandler<ClickHandler>(element, "onClick");
+    handlerB(activation);
+    expect(stepFind).toHaveBeenCalledOnce();
+    handlerB(clickActivation(element));
+    expect(stepFind).toHaveBeenCalledTimes(2);
+  });
+
+  it("retires an equal-looking remount while reused callback functions remain current", async () => {
+    const s = session("owner", "equal-remount");
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const rendered = render(<FindBoundary key="A" session={s} replaceVisible {...callbacks} />);
+    const staleSearch = screen.getByTestId("find-input") as HTMLInputElement;
+    const staleNext = screen.getByTestId("find-next") as HTMLButtonElement;
+    const staleSearchHandler = reactHandler<ChangeHandler>(staleSearch, "onChange");
+    const staleNextHandler = reactHandler<ClickHandler>(staleNext, "onClick");
+
+    rendered.rerender(<FindBoundary key="B" session={s} replaceVisible {...callbacks} />);
+    expect(staleSearch.isConnected).toBe(false);
+    expect(staleNext.isConnected).toBe(false);
+    setFind.mockClear();
+    stepFind.mockClear();
+    invokeChange(staleSearchHandler, staleSearch, "mat");
+    staleNextHandler(clickActivation(staleNext));
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("find-next"));
+    expect(stepFind).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByTestId("find-count")).toHaveTextContent("2 of 2"));
+    fireEvent.change(screen.getByTestId("find-input"), { target: { value: "mat" } });
+    expect(setFind).toHaveBeenCalledOnce();
+  });
+
+  it("uses the exact session methods and represented replacement captured by an accepted publication", () => {
+    const s = session("owner", "frozen-methods");
+    const returnedStep = { from: 10, to: 13 };
+    const returnedReplace = { from: 20, to: 23 };
+    const exactStep = vi.fn(() => returnedStep);
+    const exactReplace = vi.fn(() => returnedReplace);
+    const exactReplaceAll = vi.fn(() => 2);
+    s.stepFind = exactStep;
+    s.replaceActive = exactReplace;
+    s.replaceAll = exactReplaceAll;
+    const onReveal = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={onReveal}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "$1 exact" } });
+
+    const next = screen.getByTestId("find-next") as HTMLButtonElement;
+    const replaceOne = screen.getByTestId("replace-one") as HTMLButtonElement;
+    const replaceAll = screen.getByTestId("replace-all") as HTMLButtonElement;
+    const nextHandler = reactHandler<ClickHandler>(next, "onClick");
+    const replaceOneHandler = reactHandler<ClickHandler>(replaceOne, "onClick");
+    const replaceAllHandler = reactHandler<ClickHandler>(replaceAll, "onClick");
+    const laterStep = vi.fn();
+    const laterReplace = vi.fn();
+    const laterReplaceAll = vi.fn();
+    s.stepFind = laterStep;
+    s.replaceActive = laterReplace;
+    s.replaceAll = laterReplaceAll;
+    (screen.getByTestId("replace-input") as HTMLInputElement).value = "later DOM value";
+
+    const nextEvent = clickActivation(next);
+    act(() => {
+      nextHandler(nextEvent);
+      nextHandler(nextEvent);
+      replaceOneHandler(clickActivation(replaceOne));
+      replaceAllHandler(clickActivation(replaceAll));
+    });
+    expect(exactStep).toHaveBeenCalledOnce();
+    expect(exactStep).toHaveBeenCalledWith(1);
+    expect(exactReplace).toHaveBeenCalledOnce();
+    expect(exactReplace).toHaveBeenCalledWith("$1 exact");
+    expect(exactReplaceAll).toHaveBeenCalledOnce();
+    expect(exactReplaceAll).toHaveBeenCalledWith("$1 exact");
+    expect(laterStep).not.toHaveBeenCalled();
+    expect(laterReplace).not.toHaveBeenCalled();
+    expect(laterReplaceAll).not.toHaveBeenCalled();
+    expect(onReveal.mock.calls.map(([match]) => match)).toEqual([returnedStep, returnedReplace]);
+  });
+
+  it("publishes exact query and option snapshots and reveals only that update's active match", () => {
+    const s = session("owner", "option-snapshots");
+    const setFind = vi.spyOn(s, "setFind");
+    const onReveal = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible={false}
+        onReplaceVisible={vi.fn()}
+        onReveal={onReveal}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("find-match-case"));
+    expect(setFind).toHaveBeenCalledOnce();
+    expect(setFind.mock.calls[0]?.[0]).toBe("cat");
+    expect(setFind.mock.calls[0]?.[1]).toEqual({
+      matchCase: true,
+      wholeWord: false,
+      regex: false,
+    });
+    expect(onReveal).toHaveBeenCalledOnce();
+    expect(onReveal).toHaveBeenCalledWith(s.find?.matches[s.find.active]);
+  });
+
+  it("keeps no-match click controls disabled without suppressing exact keyboard semantics", () => {
+    const s = session("owner", "no-matches");
+    s.setFind("missing");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const onReveal = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={onReveal}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("find-count")).toHaveTextContent("0 of 0");
+    for (const testId of ["find-prev", "find-next", "replace-one", "replace-all"]) {
+      const element = screen.getByTestId(testId) as HTMLButtonElement;
+      expect(element).toBeDisabled();
+      reactHandler<ClickHandler>(element, "onClick")(clickActivation(element));
+    }
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(screen.getByTestId("find-input"), { key: "Enter" });
+    fireEvent.keyDown(screen.getByTestId("replace-input"), { key: "Enter" });
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(replaceActive).toHaveBeenCalledOnce();
+    expect(onReveal).not.toHaveBeenCalled();
+  });
+});
+
+describe("FindBar exact publication inputs", () => {
+  it.each((["search", "replace"] as const).flatMap((input) =>
+    (["wrong-before-current", "current-before-wrong"] as const).map((order) => [input, order] as const)
+  ))("binds %s change to its exact current input (%s)", async (input, order) => {
+    const s = session("owner", `input-${input}-${order}`);
+    const representedOptions = s.find!.options;
+    const setFind = vi.spyOn(s, "setFind");
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    const testId = input === "search" ? "find-input" : "replace-input";
+    const element = screen.getByTestId(testId) as HTMLInputElement;
+    const handler = reactHandler<ChangeHandler>(element, "onChange");
+    const foreign = document.createElement("input");
+    const foreignReads = vi.fn(() => "foreign");
+    Object.defineProperty(foreign, "value", { configurable: true, get: foreignReads });
+    document.body.append(foreign);
+    const replacement = document.createElement("input");
+    const replacementReads = vi.fn(() => "replacement");
+    Object.defineProperty(replacement, "value", { configurable: true, get: replacementReads });
+    screen.getByTestId("find-bar").append(replacement);
+    const detached = document.createElement("input");
+
+    act(() => {
+      handler({ currentTarget: foreign });
+      handler({ currentTarget: replacement });
+      handler({ currentTarget: detached });
+      handler({ currentTarget: screen.getByTestId(input === "search" ? "replace-input" : "find-input") as HTMLInputElement });
+    });
+    expect(foreignReads).not.toHaveBeenCalled();
+    expect(replacementReads).not.toHaveBeenCalled();
+    expect(setFind).not.toHaveBeenCalled();
+    if (input === "replace") expect(element).toHaveValue("");
+
+    element.value = input === "search" ? "mat" : "dog";
+    const activation = {
+      currentTarget: order === "wrong-before-current" ? foreign : element,
+    };
+    act(() => {
+      handler(activation);
+      activation.currentTarget = order === "wrong-before-current" ? element : foreign;
+      handler(activation);
+      activation.currentTarget = element;
+      handler(activation);
+    });
+    if (input === "search") {
+      expect(setFind).toHaveBeenCalledOnce();
+      expect(setFind.mock.calls[0]?.[0]).toBe("mat");
+      expect(setFind.mock.calls[0]?.[1]).toBe(representedOptions);
+      await waitFor(() => expect(screen.getByTestId("find-input")).toHaveValue("mat"));
+      fireEvent.change(screen.getByTestId("find-input"), { target: { value: "cat" } });
+      expect(setFind).toHaveBeenCalledTimes(2);
+    } else {
+      expect(screen.getByTestId("replace-input")).toHaveValue("dog");
+      fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "fox" } });
+      expect(screen.getByTestId("replace-input")).toHaveValue("fox");
+      expect(setFind).not.toHaveBeenCalled();
+    }
+
+    foreign.remove();
+    replacement.remove();
+  });
+
+  it.each([
+    ["search", "Enter", false, "step", 1],
+    ["search", "Enter", true, "step", -1],
+    ["replace", "Enter", false, "replace", 0],
+    ["replace", "Enter", true, "step", -1],
+  ] as const)("isolates %s %s with shift=%s and invokes only the exact result destination", (input, key, shiftKey, destination, direction) => {
+    const s = session("owner", `key-${input}-${shiftKey}`);
+    const returned = { from: 4, to: 7 };
+    const stepFind = vi.spyOn(s, "stepFind").mockReturnValue(returned);
+    const replaceActive = vi.spyOn(s, "replaceActive").mockReturnValue(returned);
+    const onReveal = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={onReveal}
+        onClose={vi.fn()}
+      />,
+    );
+    const testId = input === "search" ? "find-input" : "replace-input";
+    const element = screen.getByTestId(testId) as HTMLInputElement;
+    const handler = reactHandler<InputKeyHandler>(element, "onKeyDown");
+    const foreign = document.createElement("input");
+    document.body.append(foreign);
+    const event = inputKeyActivation(foreign, key, shiftKey);
+
+    act(() => {
+      handler(event);
+      event.currentTarget = element;
+      event.target = element;
+      handler(event);
+      handler(event);
+    });
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    if (destination === "step") {
+      expect(stepFind).toHaveBeenCalledOnce();
+      expect(stepFind).toHaveBeenCalledWith(direction);
+      expect(replaceActive).not.toHaveBeenCalled();
+    } else {
+      expect(replaceActive).toHaveBeenCalledOnce();
+      expect(stepFind).not.toHaveBeenCalled();
+    }
+    expect(onReveal).toHaveBeenCalledOnce();
+    expect(onReveal).toHaveBeenCalledWith(returned);
+    foreign.remove();
+  });
+
+  it.each(["search", "replace"] as const)("closes Escape only from the exact %s input publication", (input) => {
+    const s = session("owner", `escape-${input}`);
+    const onClose = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+    const testId = input === "search" ? "find-input" : "replace-input";
+    const element = screen.getByTestId(testId) as HTMLInputElement;
+    const handler = reactHandler<InputKeyHandler>(element, "onKeyDown");
+    const foreign = document.createElement("input");
+    document.body.append(foreign);
+    const event = inputKeyActivation(foreign, "Escape");
+
+    handler(event);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(event.stopPropagation).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    event.currentTarget = element;
+    event.target = element;
+    handler(event);
+    handler(event);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopPropagation).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+    foreign.remove();
+  });
+
+  it("closes Escape from the exact bar but ignores a foreign target and a wrong bar", () => {
+    const s = session("owner", "escape-bar");
+    const onClose = vi.fn();
+    render(
+      <FindBoundary
+        session={s}
+        replaceVisible
+        onReplaceVisible={vi.fn()}
+        onReveal={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+    const bar = screen.getByTestId("find-bar") as HTMLDivElement;
+    const handler = reactHandler<BarKeyHandler>(bar, "onKeyDown");
+    const foreignBar = document.createElement("div");
+    const foreignTarget = document.createElement("button");
+    document.body.append(foreignBar, foreignTarget);
+    const wrongBar = {
+      currentTarget: foreignBar,
+      target: foreignTarget,
+      key: "Escape",
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    handler(wrongBar);
+    expect(onClose).not.toHaveBeenCalled();
+    const wrongTarget = { ...wrongBar, currentTarget: bar };
+    handler(wrongTarget);
+    expect(onClose).not.toHaveBeenCalled();
+
+    const exact = {
+      currentTarget: bar,
+      target: screen.getByTestId("find-next"),
+      key: "Escape",
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    handler(exact);
+    handler(exact);
+    expect(exact.preventDefault).toHaveBeenCalledOnce();
+    expect(exact.stopPropagation).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+    foreignBar.remove();
+    foreignTarget.remove();
+  });
+});
+
+describe("FindBar exact focus publications", () => {
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "keeps reused frame ids isolated by their exact publication (%s)",
+    (order) => {
+      const frames = frameEnvironment(true);
+      const focus = trackFocus();
+      const s = session("owner", `reused-frame-${order}`);
+      const callbacks = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+      const rendered = render(<FindBoundary session={s} replaceVisible={false} {...callbacks} />);
+      frames.reset();
+
+      fireEvent.click(screen.getByTestId("find-toggle-replace"));
+      rendered.rerender(<FindBoundary session={s} replaceVisible {...callbacks} />);
+      const stale = frames.captured[0];
+      expect(stale.id).toBe(1);
+      rendered.rerender(<FindBoundary session={s} replaceVisible={false} {...callbacks} />);
+      expect(frames.cancel).toHaveBeenCalledWith(1);
+
+      fireEvent.click(screen.getByTestId("find-toggle-replace"));
+      rendered.rerender(<FindBoundary session={s} replaceVisible {...callbacks} />);
+      const current = frames.captured[1];
+      expect(current.id).toBe(stale.id);
+      const before = focus.focused.filter((target) => target === "replace-input").length;
+      act(() => {
+        for (const frame of order === "stale-before-current" ? [stale, current] : [current, stale]) {
+          frames.invoke(frame);
+        }
+      });
+      expect(focus.focused.filter((target) => target === "replace-input")).toHaveLength(before + 1);
+      expect(screen.getByTestId("replace-input")).toHaveFocus();
+    },
+  );
+
+  it("does not replay a search focus request across callback-only publications", () => {
+    const s = session("owner", "search-focus-publication");
+    const focus = trackFocus();
+    const callbacksA = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const callbacksB = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const rendered = render(<FindBoundary session={s} replaceVisible={false} focusNonce={4} {...callbacksA} />);
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(1);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(1);
+
+    rendered.rerender(<FindBoundary session={s} replaceVisible={false} focusNonce={4} {...callbacksB} />);
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(1);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(1);
+
+    rendered.rerender(<FindBoundary session={s} replaceVisible={false} focusNonce={5} {...callbacksB} />);
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(2);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(2);
   });
 });
 
@@ -423,6 +1071,7 @@ describe("FindBar invalid regular expressions", () => {
     renderBar(s, true);
 
     fireEvent.click(screen.getByTestId("find-regex"));
+    await waitFor(() => expect(screen.getByTestId("find-regex")).toHaveAttribute("aria-pressed", "true"));
     const input = screen.getByTestId("find-input");
     fireEvent.change(input, { target: { value: "(" } });
 
@@ -462,16 +1111,19 @@ describe("FindBar invalid regular expressions", () => {
     renderBar(s, false);
 
     fireEvent.click(screen.getByTestId("find-regex"));
+    await waitFor(() => expect(screen.getByTestId("find-regex")).toHaveAttribute("aria-pressed", "true"));
     const input = screen.getByTestId("find-input");
     fireEvent.change(input, { target: { value: "(" } });
     expect(await screen.findByTestId("find-regex-error")).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("find-regex"));
     await waitFor(() => expect(screen.queryByTestId("find-regex-error")).toBeNull());
+    await waitFor(() => expect(screen.getByTestId("find-regex")).toHaveAttribute("aria-pressed", "false"));
     expect(input).toHaveAttribute("aria-invalid", "false");
     expect(screen.getByTestId("find-count")).toHaveTextContent("0 of 0");
 
     fireEvent.click(screen.getByTestId("find-regex"));
+    await waitFor(() => expect(screen.getByTestId("find-regex")).toHaveAttribute("aria-pressed", "true"));
     fireEvent.change(input, { target: { value: "" } });
     await waitFor(() => expect(screen.queryByTestId("find-regex-error")).toBeNull());
     expect(input).toHaveAttribute("aria-invalid", "false");
