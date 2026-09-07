@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, apiErrorText } from "@/lib/api";
 import {
@@ -14,14 +14,37 @@ type Action =
   | { kind: "preview" | "disable" | "retry"; serial: number }
   | { kind: "enable"; serial: number; destination: GistAutoUpdateDestination };
 type Problem = { status: "failed" | "conflict"; message: string; source: Action["kind"] | "destination" };
+type AuthorityStamp = { mount: symbol; serial: number; visibilityGeneration: number };
+type RequestOwner = AuthorityStamp & { token: symbol; kind: Action["kind"] };
+type TimerOwner = AuthorityStamp & { token: symbol };
+type ControlAuthority = {
+  identity: string;
+  mount: symbol | null;
+  visible: boolean;
+  visibilityGeneration: number;
+  busy: Action["kind"] | null;
+  requestOwner: RequestOwner | null;
+  queuedStatus: AuthorityStamp | null;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  timerOwner: TimerOwner | null;
+  runQueuedStatus: (() => void) | null;
+};
 
 const LABELS = { off: "Off", pending: "Pending", syncing: "Syncing", synced: "Synced", failed: "Failed", conflict: "Conflict" };
 
+function clearAuthorityTimer(authority: ControlAuthority) {
+  if (authority.timer !== undefined) clearTimeout(authority.timer);
+  authority.timer = undefined;
+  authority.timerOwner = null;
+}
+
 export function GistAutoUpdateControl({ doc, isOwner }: { doc: DocumentDto; isOwner: boolean }) {
   if (!isOwner || doc.storage !== "gist" || !doc.gistId || !doc.gistFile || !doc.githubUrl || !doc.publishedAt) return null;
+  const identity = JSON.stringify([doc.id, doc.gistId, doc.gistFile, doc.githubUrl, doc.ownerId]);
   return (
     <AutoUpdateSettings
-      key={JSON.stringify([doc.id, doc.gistId, doc.gistFile, doc.githubUrl, doc.ownerId])}
+      key={identity}
+      identity={identity}
       documentId={doc.id}
       gistId={doc.gistId}
       filename={doc.gistFile}
@@ -30,9 +53,27 @@ export function GistAutoUpdateControl({ doc, isOwner }: { doc: DocumentDto; isOw
   );
 }
 
-function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId: string; gistId: string; filename: string; url: string }) {
+function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
+  identity: string;
+  documentId: string;
+  gistId: string;
+  filename: string;
+  url: string;
+}) {
   const id = useId();
   const serial = useRef(0);
+  const authorityRef = useRef<ControlAuthority>({
+    identity,
+    mount: null,
+    visible: false,
+    visibilityGeneration: 0,
+    busy: "status",
+    requestOwner: null,
+    queuedStatus: null,
+    timer: undefined,
+    timerOwner: null,
+    runQueuedStatus: null,
+  });
   const [action, setAction] = useState<Action>({ kind: "status", serial: 0, explicit: false });
   const [busy, setBusy] = useState<Action["kind"] | null>("status");
   const [status, setStatus] = useState<GistAutoUpdateStatus | null>(null);
@@ -40,20 +81,75 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
   const [acknowledged, setAcknowledged] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    let visible = document.visibilityState === "visible";
-    let visibilityGeneration = 0;
-    let statusInFlight = false;
-    let resumeStatus = false;
-    let explicitInFlight = action.kind !== "status" || action.explicit;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const current = () => active && serial.current === action.serial;
-    const clearTimer = () => {
-      clearTimeout(timer);
-      timer = undefined;
+  useLayoutEffect(() => {
+    const authority = authorityRef.current;
+    const mount = Symbol(identity);
+    authority.mount = mount;
+    authority.visible = document.visibilityState === "visible";
+
+    const onVisibilityChange = () => {
+      if (authority.identity !== identity || authority.mount !== mount) return;
+      const visible = document.visibilityState === "visible";
+      if (visible === authority.visible) return;
+      authority.visible = visible;
+      authority.visibilityGeneration++;
+      authority.queuedStatus = null;
+      clearAuthorityTimer(authority);
+      if (!visible) return;
+      authority.queuedStatus = {
+        mount,
+        serial: serial.current,
+        visibilityGeneration: authority.visibilityGeneration,
+      };
+      authority.runQueuedStatus?.();
     };
-    const matches = (destination: GistAutoUpdateDestination | null) => {
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (authority.identity !== identity || authority.mount !== mount) return;
+      authority.mount = null;
+      authority.visibilityGeneration++;
+      authority.requestOwner = null;
+      authority.queuedStatus = null;
+      authority.runQueuedStatus = null;
+      clearAuthorityTimer(authority);
+    };
+  }, [identity]);
+
+  useEffect(() => {
+    const authority = authorityRef.current;
+    let statusInFlight = false;
+    const stampIsCurrent = (stamp: AuthorityStamp, requireVisible = true) => {
+      return authority.identity === identity
+        && authority.mount === stamp.mount
+        && serial.current === stamp.serial
+        && authority.visibilityGeneration === stamp.visibilityGeneration
+        && (!requireVisible || authority.visible);
+    };
+    const owns = (owner: RequestOwner) => {
+      return authority.requestOwner === owner && stampIsCurrent(owner);
+    };
+    const claim = (kind: Action["kind"], requireVisible: boolean) => {
+      const mount = authority.mount;
+      if (
+        authority.identity !== identity
+        || mount === null
+        || serial.current !== action.serial
+        || (requireVisible && !authority.visible)
+      ) return null;
+      const owner: RequestOwner = {
+        mount,
+        serial: action.serial,
+        visibilityGeneration: authority.visibilityGeneration,
+        token: Symbol(kind),
+        kind,
+      };
+      authority.requestOwner = owner;
+      return owner;
+    };
+    const matches = (owner: RequestOwner, destination: GistAutoUpdateDestination | null) => {
+      if (!owns(owner)) return false;
       if (!destination || (destination.gistId === gistId && destination.filename === filename)) return true;
       setPreview(null);
       setAcknowledged(false);
@@ -64,23 +160,40 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
       });
       return false;
     };
-    const fail = (error: unknown, source: Action["kind"]) => {
+    const fail = (owner: RequestOwner, error: unknown, source: Action["kind"]) => {
+      if (!owns(owner)) return;
       setProblem({
         status: error instanceof ApiError && error.body?.status === "conflict" ? "conflict" : "failed",
         source,
         message: apiErrorText(error, "Could not update gist auto-update controls. Check the status before trying again."),
       });
     };
-    const schedule = () => {
-      clearTimer();
-      if (!current() || !visible) return;
-      timer = setTimeout(() => {
-        timer = undefined;
-        void poll();
+    const schedule = (owner: RequestOwner) => {
+      if (!owns(owner)) return;
+      if (authority.queuedStatus && stampIsCurrent(authority.queuedStatus)) return;
+      clearAuthorityTimer(authority);
+      const timerOwner: TimerOwner = {
+        mount: owner.mount,
+        serial: owner.serial,
+        visibilityGeneration: owner.visibilityGeneration,
+        token: Symbol("timer"),
+      };
+      authority.timerOwner = timerOwner;
+      authority.timer = setTimeout(() => {
+        if (authority.timerOwner !== timerOwner) return;
+        authority.timer = undefined;
+        authority.timerOwner = null;
+        if (!stampIsCurrent(timerOwner)) return;
+        authority.queuedStatus = {
+          mount: timerOwner.mount,
+          serial: timerOwner.serial,
+          visibilityGeneration: timerOwner.visibilityGeneration,
+        };
+        authority.runQueuedStatus?.();
       }, 2_000);
     };
-    const accept = (next: GistAutoUpdateStatus) => {
-      if (!matches(next.destination)) return false;
+    const accept = (owner: RequestOwner, next: GistAutoUpdateStatus) => {
+      if (!owns(owner) || !matches(owner, next.destination)) return false;
       setStatus(next);
       if (next.enabled) {
         setPreview(null);
@@ -88,48 +201,89 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
       }
       return next.status !== "failed" && next.status !== "conflict";
     };
-    const automaticCurrent = (requestGeneration: number) =>
-      current() && visible && requestGeneration === visibilityGeneration;
-    async function poll(resume = false) {
-      if (!current() || !visible) return;
+
+    function queueStatus() {
+      const mount = authority.mount;
+      if (
+        authority.identity !== identity
+        || mount === null
+        || serial.current !== action.serial
+        || !authority.visible
+      ) return;
+      authority.queuedStatus = {
+        mount,
+        serial: action.serial,
+        visibilityGeneration: authority.visibilityGeneration,
+      };
+      requestQueuedStatus();
+    }
+
+    function requestQueuedStatus() {
+      const queued = authority.queuedStatus;
+      if (!queued || queued.serial !== action.serial || !stampIsCurrent(queued)) return;
+      const currentOwner = authority.requestOwner;
+      if (currentOwner && currentOwner.mount === queued.mount && currentOwner.serial === queued.serial) return;
+      authority.queuedStatus = null;
+      void poll();
+    }
+
+    function finish(owner: RequestOwner) {
+      const ownsPhysicalRequest = authority.identity === identity
+        && authority.mount === owner.mount
+        && serial.current === owner.serial
+        && authority.requestOwner === owner;
+      if (!ownsPhysicalRequest) return;
+      const ownsCurrentGeneration = authority.visible
+        && authority.visibilityGeneration === owner.visibilityGeneration;
+      authority.requestOwner = null;
+      if (ownsCurrentGeneration && authority.busy !== null) {
+        authority.busy = null;
+        setBusy(null);
+      }
+      requestQueuedStatus();
+    }
+
+    async function poll() {
       if (statusInFlight) {
-        if (resume) resumeStatus = true;
+        queueStatus();
         return;
       }
-      const requestGeneration = visibilityGeneration;
+      const currentOwner = authority.requestOwner;
+      if (
+        currentOwner
+        && currentOwner.mount === authority.mount
+        && currentOwner.serial === action.serial
+      ) {
+        queueStatus();
+        return;
+      }
+      const owner = claim("status", true);
+      if (!owner) return;
       statusInFlight = true;
       try {
         const next = await api.documents.gistAutoUpdate(documentId);
-        if (!automaticCurrent(requestGeneration)) return;
+        if (!owns(owner)) return;
         setProblem(null);
-        if (accept(next)) schedule();
+        if (accept(owner, next)) schedule(owner);
       } catch (error) {
-        if (automaticCurrent(requestGeneration)) fail(error, "status");
+        fail(owner, error, "status");
       } finally {
-        const ownsSettlement = automaticCurrent(requestGeneration);
         statusInFlight = false;
-        if (ownsSettlement) setBusy(null);
-        if (resumeStatus) {
-          const shouldResume = current() && visible;
-          resumeStatus = false;
-          if (shouldResume) void poll();
-        }
+        finish(owner);
       }
     }
+
     async function run() {
-      if (action.kind === "status" && !action.explicit) return poll();
+      if (action.kind === "status") return poll();
+      const owner = claim(action.kind, false);
+      if (!owner) return;
       try {
-        if (action.kind === "status") {
-          const next = await api.documents.gistAutoUpdate(documentId);
-          if (!current()) return;
-          setProblem(null);
-          if (accept(next)) schedule();
-        } else if (action.kind === "preview") {
+        if (action.kind === "preview") {
           const result = await api.documents.gistAutoUpdatePreview(documentId);
-          if (!current()) return;
-          if (matches(result.destination)) {
+          if (!owns(owner)) return;
+          if (matches(owner, result.destination)) {
             setPreview(result.destination);
-            schedule();
+            schedule(owner);
           }
         } else {
           const next = action.kind === "retry"
@@ -137,50 +291,54 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
             : await api.documents.setGistAutoUpdate(documentId, action.kind === "enable"
               ? { enabled: true, acknowledgeRisk: true, destination: action.destination }
               : { enabled: false });
-          if (!current()) return;
+          if (!owns(owner)) return;
           setPreview(null);
           setAcknowledged(false);
-          if (accept(next)) schedule();
+          if (accept(owner, next)) schedule(owner);
         }
       } catch (error) {
-        if (!current()) return;
-        fail(error, action.kind);
+        if (!owns(owner)) return;
+        fail(owner, error, action.kind);
         if (action.kind === "enable") {
           setPreview(null);
           setAcknowledged(false);
         }
       } finally {
-        explicitInFlight = false;
-        if (current()) setBusy(null);
+        finish(owner);
       }
     }
-    const onVisibilityChange = () => {
-      const nextVisible = document.visibilityState === "visible";
-      if (nextVisible === visible) return;
-      visible = nextVisible;
-      clearTimer();
-      if (!visible) {
-        visibilityGeneration++;
-        resumeStatus = false;
-        return;
-      }
-      if (!explicitInFlight) void poll(true);
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    authority.runQueuedStatus = requestQueuedStatus;
+    const queued = authority.queuedStatus;
+    if (action.kind === "status" && queued?.serial === action.serial && stampIsCurrent(queued)) {
+      authority.queuedStatus = null;
+    }
     void run();
     return () => {
-      active = false;
-      visibilityGeneration++;
-      resumeStatus = false;
-      clearTimer();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (authority.runQueuedStatus === requestQueuedStatus) authority.runQueuedStatus = null;
     };
-  }, [documentId, gistId, filename, action]);
+  }, [action, documentId, filename, gistId, identity]);
 
   function start(kind: Action["kind"]) {
-    if (busy || (kind === "enable" && (!preview || !acknowledged || status?.enabled))) return;
-    // Invalidate an in-flight poll immediately, before the next effect can clean it up.
+    const authority = authorityRef.current;
+    const mount = authority.mount;
+    if (
+      authority.identity !== identity
+      || mount === null
+      || authority.busy !== null
+      || (kind === "enable" && (!preview || !acknowledged || status?.enabled))
+    ) return;
+    const queued = authority.queuedStatus;
+    const preserveQueuedStatus = queued
+      && queued.mount === mount
+      && queued.serial === serial.current
+      && queued.visibilityGeneration === authority.visibilityGeneration;
     const nextSerial = ++serial.current;
+    clearAuthorityTimer(authority);
+    authority.queuedStatus = preserveQueuedStatus
+      ? { mount, serial: nextSerial, visibilityGeneration: authority.visibilityGeneration }
+      : null;
+    authority.busy = kind;
     setBusy(kind);
     setProblem(null);
     if (kind === "preview") {

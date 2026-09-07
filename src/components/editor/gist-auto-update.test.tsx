@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useEffect, useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { api, ApiError } from "@/lib/api";
@@ -60,6 +61,25 @@ async function mount(doc = DOC) {
 async function consent() {
   await click("Check linked gist");
   await act(async () => { fireEvent.click(screen.getByRole("checkbox", { name: "I acknowledge the sharing and overwrite risks." })); });
+}
+function GistBoundary({
+  doc,
+  show = true,
+  onLayout,
+  onPassiveCleanup,
+}: {
+  doc: DocumentDto;
+  show?: boolean;
+  onLayout?: (doc: DocumentDto, show: boolean) => void;
+  onPassiveCleanup?: (doc: DocumentDto, show: boolean) => void;
+}) {
+  useLayoutEffect(() => {
+    onLayout?.(doc, show);
+  }, [doc, onLayout, show]);
+  useEffect(() => {
+    return () => onPassiveCleanup?.(doc, show);
+  }, [doc, onPassiveCleanup, show]);
+  return show ? <GistAutoUpdateControl doc={doc} isOwner /> : null;
 }
 
 beforeEach(() => {
@@ -472,7 +492,7 @@ describe("gist auto-update request lifetimes", () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
-  it("does not duplicate an explicit preview when visibility changes and resumes status after it settles", async () => {
+  it("invalidates an explicit preview while hidden and queues one current status behind it on return", async () => {
     const explicitPreview = deferred<{ destination: GistAutoUpdateDestination }>();
     await mount();
     vi.mocked(api.documents.gistAutoUpdatePreview).mockReturnValueOnce(explicitPreview.promise);
@@ -488,11 +508,66 @@ describe("gist auto-update request lifetimes", () => {
     expect(vi.getTimerCount()).toBe(0);
 
     await act(async () => { explicitPreview.resolve({ destination: DESTINATION }); });
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
-    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
-    expect(vi.getTimerCount()).toBe(1);
-    await advance();
+    expect(screen.queryByRole("checkbox")).toBeNull();
     expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+    expect(state()).toHaveTextContent("Off");
+    expect(vi.getTimerCount()).toBe(1);
+    await advance(1_999);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+    await advance(1);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(3);
+  });
+
+  it("serializes immediate duplicate and mixed explicit activation before React rerenders", async () => {
+    const previewRequest = deferred<{ destination: GistAutoUpdateDestination }>();
+    await mount();
+    vi.mocked(api.documents.gistAutoUpdatePreview).mockReturnValueOnce(previewRequest.promise);
+
+    act(() => {
+      const check = screen.getByRole("button", { name: "Check linked gist" });
+      fireEvent.click(check);
+      fireEvent.click(check);
+    });
+    await settle();
+    expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(1);
+
+    await act(async () => { previewRequest.resolve({ destination: DESTINATION }); });
+    fireEvent.click(screen.getByRole("checkbox"));
+    const enableRequest = deferred<GistAutoUpdateStatus>();
+    vi.mocked(api.documents.setGistAutoUpdate).mockReturnValueOnce(enableRequest.promise);
+    act(() => {
+      const enable = screen.getByRole("button", { name: "Enable auto-update" });
+      const recheck = screen.getByRole("button", { name: "Recheck linked gist" });
+      fireEvent.click(enable);
+      fireEvent.click(enable);
+      fireEvent.click(recheck);
+    });
+    await settle();
+    expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(1);
+    expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(1);
+
+    await act(async () => { enableRequest.resolve(PENDING); });
+    expect(state()).toHaveTextContent("Pending");
+  });
+
+  it("does not let an old status finalizer clear a current preview owner", async () => {
+    const oldStatus = deferred<GistAutoUpdateStatus>();
+    const currentPreview = deferred<{ destination: GistAutoUpdateDestination }>();
+    await mount();
+    vi.mocked(api.documents.gistAutoUpdate).mockReturnValueOnce(oldStatus.promise);
+    await advance();
+    vi.mocked(api.documents.gistAutoUpdatePreview).mockReturnValueOnce(currentPreview.promise);
+    await click("Check linked gist");
+
+    await act(async () => { oldStatus.resolve(PENDING); });
+    expect(state()).toHaveTextContent("Off");
+    expect(screen.getByTestId("gist-auto-update-preview")).toHaveAttribute("data-status", "checking");
+    expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeDisabled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => { currentPreview.resolve({ destination: DESTINATION }); });
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(vi.getTimerCount()).toBe(1);
   });
 
   it.each(["resolve", "reject"] as const)("ignores a late poll that would %s after enabling", async (outcome) => {
@@ -538,6 +613,79 @@ describe("gist auto-update request lifetimes", () => {
     await advance();
     expect(api.documents.gistAutoUpdate).toHaveBeenLastCalledWith(nextDoc.id);
   });
+
+  it.each(["resolve", "reject"] as const)(
+    "retires a replaced document before an old status can %s in the parent layout boundary",
+    async (outcome) => {
+      const oldStatus = deferred<GistAutoUpdateStatus>();
+      const currentStatus = deferred<GistAutoUpdateStatus>();
+      const nextDoc = { ...DOC, id: "layout-replacement-doc" };
+      let oldPassiveCleaned = false;
+      const onLayout = vi.fn((doc: DocumentDto) => {
+        if (doc.id !== nextDoc.id) return;
+        expect(oldPassiveCleaned).toBe(false);
+        if (outcome === "resolve") oldStatus.resolve(PENDING);
+        else oldStatus.reject(new ApiError(503, "Retired status failure."));
+      });
+      const onPassiveCleanup = vi.fn((doc: DocumentDto) => {
+        if (doc.id === DOC.id) oldPassiveCleaned = true;
+      });
+      vi.mocked(api.documents.gistAutoUpdate)
+        .mockReturnValueOnce(oldStatus.promise)
+        .mockReturnValueOnce(currentStatus.promise);
+      const { rerender } = render(
+        <GistBoundary doc={DOC} onLayout={onLayout} onPassiveCleanup={onPassiveCleanup} />,
+      );
+      await settle();
+
+      rerender(<GistBoundary doc={nextDoc} onLayout={onLayout} onPassiveCleanup={onPassiveCleanup} />);
+      await settle();
+      expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+      expect(api.documents.gistAutoUpdate).toHaveBeenNthCalledWith(2, nextDoc.id);
+      expect(state()).toHaveAttribute("data-status", "loading");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("button", { name: "Check linked gist" })).toBeDisabled();
+      expect(vi.getTimerCount()).toBe(0);
+
+      await act(async () => { currentStatus.resolve(OFF); });
+      expect(state()).toHaveTextContent("Off");
+      expect(screen.getByRole("button", { name: "Check linked gist" })).toBeEnabled();
+      expect(vi.getTimerCount()).toBe(1);
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "retires removed DOM before an explicit enable can %s in the parent layout boundary",
+    async (outcome) => {
+      const enableRequest = deferred<GistAutoUpdateStatus>();
+      let oldPassiveCleaned = false;
+      const onLayout = vi.fn((_doc: DocumentDto, show: boolean) => {
+        if (show) return;
+        expect(oldPassiveCleaned).toBe(false);
+        if (outcome === "resolve") enableRequest.resolve(PENDING);
+        else enableRequest.reject(new ApiError(503, "Retired enable failure."));
+      });
+      const onPassiveCleanup = vi.fn((_doc: DocumentDto, show: boolean) => {
+        if (show) oldPassiveCleaned = true;
+      });
+      vi.mocked(api.documents.setGistAutoUpdate).mockReturnValueOnce(enableRequest.promise);
+      const { rerender } = render(
+        <GistBoundary doc={DOC} onLayout={onLayout} onPassiveCleanup={onPassiveCleanup} />,
+      );
+      await settle();
+      await consent();
+      await click("Enable auto-update");
+      expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(1);
+
+      rerender(<GistBoundary doc={DOC} show={false} onLayout={onLayout} onPassiveCleanup={onPassiveCleanup} />);
+      await settle();
+      expect(screen.queryByTestId("gist-auto-update")).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+      await advance(20_000);
+      expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+      expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     { gistId: "new-gist", githubUrl: "https://gist.github.com/new-gist" },
