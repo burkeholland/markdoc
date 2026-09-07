@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -9,6 +10,8 @@ const version = vi.fn();
 const renameVersion = vi.fn();
 const restoreVersion = vi.fn();
 const copyVersion = vi.fn();
+const push = vi.fn();
+const pendingNotice = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
   api: {
@@ -23,7 +26,11 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() }),
+  useRouter: () => ({ push, replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() }),
+}));
+
+vi.mock("@/lib/notice", () => ({
+  setPendingNotice: (...args: unknown[]) => pendingNotice(...args),
 }));
 
 import { ApiError } from "@/lib/api";
@@ -39,6 +46,11 @@ function deferred<T>() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+function SettleInLayout({ settle }: { settle: () => void }) {
+  useLayoutEffect(() => settle(), [settle]);
+  return null;
 }
 
 function session(docId: string): CollabSession {
@@ -59,6 +71,13 @@ function spinnerFor(title: string): Element | null {
   return versionItem(title).querySelector(".animate-spin");
 }
 
+function expectMutationControlsToBeDisabled(disabled: boolean) {
+  for (const testId of ["version-restore", "version-rename", "version-copy"]) {
+    if (disabled) expect(screen.getByTestId(testId)).toBeDisabled();
+    else expect(screen.getByTestId(testId)).toBeEnabled();
+  }
+}
+
 const named: VersionSummary = {
   id: "ver-1",
   number: 1,
@@ -77,6 +96,8 @@ beforeEach(() => {
   renameVersion.mockReset();
   restoreVersion.mockReset().mockResolvedValue({ ok: true });
   copyVersion.mockReset().mockResolvedValue({ id: "copy-1", title: "Copy" });
+  push.mockReset();
+  pendingNotice.mockReset();
 });
 
 afterEach(() => {
@@ -100,6 +121,590 @@ describe("VersionsPanel · rename a version", () => {
     expect(await screen.findByText("Title must be 1–200 characters")).toBeInTheDocument();
     expect(screen.queryByText("Invalid request")).toBeNull();
     expect(renameVersion).toHaveBeenCalledWith(DOC_ID, "ver-1", "Final");
+  });
+});
+
+describe("VersionsPanel · mutation ownership", () => {
+  it("starts one confirmed Restore for two immediate activations and owns its one reload", async () => {
+    const docId = "mutation-restore-once";
+    const current = { ...named, id: "restore-once", title: "Restore once" };
+    const restoreRequest = deferred<{ ok: boolean }>();
+    const reloadRequest = deferred<{ versions: VersionSummary[] }>();
+    const onPreview = vi.fn();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockReset().mockResolvedValueOnce({ versions: [current] }).mockReturnValueOnce(reloadRequest.promise);
+    restoreVersion.mockReturnValueOnce(restoreRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Restore once"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledWith({ version: current, content: "# Draft" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Compare v1" })).toBeChecked());
+    onPreview.mockClear();
+
+    const restoreButton = screen.getByTestId("version-restore");
+    fireEvent.click(restoreButton);
+    fireEvent.click(restoreButton);
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(restoreVersion).toHaveBeenCalledWith(docId, current.id);
+    expect(versions).toHaveBeenCalledOnce();
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Restore once")).not.toBeNull();
+
+    restoreRequest.resolve({ ok: true });
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(2));
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    expect(screen.getByRole("checkbox", { name: "Compare v1" })).not.toBeChecked();
+    expect(spinnerFor("Restore once")).not.toBeNull();
+
+    reloadRequest.resolve({ versions: [current] });
+    await waitFor(() => expect(spinnerFor("Restore once")).toBeNull());
+    expect(versions).toHaveBeenNthCalledWith(2, docId);
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("declining Restore claims nothing and preserves the current preview intent", async () => {
+    const docId = "mutation-restore-declined";
+    const current = { ...named, id: "restore-declined", title: "Restore declined" };
+    const onPreview = vi.fn();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    versions.mockResolvedValueOnce({ versions: [current] });
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Restore declined"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Compare v1" })).toBeChecked());
+    onPreview.mockClear();
+
+    fireEvent.click(screen.getByTestId("version-restore"));
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(restoreVersion).not.toHaveBeenCalled();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(screen.getByRole("checkbox", { name: "Compare v1" })).toBeChecked();
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Restore declined")).toBeNull();
+  });
+
+  it("releases a failed Restore for one retry and reloads only after the retry succeeds", async () => {
+    const docId = "mutation-restore-retry";
+    const current = { ...named, id: "restore-retry", title: "Restore retry" };
+    const firstRequest = deferred<{ ok: boolean }>();
+    const retryRequest = deferred<{ ok: boolean }>();
+    const reloadRequest = deferred<{ versions: VersionSummary[] }>();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockReset().mockResolvedValueOnce({ versions: [current] }).mockReturnValueOnce(reloadRequest.promise);
+    restoreVersion.mockReturnValueOnce(firstRequest.promise).mockReturnValueOnce(retryRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Restore retry"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+
+    fireEvent.click(screen.getByTestId("version-restore"));
+    firstRequest.reject(new Error("restore unavailable"));
+    expect(await screen.findByText("restore unavailable")).toBeInTheDocument();
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Restore retry")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("version-restore"));
+    expect(screen.queryByText("restore unavailable")).toBeNull();
+    expect(restoreVersion).toHaveBeenCalledTimes(2);
+    expectMutationControlsToBeDisabled(true);
+    retryRequest.resolve({ ok: true });
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(2));
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    reloadRequest.resolve({ versions: [current] });
+    await waitFor(() => expect(spinnerFor("Restore retry")).toBeNull());
+    expect(restoreVersion).toHaveBeenNthCalledWith(2, docId, current.id);
+    expect(versions).toHaveBeenNthCalledWith(2, docId);
+  });
+
+  it("submits an Enter-plus-blur Rename once with the trimmed title", async () => {
+    const docId = "mutation-rename-once";
+    const current = { ...named, id: "rename-once", title: "Rename once" };
+    const renamed = { ...current, title: "Final title" };
+    const renameRequest = deferred<{ ok: boolean }>();
+    const reloadRequest = deferred<{ versions: VersionSummary[] }>();
+    const onPreview = vi.fn();
+    versions.mockReset().mockResolvedValueOnce({ versions: [current] }).mockReturnValueOnce(reloadRequest.promise);
+    renameVersion.mockReturnValueOnce(renameRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Rename once"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId("version-rename"));
+    const input = screen.getByTestId("version-rename-input");
+    fireEvent.change(input, { target: { value: "  Final title  " } });
+    act(() => {
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.blur(input);
+    });
+
+    expect(renameVersion).toHaveBeenCalledOnce();
+    expect(renameVersion).toHaveBeenCalledWith(docId, current.id, "Final title");
+    expect(versions).toHaveBeenCalledOnce();
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Rename once")).not.toBeNull();
+
+    renameRequest.resolve({ ok: true });
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(2));
+    expect(spinnerFor("Rename once")).not.toBeNull();
+    reloadRequest.resolve({ versions: [renamed] });
+    expect(await screen.findByText("Final title")).toBeInTheDocument();
+    await waitFor(() => expect(spinnerFor("Final title")).toBeNull());
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(versions).toHaveBeenNthCalledWith(2, docId);
+  });
+
+  it("releases a failed Rename for one retry and refreshes only after the retry succeeds", async () => {
+    const docId = "mutation-rename-retry";
+    const current = { ...named, id: "rename-retry", title: "Rename retry" };
+    const renamed = { ...current, title: "Recovered title" };
+    const firstRequest = deferred<{ ok: boolean }>();
+    const retryRequest = deferred<{ ok: boolean }>();
+    const reloadRequest = deferred<{ versions: VersionSummary[] }>();
+    versions.mockReset().mockResolvedValueOnce({ versions: [current] }).mockReturnValueOnce(reloadRequest.promise);
+    renameVersion.mockReturnValueOnce(firstRequest.promise).mockReturnValueOnce(retryRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Rename retry"));
+    fireEvent.click(screen.getByTestId("version-rename"));
+    fireEvent.change(screen.getByTestId("version-rename-input"), { target: { value: "Recovered title" } });
+    fireEvent.blur(screen.getByTestId("version-rename-input"));
+    firstRequest.reject(new Error("rename unavailable"));
+
+    expect(await screen.findByText("rename unavailable")).toBeInTheDocument();
+    expect(renameVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Rename retry")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("version-rename"));
+    fireEvent.change(screen.getByTestId("version-rename-input"), { target: { value: " Recovered title " } });
+    fireEvent.keyDown(screen.getByTestId("version-rename-input"), { key: "Enter" });
+    expect(screen.queryByText("rename unavailable")).toBeNull();
+    expect(renameVersion).toHaveBeenCalledTimes(2);
+    expectMutationControlsToBeDisabled(true);
+    retryRequest.resolve({ ok: true });
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(2));
+    reloadRequest.resolve({ versions: [renamed] });
+    expect(await screen.findByText("Recovered title")).toBeInTheDocument();
+    await waitFor(() => expect(spinnerFor("Recovered title")).toBeNull());
+    expect(renameVersion).toHaveBeenNthCalledWith(2, docId, current.id, "Recovered title");
+    expect(versions).toHaveBeenNthCalledWith(2, docId);
+  });
+
+  it("starts one Copy for two immediate activations and navigates once", async () => {
+    const docId = "mutation-copy-once";
+    const current = { ...named, id: "copy-once", title: "Copy once" };
+    const copyRequest = deferred<{ id: string; title: string }>();
+    const onPreview = vi.fn();
+    versions.mockResolvedValueOnce({ versions: [current] });
+    copyVersion.mockReturnValueOnce(copyRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Copy once"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+    const copyButton = screen.getByTestId("version-copy");
+    fireEvent.click(copyButton);
+    fireEvent.click(copyButton);
+
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(copyVersion).toHaveBeenCalledWith(docId, current.id);
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Copy once")).not.toBeNull();
+    copyRequest.resolve({ id: "copied-document", title: "Copied title" });
+
+    await waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(push).toHaveBeenCalledWith("/d/copied-document");
+    expect(pendingNotice).toHaveBeenCalledOnce();
+    expect(pendingNotice).toHaveBeenCalledWith("Created “Copied title” from version 1.", "success");
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Copy once")).toBeNull();
+  });
+
+  it("releases a failed Copy for one retry and publishes effects only after success", async () => {
+    const docId = "mutation-copy-retry";
+    const current = { ...named, id: "copy-retry", title: "Copy retry" };
+    const firstRequest = deferred<{ id: string; title: string }>();
+    const retryRequest = deferred<{ id: string; title: string }>();
+    versions.mockResolvedValueOnce({ versions: [current] });
+    copyVersion.mockReturnValueOnce(firstRequest.promise).mockReturnValueOnce(retryRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Copy retry"));
+    fireEvent.click(screen.getByTestId("version-copy"));
+    firstRequest.reject(new Error("copy unavailable"));
+
+    expect(await screen.findByText("copy unavailable")).toBeInTheDocument();
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Copy retry")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("version-copy"));
+    expect(screen.queryByText("copy unavailable")).toBeNull();
+    expect(copyVersion).toHaveBeenCalledTimes(2);
+    expectMutationControlsToBeDisabled(true);
+    retryRequest.resolve({ id: "copy-retry-document", title: "Recovered copy" });
+
+    await waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(pendingNotice).toHaveBeenCalledOnce();
+    expect(pendingNotice).toHaveBeenCalledWith("Created “Recovered copy” from version 1.", "success");
+    expect(push).toHaveBeenCalledWith("/d/copy-retry-document");
+    expect(copyVersion).toHaveBeenNthCalledWith(2, docId, current.id);
+    expect(versions).toHaveBeenCalledOnce();
+    expectMutationControlsToBeDisabled(false);
+  });
+
+  it("blocks every other mutation kind while one Restore is pending", async () => {
+    const docId = "mutation-cross-kind";
+    const current = { ...named, id: "cross-kind", title: "Cross kind" };
+    const restoreRequest = deferred<{ ok: boolean }>();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockResolvedValueOnce({ versions: [current] });
+    restoreVersion.mockReturnValueOnce(restoreRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Cross kind"));
+    const renameButton = screen.getByTestId("version-rename");
+    const copyButton = screen.getByTestId("version-copy");
+    fireEvent.click(screen.getByTestId("version-restore"));
+    fireEvent.click(renameButton);
+    fireEvent.click(copyButton);
+    fireEvent.click(screen.getByTestId("version-restore"));
+
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(renameVersion).not.toHaveBeenCalled();
+    expect(copyVersion).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Cross kind")).not.toBeNull();
+
+    restoreRequest.reject(new Error("release owner"));
+    expect(await screen.findByText("release owner")).toBeInTheDocument();
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Cross kind")).toBeNull();
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a late Restore %s after Close", async (settlement) => {
+    const docId = `mutation-close-restore-${settlement}`;
+    const current = { ...named, id: `close-restore-${settlement}`, title: `Close restore ${settlement}` };
+    const restoreRequest = deferred<{ ok: boolean }>();
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockResolvedValueOnce({ versions: [current] });
+    restoreVersion.mockReturnValueOnce(restoreRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={onClose} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText(`Close restore ${settlement}`));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Compare v1" })).toBeChecked());
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId("version-restore"));
+    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    expect(spinnerFor(`Close restore ${settlement}`)).toBeNull();
+    if (settlement === "resolve") restoreRequest.resolve({ ok: true });
+    else restoreRequest.reject(new Error("obsolete restore failure"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(screen.getByRole("checkbox", { name: "Compare v1" })).toBeChecked();
+    expect(screen.getByTestId("version-restore")).toBeInTheDocument();
+    expect(screen.queryByText("obsolete restore failure")).toBeNull();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a late Copy %s after Close", async (settlement) => {
+    const docId = `mutation-close-copy-${settlement}`;
+    const current = { ...named, id: `close-copy-${settlement}`, title: `Close copy ${settlement}` };
+    const copyRequest = deferred<{ id: string; title: string }>();
+    const onPreview = vi.fn();
+    versions.mockResolvedValueOnce({ versions: [current] });
+    copyVersion.mockReturnValueOnce(copyRequest.promise);
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText(`Close copy ${settlement}`));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId("version-copy"));
+    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
+    expect(spinnerFor(`Close copy ${settlement}`)).toBeNull();
+
+    if (settlement === "resolve") copyRequest.resolve({ id: "obsolete-copy", title: "Obsolete copy" });
+    else copyRequest.reject(new Error("obsolete copy failure"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledWith(null);
+    expect(screen.queryByText("obsolete copy failure")).toBeNull();
+    expect(versions).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the new document's Copy owner when the replaced document's Restore settles", async () => {
+    const oldDocId = "mutation-replacement-old";
+    const newDocId = "mutation-replacement-new";
+    const oldVersion = { ...named, id: "replacement-old-version", title: "Replacement old" };
+    const newVersion = { ...named, id: "replacement-new-version", title: "Replacement new" };
+    const oldRestore = deferred<{ ok: boolean }>();
+    const currentCopy = deferred<{ id: string; title: string }>();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockImplementation((docId: string) => Promise.resolve({ versions: [docId === oldDocId ? oldVersion : newVersion] }));
+    restoreVersion.mockReturnValueOnce(oldRestore.promise);
+    copyVersion.mockReturnValueOnce(currentCopy.promise);
+    const props = { onClose: vi.fn(), onPreview, refreshKey: 0 };
+
+    const rendered = render(<VersionsPanel {...props} session={session(oldDocId)} />);
+    fireEvent.click(await screen.findByText("Replacement old"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTestId("version-restore"));
+    rendered.rerender(<VersionsPanel {...props} session={session(newDocId)} />);
+    fireEvent.click(await screen.findByText("Replacement new"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledTimes(2));
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId("version-copy"));
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Replacement new")).not.toBeNull();
+
+    oldRestore.resolve({ ok: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(restoreVersion).toHaveBeenCalledWith(oldDocId, oldVersion.id);
+    expect(versions).toHaveBeenCalledTimes(2);
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Replacement new")).not.toBeNull();
+
+    currentCopy.resolve({ id: "replacement-copy", title: "Current copy" });
+    await waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(copyVersion).toHaveBeenCalledWith(newDocId, newVersion.id);
+    expect(pendingNotice).toHaveBeenCalledOnce();
+    expect(pendingNotice).toHaveBeenCalledWith("Created “Current copy” from version 1.", "success");
+    expect(push).toHaveBeenCalledWith("/d/replacement-copy");
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Replacement new")).toBeNull();
+  });
+
+  it.each([
+    ["restore", "resolve"],
+    ["restore", "reject"],
+    ["copy", "resolve"],
+    ["copy", "reject"],
+  ] as const)("retires an old %s before its layout-settled %s reaches UI after replacement", async (kind, settlement) => {
+    const oldDocId = `mutation-layout-old-${kind}-${settlement}`;
+    const newDocId = `mutation-layout-new-${kind}-${settlement}`;
+    const oldVersion = { ...named, id: `layout-old-${kind}-${settlement}`, title: `Layout old ${kind} ${settlement}` };
+    const newVersion = { ...named, id: `layout-new-${kind}-${settlement}`, title: `Layout new ${kind} ${settlement}` };
+    const mutation = deferred<unknown>();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockImplementation((docId: string) => Promise.resolve({ versions: [docId === oldDocId ? oldVersion : newVersion] }));
+    if (kind === "restore") restoreVersion.mockReturnValueOnce(mutation.promise);
+    else copyVersion.mockReturnValueOnce(mutation.promise);
+    const props = { onClose: vi.fn(), onPreview, refreshKey: 0 };
+
+    const rendered = render(<VersionsPanel {...props} session={session(oldDocId)} />);
+    fireEvent.click(await screen.findByText(`Layout old ${kind} ${settlement}`));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId(kind === "restore" ? "version-restore" : "version-copy"));
+
+    const settle = () => {
+      if (settlement === "reject") mutation.reject(new Error("obsolete layout failure"));
+      else if (kind === "restore") mutation.resolve({ ok: true });
+      else mutation.resolve({ id: "obsolete-layout-copy", title: "Obsolete layout copy" });
+    };
+    rendered.rerender(
+      <>
+        <VersionsPanel {...props} session={session(newDocId)} />
+        <SettleInLayout settle={settle} />
+      </>,
+    );
+
+    expect(await screen.findByText(`Layout new ${kind} ${settlement}`)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(versions).toHaveBeenCalledTimes(2);
+    expect(versions).toHaveBeenNthCalledWith(1, oldDocId);
+    expect(versions).toHaveBeenNthCalledWith(2, newDocId);
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(screen.queryByText("obsolete layout failure")).toBeNull();
+    expect(screen.queryByText(`Layout old ${kind} ${settlement}`)).toBeNull();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    if (kind === "restore") expect(restoreVersion).toHaveBeenCalledOnce();
+    else expect(copyVersion).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an old layout-settled finalizer unlock the newer Copy owner", async () => {
+    const docId = "mutation-layout-newer-owner";
+    const current = { ...named, id: "layout-newer-owner-version", title: "Layout newer owner" };
+    const oldRestore = deferred<{ ok: boolean }>();
+    const currentCopy = deferred<{ id: string; title: string }>();
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockResolvedValueOnce({ versions: [current] });
+    restoreVersion.mockReturnValueOnce(oldRestore.promise);
+    copyVersion.mockReturnValueOnce(currentCopy.promise);
+    const props = { session: session(docId), onClose, onPreview, refreshKey: 0 };
+
+    const rendered = render(<VersionsPanel {...props} />);
+    fireEvent.click(await screen.findByText("Layout newer owner"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTestId("version-restore"));
+    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
+    fireEvent.click(screen.getByTestId("version-copy"));
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Layout newer owner")).not.toBeNull();
+
+    rendered.rerender(
+      <>
+        <VersionsPanel {...props} />
+        <SettleInLayout settle={() => oldRestore.resolve({ ok: true })} />
+      </>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledTimes(2);
+    expect(onPreview).toHaveBeenLastCalledWith(null);
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Layout newer owner")).not.toBeNull();
+
+    currentCopy.resolve({ id: "layout-current-copy", title: "Layout current copy" });
+    await waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(pendingNotice).toHaveBeenCalledOnce();
+    expect(push).toHaveBeenCalledWith("/d/layout-current-copy");
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Layout newer owner")).toBeNull();
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores a late Copy %s after unmount", async (settlement) => {
+    const docId = `mutation-unmount-${settlement}`;
+    const current = { ...named, id: `mutation-unmount-version-${settlement}`, title: `Mutation unmount ${settlement}` };
+    const copyRequest = deferred<{ id: string; title: string }>();
+    const onPreview = vi.fn();
+    versions.mockResolvedValueOnce({ versions: [current] });
+    copyVersion.mockReturnValueOnce(copyRequest.promise);
+
+    const rendered = render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText(`Mutation unmount ${settlement}`));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId("version-copy"));
+    rendered.unmount();
+    if (settlement === "resolve") copyRequest.resolve({ id: "too-late", title: "Too late" });
+    else copyRequest.reject(new Error("too late"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("lets an owned post-Rename reload supersede an older list request", async () => {
+    const docId = "mutation-owned-list";
+    const current = { ...named, id: "owned-list-version", title: "Owned list current" };
+    const renamed = { ...current, title: "Owned list renamed" };
+    const stale = { ...current, title: "Stale list result" };
+    const renameRequest = deferred<{ ok: boolean }>();
+    const olderList = deferred<{ versions: VersionSummary[] }>();
+    const ownedList = deferred<{ versions: VersionSummary[] }>();
+    const nextRefresh = deferred<{ versions: VersionSummary[] }>();
+    versions
+      .mockReset()
+      .mockResolvedValueOnce({ versions: [current] })
+      .mockReturnValueOnce(olderList.promise)
+      .mockReturnValueOnce(ownedList.promise)
+      .mockReturnValueOnce(nextRefresh.promise);
+
+    const first = render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    await screen.findByText("Owned list current");
+    await waitFor(() => expect(versions).toHaveBeenCalledOnce());
+    first.unmount();
+
+    renameVersion.mockReturnValueOnce(renameRequest.promise);
+    const second = render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    expect(screen.getByText("Owned list current")).toBeInTheDocument();
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByText("Owned list current"));
+    fireEvent.click(await screen.findByTestId("version-rename"));
+    fireEvent.change(screen.getByTestId("version-rename-input"), { target: { value: "Owned list renamed" } });
+    fireEvent.keyDown(screen.getByTestId("version-rename-input"), { key: "Enter" });
+    renameRequest.resolve({ ok: true });
+
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(3));
+    expect(spinnerFor("Owned list current")).not.toBeNull();
+    ownedList.resolve({ versions: [renamed] });
+    expect(await screen.findByText("Owned list renamed")).toBeInTheDocument();
+    await waitFor(() => expect(spinnerFor("Owned list renamed")).toBeNull());
+    olderList.resolve({ versions: [stale] });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Owned list renamed")).toBeInTheDocument();
+    expect(screen.queryByText("Stale list result")).toBeNull();
+    expect(versions).toHaveBeenCalledTimes(3);
+    second.unmount();
+
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    expect(screen.getByText("Owned list renamed")).toBeInTheDocument();
+    await waitFor(() => expect(versions).toHaveBeenCalledTimes(4));
+    expect(versions).toHaveBeenNthCalledWith(2, docId);
+    expect(versions).toHaveBeenNthCalledWith(3, docId);
+    expect(renameVersion).toHaveBeenCalledOnce();
   });
 });
 
@@ -397,12 +1002,14 @@ describe("VersionsPanel · preview intent ownership", () => {
 
     expect(restoreVersion).toHaveBeenCalledWith(docId, current.id);
     expect(spinnerFor("Restore pending")).not.toBeNull();
+    expectMutationControlsToBeDisabled(true);
     await act(async () => {
       previewRequest.resolve(contentResult(current, "# Obsolete"));
       await Promise.resolve();
     });
     expect(onPreview).not.toHaveBeenCalled();
     expect(spinnerFor("Restore pending")).not.toBeNull();
+    expectMutationControlsToBeDisabled(true);
 
     await act(async () => {
       restoreRequest.resolve({ ok: true });
@@ -411,6 +1018,10 @@ describe("VersionsPanel · preview intent ownership", () => {
     expect(onPreview).toHaveBeenCalledOnce();
     expect(onPreview).toHaveBeenCalledWith(null);
     await waitFor(() => expect(screen.getByTestId("versions-panel").querySelector(".animate-spin")).toBeNull());
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledTimes(2);
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
   });
 
   it("keeps Copy busy when its version preview finishes first", async () => {
@@ -430,12 +1041,14 @@ describe("VersionsPanel · preview intent ownership", () => {
 
     expect(copyVersion).toHaveBeenCalledWith(docId, current.id);
     expect(spinnerFor("Copy pending")).not.toBeNull();
+    expectMutationControlsToBeDisabled(true);
     await act(async () => {
       previewRequest.resolve(contentResult(current, "# Preview"));
       await Promise.resolve();
     });
     expect(onPreview).toHaveBeenCalledOnce();
     expect(spinnerFor("Copy pending")).not.toBeNull();
+    expectMutationControlsToBeDisabled(true);
 
     await act(async () => {
       copyRequest.reject(new Error("copy failed"));
@@ -443,6 +1056,11 @@ describe("VersionsPanel · preview intent ownership", () => {
     });
     expect(screen.getByText("copy failed")).toBeInTheDocument();
     expect(spinnerFor("Copy pending")).toBeNull();
+    expectMutationControlsToBeDisabled(false);
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
   });
 
   it("coalesces concurrent reads of the same version", async () => {
