@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { ChevronDown, List } from "lucide-react";
 import type { RenderedHeading } from "@/server/export/html";
 import { cn } from "@/lib/utils";
@@ -8,13 +8,45 @@ import { cn } from "@/lib/utils";
 /** Vertical offset (sticky chrome + breathing room) used to decide which heading is "current". */
 const TOP_OFFSET = 88;
 
-function useActiveHeading(headings: RenderedHeading[]): string | null {
-  const [active, setActive] = useState<string | null>(null);
+type HeadingsAuthority = {
+  headings: RenderedHeading[];
+};
+
+type ObserverOwner = {
+  authority: HeadingsAuthority;
+  retire: () => void;
+};
+
+type ActiveHeading = {
+  authority: HeadingsAuthority;
+  id: string;
+};
+
+function retireOwnedObserver(authority: HeadingsAuthority, observerOwnerRef: RefObject<ObserverOwner | null>) {
+  const observerOwner = observerOwnerRef.current;
+  if (observerOwner?.authority === authority) observerOwner.retire();
+}
+
+function useActiveHeading(
+  authority: HeadingsAuthority,
+  authorityRef: RefObject<HeadingsAuthority | null>,
+  observerOwnerRef: RefObject<ObserverOwner | null>,
+): string | null {
+  const [publication, setPublication] = useState<ActiveHeading | null>(null);
+
   useEffect(() => {
-    const elements = headings.map((h) => document.getElementById(h.id)).filter((el): el is HTMLElement => !!el);
+    const hasAuthority = () => authorityRef.current === authority;
+    if (!hasAuthority()) return;
+
+    const elements = authority.headings.map((h) => document.getElementById(h.id)).filter((el): el is HTMLElement => !!el);
     if (elements.length === 0) return;
+
     const visible = new Set<string>();
+    let retired = false;
+    const isCurrent = () => !retired && hasAuthority();
     const pick = () => {
+      if (!isCurrent()) return;
+
       // Prefer the topmost heading on screen; with none on screen, keep the last one scrolled past.
       let best: { id: string; top: number } | null = null;
       let lastAbove: string | null = null;
@@ -23,10 +55,12 @@ function useActiveHeading(headings: RenderedHeading[]): string | null {
         if (visible.has(el.id) && (!best || top < best.top)) best = { id: el.id, top };
         if (top < TOP_OFFSET) lastAbove = el.id;
       }
-      setActive(best?.id ?? lastAbove ?? elements[0].id);
+      if (!isCurrent()) return;
+      setPublication({ authority, id: best?.id ?? lastAbove ?? elements[0].id });
     };
     const io = new IntersectionObserver(
       (entries) => {
+        if (!isCurrent()) return;
         for (const e of entries) {
           if (e.isIntersecting) visible.add(e.target.id);
           else visible.delete(e.target.id);
@@ -35,22 +69,48 @@ function useActiveHeading(headings: RenderedHeading[]): string | null {
       },
       { rootMargin: `-${TOP_OFFSET}px 0px -55% 0px`, threshold: [0, 1] },
     );
+    const owner: ObserverOwner = {
+      authority,
+      retire: () => {
+        if (retired) return;
+        retired = true;
+        io.disconnect();
+        if (observerOwnerRef.current === owner) observerOwnerRef.current = null;
+      },
+    };
+
+    observerOwnerRef.current = owner;
     elements.forEach((el) => io.observe(el));
     pick();
-    return () => io.disconnect();
-  }, [headings]);
-  return active;
+    return owner.retire;
+  }, [authority, authorityRef, observerOwnerRef]);
+
+  return publication?.authority === authority ? publication.id : null;
 }
 
 /** h2/h3 table of contents; sticky on wide screens, a "Contents" disclosure above the article on phones. */
 export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
-  const active = useActiveHeading(headings);
-  const [open, setOpen] = useState(false);
+  const authority = useMemo<HeadingsAuthority>(() => ({ headings }), [headings]);
+  const authorityRef = useRef<HeadingsAuthority | null>(null);
+  const observerOwnerRef = useRef<ObserverOwner | null>(null);
+  const [openAuthority, setOpenAuthority] = useState<HeadingsAuthority | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const active = useActiveHeading(authority, authorityRef, observerOwnerRef);
+  const open = openAuthority === authority;
+
+  useLayoutEffect(() => {
+    authorityRef.current = authority;
+
+    return () => {
+      if (authorityRef.current === authority) authorityRef.current = null;
+      retireOwnedObserver(authority, observerOwnerRef);
+    };
+  }, [authority]);
+
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (!open || event.key !== "Escape") return;
+    if (!open || event.key !== "Escape" || authorityRef.current !== authority) return;
     event.preventDefault();
-    setOpen(false);
+    setOpenAuthority((current) => current === authority ? null : current);
     toggleRef.current?.focus();
   };
   return (
@@ -61,7 +121,10 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
         className="flex w-full items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 lg:hidden"
         aria-expanded={open}
         aria-controls="reader-toc-list"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (authorityRef.current !== authority) return;
+          setOpenAuthority((current) => current === authority ? null : authority);
+        }}
         data-testid="reader-toc-toggle"
       >
         <List size={15} />
@@ -82,7 +145,10 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
               )}
               aria-current={active === h.id ? "location" : undefined}
               data-testid="reader-toc-entry"
-              onClick={() => setOpen(false)}
+              onClick={() => {
+                if (authorityRef.current !== authority) return;
+                setOpenAuthority((current) => current === authority ? null : current);
+              }}
             >
               {h.text}
             </a>
