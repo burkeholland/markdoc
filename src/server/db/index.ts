@@ -27,6 +27,7 @@ interface DbGlobal {
 // copy of this module in the same process. Share one connection through globalThis.
 const g = globalThis as typeof globalThis & { __markdocDb?: DbGlobal };
 const registry: DbGlobal = (g.__markdocDb ??= {});
+const PRODUCTION_PGLITE_OPT_IN = "local-rehearsal-only";
 
 export const GIST_LOCK_CONNECT_TIMEOUT_MS = 5_000;
 export const GIST_LOCK_QUERY_TIMEOUT_MS = 5_000;
@@ -117,7 +118,12 @@ function migrationsFolder(): string {
 }
 
 async function create(): Promise<Db> {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.DATABASE_URL?.trim();
+  // Production PGlite is only for explicit local/image rehearsals; ambient container defaults must not enable it.
+  const allowProductionPglite = process.env.MARKDOC_PRODUCTION_PGLITE === PRODUCTION_PGLITE_OPT_IN;
+  if (!url && process.env.NODE_ENV === "production" && !allowProductionPglite) {
+    throw new Error("DATABASE_URL is required in production");
+  }
   if (url) {
     const { drizzle } = await import("drizzle-orm/node-postgres");
     const { Pool, Client } = await import("pg");
