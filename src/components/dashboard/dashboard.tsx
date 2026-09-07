@@ -333,7 +333,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     loadTrash();
   }, [filter, loadTrash]);
 
-  useEffect(
+  useLayoutEffect(
     () => () => {
       filterRef.current = "all";
       trashVisitId.current += 1;

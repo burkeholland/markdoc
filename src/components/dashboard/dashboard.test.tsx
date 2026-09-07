@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { startTransition, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
 
@@ -86,6 +87,18 @@ function renderDashboard(children?: React.ReactNode, documents = DOCUMENTS) {
       <Dashboard user={USER} documents={documents} githubAvailable githubConfigured />
       {children}
     </>,
+  );
+}
+
+function TransitionUnmount({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(true);
+  return (
+    <>
+      <button type="button" data-testid="unmount-dashboard" onClick={() => startTransition(() => setMounted(false))}>
+        Unmount dashboard
+      </button>
+      {mounted ? children : null}
+    </>
   );
 }
 
@@ -947,5 +960,94 @@ describe("dashboard trash recovery", () => {
     expect(router.push).not.toHaveBeenCalled();
     expect(router.refresh).not.toHaveBeenCalled();
     expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("retires pending Restore and Delete ownership at the layout unmount boundary", async () => {
+    vi.useRealTimers();
+    const restore = deferred<{ ok: true }>();
+    const deletion = deferred<{ ok: true; permanent: boolean }>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: PromiseRejectionEvent) => {
+      unhandled.push(event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    restoreDocument.mockReturnValueOnce(restore.promise);
+    purgeDocument.mockReturnValueOnce(deletion.promise);
+    listDocuments
+      .mockResolvedValueOnce({ documents: [trashedDoc("restore-boundary", "Restore boundary")] })
+      .mockResolvedValueOnce({ documents: [trashedDoc("delete-boundary", "Delete boundary")] });
+
+    const unmountAndSettle = async (
+      title: string,
+      action: "restore-button" | "purge-button",
+      settle: () => void,
+      pending: Promise<unknown>,
+    ) => {
+      const view = render(
+        <TransitionUnmount>
+          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+        </TransitionUnmount>,
+      );
+      openTrash();
+      await act(async () => {});
+      fireEvent.click(trashButton(title, action));
+      const removed = deferred<void>();
+      const settled = Promise.allSettled([pending]);
+      let settledAtRemoval = false;
+      let postRemovalMutations = 0;
+      const observer = new MutationObserver((records) => {
+        if (document.querySelector('[data-testid="trash-view"]')) return;
+        if (!settledAtRemoval) {
+          settledAtRemoval = true;
+          settle();
+          removed.resolve();
+          return;
+        }
+        postRemovalMutations += records.length;
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      const actEnvironment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+
+      try {
+        screen.getByTestId("unmount-dashboard").click();
+        await removed.promise;
+        await settled;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(screen.queryByTestId("trash-view")).toBeNull();
+        expect(screen.queryByTestId("trash-card")).toBeNull();
+        expect(screen.queryByTestId("toast")).toBeNull();
+        return postRemovalMutations;
+      } finally {
+        actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+        observer.disconnect();
+        view.unmount();
+      }
+    };
+
+    try {
+      const restoreMutations = await unmountAndSettle("Restore boundary", "restore-button", () => restore.resolve({ ok: true }), restore.promise);
+      const deleteMutations = await unmountAndSettle(
+        "Delete boundary",
+        "purge-button",
+        () => deletion.reject(new ApiError(503, "Unmounted delete failed")),
+        deletion.promise,
+      );
+
+      expect(restoreDocument).toHaveBeenCalledTimes(1);
+      expect(restoreDocument).toHaveBeenLastCalledWith("restore-boundary");
+      expect(purgeDocument).toHaveBeenCalledTimes(1);
+      expect(purgeDocument).toHaveBeenLastCalledWith("delete-boundary", { permanent: true });
+      expect(restoreMutations + deleteMutations).toBe(0);
+      expect(router.refresh).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(console.error).not.toHaveBeenCalled();
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
   });
 });
