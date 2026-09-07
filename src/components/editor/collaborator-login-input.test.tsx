@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRoot } from "react-dom/client";
 import {
+  useCallback,
   useLayoutEffect,
   useState,
   type ChangeEvent,
@@ -53,6 +54,24 @@ function Harness({ exclude = [], onPick, onSubmit }: { exclude?: string[]; onPic
       <button type="submit">Add</button>
     </form>
   );
+}
+
+function ExactValueHarness({
+  onChange,
+  onPick,
+}: {
+  onChange: (login: string) => void;
+  onPick: (login: string) => void;
+}) {
+  const [login, setLogin] = useState("octocat");
+  const change = useCallback(
+    (next: string) => {
+      onChange(next);
+      setLogin(next);
+    },
+    [onChange],
+  );
+  return <CollaboratorLoginInput value={login} onChange={change} exclude={[]} onPick={onPick} />;
 }
 
 /**
@@ -425,6 +444,48 @@ describe("CollaboratorLoginInput", () => {
     expect(input().value).toBe("octodog");
     expect(onPick).toHaveBeenCalledWith("octodog");
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("keeps the same input current after an exact-value pick whose controlled change is a no-op", async () => {
+    searchUsers.mockImplementation((q) => answer(q));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    render(<ExactValueHarness onChange={onChange} onPick={onPick} />);
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    expect(options()).toEqual(["octocat"]);
+    const exactOption = screen.getByTestId("share-login-option");
+    const capturedPick = reactHandler<() => void>(exactOption, "onClick");
+
+    act(() => capturedPick());
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledWith("octocat");
+    expect(onPick).toHaveBeenCalledOnce();
+    expect(onPick).toHaveBeenCalledWith("octocat");
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(input()).toBe(exactInput);
+
+    act(() => {
+      capturedPick();
+      capturedPick();
+    });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onPick).toHaveBeenCalledOnce();
+    expect(searchUsers).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(exactInput, { target: { value: "octodog" } });
+    fireEvent.focus(exactInput);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenLastCalledWith("octodog");
+    expect(input()).toBe(exactInput);
+    await settle();
+
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octocat", "octodog"]);
+    expect(options()).toEqual(["octodog"]);
+    fireEvent.mouseEnter(screen.getByTestId("share-login-option"));
+    expect(screen.getByTestId("share-login-option")).toHaveAttribute("aria-selected", "true");
+    expect(onPick).toHaveBeenCalledOnce();
   });
 
   it("never suggests the owner or someone already listed, and caps the list at eight", async () => {

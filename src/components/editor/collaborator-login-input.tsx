@@ -442,7 +442,9 @@ export function CollaboratorLoginInput({
       const ownedState = ownerPublication.state;
       picked.current = candidate.login;
       setPublished((previous) =>
-        ownsVisitIdentity(owner) && previous === ownedState ? { ...ownedState, open: false, active: -1, lookup: null } : previous,
+        ownsVisitIdentity(owner) && previous === ownedState
+          ? { ...ownedState, query: null, open: false, active: -1, lookup: null }
+          : previous,
       );
       owner.scope.onChange(candidate.login);
       if (!ownsVisitIdentity(owner)) return;
