@@ -2,7 +2,7 @@
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -66,18 +66,33 @@ import { HEADER_BOX } from "./chrome-classes";
 // open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
 const KeepAgentHereDialog = lazyOnFirstUse(() => import("./keep-agent-here"), (m) => m.KeepAgentHereDialog);
 
+type ManualSaveOwner = {
+  session: CollabSession;
+  operation: number;
+};
+
+type ManualSaveState =
+  | { owner: ManualSaveOwner; status: "pending" }
+  | { owner: ManualSaveOwner; status: "failed"; message: string };
+
 export function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
   const liveUnsynced = useSessionValue(session, (s) => Math.max(s.unsyncedChanges, s.dirty ? 1 : 0));
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
   const liveProlonged = useSessionValue(session, (s) => s.prolongedOffline);
   const saveError = useSessionValue(session, (s) => s.saveError);
-  const [manualFailure, setManualFailure] = useState<{ session: CollabSession; message: string } | null>(null);
-  const manualError = manualFailure?.session === session ? manualFailure.message : null;
-  const activeSession = useRef<CollabSession | null>(session);
-  useEffect(() => {
-    activeSession.current = session;
-    return () => { activeSession.current = null; };
+  const [manualSave, setManualSave] = useState<ManualSaveState | null>(null);
+  const manualSaveOwner = useRef<ManualSaveOwner | null>(null);
+  const nextManualOperation = useRef(0);
+  const currentManualSave = manualSave?.owner.session === session ? manualSave : null;
+  const manualPending = currentManualSave?.status === "pending";
+  const manualError = currentManualSave?.status === "failed" ? currentManualSave.message : null;
+  useLayoutEffect(() => {
+    manualSaveOwner.current = null;
+    setManualSave(null);
+    return () => {
+      manualSaveOwner.current = null;
+    };
   }, [session]);
   // The server renders a fresh session ("Connecting…"); an offline client may already have
   // failed to connect by the time React hydrates. Match the server markup first, then switch.
@@ -85,9 +100,6 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
   const raw: SaveState = hydrated ? liveState : "connecting";
   // The session now waits for database acknowledgement; no cosmetic extra debounce is needed.
   const state = raw;
-  useEffect(() => {
-    if (state === "saved") setManualFailure((current) => current?.session === session ? null : current);
-  }, [state, session]);
   const unsynced = hydrated ? liveUnsynced : 0;
   const recovered = hydrated && liveRecovered;
   const prolonged = hydrated && liveProlonged;
@@ -118,19 +130,32 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
       <button
         type="button"
         className="inline-flex items-center gap-1.5"
-        disabled={!session.canEdit}
+        disabled={!session.canEdit || manualPending}
+        aria-busy={manualPending || undefined}
         aria-label="Save document"
         onClick={() => {
-          void session.flushSave().then(
-            () => {
-              if (activeSession.current === session) setManualFailure(null);
-            },
-            (error: unknown) => {
-              if (activeSession.current === session) {
-                setManualFailure({ session, message: error instanceof Error ? error.message : "Save failed" });
-              }
-            },
-          );
+          if (!session.canEdit || manualSaveOwner.current) return;
+          const owner = { session, operation: ++nextManualOperation.current };
+          manualSaveOwner.current = owner;
+          setManualSave({ owner, status: "pending" });
+          void (async () => {
+            try {
+              await session.flushSave();
+              if (manualSaveOwner.current?.session !== owner.session
+                || manualSaveOwner.current.operation !== owner.operation) return;
+              manualSaveOwner.current = null;
+              setManualSave((current) => current?.owner.session === owner.session
+                && current.owner.operation === owner.operation ? null : current);
+            } catch (error: unknown) {
+              if (manualSaveOwner.current?.session !== owner.session
+                || manualSaveOwner.current.operation !== owner.operation) return;
+              manualSaveOwner.current = null;
+              setManualSave((current) => current?.owner.session === owner.session
+                && current.owner.operation === owner.operation
+                ? { owner, status: "failed", message: error instanceof Error ? error.message : "Save failed" }
+                : current);
+            }
+          })();
         }}
       >
         {m.icon}
