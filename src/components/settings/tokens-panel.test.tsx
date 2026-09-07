@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { StrictMode } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 vi.mock("@/components/settings/copilot-checklist", () => ({
   CopilotChecklist: () => null,
@@ -39,21 +40,367 @@ function patches(): Array<[string, unknown]> {
 /** A `fetch` answer the test settles later, to make one request land after another that started after it. */
 function deferred() {
   let settle!: (r: Response) => void;
-  const later = new Promise<Response>((r) => (settle = r));
-  return { later, settle };
+  let reject!: (reason: unknown) => void;
+  const later = new Promise<Response>((resolve, fail) => {
+    settle = resolve;
+    reject = fail;
+  });
+  return { later, settle, reject };
 }
 
 /** `POST /api/tokens` answer: minting a token is the user's path to a list reload right before the switch click. */
 const minted = () => response({ token: { token: "mdk_new_secret", name: "GitHub Copilot CLI", scope: "comment", documentIds: null } });
 
+function LayoutBoundary({ boundary = 0, onBoundary, children }: {
+  boundary?: number;
+  onBoundary?: () => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return children;
+}
+
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
+}
+
+function AccountPanel({ login, origin = "https://markdoc.test" }: { login: string; origin?: string }) {
+  return (
+    <section data-testid={`token-account-${login}`} tabIndex={-1}>
+      <TokensPanel origin={origin} userLogin={login} />
+    </section>
+  );
+}
+
+function callsFor(method: "GET" | "POST" | "PATCH") {
+  return fetchMock.mock.calls.filter(([, init]) => (init?.method ?? "GET") === method);
+}
+
+const unhandledRejections: unknown[] = [];
+const recordUnhandledRejection = (reason: unknown) => {
+  unhandledRejections.push(reason);
+};
+
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
+  unhandledRejections.length = 0;
+  process.on("unhandledRejection", recordUnhandledRejection);
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await Promise.resolve();
+  process.off("unhandledRejection", recordUnhandledRejection);
   vi.unstubAllGlobals();
+  expect(unhandledRejections).toEqual([]);
+});
+
+describe("Settings → Agents: account-session authority", () => {
+  it.each(["success", "failure"] as const)(
+    "retires an old account list %s at the parent layout boundary",
+    async (outcome) => {
+      const oldList = deferred();
+      const currentList = deferred();
+      const oldToken = { ...token, id: "old-token", name: "Old account agent" };
+      const currentToken = { ...token, id: "current-token", name: "Current account agent" };
+      fetchMock.mockReturnValueOnce(oldList.later).mockReturnValueOnce(currentList.later);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <LayoutBoundary>
+              <AccountPanel login="old-account" origin="https://old.markdoc.test" />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </LayoutBoundary>,
+          );
+        });
+        expect(callsFor("GET")).toHaveLength(1);
+
+        let reachedBoundary!: () => void;
+        const boundaryReached = new Promise<void>((resolve) => {
+          reachedBoundary = resolve;
+        });
+        root.render(
+          <LayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              oldList.settle(outcome === "success"
+                ? response({ tokens: [oldToken] })
+                : response({ error: "Old account list failed" }, 503));
+              reachedBoundary();
+            }}
+          >
+            <AccountPanel login="current-account" origin="https://current.markdoc.test" />
+          </LayoutBoundary>,
+        );
+        await boundaryReached;
+        await act(async () => {
+          await Promise.allSettled([oldList.later]);
+          await Promise.resolve();
+        });
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(screen.getByText("Manage tokens for current-account. Agents can never do more than you can.")).toBeVisible();
+        expect(screen.getByText("Loading tokens...")).toBeVisible();
+        expect(screen.queryByText(oldToken.name)).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(screen.queryByTestId("token-created")).toBeNull();
+        expect(callsFor("GET").map(([url, init]) => [String(url), init?.cache])).toEqual([
+          ["/api/tokens?includeRevoked=true", "no-store"],
+          ["/api/tokens?includeRevoked=true", "no-store"],
+        ]);
+
+        await act(async () => currentList.settle(response({ tokens: [currentToken] })));
+        expect(await screen.findByText(currentToken.name)).toBeVisible();
+        expect(screen.getAllByTestId("token-row")).toHaveLength(1);
+        expect(screen.queryByText(oldToken.name)).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(callsFor("GET")).toHaveLength(2);
+        expect(callsFor("POST")).toHaveLength(0);
+        expect(callsFor("PATCH")).toHaveLength(0);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "keeps current account creation pending when an old account create settles with %s",
+    async (outcome) => {
+      const oldCreate = deferred();
+      const currentCreate = deferred();
+      const currentReload = deferred();
+      const currentToken = { ...token, id: "current-created-token", name: "Current account agent" };
+      fetchMock
+        .mockResolvedValueOnce(response({ tokens: [] }))
+        .mockResolvedValueOnce(response({ tokens: [] }))
+        .mockReturnValueOnce(oldCreate.later)
+        .mockReturnValueOnce(currentCreate.later)
+        .mockReturnValueOnce(currentReload.later);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <LayoutBoundary>
+              <AccountPanel key="old" login="old-account" />
+              <AccountPanel key="current" login="current-account" />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </LayoutBoundary>,
+          );
+        });
+        expect(await screen.findAllByText("No tokens yet.")).toHaveLength(2);
+        const oldAccount = within(screen.getByTestId("token-account-old-account"));
+        const currentSection = screen.getByTestId("token-account-current-account");
+        const currentAccount = within(currentSection);
+        fireEvent.click(oldAccount.getByTestId("token-add"));
+        fireEvent.change(oldAccount.getByTestId("token-name"), { target: { value: "Old account agent" } });
+        fireEvent.click(oldAccount.getByTestId("token-create"));
+        fireEvent.click(currentAccount.getByTestId("token-add"));
+        fireEvent.change(currentAccount.getByTestId("token-name"), { target: { value: "Current account agent" } });
+        fireEvent.click(currentAccount.getByTestId("token-create"));
+        currentSection.focus();
+
+        expect(callsFor("POST")).toHaveLength(2);
+        expect(callsFor("POST").map(([url, init]) => [String(url), JSON.parse(String(init?.body))])).toEqual([
+          ["/api/tokens", { name: "Old account agent", expiresInDays: 90, scope: "comment", documentIds: null }],
+          ["/api/tokens", { name: "Current account agent", expiresInDays: 90, scope: "comment", documentIds: null }],
+        ]);
+        expect(currentAccount.getByTestId("token-name")).toBeDisabled();
+
+        let reachedBoundary!: () => void;
+        const boundaryReached = new Promise<void>((resolve) => {
+          reachedBoundary = resolve;
+        });
+        root.render(
+          <LayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (outcome === "success") {
+                oldCreate.settle(response({
+                  token: { token: "mdk_old_secret", name: "Old account agent", scope: "comment", documentIds: null },
+                }, 201));
+              } else {
+                oldCreate.reject(new Error("Old account create failed"));
+              }
+              reachedBoundary();
+            }}
+          >
+            <AccountPanel key="current" login="current-account" />
+          </LayoutBoundary>,
+        );
+        await boundaryReached;
+        await act(async () => {
+          await Promise.allSettled([oldCreate.later]);
+          await Promise.resolve();
+        });
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(screen.queryByTestId("token-account-old-account")).toBeNull();
+        expect(currentSection).toHaveFocus();
+        expect(currentAccount.getByTestId("token-name")).toBeDisabled();
+        expect(currentAccount.getByTestId("token-create")).toBeDisabled();
+        expect(screen.queryByTestId("token-created")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(screen.queryByTestId("token-row")).toBeNull();
+        expect(callsFor("GET")).toHaveLength(2);
+        expect(callsFor("POST")).toHaveLength(2);
+        expect(callsFor("PATCH")).toHaveLength(0);
+
+        await act(async () => currentCreate.settle(response({
+          token: { token: "mdk_current_secret", name: "Current account agent", scope: "comment", documentIds: null },
+        }, 201)));
+        expect(await screen.findByTestId("token-created")).toHaveTextContent("Current account agent");
+        expect(screen.getAllByTestId("token-created")).toHaveLength(1);
+        expect(screen.getByTestId("copy-token")).toHaveTextContent("mdk_current_secret");
+        expect(currentAccount.getByTestId("token-name")).toBeDisabled();
+        expect(callsFor("GET")).toHaveLength(3);
+
+        await act(async () => currentReload.settle(response({ tokens: [currentToken] })));
+        expect(await screen.findByText(currentToken.name)).toBeVisible();
+        expect(currentAccount.getByTestId("token-name")).toBeEnabled();
+        expect(screen.getAllByTestId("token-row")).toHaveLength(1);
+        expect(screen.getAllByTestId("token-created")).toHaveLength(1);
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(callsFor("GET")).toHaveLength(3);
+        expect(callsFor("POST")).toHaveLength(2);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "keeps the current optimistic row owner when an old account replacement settles with %s",
+    async (outcome) => {
+      const oldReplace = deferred();
+      const currentPatch = deferred();
+      const oldToken = { ...token, id: "shared-token", name: "Old account agent" };
+      const currentToken = { ...token, id: "shared-token", name: "Current account agent" };
+      fetchMock
+        .mockResolvedValueOnce(response({ tokens: [oldToken] }))
+        .mockResolvedValueOnce(response({ tokens: [currentToken] }))
+        .mockReturnValueOnce(oldReplace.later)
+        .mockReturnValueOnce(currentPatch.later);
+      vi.stubGlobal("confirm", vi.fn(() => true));
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <LayoutBoundary>
+              <AccountPanel key="old" login="old-account" />
+              <AccountPanel key="current" login="current-account" />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </LayoutBoundary>,
+          );
+        });
+        const oldAccount = within(screen.getByTestId("token-account-old-account"));
+        const currentSection = screen.getByTestId("token-account-current-account");
+        const currentAccount = within(currentSection);
+        fireEvent.click(await oldAccount.findByRole("button", { name: "Replace Old account agent" }));
+        const currentSwitch = await currentAccount.findByTestId("token-collaborators-may-ask");
+        fireEvent.click(currentSwitch);
+        currentSection.focus();
+
+        expect(currentSwitch).toHaveAttribute("aria-checked", "true");
+        expect(currentSwitch).toBeDisabled();
+        expect(callsFor("POST").map(([url, init]) => [String(url), JSON.parse(String(init?.body))])).toEqual([
+          ["/api/tokens/shared-token/replace", { confirm: true }],
+        ]);
+        expect(callsFor("PATCH").map(([url, init]) => [String(url), JSON.parse(String(init?.body))])).toEqual([
+          ["/api/tokens/shared-token", { collaboratorsMayAsk: true }],
+        ]);
+
+        let reachedBoundary!: () => void;
+        const boundaryReached = new Promise<void>((resolve) => {
+          reachedBoundary = resolve;
+        });
+        root.render(
+          <LayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (outcome === "success") {
+                oldReplace.settle(response({
+                  token: { token: "mdk_old_replacement", name: oldToken.name, scope: "comment", documentIds: null },
+                }, 201));
+              } else {
+                oldReplace.reject(new Error("Old account replacement failed"));
+              }
+              reachedBoundary();
+            }}
+          >
+            <AccountPanel key="current" login="current-account" />
+          </LayoutBoundary>,
+        );
+        await boundaryReached;
+        await act(async () => {
+          await Promise.allSettled([oldReplace.later]);
+          await Promise.resolve();
+        });
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(screen.queryByTestId("token-account-old-account")).toBeNull();
+        expect(currentSection).toHaveFocus();
+        expect(screen.getAllByTestId("token-row")).toHaveLength(1);
+        expect(screen.getByTestId("token-row")).toHaveTextContent(currentToken.name);
+        expect(screen.queryByText(oldToken.name)).toBeNull();
+        expect(currentSwitch).toHaveAttribute("aria-checked", "true");
+        expect(currentSwitch).toBeDisabled();
+        expect(screen.queryByTestId("token-created")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(callsFor("GET")).toHaveLength(2);
+        expect(callsFor("POST")).toHaveLength(1);
+        expect(callsFor("PATCH")).toHaveLength(1);
+
+        await act(async () => currentPatch.settle(response({
+          token: { ...currentToken, collaboratorsMayAsk: true },
+        })));
+        await waitFor(() => expect(currentSwitch).toBeEnabled());
+        expect(currentSwitch).toHaveAttribute("aria-checked", "true");
+        expect(screen.getByTestId("token-row")).toHaveTextContent(currentToken.name);
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(screen.queryByTestId("token-created")).toBeNull();
+        expect(callsFor("GET")).toHaveLength(2);
+        expect(callsFor("POST")).toHaveLength(1);
+        expect(callsFor("PATCH")).toHaveLength(1);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 });
 
 describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () => {

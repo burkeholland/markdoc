@@ -58,7 +58,18 @@ interface MountedOperation {
   mount: symbol;
 }
 
-interface CreateOperation extends MountedOperation {
+interface ManagerSession {
+  authority: symbol;
+  origin: string;
+  userLogin: string;
+  documentId?: string;
+}
+
+interface ManagerOperation {
+  session: ManagerSession;
+}
+
+interface CreateOperation extends ManagerOperation {
   name: string;
   expires: string;
   scope: TokenScopeName;
@@ -66,7 +77,7 @@ interface CreateOperation extends MountedOperation {
   documentIds: string[];
 }
 
-interface TokenOperation extends MountedOperation {
+interface TokenOperation extends ManagerOperation {
   id: string;
   kind: TokenMutationKind;
 }
@@ -93,7 +104,8 @@ interface DocumentListOperation extends MountedOperation {
 
 /** Closing a host dialog unmounts all transient state, including late creation responses. */
 export function TokensPanel({ open = true, ...props }: TokensPanelProps) {
-  return open ? <TokenManager key={props.documentId ?? "settings"} {...props} /> : null;
+  const managerKey = JSON.stringify([props.origin, props.userLogin, props.documentId ?? null]);
+  return open ? <TokenManager key={managerKey} {...props} /> : null;
 }
 
 function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }: Omit<TokensPanelProps, "open">) {
@@ -125,7 +137,13 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const documentVisit = useRef<number | null>(null);
   const documentOwner = useRef<DocumentListOperation | null>(null);
   const documentRequest = useRef<DocumentListRequest | null>(null);
-  const mounted = useRef<symbol | null>(null);
+  const managerSession = useRef<ManagerSession>({
+    authority: Symbol("token-manager-session"),
+    origin,
+    userLogin,
+    documentId,
+  }).current;
+  const activeManagerSession = useRef<ManagerSession | null>(null);
   const createOwner = useRef<CreateOperation | null>(null);
   const tokenOwners = useRef(new Map<string, TokenOperation>());
   const latestTokenOperations = useRef(new Map<string, TokenOperation>());
@@ -143,6 +161,12 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const matching = conflictName ? tokens?.find((t) => tokenState(t) === "Active" && agentMentionSlug(t.name).toLowerCase() === agentMentionSlug(conflictName).toLowerCase()) : null;
   const chooserVisible = destination === "tokens" && showCreate && restrict && !documentId;
 
+  const isManagerSessionCurrent = useCallback((session: ManagerSession) =>
+    activeManagerSession.current === session
+    && activeManagerSession.current?.authority === session.authority
+    && session.origin === origin
+    && session.userLogin === userLogin
+    && session.documentId === documentId, [documentId, origin, userLogin]);
   const isDocumentCurrent = useCallback((operation: DocumentListOperation) =>
     documentMountActive.current
     && operation.mount === documentMount
@@ -214,6 +238,30 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   }, [beginDocumentRequest]);
 
   useLayoutEffect(() => {
+    const owners = tokenOwners.current;
+    const latestOperations = latestTokenOperations.current;
+    const flips = pendingFlips.current;
+    const rows = updatedRows.current;
+    activeManagerSession.current = managerSession;
+    return () => {
+      if (activeManagerSession.current !== managerSession) return;
+      activeManagerSession.current = null;
+      loadSeq.current += 1;
+      if (createOwner.current?.session === managerSession) createOwner.current = null;
+      for (const [tokenId, operation] of owners) {
+        if (operation.session === managerSession) owners.delete(tokenId);
+      }
+      for (const [tokenId, operation] of latestOperations) {
+        if (operation.session === managerSession) latestOperations.delete(tokenId);
+      }
+      for (const [tokenId, pending] of flips) {
+        if (pending.owner.session === managerSession) flips.delete(tokenId);
+      }
+      rows.clear();
+      createdRef.current = null;
+    };
+  }, [managerSession]);
+  useLayoutEffect(() => {
     documentMountActive.current = true;
     return () => {
       documentMountActive.current = false;
@@ -228,34 +276,13 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     };
   }, [beginDocumentVisit, chooserVisible, retireDocumentVisit]);
 
-  useEffect(() => {
-    const mount = Symbol("token-manager");
-    const owners = tokenOwners.current;
-    const latestOperations = latestTokenOperations.current;
-    const flips = pendingFlips.current;
-    mounted.current = mount;
-    return () => {
-      if (mounted.current === mount) mounted.current = null;
-      if (createOwner.current?.mount === mount) createOwner.current = null;
-      for (const [tokenId, operation] of owners) {
-        if (operation.mount === mount) owners.delete(tokenId);
-      }
-      for (const [tokenId, operation] of latestOperations) {
-        if (operation.mount === mount) latestOperations.delete(tokenId);
-      }
-      for (const [tokenId, pending] of flips) {
-        if (pending.owner.mount === mount) flips.delete(tokenId);
-      }
-      createdRef.current = null;
-    };
-  }, []);
   const load = useCallback(async (ownerCurrent?: () => boolean) => {
-    const mount = mounted.current;
-    if (!mount || (ownerCurrent && !ownerCurrent())) return;
+    const session = activeManagerSession.current;
+    if (!session || !isManagerSessionCurrent(session) || (ownerCurrent && !ownerCurrent())) return;
     const seq = ++loadSeq.current;
     updatedRows.current.clear();
     setLoadError(null);
-    const current = () => mounted.current === mount && seq === loadSeq.current && (!ownerCurrent || ownerCurrent());
+    const current = () => isManagerSessionCurrent(session) && seq === loadSeq.current && (!ownerCurrent || ownerCurrent());
     try {
       const res = await api.tokens.list(true);
       if (!current()) return;
@@ -269,34 +296,37 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       setTokens(null);
       setLoadError({ message: apiErrorText(e, "Failed to load tokens"), permission: e instanceof ApiError && (e.status === 401 || e.status === 403) });
     }
-  }, []);
+  }, [isManagerSessionCurrent]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     if (embedded) return;
     const readHash = () => {
+      if (!isManagerSessionCurrent(managerSession)) return;
       if (createOwner.current || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace")) return;
       setDestination(window.location.hash === "#connect" ? "connect" : "tokens");
     };
     readHash();
     window.addEventListener("hashchange", readHash);
     return () => window.removeEventListener("hashchange", readHash);
-  }, [embedded]);
+  }, [embedded, isManagerSessionCurrent, managerSession]);
 
   const isCreateCurrent = (operation: CreateOperation) =>
-    mounted.current === operation.mount && createOwner.current === operation;
+    isManagerSessionCurrent(operation.session) && createOwner.current === operation;
   const isTokenCurrent = (operation: TokenOperation) =>
-    mounted.current === operation.mount && tokenOwners.current.get(operation.id) === operation;
+    isManagerSessionCurrent(operation.session) && tokenOwners.current.get(operation.id) === operation;
   const isLatestTokenOperation = (operation: TokenOperation) =>
-    mounted.current === operation.mount && latestTokenOperations.current.get(operation.id) === operation;
+    isManagerSessionCurrent(operation.session) && latestTokenOperations.current.get(operation.id) === operation;
   const hasSecretWork = () =>
-    createOwner.current !== null || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace");
+    isManagerSessionCurrent(managerSession)
+    && (createOwner.current !== null || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace"));
   const tokenOperationBlocked = (tokenId: string, kind: TokenMutationKind) =>
-    tokenOwners.current.has(tokenId)
+    !isManagerSessionCurrent(managerSession)
+    || tokenOwners.current.has(tokenId)
     || (kind === "replace" && (createdRef.current !== null || hasSecretWork()));
   const beginTokenOperation = (tokenId: string, kind: TokenMutationKind) => {
-    const mount = mounted.current;
-    if (!mount || tokenOperationBlocked(tokenId, kind)) return null;
-    const operation: TokenOperation = { mount, id: tokenId, kind };
+    const session = activeManagerSession.current;
+    if (!session || !isManagerSessionCurrent(session) || tokenOperationBlocked(tokenId, kind)) return null;
+    const operation: TokenOperation = { session, id: tokenId, kind };
     tokenOwners.current.set(tokenId, operation);
     latestTokenOperations.current.set(tokenId, operation);
     setPendingActions((current) => ({ ...current, [tokenId]: operation }));
@@ -322,11 +352,12 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   };
 
   const create = async () => {
+    const session = activeManagerSession.current;
+    if (!session || !isManagerSessionCurrent(session)) return;
     if (documentAuthorityUnavailable) return;
     if (restrictionError) { setError(restrictionError); return; }
-    const mount = mounted.current;
-    if (!mount || createOwner.current || createdRef.current || [...tokenOwners.current.values()].some((operation) => operation.kind !== "collaborators")) return;
-    const operation: CreateOperation = { mount, name, expires, scope, restrict, documentIds: [...documentIds] };
+    if (createOwner.current || createdRef.current || [...tokenOwners.current.values()].some((operation) => operation.kind !== "collaborators")) return;
+    const operation: CreateOperation = { session, name, expires, scope, restrict, documentIds: [...documentIds] };
     createOwner.current = operation;
     setCreatePending(operation);
     setError(null);
@@ -393,17 +424,20 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const setCollaboratorsMayAsk = async (t: ApiTokenDto, value: boolean) => {
     const operation = beginTokenOperation(t.id, "collaborators");
     if (!operation) return;
+    const pending = { value, owner: operation };
+    pendingFlips.current.set(t.id, pending);
     const flip = (nextValue: boolean) => setTokens((rows) =>
-      isLatestTokenOperation(operation) ? rows?.map((row) => row.id === t.id ? { ...row, collaboratorsMayAsk: nextValue } : row) ?? rows : rows);
+      isLatestTokenOperation(operation)
+        ? rows?.map((row) => row.id === t.id ? { ...row, collaboratorsMayAsk: nextValue } : row) ?? rows
+        : rows);
     flip(value);
     setSwitchErrors((current) => {
+      if (!isLatestTokenOperation(operation)) return current;
       if (!(t.id in current)) return current;
       const next = { ...current };
       delete next[t.id];
       return next;
     });
-    const pending = { value, owner: operation };
-    pendingFlips.current.set(t.id, pending);
     try {
       const res = await api.tokens.update(t.id, { collaboratorsMayAsk: value });
       if (isTokenCurrent(operation) && pendingFlips.current.get(t.id) === pending) {
@@ -413,7 +447,9 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     } catch (e) {
       if (!isTokenCurrent(operation) || pendingFlips.current.get(t.id) !== pending) return;
       flip(!value);
-      setSwitchErrors((current) => ({ ...current, [t.id]: `Could not update “${t.name}”: ${apiErrorText(e, "The change was not saved")}` }));
+      setSwitchErrors((current) => isLatestTokenOperation(operation)
+        ? { ...current, [t.id]: `Could not update “${t.name}”: ${apiErrorText(e, "The change was not saved")}` }
+        : current);
     } finally {
       if (isTokenCurrent(operation) && pendingFlips.current.get(t.id) === pending) {
         pendingFlips.current.delete(t.id);
