@@ -177,6 +177,74 @@ describe("ShareDialog collaborator list recovery", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("makes a late initial-list success inert at the synchronous Done boundary", async () => {
+    const pending = deferred<CollaboratorResponse>();
+    collaborators.mockReturnValueOnce(pending.promise);
+    const onOpenChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    const loading = screen.getByTestId("collaborator-list-loading");
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      pending.resolve(collaboratorResponse("Stale owner", "Stale collaborator"));
+      await pending.promise;
+    });
+    expect(collaborators).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("collaborator-list-loading")).toBe(loading);
+    expect(screen.queryByText("Stale owner")).toBeNull();
+    expect(screen.queryByText("Stale collaborator")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("makes a late initial-list failure and finalizer inert at the synchronous Done boundary", async () => {
+    const pending = deferred<CollaboratorResponse>();
+    collaborators.mockReturnValueOnce(pending.promise);
+    const onOpenChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    const loading = screen.getByTestId("collaborator-list-loading");
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+    await act(async () => {
+      pending.reject(new ApiError(503, "Closed list failed"));
+      await pending.promise.catch(() => undefined);
+    });
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(collaborators).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("collaborator-list-loading")).toBe(loading);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("keeps a reopened visit's load when a closed Retry succeeds late", async () => {
+    const oldRetry = deferred<CollaboratorResponse>();
+    const reopenedLoad = deferred<CollaboratorResponse>();
+    collaborators.mockRejectedValueOnce(new ApiError(503, "Initial list failed")).mockReturnValueOnce(oldRetry.promise).mockReturnValueOnce(reopenedLoad.promise);
+    const onOpenChange = vi.fn();
+    const view = render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    view.rerender(<ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      oldRetry.resolve(collaboratorResponse("Stale owner", "Stale collaborator"));
+      await oldRetry.promise;
+    });
+    expect(screen.getByTestId("collaborator-list-loading")).toBeInTheDocument();
+    expect(screen.queryByText("Stale owner")).toBeNull();
+    expect(screen.queryByText("Stale collaborator")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    reopenedLoad.resolve(collaboratorResponse("Current owner", "Current collaborator"));
+    expect(await screen.findByText("Current collaborator")).toBeInTheDocument();
+    expect(screen.getByText("Current owner")).toBeInTheDocument();
+    expect(collaborators).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps a reopened dialog's newer error when the closed instance succeeds late, then recovers current rows", async () => {
     const closedRequest = deferred<CollaboratorResponse>();
     const reopenedRequest = deferred<CollaboratorResponse>();
@@ -311,6 +379,177 @@ describe("ShareDialog · add a collaborator", () => {
     expect(screen.queryByText("Invalid request")).toBeNull();
     expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "someone.else", "editor");
     expect(screen.getByTestId("share-login")).toHaveValue("someone.else");
+  });
+
+  it("owns one trimmed login and role per activation, suppresses a duplicate, and retries a current failure", async () => {
+    const failed = deferred<unknown>();
+    const retry = deferred<unknown>();
+    const refresh = deferred<CollaboratorResponse>();
+    addCollaborator.mockReset().mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob")).mockReturnValueOnce(refresh.promise);
+    await openDialog();
+    const input = screen.getByTestId("share-login");
+    const role = screen.getByTestId("share-role");
+    const form = screen.getByTestId("share-add").closest("form") as HTMLFormElement;
+    fireEvent.change(input, { target: { value: "  charlie  " } });
+    fireEvent.change(role, { target: { value: "commenter" } });
+
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(addCollaborator).toHaveBeenCalledOnce();
+    expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "charlie", "commenter");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    await act(async () => {
+      failed.reject(new ApiError(422, "Charlie cannot be added"));
+      await failed.promise.catch(() => undefined);
+    });
+
+    expect(await screen.findByTestId("share-add-error")).toHaveTextContent("Charlie cannot be added");
+    expect(input).toHaveValue("  charlie  ");
+    expect(screen.getByTestId("share-add")).toBeEnabled();
+    fireEvent.submit(form);
+    expect(addCollaborator).toHaveBeenCalledTimes(2);
+    expect(addCollaborator).toHaveBeenNthCalledWith(2, DOC_ID, "charlie", "commenter");
+    expect(screen.queryByTestId("share-add-error")).toBeNull();
+
+    await act(async () => {
+      retry.resolve({});
+      await retry.promise;
+    });
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(2));
+    expect(input).toHaveValue("");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    fireEvent.change(input, { target: { value: "delta" } });
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    refresh.resolve(collaboratorRows("bob", "charlie"));
+    expect(await screen.findByText("@charlie")).toBeInTheDocument();
+    expect(screen.getByTestId("share-add")).toBeEnabled();
+    expect(screen.queryByTestId("share-add-error")).toBeNull();
+  });
+
+  it("makes a late Add success inert at the synchronous Done boundary", async () => {
+    const pending = deferred<unknown>();
+    addCollaborator.mockReset().mockReturnValueOnce(pending.promise);
+    const onOpenChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await screen.findByTestId("collaborator-row");
+    const input = screen.getByTestId("share-login");
+    fireEvent.change(input, { target: { value: "charlie" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      pending.resolve({});
+      await pending.promise;
+    });
+    expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "charlie", "editor");
+    expect(collaborators).toHaveBeenCalledOnce();
+    expect(input).toHaveValue("charlie");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    expect(screen.getByText("@bob")).toBeInTheDocument();
+    expect(screen.queryByText("@charlie")).toBeNull();
+    expect(screen.queryByTestId("share-add-error")).toBeNull();
+  });
+
+  it("makes a late Add failure and finalizer inert at the synchronous Done boundary", async () => {
+    const pending = deferred<unknown>();
+    addCollaborator.mockReset().mockReturnValueOnce(pending.promise);
+    const onOpenChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await screen.findByTestId("collaborator-row");
+    const input = screen.getByTestId("share-login");
+    fireEvent.change(input, { target: { value: "charlie" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+
+    await act(async () => {
+      pending.reject(new ApiError(503, "Closed Add failed"));
+      await pending.promise.catch(() => undefined);
+    });
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(collaborators).toHaveBeenCalledOnce();
+    expect(input).toHaveValue("charlie");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    expect(screen.queryByTestId("share-add-error")).toBeNull();
+    expect(screen.getByText("@bob")).toBeInTheDocument();
+  });
+
+  it("keeps a reopened visit's Add and list owners when old work settles", async () => {
+    const oldList = deferred<CollaboratorResponse>();
+    const reopenedList = deferred<CollaboratorResponse>();
+    const refreshedList = deferred<CollaboratorResponse>();
+    const oldAdd = deferred<unknown>();
+    const currentAdd = deferred<unknown>();
+    collaborators.mockReset().mockReturnValueOnce(oldList.promise).mockReturnValueOnce(reopenedList.promise).mockReturnValueOnce(refreshedList.promise);
+    addCollaborator.mockReset().mockReturnValueOnce(oldAdd.promise).mockReturnValueOnce(currentAdd.promise);
+    const onOpenChange = vi.fn();
+    const view = render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "old-user" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    view.rerender(<ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(2));
+    reopenedList.resolve(collaboratorRows("bob"));
+    expect(await screen.findByText("@bob")).toBeInTheDocument();
+
+    const input = screen.getByTestId("share-login");
+    fireEvent.change(input, { target: { value: "current-user" } });
+    fireEvent.change(screen.getByTestId("share-role"), { target: { value: "viewer" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    expect(addCollaborator).toHaveBeenNthCalledWith(1, DOC_ID, "old-user", "editor");
+    expect(addCollaborator).toHaveBeenNthCalledWith(2, DOC_ID, "current-user", "viewer");
+
+    await act(async () => {
+      oldAdd.resolve({});
+      oldList.reject(new ApiError(503, "Old list failed"));
+      await Promise.allSettled([oldAdd.promise, oldList.promise]);
+    });
+    expect(collaborators).toHaveBeenCalledTimes(2);
+    expect(input).toHaveValue("current-user");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    expect(screen.getByText("@bob")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await act(async () => {
+      currentAdd.resolve({});
+      await currentAdd.promise;
+    });
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(3));
+    expect(input).toHaveValue("");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    refreshedList.resolve(collaboratorRows("bob", "current-user"));
+    expect(await screen.findByText("@current-user")).toBeInTheDocument();
+    expect(collaborators).toHaveBeenCalledTimes(3);
+  });
+
+  it("handles late Add resolution and list rejection after unmount without effects or unhandled rejections", async () => {
+    const list = deferred<CollaboratorResponse>();
+    const add = deferred<unknown>();
+    collaborators.mockReset().mockReturnValueOnce(list.promise);
+    addCollaborator.mockReset().mockReturnValueOnce(add.promise);
+    const view = render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />);
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "charlie" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    const unhandled = vi.fn();
+    const onUnhandled = (reason: unknown) => unhandled(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      view.unmount();
+      await act(async () => {
+        add.resolve({});
+        list.reject(new ApiError(503, "Late list failed"));
+        await Promise.allSettled([add.promise, list.promise]);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(addCollaborator).toHaveBeenCalledOnce();
+      expect(collaborators).toHaveBeenCalledOnce();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
 
