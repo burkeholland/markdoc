@@ -1726,24 +1726,113 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
   );
 }
 
-/** Review cards for the document; re-fetched when a `review.create` shows up in the live activity (cheap: reviews are rare). */
-function useReviews(session: CollabSession): ReviewDto[] {
-  const [reviews, setReviews] = useState<ReviewDto[]>([]);
+interface ReviewLoadState {
+  documentId: string;
+  reviews: ReviewDto[];
+  loaded: boolean;
+  loading: boolean;
+  error: boolean;
+}
+
+interface ReviewLoadCoordinator {
+  mounted: boolean;
+  initialized: boolean;
+  documentId: string;
+  threadCount: number;
+  version: number;
+  request: { documentId: string; version: number } | null;
+}
+
+function initialReviewLoadState(documentId: string): ReviewLoadState {
+  return { documentId, reviews: [], loaded: false, loading: true, error: false };
+}
+
+/** Review cards for the document; thread-count changes coalesce behind one stale-safe request. */
+function useReviews(session: CollabSession): ReviewLoadState & { retry: () => void } {
   const threadCount = useSessionValue(session, (s) => s.comments.ymap.size);
-  useEffect(() => {
-    let cancelled = false;
-    api.documents
-      .reviews(session.docId)
-      .then((r) => {
-        if (!cancelled) setReviews(r.reviews);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
+  const [state, setState] = useState<ReviewLoadState>(() => initialReviewLoadState(session.docId));
+  const coordinator = useRef<ReviewLoadCoordinator>({
+    mounted: true,
+    initialized: false,
+    documentId: session.docId,
+    threadCount,
+    version: 0,
+    request: null,
+  });
+
+  const load = useCallback(function loadReviews() {
+    const current = coordinator.current;
+    if (!current.mounted || current.request) return;
+
+    const request = { documentId: current.documentId, version: current.version };
+    current.request = request;
+    setState((previous) =>
+      previous.documentId === request.documentId
+        ? { ...previous, loading: true }
+        : initialReviewLoadState(request.documentId),
+    );
+
+    const settle = (reviews: ReviewDto[] | null) => {
+      const latest = coordinator.current;
+      if (latest.request !== request) return;
+      latest.request = null;
+      if (!latest.mounted) return;
+      if (request.documentId !== latest.documentId || request.version !== latest.version) {
+        loadReviews();
+        return;
+      }
+      setState((previous) => {
+        if (previous.documentId !== request.documentId) return previous;
+        if (reviews === null) return { ...previous, loading: false, error: true };
+        return { ...previous, reviews, loaded: true, loading: false, error: false };
+      });
     };
-    // A review adds threads to the shared doc; a changed thread count is the cue to re-fetch.
-  }, [session.docId, threadCount]);
-  return reviews;
+
+    void api.documents.reviews(request.documentId).then(
+      (response) => settle(response.reviews),
+      () => settle(null),
+    );
+  }, []);
+
+  useEffect(() => {
+    const current = coordinator.current;
+    current.mounted = true;
+    return () => {
+      current.mounted = false;
+      current.version += 1;
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const current = coordinator.current;
+    current.mounted = true;
+    if (!current.initialized || current.documentId !== session.docId) {
+      current.initialized = true;
+      current.documentId = session.docId;
+      current.threadCount = threadCount;
+      current.version += 1;
+      setState(initialReviewLoadState(session.docId));
+      load();
+    }
+  }, [load, session.docId, threadCount]);
+
+  useEffect(() => {
+    const current = coordinator.current;
+    if (!current.mounted || current.documentId !== session.docId || current.threadCount === threadCount) return;
+    current.threadCount = threadCount;
+    current.version += 1;
+    load();
+  }, [load, session.docId, threadCount]);
+
+  const retry = useCallback(() => {
+    const current = coordinator.current;
+    if (!current.mounted || current.documentId !== session.docId || current.request) return;
+    current.version += 1;
+    load();
+  }, [load, session.docId]);
+
+  const visibleState = state.documentId === session.docId ? state : initialReviewLoadState(session.docId);
+  return { ...visibleState, retry };
 }
 
 export function CommentsPanel({
@@ -1853,7 +1942,7 @@ export function CommentsPanel({
     },
     [session, postAgentRequest],
   );
-  const reviews = useReviews(session);
+  const { reviews, loaded: reviewsLoaded, loading: reviewsLoading, error: reviewsError, retry: retryReviews } = useReviews(session);
   const unreadRefs = useUnreadRefs(session.docId);
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const open = threads.filter((t) => !t.resolved);
@@ -2028,6 +2117,21 @@ export function CommentsPanel({
         )}
       </div>
       <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
+        {tab !== "suggestions" && reviewsError && (
+          <div className="flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="reviews-error">
+            <span className="min-w-0 flex-1">{reviewsLoaded ? "Review details may be out of date." : "Couldn’t load review details."}</span>
+            <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5" onClick={retryReviews} disabled={reviewsLoading} aria-busy={reviewsLoading || undefined}>
+              {reviewsLoading && <Loader2 size={13} className="animate-spin" aria-hidden />}
+              {reviewsLoading ? "Retrying…" : "Retry"}
+            </button>
+          </div>
+        )}
+        {tab !== "suggestions" && !reviewsError && reviewsLoading && (
+          <div className="flex items-center gap-2 rounded-lg bg-surface px-3 py-2 text-xs text-ink-3 ring-1 ring-line" role="status" data-testid="reviews-loading">
+            <Loader2 size={13} className="animate-spin" aria-hidden />
+            {reviewsLoaded ? "Refreshing review details…" : "Loading review details…"}
+          </div>
+        )}
         {tab === "open" && openReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {openReviews.map((r) => (
@@ -2072,7 +2176,7 @@ export function CommentsPanel({
           </div>
         )}
         {tab === "open" &&
-          (open.length === 0 && !pending ? (
+          (open.length === 0 && !pending && reviewsLoaded ? (
             <EmptyState icon={<MessageSquare size={28} />} title="No open comments">
               {suggestionCount > 0 && (
                 <span className="mb-3 flex flex-wrap items-center justify-center gap-1 text-ink-3" data-testid="comments-empty-suggestions">
@@ -2118,7 +2222,7 @@ export function CommentsPanel({
           </div>
         )}
         {tab === "resolved" &&
-          (resolved.length === 0 && resolvedReviews.length === 0 ? (
+          (resolved.length === 0 && resolvedReviews.length === 0 && reviewsLoaded ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
             resolved.map((t) => (

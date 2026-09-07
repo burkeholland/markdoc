@@ -64,10 +64,10 @@ import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps }
 type FakeProvider = { opts: { onAwarenessChange?: (e: { states: unknown[] }) => void } };
 const lastProvider = () => (HocuspocusProvider as unknown as { last: FakeProvider | null }).last!;
 
-function reviewDto(id: string, threadIds: string[]): ReviewDto {
+function reviewDto(id: string, threadIds: string[], documentId = "doc"): ReviewDto {
   return {
     id,
-    documentId: "doc",
+    documentId,
     authorId: "alice",
     authorName: "Copilot",
     collabAuthorId: "agent:alice:Copilot",
@@ -77,6 +77,25 @@ function reviewDto(id: string, threadIds: string[]): ReviewDto {
     threadIds,
     createdAt: new Date().toISOString(),
   };
+}
+
+type ReviewsResponse = Awaited<ReturnType<typeof api.documents.reviews>>;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+function reviewSession(docId: string) {
+  const user = makeCollabUser("alice", "Alice");
+  const session = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
+  session.keepAlive();
+  return { session, user };
 }
 
 describe("CommentsPanel", () => {
@@ -316,6 +335,211 @@ describe("CommentsPanel", () => {
     editorControl.focus();
     view.rerender(<Harness open focusOnMount />);
     await waitFor(() => expect(screen.getByRole("tab", { name: "Open" })).toHaveFocus());
+  });
+
+  describe("review metadata loading", () => {
+    it("keeps live comments visible behind one neutral initial status until a successful empty result", async () => {
+      const initial = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset().mockReturnValueOnce(initial.promise);
+      const created = reviewSession("reviews-loading");
+      session = created.session;
+      session.ytext.insert(0, "A live comment.");
+      session.comments.add({ from: 0, to: 1, body: "Still available.", author: created.user });
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+
+      expect(screen.getByTestId("reviews-loading")).toHaveTextContent("Loading review details…");
+      expect(screen.getByTestId("comment-thread")).toHaveTextContent("Still available.");
+      expect(screen.queryByText("No open comments")).toBeNull();
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      expect(screen.getAllByTestId("reviews-loading")).toHaveLength(1);
+      expect(screen.queryByText("Nothing resolved yet")).toBeNull();
+
+      await act(async () => {
+        initial.resolve({ reviews: [] });
+        await initial.promise;
+      });
+
+      expect(await screen.findByText("Nothing resolved yet")).toBeInTheDocument();
+      expect(screen.queryByTestId("reviews-loading")).toBeNull();
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+      expect(api.documents.reviews).toHaveBeenCalledWith("reviews-loading");
+    });
+
+    it("retries a first-load failure once and guards repeated activation until genuine empty success", async () => {
+      const retry = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews)
+        .mockReset()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockReturnValueOnce(retry.promise);
+      session = reviewSession("reviews-retry").session;
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Couldn’t load review details.");
+      expect(within(alert).getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+      expect(screen.queryByText("No open comments")).toBeNull();
+
+      const retryButton = within(alert).getByRole("button", { name: "Retry" });
+      fireEvent.click(retryButton);
+      fireEvent.click(retryButton);
+
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+      expect(within(alert).getByRole("button", { name: "Retrying…" })).toBeDisabled();
+      await act(async () => {
+        retry.resolve({ reviews: [] });
+        await retry.promise;
+      });
+
+      expect(await screen.findByText("No open comments")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(api.documents.reviews).toHaveBeenNthCalledWith(2, "reviews-retry");
+    });
+
+    it("keeps cached review cards and live comments visible when a thread-count refresh fails", async () => {
+      const refresh = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset();
+      const created = reviewSession("reviews-cached");
+      session = created.session;
+      session.ytext.insert(0, "Review this text.");
+      const reviewThread = session.comments.add({ from: 0, to: 6, body: "Review finding.", author: created.user });
+      const cached = reviewDto("cached", [reviewThread], session.docId);
+      vi.mocked(api.documents.reviews)
+        .mockResolvedValueOnce({ reviews: [cached] })
+        .mockReturnValueOnce(refresh.promise);
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      expect(await screen.findByText("Review cached.")).toBeInTheDocument();
+
+      act(() => {
+        session!.comments.add({ from: 7, to: 11, body: "A live follow-up.", author: created.user });
+      });
+
+      expect(await screen.findByTestId("reviews-loading")).toHaveTextContent("Refreshing review details…");
+      expect(screen.getByText("Review cached.")).toBeInTheDocument();
+      await act(async () => {
+        refresh.reject(new Error("refresh unavailable"));
+        try {
+          await refresh.promise;
+        } catch {}
+      });
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Review details may be out of date.");
+      expect(screen.getByText("Review cached.")).toBeInTheDocument();
+      expect(screen.getByText("Review finding.")).toBeInTheDocument();
+      expect(screen.getByText("A live follow-up.")).toBeInTheDocument();
+      expect(screen.getAllByTestId("review-card")).toHaveLength(1);
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+    });
+
+    it("coalesces a burst of thread-count changes during pending work into one current refresh", async () => {
+      const stale = deferred<ReviewsResponse>();
+      const current = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset().mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+      const created = reviewSession("reviews-coalesced");
+      session = created.session;
+      session.ytext.insert(0, "One two.");
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      act(() => {
+        session!.comments.add({ from: 0, to: 3, body: "First.", author: created.user });
+      });
+      await act(async () => {});
+      act(() => {
+        session!.comments.add({ from: 4, to: 7, body: "Second.", author: created.user });
+      });
+      await act(async () => {});
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        stale.resolve({ reviews: [reviewDto("stale", [], session!.docId)] });
+        await stale.promise;
+      });
+
+      await waitFor(() => expect(api.documents.reviews).toHaveBeenCalledTimes(2));
+      expect(screen.getByTestId("reviews-loading")).toHaveTextContent("Loading review details…");
+      expect(screen.queryByText("Review stale.")).toBeNull();
+
+      await act(async () => {
+        current.resolve({ reviews: [] });
+        await current.promise;
+      });
+
+      expect(await screen.findByText("Nothing resolved yet")).toBeInTheDocument();
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(["resolve", "reject"] as const)("isolates an old document’s stale Retry %s before loading the current document", async (outcome) => {
+      const oldRequest = deferred<ReviewsResponse>();
+      const newRequest = deferred<ReviewsResponse>();
+      let oldCalls = 0;
+      vi.mocked(api.documents.reviews).mockReset().mockImplementation((docId) => {
+        if (docId !== "reviews-old") return newRequest.promise;
+        oldCalls += 1;
+        return oldCalls === 1 ? Promise.reject(new Error("old initial failure")) : oldRequest.promise;
+      });
+      const old = reviewSession("reviews-old");
+      const next = reviewSession("reviews-new");
+      session = next.session;
+
+      const rendered = render(<CommentsPanel session={old.session} onClose={() => {}} onReveal={() => {}} />);
+      const oldAlert = await screen.findByRole("alert");
+      fireEvent.click(within(oldAlert).getByRole("button", { name: "Retry" }));
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+      rendered.rerender(<CommentsPanel session={next.session} onClose={() => {}} onReveal={() => {}} />);
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("reviews-loading")).toBeInTheDocument();
+
+      await act(async () => {
+        if (outcome === "resolve") oldRequest.resolve({ reviews: [reviewDto("old", [], old.session.docId)] });
+        else oldRequest.reject(new Error("old failure"));
+        try {
+          await oldRequest.promise;
+        } catch {}
+      });
+
+      await waitFor(() => expect(api.documents.reviews).toHaveBeenCalledTimes(3));
+      expect(api.documents.reviews).toHaveBeenNthCalledWith(3, "reviews-new");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByText("Review old.")).toBeNull();
+
+      await act(async () => {
+        newRequest.resolve({ reviews: [reviewDto("new", [], next.session.docId)] });
+        await newRequest.promise;
+      });
+
+      expect(await screen.findByText("Review new.")).toBeInTheDocument();
+      expect(screen.queryByText("Review old.")).toBeNull();
+      old.session.destroy();
+    });
+
+    it.each(["resolve", "reject"] as const)("drops a queued refresh and late %s settlement after unmount", async (outcome) => {
+      const pending = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset().mockReturnValue(pending.promise);
+      const created = reviewSession(`reviews-unmount-${outcome}`);
+      session = created.session;
+      const rendered = render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+      act(() => {
+        session!.comments.add({ from: 0, to: 0, body: "Queue a refresh.", author: created.user });
+      });
+      await act(async () => {});
+
+      rendered.unmount();
+      await act(async () => {
+        if (outcome === "resolve") pending.resolve({ reviews: [] });
+        else pending.reject(new Error("late failure"));
+        try {
+          await pending.promise;
+        } catch {}
+      });
+
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+    });
   });
 
   it("keeps a review in Open until every suggestion is decided and every thread resolved; Resolve all clears it", async () => {
@@ -1205,7 +1429,7 @@ describe("CommentsPanel", () => {
     it("the empty state's 'Comment and mention an agent' seeds `@`, opens the picker at once and posts a request with selection: null", async () => {
       mount();
       expect(screen.queryByText(/Ask an agent/)).toBeNull();
-      fireEvent.click(screen.getByTestId("comments-empty-agent"));
+      fireEvent.click(await screen.findByTestId("comments-empty-agent"));
       const box = await composer();
       await waitFor(() => expect(box).toHaveFocus());
       expect(box.value).toBe("@");
@@ -1352,14 +1576,14 @@ describe("CommentsPanel", () => {
       expect(box.value).toBe("@");
     });
 
-    it("a viewer sees neither the header button nor the empty-state line", () => {
+    it("a viewer sees neither the header button nor the empty-state line", async () => {
       const user = makeCollabUser("vic", "Vic", null, "vic");
       session = new CollabSession({ docId: "doc", user, role: "viewer", getToken: async () => "token", autoConnect: false });
       session.keepAlive();
       render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
       expect(screen.queryByTestId("comment-document")).toBeNull();
       expect(screen.queryByTestId("comments-empty-agent")).toBeNull();
-      expect(screen.getByText("No open comments")).toBeInTheDocument();
+      expect(await screen.findByText("No open comments")).toBeInTheDocument();
     });
   });
 });
