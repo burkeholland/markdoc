@@ -48,6 +48,23 @@ export interface ImportItem {
   title?: string;
   warnings: string[];
   error?: string;
+  /** Internal action shared by the failed rows in the current in-memory batch. */
+  retry?: () => void;
+}
+
+function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocument[]; failed: FailedImport[] } {
+  return {
+    documents: items.flatMap((item) =>
+      item.status === "done" && item.id
+        ? [{ id: item.id, title: item.title ?? item.name, warnings: item.warnings }]
+        : [],
+    ),
+    failed: items.flatMap((item, index) =>
+      item.status === "error"
+        ? [{ index, name: item.name, error: item.error ?? "Import failed" }]
+        : [],
+    ),
+  };
 }
 
 export interface ImportDialogProps {
@@ -68,6 +85,7 @@ function StatusIcon({ status }: { status: ImportItemStatus }) {
 /** Per-file progress and "Open" links for an import batch. */
 export function ImportDialog({ open, onOpenChange, items, ignored, footer }: ImportDialogProps) {
   const busy = items.some((i) => i.status === "uploading");
+  const retry = items.find((i) => i.retry)?.retry;
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent title="Import files" description="Each file becomes a new document. Images dropped with a Markdown file are attached to it.">
@@ -105,6 +123,11 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
               {ignored.length > 4 ? "…" : ""}
             </p>
           )}
+          {retry && (
+            <button type="button" className="btn btn-sm btn-outline mt-4" disabled={busy} onClick={retry}>
+              Retry failed
+            </button>
+          )}
           {footer}
         </div>
       </DialogContent>
@@ -114,8 +137,8 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
 
 export interface UseFileImportOptions {
   /**
-   * Called once every file finished; `documents` holds the created documents (empty on failure) and
-   * `failed` the files the server could not import (the request itself failing counts as none created).
+   * Called after each upload attempt. After a retry, the arguments describe the current result for the
+   * whole original batch so callers retain accurate partial-success accounting.
    */
   onDone?: (documents: ImportedDocument[], failed: FailedImport[]) => void;
   onError?: (message: string) => void;
@@ -131,46 +154,169 @@ export function useFileImport(options: UseFileImportOptions = {}) {
   const [open, setOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const itemsRef = useRef<ImportItem[]>([]);
+  const generationRef = useRef(0);
+  const activeUploadsRef = useRef(0);
+  const retryPendingRef = useRef(false);
+  const retryOwnershipRef = useRef<{
+    generation: number;
+    files: Map<number, File>;
+    images: File[];
+  } | null>(null);
   const optionsRef = useRef(options);
   useEffect(() => {
     optionsRef.current = options;
   }, [options]);
 
+  const replaceItems = useCallback((next: ImportItem[]) => {
+    itemsRef.current = next;
+    setItems(next);
+  }, []);
+
+  const setDialogOpen = useCallback((next: boolean) => {
+    if (!next) {
+      if (activeUploadsRef.current > 0) return;
+      retryOwnershipRef.current = null;
+    }
+    setOpen(next);
+  }, []);
+
+  const retryFailed = useCallback(async () => {
+    const ownership = retryOwnershipRef.current;
+    if (!ownership || retryPendingRef.current) return;
+
+    const entries = Array.from(ownership.files.entries()).sort(([a], [b]) => a - b);
+    if (entries.length === 0) return;
+
+    retryPendingRef.current = true;
+    activeUploadsRef.current++;
+    const rowIndexes = entries.map(([index]) => index);
+    const documents = entries.map(([, file]) => file);
+    replaceItems(
+      itemsRef.current.map((item, index) =>
+        ownership.files.has(index) ? { ...item, status: "uploading", warnings: [], error: undefined } : item,
+      ),
+    );
+
+    try {
+      const { documents: created, failed } = await uploadImportBatch(documents, ownership.images);
+      if (retryOwnershipRef.current !== ownership || generationRef.current !== ownership.generation) return;
+
+      const failedAt = new Map(failed.map((failure) => [failure.index, failure.error]));
+      const retained = new Map<number, File>();
+      const outcomes = new Map<number, ImportItem>();
+      let nextCreated = 0;
+      for (let attemptIndex = 0; attemptIndex < rowIndexes.length; attemptIndex++) {
+        const rowIndex = rowIndexes[attemptIndex];
+        const file = documents[attemptIndex];
+        const retry = itemsRef.current[rowIndex]?.retry;
+        const error = failedAt.get(attemptIndex);
+        if (error !== undefined) {
+          retained.set(rowIndex, file);
+          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error, retry });
+          continue;
+        }
+        const document = created[nextCreated++];
+        if (document) {
+          outcomes.set(rowIndex, {
+            name: file.name,
+            status: "done",
+            id: document.id,
+            title: document.title,
+            warnings: document.warnings,
+          });
+        } else {
+          retained.set(rowIndex, file);
+          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error: "Import failed", retry });
+        }
+      }
+
+      const nextItems = itemsRef.current.map((item, index) => outcomes.get(index) ?? item);
+      replaceItems(nextItems);
+      retryOwnershipRef.current = retained.size
+        ? { generation: ownership.generation, files: retained, images: ownership.images }
+        : null;
+      const result = summarizeImportItems(nextItems);
+      optionsRef.current.onDone?.(result.documents, result.failed);
+    } catch (err) {
+      if (retryOwnershipRef.current !== ownership || generationRef.current !== ownership.generation) return;
+      const message = apiErrorText(err, "Import failed");
+      const nextItems = itemsRef.current.map((item, index) =>
+        ownership.files.has(index) ? { ...item, status: "error" as const, warnings: [], error: message } : item,
+      );
+      replaceItems(nextItems);
+      optionsRef.current.onError?.(message);
+      const result = summarizeImportItems(nextItems);
+      optionsRef.current.onDone?.(result.documents, result.failed);
+    } finally {
+      retryPendingRef.current = false;
+      activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+    }
+  }, [replaceItems]);
+
   const start = useCallback(async (files: Iterable<File>) => {
+    const generation = ++generationRef.current;
+    retryOwnershipRef.current = null;
     const { documents, images, ignored: skipped } = splitImportFiles(files);
     setIgnored(skipped.map((f) => f.name));
     if (documents.length === 0) {
       const msg = images.length ? "Drop a Markdown, text or HTML file together with the images." : NOTHING_IMPORTABLE_MESSAGE;
       optionsRef.current.onError?.(msg);
-      setItems([]);
+      replaceItems([]);
       setOpen(skipped.length > 0 || images.length > 0);
       return;
     }
-    setItems(documents.map((f) => ({ name: f.name, status: "uploading", warnings: [] })));
+    replaceItems(documents.map((f) => ({ name: f.name, status: "uploading", warnings: [] })));
     setOpen(true);
+    activeUploadsRef.current++;
+    retryOwnershipRef.current = {
+      generation,
+      files: new Map(documents.map((file, index) => [index, file])),
+      images,
+    };
     try {
       const { documents: created, failed } = await uploadImportBatch(documents, images);
+      if (generationRef.current !== generation) return;
       // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
       const failedAt = new Map(failed.map((f) => [f.index, f.error]));
+      const retained = new Map<number, File>();
       let next = 0;
-      setItems(
+      replaceItems(
         documents.map((f, i): ImportItem => {
           const error = failedAt.get(i);
-          if (error !== undefined) return { name: f.name, status: "error", warnings: [], error };
+          if (error !== undefined) {
+            retained.set(i, f);
+            return { name: f.name, status: "error", warnings: [], error, retry: retryFailed };
+          }
           const doc = created[next++];
-          return doc ? { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings } : { name: f.name, status: "error", warnings: [] };
+          if (doc) return { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings };
+          retained.set(i, f);
+          return { name: f.name, status: "error", warnings: [], error: "Import failed", retry: retryFailed };
         }),
       );
+      retryOwnershipRef.current = retained.size ? { generation, files: retained, images } : null;
       optionsRef.current.onDone?.(created, failed);
     } catch (err) {
+      if (generationRef.current !== generation) return;
       const message = apiErrorText(err, "Import failed");
-      setItems(documents.map((f) => ({ name: f.name, status: "error", warnings: [], error: message })));
+      replaceItems(documents.map((f) => ({ name: f.name, status: "error", warnings: [], error: message, retry: retryFailed })));
       optionsRef.current.onError?.(message);
       optionsRef.current.onDone?.([], []);
+    } finally {
+      activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
     }
-  }, []);
+  }, [replaceItems, retryFailed]);
 
   const pick = useCallback(() => inputRef.current?.click(), []);
+
+  useEffect(
+    () => () => {
+      generationRef.current++;
+      retryOwnershipRef.current = null;
+      itemsRef.current = [];
+    },
+    [],
+  );
 
   // Whole-window drag tracking: show the overlay while files are dragged anywhere over the page.
   useEffect(() => {
@@ -228,7 +374,7 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     />
   );
 
-  return { items, ignored, open, setOpen, dragging, start, pick, input };
+  return { items, ignored, open, setOpen: setDialogOpen, dragging, start, pick, input };
 }
 
 /** Full-page overlay shown while files are dragged over the dashboard. */
