@@ -44,7 +44,8 @@ function safeAreaInsets(): Insets {
 }
 
 interface BubbleGeometry {
-  view: EditorView;
+  owner: BubbleOwner;
+  authority: BubbleActionAuthority;
   layer: HTMLDivElement;
   position: SelectionBubblePosition;
   placement: NonNullable<ReturnType<typeof selectionBubbleLayerPosition>>;
@@ -57,6 +58,15 @@ interface BubbleOwner {
   session: CollabSession;
   schedule: () => void;
   dispose: () => void;
+}
+
+interface BubbleActionAuthority {
+  owner: BubbleOwner;
+  view: EditorView;
+  session: CollabSession;
+  actions: EditorActions;
+  onLink: () => void;
+  onComment: () => void;
 }
 
 function BubbleButton({
@@ -109,13 +119,42 @@ export function SelectionBubble({
   onLink: () => void;
 }) {
   const [geometry, setGeometry] = useState<BubbleGeometry | null>(null);
+  const publicationRef = useRef<BubbleGeometry | null>(null);
   const ownerRef = useRef<BubbleOwner | null>(null);
+  const authorityRef = useRef<BubbleActionAuthority | null>(null);
+
+  const retirePublication = (publication: BubbleGeometry) => {
+    if (publicationRef.current === publication) publicationRef.current = null;
+    setGeometry((current) => current === publication ? null : current);
+  };
+  const retireAuthority = (authority: BubbleActionAuthority) => {
+    if (authorityRef.current !== authority) return;
+    authorityRef.current = null;
+    const publication = publicationRef.current;
+    if (publication?.authority === authority) retirePublication(publication);
+  };
 
   // Resolve ref.current on every commit: the pane can be replaced without replacing its ref.
   useLayoutEffect(() => {
     const scroller = containerRef.current;
     const previous = ownerRef.current;
-    if (previous?.view === view && previous?.editor === view?.dom && previous?.scroller === scroller && previous?.session === session) return;
+    if (previous?.view === view && previous?.editor === view?.dom && previous?.scroller === scroller && previous?.session === session) {
+      const previousAuthority = authorityRef.current;
+      if (
+        previousAuthority?.owner === previous &&
+        previousAuthority.view === view &&
+        previousAuthority.session === session &&
+        previousAuthority.actions === actions &&
+        previousAuthority.onLink === onLink &&
+        previousAuthority.onComment === onComment
+      ) return;
+      if (previousAuthority) retireAuthority(previousAuthority);
+      authorityRef.current = { owner: previous, view, session, actions, onLink, onComment };
+      previous.schedule();
+      return;
+    }
+    const previousAuthority = authorityRef.current;
+    if (previousAuthority) retireAuthority(previousAuthority);
     previous?.dispose();
     ownerRef.current = null;
     if (!view || !scroller) {
@@ -149,10 +188,16 @@ export function SelectionBubble({
     const hide = () => {
       if (disposed) return;
       if (topLayer && layer.matches(":popover-open")) layer.hidePopover();
-      setGeometry(null);
+      const publication = publicationRef.current;
+      if (publication?.owner === owner) retirePublication(publication);
     };
     const compute = () => {
       if (disposed) return;
+      const authority = authorityRef.current;
+      if (ownerRef.current !== owner || authority?.owner !== owner) {
+        hide();
+        return;
+      }
       if (view.isDestroyed || !editor.isConnected || !scroller.isConnected || containerRef.current !== scroller) {
         hide();
         return;
@@ -263,7 +308,10 @@ export function SelectionBubble({
         }
         // Clip only paint beyond the allowed pane/viewport intersection (including shadow tails).
         layer.style.clipPath = `inset(${(bounds.top - layerBox.top) * placement.scaleY}px ${(layerBox.left + layerBox.width - bounds.left - bounds.width) * placement.scaleX}px ${(layerBox.top + layerBox.height - bounds.top - bounds.height) * placement.scaleY}px ${(bounds.left - layerBox.left) * placement.scaleX}px)`;
-        setGeometry({ view, layer, position, placement });
+        if (ownerRef.current !== owner || authorityRef.current !== authority) return;
+        const publication = { owner, authority, layer, position, placement };
+        publicationRef.current = publication;
+        setGeometry(publication);
       } catch (error) {
         // A replaced editor DOM can invalidate a range between selection and layout updates.
         if (error instanceof RangeError || (error instanceof DOMException && ["IndexSizeError", "InvalidStateError"].includes(error.name))) {
@@ -358,11 +406,15 @@ export function SelectionBubble({
       removeFullscreenWidget();
       layer.remove();
     };
-    ownerRef.current = { view, editor, scroller, session, schedule, dispose };
-    schedule();
+    const owner = { view, editor, scroller, session, schedule, dispose };
+    ownerRef.current = owner;
+    authorityRef.current = { owner, view, session, actions, onLink, onComment };
+    owner.schedule();
   });
 
   useLayoutEffect(() => () => {
+    authorityRef.current = null;
+    publicationRef.current = null;
     ownerRef.current?.dispose();
     ownerRef.current = null;
   }, []);
@@ -370,9 +422,34 @@ export function SelectionBubble({
   // Format changes carry every editor selection update into the shared geometry scheduler.
   useLayoutEffect(() => ownerRef.current?.schedule(), [format]);
 
-  if (!geometry || geometry.view !== view) return null;
+  if (
+    !geometry ||
+    geometry.owner.view !== view ||
+    geometry.owner.session !== session ||
+    geometry.authority.owner !== geometry.owner ||
+    geometry.authority.view !== view ||
+    geometry.authority.session !== session ||
+    geometry.authority.actions !== actions ||
+    geometry.authority.onLink !== onLink ||
+    geometry.authority.onComment !== onComment
+  ) return null;
+  const { owner, authority } = geometry;
   const { position: pos, placement, layer } = geometry;
-  const canEdit = session.canEdit;
+  const hasActionAuthority = () =>
+    publicationRef.current === geometry &&
+    ownerRef.current === owner &&
+    authorityRef.current === authority;
+  const invokeEdit = (action: () => void) => {
+    if (!hasActionAuthority()) return;
+    if (!authority.session.canEdit) return;
+    action();
+  };
+  const invokeComment = () => {
+    if (!hasActionAuthority()) return;
+    if (!authority.session.canComment) return;
+    authority.onComment();
+  };
+  const canEdit = authority.session.canEdit;
 
   return createPortal(
     <div
@@ -388,23 +465,23 @@ export function SelectionBubble({
         aria-label="Selection"
         aria-orientation="horizontal"
       >
-        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} onClick={() => actions.toggleMark("strong")}>
+        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("strong"))}>
           <Bold size={16} strokeWidth={2.6} />
         </BubbleButton>
-        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} onClick={() => actions.toggleMark("em")}>
+        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("em"))}>
           <Italic size={16} />
         </BubbleButton>
-        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} onClick={() => actions.toggleMark("strike")}>
+        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("strike"))}>
           <Strikethrough size={16} />
         </BubbleButton>
-        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} onClick={() => actions.toggleMark("code")}>
+        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} onClick={() => invokeEdit(() => authority.actions.toggleMark("code"))}>
           <Code size={16} />
         </BubbleButton>
-        <BubbleButton label="Link" active={format.link} disabled={!canEdit} onClick={onLink}>
+        <BubbleButton label="Link" active={format.link} disabled={!canEdit} onClick={() => invokeEdit(authority.onLink)}>
           <LinkIcon size={16} />
         </BubbleButton>
         <span className="mx-[2px] h-[20px] w-px shrink-0 bg-white/20" />
-        <BubbleButton label="Comment" disabled={!session.canComment} onClick={onComment}>
+        <BubbleButton label="Comment" disabled={!authority.session.canComment} onClick={invokeComment}>
           <MessageSquarePlus size={16} />
         </BubbleButton>
       </div>
