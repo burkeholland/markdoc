@@ -144,71 +144,106 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [now, setNow] = useState(() => Date.now());
   const expanded = useRef(false);
   const alive = useRef(true);
-  const listRequest = useRef(0);
-  const retryPending = useRef(false);
+  const nextBeforeRef = useRef<string | null>(null);
+  const refreshSequence = useRef(0);
+  const refreshOperation = useRef<number | null>(null);
+  const loadMoreSequence = useRef(0);
+  const loadMoreOperation = useRef<{ id: number; cursor: string } | null>(null);
+
+  const invalidateOperations = useCallback(() => {
+    alive.current = false;
+    refreshOperation.current = null;
+    loadMoreOperation.current = null;
+  }, []);
 
   useEffect(() => {
     alive.current = true;
-    return () => {
-      alive.current = false;
-      listRequest.current += 1;
-    };
-  }, []);
+    return invalidateOperations;
+  }, [invalidateOperations]);
 
   // Reload the first page; older pages the user has already expanded are kept below it.
-  const refresh = useCallback(async () => {
-    const request = ++listRequest.current;
-    try {
-      const page = await api.documents.activity(session.docId, { limit: PAGE });
-      if (!alive.current || request !== listRequest.current) return;
-      setItems((prev) => {
-        if (!prev || !expanded.current) return page.items;
-        const seen = new Set(page.items.map((i) => i.id));
-        return [...page.items, ...prev.filter((i) => !seen.has(i.id))];
-      });
-      if (!expanded.current) setNextBefore(page.nextBefore);
-      setListError(null);
-      setNow(Date.now());
-    } catch (e) {
-      if (!alive.current || request !== listRequest.current) return;
-      setListError(apiErrorText(e, "Failed to load activity"));
-    }
+  const refresh = useCallback((isRetry = false) => {
+    if (!alive.current || refreshOperation.current !== null) return;
+    const request = ++refreshSequence.current;
+    refreshOperation.current = request;
+    if (isRetry) setRetrying(true);
+
+    void (async () => {
+      try {
+        const page = await api.documents.activity(session.docId, { limit: PAGE });
+        if (!alive.current || refreshOperation.current !== request) return;
+        setItems((prev) => {
+          if (!prev || !expanded.current) return page.items;
+          const seen = new Set(page.items.map((i) => i.id));
+          return [...page.items, ...prev.filter((i) => !seen.has(i.id))];
+        });
+        if (!expanded.current) {
+          const pageOperation = loadMoreOperation.current;
+          if (pageOperation && pageOperation.cursor !== page.nextBefore) {
+            loadMoreOperation.current = null;
+            setLoadingMore(false);
+          }
+          nextBeforeRef.current = page.nextBefore;
+          setNextBefore(page.nextBefore);
+        }
+        setListError(null);
+        setNow(Date.now());
+      } catch (e) {
+        if (!alive.current || refreshOperation.current !== request) return;
+        setListError(apiErrorText(e, "Failed to load activity"));
+      } finally {
+        if (refreshOperation.current !== request) return;
+        refreshOperation.current = null;
+        if (alive.current && isRetry) setRetrying(false);
+      }
+    })();
   }, [session.docId]);
 
   const retry = useCallback(() => {
-    if (retryPending.current) return;
-    retryPending.current = true;
-    setRetrying(true);
-    void refresh().finally(() => {
-      retryPending.current = false;
-      if (alive.current) setRetrying(false);
-    });
+    refresh(true);
   }, [refresh]);
 
   useEffect(() => {
-    void refresh();
+    refresh();
     const timer = setInterval(() => {
-      if (!retryPending.current) void refresh();
+      refresh();
     }, REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh]);
 
-  const loadMore = async () => {
-    if (!nextBefore || loadingMore) return;
+  const loadMore = () => {
+    const cursor = nextBeforeRef.current;
+    if (!alive.current || !cursor || loadMoreOperation.current !== null) return;
+    const operation = { id: ++loadMoreSequence.current, cursor };
+    loadMoreOperation.current = operation;
     setLoadingMore(true);
-    try {
-      const page = await api.documents.activity(session.docId, { before: nextBefore, limit: PAGE });
-      setItems((prev) => {
-        const seen = new Set((prev ?? []).map((i) => i.id));
-        return [...(prev ?? []), ...page.items.filter((i) => !seen.has(i.id))];
-      });
-      setNextBefore(page.nextBefore);
-      expanded.current = true;
-    } catch (e) {
-      setError(apiErrorText(e, "Failed to load more"));
-    } finally {
-      setLoadingMore(false);
-    }
+
+    void (async () => {
+      try {
+        const page = await api.documents.activity(session.docId, { before: cursor, limit: PAGE });
+        if (!alive.current || loadMoreOperation.current !== operation || nextBeforeRef.current !== cursor) return;
+        setItems((prev) => {
+          const seen = new Set((prev ?? []).map((i) => i.id));
+          return [...(prev ?? []), ...page.items.filter((i) => !seen.has(i.id))];
+        });
+        nextBeforeRef.current = page.nextBefore;
+        setNextBefore(page.nextBefore);
+        expanded.current = true;
+        setError(null);
+      } catch (e) {
+        if (!alive.current || loadMoreOperation.current !== operation || nextBeforeRef.current !== cursor) return;
+        setError(apiErrorText(e, "Failed to load more"));
+      } finally {
+        if (loadMoreOperation.current !== operation) return;
+        loadMoreOperation.current = null;
+        if (alive.current) setLoadingMore(false);
+      }
+    })();
+  };
+
+  const close = () => {
+    invalidateOperations();
+    onClose();
   };
 
   const groups = useMemo(() => groupByDay(items ?? []), [items]);
@@ -217,7 +252,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="activity-panel">
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Activity</span>
-        <button type="button" className="icon-btn h-8 w-8" onClick={onClose} aria-label="Close activity">
+        <button type="button" className="icon-btn h-8 w-8" onClick={close} aria-label="Close activity">
           <X size={16} />
         </button>
       </div>
