@@ -142,6 +142,18 @@ interface CloseTransition {
   focusRestored: boolean;
 }
 
+interface DismissalProof {
+  authority: PaletteAuthority;
+  visit: PaletteVisit;
+  token: symbol;
+  presentation: PalettePresentation;
+  content: HTMLDivElement;
+  overlay: HTMLDivElement;
+  event: Event;
+  source: "escape" | "pointer";
+  consumed: boolean;
+}
+
 interface CommandExecution {
   authority: PaletteAuthority;
   visit: PaletteVisit;
@@ -263,6 +275,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   const committedPresentationRef = useRef<PalettePresentation | null>(null);
   const childRequestRef = useRef<ChildRequest | null>(null);
   const successorRef = useRef<PresentationSuccessor | null>(null);
+  const dismissalRef = useRef<DismissalProof | null>(null);
   const closeRef = useRef<CloseTransition | null>(null);
   const commandTimersRef = useRef(new Set<CommandExecution>());
   const claimedControlsRef = useRef(new WeakSet<object>());
@@ -350,6 +363,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         childRequestRef.current = null;
       }
       if (successorRef.current?.request.authority === authority) successorRef.current = null;
+      if (dismissalRef.current?.authority === authority) dismissalRef.current = null;
       if (closeRef.current?.authority === authority) closeRef.current = null;
       for (const execution of commandTimers) {
         if (execution.authority !== authority) continue;
@@ -487,6 +501,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     value.retired = true;
     value.active = false;
     if (presentationRef.current === value) presentationRef.current = null;
+    if (dismissalRef.current?.presentation === value) dismissalRef.current = null;
     const request = childRequestRef.current;
     if (request?.owner === value && successorRef.current?.from !== value) invalidateChildRequest(request);
   }
@@ -542,6 +557,63 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     if (value.consumedEvents.has(event)) return false;
     value.consumedEvents.add(event);
     return true;
+  }
+
+  function publishDismissal(
+    value: PalettePresentation,
+    event: KeyboardEvent | CustomEvent<{ originalEvent: PointerEvent }>,
+    source: DismissalProof["source"],
+  ): void {
+    const content = value.content.element;
+    const overlay = value.overlay.element;
+    const visit = value.visit;
+    if (
+      !content ||
+      !overlay ||
+      !visit ||
+      !ownsPresentation(value) ||
+      !content.isConnected ||
+      !overlay.isConnected ||
+      value.consumedEvents.has(event)
+    ) {
+      return;
+    }
+    if (source === "escape") {
+      const target = event.target;
+      if (
+        event.currentTarget !== content.ownerDocument ||
+        !(target instanceof Node) ||
+        !target.isConnected ||
+        target.ownerDocument !== content.ownerDocument ||
+        !content.contains(target)
+      ) {
+        return;
+      }
+    } else {
+      const target = (event as CustomEvent<{ originalEvent: PointerEvent }>).detail?.originalEvent?.target;
+      if (
+        event.currentTarget !== target ||
+        !(target instanceof Node) ||
+        !target.isConnected ||
+        target.ownerDocument !== content.ownerDocument ||
+        content.contains(target)
+      ) {
+        return;
+      }
+    }
+
+    value.consumedEvents.add(event);
+    dismissalRef.current = {
+      authority: value.authority,
+      visit,
+      token: Symbol("command-palette-dismissal"),
+      presentation: value,
+      content,
+      overlay,
+      event,
+      source,
+      consumed: false,
+    };
   }
 
   function ownsChildRequest(request: ChildRequest): boolean {
@@ -772,6 +844,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
 
       value.active = true;
       presentationRef.current = value;
+      if (dismissalRef.current?.presentation !== value) dismissalRef.current = null;
       const request = value.state.childLoad?.request;
       const successor = successorRef.current;
       const adoptsRequest =
@@ -850,7 +923,22 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     <RadixDialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (next || !ownsPresentation(presentation)) return;
+        const dismissal = dismissalRef.current;
+        if (
+          next ||
+          !dismissal ||
+          dismissal.consumed ||
+          dismissal.authority !== presentation.authority ||
+          dismissal.visit !== presentation.visit ||
+          dismissal.presentation !== presentation ||
+          dismissal.content !== presentation.content.element ||
+          dismissal.overlay !== presentation.overlay.element ||
+          !ownsPresentation(presentation)
+        ) {
+          return;
+        }
+        dismissal.consumed = true;
+        if (dismissalRef.current === dismissal) dismissalRef.current = null;
         invalidateChildRequest(presentation.state.childLoad?.request ?? null);
         const nextState =
           presentation.state.childLoad || presentation.state.childError
@@ -869,6 +957,8 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           className="fixed left-1/2 top-[12vh] z-50 w-[min(92vw,600px)] -translate-x-1/2 overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl shadow-black/20 outline-none animate-fade-in"
           aria-label="Command palette"
           data-testid="command-palette"
+          onEscapeKeyDown={(event) => publishDismissal(presentation, event, "escape")}
+          onPointerDownOutside={(event) => publishDismissal(presentation, event, "pointer")}
           onOpenAutoFocus={(event) => {
             const input = presentation.input.element;
             const currentVisit = presentation.visit;

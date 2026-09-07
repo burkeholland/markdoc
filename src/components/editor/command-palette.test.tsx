@@ -24,6 +24,10 @@ function childCommand(id: string, title: string, children: Command["children"]):
   return { ...command(id, title), children };
 }
 
+function commandProvider(...items: Command[]): () => Command[] {
+  return () => items;
+}
+
 function reactProps<T extends object>(element: Element): T {
   const key = Object.getOwnPropertyNames(element).find((name) => name.startsWith("__reactProps$"));
   if (!key) throw new Error("React props were not published on the element");
@@ -46,6 +50,48 @@ interface ButtonHandlerProps {
 interface InputHandlerProps {
   onChange: ChangeEventHandler<HTMLInputElement>;
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
+}
+
+interface ContentDismissalHandlers {
+  onEscapeKeyDown: (event: KeyboardEvent) => void;
+  onPointerDownOutside: (event: CustomEvent<{ originalEvent: PointerEvent }>) => void;
+  onDismiss: () => void;
+}
+
+function reactAncestorHandler<T extends (...args: never[]) => unknown>(element: Element, name: string): T {
+  const key = Object.getOwnPropertyNames(element).find((value) => value.startsWith("__reactFiber$"));
+  if (!key) throw new Error("React fiber was not published on the element");
+  let fiber = (element as unknown as Record<string, unknown>)[key] as
+    | { memoizedProps?: Record<string, unknown>; return?: unknown }
+    | null;
+  while (fiber) {
+    const handler = fiber.memoizedProps?.[name];
+    if (typeof handler === "function") return handler as T;
+    fiber = fiber.return as typeof fiber;
+  }
+  throw new Error(`React ancestor handler ${name} was not found`);
+}
+
+function contentDismissalHandlers(content: Element): ContentDismissalHandlers {
+  return {
+    onEscapeKeyDown: reactAncestorHandler(content, "onEscapeKeyDown"),
+    onPointerDownOutside: reactAncestorHandler(content, "onPointerDownOutside"),
+    onDismiss: reactAncestorHandler(content, "onDismiss"),
+  };
+}
+
+function escapeDismissalEvent(
+  content: HTMLElement,
+  target: Node = content,
+  currentTarget: EventTarget = content.ownerDocument,
+) {
+  return { currentTarget, target, preventDefault: vi.fn() } as unknown as KeyboardEvent;
+}
+
+function pointerOutsideEvent(_content: HTMLElement, target: HTMLElement, currentTarget: EventTarget = target) {
+  return exactEvent(currentTarget as HTMLElement, {
+    detail: { originalEvent: { target } },
+  }) as unknown as CustomEvent<{ originalEvent: PointerEvent }>;
 }
 
 async function settle<T>(pending: ReturnType<typeof deferred<T>>, kind: "resolve", value: T): Promise<void>;
@@ -758,7 +804,7 @@ describe("CommandPalette command ownership", () => {
       opener.focus();
       fireEvent.click(opener);
       await screen.findByTestId("palette-input");
-      fireEvent.keyDown(document, { key: "Escape" });
+      fireEvent.keyDown(screen.getByTestId("palette-input"), { key: "Escape" });
       await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
       await waitFor(() => expect(opener).toHaveFocus());
 
@@ -774,6 +820,197 @@ describe("CommandPalette command ownership", () => {
     } finally {
       outside.remove();
     }
+  });
+
+  it("requires exact one-use dismissal provenance before accepting Radix dismissal", async () => {
+    const onOpenChange = vi.fn();
+    render(
+      <CommandPalette
+        open
+        onOpenChange={onOpenChange}
+        commands={commandProvider(command("alpha", "Alpha"))}
+      />,
+    );
+
+    const content = await screen.findByRole("dialog");
+    const handlers = contentDismissalHandlers(content);
+    const connectedForeign = document.createElement("div");
+    const detachedForeign = document.createElement("div");
+    document.body.append(connectedForeign);
+
+    try {
+      handlers.onDismiss();
+      handlers.onDismiss();
+      handlers.onEscapeKeyDown(escapeDismissalEvent(content, content, connectedForeign));
+      handlers.onDismiss();
+      handlers.onEscapeKeyDown(escapeDismissalEvent(content, detachedForeign));
+      handlers.onDismiss();
+      handlers.onPointerDownOutside(pointerOutsideEvent(content, connectedForeign, content));
+      handlers.onDismiss();
+      handlers.onPointerDownOutside(pointerOutsideEvent(content, content));
+      handlers.onDismiss();
+      handlers.onPointerDownOutside(pointerOutsideEvent(content, detachedForeign));
+      handlers.onDismiss();
+
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      handlers.onEscapeKeyDown(escapeDismissalEvent(content));
+      handlers.onDismiss();
+      handlers.onDismiss();
+
+      expect(onOpenChange).toHaveBeenCalledTimes(1);
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      connectedForeign.remove();
+    }
+  });
+
+  it.each(["escape", "pointer"] as const)(
+    "closes once and restores focus for an exact current %s dismissal",
+    async (source) => {
+      vi.useFakeTimers();
+      const opener = document.createElement("button");
+      document.body.append(opener);
+      opener.focus();
+      const onOpenChange = vi.fn();
+      const commands = commandProvider(command("alpha", "Alpha"));
+      const rendered = render(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChange}
+          commands={commands}
+        />,
+      );
+
+      try {
+        await act(async () => vi.runAllTimersAsync());
+        const content = screen.getByRole("dialog");
+        const handlers = contentDismissalHandlers(content);
+        const outside = document.createElement("div");
+        document.body.append(outside);
+
+        try {
+          if (source === "escape") {
+            handlers.onEscapeKeyDown(escapeDismissalEvent(content));
+          } else {
+            handlers.onPointerDownOutside(pointerOutsideEvent(content, outside));
+          }
+          handlers.onDismiss();
+          handlers.onDismiss();
+
+          expect(onOpenChange).toHaveBeenCalledTimes(1);
+          rendered.rerender(
+            <CommandPalette
+              open={false}
+              onOpenChange={onOpenChange}
+              commands={commands}
+            />,
+          );
+          await act(async () => vi.runAllTimersAsync());
+
+          expect(document.activeElement).toBe(opener);
+        } finally {
+          outside.remove();
+        }
+      } finally {
+        opener.remove();
+      }
+    },
+  );
+
+  it.each([
+    { order: "stale-first", source: "escape" },
+    { order: "current-first", source: "escape" },
+    { order: "stale-first", source: "pointer" },
+    { order: "current-first", source: "pointer" },
+  ] as const)(
+    "keeps replacement $source dismissal authority exact when $order handlers run first",
+    async ({ order, source }) => {
+      const onOpenChangeA = vi.fn();
+      const onOpenChangeB = vi.fn();
+      const rendered = render(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChangeA}
+          commands={commandProvider(command("alpha", "Alpha"))}
+        />,
+      );
+      const content = await screen.findByRole("dialog");
+      const stale = contentDismissalHandlers(content);
+
+      rendered.rerender(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChangeB}
+          commands={commandProvider(command("beta", "Beta"))}
+        />,
+      );
+      await screen.findByText("Beta");
+      const currentContent = screen.getByRole("dialog");
+      const current = contentDismissalHandlers(currentContent);
+      const outside = document.createElement("div");
+      document.body.append(outside);
+      const invokeSource = (handlers: ContentDismissalHandlers, handlerContent: HTMLElement) => {
+        if (source === "escape") {
+          handlers.onEscapeKeyDown(escapeDismissalEvent(handlerContent));
+        } else {
+          handlers.onPointerDownOutside(pointerOutsideEvent(handlerContent, outside));
+        }
+      };
+      const runStale = () => {
+        invokeSource(stale, content);
+        stale.onDismiss();
+      };
+      const runCurrent = () => {
+        invokeSource(current, currentContent);
+        current.onDismiss();
+      };
+
+      try {
+        if (order === "stale-first") {
+          runStale();
+          expect(onOpenChangeA).not.toHaveBeenCalled();
+          expect(onOpenChangeB).not.toHaveBeenCalled();
+          runCurrent();
+        } else {
+          runCurrent();
+          runStale();
+        }
+
+        expect(onOpenChangeA).not.toHaveBeenCalled();
+        expect(onOpenChangeB).toHaveBeenCalledTimes(1);
+        expect(screen.getByText("Beta")).toBeInTheDocument();
+      } finally {
+        outside.remove();
+      }
+    },
+  );
+
+  it("rejects an equal-looking remount's dismissal handlers while the replacement remains usable", async () => {
+    const onOpenChangeA = vi.fn();
+    const onOpenChangeB = vi.fn();
+    const commands = commandProvider(command("alpha", "Alpha"));
+    const rendered = render(
+      <CommandPalette key="a" open onOpenChange={onOpenChangeA} commands={commands} />,
+    );
+    const staleContent = await screen.findByRole("dialog");
+    const stale = contentDismissalHandlers(staleContent);
+
+    rendered.rerender(
+      <CommandPalette key="b" open onOpenChange={onOpenChangeB} commands={commands} />,
+    );
+    const currentContent = await screen.findByRole("dialog");
+    const current = contentDismissalHandlers(currentContent);
+
+    stale.onEscapeKeyDown(escapeDismissalEvent(staleContent));
+    stale.onDismiss();
+    expect(onOpenChangeA).not.toHaveBeenCalled();
+    expect(onOpenChangeB).not.toHaveBeenCalled();
+
+    current.onEscapeKeyDown(escapeDismissalEvent(currentContent));
+    current.onDismiss();
+    expect(onOpenChangeA).not.toHaveBeenCalled();
+    expect(onOpenChangeB).toHaveBeenCalledTimes(1);
   });
 
   it("rejects wrong, foreign, and detached row currentTargets without claiming the current row", async () => {
