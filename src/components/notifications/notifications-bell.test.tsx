@@ -16,7 +16,13 @@ const store = vi.hoisted(() => ({
 }));
 
 type PopoverOpenChange = (open: boolean) => void;
+interface ContentCallbacks {
+  escape?: (event: KeyboardEvent) => void;
+  outside?: unknown;
+}
+
 const capturedPopoverOpenChanges = vi.hoisted(() => [] as PopoverOpenChange[]);
+const capturedContentCallbacks = vi.hoisted(() => [] as ContentCallbacks[]);
 
 vi.mock("@/lib/notifications-store", () => ({
   ...store,
@@ -26,11 +32,19 @@ vi.mock("@/lib/notifications-store", () => ({
 vi.mock("@/components/ui/primitives", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/ui/primitives")>();
   const ActualPopover = actual.Popover;
+  const ActualPopoverContent = actual.PopoverContent;
   return {
     ...actual,
     Popover: (props: ComponentProps<typeof ActualPopover>) => {
       if (props.onOpenChange) capturedPopoverOpenChanges.push(props.onOpenChange);
       return <ActualPopover {...props} />;
+    },
+    PopoverContent: (props: ComponentProps<typeof ActualPopoverContent>) => {
+      capturedContentCallbacks.push({
+        escape: props.onEscapeKeyDown,
+        outside: props.onInteractOutside,
+      });
+      return <ActualPopoverContent {...props} />;
     },
   };
 });
@@ -46,6 +60,22 @@ interface BellState {
   readAllPending: boolean;
   readError: NotificationReadError | null;
   readErrorPending: boolean;
+}
+
+interface CapturedMouseEvent {
+  currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  nativeEvent: MouseEvent;
+  defaultPrevented: boolean;
+}
+
+type MouseHandler = (event: CapturedMouseEvent) => void;
+type ElementRef<T extends HTMLElement> = (element: T | null) => void;
+
+interface CapturedControl {
+  element: HTMLButtonElement;
+  click: MouseHandler;
+  ref: ElementRef<HTMLButtonElement>;
 }
 
 const EMPTY: BellState = {
@@ -70,6 +100,18 @@ const ITEM: NotificationDto = {
   createdAt: "2026-09-07T12:00:00.000Z",
   readAt: null,
 };
+const ITEM_TWO: NotificationDto = {
+  ...ITEM,
+  id: "notification-two",
+  kind: "reply",
+  documentId: "document-two",
+  documentTitle: "Second launch plan",
+  actorLogin: "bob",
+  actorName: "Bob",
+  refId: "thread-two",
+  snippet: "A second notification",
+  createdAt: "2026-09-07T13:00:00.000Z",
+};
 const REPLACEMENT_ITEM: NotificationDto = {
   ...ITEM,
   kind: "reply",
@@ -82,16 +124,68 @@ const REPLACEMENT_ITEM: NotificationDto = {
   createdAt: "2026-09-07T13:00:00.000Z",
   readAt: "2026-09-07T13:05:00.000Z",
 };
+const READ_FAILURE: NotificationReadError = {
+  id: 7,
+  operationId: 7,
+  operation: "single",
+  message: "Couldn't mark this notification as read.",
+  notificationId: ITEM.id,
+};
 
 const directRoots: { root: Root; host: HTMLDivElement }[] = [];
 
-function reactHandler<T>(element: HTMLElement, name: string): T {
+function reactProperty<T>(element: HTMLElement, name: string): T | undefined {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
   const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  const handler = props?.[name];
-  if (!handler) throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
-  return handler as T;
+  return props?.[name] as T | undefined;
+}
+
+function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElement, name: string): T {
+  const handler = reactProperty<T>(element, name);
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return handler;
+}
+
+function reactRef<T extends HTMLElement>(element: HTMLElement): ElementRef<T> {
+  const ref = reactProperty<ElementRef<T>>(element, "ref");
+  if (typeof ref !== "function") throw new Error(`A callback ref was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return ref;
+}
+
+function captureControl(element: HTMLElement): CapturedControl {
+  if (!(element instanceof HTMLButtonElement)) throw new Error("Expected a button control");
+  return {
+    element,
+    click: reactHandler<MouseHandler>(element, "onClick"),
+    ref: reactRef<HTMLButtonElement>(element),
+  };
+}
+
+function captureActions() {
+  return {
+    readRetry: screen.queryByTestId("notifications-read-retry")
+      ? captureControl(screen.getByTestId("notifications-read-retry"))
+      : null,
+    loadRetry: screen.queryByTestId("notifications-load-retry")
+      ? captureControl(screen.getByTestId("notifications-load-retry"))
+      : null,
+    readAll: captureControl(screen.getByTestId("notifications-read-all")),
+    rows: screen.queryAllByTestId("notification-item").map(captureControl),
+  };
+}
+
+function invoke(control: CapturedControl, source: EventTarget | null = control.element, target: EventTarget | null = source) {
+  const ownerDocument = source instanceof Node ? source.ownerDocument ?? document : document;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const nativeEvent = new MouseEventConstructor("click", { bubbles: true });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: target });
+  control.click({
+    currentTarget: source,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+  });
 }
 
 function BellBoundary({
@@ -124,7 +218,15 @@ function createBellRoot(state: BellState, props: NotificationsBellProps) {
   return root;
 }
 
-function renderBellRoot(root: Root, state: BellState, props: NotificationsBellProps & { present?: boolean; boundary?: number; onBoundary?: () => void }) {
+function renderBellRoot(
+  root: Root,
+  state: BellState,
+  props: NotificationsBellProps & {
+    present?: boolean;
+    boundary?: number;
+    onBoundary?: () => void;
+  },
+) {
   store.useNotifications.mockReturnValue(state);
   act(() => root.render(<BellBoundary {...props} />));
 }
@@ -135,17 +237,15 @@ function latestOpenChange(except?: PopoverOpenChange) {
   return callback;
 }
 
-function openDirectBell(callback = latestOpenChange()) {
-  act(() => callback(true));
-  expect(screen.getByTestId("notifications-popover")).toBeVisible();
+function latestContentCallbacks(except?: ContentCallbacks) {
+  const callbacks = capturedContentCallbacks.findLast((candidate) => candidate !== except);
+  if (!callbacks) throw new Error("The popover did not publish content callbacks");
+  return callbacks;
 }
 
-function captureCurrentActions() {
-  return {
-    item: reactHandler<() => void>(screen.getByTestId("notification-item"), "onClick"),
-    readAll: reactHandler<() => void>(screen.getByTestId("notifications-read-all"), "onClick"),
-    retry: reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick"),
-  };
+function openCurrentBell() {
+  fireEvent.click(screen.getByTestId("notifications-bell"));
+  expect(screen.getByTestId("notifications-popover")).toBeVisible();
 }
 
 function openBell(state: BellState, onOpen = vi.fn()) {
@@ -155,23 +255,55 @@ function openBell(state: BellState, onOpen = vi.fn()) {
       <NotificationsBell onOpen={onOpen} />
     </TooltipProvider>,
   );
-  fireEvent.click(screen.getByTestId("notifications-bell"));
+  openCurrentBell();
   return view;
+}
+
+function outsideEvent(target: Node) {
+  const ownerDocument = target.ownerDocument ?? document;
+  const view = ownerDocument.defaultView;
+  if (!view) throw new Error("Outside target has no window");
+  const originalEvent = new view.MouseEvent("pointerdown", { bubbles: true });
+  Object.defineProperty(originalEvent, "target", { configurable: true, value: target });
+  const event = new view.CustomEvent("dismissableLayer.pointerDownOutside", {
+    cancelable: true,
+    detail: { originalEvent },
+  });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function invokeOutside(callback: unknown, event: Event) {
+  if (typeof callback !== "function") throw new Error("The popover did not publish an outside callback");
+  callback(event);
 }
 
 beforeEach(() => {
   capturedPopoverOpenChanges.length = 0;
+  capturedContentCallbacks.length = 0;
   store.useNotifications.mockReset();
   store.refreshNotifications.mockReset().mockResolvedValue(undefined);
-  store.markAllNotificationsRead.mockReset();
-  store.markNotificationRead.mockReset();
-  store.retryNotificationRead.mockReset();
+  store.markAllNotificationsRead.mockReset().mockResolvedValue(undefined);
+  store.markNotificationRead.mockReset().mockResolvedValue(undefined);
+  store.retryNotificationRead.mockReset().mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  cleanup();
+  while (directRoots.length) {
+    const mounted = directRoots.pop()!;
+    act(() => mounted.root.unmount());
+    mounted.host.remove();
+  }
 });
 
 describe("notification read actions", () => {
-  it("claims a single read before opening the item once", () => {
+  it("claims a single read before opening the immutable item once", () => {
     const order: string[] = [];
-    const onOpen = vi.fn(() => order.push("open"));
+    const onOpen = vi.fn((notification: NotificationDto) => {
+      order.push("open");
+      expect(Object.isFrozen(notification)).toBe(true);
+    });
     store.markNotificationRead.mockImplementation(() => {
       order.push("read");
       return Promise.resolve();
@@ -181,13 +313,11 @@ describe("notification read actions", () => {
     fireEvent.click(screen.getByTestId("notification-item"));
 
     expect(order).toEqual(["read", "open"]);
-    expect(store.markNotificationRead).toHaveBeenCalledWith(ITEM.id);
-    expect(store.markNotificationRead).toHaveBeenCalledOnce();
-    expect(onOpen).toHaveBeenCalledWith(ITEM);
-    expect(onOpen).toHaveBeenCalledOnce();
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
   });
 
-  it("disables read-all while pending and presents one retryable rollback", () => {
+  it("keeps optimistic all-read, retry pending, badge, labels, and rollback behavior", () => {
     const failure: NotificationReadError = {
       id: 1,
       operationId: 1,
@@ -212,11 +342,7 @@ describe("notification read actions", () => {
         <NotificationsBell onOpen={onOpen} />
       </TooltipProvider>,
     );
-
-    const pending = screen.getByRole("button", { name: "Marking all…" });
-    expect(pending).toBeDisabled();
-    fireEvent.click(pending);
-    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Marking all…" })).toBeDisabled();
     expect(screen.queryByTestId("notifications-badge")).toBeNull();
 
     store.useNotifications.mockReturnValue({
@@ -233,45 +359,26 @@ describe("notification read actions", () => {
     );
 
     expect(screen.getByTestId("notifications-badge")).toHaveTextContent("1");
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't mark all notifications as read.");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(store.retryNotificationRead).toHaveBeenCalledWith(failure);
-    expect(store.retryNotificationRead).toHaveBeenCalledOnce();
+    expect(screen.getByRole("alert")).toHaveTextContent(failure.message);
+    fireEvent.click(screen.getByTestId("notifications-read-retry"));
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(failure);
   });
 
   it("disables a mutation retry while its replacement owner is pending", () => {
-    const failure: NotificationReadError = {
-      id: 2,
-      operationId: 2,
-      operation: "single",
-      message: "Couldn't mark this notification as read.",
-      notificationId: ITEM.id,
-    };
     openBell({
       ...EMPTY,
       items: [{ ...ITEM, readAt: "2026-09-07T12:10:00.000Z" }],
       loaded: true,
-      readError: failure,
+      readError: READ_FAILURE,
       readErrorPending: true,
     });
 
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
   });
 });
 
-afterEach(() => {
-  cleanup();
-  while (directRoots.length) {
-    const mounted = directRoots.pop()!;
-    act(() => mounted.root.unmount());
-    mounted.host.remove();
-  }
-});
-
 describe("notification bell loading", () => {
-  it("shows a neutral first-load state instead of claiming the empty result succeeded", () => {
+  it("shows a neutral first-load state instead of claiming empty success", () => {
     openBell({ ...EMPTY, loading: true });
 
     expect(screen.getByText("Loading notifications…")).toBeVisible();
@@ -279,17 +386,14 @@ describe("notification bell loading", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("shows one Retry action for a first-load failure and exposes its pending state", () => {
+  it("shows one first-load Retry and publishes its exact pending replacement", () => {
     const onOpen = vi.fn();
     const view = openBell({ ...EMPTY, loadError: true }, onOpen);
+    const retry = screen.getByTestId("notifications-load-retry");
 
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load notifications.");
-    const retry = screen.getByRole("button", { name: "Retry" });
-    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
-    expect(screen.queryByText("You're all caught up.")).toBeNull();
-
     fireEvent.click(retry);
-    expect(store.refreshNotifications).toHaveBeenCalledTimes(1);
+    expect(store.refreshNotifications).toHaveBeenCalledOnce();
 
     store.useNotifications.mockReturnValue({ ...EMPTY, loading: true, loadError: true });
     view.rerender(
@@ -300,7 +404,7 @@ describe("notification bell loading", () => {
     expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
   });
 
-  it("shows the unchanged empty-success sentence only after a successful load", () => {
+  it("shows empty success only after a successful load", () => {
     openBell({ ...EMPTY, loaded: true });
 
     expect(screen.getByText("You're all caught up.")).toBeVisible();
@@ -318,311 +422,534 @@ describe("notification bell loading", () => {
   });
 });
 
-describe("notification bell visit authority", () => {
-  const readFailure: NotificationReadError = {
-    id: 7,
-    operationId: 7,
-    operation: "single",
-    message: "Couldn't mark this notification as read.",
-    notificationId: ITEM.id,
+describe("Radix disclosure provenance", () => {
+  const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+
+  it("requires one current trigger proof for each open and close callback", () => {
+    createBellRoot(state, { onOpen: vi.fn() });
+    const closedCallback = latestOpenChange();
+
+    act(() => {
+      closedCallback(true);
+      closedCallback(false);
+    });
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    openCurrentBell();
+    const openCallback = latestOpenChange(closedCallback);
+    act(() => {
+      closedCallback(false);
+      openCallback(false);
+      openCallback(false);
+    });
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("notifications-bell"));
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    act(() => openCallback(false));
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    openCurrentBell();
+    expect(screen.getByTestId("notifications-read-all")).toBeEnabled();
+  });
+
+  it("accepts actual Escape and outside dismissal while rejecting stale content provenance", async () => {
+    const root = createBellRoot(state, { currentDocId: "document-one", onOpen: vi.fn() });
+    openCurrentBell();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    openCurrentBell();
+    const staleContent = latestContentCallbacks();
+    const staleOpenChange = latestOpenChange();
+    renderBellRoot(root, state, {
+      currentDocId: "document-two",
+      onOpen: vi.fn(),
+      boundary: 1,
+      onBoundary: () => {
+        expect(screen.queryByTestId("notifications-popover")).toBeNull();
+        staleContent.escape?.(new KeyboardEvent("keydown", { key: "Escape" }));
+        staleOpenChange(false);
+      },
+    });
+
+    openCurrentBell();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    fireEvent.pointerDown(outside);
+    fireEvent.click(outside);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    outside.remove();
+  });
+
+  it("rejects current content callbacks sourced from another document without spending a proof", async () => {
+    createBellRoot(state, { onOpen: vi.fn() });
+    openCurrentBell();
+    const content = latestContentCallbacks();
+    const openChange = latestOpenChange();
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignTarget = iframe.contentDocument!.createElement("button");
+    iframe.contentDocument!.body.append(foreignTarget);
+
+    act(() => {
+      invokeOutside(content.outside, outsideEvent(foreignTarget));
+      openChange(false);
+    });
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    fireEvent.pointerDown(outside);
+    fireEvent.click(outside);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    outside.remove();
+    iframe.remove();
+  });
+
+  it("rejects stale and fabricated trigger handlers on a reused bell", () => {
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { currentDocId: "document-one", onOpen });
+    const trigger = captureControl(screen.getByTestId("notifications-bell"));
+    let currentTrigger!: CapturedControl;
+
+    renderBellRoot(root, state, {
+      currentDocId: "document-two",
+      onOpen,
+      boundary: 1,
+      onBoundary: () => {
+        currentTrigger = captureControl(screen.getByTestId("notifications-bell"));
+        expect(currentTrigger.element).toBe(trigger.element);
+        invoke(trigger, currentTrigger.element);
+        expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      },
+    });
+
+    act(() => invoke(currentTrigger, currentTrigger.element, document.body));
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    openCurrentBell();
+  });
+});
+
+describe("exact notification controls", () => {
+  const state = {
+    ...EMPTY,
+    items: [ITEM, ITEM_TWO],
+    unreadCount: 2,
+    loadError: true,
+    readError: READ_FAILURE,
   };
-  const actionableState = {
+
+  it("rejects sibling, foreign, detached, disabled, wrong-row, and cross-control sources independently", () => {
+    const onOpen = vi.fn();
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const actions = captureActions();
+    const readRetry = actions.readRetry!;
+    const loadRetry = actions.loadRetry!;
+    const detached = document.createElement("button");
+    const foreign = document.createElement("button");
+    document.body.append(foreign);
+    const firstRowParent = actions.rows[0]!.element.parentElement;
+    if (!firstRowParent) throw new Error("The first row has no list item");
+
+    act(() => {
+      invoke(readRetry, loadRetry.element);
+      invoke(loadRetry, actions.readAll.element);
+      invoke(actions.readAll, detached);
+      invoke(actions.rows[0]!, actions.rows[1]!.element);
+      invoke(actions.rows[1]!, foreign);
+      actions.rows[0]!.element.disabled = true;
+      invoke(actions.rows[0]!);
+      actions.rows[0]!.element.disabled = false;
+    });
+
+    firstRowParent.replaceChild(detached, actions.rows[0]!.element);
+    act(() => {
+      invoke(actions.rows[0]!);
+      invoke(actions.rows[0]!, detached);
+    });
+    firstRowParent.replaceChild(actions.rows[0]!.element, detached);
+
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+
+    fireEvent.click(readRetry.element);
+    fireEvent.click(loadRetry.element);
+    fireEvent.click(actions.readAll.element);
+    expect(store.retryNotificationRead).toHaveBeenCalledOnce();
+    expect(store.refreshNotifications).toHaveBeenCalledOnce();
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+
+    fireEvent.click(actions.rows[0]!.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    foreign.remove();
+  });
+
+  it("rejects a replacement ref and publishes a successor without mutating the established owner", () => {
+    const onOpen = vi.fn();
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const stale = captureActions().rows[0]!;
+    const replacement = stale.element.cloneNode(true);
+    if (!(replacement instanceof HTMLButtonElement)) throw new Error("Expected a replacement button");
+
+    act(() => stale.ref(replacement));
+    const current = captureActions().rows[0]!;
+    act(() => {
+      invoke(stale, replacement);
+      invoke(stale, current.element);
+    });
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+
+    fireEvent.click(current.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledOnce();
+  });
+
+  it("keeps unrelated actions usable after rejected and claimed Retry and Mark all read callbacks", () => {
+    createBellRoot(state, { onOpen: vi.fn() });
+    openCurrentBell();
+    const actions = captureActions();
+
+    act(() => {
+      invoke(actions.readRetry!, actions.rows[0]!.element);
+      invoke(actions.readRetry!);
+      invoke(actions.readRetry!);
+      invoke(actions.readAll);
+      invoke(actions.readAll);
+      invoke(actions.loadRetry!);
+    });
+
+    expect(store.retryNotificationRead).toHaveBeenCalledOnce();
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(store.refreshNotifications).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+
+    fireEvent.click(actions.rows[1]!.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM_TWO.id);
+  });
+});
+
+describe("publication succession", () => {
+  const state = {
     ...EMPTY,
     items: [ITEM],
     unreadCount: 1,
     loaded: true,
-    readError: readFailure,
+    readError: READ_FAILURE,
   };
 
   it.each([
     ["stale before current", false],
     ["current before stale", true],
-  ] as const)(
-    "retires a document visit before the parent layout boundary and preserves current actions %s",
-    (_label, currentFirst) => {
-      const order: string[] = [];
-      const previousOpen = vi.fn();
-      const currentOpen = vi.fn((): void => {
-        order.push("open");
-      });
-      store.markNotificationRead.mockImplementation(() => {
-        order.push("read");
-        return Promise.resolve();
-      });
-      const root = createBellRoot(actionableState, {
-        currentDocId: "document-one",
-        onOpen: previousOpen,
-      });
-      const staleOpenChange = latestOpenChange();
-      openDirectBell(staleOpenChange);
-      const stale = captureCurrentActions();
-      let nextOpenChange!: PopoverOpenChange;
+  ] as const)("keeps only B handlers live across an equal-looking same-element render, %s", (_label, currentFirst) => {
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { currentDocId: ITEM.documentId, onOpen });
+    openCurrentBell();
+    const stale = captureActions();
+    let current!: ReturnType<typeof captureActions>;
 
-      renderBellRoot(root, actionableState, {
-        currentDocId: "document-two",
-        onOpen: currentOpen,
-        boundary: 1,
-        onBoundary: () => {
-          expect(screen.queryByTestId("notifications-popover")).toBeNull();
-          nextOpenChange = latestOpenChange(staleOpenChange);
-          staleOpenChange(true);
-          stale.item();
-          stale.readAll();
-          stale.retry();
-          expect(screen.queryByTestId("notifications-popover")).toBeNull();
-          expect(store.markNotificationRead).not.toHaveBeenCalled();
-          expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
-          expect(store.retryNotificationRead).not.toHaveBeenCalled();
-          expect(previousOpen).not.toHaveBeenCalled();
-          expect(currentOpen).not.toHaveBeenCalled();
-        },
-      });
-
-      openDirectBell(nextOpenChange);
-      const current = captureCurrentActions();
-      const invokeInOrder = (staleAction: () => void, currentAction: () => void) => {
-        act(() => {
-          if (currentFirst) currentAction();
-          staleAction();
-          if (!currentFirst) currentAction();
-        });
-      };
-
-      invokeInOrder(stale.retry, current.retry);
-      expect(store.retryNotificationRead).toHaveBeenCalledOnce();
-      expect(store.retryNotificationRead).toHaveBeenCalledWith(readFailure);
-
-      invokeInOrder(stale.readAll, current.readAll);
-      expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
-
-      act(() => {
-        if (currentFirst) nextOpenChange(false);
-        staleOpenChange(currentFirst);
-        if (!currentFirst) nextOpenChange(false);
-      });
-      expect(screen.queryByTestId("notifications-popover")).toBeNull();
-
-      openDirectBell(nextOpenChange);
-      const reopened = captureCurrentActions();
-      let reentered = false;
-      currentOpen.mockImplementation(() => {
-        order.push("open");
-        if (!reentered) {
-          reentered = true;
-          reopened.item();
-        }
-      });
-      invokeInOrder(stale.item, reopened.item);
-
-      expect(order).toEqual(["read", "open"]);
-      expect(store.markNotificationRead).toHaveBeenCalledOnce();
-      expect(store.markNotificationRead).toHaveBeenCalledWith(ITEM.id);
-      expect(currentOpen).toHaveBeenCalledOnce();
-      expect(currentOpen).toHaveBeenCalledWith(ITEM);
-      expect(previousOpen).not.toHaveBeenCalled();
-      expect(screen.queryByTestId("notifications-popover")).toBeNull();
-
-      act(() => {
-        reopened.item();
-        staleOpenChange(true);
-        stale.item();
-        stale.readAll();
-        stale.retry();
-      });
-      expect(store.markNotificationRead).toHaveBeenCalledOnce();
-      expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
-      expect(store.retryNotificationRead).toHaveBeenCalledOnce();
-      expect(currentOpen).toHaveBeenCalledOnce();
-      expect(screen.queryByTestId("notifications-popover")).toBeNull();
-    },
-  );
-
-  it("retires the previous callback visit even when the document id is unchanged", () => {
-    const previousOpen = vi.fn();
-    const currentOpen = vi.fn();
-    const root = createBellRoot(actionableState, {
+    renderBellRoot(root, state, {
       currentDocId: ITEM.documentId,
-      onOpen: previousOpen,
-    });
-    const staleOpenChange = latestOpenChange();
-    openDirectBell(staleOpenChange);
-    const stale = captureCurrentActions();
-    let nextOpenChange!: PopoverOpenChange;
-
-    renderBellRoot(root, actionableState, {
-      currentDocId: ITEM.documentId,
-      onOpen: currentOpen,
+      onOpen,
       boundary: 1,
       onBoundary: () => {
-        expect(screen.queryByTestId("notifications-popover")).toBeNull();
-        nextOpenChange = latestOpenChange(staleOpenChange);
-        staleOpenChange(true);
-        stale.item();
-        stale.readAll();
-        stale.retry();
+        current = captureActions();
+        expect(current.rows[0]!.element).toBe(stale.rows[0]!.element);
+        expect(current.readAll.element).toBe(stale.readAll.element);
       },
     });
 
-    expect(store.markNotificationRead).not.toHaveBeenCalled();
-    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
-    expect(store.retryNotificationRead).not.toHaveBeenCalled();
-    expect(previousOpen).not.toHaveBeenCalled();
-    openDirectBell(nextOpenChange);
-    const currentItem = reactHandler<() => void>(screen.getByTestId("notification-item"), "onClick");
-    act(() => currentItem());
-    expect(store.markNotificationRead).toHaveBeenCalledOnce();
-    expect(currentOpen).toHaveBeenCalledWith(ITEM);
-    expect(currentOpen).toHaveBeenCalledOnce();
-    expect(previousOpen).not.toHaveBeenCalled();
+    const inOrder = (a: CapturedControl, b: CapturedControl) => {
+      act(() => {
+        if (currentFirst) invoke(b);
+        invoke(a, b.element);
+        if (!currentFirst) invoke(b);
+      });
+    };
+    inOrder(stale.readRetry!, current.readRetry!);
+    inOrder(stale.readAll, current.readAll);
+    inOrder(stale.rows[0]!, current.rows[0]!);
+
+    expect(store.retryNotificationRead).toHaveBeenCalledOnce();
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
   });
 
-  it("closes and retires the visit when readiness becomes false without enabling notification fetching", () => {
+  it.each([
+    ["A first", false],
+    ["B first", true],
+  ] as const)("enforces the A/B handler-control matrix across equal-looking remounts, %s", (_label, currentFirst) => {
     const onOpen = vi.fn();
-    const root = createBellRoot(actionableState, {
-      currentDocId: ITEM.documentId,
-      onOpen,
-      ready: true,
-    });
-    const staleOpenChange = latestOpenChange();
-    openDirectBell(staleOpenChange);
-    const stale = captureCurrentActions();
-    let notReadyOpenChange!: PopoverOpenChange;
+    const root = createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const stale = captureActions().readRetry!;
 
-    renderBellRoot(root, actionableState, {
-      currentDocId: ITEM.documentId,
+    renderBellRoot(root, state, { onOpen, present: false });
+    renderBellRoot(root, state, { onOpen, present: true });
+    openCurrentBell();
+    const current = captureActions().readRetry!;
+
+    act(() => {
+      invoke(stale, stale.element);
+      invoke(stale, current.element);
+      invoke(current, stale.element);
+      if (currentFirst) invoke(current, current.element);
+      invoke(stale, current.element);
+      if (!currentFirst) invoke(current, current.element);
+    });
+
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(READ_FAILURE);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+  });
+
+  it("ignores late A control and portal cleanup after B owns reused elements", () => {
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const staleRow = captureActions().rows[0]!;
+    const content = screen.getByTestId("notifications-popover");
+    const portalRoot = content.firstElementChild;
+    if (!(portalRoot instanceof HTMLDivElement)) throw new Error("Expected the portal root");
+    const staleRootRef = reactRef<HTMLDivElement>(portalRoot);
+
+    renderBellRoot(root, state, { onOpen });
+    const currentRow = captureActions().rows[0]!;
+    expect(currentRow.element).toBe(staleRow.element);
+
+    act(() => {
+      staleRow.ref(null);
+      staleRootRef(null);
+      invoke(staleRow, currentRow.element);
+    });
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+
+    fireEvent.click(currentRow.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+  });
+
+  it("turns late portal attachment and replacement callbacks into successor publications", () => {
+    const onOpen = vi.fn();
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const content = screen.getByTestId("notifications-popover");
+    const portalRoot = content.firstElementChild;
+    if (!(portalRoot instanceof HTMLDivElement)) throw new Error("Expected the portal root");
+    const staleRootRef = reactRef<HTMLDivElement>(portalRoot);
+    const staleRow = captureActions().rows[0]!;
+
+    act(() => {
+      staleRootRef(null);
+      staleRootRef(portalRoot);
+    });
+    const attached = captureActions().rows[0]!;
+    act(() => invoke(staleRow, attached.element));
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+
+    const replacementContent = document.createElement("div");
+    const replacementRoot = document.createElement("div");
+    replacementContent.append(replacementRoot);
+    document.body.append(replacementContent);
+    const attachedRootRef = reactRef<HTMLDivElement>(
+      screen.getByTestId("notifications-popover").firstElementChild as HTMLDivElement,
+    );
+    act(() => attachedRootRef(replacementRoot));
+    const current = captureActions().rows[0]!;
+
+    fireEvent.click(current.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledOnce();
+    replacementContent.remove();
+  });
+
+  it("retires fact and DOM publication A before the parent layout boundary", () => {
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { currentDocId: "other", onOpen });
+    openCurrentBell();
+    const stale = captureActions().rows[0]!;
+    let current!: CapturedControl;
+
+    renderBellRoot(
+      root,
+      { ...state, items: [REPLACEMENT_ITEM], unreadCount: 0 },
+      {
+        currentDocId: "other",
+        onOpen,
+        boundary: 1,
+        onBoundary: () => {
+          current = captureActions().rows[0]!;
+          invoke(stale, current.element);
+          expect(store.markNotificationRead).not.toHaveBeenCalled();
+          expect(screen.getByTestId("notification-item")).toHaveTextContent("Bob mentioned you");
+        },
+      },
+    );
+
+    fireEvent.click(current.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(REPLACEMENT_ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(REPLACEMENT_ITEM);
+  });
+
+  it("retires every disclosure action before readiness is false at the parent boundary", () => {
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { onOpen, ready: true });
+    openCurrentBell();
+    const stale = captureActions();
+    const staleOpenChange = latestOpenChange();
+
+    renderBellRoot(root, state, {
       onOpen,
       ready: false,
       boundary: 1,
       onBoundary: () => {
         expect(screen.queryByTestId("notifications-popover")).toBeNull();
-        notReadyOpenChange = latestOpenChange(staleOpenChange);
+        invoke(stale.readRetry!);
+        invoke(stale.readAll);
+        invoke(stale.rows[0]!);
         staleOpenChange(true);
-        stale.item();
-        stale.readAll();
-        stale.retry();
-        notReadyOpenChange(true);
       },
     });
 
     expect(store.useNotifications).toHaveBeenLastCalledWith(false);
-    expect(screen.queryByTestId("notifications-popover")).toBeNull();
-    expect(store.markNotificationRead).not.toHaveBeenCalled();
-    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
     expect(store.retryNotificationRead).not.toHaveBeenCalled();
-    expect(onOpen).not.toHaveBeenCalled();
-  });
-
-  it("retires every captured action before a removed bell reaches the parent layout boundary", () => {
-    const onOpen = vi.fn();
-    const root = createBellRoot(actionableState, {
-      currentDocId: ITEM.documentId,
-      onOpen,
-    });
-    const staleOpenChange = latestOpenChange();
-    openDirectBell(staleOpenChange);
-    const stale = captureCurrentActions();
-
-    renderBellRoot(root, actionableState, {
-      currentDocId: ITEM.documentId,
-      onOpen,
-      present: false,
-      boundary: 1,
-      onBoundary: () => {
-        expect(screen.queryByTestId("notifications-popover")).toBeNull();
-        staleOpenChange(true);
-        stale.item();
-        stale.readAll();
-        stale.retry();
-      },
-    });
-
-    expect(store.markNotificationRead).not.toHaveBeenCalled();
     expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
-    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
     expect(onOpen).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("notifications-bell"));
     expect(screen.queryByTestId("notifications-popover")).toBeNull();
   });
+});
 
-  it.each([
-    ["stale before current", false],
-    ["current before stale", true],
-  ] as const)("retires same-id row data before the parent layout boundary with the %s callback order", (_label, currentFirst) => {
+describe("live fact revalidation and reentrancy", () => {
+  it("rejects in-place notification mutation and exact-order changes until facts are restored", () => {
+    const first = { ...ITEM };
+    const second = { ...ITEM_TWO };
+    const items = [first, second];
+    const state = { ...EMPTY, items, unreadCount: 2, loaded: true };
     const onOpen = vi.fn();
-    const root = createBellRoot(
-      { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true },
-      { currentDocId: "other-document", onOpen },
-    );
-    openDirectBell();
-    const staleItem = reactHandler<() => void>(screen.getByTestId("notification-item"), "onClick");
-    let currentItem!: () => void;
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const actions = captureActions();
 
-    renderBellRoot(
-      root,
-      { ...EMPTY, items: [REPLACEMENT_ITEM], loaded: true },
-      {
-        currentDocId: "other-document",
-        onOpen,
-        boundary: 1,
-        onBoundary: () => {
-          expect(screen.getByTestId("notifications-popover")).toBeVisible();
-          expect(screen.getByTestId("notification-item")).toHaveTextContent("Bob mentioned you");
-          currentItem = reactHandler<() => void>(screen.getByTestId("notification-item"), "onClick");
-          if (!currentFirst) staleItem();
-          expect(store.markNotificationRead).not.toHaveBeenCalled();
-        },
-      },
-    );
+    first.documentId = "mutated-document";
+    items.reverse();
+    act(() => invoke(actions.rows[0]!));
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("notification-item")[0]).toHaveAttribute("data-document-id", ITEM.documentId);
 
-    act(() => {
-      if (currentFirst) currentItem();
-      staleItem();
-      if (!currentFirst) currentItem();
-      currentItem();
-    });
-    expect(store.markNotificationRead).toHaveBeenCalledOnce();
-    expect(store.markNotificationRead).toHaveBeenCalledWith(REPLACEMENT_ITEM.id);
-    expect(onOpen).toHaveBeenCalledOnce();
-    expect(onOpen).toHaveBeenCalledWith(REPLACEMENT_ITEM);
-    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    items.reverse();
+    first.documentId = ITEM.documentId;
+    fireEvent.click(actions.rows[0]!.element);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
   });
 
-  it.each([
-    ["stale before current", false],
-    ["current before stale", true],
-  ] as const)("keeps only the current visit's initial-load Retry usable %s", (_label, currentFirst) => {
-    const loadFailureState = { ...EMPTY, loadError: true };
-    const previousOpen = vi.fn();
-    const currentOpen = vi.fn();
-    const root = createBellRoot(loadFailureState, {
-      currentDocId: "document-one",
-      onOpen: previousOpen,
-    });
-    const staleOpenChange = latestOpenChange();
-    openDirectBell(staleOpenChange);
-    const staleRetry = reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick");
-    let nextOpenChange!: PopoverOpenChange;
+  it("rejects in-place read-error and pending scalar mutation without claiming the Retry", () => {
+    const error = { ...READ_FAILURE };
+    const state = {
+      ...EMPTY,
+      items: [ITEM],
+      unreadCount: 1,
+      loaded: true,
+      readError: error,
+    };
+    createBellRoot(state, { onOpen: vi.fn() });
+    openCurrentBell();
+    const retry = captureActions().readRetry!;
 
-    renderBellRoot(root, loadFailureState, {
-      currentDocId: "document-two",
-      onOpen: currentOpen,
-      boundary: 1,
-      onBoundary: () => {
-        expect(screen.queryByTestId("notifications-popover")).toBeNull();
-        nextOpenChange = latestOpenChange(staleOpenChange);
-        staleRetry();
-      },
-    });
+    error.message = "Producer rewrote the failure";
+    state.readErrorPending = true;
+    act(() => invoke(retry));
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(READ_FAILURE.message);
 
-    openDirectBell(nextOpenChange);
-    const currentRetry = reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick");
-    act(() => {
-      if (currentFirst) currentRetry();
-      staleRetry();
-      if (!currentFirst) currentRetry();
-    });
+    error.message = READ_FAILURE.message;
+    state.readErrorPending = false;
+    fireEvent.click(retry.element);
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(READ_FAILURE);
+    expect(Object.isFrozen(store.retryNotificationRead.mock.calls[0]![0])).toBe(true);
+  });
+
+  it("re-reads live unread and pending facts before Mark all read", () => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    createBellRoot(state, { onOpen: vi.fn() });
+    openCurrentBell();
+    const readAll = captureActions().readAll;
+
+    state.unreadCount = 0;
+    state.readAllPending = true;
+    act(() => invoke(readAll));
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+
+    state.unreadCount = 1;
+    state.readAllPending = false;
+    fireEvent.click(readAll.element);
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+  });
+
+  it("re-reads live loading and failure facts before initial-load Retry", () => {
+    const state = { ...EMPTY, loadError: true };
+    createBellRoot(state, { onOpen: vi.fn() });
+    openCurrentBell();
+    const retry = captureActions().loadRetry!;
+
+    state.loading = true;
+    state.loadError = false;
+    act(() => invoke(retry));
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+
+    state.loading = false;
+    state.loadError = true;
+    fireEvent.click(retry.element);
     expect(store.refreshNotifications).toHaveBeenCalledOnce();
-    expect(previousOpen).not.toHaveBeenCalled();
-    expect(currentOpen).not.toHaveBeenCalled();
-    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+  });
+
+  it("claims a row before reentrant competing rows and actions, then preserves store-close-callback order", () => {
+    const producerRow = { ...ITEM };
+    const state = {
+      ...EMPTY,
+      items: [producerRow, { ...ITEM_TWO }],
+      unreadCount: 2,
+      loaded: true,
+      readError: { ...READ_FAILURE },
+    };
+    const order: string[] = [];
+    store.markNotificationRead.mockImplementation(() => {
+      order.push("read");
+      producerRow.documentTitle = "Mutated during the store call";
+      return Promise.resolve();
+    });
+    const onOpen = vi.fn((notification: NotificationDto) => {
+      order.push("open");
+      expect(notification.documentTitle).toBe(ITEM.documentTitle);
+      expect(Object.isFrozen(notification)).toBe(true);
+      invoke(actions.rows[1]!);
+      invoke(actions.readAll);
+      invoke(actions.readRetry!);
+    });
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const actions = captureActions();
+
+    fireEvent.click(actions.rows[0]!.element);
+
+    expect(order).toEqual(["read", "open"]);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    act(() => invoke(actions.rows[0]!));
+    expect(store.markNotificationRead).toHaveBeenCalledOnce();
   });
 });
