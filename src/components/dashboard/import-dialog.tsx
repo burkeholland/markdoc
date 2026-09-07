@@ -52,6 +52,12 @@ export interface ImportItem {
   retry?: () => void;
 }
 
+interface RetryOwnership {
+  generation: number;
+  files: Map<number, File>;
+  images: File[];
+}
+
 function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocument[]; failed: FailedImport[] } {
   return {
     documents: items.flatMap((item) =>
@@ -157,12 +163,8 @@ export function useFileImport(options: UseFileImportOptions = {}) {
   const itemsRef = useRef<ImportItem[]>([]);
   const generationRef = useRef(0);
   const activeUploadsRef = useRef(0);
-  const retryPendingRef = useRef(false);
-  const retryOwnershipRef = useRef<{
-    generation: number;
-    files: Map<number, File>;
-    images: File[];
-  } | null>(null);
+  const retryPendingRef = useRef<RetryOwnership | null>(null);
+  const retryOwnershipRef = useRef<RetryOwnership | null>(null);
   const optionsRef = useRef(options);
   useEffect(() => {
     optionsRef.current = options;
@@ -183,12 +185,12 @@ export function useFileImport(options: UseFileImportOptions = {}) {
 
   const retryFailed = useCallback(async () => {
     const ownership = retryOwnershipRef.current;
-    if (!ownership || retryPendingRef.current) return;
+    if (!ownership || retryPendingRef.current === ownership) return;
 
     const entries = Array.from(ownership.files.entries()).sort(([a], [b]) => a - b);
     if (entries.length === 0) return;
 
-    retryPendingRef.current = true;
+    retryPendingRef.current = ownership;
     activeUploadsRef.current++;
     const rowIndexes = entries.map(([index]) => index);
     const documents = entries.map(([, file]) => file);
@@ -249,7 +251,7 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       const result = summarizeImportItems(nextItems);
       optionsRef.current.onDone?.(result.documents, result.failed);
     } finally {
-      retryPendingRef.current = false;
+      if (retryPendingRef.current === ownership) retryPendingRef.current = null;
       activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
     }
   }, [replaceItems]);

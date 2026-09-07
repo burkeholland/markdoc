@@ -142,36 +142,62 @@ describe("useFileImport · retrying failed files", () => {
     await waitFor(() => expect(screen.queryByTestId("import-dialog")).toBeNull());
   });
 
-  it("replaces retry ownership when a new batch starts", async () => {
+  it("lets a replacement batch retry while the obsolete retry is pending and ignores the obsolete result", async () => {
     const oldDocument = new File(["# Old"], "old.md", { type: "text/markdown" });
     const oldImage = new File(["old"], "old.png", { type: "image/png" });
     const newDocument = new File(["# New"], "new.md", { type: "text/markdown" });
     const newImage = new File(["new"], "new.png", { type: "image/png" });
+    const oldRetry = deferred<ImportBatch>();
+    const newRetry = deferred<ImportBatch>();
     uploadImportBatch
       .mockResolvedValueOnce({
         documents: [],
         failed: [{ index: 0, name: oldDocument.name, error: "Old failure" }],
       })
+      .mockReturnValueOnce(oldRetry.promise)
       .mockResolvedValueOnce({
         documents: [],
         failed: [{ index: 0, name: newDocument.name, error: "New failure" }],
       })
-      .mockResolvedValueOnce({
-        documents: [{ id: "doc-new", title: "New", warnings: [] }],
-        failed: [],
-      });
+      .mockReturnValueOnce(newRetry.promise);
 
     render(<Harness batches={[[oldDocument, oldImage], [newDocument, newImage]]} onError={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
     expect(await screen.findByText("Old failure")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+    await waitFor(() => expect(uploadImportBatch).toHaveBeenCalledTimes(2));
 
     fireEvent.change(screen.getByTestId("import-file-input"), { target: { files: [newDocument, newImage] } });
     expect(await screen.findByText("New failure")).toBeInTheDocument();
     expect(screen.queryByText("Old failure")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+    const replacementRetry = screen.getByRole("button", { name: "Retry failed" });
+    expect(replacementRetry).toBeEnabled();
+    fireEvent.click(replacementRetry);
+    await waitFor(() => expect(replacementRetry).toBeDisabled());
 
-    expect(await screen.findByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-new");
+    expect(uploadImportBatch).toHaveBeenCalledTimes(4);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [oldDocument], [oldImage]);
     expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [newDocument], [newImage]);
-    expect(uploadImportBatch.mock.calls.flatMap(([documents]) => documents as File[]).filter((file) => file === oldDocument)).toHaveLength(1);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(4, [newDocument], [newImage]);
+
+    await act(async () => {
+      oldRetry.resolve({
+        documents: [{ id: "doc-old", title: "Old", warnings: [] }],
+        failed: [],
+      });
+    });
+    expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "uploading");
+    expect(replacementRetry).toBeDisabled();
+    fireEvent.click(replacementRetry);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(4);
+
+    await act(async () => {
+      newRetry.resolve({
+        documents: [{ id: "doc-new", title: "New", warnings: [] }],
+        failed: [],
+      });
+    });
+    expect(await screen.findByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-new");
+    expect(screen.queryByText("Old")).toBeNull();
   });
 });
