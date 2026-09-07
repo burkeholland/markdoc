@@ -25,14 +25,22 @@ export function checklistState(tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "last
   return { hasToken: tokens.length > 0, mcpSeen: tokens.some((t) => !!t.lastMcpSeenAt), mcpCalled: tokens.some((t) => !!t.lastMcpCallAt) };
 }
 
+function advanceChecklistState(current: ChecklistState, tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "lastMcpCallAt">[]): ChecklistState {
+  const next = checklistState(tokens);
+  return {
+    hasToken: current.hasToken || next.hasToken,
+    mcpSeen: current.mcpSeen || next.mcpSeen,
+    mcpCalled: current.mcpCalled || next.mcpCalled,
+  };
+}
+
 /**
  * "Set up Copilot CLI" at the top of Settings → Agents: four steps whose checkmarks come from real
  * state — a token exists, an MCP client listed the tools with it (`lastMcpSeenAt`), a tool call went
  * through (`lastMcpCallAt`, so the permission prompt was answered) or a request was sent from the editor.
  */
 export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs = 5000 }: CopilotChecklistProps) {
-  const [tokens, setTokens] = useState(initialTokens);
-  const state = checklistState(tokens);
+  const [state, setState] = useState(() => checklistState(initialTokens));
   const steps: { id: string; label: string; detail: React.ReactNode; done: boolean }[] = [
     { id: "token", label: "Create a token", detail: <>Below: name it after the agent (e.g. “GitHub Copilot CLI”) and copy the secret once.</>, done: state.hasToken },
     {
@@ -70,7 +78,9 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs 
     const load = () =>
       api.tokens
         .list()
-        .then((r) => !cancelled && setTokens(r.tokens))
+        .then((r) => {
+          if (!cancelled) setState((current) => advanceChecklistState(current, r.tokens));
+        })
         .catch(() => {});
     void load();
     const timer = setInterval(() => void load(), pollMs);
