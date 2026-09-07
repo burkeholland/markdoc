@@ -8,6 +8,8 @@ type ListOptions = { starred?: boolean; trash?: boolean };
 type ListResponse = { documents: DocumentSummaryDto[] };
 const searchDocuments = vi.fn<(query: string, init?: RequestInit) => Promise<SearchResponse>>();
 const listDocuments = vi.fn<(options?: ListOptions) => Promise<ListResponse>>();
+const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
+const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
@@ -22,7 +24,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
       documents: {
         ...actual.api.documents,
         search: (query: string, init?: RequestInit) => searchDocuments(query, init),
-          list: (options?: ListOptions) => listDocuments(options),
+        list: (options?: ListOptions) => listDocuments(options),
+        star: (id: string) => starDocument(id),
+        unstar: (id: string) => unstarDocument(id),
       },
     },
   };
@@ -69,10 +73,10 @@ const DOCUMENTS = [
   doc("notes", "Meeting notes", "An ordinary excerpt"),
 ];
 
-function renderDashboard(children?: React.ReactNode) {
+function renderDashboard(children?: React.ReactNode, documents = DOCUMENTS) {
   return render(
     <>
-      <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+      <Dashboard user={USER} documents={documents} githubAvailable githubConfigured />
       {children}
     </>,
   );
@@ -102,12 +106,22 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function documentStar(title: string) {
+  const list = screen.getByTestId("document-list");
+  const link = within(list).getByRole("link", { name: new RegExp(title) });
+  return within(link.closest("li")!).getByTestId("star-toggle");
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   searchDocuments.mockReset();
   searchDocuments.mockImplementation(async (query) => ({ query, documents: [] }));
   listDocuments.mockReset();
   listDocuments.mockResolvedValue({ documents: [] });
+  starDocument.mockReset();
+  starDocument.mockResolvedValue({ starred: true });
+  unstarDocument.mockReset();
+  unstarDocument.mockResolvedValue({ starred: false });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -252,6 +266,216 @@ describe("dashboard content-search recovery", () => {
     expect(screen.getByRole("link", { name: /Gamma result/ })).toBeInTheDocument();
     expect(screen.queryByText(/Stale alpha result/)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("dashboard star recovery", () => {
+  it("optimistically stars and unstars, disables the document while pending, and commits each response", async () => {
+    const starring = deferred<{ starred: true }>();
+    const unstarring = deferred<{ starred: false }>();
+    starDocument.mockReturnValueOnce(starring.promise);
+    unstarDocument.mockReturnValueOnce(unstarring.promise);
+    renderDashboard();
+
+    fireEvent.click(documentStar("Alpha planning"));
+
+    expect(starDocument).toHaveBeenCalledOnce();
+    expect(starDocument).toHaveBeenCalledWith("alpha-title");
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "true");
+    expect(documentStar("Alpha planning")).toBeDisabled();
+    expect(documentStar("Meeting notes")).toBeEnabled();
+
+    await act(async () => {
+      starring.resolve({ starred: true });
+      await starring.promise;
+    });
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "true");
+    expect(documentStar("Alpha planning")).toBeEnabled();
+
+    fireEvent.click(documentStar("Alpha planning"));
+
+    expect(unstarDocument).toHaveBeenCalledOnce();
+    expect(unstarDocument).toHaveBeenCalledWith("alpha-title");
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "false");
+    expect(documentStar("Alpha planning")).toBeDisabled();
+
+    await act(async () => {
+      unstarring.resolve({ starred: false });
+      await unstarring.promise;
+    });
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "false");
+    expect(documentStar("Alpha planning")).toBeEnabled();
+  });
+
+  it("suppresses synchronous duplicate activation across duplicate controls for one document", async () => {
+    const pending = deferred<{ starred: false }>();
+    unstarDocument.mockReturnValueOnce(pending.promise);
+    renderDashboard(undefined, [{ ...doc("starred", "Starred document"), starred: true }]);
+    const stripButton = within(screen.getByTestId("starred-strip")).getByRole("button", { name: "Unstar" });
+    const listButton = documentStar("Starred document");
+
+    act(() => {
+      stripButton.click();
+      listButton.click();
+    });
+
+    expect(unstarDocument).toHaveBeenCalledOnce();
+    expect(unstarDocument).toHaveBeenCalledWith("starred");
+    expect(starDocument).not.toHaveBeenCalled();
+    expect(documentStar("Starred document")).toBeDisabled();
+
+    await act(async () => {
+      pending.resolve({ starred: false });
+      await pending.promise;
+    });
+  });
+
+  it("allows independent documents to mutate concurrently while keeping each document single-flight", async () => {
+    const alpha = deferred<{ starred: true }>();
+    const notes = deferred<{ starred: true }>();
+    starDocument.mockReturnValueOnce(alpha.promise).mockReturnValueOnce(notes.promise);
+    renderDashboard();
+
+    fireEvent.click(documentStar("Alpha planning"));
+    fireEvent.click(documentStar("Meeting notes"));
+
+    expect(starDocument.mock.calls).toEqual([["alpha-title"], ["notes"]]);
+    expect(documentStar("Alpha planning")).toBeDisabled();
+    expect(documentStar("Meeting notes")).toBeDisabled();
+
+    await act(async () => {
+      alpha.resolve({ starred: true });
+      await alpha.promise;
+    });
+    expect(documentStar("Alpha planning")).toBeEnabled();
+    expect(documentStar("Meeting notes")).toBeDisabled();
+
+    await act(async () => {
+      notes.resolve({ starred: true });
+      await notes.promise;
+    });
+    expect(documentStar("Meeting notes")).toBeEnabled();
+  });
+
+  it("rolls a failed toggle back with the API reason and retries the same action once", async () => {
+    const first = deferred<{ starred: true }>();
+    const retry = deferred<{ starred: true }>();
+    starDocument.mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise);
+    renderDashboard();
+
+    fireEvent.click(documentStar("Alpha planning"));
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => {
+      first.reject(new ApiError(503, "Star service unavailable"));
+      await Promise.allSettled([first.promise]);
+    });
+
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "false");
+    expect(documentStar("Alpha planning")).toBeEnabled();
+    expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", "error");
+    expect(screen.getByTestId("toast")).toHaveTextContent("Star service unavailable");
+    expect(console.error).not.toHaveBeenCalled();
+
+    fireEvent.click(documentStar("Alpha planning"));
+
+    expect(starDocument.mock.calls).toEqual([["alpha-title"], ["alpha-title"]]);
+    expect(unstarDocument).not.toHaveBeenCalled();
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "true");
+    expect(documentStar("Alpha planning")).toBeDisabled();
+
+    await act(async () => {
+      retry.resolve({ starred: true });
+      await retry.promise;
+    });
+  });
+
+  it("shares optimistic and pending state when a local match is replaced by the server result", async () => {
+    const search = deferred<SearchResponse>();
+    const starring = deferred<{ starred: true }>();
+    searchDocuments.mockReturnValueOnce(search.promise);
+    starDocument.mockReturnValueOnce(starring.promise);
+    renderDashboard();
+    const input = screen.getByRole("textbox", { name: "Search documents" });
+
+    fireEvent.change(input, { target: { value: "alpha" } });
+    fireEvent.click(documentStar("Alpha planning"));
+    await settleSearch();
+
+    await act(async () => {
+      search.resolve({ query: "alpha", documents: [result("alpha-title", "Alpha planning", "Server alpha result")] });
+      await search.promise;
+    });
+
+    expect(screen.getByTestId("search-snippet")).toHaveTextContent("Server alpha result");
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "true");
+    expect(documentStar("Alpha planning")).toBeDisabled();
+    fireEvent.click(documentStar("Alpha planning"));
+    expect(starDocument).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      starring.resolve({ starred: true });
+      await starring.promise;
+    });
+    expect(documentStar("Alpha planning")).toBeEnabled();
+  });
+
+  it("isolates stale successes, errors, and finalizers after prop refresh removes and restores cards", async () => {
+    const staleSuccess = deferred<{ starred: true }>();
+    const staleError = deferred<{ starred: true }>();
+    const currentAlpha = deferred<{ starred: true }>();
+    const currentNotes = deferred<{ starred: true }>();
+    starDocument
+      .mockReturnValueOnce(staleSuccess.promise)
+      .mockReturnValueOnce(staleError.promise)
+      .mockReturnValueOnce(currentAlpha.promise)
+      .mockReturnValueOnce(currentNotes.promise);
+    const view = renderDashboard();
+
+    fireEvent.click(documentStar("Alpha planning"));
+    fireEvent.click(documentStar("Meeting notes"));
+    view.rerender(<Dashboard user={USER} documents={[doc("alpha-title", "Alpha planning")]} githubAvailable githubConfigured />);
+    expect(screen.queryByRole("link", { name: /Meeting notes/ })).toBeNull();
+    view.rerender(<Dashboard user={USER} documents={DOCUMENTS.map((item) => ({ ...item }))} githubAvailable githubConfigured />);
+
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "false");
+    expect(documentStar("Meeting notes")).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(documentStar("Alpha planning"));
+    fireEvent.click(documentStar("Meeting notes"));
+
+    await act(async () => {
+      staleSuccess.resolve({ starred: true });
+      staleError.reject(new ApiError(503, "Obsolete star failure"));
+      await Promise.allSettled([staleSuccess.promise, staleError.promise]);
+    });
+
+    expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "true");
+    expect(documentStar("Meeting notes")).toHaveAttribute("aria-pressed", "true");
+    expect(documentStar("Alpha planning")).toBeDisabled();
+    expect(documentStar("Meeting notes")).toBeDisabled();
+    expect(screen.queryByText("Obsolete star failure")).toBeNull();
+    expect(console.error).not.toHaveBeenCalled();
+
+    await act(async () => {
+      currentAlpha.resolve({ starred: true });
+      currentNotes.resolve({ starred: true });
+      await Promise.all([currentAlpha.promise, currentNotes.promise]);
+    });
+  });
+
+  it("ignores a pending mutation after unmount", async () => {
+    const pending = deferred<{ starred: true }>();
+    starDocument.mockReturnValueOnce(pending.promise);
+    const view = renderDashboard();
+    fireEvent.click(documentStar("Alpha planning"));
+
+    view.unmount();
+    await act(async () => {
+      pending.reject(new ApiError(503, "Unmounted star failure"));
+      await Promise.allSettled([pending.promise]);
+    });
+
+    expect(console.error).not.toHaveBeenCalled();
   });
 });
 
