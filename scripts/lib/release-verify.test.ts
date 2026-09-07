@@ -29,7 +29,7 @@ import {
   type Check,
   type ReleaseVerifyIo,
 } from "./release-verify";
-import { connectCollab, createIo, createLocalDist, runMain } from "../release-verify.mjs";
+import { connectBareCollab, connectCollab, createIo, createLocalDist, runMain } from "../release-verify.mjs";
 
 const SHA = "5f9eb0daa9ea5ac35d3785a4f0aad6a465cb32b6";
 const OTHER_SHA = "0000000000000000000000000000000000000000";
@@ -375,11 +375,17 @@ describe("runReleaseVerify against an in-process origin", () => {
   });
 
   const rejected: ReleaseVerifyIo["connectCollab"] = async () => ({ outcome: "rejected", reason: "permission-denied", ms: 12 });
-  const io = (overrides: Partial<ReleaseVerifyIo> = {}, distDir: string | null = dist): ReleaseVerifyIo => ({ ...createIo({ timeoutMs: 5000, dist: distDir ?? undefined }), connectCollab: rejected, ...overrides });
+  const idleClosed: ReleaseVerifyIo["connectBareCollab"] = async () => ({ outcome: "closed", opened: true, code: 4401, reason: "Unauthorized", ms: 3_000 });
+  const io = (overrides: Partial<ReleaseVerifyIo> = {}, distDir: string | null = dist): ReleaseVerifyIo => ({
+    ...createIo({ timeoutMs: 5000, dist: distDir ?? undefined }),
+    connectBareCollab: idleClosed,
+    connectCollab: rejected,
+    ...overrides,
+  });
 
   it("all rows pass with a matching build; redirect is skipped for an http:// base; exit code 0", async () => {
     const report = await runReleaseVerify({ base: site.url, sha: SHA }, io());
-    expect(report.checks.map((check) => check.name)).toEqual(["health", "health:live", "api:404", "mcp:alive", "redirect", "headers", "login", "chunks:identity", "chunks:all", "css:rules", "brotli", "gzip", "leak:localhost", "collab:reject"]);
+    expect(report.checks.map((check) => check.name)).toEqual(["health", "health:live", "api:404", "mcp:alive", "redirect", "headers", "login", "chunks:identity", "chunks:all", "css:rules", "brotli", "gzip", "leak:localhost", "collab:idle", "collab:reject"]);
     expect(statusOf(report.checks)).toEqual({
       health: "pass",
       "health:live": "pass",
@@ -394,9 +400,10 @@ describe("runReleaseVerify against an in-process origin", () => {
       brotli: "pass",
       gzip: "pass",
       "leak:localhost": "pass",
+      "collab:idle": "pass",
       "collab:reject": "pass",
     });
-    expect(report.summary).toEqual({ passed: 13, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
+    expect(report.summary).toEqual({ passed: 14, failed: 0, warned: 0, skipped: 1, exitCode: 0 });
     expect(row(report.checks, "headers").detail).toBe("GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http)");
     expect(row(report.checks, "login").detail).toContain("references 3 .js + 1 .css chunks");
     expect(row(report.checks, "chunks:identity").detail).toContain("4 chunks");
@@ -405,10 +412,11 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(row(report.checks, "css:rules").detail).toContain("identical rule sets");
     expect(row(report.checks, "brotli").detail).toMatch(/^4 chunks ≥ 1 024 B, identity [\d ]+ bytes → br [\d ]+ bytes \([\d.]+ %\), content-length = local \.br size$/);
     expect(row(report.checks, "gzip").detail).toMatch(/^main-abc\.js: identity 3 \d{3} B → gzip \d+ B, decompressed SHA-256 identical$/);
+    expect(row(report.checks, "collab:idle").detail).toContain('bare 101 upgrade closed 4401 "Unauthorized" after 3000 ms');
     expect(row(report.checks, "collab:reject").detail).toContain("authenticationFailed after 12 ms (permission-denied)");
     expect(report.base).toBe(site.url);
     expect(report.startedAt <= report.finishedAt).toBe(true);
-    expect(formatReport(report.checks).split("\n")).toHaveLength(16);
+    expect(formatReport(report.checks).split("\n")).toHaveLength(17);
   });
 
   describe("headers", () => {
@@ -504,7 +512,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(report.checks.map((check) => check.name).slice(0, 5)).toEqual(["health", "health:live", "api:404", "mcp:alive", "redirect"]);
       const flipped = await runReleaseVerify({ base: site.url, sha: SHA, waitFlipSeconds: 5 }, io({}, null));
       expect(flipped.checks.map((check) => check.name).slice(0, 6)).toEqual(["flip", "health", "health:live", "api:404", "mcp:alive", "redirect"]);
-      expect(flipped.checks).toHaveLength(15);
+      expect(flipped.checks).toHaveLength(16);
     });
 
     it("the card is asked for with a plain Accept, the unknown path differs between runs, and no detail echoes the auth line", async () => {
@@ -542,7 +550,7 @@ describe("runReleaseVerify against an in-process origin", () => {
         expect(excerptOf(check.detail)).toBe(HTML_404.slice(0, 120));
         expect(row(report.checks, "mcp:alive")).toMatchObject({ status: "pass" });
         expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
-        expect(formatReport(report.checks).split("\n")).toHaveLength(16);
+        expect(formatReport(report.checks).split("\n")).toHaveLength(17);
       } finally {
         site.apiNotFound = "json";
       }
@@ -666,12 +674,37 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(row(closed.checks, "collab:reject").detail).toContain("socket closed (code 1006) after 40 ms");
   });
 
+  it("keeps a bare no-frame upgrade distinct from invalid-token authentication", async () => {
+    const timeout = await runReleaseVerify(
+      { base: site.url, sha: SHA, timeoutMs: 5_000 },
+      io({ connectBareCollab: async () => ({ outcome: "timeout", opened: true }) }),
+    );
+    expect(row(timeout.checks, "collab:idle")).toEqual({
+      name: "collab:idle",
+      status: "fail",
+      detail: expect.stringContaining("bare 101 upgrade stayed open for 5000 ms without authentication"),
+    });
+    expect(row(timeout.checks, "collab:reject").status).toBe("pass");
+
+    const noUpgrade = await runReleaseVerify(
+      { base: site.url, sha: SHA },
+      io({ connectBareCollab: async () => ({ outcome: "closed", opened: false, code: 1006, ms: 10 }) }),
+    );
+    expect(row(noUpgrade.checks, "collab:idle").detail).toContain("closed before the 101 upgrade completed");
+
+    const wrongClose = await runReleaseVerify(
+      { base: site.url, sha: SHA },
+      io({ connectBareCollab: async () => ({ outcome: "closed", opened: true, code: 4408, reason: "Connection Timeout", ms: 3_000 }) }),
+    );
+    expect(row(wrongClose.checks, "collab:idle").detail).toContain('expected 4401 "Unauthorized"');
+  });
+
   it("without --dist the local comparisons are skipped, not failed", async () => {
     const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
     expect(statusOf(report.checks)).toMatchObject({ "chunks:identity": "pass", "chunks:all": "skipped", "css:rules": "skipped", brotli: "pass", gzip: "pass" });
     expect(row(report.checks, "chunks:identity").detail).toContain("not compared");
     expect(row(report.checks, "chunks:all").detail).toContain("no --dist");
-    expect(report.summary).toEqual({ passed: 11, failed: 0, warned: 0, skipped: 3, exitCode: 0 });
+    expect(report.summary).toEqual({ passed: 12, failed: 0, warned: 0, skipped: 3, exitCode: 0 });
   });
 
   it("a renamed Tailwind stylesheet is compared rule by rule (warn on ≤ 5 local-only utilities), its .br by decompression only", async () => {
@@ -688,7 +721,7 @@ describe("runReleaseVerify against an in-process origin", () => {
     expect(all.status).toBe("fail");
     expect(all.detail).toContain("2 unreferenced local chunks (2 .js + 0 .css)");
     expect(all.detail).toContain("orphan-xyz.js: status 404");
-    expect(report.summary).toEqual({ passed: 11, failed: 1, warned: 1, skipped: 1, exitCode: 1 });
+    expect(report.summary).toEqual({ passed: 12, failed: 1, warned: 1, skipped: 1, exitCode: 1 });
   });
 
   it("a dev origin in a referenced chunk fails leak:localhost; a bare token only warns", async () => {
@@ -738,7 +771,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(flip.status).toBe("pass");
       expect(flip.detail).toMatch(/^at version after 3 samples, 0 non-200, max rtt 500 ms; first sample at the new version 2026-08-31T13:00:0\d\.\d{3}Z, \d\.\d s after the first sample$/);
       expect(report.checks[0].name).toBe("flip");
-      expect(report.checks).toHaveLength(15);
+      expect(report.checks).toHaveLength(16);
       expect(report.summary.failed).toBe(0);
     });
 
@@ -757,8 +790,8 @@ describe("runReleaseVerify against an in-process origin", () => {
       const flip = row(report.checks, "flip");
       expect(flip.status).toBe("fail");
       expect(flip.detail).toMatch(/^version did not become 5f9eb0d\w+ within 6 s: [3-5] samples, 0 non-200, max rtt 500 ms, last version 0{40}$/);
-      expect(report.checks).toHaveLength(15);
-      expect(statusOf(report.checks)).toMatchObject({ health: "pass", login: "pass", "collab:reject": "pass" });
+      expect(report.checks).toHaveLength(16);
+      expect(statusOf(report.checks)).toMatchObject({ health: "pass", login: "pass", "collab:idle": "pass", "collab:reject": "pass" });
       expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
     });
   });
@@ -776,6 +809,12 @@ describe("runReleaseVerify against an in-process origin", () => {
       const { result, authenticateLogs } = await quietOnAuthenticate(() => connectCollab(`ws://${new URL(site.url).host}/collab`, 5000));
       expect(result).toMatchObject({ outcome: "rejected", reason: "permission-denied" });
       expect(authenticateLogs).toEqual([["[onAuthenticate]", "no such token"]]);
+    });
+
+    it("the real connectBareCollab observes the 101 upgrade and bare-socket deadline", async () => {
+      const result = await connectBareCollab(`ws://${new URL(site.url).host}/collab`, 5_000);
+      expect(result).toMatchObject({ outcome: "closed", opened: true, code: 4401, reason: "Unauthorized" });
+      if (result.outcome === "closed") expect(result.ms).toBeLessThan(5_000);
     });
 
     it("reports a socket that closes without authentication (no upgrade) as closed, within the grace period", async () => {
@@ -823,11 +862,11 @@ describe("runReleaseVerify against an in-process origin", () => {
       const code = await runMain(["--base", site.url, "--sha", SHA, "--dist", dist, "--json", jsonPath, "--timeout-ms", "5000"], { output, io: io() });
       expect(code).toBe(0);
       expect(lines[0].split("\n")[0]).toBe("| check | status | detail |");
-      expect(lines[1]).toBe("release-verify: 13 passed, 0 failed, 0 warned, 1 skipped");
+      expect(lines[1]).toBe("release-verify: 14 passed, 0 failed, 0 warned, 1 skipped");
       const written = JSON.parse(readFileSync(jsonPath, "utf8")) as { base: string; sha: string; checks: Check[]; summary: { exitCode: number } };
       expect(written.base).toBe(site.url);
       expect(written.sha).toBe(SHA);
-      expect(written.checks).toHaveLength(14);
+      expect(written.checks).toHaveLength(15);
       expect(written.summary.exitCode).toBe(0);
     });
 
@@ -847,11 +886,12 @@ describe("runReleaseVerify against an in-process origin", () => {
       );
       expect(authenticateLogs).toHaveLength(1);
       expect(result.stderr).toBe("");
+      expect(result.stdout).toContain("| collab:idle | pass |");
       expect(result.stdout).toContain("| collab:reject | pass |");
       expect(result.stdout).toMatch(/\| api:404 \| pass \| GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, application\/json, JSON \{ error, path \} echoing the path \|/);
       expect(result.stdout).toMatch(/\| mcp:alive \| pass \| GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0 \|/);
       expect(result.stdout).toContain("| headers | pass | GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http) |");
-      expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 13 passed, 0 failed, 0 warned, 1 skipped");
+      expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 14 passed, 0 failed, 0 warned, 1 skipped");
       expect(result.code).toBe(0);
     }, 60_000);
   });
