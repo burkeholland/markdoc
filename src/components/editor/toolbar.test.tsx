@@ -60,8 +60,9 @@ vi.mock("@/components/ui/primitives", () => ({
 import { Toolbar } from "./toolbar";
 
 type ToolbarProps = ComponentProps<typeof Toolbar>;
-type ClickHandler = () => void;
-type MouseDownHandler = (event: { preventDefault: () => void }) => void;
+type ControlEvent = { currentTarget: HTMLButtonElement; preventDefault: () => void };
+type ClickHandler = (event: ControlEvent) => void;
+type MouseDownHandler = (event: ControlEvent) => void;
 type HeadingChangeHandler = (value: string) => void;
 type CloseHandler = (event: { preventDefault: () => void }) => void;
 type FocusHandler = (event: { currentTarget: HTMLDivElement; target: Element }) => void;
@@ -304,6 +305,20 @@ function button(publication: ReturnType<typeof capturePublication>, label: (type
   return control;
 }
 
+function activate(
+  control: ReturnType<typeof button>,
+  currentTarget: HTMLButtonElement = control.element,
+) {
+  control.click({ currentTarget, preventDefault: vi.fn() });
+}
+
+function controlEvent(
+  control: ReturnType<typeof button>,
+  currentTarget: HTMLButtonElement = control.element,
+): ControlEvent {
+  return { currentTarget, preventDefault: vi.fn() };
+}
+
 function keyEvent(root: HTMLDivElement, key: string, modifiers: Partial<Pick<KeyEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey">> = {}) {
   return {
     currentTarget: root,
@@ -348,14 +363,37 @@ describe("Toolbar publication authority", () => {
     expect(button(publication, "Redo").element).toBeEnabled();
     expect(button(publication, "Comment").element).toHaveClass("btn-outline");
 
+    const foreign = document.createElement("button");
+    document.body.append(foreign);
+    const detached = document.createElement("button");
+    const bold = button(publication, "Bold");
+    const image = button(publication, "Image");
+    const comment = button(publication, "Comment");
+    bold.click(controlEvent(bold, button(publication, "Italic").element));
+    bold.click(controlEvent(bold, foreign));
+    image.click(controlEvent(image, detached));
+    comment.click(controlEvent(comment, bold.element));
+    expect(f.actions.toggleMark).not.toHaveBeenCalled();
+    expect(f.onImage).not.toHaveBeenCalled();
+    expect(f.onComment).not.toHaveBeenCalled();
+    for (const [control, target] of [
+      [bold, comment.element],
+      [button(publication, "Text style"), foreign],
+      [comment, detached],
+    ] as const) {
+      const event = controlEvent(control, target);
+      control.mouseDown(event);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+
     f.actions.toggleMark.mockImplementation((kind: string) => {
-      if (kind === "strong") button(publication, "Bold").click();
+      if (kind === "strong") activate(button(publication, "Bold"));
     });
-    f.onImage.mockImplementation(() => button(publication, "Image").click());
+    f.onImage.mockImplementation(() => activate(button(publication, "Image")));
     for (const label of BUTTON_LABELS.slice(1)) {
       const control = button(publication, label);
-      control.click();
-      control.click();
+      activate(control);
+      activate(control);
     }
     publication.headingChange("3");
     publication.headingChange("3");
@@ -383,8 +421,8 @@ describe("Toolbar publication authority", () => {
     expect(f.actions.focus).toHaveBeenCalledOnce();
 
     for (const label of ["Bold", "Text style", "Comment"] as const) {
-      const event = { preventDefault: vi.fn() };
       const control = button(publication, label);
+      const event = controlEvent(control);
       control.mouseDown(event);
       control.mouseDown(event);
       expect(event.preventDefault).toHaveBeenCalledOnce();
@@ -404,6 +442,13 @@ describe("Toolbar publication authority", () => {
       const staleRoot = stale.root;
       const staleBold = button(stale, "Bold").element;
       let current!: ReturnType<typeof capturePublication>;
+      let protectedTabs: number[] = [];
+      let protectedFocus: Element | null = null;
+      const rejectedMouseEvents: ControlEvent[] = [];
+      let acceptedMouse!: ControlEvent;
+      const foreign = document.createElement("button");
+      document.body.append(foreign);
+      const detached = document.createElement("button");
 
       const nextProps = {
         ...f.props,
@@ -422,20 +467,55 @@ describe("Toolbar publication authority", () => {
           current = capturePublication();
           expect(current.root).toBe(staleRoot);
           expect(button(current, "Bold").element).toBe(staleBold);
+          protectedTabs = screen.getAllByRole("button").map((element) => (element as HTMLButtonElement).tabIndex);
+          protectedFocus = document.activeElement;
+          const currentBold = button(current, "Bold");
+          const currentComment = button(current, "Comment");
+          const staleBoldControl = button(stale, "Bold");
+          const staleComment = button(stale, "Comment");
+          currentBold.click(controlEvent(currentBold, currentComment.element));
+          currentBold.click(controlEvent(currentBold, foreign));
+          currentComment.click(controlEvent(currentComment, currentBold.element));
+          currentComment.click(controlEvent(currentComment, detached));
+          const currentWrongMouse = controlEvent(currentBold, currentComment.element);
+          const staleExactMouse = controlEvent(staleBoldControl, currentBold.element);
+          currentBold.mouseDown(currentWrongMouse);
+          staleBoldControl.mouseDown(staleExactMouse);
+          rejectedMouseEvents.push(currentWrongMouse, staleExactMouse);
+          acceptedMouse = controlEvent(currentComment);
+          currentComment.mouseDown(acceptedMouse);
+          currentComment.mouseDown(acceptedMouse);
           if (order === "stale-before-current") {
-            button(stale, "Bold").click();
-            button(current, "Bold").click();
+            activate(staleBoldControl, currentBold.element);
+            activate(staleComment, currentComment.element);
+            activate(currentBold);
+            activate(currentComment);
           } else {
-            button(current, "Bold").click();
-            button(stale, "Bold").click();
+            activate(currentBold);
+            activate(currentComment);
+            activate(staleBoldControl, currentBold.element);
+            activate(staleComment, currentComment.element);
           }
         },
       });
 
       expect(passiveCleanup).toHaveBeenCalledOnce();
       expect(sharedToggle.mock.calls).toEqual([["strong"]]);
-      button(stale, "Bold").click();
+      expect(nextProps.onComment).toHaveBeenCalledOnce();
+      for (const event of rejectedMouseEvents) expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(acceptedMouse.preventDefault).toHaveBeenCalledOnce();
+      activate(button(stale, "Bold"), button(current, "Bold").element);
+      activate(button(stale, "Comment"), button(current, "Comment").element);
+      const postCleanupMouse = controlEvent(button(stale, "Bold"), button(current, "Bold").element);
+      button(stale, "Bold").mouseDown(postCleanupMouse);
+      expect(postCleanupMouse.preventDefault).not.toHaveBeenCalled();
+      activate(button(current, "Image"));
       expect(sharedToggle).toHaveBeenCalledOnce();
+      expect(nextProps.onComment).toHaveBeenCalledOnce();
+      expect(nextProps.onImage).toHaveBeenCalledOnce();
+      expect(screen.getAllByRole("button").map((element) => (element as HTMLButtonElement).tabIndex)).toEqual(protectedTabs);
+      expect(document.activeElement).toBe(protectedFocus);
+      expect(screen.getAllByTestId("toolbar")).toHaveLength(1);
       expect(button(current, "Bold").element).toHaveAttribute("aria-pressed", "true");
     },
   );
@@ -473,14 +553,14 @@ describe("Toolbar publication authority", () => {
           current = capturePublication();
           expect(current.root).toBe(staleRoot);
           expect(button(current, "Bold").element).toBe(staleBold);
-          button(stale, "Bold").click();
+          activate(button(stale, "Bold"));
           stale.headingChange("4");
           const staleClose = { preventDefault: vi.fn() };
           stale.headingClose(staleClose);
           if (replacement === "callbacks") {
-            button(stale, "Image").click();
-            button(stale, "Table").click();
-            button(stale, "Comment").click();
+            activate(button(stale, "Image"));
+            activate(button(stale, "Table"));
+            activate(button(stale, "Comment"));
           }
           expect(staleClose.preventDefault).not.toHaveBeenCalled();
         },
@@ -490,14 +570,14 @@ describe("Toolbar publication authority", () => {
       expect(f.actions.toggleMark).not.toHaveBeenCalled();
       expect(f.actions.setHeading).not.toHaveBeenCalled();
       expect(f.actions.focus).not.toHaveBeenCalled();
-      button(current, "Bold").click();
+      activate(button(current, "Bold"));
       current.headingChange("4");
       const close = { preventDefault: vi.fn() };
       current.headingClose(close);
       if (replacement === "callbacks") {
-        button(current, "Image").click();
-        button(current, "Table").click();
-        button(current, "Comment").click();
+        activate(button(current, "Image"));
+        activate(button(current, "Table"));
+        activate(button(current, "Comment"));
         expect(f.onImage).not.toHaveBeenCalled();
         expect(f.onTable).not.toHaveBeenCalled();
         expect(f.onComment).not.toHaveBeenCalled();
@@ -522,6 +602,13 @@ describe("Toolbar publication authority", () => {
       const rendered = directRender({ toolbar: first.props, onPassiveCleanup: passiveCleanup });
       const stale = capturePublication();
       let current!: ReturnType<typeof capturePublication>;
+      let protectedTabs: number[] = [];
+      let protectedFocus: Element | null = null;
+      const rejectedMouseEvents: ControlEvent[] = [];
+      let acceptedMouse!: ControlEvent;
+      const foreign = document.createElement("button");
+      document.body.append(foreign);
+      const detached = document.createElement("button");
 
       rendered.update({
         toolbar: {
@@ -537,20 +624,57 @@ describe("Toolbar publication authority", () => {
           current = capturePublication();
           expect(current.root).not.toBe(stale.root);
           expect(button(current, "Bold").element).not.toBe(button(stale, "Bold").element);
+          protectedTabs = screen.getAllByRole("button").map((element) => (element as HTMLButtonElement).tabIndex);
+          protectedFocus = document.activeElement;
+          const staleBold = button(stale, "Bold");
+          const staleComment = button(stale, "Comment");
+          const currentBold = button(current, "Bold");
+          const currentComment = button(current, "Comment");
+          currentBold.click(controlEvent(currentBold, staleBold.element));
+          staleBold.click(controlEvent(staleBold, currentBold.element));
+          currentBold.click(controlEvent(currentBold, currentComment.element));
+          currentComment.click(controlEvent(currentComment, staleComment.element));
+          currentBold.click(controlEvent(currentBold, foreign));
+          currentComment.click(controlEvent(currentComment, detached));
+          const currentWrongMouse = controlEvent(currentBold, staleBold.element);
+          const staleWrongMouse = controlEvent(staleBold, currentBold.element);
+          currentBold.mouseDown(currentWrongMouse);
+          staleBold.mouseDown(staleWrongMouse);
+          rejectedMouseEvents.push(currentWrongMouse, staleWrongMouse);
+          acceptedMouse = controlEvent(currentComment);
+          currentComment.mouseDown(acceptedMouse);
+          currentComment.mouseDown(acceptedMouse);
           if (order === "stale-before-current") {
-            button(stale, "Bold").click();
-            button(current, "Bold").click();
+            activate(staleBold);
+            activate(staleComment);
+            activate(currentBold);
+            activate(currentComment);
           } else {
-            button(current, "Bold").click();
-            button(stale, "Bold").click();
+            activate(currentBold);
+            activate(currentComment);
+            activate(staleBold);
+            activate(staleComment);
           }
         },
       });
 
       expect(sharedToggle.mock.calls).toEqual([["strong"]]);
+      expect(first.onComment).toHaveBeenCalledOnce();
       expect(passiveCleanup).toHaveBeenCalledOnce();
-      button(stale, "Bold").click();
+      for (const event of rejectedMouseEvents) expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(acceptedMouse.preventDefault).toHaveBeenCalledOnce();
+      activate(button(stale, "Bold"), button(current, "Bold").element);
+      activate(button(stale, "Comment"), button(current, "Comment").element);
+      const postCleanupMouse = controlEvent(button(stale, "Bold"), button(current, "Bold").element);
+      button(stale, "Bold").mouseDown(postCleanupMouse);
+      expect(postCleanupMouse.preventDefault).not.toHaveBeenCalled();
+      activate(button(current, "Image"));
       expect(sharedToggle).toHaveBeenCalledOnce();
+      expect(first.onComment).toHaveBeenCalledOnce();
+      expect(first.onImage).toHaveBeenCalledOnce();
+      expect(screen.getAllByRole("button").map((element) => (element as HTMLButtonElement).tabIndex)).toEqual(protectedTabs);
+      expect(document.activeElement).toBe(protectedFocus);
+      expect(screen.getAllByTestId("toolbar")).toHaveLength(1);
       expect(stale.root.isConnected).toBe(false);
       expect(current.root.isConnected).toBe(true);
     },
@@ -562,7 +686,7 @@ describe("Toolbar publication authority", () => {
     const rendered = directRender({ toolbar: f.props, onPassiveCleanup: passiveCleanup });
     const stale = capturePublication();
     const staleTabs = screen.getAllByRole("button").map((element) => (element as HTMLButtonElement).tabIndex);
-    const staleMouse = { preventDefault: vi.fn() };
+    const staleMouse = controlEvent(button(stale, "Bold"));
     const staleKey = keyEvent(stale.root, "ArrowRight");
     const staleClose = { preventDefault: vi.fn() };
 
@@ -573,7 +697,7 @@ describe("Toolbar publication authority", () => {
       onPassiveCleanup: passiveCleanup,
       onBoundary: () => {
         expect(passiveCleanup).not.toHaveBeenCalled();
-        button(stale, "Bold").click();
+        activate(button(stale, "Bold"));
         button(stale, "Bold").mouseDown(staleMouse);
         stale.headingChange("2");
         stale.headingClose(staleClose);
@@ -593,8 +717,8 @@ describe("Toolbar publication authority", () => {
 
     rendered.update({ toolbar: f.props, publicationKey: 2, boundary: 2, onPassiveCleanup: passiveCleanup });
     const current = capturePublication();
-    button(stale, "Bold").click();
-    button(current, "Bold").click();
+    activate(button(stale, "Bold"));
+    activate(button(current, "Bold"));
     expect(f.actions.toggleMark.mock.calls).toEqual([["strong"]]);
   });
 
@@ -607,8 +731,8 @@ describe("Toolbar publication authority", () => {
       toolbar: f.props,
       boundary: 1,
       onBoundary: () => {
-        for (const label of ["Bold", "Undo", "Redo", "Comment"] as const) button(enabled, label).click();
-        const mouse = { preventDefault: vi.fn() };
+        for (const label of ["Bold", "Undo", "Redo", "Comment"] as const) activate(button(enabled, label));
+        const mouse = controlEvent(button(enabled, "Bold"));
         button(enabled, "Bold").mouseDown(mouse);
         expect(mouse.preventDefault).not.toHaveBeenCalled();
       },
@@ -627,10 +751,10 @@ describe("Toolbar publication authority", () => {
     f.session.set({ canEdit: true, canUndo: true, canRedo: true, canComment: true });
     rendered.update({ toolbar: f.props, boundary: 2 });
     let current = capturePublication();
-    button(current, "Bold").click();
-    button(current, "Undo").click();
-    button(current, "Redo").click();
-    button(current, "Comment").click();
+    activate(button(current, "Bold"));
+    activate(button(current, "Undo"));
+    activate(button(current, "Redo"));
+    activate(button(current, "Comment"));
     expect(f.actions.toggleMark.mock.calls).toEqual([["strong"]]);
     expect(f.actions.undo).toHaveBeenCalledOnce();
     expect(f.actions.redo).toHaveBeenCalledOnce();
@@ -641,8 +765,8 @@ describe("Toolbar publication authority", () => {
     f.session.set({ canUndo: true, canRedo: true });
     rendered.update({ toolbar: f.props, boundary: 4 });
     current = capturePublication();
-    button(current, "Undo").click();
-    button(current, "Redo").click();
+    activate(button(current, "Undo"));
+    activate(button(current, "Redo"));
     expect(f.actions.undo).toHaveBeenCalledTimes(2);
     expect(f.actions.redo).toHaveBeenCalledTimes(2);
   });
@@ -651,19 +775,19 @@ describe("Toolbar publication authority", () => {
     const f = fixture();
     const rendered = directRender({ toolbar: f.props });
     const first = capturePublication();
-    button(first, "Bold").click();
+    activate(button(first, "Bold"));
 
     const pressed = { ...f.props, format: format({ strong: true }) };
     rendered.update({ toolbar: pressed, boundary: 1 });
     const second = capturePublication();
-    button(first, "Bold").click();
-    button(second, "Bold").click();
+    activate(button(first, "Bold"));
+    activate(button(second, "Bold"));
 
     const cleared = { ...f.props, format: format({ strong: false }) };
     rendered.update({ toolbar: cleared, boundary: 2 });
     const third = capturePublication();
-    button(second, "Bold").click();
-    button(third, "Bold").click();
+    activate(button(second, "Bold"));
+    activate(button(third, "Bold"));
     expect(f.actions.toggleMark.mock.calls).toEqual([["strong"], ["strong"], ["strong"]]);
   });
 
@@ -671,11 +795,11 @@ describe("Toolbar publication authority", () => {
     const f = fixture();
     const rendered = directRender({ toolbar: f.props });
     const stale = capturePublication();
-    const staleMouse = { preventDefault: vi.fn() };
+    const staleMouse = controlEvent(button(stale, "Bold"));
     const staleKey = keyEvent(stale.root, "ArrowRight");
 
     f.currentFormat.strong = true;
-    button(stale, "Bold").click();
+    activate(button(stale, "Bold"));
     button(stale, "Bold").mouseDown(staleMouse);
     stale.keyDown(staleKey);
     expect(f.actions.toggleMark).not.toHaveBeenCalled();
@@ -684,16 +808,16 @@ describe("Toolbar publication authority", () => {
 
     f.currentFormat.strong = false;
     f.session.mutate({ canUndo: false });
-    button(stale, "Bold").click();
-    button(stale, "Undo").click();
+    activate(button(stale, "Bold"));
+    activate(button(stale, "Undo"));
     expect(f.actions.toggleMark).not.toHaveBeenCalled();
     expect(f.actions.undo).not.toHaveBeenCalled();
 
     f.session.mutate({ canUndo: true });
     rendered.update({ toolbar: { ...f.props, format: format() }, boundary: 1 });
     const current = capturePublication();
-    button(stale, "Bold").click();
-    button(current, "Bold").click();
+    activate(button(stale, "Bold"));
+    activate(button(current, "Bold"));
     expect(f.actions.toggleMark.mock.calls).toEqual([["strong"]]);
   });
 

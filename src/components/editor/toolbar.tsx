@@ -38,7 +38,8 @@ type ToolbarControl<T extends HTMLElement = HTMLButtonElement> = Readonly<{
   rootButton: boolean;
   element: () => T | null;
   capture: (element: T | null) => void;
-  onClick: () => void;
+  activate: () => void;
+  onClick: (event: MouseEvent<T>) => void;
   onMouseDown: (event: MouseEvent<T>) => void;
 }>;
 
@@ -230,8 +231,13 @@ function createToolbarPublication({
     if (!claim(action)) return;
     action.run();
   };
-  const preventMouseDown = (control: OwnedToolbarControl, event: { preventDefault: () => void }) => {
-    if (!ownsControl(control) || mouseEvents.has(event)) return;
+  const ownsEventSource = (control: OwnedToolbarControl, event: { currentTarget: EventTarget | null }) =>
+    event.currentTarget === control.element();
+  const preventMouseDown = (
+    control: OwnedToolbarControl,
+    event: { currentTarget: EventTarget | null; preventDefault: () => void },
+  ) => {
+    if (!ownsEventSource(control, event) || !ownsControl(control) || mouseEvents.has(event)) return;
     mouseEvents.add(event);
     event.preventDefault();
   };
@@ -259,8 +265,12 @@ function createToolbarPublication({
       rootButton,
       element: owner.element,
       capture: owner.capture,
-      onClick: () => {
+      activate: () => {
         if (action) activate(action);
+      },
+      onClick: (event) => {
+        if (!ownsEventSource(control, event) || !action) return;
+        activate(action);
       },
       onMouseDown: (event) => preventMouseDown(control, event),
     });
@@ -417,7 +427,7 @@ function createToolbarPublication({
   const onHeadingChange = (value: string) => {
     const item = headingItems.find(({ level }) => String(level) === value);
     if (!item || !ownsControl(item.control)) return;
-    item.control.onClick();
+    item.control.activate();
   };
   const onHeadingClose = (event: { preventDefault: () => void }) => {
     if (closeEvents.has(event) || !claim(closeAction)) return;
