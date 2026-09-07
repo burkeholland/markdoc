@@ -5,6 +5,8 @@ import type { DocumentDto } from "@/server/dto";
 
 const collaborators = vi.fn();
 const addCollaborator = vi.fn();
+const removeCollaborator = vi.fn();
+const patchDocument = vi.fn();
 const tokensList = vi.fn();
 const tokensCreate = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => ({
@@ -13,8 +15,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
     documents: {
       collaborators: (...args: unknown[]) => collaborators(...args),
       addCollaborator: (...args: unknown[]) => addCollaborator(...args),
-      removeCollaborator: vi.fn(),
-      patch: vi.fn(),
+      removeCollaborator: (...args: unknown[]) => removeCollaborator(...args),
+      patch: (...args: unknown[]) => patchDocument(...args),
     },
     tokens: {
       list: (...args: unknown[]) => tokensList(...args),
@@ -38,6 +40,7 @@ import { ShareDialog } from "./share-dialog";
 const DOC_ID = "doc-919";
 type CollaboratorResponse = {
   owner: { login: string | null; name: string | null; image: string | null } | null;
+  linkAccess: DocumentDto["linkAccess"];
   collaborators: { login: string; name: string | null; image: string | null; role: "editor" | "commenter" | "viewer" }[];
   agents: never[];
 };
@@ -74,9 +77,23 @@ function deferred<T>() {
 function collaboratorResponse(owner: string, collaborator: string): CollaboratorResponse {
   return {
     owner: { login: owner, name: owner, image: null },
+    linkAccess: "private",
     collaborators: [{ login: collaborator, name: collaborator, image: null, role: "editor" }],
     agents: [],
   };
+}
+
+function collaboratorRows(...logins: string[]): CollaboratorResponse {
+  return {
+    owner: { login: "alice", name: "Alice", image: null },
+    linkAccess: "private",
+    collaborators: logins.map((login) => ({ login, name: login[0].toUpperCase() + login.slice(1), image: null, role: "editor" })),
+    agents: [],
+  };
+}
+
+function collaboratorRow(login: string) {
+  return screen.getByText(`@${login}`).closest('[data-testid="collaborator-row"]') as HTMLElement;
 }
 
 /** `a` comes before `b` in document order. */
@@ -89,7 +106,7 @@ function renderDialog(props: Partial<{ isOwner: boolean; doc: DocumentDto }> = {
 /** The dialog with its people list loaded (the link row sits under it). */
 async function openDialog(props: Partial<{ isOwner: boolean; doc: DocumentDto }> = {}) {
   renderDialog(props);
-  await screen.findByTestId("collaborator-row");
+  await screen.findAllByTestId("collaborator-row");
   return screen.getByRole("dialog");
 }
 
@@ -101,10 +118,13 @@ async function expandAgentCard() {
 beforeEach(() => {
   collaborators.mockReset().mockResolvedValue({
     owner: { login: "alice", name: "Alice", image: null },
+    linkAccess: "private",
     collaborators: [{ login: "bob", name: "Bob", image: null, role: "editor" }],
     agents: [],
   });
-  addCollaborator.mockReset();
+  addCollaborator.mockReset().mockResolvedValue({ ok: true, login: "bob", role: "editor", pending: false });
+  removeCollaborator.mockReset().mockResolvedValue({ ok: true });
+  patchDocument.mockReset().mockResolvedValue({ document: { ...doc, linkAccess: "view" } });
   tokensList.mockReset().mockResolvedValue({ tokens: [] });
   tokensCreate.mockReset().mockImplementation(async (name: string, _expires: number, options: { scope: string; documentIds: string[] | null }) => ({
     token: { id: "tok-1", name, token: "mdk_one_time_secret", prefix: "mdk_one_", scope: options.scope, documentIds: options.documentIds, createdAt: "2026-09-05T00:00:00.000Z", expiresAt: null },
@@ -291,6 +311,305 @@ describe("ShareDialog · add a collaborator", () => {
     expect(screen.queryByText("Invalid request")).toBeNull();
     expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "someone.else", "editor");
     expect(screen.getByTestId("share-login")).toHaveValue("someone.else");
+  });
+});
+
+describe("ShareDialog · permission actions", () => {
+  it("owns role and Remove synchronously per login while other collaborator rows remain independent", async () => {
+    const bobRole = deferred<unknown>();
+    const charlieRole = deferred<unknown>();
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    addCollaborator.mockReset().mockReturnValueOnce(bobRole.promise).mockReturnValueOnce(charlieRole.promise);
+    await openDialog();
+    const bobRow = collaboratorRow("bob");
+    const charlieRow = collaboratorRow("charlie");
+    const bobSelect = within(bobRow).getByRole("combobox", { name: "Role for bob" });
+    const charlieSelect = within(charlieRow).getByRole("combobox", { name: "Role for charlie" });
+
+    fireEvent.change(bobSelect, { target: { value: "viewer" } });
+    fireEvent.change(bobSelect, { target: { value: "commenter" } });
+    fireEvent.click(within(bobRow).getByRole("button", { name: "Remove bob" }));
+
+    expect(addCollaborator).toHaveBeenCalledOnce();
+    expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "bob", "viewer");
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    expect(bobSelect).toBeDisabled();
+    expect(within(bobRow).getByRole("button", { name: "Remove bob" })).toBeDisabled();
+    expect(charlieSelect).toBeEnabled();
+    expect(within(charlieRow).getByRole("button", { name: "Remove charlie" })).toBeEnabled();
+
+    fireEvent.change(charlieSelect, { target: { value: "commenter" } });
+    expect(addCollaborator).toHaveBeenCalledTimes(2);
+    expect(addCollaborator).toHaveBeenNthCalledWith(2, DOC_ID, "charlie", "commenter");
+    expect(charlieSelect).toBeDisabled();
+
+    await act(async () => {
+      bobRole.resolve({});
+      charlieRole.resolve({});
+      await Promise.all([bobRole.promise, charlieRole.promise]);
+    });
+    await waitFor(() => expect(within(collaboratorRow("bob")).getByRole("combobox")).toHaveValue("viewer"));
+    expect(within(collaboratorRow("charlie")).getByRole("combobox")).toHaveValue("commenter");
+  });
+
+  it("keeps a failed role confirmed and makes the same role change retryable", async () => {
+    const failed = deferred<unknown>();
+    const retry = deferred<unknown>();
+    addCollaborator.mockReset().mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    await openDialog();
+    const row = collaboratorRow("bob");
+    const select = within(row).getByRole("combobox", { name: "Role for bob" });
+
+    fireEvent.change(select, { target: { value: "viewer" } });
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("editor");
+    await act(async () => {
+      failed.reject(new ApiError(409, "Bob's role changed elsewhere"));
+      await failed.promise.catch(() => undefined);
+    });
+
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Bob's role changed elsewhere");
+    expect(select).toBeEnabled();
+    expect(select).toHaveValue("editor");
+    fireEvent.change(select, { target: { value: "viewer" } });
+    expect(addCollaborator).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("share-action-error")).toBeNull();
+
+    await act(async () => {
+      retry.resolve({});
+      await retry.promise;
+    });
+    await waitFor(() => expect(select).toHaveValue("viewer"));
+  });
+
+  it("suppresses duplicate Remove, surfaces failure, and removes the row on retry", async () => {
+    const failed = deferred<unknown>();
+    const retry = deferred<unknown>();
+    removeCollaborator.mockReset().mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    await openDialog();
+    const row = collaboratorRow("bob");
+    const remove = within(row).getByRole("button", { name: "Remove bob" });
+
+    fireEvent.click(remove);
+    fireEvent.click(remove);
+    expect(removeCollaborator).toHaveBeenCalledOnce();
+    expect(removeCollaborator).toHaveBeenCalledWith(DOC_ID, "bob");
+    expect(remove).toBeDisabled();
+    expect(within(row).getByRole("combobox", { name: "Role for bob" })).toBeDisabled();
+    await act(async () => {
+      failed.reject(new ApiError(503, "Permission service unavailable"));
+      await failed.promise.catch(() => undefined);
+    });
+
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Permission service unavailable");
+    expect(screen.getByText("@bob")).toBeInTheDocument();
+    expect(remove).toBeEnabled();
+    fireEvent.click(remove);
+    expect(removeCollaborator).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("share-action-error")).toBeNull();
+
+    await act(async () => {
+      retry.resolve({});
+      await retry.promise;
+    });
+    await waitFor(() => expect(screen.queryByText("@bob")).toBeNull());
+  });
+
+  it("locks every link choice, retries a failure, and commits only the server-confirmed document", async () => {
+    const failed = deferred<unknown>();
+    const retry = deferred<{ document: DocumentDto }>();
+    const serverDocument = { ...doc, title: "Server-confirmed title", linkAccess: "comment" as const };
+    patchDocument.mockReset().mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    const onDocChange = vi.fn();
+    const view = render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByTestId("collaborator-row");
+    const select = screen.getByTestId("link-access");
+
+    fireEvent.change(select, { target: { value: "view" } });
+    fireEvent.change(select, { target: { value: "edit" } });
+    expect(patchDocument).toHaveBeenCalledOnce();
+    expect(patchDocument).toHaveBeenCalledWith(DOC_ID, { linkAccess: "view" });
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("private");
+    for (const option of within(select).getAllByRole("option")) expect(option).toBeDisabled();
+
+    await act(async () => {
+      failed.reject(new ApiError(409, "Link access changed elsewhere"));
+      await failed.promise.catch(() => undefined);
+    });
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Link access changed elsewhere");
+    expect(select).toBeEnabled();
+    expect(select).toHaveValue("private");
+    fireEvent.change(select, { target: { value: "view" } });
+    expect(patchDocument).toHaveBeenCalledTimes(2);
+    expect(patchDocument).toHaveBeenNthCalledWith(2, DOC_ID, { linkAccess: "view" });
+
+    await act(async () => {
+      retry.resolve({ document: serverDocument });
+      await retry.promise;
+    });
+    await waitFor(() => expect(onDocChange).toHaveBeenCalledWith(serverDocument));
+    expect(onDocChange).toHaveBeenCalledOnce();
+    view.rerender(<ShareDialog open onOpenChange={vi.fn()} doc={serverDocument} isOwner onDocChange={onDocChange} />);
+    expect(select).toHaveValue("comment");
+    expect(select).toBeEnabled();
+  });
+
+  it("invalidates permission operations synchronously when a close handler runs", async () => {
+    const roleRequest = deferred<unknown>();
+    const linkRequest = deferred<unknown>();
+    addCollaborator.mockReset().mockReturnValueOnce(roleRequest.promise);
+    patchDocument.mockReset().mockReturnValueOnce(linkRequest.promise);
+    const onOpenChange = vi.fn();
+    const onDocChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByTestId("collaborator-row");
+    const roleSelect = within(collaboratorRow("bob")).getByRole("combobox", { name: "Role for bob" });
+    const linkSelect = screen.getByTestId("link-access");
+    fireEvent.change(roleSelect, { target: { value: "viewer" } });
+    fireEvent.change(linkSelect, { target: { value: "view" } });
+    expect(roleSelect).toBeDisabled();
+    expect(linkSelect).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await act(async () => {
+      roleRequest.resolve({});
+      linkRequest.reject(new ApiError(503, "Closed link request failed"));
+      await Promise.allSettled([roleRequest.promise, linkRequest.promise]);
+    });
+
+    expect(within(collaboratorRow("bob")).getByRole("combobox")).toHaveValue("editor");
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("share-action-error")).toBeNull();
+    expect(roleSelect).toBeDisabled();
+    expect(linkSelect).toBeDisabled();
+  });
+
+  it("does not let a closed dialog's role success or finalizer affect a reopened same-login Remove", async () => {
+    const oldRole = deferred<unknown>();
+    const currentRemove = deferred<unknown>();
+    addCollaborator.mockReset().mockReturnValueOnce(oldRole.promise);
+    removeCollaborator.mockReset().mockReturnValueOnce(currentRemove.promise);
+    const view = render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await screen.findByTestId("collaborator-row");
+    fireEvent.change(within(collaboratorRow("bob")).getByRole("combobox"), { target: { value: "viewer" } });
+
+    view.rerender(<ShareDialog open={false} onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />);
+    view.rerender(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(2));
+    const reopenedRow = await screen.findByTestId("collaborator-row");
+    fireEvent.click(within(reopenedRow).getByRole("button", { name: "Remove bob" }));
+    expect(within(reopenedRow).getByRole("combobox")).toBeDisabled();
+
+    await act(async () => {
+      oldRole.resolve({});
+      await oldRole.promise;
+    });
+    expect(within(collaboratorRow("bob")).getByRole("combobox")).toHaveValue("editor");
+    expect(within(collaboratorRow("bob")).getByRole("combobox")).toBeDisabled();
+    expect(within(collaboratorRow("bob")).getByRole("button", { name: "Remove bob" })).toBeDisabled();
+
+    await act(async () => {
+      currentRemove.reject(new ApiError(503, "Current Remove failed"));
+      await currentRemove.promise.catch(() => undefined);
+    });
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Current Remove failed");
+    expect(screen.getByText("@bob")).toBeInTheDocument();
+  });
+
+  it("does not let an old document's Remove error replace the current link error or rows", async () => {
+    const oldRemove = deferred<unknown>();
+    removeCollaborator.mockReset().mockReturnValueOnce(oldRemove.promise);
+    patchDocument.mockRejectedValueOnce(new ApiError(503, "Current link change failed"));
+    const nextDoc = { ...doc, id: "doc-920", title: "Next document" };
+    const view = render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await screen.findByTestId("collaborator-row");
+    fireEvent.click(within(collaboratorRow("bob")).getByRole("button", { name: "Remove bob" }));
+
+    view.rerender(<ShareDialog open onOpenChange={vi.fn()} doc={nextDoc} isOwner onDocChange={vi.fn()} />);
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(2));
+    await screen.findByTestId("collaborator-row");
+    fireEvent.change(screen.getByTestId("link-access"), { target: { value: "view" } });
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Current link change failed");
+
+    await act(async () => {
+      oldRemove.reject(new ApiError(503, "Old Remove failed"));
+      await oldRemove.promise.catch(() => undefined);
+    });
+    expect(screen.getByTestId("share-action-error")).toHaveTextContent("Current link change failed");
+    expect(screen.getByText("@bob")).toBeInTheDocument();
+    expect(removeCollaborator).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an old document's link success call onDocChange or unlock its successor", async () => {
+    const oldLink = deferred<{ document: DocumentDto }>();
+    const currentLink = deferred<{ document: DocumentDto }>();
+    patchDocument.mockReset().mockReturnValueOnce(oldLink.promise).mockReturnValueOnce(currentLink.promise);
+    const onDocChange = vi.fn();
+    const nextDoc = { ...doc, id: "doc-920", title: "Next document" };
+    const view = render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByTestId("collaborator-row");
+    fireEvent.change(screen.getByTestId("link-access"), { target: { value: "view" } });
+
+    view.rerender(<ShareDialog open onOpenChange={vi.fn()} doc={nextDoc} isOwner onDocChange={onDocChange} />);
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByTestId("link-access"), { target: { value: "edit" } });
+    expect(patchDocument).toHaveBeenNthCalledWith(2, nextDoc.id, { linkAccess: "edit" });
+    expect(screen.getByTestId("link-access")).toBeDisabled();
+
+    await act(async () => {
+      oldLink.resolve({ document: { ...doc, linkAccess: "view" } });
+      await oldLink.promise;
+    });
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("link-access")).toBeDisabled();
+    expect(screen.getByTestId("link-access")).toHaveValue("private");
+
+    await act(async () => {
+      currentLink.reject(new ApiError(503, "Current link request failed"));
+      await currentLink.promise.catch(() => undefined);
+    });
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Current link request failed");
+    expect(screen.getByTestId("link-access")).toBeEnabled();
+  });
+
+  it("handles late permission resolves and rejections after unmount without effects or unhandled rejections", async () => {
+    const roleRequest = deferred<unknown>();
+    const removeRequest = deferred<unknown>();
+    const linkRequest = deferred<unknown>();
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    addCollaborator.mockReset().mockReturnValueOnce(roleRequest.promise);
+    removeCollaborator.mockReset().mockReturnValueOnce(removeRequest.promise);
+    patchDocument.mockReset().mockReturnValueOnce(linkRequest.promise);
+    const onDocChange = vi.fn();
+    const view = render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByText("@charlie");
+    fireEvent.change(within(collaboratorRow("bob")).getByRole("combobox"), { target: { value: "viewer" } });
+    fireEvent.click(within(collaboratorRow("charlie")).getByRole("button", { name: "Remove charlie" }));
+    fireEvent.change(screen.getByTestId("link-access"), { target: { value: "view" } });
+    expect(addCollaborator).toHaveBeenCalledOnce();
+    expect(removeCollaborator).toHaveBeenCalledOnce();
+    expect(patchDocument).toHaveBeenCalledOnce();
+
+    const unhandled = vi.fn();
+    const onUnhandled = (reason: unknown) => unhandled(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      view.unmount();
+      await act(async () => {
+        roleRequest.resolve({});
+        removeRequest.reject(new ApiError(503, "Late Remove failed"));
+        linkRequest.reject(new ApiError(503, "Late link failed"));
+        await Promise.allSettled([roleRequest.promise, removeRequest.promise, linkRequest.promise]);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(onDocChange).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
 
