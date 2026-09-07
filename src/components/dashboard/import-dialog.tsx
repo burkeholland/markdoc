@@ -63,6 +63,20 @@ interface HookAuthority {
   readonly token: symbol;
 }
 
+type StartFileImport = (files: Iterable<File>) => Promise<void>;
+
+interface DragListenerOwner {
+  active: boolean;
+  readonly authority: HookAuthority;
+  readonly target: Window;
+  depth: number;
+  start: StartFileImport;
+  readonly enter: (event: DragEvent) => void;
+  readonly over: (event: DragEvent) => void;
+  readonly leave: (event: DragEvent) => void;
+  readonly drop: (event: DragEvent) => void;
+}
+
 interface InitialBatchOwnership {
   kind: "initial";
   authority: HookAuthority;
@@ -376,55 +390,72 @@ export function useFileImport(options: UseFileImportOptions = {}) {
 
   const pick = useCallback(() => inputRef.current?.click(), []);
 
+  const dragOwnerRef = useRef<DragListenerOwner | null>(null);
+  const startIntentRef = useRef(start);
+
+  useLayoutEffect(() => {
+    startIntentRef.current = start;
+    const owner = dragOwnerRef.current;
+    if (owner?.active && authorityRef.current === owner.authority) owner.start = start;
+  }, [start]);
+
   useLayoutEffect(() => {
     const authority: HookAuthority = { token: Symbol("file-import-authority") };
+    const target = window;
+    const ownsListeners = () =>
+      owner.active && dragOwnerRef.current === owner && authorityRef.current === owner.authority;
+    const owner: DragListenerOwner = {
+      active: true,
+      authority,
+      target,
+      depth: 0,
+      start: startIntentRef.current,
+      enter: (event) => {
+        if (!ownsListeners() || !dragHasFiles(event.dataTransfer)) return;
+        owner.depth++;
+        setDragging(true);
+      },
+      over: (event) => {
+        if (!ownsListeners() || !dragHasFiles(event.dataTransfer)) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      },
+      leave: (event) => {
+        if (!ownsListeners() || !dragHasFiles(event.dataTransfer)) return;
+        owner.depth = Math.max(0, owner.depth - 1);
+        if (owner.depth === 0) setDragging(false);
+      },
+      drop: (event) => {
+        if (!ownsListeners()) return;
+        owner.depth = 0;
+        setDragging(false);
+        if (!dragHasFiles(event.dataTransfer)) return;
+        event.preventDefault();
+        const files = Array.from(event.dataTransfer?.files ?? []);
+        if (files.length) void owner.start(files);
+      },
+    };
     authorityRef.current = authority;
+    dragOwnerRef.current = owner;
+    target.addEventListener("dragenter", owner.enter);
+    target.addEventListener("dragover", owner.over);
+    target.addEventListener("dragleave", owner.leave);
+    target.addEventListener("drop", owner.drop);
     return () => {
-      if (authorityRef.current !== authority) return;
-      authorityRef.current = null;
-      if (activeUploadRef.current?.authority === authority) activeUploadRef.current = null;
-      if (retryOwnershipRef.current?.authority === authority) retryOwnershipRef.current = null;
-      itemsRef.current = [];
+      owner.active = false;
+      if (dragOwnerRef.current === owner) dragOwnerRef.current = null;
+      if (authorityRef.current === authority) {
+        authorityRef.current = null;
+        if (activeUploadRef.current?.authority === authority) activeUploadRef.current = null;
+        if (retryOwnershipRef.current?.authority === authority) retryOwnershipRef.current = null;
+        itemsRef.current = [];
+      }
+      owner.target.removeEventListener("dragenter", owner.enter);
+      owner.target.removeEventListener("dragover", owner.over);
+      owner.target.removeEventListener("dragleave", owner.leave);
+      owner.target.removeEventListener("drop", owner.drop);
     };
   }, []);
-
-  // Whole-window drag tracking: show the overlay while files are dragged anywhere over the page.
-  useEffect(() => {
-    let depth = 0;
-    const enter = (e: DragEvent) => {
-      if (!dragHasFiles(e.dataTransfer)) return;
-      depth++;
-      setDragging(true);
-    };
-    const over = (e: DragEvent) => {
-      if (!dragHasFiles(e.dataTransfer)) return;
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
-    };
-    const leave = (e: DragEvent) => {
-      if (!dragHasFiles(e.dataTransfer)) return;
-      depth = Math.max(0, depth - 1);
-      if (depth === 0) setDragging(false);
-    };
-    const drop = (e: DragEvent) => {
-      depth = 0;
-      setDragging(false);
-      if (!dragHasFiles(e.dataTransfer)) return;
-      e.preventDefault();
-      const files = Array.from(e.dataTransfer?.files ?? []);
-      if (files.length) void start(files);
-    };
-    window.addEventListener("dragenter", enter);
-    window.addEventListener("dragover", over);
-    window.addEventListener("dragleave", leave);
-    window.addEventListener("drop", drop);
-    return () => {
-      window.removeEventListener("dragenter", enter);
-      window.removeEventListener("dragover", over);
-      window.removeEventListener("dragleave", leave);
-      window.removeEventListener("drop", drop);
-    };
-  }, [start]);
 
   const input = (
     <input

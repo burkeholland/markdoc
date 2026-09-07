@@ -65,6 +65,134 @@ function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   return null;
 }
 
+const WINDOW_DRAG_TYPES = ["dragenter", "dragover", "dragleave", "drop"] as const;
+type WindowDragType = (typeof WINDOW_DRAG_TYPES)[number];
+
+function DragHarness({
+  instance,
+  onError,
+  onDone,
+}: {
+  instance: string;
+  onError: (message: string) => void;
+  onDone?: (documents: ImportedDocument[], failed: FailedImport[]) => void;
+}) {
+  const { items, ignored, open, setOpen, dragging, pick, input } = useFileImport({ onError, onDone });
+  return (
+    <>
+      <output data-testid={`dragging-${instance}`} data-active={dragging} />
+      <button type="button" onClick={pick}>
+        {instance} pick
+      </button>
+      {input}
+      <ImportDialog open={open} onOpenChange={setOpen} items={items} ignored={ignored} />
+    </>
+  );
+}
+
+function DragImportBoundary({
+  instance,
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onError,
+  onDone,
+}: {
+  instance: string;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onError: (message: string) => void;
+  onDone?: (documents: ImportedDocument[], failed: FailedImport[]) => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <DragHarness key={instance} instance={instance} onError={onError} onDone={onDone} /> : null;
+}
+
+function trackWindowDragListeners() {
+  const active: Record<WindowDragType, Set<EventListenerOrEventListenerObject>> = {
+    dragenter: new Set(),
+    dragover: new Set(),
+    dragleave: new Set(),
+    drop: new Set(),
+  };
+  const added: Record<WindowDragType, EventListenerOrEventListenerObject[]> = {
+    dragenter: [],
+    dragover: [],
+    dragleave: [],
+    drop: [],
+  };
+  const removed: Record<WindowDragType, EventListenerOrEventListenerObject[]> = {
+    dragenter: [],
+    dragover: [],
+    dragleave: [],
+    drop: [],
+  };
+  const add = window.addEventListener.bind(window);
+  const remove = window.removeEventListener.bind(window);
+  const isDragType = (type: string): type is WindowDragType =>
+    WINDOW_DRAG_TYPES.includes(type as WindowDragType);
+
+  vi.spyOn(window, "addEventListener").mockImplementation((type, listener, options) => {
+    if (isDragType(type)) {
+      active[type].add(listener);
+      added[type].push(listener);
+    }
+    add(type, listener, options);
+  });
+  vi.spyOn(window, "removeEventListener").mockImplementation((type, listener, options) => {
+    if (isDragType(type)) {
+      active[type].delete(listener);
+      removed[type].push(listener);
+    }
+    remove(type, listener, options);
+  });
+
+  return { active, added, removed };
+}
+
+type DragListenerTracker = ReturnType<typeof trackWindowDragListeners>;
+type CapturedDragOwner = Record<WindowDragType, EventListener>;
+
+function captureDragOwner(tracker: DragListenerTracker, index: number): CapturedDragOwner {
+  const listener = (type: WindowDragType) => {
+    const captured = tracker.added[type][index];
+    if (typeof captured !== "function") throw new Error(`Missing ${type} listener at index ${index}`);
+    return captured;
+  };
+  return {
+    dragenter: listener("dragenter"),
+    dragover: listener("dragover"),
+    dragleave: listener("dragleave"),
+    drop: listener("drop"),
+  };
+}
+
+function trackedDragEvent(type: WindowDragType, files: File[] = [], hasFiles = true) {
+  const preventDefault = vi.fn();
+  const dropEffectWrites: string[] = [];
+  let dropEffect = "none";
+  const dataTransfer = {
+    types: hasFiles ? ["Files"] : ["text/plain"],
+    files,
+    get dropEffect() {
+      return dropEffect;
+    },
+    set dropEffect(value: string) {
+      dropEffect = value;
+      dropEffectWrites.push(value);
+    },
+  } as unknown as DataTransfer;
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    dataTransfer: { value: dataTransfer },
+    preventDefault: { value: preventDefault },
+  });
+  return { event: event as DragEvent, preventDefault, dropEffectWrites };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -104,6 +232,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   process.off("unhandledRejection", recordUnhandledRejection);
+  vi.restoreAllMocks();
 });
 
 describe("useFileImport - initial batch ownership", () => {
@@ -686,6 +815,348 @@ describe("useFileImport - stale and independent operations", () => {
     expect(secondDone).toHaveBeenCalledTimes(1);
     expect(firstDone).toHaveBeenCalledWith([{ id: "doc-first", title: "First", warnings: [] }], []);
     expect(secondDone).toHaveBeenCalledWith([{ id: "doc-second", title: "Second", warnings: [] }], []);
+  });
+});
+
+describe("useFileImport - window drag listener ownership", () => {
+  it.each([
+    { name: "stale before current", order: ["stale", "current"] as const },
+    { name: "current before stale", order: ["current", "stale"] as const },
+  ])("accepts one replacement drop with $name callback order", async ({ order }) => {
+    const tracker = trackWindowDragListeners();
+    const file = new File(["# Current"], "current.md", { type: "text/markdown" });
+    const oldOnDone = vi.fn();
+    const oldOnError = vi.fn();
+    const currentOnDone = vi.fn();
+    const currentOnError = vi.fn();
+    uploadImportBatch.mockResolvedValueOnce({
+      documents: [{ id: "doc-current", title: "Current", warnings: [] }],
+      failed: [],
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(<DragImportBoundary instance="A" onError={oldOnError} onDone={oldOnDone} />);
+      });
+      const stale = captureDragOwner(tracker, 0);
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.added[type]).toHaveLength(1);
+        expect(tracker.active[type]).toEqual(new Set([stale[type]]));
+      }
+
+      let staleActiveAtBoundary: boolean[] = [];
+      await act(async () => {
+        root.render(
+          <DragImportBoundary
+            instance="B"
+            boundary={1}
+            onBoundary={() => {
+              staleActiveAtBoundary = WINDOW_DRAG_TYPES.map((type) => tracker.active[type].has(stale[type]));
+            }}
+            onError={currentOnError}
+            onDone={currentOnDone}
+          />,
+        );
+      });
+      const current = captureDragOwner(tracker, 1);
+
+      expect(staleActiveAtBoundary).toEqual([false, false, false, false]);
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.added[type]).toEqual([stale[type], current[type]]);
+        expect(tracker.removed[type]).toEqual([stale[type]]);
+        expect(tracker.active[type]).toEqual(new Set([current[type]]));
+      }
+
+      const dropped = trackedDragEvent("drop", [file]);
+      await act(async () => {
+        for (const callback of order) {
+          if (callback === "stale") stale.drop(dropped.event);
+          else current.drop(dropped.event);
+        }
+        await Promise.resolve();
+      });
+
+      expect(dropped.preventDefault).toHaveBeenCalledTimes(1);
+      expect(dropped.dropEffectWrites).toEqual([]);
+      expect(uploadImportBatch).toHaveBeenCalledTimes(1);
+      expect(uploadImportBatch).toHaveBeenCalledWith([file], []);
+      expect(oldOnDone).not.toHaveBeenCalled();
+      expect(oldOnError).not.toHaveBeenCalled();
+      expect(currentOnError).not.toHaveBeenCalled();
+      expect(currentOnDone).toHaveBeenCalledOnce();
+      expect(currentOnDone).toHaveBeenCalledWith([{ id: "doc-current", title: "Current", warnings: [] }], []);
+      expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-current");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+
+    for (const type of WINDOW_DRAG_TYPES) {
+      expect(tracker.active[type].size).toBe(0);
+      expect(tracker.removed[type]).toEqual(tracker.added[type]);
+      expect(new Set(tracker.added[type]).size).toBe(2);
+    }
+  });
+
+  it("routes a boundary drop to B and preserves B listeners, depth, options, and picker ownership", async () => {
+    const tracker = trackWindowDragListeners();
+    const dropped = new File(["# Dropped"], "dropped.md", { type: "text/markdown" });
+    const picked = new File(["# Picked"], "picked.md", { type: "text/markdown" });
+    const duplicate = new File(["# Duplicate"], "duplicate.md", { type: "text/markdown" });
+    const oldOnDone = vi.fn();
+    const oldOnError = vi.fn();
+    const firstCurrentOnDone = vi.fn();
+    const firstCurrentOnError = vi.fn();
+    const latestOnDone = vi.fn();
+    const latestOnError = vi.fn();
+    uploadImportBatch.mockResolvedValueOnce({
+      documents: [{ id: "doc-dropped", title: "Dropped", warnings: [] }],
+      failed: [],
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(<DragImportBoundary instance="A" onError={oldOnError} onDone={oldOnDone} />);
+      });
+      const stale = captureDragOwner(tracker, 0);
+      const boundaryDrop = trackedDragEvent("drop", [dropped]);
+      let staleActiveAtBoundary: boolean[] = [];
+
+      await act(async () => {
+        root.render(
+          <DragImportBoundary
+            instance="B"
+            boundary={1}
+            onBoundary={() => {
+              staleActiveAtBoundary = WINDOW_DRAG_TYPES.map((type) => tracker.active[type].has(stale[type]));
+              window.dispatchEvent(boundaryDrop.event);
+            }}
+            onError={firstCurrentOnError}
+            onDone={firstCurrentOnDone}
+          />,
+        );
+        await Promise.resolve();
+      });
+      const current = captureDragOwner(tracker, 1);
+
+      expect(staleActiveAtBoundary).toEqual([false, false, false, false]);
+      expect(boundaryDrop.preventDefault).toHaveBeenCalledOnce();
+      expect(uploadImportBatch).toHaveBeenCalledTimes(1);
+      expect(uploadImportBatch).toHaveBeenNthCalledWith(1, [dropped], []);
+      expect(firstCurrentOnDone).toHaveBeenCalledWith([{ id: "doc-dropped", title: "Dropped", warnings: [] }], []);
+      expect(oldOnDone).not.toHaveBeenCalled();
+      expect(oldOnError).not.toHaveBeenCalled();
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.active[type]).toEqual(new Set([current[type]]));
+      }
+
+      const fileOver = trackedDragEvent("dragover", [dropped]);
+      act(() => {
+        window.dispatchEvent(fileOver.event);
+      });
+      expect(fileOver.preventDefault).toHaveBeenCalledOnce();
+      expect(fileOver.dropEffectWrites).toEqual(["copy"]);
+
+      const firstEnter = trackedDragEvent("dragenter", [dropped]);
+      act(() => {
+        window.dispatchEvent(firstEnter.event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+
+      const callsBeforeNonFiles = uploadImportBatch.mock.calls.length;
+      for (const type of ["dragenter", "dragover", "dragleave"] as const) {
+        const nonFile = trackedDragEvent(type, [], false);
+        act(() => {
+          window.dispatchEvent(nonFile.event);
+        });
+        expect(nonFile.preventDefault).not.toHaveBeenCalled();
+        expect(nonFile.dropEffectWrites).toEqual([]);
+        expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+      }
+      const nonFileDrop = trackedDragEvent("drop", [], false);
+      act(() => {
+        window.dispatchEvent(nonFileDrop.event);
+      });
+      expect(nonFileDrop.preventDefault).not.toHaveBeenCalled();
+      expect(nonFileDrop.dropEffectWrites).toEqual([]);
+      expect(uploadImportBatch).toHaveBeenCalledTimes(callsBeforeNonFiles);
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "false");
+
+      act(() => {
+        window.dispatchEvent(trackedDragEvent("dragenter", [dropped]).event);
+        window.dispatchEvent(trackedDragEvent("dragenter", [dropped]).event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+
+      await act(async () => {
+        root.render(
+          <DragImportBoundary
+            instance="B"
+            boundary={2}
+            onError={latestOnError}
+            onDone={latestOnDone}
+          />,
+        );
+      });
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.added[type]).toEqual([stale[type], current[type]]);
+        expect(tracker.active[type]).toEqual(new Set([current[type]]));
+      }
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+
+      act(() => {
+        window.dispatchEvent(trackedDragEvent("dragleave", [dropped]).event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+      act(() => {
+        window.dispatchEvent(trackedDragEvent("dragleave", [dropped]).event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "false");
+
+      const pickerUpload = deferred<ImportBatch>();
+      uploadImportBatch.mockReturnValueOnce(pickerUpload.promise);
+      act(() => {
+        dispatchPickedFiles(screen.getByTestId("import-file-input") as HTMLInputElement, [picked]);
+      });
+      expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+      expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [picked], []);
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.added[type]).toHaveLength(2);
+        expect(tracker.active[type]).toEqual(new Set([current[type]]));
+      }
+
+      const duplicateDrop = trackedDragEvent("drop", [duplicate]);
+      act(() => {
+        window.dispatchEvent(duplicateDrop.event);
+      });
+      expect(duplicateDrop.preventDefault).toHaveBeenCalledOnce();
+      expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        pickerUpload.resolve({
+          documents: [{ id: "doc-picked", title: "Picked", warnings: [] }],
+          failed: [],
+        });
+      });
+      expect(latestOnDone).toHaveBeenCalledOnce();
+      expect(latestOnDone).toHaveBeenCalledWith([{ id: "doc-picked", title: "Picked", warnings: [] }], []);
+      expect(latestOnError).not.toHaveBeenCalled();
+      expect(firstCurrentOnDone).toHaveBeenCalledOnce();
+      expect(firstCurrentOnError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+
+    for (const type of WINDOW_DRAG_TYPES) {
+      expect(tracker.active[type].size).toBe(0);
+      expect(tracker.removed[type]).toEqual(tracker.added[type]);
+    }
+  });
+
+  it("retires removed callbacks before the boundary without disturbing a remounted owner", async () => {
+    const tracker = trackWindowDragListeners();
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    const oldOnDone = vi.fn();
+    const oldOnError = vi.fn();
+    const currentOnDone = vi.fn();
+    const currentOnError = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(<DragImportBoundary instance="A" onError={oldOnError} onDone={oldOnDone} />);
+      });
+      const stale = captureDragOwner(tracker, 0);
+      let staleActiveAtBoundary: boolean[] = [];
+
+      await act(async () => {
+        root.render(
+          <DragImportBoundary
+            instance="A"
+            present={false}
+            boundary={1}
+            onBoundary={() => {
+              staleActiveAtBoundary = WINDOW_DRAG_TYPES.map((type) => tracker.active[type].has(stale[type]));
+            }}
+            onError={oldOnError}
+            onDone={oldOnDone}
+          />,
+        );
+      });
+      expect(staleActiveAtBoundary).toEqual([false, false, false, false]);
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.active[type].size).toBe(0);
+        expect(tracker.removed[type]).toEqual([stale[type]]);
+      }
+
+      await act(async () => {
+        root.render(
+          <DragImportBoundary
+            instance="B"
+            boundary={2}
+            onError={currentOnError}
+            onDone={currentOnDone}
+          />,
+        );
+      });
+      const current = captureDragOwner(tracker, 1);
+      act(() => {
+        current.dragenter(trackedDragEvent("dragenter", [file]).event);
+        current.dragenter(trackedDragEvent("dragenter", [file]).event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+
+      const staleEnter = trackedDragEvent("dragenter", [file]);
+      const staleOver = trackedDragEvent("dragover", [file]);
+      const staleLeave = trackedDragEvent("dragleave", [file]);
+      const staleDrop = trackedDragEvent("drop", [file]);
+      act(() => {
+        stale.dragenter(staleEnter.event);
+        stale.dragover(staleOver.event);
+        stale.dragleave(staleLeave.event);
+        stale.drop(staleDrop.event);
+      });
+
+      for (const event of [staleEnter, staleOver, staleLeave, staleDrop]) {
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(event.dropEffectWrites).toEqual([]);
+      }
+      expect(uploadImportBatch).not.toHaveBeenCalled();
+      expect(oldOnDone).not.toHaveBeenCalled();
+      expect(oldOnError).not.toHaveBeenCalled();
+      expect(currentOnDone).not.toHaveBeenCalled();
+      expect(currentOnError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+      for (const type of WINDOW_DRAG_TYPES) {
+        expect(tracker.active[type]).toEqual(new Set([current[type]]));
+      }
+
+      act(() => {
+        current.dragleave(trackedDragEvent("dragleave", [file]).event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "true");
+      act(() => {
+        current.dragleave(trackedDragEvent("dragleave", [file]).event);
+      });
+      expect(screen.getByTestId("dragging-B")).toHaveAttribute("data-active", "false");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+
+    for (const type of WINDOW_DRAG_TYPES) {
+      expect(tracker.active[type].size).toBe(0);
+      expect(tracker.removed[type]).toEqual(tracker.added[type]);
+    }
   });
 });
 
