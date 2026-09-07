@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ComponentProps } from "react";
+import { useEffect, useLayoutEffect, type ComponentProps } from "react";
 import * as Y from "yjs";
 
 vi.mock("@hocuspocus/provider", async () => {
@@ -46,6 +46,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
         ...actual.api.documents,
         publish: vi.fn(),
         pull: vi.fn(),
+        sync: vi.fn(),
       },
     },
   };
@@ -129,6 +130,7 @@ vi.mock("./sync-dialog", async () => {
   return {
     SyncDialog: (props: ComponentProps<typeof import("./sync-dialog").SyncDialog>) => {
       syncDialogProps = props;
+      if (syncCompareProducers.at(-1) !== props.actions.compare) syncCompareProducers.push(props.actions.compare);
       const [instance] = useState(() => ++syncDialogSequence);
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState<string | null>(null);
@@ -174,9 +176,21 @@ vi.mock("./sync-dialog", async () => {
   };
 });
 vi.mock("./versions-panel", () => ({
-  VersionDiffView: () => null,
+  VersionDiffView: (props: ComponentProps<typeof import("./versions-panel").VersionDiffView>) => {
+    versionDiffProps = props;
+    return (
+      <div
+        data-testid="version-diff-mock"
+        data-document={props.session.docId}
+        data-version={props.preview.version.id}
+      >
+        {props.preview.content}
+      </div>
+    );
+  },
   VersionsPanel: (props: ComponentProps<typeof import("./versions-panel").VersionsPanel>) => {
     versionsRefresh = props.refreshKey;
+    if (versionPreviewProducers.at(-1) !== props.onPreview) versionPreviewProducers.push(props.onPreview);
     return <div data-testid="versions-panel-mock" data-refresh={props.refreshKey} />;
   },
 }));
@@ -225,6 +239,10 @@ type HeaderProps = ComponentProps<typeof import("./header").Header>;
 type CommitProps = ComponentProps<typeof import("./github-dialog").CommitDialog>;
 type SyncDialogProps = ComponentProps<typeof import("./sync-dialog").SyncDialog>;
 type SyncPollingProps = Parameters<typeof import("./use-sync-polling").useSyncPolling>[0];
+type VersionDiffProps = ComponentProps<typeof import("./versions-panel").VersionDiffView>;
+type VersionPreview = VersionDiffProps["preview"];
+type VersionPreviewProducer = ComponentProps<typeof import("./versions-panel").VersionsPanel>["onPreview"];
+type CompareProducer = SyncDialogProps["actions"]["compare"];
 type PublishResponse = Awaited<ReturnType<typeof api.documents.publish>>;
 type PullResponse = Awaited<ReturnType<typeof api.documents.pull>>;
 
@@ -284,7 +302,10 @@ let headerProps: HeaderProps;
 let commitProps: CommitProps;
 let syncDialogProps: SyncDialogProps;
 let syncPollingProps: SyncPollingProps;
+let versionDiffProps: VersionDiffProps;
 let versionsRefresh: number | null;
+let versionPreviewProducers: VersionPreviewProducer[] = [];
+let syncCompareProducers: CompareProducer[] = [];
 let commitDialogSequence = 0;
 let syncDialogSequence = 0;
 let commitDialogRuns: Promise<void>[] = [];
@@ -340,12 +361,97 @@ function pullResponse(document: DocumentDto | null = null, options: { changed?: 
   };
 }
 
+function syncResponse(content: string, remote: SyncStatusDto["remote"] = REMOTE): SyncStatusDto {
+  return {
+    status: "diverged",
+    remote,
+    localChanged: true,
+    remoteChanged: true,
+    lines: { local: 2, remote: 3 },
+    remoteContent: content,
+    pollMs: 60_000,
+  };
+}
+
+function versionPreview(content = "Version content"): VersionPreview {
+  return {
+    version: {
+      id: "version-7",
+      number: 7,
+      title: "Version seven",
+      kind: "named",
+      createdBy: USER.id,
+      createdByName: USER.name,
+      commitSha: null,
+      createdAt: "2026-09-06T12:00:00.000Z",
+      size: content.length,
+    },
+    content,
+  };
+}
+
 function shell(doc: DocumentDto = DOC, user: EditorUser = USER) {
   return <EditorShell doc={doc} role="owner" user={user} githubAvailable githubConfigured />;
 }
 
+function PassiveCleanupProbe({
+  doc,
+  user,
+  session,
+  onCleanup,
+}: {
+  doc: DocumentDto;
+  user: EditorUser;
+  session: CollabSession;
+  onCleanup: () => void;
+}) {
+  useEffect(() => onCleanup, [doc, onCleanup, session, user]);
+  return null;
+}
+
+const noPassiveCleanup = () => {};
+
+function EditorBoundary({
+  doc = DOC,
+  user = USER,
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup = noPassiveCleanup,
+}: {
+  doc?: DocumentDto;
+  user?: EditorUser;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  const exactSession = session;
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? (
+    <>
+      {shell(doc, user)}
+      <PassiveCleanupProbe doc={doc} user={user} session={exactSession} onCleanup={onPassiveCleanup} />
+    </>
+  ) : null;
+}
+
 async function mount(doc: DocumentDto = DOC, user: EditorUser = USER) {
   const view = render(shell(doc, user));
+  await waitFor(() => expect(headerProps.doc.id).toBe(doc.id));
+  fireEvent.click(screen.getByTestId("header-history"));
+  await screen.findByTestId("versions-panel-mock");
+  return view;
+}
+
+async function mountBoundary(
+  doc: DocumentDto = DOC,
+  user: EditorUser = USER,
+  onPassiveCleanup: () => void = noPassiveCleanup,
+) {
+  const view = render(<EditorBoundary doc={doc} user={user} onPassiveCleanup={onPassiveCleanup} />);
   await waitFor(() => expect(headerProps.doc.id).toBe(doc.id));
   fireEvent.click(screen.getByTestId("header-history"));
   await screen.findByTestId("versions-panel-mock");
@@ -374,12 +480,37 @@ function start<T>(operation: () => Promise<T>) {
   return pending;
 }
 
+function startCompare(producer: CompareProducer = syncDialogProps.actions.compare) {
+  let pending!: Promise<void>;
+  act(() => {
+    pending = producer() as unknown as Promise<void>;
+  });
+  return pending;
+}
+
+function captureClick(element: HTMLElement) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the Back control");
+  const props = (element as unknown as Record<string, { onClick?: () => void } | undefined>)[propsKey];
+  if (!props?.onClick) throw new Error("The Back control did not have an onClick handler");
+  return props.onClick;
+}
+
+function expectEditingPanes() {
+  expect(screen.queryByTestId("version-diff-mock")).toBeNull();
+  expect(screen.getByTestId("code-column")).not.toHaveClass("hidden");
+  expect(screen.getByTestId("rich-column")).not.toHaveClass("hidden");
+}
+
 beforeEach(() => {
   versionsRefresh = null;
   headerProps = undefined!;
   commitProps = undefined!;
   syncDialogProps = undefined!;
   syncPollingProps = undefined!;
+  versionDiffProps = undefined!;
+  versionPreviewProducers = [];
+  syncCompareProducers = [];
   commitDialogSequence = 0;
   syncDialogSequence = 0;
   commitDialogRuns = [];
@@ -388,6 +519,7 @@ beforeEach(() => {
   session = createSession(DOC);
   vi.mocked(api.documents.publish).mockReset();
   vi.mocked(api.documents.pull).mockReset();
+  vi.mocked(api.documents.sync).mockReset();
 });
 
 afterEach(() => {
@@ -862,5 +994,390 @@ describe("EditorShell publish and pull ownership", () => {
     expect(versionsRefresh).toBe(0);
     expect(syncPollingProps.refreshKey).toBe(0);
     window.removeEventListener("unhandledrejection", unhandled);
+  });
+});
+
+describe("EditorShell comparison preview ownership", () => {
+  it("publishes current GitHub metadata and content once, then gives the exact Back control one clear", async () => {
+    const request = deferred<SyncStatusDto>();
+    vi.mocked(api.documents.sync).mockReturnValueOnce(request.promise);
+    await mount();
+    await openSync();
+
+    const pending = startCompare();
+    expect(api.documents.sync).toHaveBeenCalledExactlyOnceWith(DOC.id, { fresh: true, content: true });
+    expect(screen.queryByTestId("version-diff-mock")).toBeNull();
+
+    const remote = {
+      ...REMOTE,
+      sha: "remote-preview-sha",
+      updatedAt: "2026-09-07T16:30:00.000Z",
+    };
+    await act(async () => {
+      request.resolve(syncResponse("# GitHub copy\n", remote));
+      await pending;
+    });
+
+    expect(versionDiffProps.session).toBe(session);
+    expect(versionDiffProps.preview.content).toBe("# GitHub copy\n");
+    expect(versionDiffProps.preview.version).toMatchObject({
+      id: "github-remote",
+      title: "GitHub",
+      kind: "import",
+      createdBy: null,
+      createdByName: "GitHub",
+      commitSha: remote.sha,
+      createdAt: remote.updatedAt,
+      size: 14,
+    });
+    expect(screen.getByTestId("sync-compare-bar")).toHaveTextContent("Comparing GitHub\\u2019s copy with this document.");
+    expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("# GitHub copy");
+
+    const back = captureClick(screen.getByTestId("sync-compare-close"));
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner);
+    focusOwner.focus();
+    act(() => {
+      back();
+      back();
+    });
+
+    expectEditingPanes();
+    expect(screen.queryByTestId("sync-compare-bar")).toBeNull();
+    expect(focusOwner).toHaveFocus();
+    focusOwner.remove();
+  });
+
+  it("publishes and clears exact Version-panel values while replacing equal-looking publications by identity", async () => {
+    await mount();
+    const producer = versionPreviewProducers.at(-1)!;
+    const first = versionPreview("Equal version content");
+    const replacement = versionPreview("Equal version content");
+    expect(replacement).toEqual(first);
+    expect(replacement).not.toBe(first);
+    expect(replacement.version).not.toBe(first.version);
+
+    act(() => producer(first));
+    await screen.findByTestId("version-diff-mock");
+    expect(versionDiffProps.preview).toBe(first);
+    expect(versionDiffProps.session).toBe(session);
+    expect(screen.queryByTestId("sync-compare-bar")).toBeNull();
+    expect(screen.queryByTestId("code-column")).toBeNull();
+    expect(screen.queryByTestId("rich-column")).toBeNull();
+
+    act(() => producer(replacement));
+    expect(versionDiffProps.preview).toBe(replacement);
+    expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("Equal version content");
+
+    act(() => {
+      producer(null);
+      producer(null);
+    });
+    expectEditingPanes();
+  });
+
+  it("keeps a current Compare rejection effect-free and leaves the visit able to publish a Version preview", async () => {
+    const failure = new ApiError(503, "GitHub compare unavailable");
+    vi.mocked(api.documents.sync).mockRejectedValueOnce(failure);
+    await mount();
+    await openSync();
+
+    await act(async () => {
+      await expect(startCompare()).rejects.toBe(failure);
+    });
+    expectEditingPanes();
+    expect(screen.queryByTestId("sync-compare-bar")).toBeNull();
+
+    const currentVersion = versionPreview("Still usable");
+    act(() => versionPreviewProducers.at(-1)!(currentVersion));
+    await screen.findByTestId("version-diff-mock");
+    expect(versionDiffProps.preview).toBe(currentVersion);
+    expect(api.documents.sync).toHaveBeenCalledExactlyOnceWith(DOC.id, { fresh: true, content: true });
+  });
+
+  it.each([
+    ["stale before current", "stale-current"],
+    ["current before stale", "current-stale"],
+  ] as const)(
+    "retires document, session, actions, producer, request, and rendered Back ownership before a replacement: %s",
+    async (_name, order) => {
+      const oldPending = deferred<SyncStatusDto>();
+      vi.mocked(api.documents.sync)
+        .mockResolvedValueOnce(syncResponse("Equal remote content"))
+        .mockReturnValueOnce(oldPending.promise)
+        .mockResolvedValueOnce(syncResponse("Equal remote content", { ...REMOTE, url: SECOND_DOC.githubUrl }));
+      let passiveCleanups = 0;
+      const countPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+      const view = await mountBoundary(DOC, USER, countPassiveCleanup);
+      await openSync();
+      const oldCompare = syncCompareProducers.at(-1)!;
+      const oldProducer = versionPreviewProducers.at(-1)!;
+
+      await act(async () => {
+        await startCompare(oldCompare);
+      });
+      const oldBack = captureClick(screen.getByTestId("sync-compare-close"));
+      const retiredRequest = startCompare(oldCompare);
+      expect(api.documents.sync).toHaveBeenCalledTimes(2);
+
+      const focusOwner = document.createElement("button");
+      document.body.append(focusOwner);
+      focusOwner.focus();
+      session = createSession(SECOND_DOC, SECOND_USER);
+      act(() => {
+        view.rerender(
+          <EditorBoundary
+            doc={SECOND_DOC}
+            user={SECOND_USER}
+            boundary={1}
+            onPassiveCleanup={countPassiveCleanup}
+            onBoundary={() => {
+              expect(passiveCleanups).toBe(0);
+              expect(screen.queryByTestId("version-diff-mock")).toBeNull();
+              oldProducer(versionPreview("Equal remote content"));
+              oldBack();
+              oldPending.resolve(syncResponse("Late old remote"));
+            }}
+          />,
+        );
+      });
+      await act(async () => {
+        await retiredRequest;
+      });
+
+      const currentCompare = syncCompareProducers.at(-1)!;
+      const currentProducer = versionPreviewProducers.at(-1)!;
+      expect(currentCompare).not.toBe(oldCompare);
+      expect(currentProducer).not.toBe(oldProducer);
+      expect(passiveCleanups).toBe(1);
+      const currentRequest = startCompare(currentCompare);
+      await act(async () => {
+        await currentRequest;
+      });
+      expect(api.documents.sync).toHaveBeenNthCalledWith(3, SECOND_DOC.id, { fresh: true, content: true });
+      expect(versionDiffProps.session).toBe(session);
+      expect(versionDiffProps.preview.content).toBe("Equal remote content");
+      const currentBack = captureClick(screen.getByTestId("sync-compare-close"));
+
+      const runStale = () => {
+        const markup = view.container.innerHTML;
+        const calls = vi.mocked(api.documents.sync).mock.calls.length;
+        const focused = document.activeElement;
+        oldProducer(versionPreview("Equal remote content"));
+        oldProducer(null);
+        oldBack();
+        void oldCompare();
+        expect(view.container.innerHTML).toBe(markup);
+        expect(api.documents.sync).toHaveBeenCalledTimes(calls);
+        expect(document.activeElement).toBe(focused);
+      };
+      const runCurrent = () => {
+        currentBack();
+        currentBack();
+      };
+
+      act(() => {
+        if (order === "stale-current") {
+          runStale();
+          expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("Equal remote content");
+          runCurrent();
+        } else {
+          runCurrent();
+          runStale();
+        }
+      });
+
+      expectEditingPanes();
+      expect(api.documents.sync).toHaveBeenCalledTimes(3);
+      expect(focusOwner).toHaveFocus();
+      focusOwner.remove();
+    },
+  );
+
+  it("retires a same-ID document object and changed destination facts before parent layout work", async () => {
+    const oldPending = deferred<SyncStatusDto>();
+    vi.mocked(api.documents.sync)
+      .mockResolvedValueOnce(syncResponse("Same-looking preview"))
+      .mockReturnValueOnce(oldPending.promise)
+      .mockResolvedValueOnce(syncResponse("Same-looking preview"));
+    let passiveCleanups = 0;
+    const countPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+    const view = await mountBoundary(DOC, USER, countPassiveCleanup);
+    await openSync();
+    const oldCompare = syncCompareProducers.at(-1)!;
+    const oldProducer = versionPreviewProducers.at(-1)!;
+    await act(async () => {
+      await startCompare(oldCompare);
+    });
+    const oldBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const retiredRequest = startCompare(oldCompare);
+    const replacementDoc: DocumentDto = {
+      ...DOC,
+      repoBranch: "preview-branch",
+      repoPath: "renamed.md",
+      githubUrl: "https://github.com/owner/repo/blob/preview-branch/renamed.md",
+      updatedAt: "2026-09-07T17:00:00.000Z",
+    };
+    act(() => {
+      view.rerender(
+        <EditorBoundary
+          doc={replacementDoc}
+          boundary={1}
+          onPassiveCleanup={countPassiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            expect(screen.queryByTestId("version-diff-mock")).toBeNull();
+            oldProducer(versionPreview("Same-looking preview"));
+            oldBack();
+            oldPending.reject(new ApiError(502, "Retired compare failed"));
+          }}
+        />,
+      );
+    });
+    await act(async () => {
+      await retiredRequest;
+    });
+
+    const currentCompare = syncCompareProducers.at(-1)!;
+    const currentProducer = versionPreviewProducers.at(-1)!;
+    expect(currentCompare).not.toBe(oldCompare);
+    expect(currentProducer).not.toBe(oldProducer);
+    expect(passiveCleanups).toBe(1);
+    await act(async () => {
+      await startCompare(currentCompare);
+    });
+    const currentBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const markup = view.container.innerHTML;
+    act(() => {
+      oldProducer(versionPreview("Same-looking preview"));
+      oldProducer(null);
+      oldBack();
+    });
+    expect(view.container.innerHTML).toBe(markup);
+    expect(versionDiffProps.preview.content).toBe("Same-looking preview");
+
+    act(() => {
+      currentBack();
+      oldBack();
+    });
+    expectEditingPanes();
+    expect(api.documents.sync).toHaveBeenCalledTimes(3);
+    expect(api.documents.sync).toHaveBeenLastCalledWith(DOC.id, { fresh: true, content: true });
+  });
+
+  it("retires a same-document session and EditorActions before a rejected Compare settles", async () => {
+    const oldPending = deferred<SyncStatusDto>();
+    vi.mocked(api.documents.sync)
+      .mockResolvedValueOnce(syncResponse("Session preview"))
+      .mockReturnValueOnce(oldPending.promise)
+      .mockResolvedValueOnce(syncResponse("Current session preview"));
+    const view = await mountBoundary();
+    await openSync();
+    const oldCompare = syncCompareProducers.at(-1)!;
+    const oldProducer = versionPreviewProducers.at(-1)!;
+    await act(async () => {
+      await startCompare(oldCompare);
+    });
+    const oldBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const retiredRequest = startCompare(oldCompare);
+    let passiveCleanups = 0;
+
+    session = createSession(DOC, SECOND_USER);
+    act(() => {
+      view.rerender(
+        <EditorBoundary
+          doc={DOC}
+          user={SECOND_USER}
+          boundary={1}
+          onPassiveCleanup={() => {
+            passiveCleanups++;
+          }}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            oldProducer(versionPreview("Late session preview"));
+            oldBack();
+            oldPending.reject(new ApiError(503, "Old session failed"));
+          }}
+        />,
+      );
+    });
+    await act(async () => {
+      await retiredRequest;
+    });
+
+    const currentCompare = syncCompareProducers.at(-1)!;
+    expect(currentCompare).not.toBe(oldCompare);
+    expect(versionPreviewProducers.at(-1)).not.toBe(oldProducer);
+    await act(async () => {
+      await startCompare(currentCompare);
+    });
+    expect(versionDiffProps.session).toBe(session);
+    expect(versionDiffProps.preview.content).toBe("Current session preview");
+    act(() => captureClick(screen.getByTestId("sync-compare-close"))());
+    expectEditingPanes();
+    expect(api.documents.sync).toHaveBeenCalledTimes(3);
+  });
+
+  it("retires preview DOM and pending Compare work before removal and keeps every retained callback inert", async () => {
+    const oldPending = deferred<SyncStatusDto>();
+    vi.mocked(api.documents.sync)
+      .mockResolvedValueOnce(syncResponse("Removed preview"))
+      .mockReturnValueOnce(oldPending.promise);
+    let passiveCleanups = 0;
+    const countPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+    const view = await mountBoundary(DOC, USER, countPassiveCleanup);
+    await openSync();
+    const staleCompare = syncCompareProducers.at(-1)!;
+    const staleProducer = versionPreviewProducers.at(-1)!;
+    await act(async () => {
+      await startCompare(staleCompare);
+    });
+    const staleBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const retiredRequest = startCompare(staleCompare);
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner);
+    focusOwner.focus();
+
+    act(() => {
+      view.rerender(
+        <EditorBoundary
+          present={false}
+          boundary={1}
+          onPassiveCleanup={countPassiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            expect(view.container.innerHTML).toBe("");
+            staleProducer(versionPreview("Boundary publication"));
+            staleProducer(null);
+            staleBack();
+            oldPending.reject(new ApiError(503, "Removed compare failed"));
+          }}
+        />,
+      );
+    });
+    await act(async () => {
+      await retiredRequest;
+    });
+    expect(passiveCleanups).toBe(1);
+
+    const removedMarkup = view.container.innerHTML;
+    const calls = vi.mocked(api.documents.sync).mock.calls.length;
+    act(() => {
+      staleProducer(versionPreview("After cleanup publication"));
+      staleProducer(null);
+      staleBack();
+      void staleCompare();
+    });
+    expect(view.container.innerHTML).toBe(removedMarkup);
+    expect(api.documents.sync).toHaveBeenCalledTimes(calls);
+    expect(api.documents.sync).toHaveBeenCalledTimes(2);
+    expect(focusOwner).toHaveFocus();
+    focusOwner.remove();
   });
 });

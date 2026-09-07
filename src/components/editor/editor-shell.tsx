@@ -138,6 +138,8 @@ export interface EditorShellProps {
 
 type PublishPullKind = "publish" | "pull";
 type EditorIdentity = { documentId: string; session: CollabSession };
+type PreviewSourceKind = "versions" | "github-compare";
+type PreviewProducer = (preview: VersionPreview | null) => void;
 type ToastKind = "info" | "error" | "success";
 interface ToastAction {
   readonly label: string;
@@ -168,6 +170,46 @@ type DocumentMutationOwner = {
   action: DocumentMutationAction;
   operation: number;
 };
+interface EditorPreviewVisit {
+  readonly mount: symbol;
+  readonly editor: EditorIdentity;
+  readonly document: DocumentDto;
+  readonly documentId: string;
+  readonly storage: DocumentDto["storage"];
+  readonly gistId: string | null;
+  readonly gistFile: string | null;
+  readonly repoOwner: string | null;
+  readonly repoName: string | null;
+  readonly repoBranch: string | null;
+  readonly repoPath: string | null;
+  readonly githubUrl: string | null;
+  readonly session: CollabSession;
+  readonly actions: EditorActions;
+  readonly versionsProducer: PreviewProducer;
+  readonly githubProducer: (preview: VersionPreview) => void;
+  active: boolean;
+  retired: boolean;
+}
+interface PreviewPublication {
+  readonly visit: EditorPreviewVisit;
+  readonly source: PreviewSourceKind;
+  readonly preview: VersionPreview;
+  readonly version: VersionPreview["version"];
+  readonly content: string;
+  readonly base: VersionPreview["base"];
+  readonly range: VersionPreview["range"];
+  readonly setRoot: (element: HTMLDivElement | null) => void;
+  readonly setBackControl: (element: HTMLButtonElement | null) => void;
+  readonly activateBack: () => void;
+  root: HTMLDivElement | null;
+  backControl: HTMLButtonElement | null;
+}
+interface GitHubCompareRequest {
+  readonly visit: EditorPreviewVisit;
+  readonly document: DocumentDto;
+  readonly documentId: string;
+  readonly request: symbol;
+}
 
 const publishPullBusyError = () => new Error("Another publish or pull is already in progress.");
 
@@ -423,7 +465,11 @@ export function EditorShell({
   const toastRenderKeysRef = useRef<WeakMap<ToastPublication, string>>(new WeakMap());
   const toastRenderKeySequence = useRef(0);
   const [toastPublications, setToastPublications] = useState<readonly ToastPublication[]>([]);
-  const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null);
+  const [previewMount] = useState(() => Symbol("editor-previews"));
+  const activePreviewVisitRef = useRef<EditorPreviewVisit | null>(null);
+  const previewPublicationRef = useRef<PreviewPublication | null>(null);
+  const githubCompareRequestsRef = useRef<Set<GitHubCompareRequest>>(new Set());
+  const [previewPublication, setPreviewPublication] = useState<PreviewPublication | null>(null);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
   const [viewsReady, setViewsReady] = useState(0);
@@ -434,6 +480,106 @@ export function EditorShell({
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const ownsPreviewVisit = useCallback(
+    (visit: EditorPreviewVisit) =>
+      visit.mount === previewMount &&
+      visit.active &&
+      !visit.retired &&
+      activePreviewVisitRef.current === visit &&
+      currentEditorRef.current === visit.editor &&
+      visit.editor.documentId === visit.documentId &&
+      visit.editor.session === visit.session,
+    [previewMount],
+  );
+  const ownsPreviewPublication = useCallback(
+    (publication: PreviewPublication) =>
+      ownsPreviewVisit(publication.visit) &&
+      previewPublicationRef.current === publication &&
+      publication.preview.version === publication.version &&
+      publication.preview.content === publication.content &&
+      publication.preview.base === publication.base &&
+      publication.preview.range === publication.range,
+    [ownsPreviewVisit],
+  );
+  const activatePreviewBack = useCallback(
+    (publication: PreviewPublication) => {
+      const root = publication.root;
+      const control = publication.backControl;
+      if (
+        publication.source !== "github-compare" ||
+        !ownsPreviewPublication(publication) ||
+        !root ||
+        !control ||
+        !root.isConnected ||
+        !control.isConnected
+      ) {
+        return;
+      }
+      previewPublicationRef.current = null;
+      setPreviewPublication((current) => current === publication ? null : current);
+    },
+    [ownsPreviewPublication],
+  );
+  const publishPreview = useCallback(
+    (visit: EditorPreviewVisit, source: PreviewSourceKind, preview: VersionPreview | null) => {
+      if (!ownsPreviewVisit(visit)) return;
+      if (!preview) {
+        const publication = previewPublicationRef.current;
+        if (!publication || publication.visit !== visit) return;
+        previewPublicationRef.current = null;
+        setPreviewPublication((current) => current === publication ? null : current);
+        return;
+      }
+
+      function setRoot(element: HTMLDivElement | null) {
+        if (element) {
+          if (ownsPreviewPublication(publication)) publication.root = element;
+        } else if (publication.root) {
+          publication.root = null;
+        }
+      }
+      function setBackControl(element: HTMLButtonElement | null) {
+        if (element) {
+          if (ownsPreviewPublication(publication)) publication.backControl = element;
+        } else if (publication.backControl) {
+          publication.backControl = null;
+        }
+      }
+      function activateBack() {
+        activatePreviewBack(publication);
+      }
+      const publication: PreviewPublication = {
+        visit,
+        source,
+        preview,
+        version: preview.version,
+        content: preview.content,
+        base: preview.base,
+        range: preview.range,
+        setRoot,
+        setBackControl,
+        activateBack,
+        root: null,
+        backControl: null,
+      };
+      previewPublicationRef.current = publication;
+      setPreviewPublication(publication);
+    },
+    [activatePreviewBack, ownsPreviewPublication, ownsPreviewVisit],
+  );
+  const retirePreviewVisit = useCallback((visit: EditorPreviewVisit) => {
+    if (visit.retired) return;
+    visit.active = false;
+    visit.retired = true;
+    if (activePreviewVisitRef.current === visit) activePreviewVisitRef.current = null;
+    for (const request of githubCompareRequestsRef.current) {
+      if (request.visit === visit) githubCompareRequestsRef.current.delete(request);
+    }
+    const publication = previewPublicationRef.current;
+    if (publication?.visit !== visit) return;
+    previewPublicationRef.current = null;
+    setPreviewPublication((current) => current === publication ? null : current);
+  }, []);
   const dismissToast = useCallback((publication: ToastPublication, timerFired = false) => {
     if (
       toastAuthorityRef.current !== publication.authority ||
@@ -633,6 +779,45 @@ export function EditorShell({
     else setDialog(kind);
   }, [openNameVersion]);
   const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
+  const previewVisit = useMemo<EditorPreviewVisit>(() => {
+    function versionsProducer(preview: VersionPreview | null) {
+      publishPreview(visit, "versions", preview);
+    }
+    function githubProducer(preview: VersionPreview) {
+      publishPreview(visit, "github-compare", preview);
+    }
+    const visit: EditorPreviewVisit = {
+      mount: previewMount,
+      editor: editorIdentity,
+      document: initialDoc,
+      documentId: initialDoc.id,
+      storage: initialDoc.storage,
+      gistId: initialDoc.gistId,
+      gistFile: initialDoc.gistFile,
+      repoOwner: initialDoc.repoOwner,
+      repoName: initialDoc.repoName,
+      repoBranch: initialDoc.repoBranch,
+      repoPath: initialDoc.repoPath,
+      githubUrl: initialDoc.githubUrl,
+      session,
+      actions,
+      versionsProducer,
+      githubProducer,
+      active: false,
+      retired: false,
+    };
+    return visit;
+  }, [actions, editorIdentity, initialDoc, previewMount, publishPreview, session]);
+  useLayoutEffect(() => {
+    const previous = activePreviewVisitRef.current;
+    if (previous && previous !== previewVisit) retirePreviewVisit(previous);
+    previewVisit.active = true;
+    previewVisit.retired = false;
+    activePreviewVisitRef.current = previewVisit;
+    return () => {
+      retirePreviewVisit(previewVisit);
+    };
+  }, [previewVisit, retirePreviewVisit]);
   const slashMenu = useSlashMenuController();
   const isOwner = role === "owner";
   useEffect(() => {
@@ -907,6 +1092,50 @@ export function EditorShell({
   const linkedToGitHub = doc.storage !== "local";
   useSyncPolling({ documentId: doc.id, enabled: linkedToGitHub, refreshKey: syncTick, onStatus: setSync });
 
+  const compareWithGitHub = useCallback(
+    (visit: EditorPreviewVisit) => {
+      if (!ownsPreviewVisit(visit)) return Promise.resolve();
+      const owner: GitHubCompareRequest = {
+        visit,
+        document: visit.document,
+        documentId: visit.documentId,
+        request: Symbol("github-compare-request"),
+      };
+      githubCompareRequestsRef.current.add(owner);
+      const ownsRequest = () =>
+        githubCompareRequestsRef.current.has(owner) &&
+        owner.visit.document === owner.document &&
+        owner.visit.documentId === owner.documentId &&
+        ownsPreviewVisit(owner.visit);
+      return (async () => {
+        try {
+          const body = await api.documents.sync(owner.documentId, { fresh: true, content: true });
+          if (!ownsRequest()) return;
+          const remoteContent = body.remoteContent ?? "";
+          const now = new Date().toISOString();
+          owner.visit.githubProducer({
+            version: {
+              id: "github-remote",
+              number: 0,
+              title: "GitHub",
+              kind: "import",
+              createdBy: null,
+              createdByName: "GitHub",
+              commitSha: body.remote.sha,
+              createdAt: body.remote.updatedAt ?? now,
+              size: remoteContent.length,
+            },
+            content: remoteContent,
+          });
+        } catch (error) {
+          if (ownsRequest()) throw error;
+        } finally {
+          githubCompareRequestsRef.current.delete(owner);
+        }
+      })();
+    },
+    [ownsPreviewVisit],
+  );
   const syncActions = useMemo<SyncActions>(
     () => ({
       merge: async () => {
@@ -937,17 +1166,9 @@ export function EditorShell({
       takeRemote: async () => {
         await pull({ force: true });
       },
-      compare: async () => {
-        const body = await api.documents.sync(doc.id, { fresh: true, content: true });
-        const remoteContent = body.remoteContent ?? "";
-        const now = new Date().toISOString();
-        setVersionPreview({
-          version: { id: "github-remote", number: 0, title: "GitHub", kind: "import", createdBy: null, createdByName: "GitHub", commitSha: body.remote.sha, createdAt: body.remote.updatedAt ?? now, size: remoteContent.length },
-          content: remoteContent,
-        });
-      },
+      compare: () => compareWithGitHub(previewVisit),
     }),
-    [applyPullError, applyPullSuccess, beginPull, finishPublishPull, ownsPublishPull, pull, publishNow, session, shownLayout, isPhone, setLayout, toast, doc.id],
+    [applyPullError, applyPullSuccess, beginPull, compareWithGitHub, finishPublishPull, ownsPublishPull, previewVisit, pull, publishNow, session, shownLayout, isPhone, setLayout, toast],
   );
 
   const download = useCallback(
@@ -1459,6 +1680,16 @@ export function EditorShell({
   // hydrating client both render it (the session has no content on either), so markup matches.
   const showRichPlaceholder = initialHtml !== null && !richHasContent;
   const showLoading = hydrated && !contentReady;
+  const renderedPreviewPublication =
+    previewPublication &&
+    previewPublication.visit === previewVisit &&
+    previewPublicationRef.current === previewPublication &&
+    activePreviewVisitRef.current === previewVisit &&
+    previewVisit.active &&
+    !previewVisit.retired
+      ? previewPublication
+      : null;
+  const versionPreview = renderedPreviewPublication?.preview ?? null;
   const showCode = shownLayout !== "rich" && !versionPreview;
   const showRich = shownLayout !== "code" && !versionPreview;
   // The code pane mounts the first time a code/split layout shows it and stays mounted (the column hides
@@ -1597,7 +1828,7 @@ export function EditorShell({
         onToast={toast}
       />
     ) : sidePanel === "versions" ? (
-      <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
+      <VersionsPanel session={session} onClose={closeSidePanel} onPreview={previewVisit.versionsProducer} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (
       <ActivityPanel session={session} onClose={closeSidePanel} />
     ) : null;
@@ -1697,17 +1928,23 @@ export function EditorShell({
                 Loading…
               </div>
             )}
-            {versionPreview ? (
-              <div className="flex h-full min-h-0 min-w-0 flex-col">
-                {versionPreview.version.id === "github-remote" && (
+            {renderedPreviewPublication ? (
+              <div ref={renderedPreviewPublication.setRoot} className="flex h-full min-h-0 min-w-0 flex-col">
+                {renderedPreviewPublication.source === "github-compare" && (
                   <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2" data-testid="sync-compare-bar">
                     <span>Comparing GitHub\u2019s copy with this document.</span>
-                    <button type="button" className="btn btn-sm btn-outline ml-auto" onClick={() => setVersionPreview(null)} data-testid="sync-compare-close">
+                    <button
+                      ref={renderedPreviewPublication.setBackControl}
+                      type="button"
+                      className="btn btn-sm btn-outline ml-auto"
+                      onClick={renderedPreviewPublication.activateBack}
+                      data-testid="sync-compare-close"
+                    >
                       Back to editing
                     </button>
                   </div>
                 )}
-                <VersionDiffView session={session} preview={versionPreview} />
+                <VersionDiffView session={renderedPreviewPublication.visit.session} preview={renderedPreviewPublication.preview} />
               </div>
             ) : (
               <>
