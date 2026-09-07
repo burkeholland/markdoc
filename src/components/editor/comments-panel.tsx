@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type MouseEvent } from "react";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -11,7 +11,7 @@ import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comm
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
-import { api } from "@/lib/api";
+import { api, apiErrorText } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
@@ -270,19 +270,21 @@ function ReactionRow({
   names,
   me,
   canReact,
+  disabled = false,
   onToggle,
 }: {
   reactions: Reactions;
   names: Record<string, string>;
   me: string;
   canReact: boolean;
+  disabled?: boolean;
   onToggle: (emoji: string) => void;
 }) {
   const { armed, open, setOpen, plainProps } = useLazyTrigger();
   const entries = Object.entries(reactions).filter(([, ids]) => ids.length > 0);
   if (entries.length === 0 && !canReact) return null;
   const addButton = (
-    <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" data-testid="reaction-add">
+    <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" disabled={disabled} data-testid="reaction-add">
       <SmilePlus size={14} />
     </button>
   );
@@ -300,7 +302,7 @@ function ReactionRow({
             title={ids.map((id) => names[id] ?? id).join(", ")}
             aria-pressed={mine}
             aria-label={`${emoji} ${ids.length}`}
-            disabled={!canReact}
+            disabled={!canReact || disabled}
             onClick={() => onToggle(emoji)}
             data-testid="reaction-chip"
           >
@@ -322,6 +324,7 @@ function ReactionRow({
                     type="button"
                     data-mine={reactions[emoji]?.includes(me) ? "true" : undefined}
                     aria-label={`React with ${emoji}`}
+                    disabled={disabled}
                     onClick={() => {
                       onToggle(emoji);
                       setOpen(false);
@@ -603,6 +606,235 @@ function useCommentOps(session: CollabSession) {
     }),
     [session, viaApi, id],
   );
+}
+
+interface CommentPanelVisit {
+  readonly marker: "comment-panel-visit";
+}
+
+type CommentRowAction =
+  | { type: "resolve"; resolved: boolean }
+  | { type: "delete" }
+  | { type: "react"; emoji: string; reacted: boolean };
+
+interface CommentRowActionOwner {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly action: Readonly<CommentRowAction>;
+}
+
+interface CommentRowActionCoordinator {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  mounted: boolean;
+  targets: Set<string>;
+  readonly owners: Map<string, CommentRowActionOwner>;
+  readonly errors: Map<string, string>;
+  readonly versions: Map<string, number>;
+  readonly listeners: Map<string, Set<() => void>>;
+}
+
+interface CommentRowActionState {
+  pending: CommentRowActionOwner | null;
+  error: string | null;
+}
+
+const ROOT_COMMENT_TARGET = "";
+
+function commentTargetKey(threadId: string, replyId: string | null): string {
+  return `${threadId}\0${replyId ?? ROOT_COMMENT_TARGET}`;
+}
+
+function pendingCommentActionLabel(owner: CommentRowActionOwner): string {
+  if (owner.action.type === "resolve") return owner.action.resolved ? "Resolving comment…" : "Re-opening comment…";
+  if (owner.action.type === "delete") return owner.replyId ? "Deleting reply…" : "Deleting comment…";
+  return `${owner.action.reacted ? "Adding" : "Removing"} ${owner.action.emoji} reaction…`;
+}
+
+function failedCommentActionText(error: unknown, owner: CommentRowActionOwner): string {
+  const { action } = owner;
+  const fallback =
+    action.type === "resolve"
+      ? `Couldn’t ${action.resolved ? "resolve" : "re-open"} the comment.`
+      : action.type === "delete"
+        ? `Couldn’t delete the ${owner.replyId ? "reply" : "comment"}.`
+        : "Couldn’t update the reaction.";
+  const reason = apiErrorText(error, fallback).trim() || fallback;
+  return `${reason.replace(/[.\s]+$/, "")}. Try again.`;
+}
+
+function CommentActionFeedback({ state }: { state: CommentRowActionState }) {
+  if (state.pending) {
+    return (
+      <div className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-3" role="status" aria-live="polite" data-testid="comment-action-pending" data-action={state.pending.action.type}>
+        <Loader2 size={12} className="animate-spin" aria-hidden />
+        {pendingCommentActionLabel(state.pending)}
+      </div>
+    );
+  }
+  if (!state.error) return null;
+  return (
+    <div className="mt-1.5 rounded-md bg-red-50 px-2 py-1.5 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="comment-action-error">
+      {state.error}
+    </div>
+  );
+}
+
+function retireCommentRowActions(coordinator: CommentRowActionCoordinator) {
+  coordinator.mounted = false;
+  coordinator.owners.clear();
+  coordinator.errors.clear();
+  coordinator.listeners.clear();
+}
+
+function mountCommentRowActions(coordinator: CommentRowActionCoordinator) {
+  coordinator.mounted = true;
+  return () => retireCommentRowActions(coordinator);
+}
+
+function syncCommentRowActionTargets(coordinator: CommentRowActionCoordinator, threads: CommentThread[]) {
+  const targets = new Set(threads.flatMap((thread) => [commentTargetKey(thread.id, null), ...thread.replies.map((reply) => commentTargetKey(thread.id, reply.id))]));
+  coordinator.targets = targets;
+  for (const key of coordinator.owners.keys()) if (!targets.has(key)) coordinator.owners.delete(key);
+  for (const key of coordinator.errors.keys()) if (!targets.has(key)) coordinator.errors.delete(key);
+}
+
+function publishCommentRowAction(coordinator: CommentRowActionCoordinator, threadId: string) {
+  coordinator.versions.set(threadId, (coordinator.versions.get(threadId) ?? 0) + 1);
+  for (const listener of coordinator.listeners.get(threadId) ?? []) listener();
+}
+
+function ownsCommentRowAction(coordinator: CommentRowActionCoordinator, owner: CommentRowActionOwner): boolean {
+  const key = commentTargetKey(owner.threadId, owner.replyId);
+  return (
+    coordinator.mounted &&
+    coordinator.session === owner.session &&
+    coordinator.documentId === owner.documentId &&
+    coordinator.visit === owner.visit &&
+    coordinator.targets.has(key) &&
+    coordinator.owners.get(key) === owner
+  );
+}
+
+function createCommentRowActionCoordinator(session: CollabSession, visit: CommentPanelVisit): CommentRowActionCoordinator {
+  return {
+    session,
+    documentId: session.docId,
+    visit,
+    mounted: true,
+    targets: new Set(),
+    owners: new Map(),
+    errors: new Map(),
+    versions: new Map(),
+    listeners: new Map(),
+  };
+}
+
+/**
+ * The panel visit owns in-flight work so changing tabs cannot unlock a target. Cards subscribe by thread,
+ * preserving memoisation while root/reply actions inside one card remain independently addressable.
+ */
+function useCommentRowActionCoordinator(session: CollabSession, visit: CommentPanelVisit, threads: CommentThread[]) {
+  const coordinator = useMemo(() => createCommentRowActionCoordinator(session, visit), [session, visit]);
+
+  useLayoutEffect(() => mountCommentRowActions(coordinator), [coordinator]);
+  useLayoutEffect(() => syncCommentRowActionTargets(coordinator, threads), [coordinator, threads]);
+
+  return coordinator;
+}
+
+function useCommentRowActions(coordinator: CommentRowActionCoordinator, thread: CommentThread) {
+  const threadId = thread.id;
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      let listeners = coordinator.listeners.get(threadId);
+      if (!listeners) {
+        listeners = new Set();
+        coordinator.listeners.set(threadId, listeners);
+      }
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) coordinator.listeners.delete(threadId);
+      };
+    },
+    [coordinator, threadId],
+  );
+  const getSnapshot = useCallback(() => coordinator.versions.get(threadId) ?? 0, [coordinator, threadId]);
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  const run = useCallback(
+    (replyId: string | null, nextAction: CommentRowAction) => {
+      const key = commentTargetKey(threadId, replyId);
+      if (!coordinator.session.commentsViaApi || !coordinator.mounted || !coordinator.targets.has(key) || coordinator.owners.has(key)) return;
+
+      const rootKey = commentTargetKey(threadId, null);
+      const rootOwner = coordinator.owners.get(rootKey);
+      const threadHasOwner = [...coordinator.owners.values()].some((owner) => owner.threadId === threadId);
+      if ((replyId !== null && rootOwner?.action.type === "delete") || (replyId === null && nextAction.type === "delete" && threadHasOwner)) return;
+
+      const action: Readonly<CommentRowAction> = Object.freeze({ ...nextAction });
+      const owner = Object.freeze({
+        session: coordinator.session,
+        documentId: coordinator.documentId,
+        visit: coordinator.visit,
+        threadId,
+        replyId,
+        action,
+      }) satisfies CommentRowActionOwner;
+      coordinator.errors.delete(key);
+      coordinator.owners.set(key, owner);
+      if (!ownsCommentRowAction(coordinator, owner)) return;
+      publishCommentRowAction(coordinator, threadId);
+
+      const settle = (result: { ok: true } | { ok: false; error: unknown }) => {
+        if (!ownsCommentRowAction(coordinator, owner)) return;
+        if (result.ok) coordinator.errors.delete(key);
+        else coordinator.errors.set(key, failedCommentActionText(result.error, owner));
+        coordinator.owners.delete(key);
+        publishCommentRowAction(coordinator, threadId);
+      };
+
+      let request: Promise<unknown>;
+      try {
+        if (action.type === "resolve") {
+          const payload = Object.freeze({ action: "resolve" as const, threadId: owner.threadId, resolved: action.resolved });
+          request = api.documents.comment(owner.documentId, payload);
+        } else if (action.type === "delete") {
+          const payload = Object.freeze({ action: "delete" as const, threadId: owner.threadId, replyId: owner.replyId ?? undefined });
+          request = api.documents.comment(owner.documentId, payload);
+        } else {
+          const payload = Object.freeze({ action: "react" as const, threadId: owner.threadId, replyId: owner.replyId ?? undefined, emoji: action.emoji });
+          request = api.documents.comment(owner.documentId, payload);
+        }
+      } catch (error) {
+        settle({ ok: false, error });
+        return;
+      }
+      void request.then(
+        () => settle({ ok: true }),
+        (error: unknown) => settle({ ok: false, error }),
+      );
+    },
+    [coordinator, threadId],
+  );
+
+  const state = (replyId: string | null): CommentRowActionState => {
+    const key = commentTargetKey(threadId, replyId);
+    return { pending: coordinator.owners.get(key) ?? null, error: coordinator.errors.get(key) ?? null };
+  };
+  const rootOwner = coordinator.owners.get(commentTargetKey(threadId, null));
+
+  return {
+    run,
+    state,
+    hasPendingReply: [...coordinator.owners.values()].some((owner) => owner.threadId === threadId && owner.replyId !== null),
+    rootDeleting: rootOwner?.action.type === "delete",
+  };
 }
 
 /** Tallest the composer grows before it scrolls inside: about 16 lines, or 40 % of a short viewport. */
@@ -1189,6 +1421,7 @@ function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMi
 const ThreadCard = memo(function ThreadCard({
   thread,
   session,
+  actionCoordinator,
   outdated,
   active,
   onReveal,
@@ -1202,6 +1435,7 @@ const ThreadCard = memo(function ThreadCard({
 }: {
   thread: CommentThread;
   session: CollabSession;
+  actionCoordinator: CommentRowActionCoordinator;
   outdated: boolean;
   active: boolean;
   onReveal: (offset: number) => void;
@@ -1225,6 +1459,10 @@ const ThreadCard = memo(function ThreadCard({
   const canEdit = session.role === "owner" || session.role === "editor";
   // Same rule as the header's Requests section (#981): the requester or the document owner may cancel.
   const canCancelRequest = !!onCancelRequest && !!request && (request.userId === me || canModerate);
+  const rowActions = useCommentRowActions(actionCoordinator, thread);
+  const rootAction = rowActions.state(null);
+  const rootBusy = rootAction.pending !== null;
+  const rootDeleteBlocked = rootBusy || rowActions.hasPendingReply;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (active) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -1268,6 +1506,18 @@ const ThreadCard = memo(function ThreadCard({
     if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
     event.preventDefault();
     reveal();
+  };
+  const resolveThread = () => {
+    if (session.commentsViaApi) rowActions.run(null, { type: "resolve", resolved: !thread.resolved });
+    else void ops.resolve(thread.id, !thread.resolved);
+  };
+  const deleteTarget = (replyId: string | null) => {
+    if (session.commentsViaApi) rowActions.run(replyId, { type: "delete" });
+    else void ops.remove(thread.id, replyId ?? undefined);
+  };
+  const reactTo = (replyId: string | null, reactions: Reactions, emoji: string) => {
+    if (session.commentsViaApi) rowActions.run(replyId, { type: "react", emoji, reacted: !reactions[emoji]?.includes(me) });
+    else void ops.react(thread.id, replyId, emoji);
   };
 
   return (
@@ -1340,7 +1590,7 @@ const ThreadCard = memo(function ThreadCard({
                   />
                 </div>
               )}
-              <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, null, emoji)} />
+              <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} disabled={rootBusy} onToggle={(emoji) => reactTo(null, thread.reactions, emoji)} />
             </>
           )}
         </div>
@@ -1351,7 +1601,9 @@ const ThreadCard = memo(function ThreadCard({
               className="icon-btn h-7 w-7"
               title={thread.resolved ? "Re-open" : "Resolve"}
               aria-label={thread.resolved ? "Re-open" : "Resolve"}
-              onClick={() => void ops.resolve(thread.id, !thread.resolved)}
+              disabled={rootBusy}
+              aria-busy={rootBusy || undefined}
+              onClick={resolveThread}
               data-testid="comment-resolve"
             >
               {thread.resolved ? <RotateCcw size={15} /> : <Check size={16} />}
@@ -1362,23 +1614,24 @@ const ThreadCard = memo(function ThreadCard({
               align="end"
               className="w-40"
               trigger={
-                <button type="button" className="icon-btn h-7 w-7" aria-label="Comment actions">
+                <button type="button" className="icon-btn h-7 w-7" aria-label="Comment actions" disabled={rootBusy} aria-busy={rootBusy || undefined}>
                   <MoreHorizontal size={16} />
                 </button>
               }
             >
               {thread.authorId === me && !thread.suggestionState && (
-                <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
+                <MenuItem icon={<Pencil size={14} />} disabled={rootBusy} onSelect={() => setEditing("root")}>
                   Edit
                 </MenuItem>
               )}
-              <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id)}>
+              <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={rootDeleteBlocked} onSelect={() => deleteTarget(null)}>
                 Delete thread
               </MenuItem>
             </LazyMenu>
           )}
         </div>
       </div>
+      <CommentActionFeedback state={rootAction} />
       {editingRoot && (
         <div className="mt-1" data-testid="comment-edit">
           <Composer
@@ -1402,6 +1655,9 @@ const ThreadCard = memo(function ThreadCard({
             const block = parseSuggestionBlock(r.body);
             const state = block ? r.suggestionState ?? (outdated ? "outdated" : "pending") : null;
             const editingReply = editing === r.id && !r.suggestionState;
+            const replyAction = rowActions.state(r.id);
+            const replyBusy = replyAction.pending !== null;
+            const replyBlocked = replyBusy || rowActions.rootDeleting;
             return (
               <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
                 <div className="flex items-start gap-2.5">
@@ -1441,7 +1697,7 @@ const ThreadCard = memo(function ThreadCard({
                             />
                           </div>
                         )}
-                        <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
+                        <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} disabled={replyBlocked} onToggle={(emoji) => reactTo(r.id, r.reactions, emoji)} />
                       </>
                     )}
                   </div>
@@ -1451,23 +1707,24 @@ const ThreadCard = memo(function ThreadCard({
                         align="end"
                         className="w-36"
                         trigger={
-                          <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
+                          <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions" disabled={replyBlocked} aria-busy={replyBusy || undefined}>
                             <MoreHorizontal size={14} />
                           </button>
                         }
                       >
                         {r.authorId === me && !r.suggestionState && (
-                          <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
+                          <MenuItem icon={<Pencil size={14} />} disabled={replyBlocked} onSelect={() => setEditing(r.id)}>
                             Edit
                           </MenuItem>
                         )}
-                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
+                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={replyBlocked} onSelect={() => deleteTarget(r.id)}>
                           Delete
                         </MenuItem>
                       </LazyMenu>
                     </div>
                   )}
                 </div>
+                <CommentActionFeedback state={replyAction} />
                 {editingReply && (
                   <div className="mt-1" data-testid="comment-edit">
                     <Composer
@@ -1873,9 +2130,11 @@ export function CommentsPanel({
   focusOnMount = false,
   onToast,
 }: CommentsPanelProps) {
+  const [visit] = useState<CommentPanelVisit>(() => ({ marker: "comment-panel-visit" }));
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
+  const actionCoordinator = useCommentRowActionCoordinator(session, visit, threads);
   const text = useSessionValue(session, (s) => s.ytext.toString());
   const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode, canEdit } = useSessionValue(
     session,
@@ -2242,6 +2501,7 @@ export function CommentsPanel({
                 key={t.id}
                 thread={t}
                 session={session}
+                actionCoordinator={actionCoordinator}
                 outdated={isSuggestionOutdated(t, text)}
                 active={t.id === activeCommentId}
                 unread={hasUnread(t)}
@@ -2271,6 +2531,7 @@ export function CommentsPanel({
                 key={t.id}
                 thread={t}
                 session={session}
+                actionCoordinator={actionCoordinator}
                 outdated={isSuggestionOutdated(t, text)}
                 active={t.id === activeCommentId}
                 unread={hasUnread(t)}
@@ -2315,6 +2576,7 @@ export function CommentsPanel({
                   key={`suggestion-${thread.id}`}
                   thread={thread}
                   session={session}
+                  actionCoordinator={actionCoordinator}
                   outdated={isSuggestionOutdated(thread, text)}
                   active={thread.id === activeCommentId}
                   unread={hasUnread(thread)}

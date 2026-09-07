@@ -29,19 +29,28 @@ vi.mock("./agent-requests", async (importOriginal) => {
   return { ...actual, claimerName: vi.fn(actual.claimerName) };
 });
 
-vi.mock("@/lib/api", () => ({
-  api: {
-    documents: {
-      collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
-      reviews: vi.fn().mockResolvedValue({ reviews: [] }),
-      comment: vi.fn().mockResolvedValue({ id: "via-api" }),
-      createRequest: vi.fn().mockResolvedValue({ request: { id: "req" } }),
+vi.mock("@/editor/collab/suggestion-block", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/editor/collab/suggestion-block")>();
+  return { ...actual, parseSuggestionBlock: vi.fn(actual.parseSuggestionBlock) };
+});
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    api: {
+      documents: {
+        collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
+        reviews: vi.fn().mockResolvedValue({ reviews: [] }),
+        comment: vi.fn().mockResolvedValue({ id: "via-api" }),
+        createRequest: vi.fn().mockResolvedValue({ request: { id: "req" } }),
+      },
+      tokens: {
+        list: vi.fn().mockResolvedValue({ tokens: [] }),
+      },
     },
-    tokens: {
-      list: vi.fn().mockResolvedValue({ tokens: [] }),
-    },
-  },
-}));
+  };
+});
 
 vi.mock("@/lib/notifications-store", () => ({
   markRefsRead: vi.fn(),
@@ -54,6 +63,7 @@ import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY } from "@/lib/mcp";
+import { parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { AgentRequestMirror } from "@/server/agent-requests";
 import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
@@ -80,6 +90,7 @@ function reviewDto(id: string, threadIds: string[], documentId = "doc"): ReviewD
 }
 
 type ReviewsResponse = Awaited<ReturnType<typeof api.documents.reviews>>;
+type CommentResponse = Awaited<ReturnType<typeof api.documents.comment>>;
 type CollaboratorsResponse = Awaited<ReturnType<typeof api.documents.collaborators>>;
 type TokensResponse = Awaited<ReturnType<typeof api.tokens.list>>;
 
@@ -102,11 +113,14 @@ function reviewSession(docId: string) {
 
 describe("CommentsPanel", () => {
   let session: CollabSession | null = null;
+  let auxiliarySessions: CollabSession[] = [];
 
   afterEach(() => {
     cleanup();
     session?.destroy();
+    for (const extra of auxiliarySessions) extra.destroy();
     session = null;
+    auxiliarySessions = [];
     vi.restoreAllMocks();
   });
 
@@ -716,6 +730,378 @@ describe("CommentsPanel", () => {
       expect(kind).toBe("info");
     });
   });
+
+  describe("API-backed row action ownership", () => {
+    interface ActionFixture {
+      session: CollabSession;
+      user: ReturnType<typeof makeCollabUser>;
+      threadIds: [string, string];
+      replyIds: [string, string];
+    }
+
+    const response = {} as CommentResponse;
+
+    const makeApiSession = (docId: string, source?: CollabSession): ActionFixture => {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const next = new CollabSession({ docId, user, role: "commenter", getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      if (source) {
+        Y.applyUpdate(next.ydoc, Y.encodeStateAsUpdate(source.ydoc));
+      } else {
+        next.ytext.insert(0, "Alpha beta gamma delta epsilon.");
+        const first = next.comments.add({ from: 0, to: 5, body: "First root.", author: user });
+        const second = next.comments.add({ from: 6, to: 10, body: "Second root.", author: user });
+        const firstReply = next.comments.reply(first, "First reply.", user)!;
+        const secondReply = next.comments.reply(second, "Second reply.", user)!;
+        next.comments.toggleReaction(first, null, "👍", user);
+        next.comments.toggleReaction(first, firstReply, "👍", user);
+        next.comments.toggleReaction(second, null, "👍", user);
+        next.comments.toggleReaction(second, secondReply, "👍", user);
+      }
+      const threads = next.comments.list();
+      session = next;
+      return {
+        session: next,
+        user,
+        threadIds: [threads[0].id, threads[1].id],
+        replyIds: [threads[0].replies[0].id, threads[1].replies[0].id],
+      };
+    };
+
+    const panel = (current: CollabSession) => (
+      <TooltipProvider>
+        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} />
+      </TooltipProvider>
+    );
+
+    const card = (threadId: string) => document.querySelector<HTMLElement>(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`)!;
+    const reply = (threadId: string, replyId: string) => card(threadId).querySelector<HTMLElement>(`[data-testid="comment-reply"][data-reply-id="${replyId}"]`)!;
+    const rootReactionRow = (threadId: string) => within(card(threadId)).getAllByTestId("reaction-row")[0];
+    const replyReactionRow = (threadId: string, replyId: string) => within(reply(threadId, replyId)).getByTestId("reaction-row");
+    const reactionChip = (row: HTMLElement, emoji = "👍") => within(row).getAllByTestId("reaction-chip").find((item) => item.getAttribute("data-emoji") === emoji)!;
+    const openRootDelete = async (threadId: string) => {
+      fireEvent.pointerDown(within(card(threadId)).getByRole("button", { name: "Comment actions" }), { button: 0 });
+      return await screen.findByRole("menuitem", { name: "Delete thread" });
+    };
+    const invokeRoot = async (kind: "resolve" | "delete" | "reaction", threadId: string) => {
+      if (kind === "resolve") fireEvent.click(within(card(threadId)).getByTestId("comment-resolve"));
+      else if (kind === "reaction") fireEvent.click(reactionChip(rootReactionRow(threadId)));
+      else fireEvent.click(await openRootDelete(threadId));
+    };
+    const expectRootControlsDisabled = (threadId: string) => {
+      expect(within(card(threadId)).getByTestId("comment-resolve")).toBeDisabled();
+      expect(within(card(threadId)).getByRole("button", { name: "Comment actions" })).toBeDisabled();
+      expect(reactionChip(rootReactionRow(threadId))).toBeDisabled();
+      expect(within(rootReactionRow(threadId)).getByRole("button", { name: "Add reaction" })).toBeDisabled();
+    };
+    const settle = async (request: ReturnType<typeof deferred<CommentResponse>>, outcome: "resolve" | "reject", reason = "request failed") => {
+      await act(async () => {
+        if (outcome === "resolve") request.resolve(response);
+        else request.reject(new Error(reason));
+        await request.promise.catch(() => {});
+      });
+    };
+
+    beforeEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue(response);
+      vi.mocked(parseSuggestionBlock).mockClear();
+    });
+
+    afterEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue({ id: "via-api" } as never);
+    });
+
+    it.each(["resolve", "delete", "reaction"] as const)("accepts one immediate duplicate %s, freezes its exact payload, and disables every competing root control", async (kind) => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession(`duplicate-${kind}`);
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+
+      let control: HTMLElement;
+      if (kind === "resolve") control = within(card(threadId)).getByTestId("comment-resolve");
+      else if (kind === "reaction") control = reactionChip(rootReactionRow(threadId));
+      else control = await openRootDelete(threadId);
+      act(() => {
+        control.click();
+        control.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      const [documentId, payload] = vi.mocked(api.documents.comment).mock.calls[0];
+      expect(documentId).toBe(`duplicate-${kind}`);
+      expect(payload).toEqual(
+        kind === "resolve"
+          ? { action: "resolve", threadId, resolved: true }
+          : kind === "delete"
+            ? { action: "delete", threadId, replyId: undefined }
+            : { action: "react", threadId, replyId: undefined, emoji: "👍" },
+      );
+      expect(Object.isFrozen(payload)).toBe(true);
+      const status = within(card(threadId)).getByTestId("comment-action-pending");
+      expect(status).toHaveAttribute("data-action", kind === "reaction" ? "react" : kind);
+      expect(status).toHaveTextContent(kind === "resolve" ? "Resolving comment…" : kind === "delete" ? "Deleting comment…" : "Removing 👍 reaction…");
+      expectRootControlsDisabled(threadId);
+
+      await settle(pending, "resolve");
+      expect(within(card(threadId)).queryByTestId("comment-action-pending")).toBeNull();
+      expect(within(card(threadId)).getByTestId("comment-resolve")).toBeEnabled();
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+    });
+
+    it("lets the first mixed root action own the target before React commits pending UI", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("mixed-root");
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const menuDelete = await openRootDelete(threadId);
+      const resolve = within(card(threadId)).getByTestId("comment-resolve");
+      const reaction = reactionChip(rootReactionRow(threadId));
+
+      act(() => {
+        resolve.click();
+        reaction.click();
+        menuDelete.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith("mixed-root", { action: "resolve", threadId, resolved: true });
+      expectRootControlsDisabled(threadId);
+      expect(within(card(threadId)).getAllByTestId("comment-action-pending")).toHaveLength(1);
+      await settle(pending, "resolve");
+    });
+
+    it("keeps the panel visit’s owner when its row unmounts for a tab switch", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("tab-switch-owner");
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      await invokeRoot("resolve", threadId);
+
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      expect(document.querySelector(`[data-thread-id="${threadId}"]`)).toBeNull();
+      fireEvent.click(screen.getByRole("tab", { name: /Open/ }));
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toHaveTextContent("Resolving comment…");
+      act(() => {
+        within(card(threadId)).getByTestId("comment-resolve").click();
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      await settle(pending, "resolve");
+    });
+
+    it("runs independent root, reply, and separate-thread targets concurrently without hiding untouched controls", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(requests[0].promise)
+        .mockReturnValueOnce(requests[1].promise)
+        .mockReturnValueOnce(requests[2].promise);
+      const fixture = makeApiSession("independent-targets");
+      render(panel(fixture.session));
+      const [first, second] = fixture.threadIds;
+      const [firstReply, secondReply] = fixture.replyIds;
+      const firstResolve = within(card(first)).getByTestId("comment-resolve");
+      const firstReplyReaction = reactionChip(replyReactionRow(first, firstReply));
+      const secondReaction = reactionChip(rootReactionRow(second));
+
+      act(() => {
+        firstResolve.click();
+        firstReplyReaction.click();
+        secondReaction.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(api.documents.comment).mock.calls).toEqual([
+        ["independent-targets", { action: "resolve", threadId: first, resolved: true }],
+        ["independent-targets", { action: "react", threadId: first, replyId: firstReply, emoji: "👍" }],
+        ["independent-targets", { action: "react", threadId: second, replyId: undefined, emoji: "👍" }],
+      ]);
+      expect(within(card(first)).getAllByTestId("comment-action-pending")).toHaveLength(2);
+      expect(within(card(second)).getAllByTestId("comment-action-pending")).toHaveLength(1);
+      expect(reactionChip(replyReactionRow(second, secondReply))).toBeEnabled();
+
+      await settle(requests[0], "resolve");
+      expect(within(card(first)).getByTestId("comment-resolve")).toBeEnabled();
+      expect(reactionChip(replyReactionRow(first, firstReply))).toBeDisabled();
+      expect(reactionChip(rootReactionRow(second))).toBeDisabled();
+      await settle(requests[1], "resolve");
+      await settle(requests[2], "resolve");
+    });
+
+    it("does not race a reply owner with a root delete that would remove it", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("delete-reply-conflict");
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const [replyId] = fixture.replyIds;
+      const rootDelete = await openRootDelete(threadId);
+      const replyReaction = reactionChip(replyReactionRow(threadId, replyId));
+
+      act(() => {
+        replyReaction.click();
+        rootDelete.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith("delete-reply-conflict", {
+        action: "react",
+        threadId,
+        replyId,
+        emoji: "👍",
+      });
+      await settle(pending, "resolve");
+    });
+
+    it.each(["resolve", "delete", "reaction"] as const)("shows one current %s failure and clears it for a same-action retry", async (kind) => {
+      const first = deferred<CommentResponse>();
+      const retry = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise);
+      const fixture = makeApiSession(`retry-${kind}`);
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+
+      await invokeRoot(kind, threadId);
+      expectRootControlsDisabled(threadId);
+      await settle(first, "reject", `${kind} unavailable`);
+
+      const alert = within(card(threadId)).getByRole("alert");
+      expect(alert).toHaveTextContent(`${kind} unavailable. Try again.`);
+      expect(within(card(threadId)).getAllByRole("alert")).toHaveLength(1);
+      expect(within(card(threadId)).getByTestId("comment-resolve")).toBeEnabled();
+      expect(reactionChip(rootReactionRow(threadId))).toBeEnabled();
+
+      await invokeRoot(kind, threadId);
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(within(card(threadId)).queryByRole("alert")).toBeNull();
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toBeVisible();
+      await settle(retry, "resolve");
+      expect(within(card(threadId)).queryByTestId("comment-action-pending")).toBeNull();
+      expect(within(card(threadId)).queryByRole("alert")).toBeNull();
+    });
+
+    it.each(["resolve", "reject"] as const)("keeps a replacement document’s same-id owner locked through old %s and finalizer settlement", async (oldOutcome) => {
+      const oldRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+      const old = makeApiSession("old-document");
+      const rendered = render(panel(old.session));
+      const [threadId] = old.threadIds;
+      await invokeRoot("resolve", threadId);
+
+      auxiliarySessions.push(old.session);
+      const current = makeApiSession("current-document", old.session);
+      expect(current.threadIds[0]).toBe(threadId);
+      rendered.rerender(panel(current.session));
+      await invokeRoot("resolve", threadId);
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toHaveTextContent("Resolving comment…");
+
+      await settle(oldRequest, oldOutcome);
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toHaveTextContent("Resolving comment…");
+      expect(within(card(threadId)).queryByRole("alert")).toBeNull();
+      act(() => {
+        within(card(threadId)).getByTestId("comment-resolve").click();
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([documentId]) => documentId)).toEqual(["old-document", "current-document"]);
+
+      await settle(currentRequest, "resolve");
+      expect(within(card(threadId)).queryByTestId("comment-action-pending")).toBeNull();
+      expect(within(card(threadId)).queryByTestId("comment-resolved-state")).toBeNull();
+    });
+
+    it.each(["resolve", "reject"] as const)("does not let old %s replace or clear a newer same-id error", async (oldOutcome) => {
+      const oldRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+      const old = makeApiSession("retired-error-document");
+      const rendered = render(panel(old.session));
+      const [threadId] = old.threadIds;
+      await invokeRoot("reaction", threadId);
+
+      auxiliarySessions.push(old.session);
+      const current = makeApiSession("new-error-document", old.session);
+      rendered.rerender(panel(current.session));
+      await invokeRoot("reaction", threadId);
+      await settle(currentRequest, "reject", "current reaction failed");
+      expect(within(card(threadId)).getByRole("alert")).toHaveTextContent("current reaction failed. Try again.");
+
+      await settle(oldRequest, oldOutcome, "old reaction failed");
+      expect(within(card(threadId)).getAllByRole("alert")).toHaveLength(1);
+      expect(within(card(threadId)).getByRole("alert")).toHaveTextContent("current reaction failed. Try again.");
+      expect(within(card(threadId)).getByRole("alert")).not.toHaveTextContent("old reaction failed");
+    });
+
+    it.each([
+      ["root", "resolve"],
+      ["reply", "reject"],
+    ] as const)("retires a removed %s target before a late %s settlement", async (target, outcome) => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession(`removed-${target}`);
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const [replyId] = fixture.replyIds;
+      if (target === "root") await invokeRoot("resolve", threadId);
+      else fireEvent.click(reactionChip(replyReactionRow(threadId, replyId)));
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        if (target === "root") fixture.session.comments.remove(threadId);
+        else fixture.session.comments.deleteReply(threadId, replyId);
+      });
+      if (target === "root") await waitFor(() => expect(document.querySelector(`[data-thread-id="${threadId}"]`)).toBeNull());
+      else await waitFor(() => expect(card(threadId).querySelector(`[data-reply-id="${replyId}"]`)).toBeNull());
+
+      await settle(pending, outcome, "removed target failed");
+      expect(screen.queryByText(/removed target failed/i)).toBeNull();
+      expect(screen.queryByTestId("comment-action-pending")).toBeNull();
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["resolve", "reject"] as const)("handles a late %s after panel unmount with zero unhandled rejections", async (outcome) => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession(`unmounted-action-${outcome}`);
+      const rendered = render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        await invokeRoot("delete", threadId);
+        rendered.unmount();
+        await settle(pending, outcome, "late action failure");
+        await act(async () => {});
+        expect(unhandled).toEqual([]);
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it("keeps unrelated memoised cards at zero renders while one target publishes pending and success", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("render-isolation");
+      render(panel(fixture.session));
+      const [first, second] = fixture.threadIds;
+
+      vi.mocked(parseSuggestionBlock).mockClear();
+      fireEvent.click(within(card(first)).getByTestId("comment-resolve"));
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "First reply.")).toHaveLength(1);
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "Second reply.")).toHaveLength(0);
+
+      await settle(pending, "resolve");
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "First reply.")).toHaveLength(2);
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "Second reply.")).toHaveLength(0);
+      expect(within(card(second)).getByTestId("comment-resolve")).toBeEnabled();
+    });
+  });
+
   describe("agent requests from comments (#1024)", () => {
     // As the collaborators route lists it (#1296): whose it is, and — off by default — whether others may ask it.
     const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false };
