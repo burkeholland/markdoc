@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { pollDocumentSync } from "./use-sync-polling";
@@ -50,8 +50,45 @@ const DOC: DocumentDto = {
   updatedAt: "2026-08-27T00:00:00.000Z",
 };
 
+const DIVERGED: SyncStatusDto = {
+  ...IN_SYNC,
+  status: "diverged",
+  localChanged: true,
+  remoteChanged: true,
+  lines: { local: 2, remote: 3 },
+};
+
+const SECOND_DOC: DocumentDto = {
+  ...DOC,
+  id: "doc-2",
+  title: "Second document",
+  repoPath: "second.md",
+  githubUrl: "https://github.com/o/r/blob/main/second.md",
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+function syncActions(overrides: Partial<SyncActions> = {}): SyncActions {
+  return {
+    merge: vi.fn(async () => 0),
+    keepMine: vi.fn(async () => undefined),
+    takeRemote: vi.fn(async () => undefined),
+    compare: vi.fn(),
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -117,5 +154,206 @@ describe("remote-unreadable sync status", () => {
     expect(screen.queryByTestId("sync-merge")).toBeNull();
     expect(screen.queryByTestId("sync-take-remote")).toBeNull();
     expect(screen.queryByTestId("sync-compare")).toBeNull();
+  });
+});
+
+describe("Sync dialog action lifecycle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  it("synchronously admits only one action and exposes its pending state", () => {
+    const pending = deferred<number>();
+    const actions = syncActions({
+      merge: vi.fn(() => {
+        const takeButton = screen.getByTestId("sync-take-remote") as HTMLButtonElement;
+        takeButton.click();
+        takeButton.click();
+        return pending.promise;
+      }),
+    });
+
+    render(<SyncDialog open onOpenChange={vi.fn()} doc={DOC} sync={DIVERGED} actions={actions} />);
+
+    fireEvent.click(screen.getByTestId("sync-merge"));
+
+    expect(actions.merge).toHaveBeenCalledOnce();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(screen.getByTestId("sync-merge")).toBeDisabled();
+    expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+    expect(screen.getByTestId("sync-take-remote")).toBeDisabled();
+    expect(screen.getByTestId("sync-compare")).toBeDisabled();
+    expect(screen.getByTestId("sync-merge").querySelector(".animate-spin")).not.toBeNull();
+  });
+
+  it("keeps a specific failure visible and admits exactly one same-action retry", async () => {
+    const retry = deferred<number>();
+    const merge = vi
+      .fn<SyncActions["merge"]>()
+      .mockRejectedValueOnce(new ApiError(409, "GitHub rejected this merge"))
+      .mockImplementationOnce(() => {
+        (screen.getByTestId("sync-merge") as HTMLButtonElement).click();
+        return retry.promise;
+      });
+    const actions = syncActions({ merge });
+
+    render(<SyncDialog open onOpenChange={vi.fn()} doc={DOC} sync={DIVERGED} actions={actions} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("sync-merge"));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("GitHub rejected this merge");
+    expect(screen.getByTestId("sync-merge")).toBeEnabled();
+    expect(merge).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByTestId("sync-merge"));
+    expect(merge).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await act(async () => {
+      retry.resolve(2);
+    });
+    expect(merge).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("sync-done")).toHaveTextContent("2 conflicts to resolve in the editor");
+  });
+
+  it("ignores stale success and error settlements after close and reopen", async () => {
+    const oldSuccess = deferred<number>();
+    const oldFailure = deferred<number>();
+    const merge = vi
+      .fn<SyncActions["merge"]>()
+      .mockImplementationOnce(() => oldSuccess.promise)
+      .mockImplementationOnce(() => oldFailure.promise);
+    const actions = syncActions({ merge });
+    const onOpenChange = vi.fn();
+    const view = render(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+
+    fireEvent.click(screen.getByTestId("sync-merge"));
+    view.rerender(<SyncDialog open={false} onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    view.rerender(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    await act(async () => {
+      oldSuccess.resolve(3);
+    });
+    expect(screen.queryByTestId("sync-done")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("sync-merge"));
+    view.rerender(<SyncDialog open={false} onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    view.rerender(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    await act(async () => {
+      oldFailure.reject(new ApiError(409, "Stale GitHub failure"));
+    });
+    act(() => vi.advanceTimersByTime(900));
+
+    expect(merge).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("sync-done")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("sync-merge")).toBeEnabled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("isolates document state and a current pending action from an old finalizer", async () => {
+    const oldMerge = deferred<number>();
+    const currentKeep = deferred<void>();
+    const actions = syncActions({
+      merge: vi.fn(() => oldMerge.promise),
+      keepMine: vi.fn(() => currentKeep.promise),
+    });
+    const view = render(<SyncDialog open onOpenChange={vi.fn()} doc={DOC} sync={DIVERGED} actions={actions} />);
+
+    fireEvent.change(screen.getByTestId("commit-message"), { target: { value: "Old document message" } });
+    fireEvent.click(screen.getByTestId("sync-merge"));
+    view.rerender(<SyncDialog open onOpenChange={vi.fn()} doc={SECOND_DOC} sync={DIVERGED} actions={actions} />);
+
+    expect(screen.getByTestId("commit-message")).toHaveValue("Update second.md");
+    fireEvent.click(screen.getByTestId("sync-keep-mine"));
+    expect(actions.keepMine).toHaveBeenCalledWith("Update second.md");
+
+    await act(async () => {
+      oldMerge.resolve(4);
+    });
+    expect(screen.getByTestId("commit-message")).toHaveValue("Update second.md");
+    expect(screen.queryByTestId("sync-done")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+    expect(screen.getByTestId("sync-keep-mine").querySelector(".animate-spin")).not.toBeNull();
+
+    await act(async () => {
+      currentKeep.resolve();
+    });
+    expect(screen.getByTestId("sync-done")).toHaveTextContent("Published your version");
+  });
+
+  it("invalidates an old close timer and closes exactly once for the current success", async () => {
+    const currentKeep = deferred<void>();
+    const actions = syncActions({ keepMine: vi.fn(() => currentKeep.promise) });
+    const onOpenChange = vi.fn();
+    const view = render(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("sync-merge"));
+    });
+    expect(screen.getByTestId("sync-done")).toHaveTextContent("Merged — review, then publish");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    view.rerender(<SyncDialog open={false} onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    view.rerender(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+    fireEvent.click(screen.getByTestId("sync-keep-mine"));
+
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("sync-keep-mine").querySelector(".animate-spin")).not.toBeNull();
+
+    await act(async () => {
+      currentKeep.resolve();
+    });
+    act(() => vi.advanceTimersByTime(899));
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(1));
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates pending settlements and delayed closes on unmount", async () => {
+    const pending = deferred<number>();
+    const onOpenChange = vi.fn();
+    const pendingView = render(
+      <SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={syncActions({ merge: vi.fn(() => pending.promise) })} />,
+    );
+
+    fireEvent.click(screen.getByTestId("sync-merge"));
+    pendingView.unmount();
+    await act(async () => {
+      pending.resolve(1);
+    });
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    const timerView = render(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={syncActions()} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("sync-merge"));
+    });
+    timerView.unmount();
+    act(() => vi.advanceTimersByTime(900));
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("preserves Compare without starting a Sync action", () => {
+    const actions = syncActions();
+    const onOpenChange = vi.fn();
+    render(<SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={actions} />);
+
+    fireEvent.click(screen.getByTestId("sync-compare"));
+
+    expect(actions.compare).toHaveBeenCalledOnce();
+    expect(actions.merge).not.toHaveBeenCalled();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

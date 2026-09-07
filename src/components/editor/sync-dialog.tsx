@@ -1,10 +1,15 @@
 "use client";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, CloudDownload, GitMerge, Loader2, Scale, UploadCloud } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import { apiErrorText, type SyncStatusDto } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
+
+type SyncActionKind = "merge" | "keep" | "take";
+type DialogVisit = { sequence: number; docId: string };
+type ActionOwner = { visit: DialogVisit; kind: SyncActionKind };
+type SuccessClose = { owner: ActionOwner; timer: ReturnType<typeof setTimeout> };
 
 export interface SyncActions {
   /** pull?merge=1 — resolves to the number of conflicts left in the document (0 = clean merge). */
@@ -35,26 +40,86 @@ export const SyncDialog = memo(function SyncDialog({
   const [busy, setBusy] = useState<"merge" | "keep" | "take" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  const visitSequenceRef = useRef(0);
+  const currentVisitRef = useRef<DialogVisit | null>(null);
+  const inFlightRef = useRef<ActionOwner | null>(null);
+  const successCloseRef = useRef<SuccessClose | null>(null);
+
   useEffect(() => {
+    const previousClose = successCloseRef.current;
+    if (previousClose) clearTimeout(previousClose.timer);
+    successCloseRef.current = null;
+    inFlightRef.current = null;
+
+    const visit = open ? { sequence: ++visitSequenceRef.current, docId: doc.id } : null;
+    currentVisitRef.current = visit;
     if (open) {
       setMessage(`Update ${doc.repoPath ?? doc.gistFile ?? "document"}`);
       setError(null);
       setDone(null);
       setBusy(null);
     }
-  }, [open, doc.repoPath, doc.gistFile]);
 
-  const run = async (kind: "merge" | "keep" | "take", fn: () => Promise<string>) => {
+    return () => {
+      if (currentVisitRef.current === visit) currentVisitRef.current = null;
+      if (visit && inFlightRef.current?.visit === visit) inFlightRef.current = null;
+      const scheduledClose = successCloseRef.current;
+      if (scheduledClose && (!visit || scheduledClose.owner.visit === visit)) {
+        clearTimeout(scheduledClose.timer);
+        successCloseRef.current = null;
+      }
+    };
+  }, [open, doc.id, doc.repoPath, doc.gistFile]);
+
+  const cancelSuccessClose = () => {
+    const scheduledClose = successCloseRef.current;
+    if (scheduledClose) clearTimeout(scheduledClose.timer);
+    successCloseRef.current = null;
+  };
+
+  const invalidateCurrentVisit = () => {
+    currentVisitRef.current = null;
+    inFlightRef.current = null;
+    cancelSuccessClose();
+  };
+
+  const ownsCurrentVisit = (owner: ActionOwner) =>
+    currentVisitRef.current === owner.visit && currentVisitRef.current.docId === owner.visit.docId;
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) invalidateCurrentVisit();
+    onOpenChange(nextOpen);
+  };
+
+  const run = async (kind: SyncActionKind, fn: () => Promise<string>) => {
+    const visit = currentVisitRef.current;
+    if (!open || !visit || visit.docId !== doc.id || inFlightRef.current) return;
+
+    const owner = { visit, kind };
+    inFlightRef.current = owner;
+    cancelSuccessClose();
     setBusy(kind);
     setError(null);
+    setDone(null);
     try {
       const note = await fn();
+      if (!ownsCurrentVisit(owner)) return;
       setDone(note);
-      setTimeout(() => onOpenChange(false), 900);
+      const timer = setTimeout(() => {
+        if (successCloseRef.current?.owner !== owner || !ownsCurrentVisit(owner)) return;
+        successCloseRef.current = null;
+        invalidateCurrentVisit();
+        onOpenChange(false);
+      }, 900);
+      successCloseRef.current = { owner, timer };
     } catch (e) {
+      if (!ownsCurrentVisit(owner)) return;
       setError(apiErrorText(e, "Sync failed"));
     } finally {
-      setBusy(null);
+      if (ownsCurrentVisit(owner) && inFlightRef.current === owner) {
+        inFlightRef.current = null;
+        setBusy(null);
+      }
     }
   };
 
@@ -73,7 +138,7 @@ export const SyncDialog = memo(function SyncDialog({
       : "The GitHub file is too large for Markdoc to read.";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         title="Sync with GitHub"
         description={remoteUnreadable ? `The file in ${where} cannot be read until it is made smaller or replaced.` : `This document and ${where} both changed since they were last in sync.`}
@@ -148,7 +213,7 @@ export const SyncDialog = memo(function SyncDialog({
                 <button type="button" className="btn btn-ghost justify-start gap-2" disabled={!!busy} data-testid="sync-compare"
                   onClick={() => {
                     actions.compare();
-                    onOpenChange(false);
+                    handleOpenChange(false);
                   }}
                 >
                   <Scale size={16} /> Compare GitHub with this document
