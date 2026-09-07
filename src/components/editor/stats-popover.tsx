@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import type { CollabSession } from "@/editor/collab/session";
@@ -13,6 +13,7 @@ import { jsonEqual, useSessionValue } from "./use-session";
 export type SourceSelection = { from: number; to: number } | null;
 
 type RelJSON = Parameters<typeof Y.createRelativePositionFromJSON>[0];
+type SelectionAuthority = { session: CollabSession };
 
 function resolve(session: CollabSession, rel: unknown): number | null {
   if (!rel) return null;
@@ -39,16 +40,25 @@ function readLocalSelection(session: CollabSession): SourceSelection {
  */
 export function useLocalSelection(session: CollabSession): SourceSelection {
   const [sel, setSel] = useState<SourceSelection>(null);
-  useEffect(() => {
+  const authorityRef = useRef<SelectionAuthority | null>(null);
+  useLayoutEffect(() => {
+    const authority = { session };
+    authorityRef.current = authority;
     const update = () => {
-      const next = readLocalSelection(session);
-      setSel((prev) => (prev?.from === next?.from && prev?.to === next?.to ? prev : next));
+      if (authorityRef.current !== authority) return;
+      const next = readLocalSelection(authority.session);
+      if (authorityRef.current !== authority) return;
+      setSel((prev) => {
+        if (authorityRef.current !== authority) return prev;
+        return prev?.from === next?.from && prev?.to === next?.to ? prev : next;
+      });
     };
     update();
-    session.awareness.on("change", update);
-    const unsubscribe = session.subscribe(update);
+    authority.session.awareness.on("change", update);
+    const unsubscribe = authority.session.subscribe(update);
     return () => {
-      session.awareness.off("change", update);
+      if (authorityRef.current === authority) authorityRef.current = null;
+      authority.session.awareness.off("change", update);
       unsubscribe();
     };
   }, [session]);

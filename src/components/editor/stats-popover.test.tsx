@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { useEffect, useLayoutEffect } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
@@ -21,9 +22,14 @@ import { CollabSession } from "@/editor/collab/session";
 import { getGoal, setGoal } from "@/editor/collab/meta";
 import { makeCollabUser } from "@/editor/collab/shared";
 import type { WritingGoal } from "@/editor/stats";
-import { StatsPopover } from "./stats-popover";
+import { StatsPopover, useLocalSelection, type SourceSelection } from "./stats-popover";
 
 const sessions: CollabSession[] = [];
+const unhandledRejections: unknown[] = [];
+
+function recordUnhandledRejection(reason: unknown) {
+  unhandledRejections.push(reason);
+}
 
 function makeSession(docId: string, role: "owner" | "viewer" = "owner", goal: WritingGoal | null = null): CollabSession {
   const session = new CollabSession({
@@ -50,6 +56,82 @@ function view(session: CollabSession, source = "One two three.") {
   return <StatsPopover session={session} source={source} selection={null} hydrated />;
 }
 
+function setLocalSelection(session: CollabSession, anchor: number, head: number) {
+  session.awareness.setLocalStateField("cursor", {
+    anchor: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(session.ytext, anchor)),
+    head: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(session.ytext, head)),
+  });
+}
+
+function seedSelection(session: CollabSession, source: string, anchor: number, head: number) {
+  session.ytext.insert(0, source);
+  setLocalSelection(session, anchor, head);
+}
+
+function trackSelectionSubscriptions(session: CollabSession) {
+  const awarenessOn = vi.spyOn(session.awareness, "on");
+  const awarenessOff = vi.spyOn(session.awareness, "off");
+  const originalSubscribe = session.subscribe;
+  const textUnsubscribes: { calls: number }[] = [];
+  const subscribe = vi.spyOn(session, "subscribe").mockImplementation((listener) => {
+    const unsubscribe = originalSubscribe(listener);
+    const tracked = { calls: 0 };
+    textUnsubscribes.push(tracked);
+    return () => {
+      tracked.calls++;
+      unsubscribe();
+    };
+  });
+  const awarenessCalls = (spy: typeof awarenessOn | typeof awarenessOff) =>
+    spy.mock.calls.filter(([event]) => event === "change").length;
+  return {
+    awarenessOff,
+    awarenessOn,
+    subscribe,
+    textUnsubscribes,
+    activeAwareness: () => awarenessCalls(awarenessOn) - awarenessCalls(awarenessOff),
+    activeText: () => subscribe.mock.calls.length - textUnsubscribes.filter(({ calls }) => calls > 0).length,
+  };
+}
+
+function SelectionProbe({ session, onSelection }: { session: CollabSession; onSelection?: (selection: SourceSelection) => void }) {
+  const selection = useLocalSelection(session);
+  useLayoutEffect(() => onSelection?.(selection), [onSelection, selection]);
+  return <output data-testid="selection-probe">{selection ? `${selection.from}:${selection.to}` : "none"}</output>;
+}
+
+function SelectionStats({ session, source }: { session: CollabSession; source: string }) {
+  const selection = useLocalSelection(session);
+  return <StatsPopover session={session} source={source} selection={selection} hydrated />;
+}
+
+function SelectionBoundary({
+  session,
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+  onSelection,
+}: {
+  session: CollabSession;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: (session: CollabSession, present: boolean) => void;
+  onSelection?: (selection: SourceSelection) => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  useEffect(() => () => onPassiveCleanup?.(session, present), [onPassiveCleanup, present, session]);
+  return present ? <SelectionProbe session={session} onSelection={onSelection} /> : null;
+}
+
+const emptySelectionCases: { label: string; select: (session: CollabSession) => void }[] = [
+  { label: "missing", select: () => {} },
+  { label: "collapsed", select: (session) => setLocalSelection(session, 4, 4) },
+];
+
 function openPopover() {
   fireEvent.click(screen.getByTestId("stats-button"));
   expect(screen.getByTestId("stats-popover")).toBeVisible();
@@ -68,10 +150,164 @@ async function updateSharedGoal(session: CollabSession, next: WritingGoal | null
   });
 }
 
-afterEach(() => {
+beforeEach(() => {
+  unhandledRejections.length = 0;
+  process.on("unhandledRejection", recordUnhandledRejection);
+});
+
+afterEach(async () => {
   cleanup();
   while (sessions.length) sessions.pop()!.destroy();
+  await Promise.resolve();
+  process.off("unhandledRejection", recordUnhandledRejection);
   vi.restoreAllMocks();
+  expect(unhandledRejections).toEqual([]);
+});
+
+describe("StatsPopover local selection authority", () => {
+  it("publishes current awareness and text changes once while keeping one subscription to each", async () => {
+    const session = makeSession("current-selection");
+    seedSelection(session, "One two three.", 0, 3);
+    const subscriptions = trackSelectionSubscriptions(session);
+    const publications = vi.fn();
+
+    render(<SelectionProbe session={session} onSelection={publications} />);
+    await act(async () => {});
+
+    expect(screen.getByTestId("selection-probe")).toHaveTextContent("0:3");
+    expect(subscriptions.activeAwareness()).toBe(1);
+    expect(subscriptions.activeText()).toBe(1);
+    expect(publications.mock.calls.map(([selection]) => selection)).toEqual([null, { from: 0, to: 3 }]);
+
+    act(() => setLocalSelection(session, 4, 7));
+    expect(screen.getByTestId("selection-probe")).toHaveTextContent("4:7");
+    expect(publications.mock.calls.map(([selection]) => selection)).toEqual([null, { from: 0, to: 3 }, { from: 4, to: 7 }]);
+
+    act(() => session.awareness.setLocalStateField("stats-test-revision", 1));
+    await act(async () => {
+      session.ytext.insert(session.ytext.length, " Four.");
+      await Promise.resolve();
+    });
+    expect(publications.mock.calls.map(([selection]) => selection)).toEqual([null, { from: 0, to: 3 }, { from: 4, to: 7 }]);
+
+    await act(async () => {
+      session.ytext.insert(0, "Zero ");
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("selection-probe")).toHaveTextContent("9:12");
+    expect(publications.mock.calls.map(([selection]) => selection)).toEqual([
+      null,
+      { from: 0, to: 3 },
+      { from: 4, to: 7 },
+      { from: 9, to: 12 },
+    ]);
+    expect(subscriptions.activeAwareness()).toBe(1);
+    expect(subscriptions.activeText()).toBe(1);
+  });
+
+  it("retires replacement listeners before old awareness and text changes at the parent layout boundary", async () => {
+    const previous = makeSession("selection-previous");
+    const current = makeSession("selection-current");
+    seedSelection(previous, "One two three four.", 0, 13);
+    seedSelection(current, "Alpha beta gamma.", 6, 10);
+    const previousSubscriptions = trackSelectionSubscriptions(previous);
+    const currentSubscriptions = trackSelectionSubscriptions(current);
+    const currentInitialRead = vi.spyOn(current.awareness, "getLocalState");
+    const publications = vi.fn();
+    let previousPassiveCleaned = false;
+    const onPassiveCleanup = vi.fn((session: CollabSession) => {
+      if (session === previous) previousPassiveCleaned = true;
+    });
+    const rendered = render(
+      <SelectionBoundary session={previous} onPassiveCleanup={onPassiveCleanup} onSelection={publications} />,
+    );
+    await act(async () => {});
+    expect(screen.getByTestId("selection-probe")).toHaveTextContent("0:13");
+
+    rendered.rerender(
+      <SelectionBoundary
+        session={current}
+        boundary={1}
+        onPassiveCleanup={onPassiveCleanup}
+        onSelection={publications}
+        onBoundary={() => {
+          expect(previousPassiveCleaned).toBe(false);
+          expect(currentInitialRead).toHaveBeenCalledOnce();
+          setLocalSelection(previous, 14, 18);
+          previous.ytext.insert(0, "Stale ");
+        }}
+      />,
+    );
+    await act(async () => {});
+
+    expect(screen.getByTestId("selection-probe")).toHaveTextContent("6:10");
+    expect(publications.mock.calls.map(([selection]) => selection)).toEqual([
+      null,
+      { from: 0, to: 13 },
+      { from: 6, to: 10 },
+    ]);
+    expect(previousSubscriptions.activeAwareness()).toBe(0);
+    expect(previousSubscriptions.activeText()).toBe(0);
+    expect(previousSubscriptions.textUnsubscribes[0]?.calls).toBe(1);
+    expect(currentSubscriptions.activeAwareness()).toBe(1);
+    expect(currentSubscriptions.activeText()).toBe(1);
+    expect(currentSubscriptions.awarenessOff).not.toHaveBeenCalled();
+    expect(currentSubscriptions.textUnsubscribes[0]?.calls).toBe(0);
+    expect(previousPassiveCleaned).toBe(true);
+  });
+
+  it("retires removed listeners before old awareness and text changes at the parent layout boundary", async () => {
+    const session = makeSession("selection-removed");
+    seedSelection(session, "One two three.", 4, 7);
+    const subscriptions = trackSelectionSubscriptions(session);
+    const publications = vi.fn();
+    let passiveCleaned = false;
+    const onPassiveCleanup = vi.fn((removed: CollabSession, present: boolean) => {
+      if (removed === session && present) passiveCleaned = true;
+    });
+    const rendered = render(
+      <SelectionBoundary session={session} onPassiveCleanup={onPassiveCleanup} onSelection={publications} />,
+    );
+    await act(async () => {});
+    expect(screen.getByTestId("selection-probe")).toHaveTextContent("4:7");
+
+    rendered.rerender(
+      <SelectionBoundary
+        session={session}
+        present={false}
+        boundary={1}
+        onPassiveCleanup={onPassiveCleanup}
+        onSelection={publications}
+        onBoundary={() => {
+          expect(passiveCleaned).toBe(false);
+          setLocalSelection(session, 8, 13);
+          session.ytext.insert(0, "Stale ");
+        }}
+      />,
+    );
+    await act(async () => {});
+
+    expect(screen.queryByTestId("selection-probe")).toBeNull();
+    expect(publications.mock.calls.map(([selection]) => selection)).toEqual([null, { from: 4, to: 7 }]);
+    expect(subscriptions.activeAwareness()).toBe(0);
+    expect(subscriptions.activeText()).toBe(0);
+    expect(subscriptions.textUnsubscribes[0]?.calls).toBe(1);
+    expect(passiveCleaned).toBe(true);
+  });
+
+  it.each(emptySelectionCases)("renders no selection counts for a $label local selection", async ({ select }) => {
+    const session = makeSession("empty-selection");
+    const source = "One two three.";
+    session.ytext.insert(0, source);
+    select(session);
+
+    render(<SelectionStats session={session} source={source} />);
+    await act(async () => {});
+    openPopover();
+
+    expect(screen.queryByTestId("selection-count")).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Selection" })).toBeNull();
+  });
 });
 
 describe("StatsPopover writing goal draft", () => {
