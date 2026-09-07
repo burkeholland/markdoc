@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { useLayoutEffect } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -11,6 +12,8 @@ const renameVersion = vi.fn();
 const restoreVersion = vi.fn();
 const copyVersion = vi.fn();
 const push = vi.fn();
+const router = { push, replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
+let activeRouter = router;
 const pendingNotice = vi.fn();
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
@@ -26,7 +29,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push, replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() }),
+  useRouter: () => activeRouter,
 }));
 
 vi.mock("@/lib/notice", () => ({
@@ -46,6 +49,98 @@ function deferred<T>() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+type CapturedEvent<T extends HTMLElement> = {
+  currentTarget: T;
+  target: T;
+  key?: string;
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+};
+
+interface CapturedProps<T extends HTMLElement> {
+  onClick?: (event: CapturedEvent<T>) => void;
+  onChange?: (event: CapturedEvent<T>) => void;
+  onBlur?: (event: CapturedEvent<T>) => void;
+  onKeyDown?: (event: CapturedEvent<T>) => void;
+  ref?: (element: T | null) => void;
+}
+
+function capturedProps<T extends HTMLElement>(element: T): CapturedProps<T> {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the element");
+  return (element as unknown as Record<string, CapturedProps<T>>)[propsKey];
+}
+
+function capturedEvent<T extends HTMLElement>(currentTarget: T, key?: string): CapturedEvent<T> {
+  return {
+    currentTarget,
+    target: currentTarget,
+    key,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+}
+
+function invoke<T extends HTMLElement>(
+  handler: ((event: CapturedEvent<T>) => void) | undefined,
+  source: T,
+  key?: string,
+) {
+  if (!handler) throw new Error("React handler was not attached to the element");
+  const event = capturedEvent(source, key);
+  handler(event);
+  return event;
+}
+
+function expectInert<T extends HTMLElement>(
+  handler: ((event: CapturedEvent<T>) => void) | undefined,
+  source: T,
+  panel: HTMLElement,
+  key?: string,
+) {
+  const markup = panel.innerHTML;
+  const focused = document.activeElement;
+  const event = invoke(handler, source, key);
+  expect(event.preventDefault).not.toHaveBeenCalled();
+  expect(event.stopPropagation).not.toHaveBeenCalled();
+  expect(panel.innerHTML).toBe(markup);
+  expect(document.activeElement).toBe(focused);
+  return event;
+}
+
+function VersionsBoundary({
+  session: currentSession,
+  onClose,
+  onPreview,
+  refreshKey = 0,
+  present = true,
+  mountKey = "panel",
+  boundary = 0,
+  onBoundary,
+}: {
+  session: CollabSession;
+  onClose: () => void;
+  onPreview: (preview: unknown) => void;
+  refreshKey?: number;
+  present?: boolean;
+  mountKey?: string;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? (
+    <VersionsPanel
+      key={mountKey}
+      session={currentSession}
+      onClose={onClose}
+      onPreview={onPreview}
+      refreshKey={refreshKey}
+    />
+  ) : null;
 }
 
 function SettleInLayout({ settle }: { settle: () => void }) {
@@ -91,6 +186,7 @@ const named: VersionSummary = {
 };
 
 beforeEach(() => {
+  activeRouter = router;
   versions.mockReset().mockResolvedValue({ versions: [named] });
   version.mockReset().mockResolvedValue({ version: { ...named, content: "# Draft" } });
   renameVersion.mockReset();
@@ -103,6 +199,383 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("VersionsPanel · exact panel publications", () => {
+  it.each(["sibling row", "foreign connected", "detached source", "replacement source"] as const)(
+    "rejects a %s Select source without consuming the exact current activation",
+    async (sourceKind) => {
+      const docId = `publication-source-${sourceKind.replaceAll(" ", "-")}`;
+      const first = { ...named, id: `${docId}-first`, number: 2, title: "Publication first" };
+      const second = { ...named, id: `${docId}-second`, number: 1, title: "Publication second" };
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+      const onPreview = vi.fn();
+      versions.mockResolvedValueOnce({ versions: [first, second] });
+      version.mockImplementation(async (_docId: string, versionId: string) => ({
+        version: { ...(versionId === first.id ? first : second), content: `# ${versionId}` },
+      }));
+
+      try {
+        await act(async () => {
+          root.render(
+            <VersionsPanel
+              session={session(docId)}
+              onClose={vi.fn()}
+              onPreview={onPreview}
+              refreshKey={0}
+            />,
+          );
+        });
+        const panel = host.querySelector<HTMLElement>('[data-testid="versions-panel"]')!;
+        const items = host.querySelectorAll<HTMLElement>('[data-testid="version-item"]');
+        const exact = items[0].querySelector<HTMLButtonElement>("button")!;
+        const sibling = items[1].querySelector<HTMLButtonElement>("button")!;
+        const exactHandler = capturedProps(exact).onClick;
+        let wrong = sibling;
+        let restoreDom = () => {};
+        let removeWrong = () => {};
+        focusOwner.focus();
+
+        if (sourceKind === "foreign connected") {
+          wrong = document.createElement("button");
+          document.body.append(wrong);
+          removeWrong = () => wrong.remove();
+        } else if (sourceKind === "detached source") {
+          const parent = exact.parentElement!;
+          exact.remove();
+          wrong = exact;
+          restoreDom = () => parent.append(exact);
+        } else if (sourceKind === "replacement source") {
+          const parent = exact.parentElement!;
+          wrong = document.createElement("button");
+          parent.replaceChild(wrong, exact);
+          restoreDom = () => parent.replaceChild(exact, wrong);
+        }
+
+        expectInert(exactHandler, wrong, panel);
+        if (sourceKind === "sibling row") {
+          expectInert(capturedProps(sibling).onClick, exact, panel);
+        }
+        expect(version).not.toHaveBeenCalled();
+        expect(onPreview).not.toHaveBeenCalled();
+
+        restoreDom();
+        invoke(exactHandler, exact);
+        invoke(exactHandler, exact);
+        await act(async () => {});
+
+        expect(version).toHaveBeenCalledOnce();
+        expect(version).toHaveBeenCalledWith(docId, first.id);
+        expect(onPreview).toHaveBeenCalledOnce();
+        expect(onPreview).toHaveBeenCalledWith({ version: first, content: `# ${first.id}` });
+        expect(document.activeElement).toBe(focusOwner);
+        removeWrong();
+      } finally {
+        await act(async () => root.unmount());
+        focusOwner.remove();
+        host.remove();
+      }
+    },
+  );
+
+  it("retires every retained control before a same-document authority reaches its parent layout boundary", async () => {
+    const docId = "publication-authority-boundary";
+    const firstSession = session(docId);
+    const nextSession = session(docId);
+    const first = { ...named, id: `${docId}-first`, number: 2, title: "Boundary first" };
+    const second = { ...named, id: `${docId}-second`, number: 1, title: "Boundary second" };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const firstClose = vi.fn();
+    const nextClose = vi.fn();
+    const firstPreview = vi.fn();
+    const nextPreview = vi.fn();
+    const nextPush = vi.fn();
+    const nextRouter = { ...router, push: nextPush };
+    const copyRequest = deferred<{ id: string; title: string }>();
+    versions.mockReset()
+      .mockResolvedValueOnce({ versions: [first, second] })
+      .mockRejectedValueOnce(new Error("refresh failed"))
+      .mockResolvedValueOnce({ versions: [first, second] });
+    copyVersion.mockReturnValueOnce(copyRequest.promise);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    try {
+      await act(async () => {
+        root.render(
+          <VersionsBoundary
+            session={firstSession}
+            onClose={firstClose}
+            onPreview={firstPreview}
+          />,
+        );
+      });
+      const firstItem = host.querySelectorAll<HTMLElement>('[data-testid="version-item"]')[0];
+      fireEvent.click(firstItem.querySelector<HTMLButtonElement>("button")!);
+      await waitFor(() => expect(firstPreview).toHaveBeenCalledOnce());
+      fireEvent.click(host.querySelector<HTMLInputElement>('[aria-label="Compare v1"]')!);
+      fireEvent.click(host.querySelector<HTMLButtonElement>('[data-testid="version-rename"]')!);
+      await act(async () => {
+        root.render(
+          <VersionsBoundary
+            session={firstSession}
+            onClose={firstClose}
+            onPreview={firstPreview}
+            refreshKey={1}
+          />,
+        );
+      });
+      expect(host.querySelector('[role="alert"]')).toHaveTextContent("refresh failed");
+
+      const panel = host.querySelector<HTMLElement>('[data-testid="versions-panel"]')!;
+      const row = host.querySelectorAll<HTMLElement>('[data-testid="version-item"]')[0];
+      const staleClose = capturedProps(host.querySelector<HTMLButtonElement>('[aria-label="Close version history"]')!).onClick;
+      const staleRetry = capturedProps(host.querySelector<HTMLButtonElement>("button.btn-outline")!).onClick;
+      const staleClear = capturedProps(Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Clear")!).onClick;
+      const staleSelect = capturedProps(row.querySelector<HTMLButtonElement>("button")!).onClick;
+      const staleCheckbox = capturedProps(row.querySelector<HTMLInputElement>('[data-testid="version-compare"]')!).onChange;
+      const staleRestore = capturedProps(row.querySelector<HTMLButtonElement>('[data-testid="version-restore"]')!).onClick;
+      const staleStartRename = capturedProps(row.querySelector<HTMLButtonElement>('[data-testid="version-rename"]')!).onClick;
+      const staleCopy = capturedProps(row.querySelector<HTMLButtonElement>('[data-testid="version-copy"]')!).onClick;
+      const oldInput = row.querySelector<HTMLInputElement>('[data-testid="version-rename-input"]')!;
+      const staleInput = capturedProps(oldInput);
+      firstClose.mockClear();
+      firstPreview.mockClear();
+      version.mockClear();
+      versions.mockClear();
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+      activeRouter = nextRouter;
+
+      root.render(
+        <VersionsBoundary
+          session={nextSession}
+          onClose={nextClose}
+          onPreview={nextPreview}
+          refreshKey={1}
+          boundary={1}
+          onBoundary={() => {
+            const currentPanel = host.querySelector<HTMLElement>('[data-testid="versions-panel"]')!;
+            const currentRow = host.querySelectorAll<HTMLElement>('[data-testid="version-item"]')[0];
+            const currentClose = host.querySelector<HTMLButtonElement>('[aria-label="Close version history"]')!;
+            const currentRetry = host.querySelector<HTMLButtonElement>("button.btn-outline")!;
+            const currentClear = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Clear")!;
+            const currentSelect = currentRow.querySelector<HTMLButtonElement>("button")!;
+            const currentCheckbox = currentRow.querySelector<HTMLInputElement>('[data-testid="version-compare"]')!;
+            const currentRestore = currentRow.querySelector<HTMLButtonElement>('[data-testid="version-restore"]')!;
+            const currentRename = currentRow.querySelector<HTMLButtonElement>('[data-testid="version-rename"]')!;
+            const currentCopy = currentRow.querySelector<HTMLButtonElement>('[data-testid="version-copy"]')!;
+            const currentInput = currentRow.querySelector<HTMLInputElement>('[data-testid="version-rename-input"]')!;
+
+            expect(currentPanel).toBe(panel);
+            for (const [handler, source] of [
+              [staleClose, currentClose],
+              [staleRetry, currentRetry],
+              [staleClear, currentClear],
+              [staleSelect, currentSelect],
+              [staleRestore, currentRestore],
+              [staleStartRename, currentRename],
+              [staleCopy, currentCopy],
+            ] as const) {
+              expectInert(handler, source, currentPanel);
+            }
+            expectInert(staleCheckbox, currentCheckbox, currentPanel);
+            currentInput.value = "Retired draft";
+            expectInert(staleInput.onChange, currentInput, currentPanel);
+            expectInert(staleInput.onBlur, currentInput, currentPanel);
+            expectInert(staleInput.onKeyDown, currentInput, currentPanel, "Enter");
+            expectInert(staleInput.onKeyDown, currentInput, currentPanel, "Escape");
+            expectInert(staleInput.onClick, currentInput, currentPanel);
+
+            expect(window.confirm).not.toHaveBeenCalled();
+            expect(versions).not.toHaveBeenCalled();
+            expect(version).not.toHaveBeenCalled();
+            expect(renameVersion).not.toHaveBeenCalled();
+            expect(restoreVersion).not.toHaveBeenCalled();
+            expect(copyVersion).not.toHaveBeenCalled();
+            expect(firstClose).not.toHaveBeenCalled();
+            expect(nextClose).not.toHaveBeenCalled();
+            expect(firstPreview).not.toHaveBeenCalled();
+            expect(nextPreview).not.toHaveBeenCalled();
+            expect(pendingNotice).not.toHaveBeenCalled();
+            expect(push).not.toHaveBeenCalled();
+            expect(nextPush).not.toHaveBeenCalled();
+
+            invoke(capturedProps(currentCopy).onClick, currentCopy);
+            invoke(capturedProps(currentCopy).onClick, currentCopy);
+            expect(copyVersion).toHaveBeenCalledOnce();
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+      copyRequest.resolve({ id: "boundary-copy", title: "Boundary copy" });
+      await waitFor(() => expect(nextPush).toHaveBeenCalledOnce());
+
+      expect(firstClose).not.toHaveBeenCalled();
+      expect(firstPreview).not.toHaveBeenCalled();
+      expect(nextPreview).not.toHaveBeenCalled();
+      expect(pendingNotice).toHaveBeenCalledOnce();
+      expect(nextPush).toHaveBeenCalledWith("/d/boundary-copy");
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps a replacement mount active when retained handlers and ref cleanup target the retired mount", async () => {
+    const docId = "publication-remount";
+    const current = { ...named, id: `${docId}-version`, title: "Remount version" };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    versions.mockResolvedValue({ versions: [current] });
+
+    try {
+      await act(async () => {
+        root.render(
+          <VersionsBoundary
+            session={session(docId)}
+            onClose={staleClose}
+            onPreview={vi.fn()}
+            mountKey="first"
+          />,
+        );
+      });
+      const oldPanel = host.querySelector<HTMLElement>('[data-testid="versions-panel"]')!;
+      const oldButton = host.querySelector<HTMLButtonElement>('[aria-label="Close version history"]')!;
+      const oldHandler = capturedProps(oldButton).onClick;
+      const oldRef = capturedProps(oldPanel).ref;
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+
+      root.render(
+        <VersionsBoundary
+          session={session(docId)}
+          onClose={currentClose}
+          onPreview={vi.fn()}
+          mountKey="second"
+          boundary={1}
+          onBoundary={() => {
+            const newPanel = host.querySelector<HTMLElement>('[data-testid="versions-panel"]')!;
+            const newButton = host.querySelector<HTMLButtonElement>('[aria-label="Close version history"]')!;
+            const newHandler = capturedProps(newButton).onClick;
+            expect(newPanel).not.toBe(oldPanel);
+            expect(newButton).not.toBe(oldButton);
+
+            expectInert(oldHandler, newButton, newPanel);
+            expectInert(newHandler, oldButton, newPanel);
+            oldRef?.(null);
+            invoke(newHandler, newButton);
+            invoke(newHandler, newButton);
+            expect(staleClose).not.toHaveBeenCalled();
+            expect(currentClose).toHaveBeenCalledOnce();
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rechecks Restore after confirmation before starting its request", async () => {
+    const docId = "publication-restore-confirmation";
+    const current = { ...named, id: `${docId}-version`, title: "Confirmation version" };
+    versions.mockResolvedValueOnce({ versions: [current] });
+    render(
+      <VersionsPanel
+        session={session(docId)}
+        onClose={vi.fn()}
+        onPreview={vi.fn()}
+        refreshKey={0}
+      />,
+    );
+    fireEvent.click(await screen.findByText("Confirmation version"));
+    const restore = screen.getByTestId("version-restore");
+    const handler = capturedProps(restore).onClick;
+    vi.spyOn(window, "confirm").mockImplementation(() => {
+      current.title = "Changed during confirmation";
+      return true;
+    });
+
+    invoke(handler, restore);
+    current.title = "Confirmation version";
+
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(restoreVersion).not.toHaveBeenCalled();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("drops a same-document Copy settlement at the replacement layout boundary and leaves the replacement usable", async () => {
+    const docId = "publication-copy-settlement";
+    const current = { ...named, id: `${docId}-version`, title: "Settlement version" };
+    const staleCopy = deferred<{ id: string; title: string }>();
+    const currentCopy = deferred<{ id: string; title: string }>();
+    const stalePreview = vi.fn();
+    const nextPreview = vi.fn();
+    const nextPush = vi.fn();
+    const nextRouter = { ...router, push: nextPush };
+    versions.mockResolvedValue({ versions: [current] });
+    copyVersion.mockReturnValueOnce(staleCopy.promise).mockReturnValueOnce(currentCopy.promise);
+    const rendered = render(
+      <VersionsBoundary
+        session={session(docId)}
+        onClose={vi.fn()}
+        onPreview={stalePreview}
+      />,
+    );
+    fireEvent.click(await screen.findByText("Settlement version"));
+    await waitFor(() => expect(stalePreview).toHaveBeenCalledOnce());
+    stalePreview.mockClear();
+    fireEvent.click(screen.getByTestId("version-copy"));
+    expect(copyVersion).toHaveBeenCalledOnce();
+    activeRouter = nextRouter;
+
+    rendered.rerender(
+      <>
+        <VersionsBoundary
+          session={session(docId)}
+          onClose={vi.fn()}
+          onPreview={nextPreview}
+          boundary={1}
+        />
+        <SettleInLayout settle={() => staleCopy.resolve({ id: "retired-copy", title: "Retired copy" })} />
+      </>,
+    );
+    await act(async () => {});
+
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expect(nextPush).not.toHaveBeenCalled();
+    expect(stalePreview).not.toHaveBeenCalled();
+    expect(nextPreview).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(false);
+
+    fireEvent.click(screen.getByTestId("version-copy"));
+    fireEvent.click(screen.getByTestId("version-copy"));
+    expect(copyVersion).toHaveBeenCalledTimes(2);
+    currentCopy.resolve({ id: "current-copy", title: "Current copy" });
+    await waitFor(() => expect(nextPush).toHaveBeenCalledOnce());
+    expect(pendingNotice).toHaveBeenCalledOnce();
+    expect(nextPush).toHaveBeenCalledWith("/d/current-copy");
+  });
 });
 
 describe("VersionsPanel · rename a version", () => {
@@ -759,8 +1232,6 @@ describe("VersionsPanel · list recovery", () => {
     expect(alert).not.toHaveFocus();
     expect(retryButton).not.toHaveFocus();
     expect(screen.getByRole("button", { name: "Close version history" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
-    expect(onClose).toHaveBeenCalledOnce();
 
     fireEvent.click(retryButton);
     fireEvent.click(retryButton);
@@ -771,6 +1242,8 @@ describe("VersionsPanel · list recovery", () => {
     expect(await screen.findByText("No versions yet")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(versions).toHaveBeenNthCalledWith(2, "versions-retry-empty");
+    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("keeps rows, selection, compare state and cached content through a refresh failure", async () => {
