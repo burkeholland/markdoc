@@ -19,16 +19,27 @@ function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Compile the query into a global RegExp, or null when it is empty or invalid. */
-export function buildFindRegex(query: string, options: FindOptions): RegExp | null {
-  if (!query) return null;
+export interface CompiledFindRegex {
+  regex: RegExp | null;
+  invalid: boolean;
+}
+
+/** Compile the query and report invalid syntax separately from an empty query. */
+export function compileFindRegex(query: string, options: FindOptions): CompiledFindRegex {
+  if (!query) return { regex: null, invalid: false };
   let source = options.regex ? query : escapeRegex(query);
   if (options.wholeWord) source = `(?<![\\p{L}\\p{N}_])(?:${source})(?![\\p{L}\\p{N}_])`;
   try {
-    return new RegExp(source, "gu" + (options.matchCase ? "" : "i"));
-  } catch {
-    return null;
+    return { regex: new RegExp(source, "gu" + (options.matchCase ? "" : "i")), invalid: false };
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return { regex: null, invalid: options.regex };
   }
+}
+
+/** Compile the query into a global RegExp, or null when it is empty or invalid. */
+export function buildFindRegex(query: string, options: FindOptions): RegExp | null {
+  return compileFindRegex(query, options).regex;
 }
 
 /** All matches of the query in the text, in document order. */
