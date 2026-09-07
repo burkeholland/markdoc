@@ -35,6 +35,8 @@ const DOC: DocumentDto = {
 const OFF: GistAutoUpdateStatus = { enabled: false, status: "off", syncedAt: null, message: null, pending: false, destination: null };
 const PENDING: GistAutoUpdateStatus = { ...OFF, enabled: true, status: "pending", destination: DESTINATION };
 let serverStatus: GistAutoUpdateStatus;
+let visibility: DocumentVisibilityState;
+const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -46,6 +48,10 @@ const settle = () => act(async () => {});
 const click = (name: string) => act(async () => { fireEvent.click(screen.getByRole("button", { name })); });
 const advance = (milliseconds = 2_000) => act(async () => { await vi.advanceTimersByTimeAsync(milliseconds); });
 const state = () => screen.getByTestId("gist-auto-update-state");
+const setVisibility = (next: DocumentVisibilityState) => {
+  visibility = next;
+  act(() => document.dispatchEvent(new Event("visibilitychange")));
+};
 async function mount(doc = DOC) {
   const result = render(<GistAutoUpdateControl doc={doc} isOwner />);
   await settle();
@@ -58,6 +64,8 @@ async function consent() {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  visibility = "visible";
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
   serverStatus = { ...OFF };
   vi.spyOn(api.documents, "gistAutoUpdate").mockImplementation(async () => serverStatus);
   vi.spyOn(api.documents, "gistAutoUpdatePreview").mockResolvedValue({ destination: DESTINATION });
@@ -75,6 +83,8 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
+  else Reflect.deleteProperty(document, "visibilityState");
 });
 
 describe("gist auto-update owner opt-in", () => {
@@ -353,6 +363,138 @@ describe("gist auto-update status and recovery", () => {
 });
 
 describe("gist auto-update request lifetimes", () => {
+  it("waits on a hidden mount, then checks once immediately and restores the settle-then-schedule cadence", async () => {
+    visibility = "hidden";
+    await mount();
+    await advance(20_000);
+    expect(api.documents.gistAutoUpdate).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(state()).toHaveAttribute("data-status", "loading");
+
+    setVisibility("visible");
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledExactlyOnceWith(DOC.id);
+    await settle();
+    expect(state()).toHaveTextContent("Off");
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await advance(1_999);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a scheduled check while hidden and starts one current check per visibility return", async () => {
+    await mount();
+    expect(vi.getTimerCount()).toBe(1);
+
+    setVisibility("hidden");
+    expect(vi.getTimerCount()).toBe(0);
+    await advance(20_000);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+
+    setVisibility("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(vi.getTimerCount()).toBe(1);
+    await advance();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["resolve", "reject"] as const)("invalidates a pending automatic status %s while hidden without stale state, error, busy, or timer commits", async (outcome) => {
+    const oldStatus = deferred<GistAutoUpdateStatus>();
+    vi.mocked(api.documents.gistAutoUpdate).mockReturnValueOnce(oldStatus.promise);
+    await mount();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+
+    setVisibility("hidden");
+    await act(async () => {
+      if (outcome === "resolve") oldStatus.resolve(PENDING);
+      else oldStatus.reject(new ApiError(503, "Stale hidden status error."));
+    });
+    await advance(20_000);
+
+    expect(state()).toHaveAttribute("data-status", "loading");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("gist-auto-update-destination")).not.toHaveTextContent("GitHub account:");
+    expect(screen.getByRole("button", { name: "Check linked gist" })).toBeDisabled();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    setVisibility("visible");
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(state()).toHaveTextContent("Off");
+    expect(screen.getByRole("button", { name: "Check linked gist" })).toBeEnabled();
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("queues one visible resume behind an old request and keeps visibility events and timer ticks single-flight", async () => {
+    const first = deferred<GistAutoUpdateStatus>();
+    const second = deferred<GistAutoUpdateStatus>();
+    const third = deferred<GistAutoUpdateStatus>();
+    const requests = [first, second, third];
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    vi.mocked(api.documents.gistAutoUpdate).mockImplementation(() => {
+      const request = requests.shift();
+      if (!request) return Promise.resolve(OFF);
+      activeRequests++;
+      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+      return request.promise.finally(() => { activeRequests--; });
+    });
+
+    await mount();
+    setVisibility("hidden");
+    setVisibility("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await advance(20_000);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+
+    await act(async () => { first.resolve(PENDING); });
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+    expect(state()).toHaveAttribute("data-status", "loading");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await advance(20_000);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+
+    await act(async () => { second.resolve(OFF); });
+    expect(state()).toHaveTextContent("Off");
+    expect(vi.getTimerCount()).toBe(1);
+    await advance();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(3);
+    await advance(20_000);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(3);
+    expect(maxActiveRequests).toBe(1);
+
+    await act(async () => { third.resolve(OFF); });
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("does not duplicate an explicit preview when visibility changes and resumes status after it settles", async () => {
+    const explicitPreview = deferred<{ destination: GistAutoUpdateDestination }>();
+    await mount();
+    vi.mocked(api.documents.gistAutoUpdatePreview).mockReturnValueOnce(explicitPreview.promise);
+    await click("Check linked gist");
+    expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(1);
+
+    setVisibility("hidden");
+    setVisibility("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await advance(20_000);
+    expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(1);
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => { explicitPreview.resolve({ destination: DESTINATION }); });
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await advance();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["resolve", "reject"] as const)("ignores a late poll that would %s after enabling", async (outcome) => {
     const poll = deferred<GistAutoUpdateStatus>();
     await mount();
@@ -448,6 +590,8 @@ describe("gist auto-update request lifetimes", () => {
     expect(vi.getTimerCount()).toBe(1);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+    setVisibility("hidden");
+    setVisibility("visible");
     await advance(20_000);
     expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
   });

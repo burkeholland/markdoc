@@ -10,7 +10,8 @@ import {
 } from "@/lib/gist-auto-update";
 
 type Action =
-  | { kind: "status" | "preview" | "disable" | "retry"; serial: number }
+  | { kind: "status"; serial: number; explicit: boolean }
+  | { kind: "preview" | "disable" | "retry"; serial: number }
   | { kind: "enable"; serial: number; destination: GistAutoUpdateDestination };
 type Problem = { status: "failed" | "conflict"; message: string; source: Action["kind"] | "destination" };
 
@@ -32,7 +33,7 @@ export function GistAutoUpdateControl({ doc, isOwner }: { doc: DocumentDto; isOw
 function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId: string; gistId: string; filename: string; url: string }) {
   const id = useId();
   const serial = useRef(0);
-  const [action, setAction] = useState<Action>({ kind: "status", serial: 0 });
+  const [action, setAction] = useState<Action>({ kind: "status", serial: 0, explicit: false });
   const [busy, setBusy] = useState<Action["kind"] | null>("status");
   const [status, setStatus] = useState<GistAutoUpdateStatus | null>(null);
   const [preview, setPreview] = useState<GistAutoUpdateDestination | null>(null);
@@ -41,8 +42,17 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
 
   useEffect(() => {
     let active = true;
+    let visible = document.visibilityState === "visible";
+    let visibilityGeneration = 0;
+    let statusInFlight = false;
+    let resumeStatus = false;
+    let explicitInFlight = action.kind !== "status" || action.explicit;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const current = () => active && serial.current === action.serial;
+    const clearTimer = () => {
+      clearTimeout(timer);
+      timer = undefined;
+    };
     const matches = (destination: GistAutoUpdateDestination | null) => {
       if (!destination || (destination.gistId === gistId && destination.filename === filename)) return true;
       setPreview(null);
@@ -61,33 +71,60 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
         message: apiErrorText(error, "Could not update gist auto-update controls. Check the status before trying again."),
       });
     };
-    const schedule = () => { timer = setTimeout(() => { void poll(); }, 2_000); };
+    const schedule = () => {
+      clearTimer();
+      if (!current() || !visible) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        void poll();
+      }, 2_000);
+    };
     const accept = (next: GistAutoUpdateStatus) => {
-      if (!matches(next.destination)) return;
+      if (!matches(next.destination)) return false;
       setStatus(next);
       if (next.enabled) {
         setPreview(null);
         setAcknowledged(false);
       }
-      if (next.status !== "failed" && next.status !== "conflict") schedule();
+      return next.status !== "failed" && next.status !== "conflict";
     };
-    async function poll() {
-      if (!current()) return;
+    const automaticCurrent = (requestGeneration: number) =>
+      current() && visible && requestGeneration === visibilityGeneration;
+    async function poll(resume = false) {
+      if (!current() || !visible) return;
+      if (statusInFlight) {
+        if (resume) resumeStatus = true;
+        return;
+      }
+      const requestGeneration = visibilityGeneration;
+      statusInFlight = true;
       try {
         const next = await api.documents.gistAutoUpdate(documentId);
-        if (!current()) return;
+        if (!automaticCurrent(requestGeneration)) return;
         setProblem(null);
-        accept(next);
+        if (accept(next)) schedule();
       } catch (error) {
-        if (current()) fail(error, "status");
+        if (automaticCurrent(requestGeneration)) fail(error, "status");
       } finally {
-        if (current()) setBusy(null);
+        const ownsSettlement = automaticCurrent(requestGeneration);
+        statusInFlight = false;
+        if (ownsSettlement) setBusy(null);
+        if (resumeStatus) {
+          const shouldResume = current() && visible;
+          resumeStatus = false;
+          if (shouldResume) void poll();
+        }
       }
     }
     async function run() {
-      if (action.kind === "status") return poll();
+      if (action.kind === "status" && !action.explicit) return poll();
       try {
-        if (action.kind === "preview") {
+        if (action.kind === "status") {
+          const next = await api.documents.gistAutoUpdate(documentId);
+          if (!current()) return;
+          setProblem(null);
+          if (accept(next)) schedule();
+        } else if (action.kind === "preview") {
           const result = await api.documents.gistAutoUpdatePreview(documentId);
           if (!current()) return;
           if (matches(result.destination)) {
@@ -103,7 +140,7 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
           if (!current()) return;
           setPreview(null);
           setAcknowledged(false);
-          accept(next);
+          if (accept(next)) schedule();
         }
       } catch (error) {
         if (!current()) return;
@@ -113,13 +150,30 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
           setAcknowledged(false);
         }
       } finally {
+        explicitInFlight = false;
         if (current()) setBusy(null);
       }
     }
+    const onVisibilityChange = () => {
+      const nextVisible = document.visibilityState === "visible";
+      if (nextVisible === visible) return;
+      visible = nextVisible;
+      clearTimer();
+      if (!visible) {
+        visibilityGeneration++;
+        resumeStatus = false;
+        return;
+      }
+      if (!explicitInFlight) void poll(true);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     void run();
     return () => {
       active = false;
-      clearTimeout(timer);
+      visibilityGeneration++;
+      resumeStatus = false;
+      clearTimer();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [documentId, gistId, filename, action]);
 
@@ -135,6 +189,8 @@ function AutoUpdateSettings({ documentId, gistId, filename, url }: { documentId:
     }
     setAction(kind === "enable"
       ? { kind, serial: nextSerial, destination: preview! }
+      : kind === "status"
+        ? { kind, serial: nextSerial, explicit: true }
       : { kind, serial: nextSerial });
   }
 
