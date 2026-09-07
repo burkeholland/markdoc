@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState, type ChangeEventHandler, type KeyboardEventHandler, type MouseEventHandler } from "react";
 import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +22,76 @@ function command(id: string, title: string, run = vi.fn()): Command {
 
 function childCommand(id: string, title: string, children: Command["children"]): Command {
   return { ...command(id, title), children };
+}
+
+function commandProvider(...items: Command[]): () => Command[] {
+  return () => items;
+}
+
+function reactProps<T extends object>(element: Element): T {
+  const key = Object.getOwnPropertyNames(element).find((name) => name.startsWith("__reactProps$"));
+  if (!key) throw new Error("React props were not published on the element");
+  return (element as unknown as Record<string, unknown>)[key] as T;
+}
+
+function exactEvent<T extends HTMLElement>(currentTarget: T, extra: Record<string, unknown> = {}) {
+  return { currentTarget, preventDefault: vi.fn(), ...extra };
+}
+
+interface RowHandlerProps {
+  onClick: MouseEventHandler<HTMLDivElement>;
+  onMouseEnter: MouseEventHandler<HTMLDivElement>;
+}
+
+interface ButtonHandlerProps {
+  onClick: MouseEventHandler<HTMLButtonElement>;
+}
+
+interface InputHandlerProps {
+  onChange: ChangeEventHandler<HTMLInputElement>;
+  onKeyDown: KeyboardEventHandler<HTMLInputElement>;
+}
+
+interface ContentDismissalHandlers {
+  onEscapeKeyDown: (event: KeyboardEvent) => void;
+  onPointerDownOutside: (event: CustomEvent<{ originalEvent: PointerEvent }>) => void;
+  onDismiss: () => void;
+}
+
+function reactAncestorHandler<T extends (...args: never[]) => unknown>(element: Element, name: string): T {
+  const key = Object.getOwnPropertyNames(element).find((value) => value.startsWith("__reactFiber$"));
+  if (!key) throw new Error("React fiber was not published on the element");
+  let fiber = (element as unknown as Record<string, unknown>)[key] as
+    | { memoizedProps?: Record<string, unknown>; return?: unknown }
+    | null;
+  while (fiber) {
+    const handler = fiber.memoizedProps?.[name];
+    if (typeof handler === "function") return handler as T;
+    fiber = fiber.return as typeof fiber;
+  }
+  throw new Error(`React ancestor handler ${name} was not found`);
+}
+
+function contentDismissalHandlers(content: Element): ContentDismissalHandlers {
+  return {
+    onEscapeKeyDown: reactAncestorHandler(content, "onEscapeKeyDown"),
+    onPointerDownOutside: reactAncestorHandler(content, "onPointerDownOutside"),
+    onDismiss: reactAncestorHandler(content, "onDismiss"),
+  };
+}
+
+function escapeDismissalEvent(
+  content: HTMLElement,
+  target: Node = content,
+  currentTarget: EventTarget = content.ownerDocument,
+) {
+  return { currentTarget, target, preventDefault: vi.fn() } as unknown as KeyboardEvent;
+}
+
+function pointerOutsideEvent(_content: HTMLElement, target: HTMLElement, currentTarget: EventTarget = target) {
+  return exactEvent(currentTarget as HTMLElement, {
+    detail: { originalEvent: { target } },
+  }) as unknown as CustomEvent<{ originalEvent: PointerEvent }>;
 }
 
 async function settle<T>(pending: ReturnType<typeof deferred<T>>, kind: "resolve", value: T): Promise<void>;
@@ -103,6 +173,22 @@ function PaletteBoundary({
   ) : (
     <ControlledPaletteMount key={instance} items={items} onPassiveCleanup={onPassiveCleanup} />
   );
+}
+
+function SameMountBoundary({
+  items,
+  revision,
+  onBoundary,
+}: {
+  items: Command[];
+  revision: number;
+  onBoundary?: () => void;
+}) {
+  const commands = useCallback(() => items, [items]);
+  useLayoutEffect(() => {
+    if (revision > 0) onBoundary?.();
+  }, [revision, onBoundary]);
+  return <CommandPalette open onOpenChange={() => {}} commands={commands} />;
 }
 
 let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
@@ -606,4 +692,495 @@ describe("CommandPalette command ownership", () => {
       }
     },
   );
+
+  it.each(["stale-first", "current-first"] as const)(
+    "binds an equal-looking same-open command/provider/prop replacement in $order order",
+    async (order) => {
+      const pending = deferred<Command[]>();
+      const oldProvider = vi.fn(() => [command("old-result", "Old result")]);
+      const currentProvider = vi.fn(() => pending.promise);
+      const oldOpenChange = vi.fn();
+      const currentOpenChange = vi.fn();
+      const oldCommands = () => [childCommand("shared", "Shared child…", oldProvider)];
+      const currentCommands = () => [childCommand("shared", "Shared child…", currentProvider)];
+      const rendered = render(
+        <CommandPalette open onOpenChange={oldOpenChange} commands={oldCommands} groupOrder={["Old"]} placeholder="Old placeholder" />,
+      );
+      const staleClick = reactProps<RowHandlerProps>(await screen.findByTestId("palette-item-shared")).onClick;
+
+      rendered.rerender(
+        <CommandPalette
+          open
+          onOpenChange={currentOpenChange}
+          commands={currentCommands}
+          groupOrder={["Current"]}
+          placeholder="Current placeholder"
+        />,
+      );
+      const input = screen.getByTestId("palette-input");
+      const currentRow = await screen.findByTestId("palette-item-shared");
+      const currentClick = reactProps<RowHandlerProps>(currentRow).onClick;
+      const staleEvent = exactEvent(currentRow);
+      const currentEvent = exactEvent(currentRow);
+
+      await act(async () => {
+        const stale = () => staleClick(staleEvent as unknown as React.MouseEvent<HTMLDivElement>);
+        const current = () => currentClick(currentEvent as unknown as React.MouseEvent<HTMLDivElement>);
+        if (order === "stale-first") {
+          stale();
+          current();
+        } else {
+          current();
+          stale();
+        }
+        await Promise.resolve();
+      });
+
+      expect(input).toHaveAttribute("placeholder", "Current placeholder");
+      expect(staleEvent.preventDefault).not.toHaveBeenCalled();
+      expect(oldProvider).not.toHaveBeenCalled();
+      expect(currentProvider).toHaveBeenCalledOnce();
+      expect(oldOpenChange).not.toHaveBeenCalled();
+      expect(currentOpenChange).not.toHaveBeenCalled();
+
+      await settle(pending, "resolve", [command("current-result", "Current result")]);
+      expect(screen.getByTestId("palette-item-current-result")).toBeInTheDocument();
+      expect(input).toHaveFocus();
+    },
+  );
+
+  it("withholds a same-mount command replacement until its exact state commits past the parent layout boundary", async () => {
+    const pending = deferred<Command[]>();
+    const oldProvider = vi.fn(() => [command("old-result", "Old result")]);
+    const currentProvider = vi.fn(() => pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let boundaryAttempts = 0;
+
+    try {
+      await act(async () => {
+        root.render(<SameMountBoundary items={[childCommand("shared", "Shared…", oldProvider)]} revision={0} />);
+      });
+      expect(screen.getByTestId("palette-item-shared")).toBeInTheDocument();
+
+      await act(async () => {
+        root.render(
+          <SameMountBoundary
+            items={[childCommand("shared", "Shared…", currentProvider)]}
+            revision={1}
+            onBoundary={() => {
+              const row = screen.getByTestId("palette-item-shared");
+              const click = reactProps<RowHandlerProps>(row).onClick;
+              click(exactEvent(row) as unknown as React.MouseEvent<HTMLDivElement>);
+              boundaryAttempts++;
+            }}
+          />,
+        );
+      });
+      expect(boundaryAttempts).toBe(1);
+      expect(oldProvider).not.toHaveBeenCalled();
+      expect(currentProvider).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByTestId("palette-item-shared"));
+      await act(async () => {});
+      expect(currentProvider).toHaveBeenCalledOnce();
+      await settle(pending, "resolve", [command("current-result", "Current result")]);
+      expect(screen.getByTestId("palette-item-current-result")).toBeInTheDocument();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("binds Escape and outside dismissal to each exact visit and restores its opener", async () => {
+    render(<Harness items={[command("leaf", "Leaf")]} initiallyOpen={false} />);
+    const opener = screen.getByRole("button", { name: "Open palette" });
+    const outside = document.createElement("button");
+    outside.textContent = "Outside";
+    document.body.append(outside);
+
+    try {
+      opener.focus();
+      fireEvent.click(opener);
+      await screen.findByTestId("palette-input");
+      fireEvent.keyDown(screen.getByTestId("palette-input"), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
+      await waitFor(() => expect(opener).toHaveFocus());
+
+      fireEvent.click(opener);
+      await screen.findByTestId("palette-input");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+      fireEvent.click(outside);
+      await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
+      await waitFor(() => expect(opener).toHaveFocus());
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("requires exact one-use dismissal provenance before accepting Radix dismissal", async () => {
+    const onOpenChange = vi.fn();
+    render(
+      <CommandPalette
+        open
+        onOpenChange={onOpenChange}
+        commands={commandProvider(command("alpha", "Alpha"))}
+      />,
+    );
+
+    const content = await screen.findByRole("dialog");
+    const handlers = contentDismissalHandlers(content);
+    const connectedForeign = document.createElement("div");
+    const detachedForeign = document.createElement("div");
+    document.body.append(connectedForeign);
+
+    try {
+      handlers.onDismiss();
+      handlers.onDismiss();
+      handlers.onEscapeKeyDown(escapeDismissalEvent(content, content, connectedForeign));
+      handlers.onDismiss();
+      handlers.onEscapeKeyDown(escapeDismissalEvent(content, detachedForeign));
+      handlers.onDismiss();
+      handlers.onPointerDownOutside(pointerOutsideEvent(content, connectedForeign, content));
+      handlers.onDismiss();
+      handlers.onPointerDownOutside(pointerOutsideEvent(content, content));
+      handlers.onDismiss();
+      handlers.onPointerDownOutside(pointerOutsideEvent(content, detachedForeign));
+      handlers.onDismiss();
+
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      handlers.onEscapeKeyDown(escapeDismissalEvent(content));
+      handlers.onDismiss();
+      handlers.onDismiss();
+
+      expect(onOpenChange).toHaveBeenCalledTimes(1);
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      connectedForeign.remove();
+    }
+  });
+
+  it.each(["escape", "pointer"] as const)(
+    "closes once and restores focus for an exact current %s dismissal",
+    async (source) => {
+      vi.useFakeTimers();
+      const opener = document.createElement("button");
+      document.body.append(opener);
+      opener.focus();
+      const onOpenChange = vi.fn();
+      const commands = commandProvider(command("alpha", "Alpha"));
+      const rendered = render(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChange}
+          commands={commands}
+        />,
+      );
+
+      try {
+        await act(async () => vi.runAllTimersAsync());
+        const content = screen.getByRole("dialog");
+        const handlers = contentDismissalHandlers(content);
+        const outside = document.createElement("div");
+        document.body.append(outside);
+
+        try {
+          if (source === "escape") {
+            handlers.onEscapeKeyDown(escapeDismissalEvent(content));
+          } else {
+            handlers.onPointerDownOutside(pointerOutsideEvent(content, outside));
+          }
+          handlers.onDismiss();
+          handlers.onDismiss();
+
+          expect(onOpenChange).toHaveBeenCalledTimes(1);
+          rendered.rerender(
+            <CommandPalette
+              open={false}
+              onOpenChange={onOpenChange}
+              commands={commands}
+            />,
+          );
+          await act(async () => vi.runAllTimersAsync());
+
+          expect(document.activeElement).toBe(opener);
+        } finally {
+          outside.remove();
+        }
+      } finally {
+        opener.remove();
+      }
+    },
+  );
+
+  it.each([
+    { order: "stale-first", source: "escape" },
+    { order: "current-first", source: "escape" },
+    { order: "stale-first", source: "pointer" },
+    { order: "current-first", source: "pointer" },
+  ] as const)(
+    "keeps replacement $source dismissal authority exact when $order handlers run first",
+    async ({ order, source }) => {
+      const onOpenChangeA = vi.fn();
+      const onOpenChangeB = vi.fn();
+      const rendered = render(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChangeA}
+          commands={commandProvider(command("alpha", "Alpha"))}
+        />,
+      );
+      const content = await screen.findByRole("dialog");
+      const stale = contentDismissalHandlers(content);
+
+      rendered.rerender(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChangeB}
+          commands={commandProvider(command("beta", "Beta"))}
+        />,
+      );
+      await screen.findByText("Beta");
+      const currentContent = screen.getByRole("dialog");
+      const current = contentDismissalHandlers(currentContent);
+      const outside = document.createElement("div");
+      document.body.append(outside);
+      const invokeSource = (handlers: ContentDismissalHandlers, handlerContent: HTMLElement) => {
+        if (source === "escape") {
+          handlers.onEscapeKeyDown(escapeDismissalEvent(handlerContent));
+        } else {
+          handlers.onPointerDownOutside(pointerOutsideEvent(handlerContent, outside));
+        }
+      };
+      const runStale = () => {
+        invokeSource(stale, content);
+        stale.onDismiss();
+      };
+      const runCurrent = () => {
+        invokeSource(current, currentContent);
+        current.onDismiss();
+      };
+
+      try {
+        if (order === "stale-first") {
+          runStale();
+          expect(onOpenChangeA).not.toHaveBeenCalled();
+          expect(onOpenChangeB).not.toHaveBeenCalled();
+          runCurrent();
+        } else {
+          runCurrent();
+          runStale();
+        }
+
+        expect(onOpenChangeA).not.toHaveBeenCalled();
+        expect(onOpenChangeB).toHaveBeenCalledTimes(1);
+        expect(screen.getByText("Beta")).toBeInTheDocument();
+      } finally {
+        outside.remove();
+      }
+    },
+  );
+
+  it("rejects an equal-looking remount's dismissal handlers while the replacement remains usable", async () => {
+    const onOpenChangeA = vi.fn();
+    const onOpenChangeB = vi.fn();
+    const commands = commandProvider(command("alpha", "Alpha"));
+    const rendered = render(
+      <CommandPalette key="a" open onOpenChange={onOpenChangeA} commands={commands} />,
+    );
+    const staleContent = await screen.findByRole("dialog");
+    const stale = contentDismissalHandlers(staleContent);
+
+    rendered.rerender(
+      <CommandPalette key="b" open onOpenChange={onOpenChangeB} commands={commands} />,
+    );
+    const currentContent = await screen.findByRole("dialog");
+    const current = contentDismissalHandlers(currentContent);
+
+    stale.onEscapeKeyDown(escapeDismissalEvent(staleContent));
+    stale.onDismiss();
+    expect(onOpenChangeA).not.toHaveBeenCalled();
+    expect(onOpenChangeB).not.toHaveBeenCalled();
+
+    current.onEscapeKeyDown(escapeDismissalEvent(currentContent));
+    current.onDismiss();
+    expect(onOpenChangeA).not.toHaveBeenCalled();
+    expect(onOpenChangeB).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects wrong, foreign, and detached row currentTargets without claiming the current row", async () => {
+    const pending = deferred<Command[]>();
+    const children = vi.fn(() => pending.promise);
+    render(<Harness items={[childCommand("first", "First…", children), command("second", "Second")]} />);
+    const first = await screen.findByTestId("palette-item-first");
+    const second = screen.getByTestId("palette-item-second");
+    const clickFirst = reactProps<RowHandlerProps>(first).onClick;
+    const foreign = document.createElement("div");
+    const detached = document.createElement("div");
+    document.body.append(foreign);
+
+    try {
+      await act(async () => {
+        clickFirst(exactEvent(second) as unknown as React.MouseEvent<HTMLDivElement>);
+        clickFirst(exactEvent(foreign) as unknown as React.MouseEvent<HTMLDivElement>);
+        clickFirst(exactEvent(detached) as unknown as React.MouseEvent<HTMLDivElement>);
+        await Promise.resolve();
+      });
+      expect(children).not.toHaveBeenCalled();
+      expect(screen.queryByRole("status")).toBeNull();
+
+      await act(async () => {
+        clickFirst(exactEvent(first) as unknown as React.MouseEvent<HTMLDivElement>);
+        await Promise.resolve();
+      });
+      expect(children).toHaveBeenCalledOnce();
+      expect(screen.getByRole("status")).toHaveTextContent("Loading…");
+      await settle(pending, "resolve", [command("result", "Result")]);
+      expect(screen.getByTestId("palette-item-result")).toBeInTheDocument();
+    } finally {
+      foreign.remove();
+    }
+  });
+
+  it("keeps Back and row publications disjoint and leaves the current Back usable", async () => {
+    const run = vi.fn();
+    render(<Harness items={[childCommand("parent", "Parent…", () => [command("leaf", "Leaf", run)])]} />);
+    fireEvent.click(await screen.findByTestId("palette-item-parent"));
+    const leaf = await screen.findByTestId("palette-item-leaf");
+    const back = screen.getByRole("button", { name: "Back" });
+    const leafClick = reactProps<RowHandlerProps>(leaf).onClick;
+    const backClick = reactProps<ButtonHandlerProps>(back).onClick;
+
+    act(() => {
+      leafClick(exactEvent(back) as unknown as React.MouseEvent<HTMLDivElement>);
+      backClick(exactEvent(leaf) as unknown as React.MouseEvent<HTMLButtonElement>);
+    });
+    expect(screen.getByTestId("palette-item-leaf")).toBeInTheDocument();
+    expect(run).not.toHaveBeenCalled();
+
+    act(() => backClick(exactEvent(back) as unknown as React.MouseEvent<HTMLButtonElement>));
+    expect(screen.getByTestId("palette-item-parent")).toBeInTheDocument();
+    act(() => backClick(exactEvent(back) as unknown as React.MouseEvent<HTMLButtonElement>));
+    expect(screen.getByTestId("palette-item-parent")).toBeInTheDocument();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("keeps Retry and row publications disjoint and leaves the current Retry usable once", async () => {
+    const retry = deferred<Command[]>();
+    const children = vi.fn().mockRejectedValueOnce(new Error("Try again")).mockReturnValueOnce(retry.promise);
+    render(<Harness items={[childCommand("parent", "Parent…", children), command("other", "Other")]} />);
+    fireEvent.click(await screen.findByTestId("palette-item-parent"));
+    const alert = await screen.findByRole("alert");
+    const retryButton = within(alert).getByRole("button", { name: "Retry" });
+    const other = screen.getByTestId("palette-item-other");
+    const retryClick = reactProps<ButtonHandlerProps>(retryButton).onClick;
+    const otherClick = reactProps<RowHandlerProps>(other).onClick;
+
+    act(() => {
+      retryClick(exactEvent(other) as unknown as React.MouseEvent<HTMLButtonElement>);
+      otherClick(exactEvent(retryButton) as unknown as React.MouseEvent<HTMLDivElement>);
+    });
+    expect(children).toHaveBeenCalledOnce();
+    expect(screen.getByRole("alert")).toHaveTextContent("Try again");
+
+    await act(async () => {
+      const retryEvent = exactEvent(retryButton);
+      retryClick(retryEvent as unknown as React.MouseEvent<HTMLButtonElement>);
+      retryClick(retryEvent as unknown as React.MouseEvent<HTMLButtonElement>);
+      await Promise.resolve();
+    });
+    expect(children).toHaveBeenCalledTimes(2);
+    await settle(retry, "resolve", [command("result", "Result")]);
+    expect(screen.getByTestId("palette-item-result")).toBeInTheDocument();
+  });
+
+  it("retires query/input/row DOM publications and accepts only their replacements", async () => {
+    vi.useFakeTimers();
+    const run = vi.fn();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    try {
+      render(<Harness items={[command("leaf", "Leaf", run)]} />);
+      await act(async () => {});
+      const input = screen.getByTestId("palette-input");
+      const oldRow = screen.getByTestId("palette-item-leaf");
+      const oldRowClick = reactProps<RowHandlerProps>(oldRow).onClick;
+      const oldInputChange = reactProps<InputHandlerProps>(input).onChange;
+
+      fireEvent.change(input, { target: { value: "missing" } });
+      expect(screen.getByTestId("palette-empty")).toBeInTheDocument();
+      act(() => oldInputChange(exactEvent(input) as unknown as React.ChangeEvent<HTMLInputElement>));
+      expect(screen.getByTestId("palette-empty")).toBeInTheDocument();
+
+      fireEvent.change(input, { target: { value: "" } });
+      const replacement = screen.getByTestId("palette-item-leaf");
+      act(() => {
+        oldRowClick(exactEvent(oldRow) as unknown as React.MouseEvent<HTMLDivElement>);
+        oldRowClick(exactEvent(replacement) as unknown as React.MouseEvent<HTMLDivElement>);
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(setItem).not.toHaveBeenCalled();
+
+      fireEvent.click(replacement);
+      await act(async () => vi.runAllTimersAsync());
+      expect(setItem).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledOnce();
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it("consumes each exact keyboard event once and freezes every navigation destination", async () => {
+    vi.useFakeTimers();
+    const firstRun = vi.fn();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    try {
+      render(
+        <Harness
+          initiallyOpen={false}
+          items={[command("first", "First", firstRun), command("second", "Second"), command("third", "Third")]}
+        />,
+      );
+      const opener = screen.getByRole("button", { name: "Open palette" });
+      opener.focus();
+      fireEvent.click(opener);
+      await act(async () => {});
+      const input = screen.getByTestId("palette-input");
+      const endHandler = reactProps<InputHandlerProps>(input).onKeyDown;
+      const endEvent = exactEvent(input, { key: "End" });
+
+      act(() => {
+        endHandler(endEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
+        endHandler(endEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
+      });
+      expect(endEvent.preventDefault).toHaveBeenCalledOnce();
+      expect(input).toHaveAttribute("aria-activedescendant", "palette-item-third");
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+
+      fireEvent.keyDown(input, { key: "Home" });
+      expect(input).toHaveAttribute("aria-activedescendant", "palette-item-first");
+      fireEvent.keyDown(input, { key: "ArrowUp" });
+      expect(input).toHaveAttribute("aria-activedescendant", "palette-item-third");
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      expect(input).toHaveAttribute("aria-activedescendant", "palette-item-first");
+
+      const enterHandler = reactProps<InputHandlerProps>(input).onKeyDown;
+      const enterEvent = exactEvent(input, { key: "Enter" });
+      act(() => {
+        enterHandler(enterEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
+        enterHandler(enterEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
+      });
+      await act(async () => vi.runAllTimersAsync());
+      expect(enterEvent.preventDefault).toHaveBeenCalledOnce();
+      expect(setItem).toHaveBeenCalledOnce();
+      expect(firstRun).toHaveBeenCalledOnce();
+      expect(opener).toHaveFocus();
+    } finally {
+      setItem.mockRestore();
+    }
+  });
 });
