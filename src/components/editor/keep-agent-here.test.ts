@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createElement } from "react";
+import { createElement, StrictMode, useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
@@ -28,7 +28,7 @@ vi.mock("@/lib/clipboard", async (importOriginal) => ({
 import { AgentConnectCard } from "@/components/settings/agent-connect-card";
 import { ApiError, api } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
-import { KeepAgentHerePanel, keepAgentPrompt } from "./keep-agent-here";
+import { KeepAgentHereDialog, KeepAgentHerePanel, keepAgentPrompt } from "./keep-agent-here";
 
 type TokenListResponse = Awaited<ReturnType<typeof api.tokens.list>>;
 
@@ -66,6 +66,31 @@ async function reject<T>(pending: ReturnType<typeof deferred<T>>, error: unknown
 
 function panel(active = true) {
   return createElement(KeepAgentHerePanel, { doc: DOC, active });
+}
+
+function dialog(open: boolean) {
+  return createElement(KeepAgentHereDialog, { doc: DOC, open, onOpenChange: () => {} });
+}
+
+/**
+ * Settles a request from the parent's layout effect after the panel visit is replaced or removed.
+ * The queued promise continuation runs before the retired visit's passive cleanup.
+ */
+function BoundaryHarness({
+  active = true,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  active?: boolean;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? panel(active) : null;
 }
 
 beforeEach(() => {
@@ -113,6 +138,19 @@ describe("agent documentation links", () => {
 });
 
 describe("KeepAgentHerePanel token setup check", () => {
+  it("keeps one physical initial check through Strict Mode's layout-effect replay", async () => {
+    const initial = deferred<TokenListResponse>();
+    listTokens.mockReset().mockReturnValueOnce(initial.promise);
+
+    render(createElement(StrictMode, null, panel()));
+
+    expect(listTokens).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveTextContent("Checking token setup…");
+    await resolve(initial, tokenResponse(1));
+    expect(listTokens).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("shows one neutral checking status and withholds first-time setup until zero tokens are confirmed", async () => {
     const initial = deferred<TokenListResponse>();
     listTokens.mockReset().mockReturnValueOnce(initial.promise);
@@ -244,57 +282,106 @@ describe("KeepAgentHerePanel token setup check", () => {
     else expect(screen.queryByTestId("agent-connect-card")).toBeNull();
   });
 
-  it("isolates stale success, error, and finalizers from a reopened generation and its Retry guard", async () => {
-    const staleSuccess = deferred<TokenListResponse>();
-    const staleError = deferred<TokenListResponse>();
-    const retry = deferred<TokenListResponse>();
-    listTokens
-      .mockReset()
-      .mockReturnValueOnce(staleSuccess.promise)
-      .mockReturnValueOnce(staleError.promise)
-      .mockRejectedValueOnce(new ApiError(503, "Current check failed."))
-      .mockReturnValueOnce(retry.promise);
-    const rendered = render(panel());
+  it.each(["success", "failure"] as const)(
+    "serializes a rapid dialog close/reopen across an old physical %s and follows it with one current check",
+    async (settlement) => {
+      const old = deferred<TokenListResponse>();
+      const current = deferred<TokenListResponse>();
+      let inFlight = 0;
+      let maximumInFlight = 0;
+      const tracked = (request: ReturnType<typeof deferred<TokenListResponse>>) => {
+        inFlight += 1;
+        maximumInFlight = Math.max(maximumInFlight, inFlight);
+        return request.promise.finally(() => {
+          inFlight -= 1;
+        });
+      };
+      listTokens
+        .mockReset()
+        .mockImplementationOnce(() => tracked(old))
+        .mockImplementationOnce(() => tracked(current));
+      const rendered = render(dialog(true));
 
-    rendered.rerender(panel(false));
-    rendered.rerender(panel());
-    rendered.rerender(panel(false));
-    rendered.rerender(panel());
-    expect(await screen.findByRole("alert")).toHaveTextContent("Current check failed.");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(listTokens).toHaveBeenCalledTimes(4);
-    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+      rendered.rerender(dialog(false));
+      expect(screen.queryByTestId("keep-agent-dialog")).toBeNull();
+      rendered.rerender(dialog(true));
+      rendered.rerender(dialog(true));
 
-    await act(async () => {
-      staleSuccess.resolve(tokenResponse(0));
-      staleError.reject(new ApiError(503, "Stale check failed."));
-      await Promise.allSettled([staleSuccess.promise, staleError.promise]);
-    });
+      expect(listTokens).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("status")).toHaveTextContent("Checking token setup…");
+      if (settlement === "success") await resolve(old, tokenResponse(0));
+      else await reject(old, new ApiError(503, "Old visit failed."));
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Current check failed.");
-    expect(screen.queryByText("Stale check failed.")).toBeNull();
-    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
-    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retrying…" }));
-    expect(listTokens).toHaveBeenCalledTimes(4);
+      expect(listTokens).toHaveBeenCalledTimes(2);
+      expect(maximumInFlight).toBe(1);
+      expect(screen.getByRole("status")).toHaveTextContent("Checking token setup…");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("agent-connect-card")).toBeNull();
 
-    await resolve(retry, tokenResponse(1));
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
-  });
+      await resolve(current, tokenResponse(0));
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.getByTestId("agent-connect-card")).toBeInTheDocument();
+      expect(maximumInFlight).toBe(1);
+    },
+  );
 
-  it("invalidates pending work on unmount without surfacing a late rejection", async () => {
+  it.each(["success", "failure"] as const)(
+    "retires a queued old %s at the inactive layout boundary before starting one current check",
+    async (settlement) => {
+      const old = deferred<TokenListResponse>();
+      const current = deferred<TokenListResponse>();
+      listTokens.mockReset().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+      const rendered = render(createElement(BoundaryHarness));
+
+      rendered.rerender(
+        createElement(BoundaryHarness, {
+          active: false,
+          boundary: 1,
+          onBoundary: () => {
+            if (settlement === "success") old.resolve(tokenResponse(0));
+            else old.reject(new ApiError(503, "Retired visit failed."));
+          },
+        }),
+      );
+      await act(async () => {
+        await Promise.allSettled([old.promise]);
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+      rendered.rerender(createElement(BoundaryHarness, { active: true, boundary: 2 }));
+      expect(listTokens).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("status")).toHaveTextContent("Checking token setup…");
+
+      await resolve(current, tokenResponse(1));
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+    },
+  );
+
+  it("retires before a failure settles at the DOM-removal layout boundary without post-unmount work or an unhandled rejection", async () => {
     const pending = deferred<TokenListResponse>();
     const unhandled = vi.fn((event: PromiseRejectionEvent) => event.preventDefault());
     listTokens.mockReset().mockReturnValueOnce(pending.promise);
     window.addEventListener("unhandledrejection", unhandled);
 
     try {
-      const rendered = render(panel());
+      const rendered = render(createElement(BoundaryHarness));
       expect(listTokens).toHaveBeenCalledTimes(1);
-      rendered.unmount();
-
-      await reject(pending, new ApiError(503, "Unmounted check failed."));
+      rendered.rerender(
+        createElement(BoundaryHarness, {
+          present: false,
+          boundary: 1,
+          onBoundary: () => pending.reject(new ApiError(503, "Removed visit failed.")),
+        }),
+      );
+      await act(async () => {
+        await Promise.allSettled([pending.promise]);
+        await Promise.resolve();
+      });
 
       expect(unhandled).not.toHaveBeenCalled();
       expect(listTokens).toHaveBeenCalledTimes(1);
