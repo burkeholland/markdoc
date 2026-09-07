@@ -1138,6 +1138,28 @@ export interface ComposerRequest {
 
 interface ComposerVisit {
   readonly marker: "composer-visit";
+  retired: boolean;
+  focusOperation: ComposerFocusOperation | null;
+  blurOperation: ComposerBlurOperation | null;
+}
+
+interface ComposerFocusOperation {
+  readonly visit: ComposerVisit;
+  readonly element: HTMLTextAreaElement;
+  readonly operation: number;
+  readonly selection: readonly [start: number, end: number] | null;
+  readonly syncMention: boolean;
+  readonly caretAction: number;
+  frame: number | null;
+}
+
+interface ComposerBlurOperation {
+  readonly visit: ComposerVisit;
+  readonly element: HTMLTextAreaElement;
+  readonly operation: number;
+  readonly closeMention: true;
+  readonly caretAction: number;
+  timer: number | null;
 }
 
 interface ComposerSubmissionOwner {
@@ -1146,6 +1168,25 @@ interface ComposerSubmissionOwner {
   readonly body: string;
   readonly request: ComposerRequest | null;
   readonly agentIdentities: readonly string[];
+}
+
+function cancelComposerFocusOperation(owner: ComposerFocusOperation) {
+  const frame = owner.frame;
+  owner.frame = null;
+  if (owner.visit.focusOperation === owner) owner.visit.focusOperation = null;
+  if (frame !== null) cancelAnimationFrame(frame);
+}
+
+function cancelComposerBlurOperation(owner: ComposerBlurOperation) {
+  const timer = owner.timer;
+  owner.timer = null;
+  if (owner.visit.blurOperation === owner) owner.visit.blurOperation = null;
+  if (timer !== null) window.clearTimeout(timer);
+}
+
+function cancelComposerDeferredWork(visit: ComposerVisit) {
+  if (visit.focusOperation) cancelComposerFocusOperation(visit.focusOperation);
+  if (visit.blurOperation) cancelComposerBlurOperation(visit.blurOperation);
 }
 
 function Composer<Result>({
@@ -1186,11 +1227,21 @@ function Composer<Result>({
   const activeVisit = useRef<ComposerVisit | null>(null);
   const activeSubmission = useRef<ComposerSubmissionOwner | null>(null);
   const operationSequence = useRef(0);
+  const deferredOperationSequence = useRef(0);
+  const caretActionSequence = useRef(0);
+  const lastCaretEvent = useRef<Event | null>(null);
   useLayoutEffect(() => {
-    const visit: ComposerVisit = { marker: "composer-visit" };
+    const visit: ComposerVisit = {
+      marker: "composer-visit",
+      retired: false,
+      focusOperation: null,
+      blurOperation: null,
+    };
     activeVisit.current = visit;
     activeSubmission.current = null;
     return () => {
+      visit.retired = true;
+      cancelComposerDeferredWork(visit);
       if (activeVisit.current === visit) {
         activeVisit.current = null;
         activeSubmission.current = null;
@@ -1208,24 +1259,100 @@ function Composer<Result>({
     }
     setTrigger(mentionTriggerAt(el.value, el.selectionStart));
   }, []);
-  useEffect(() => {
-    if (!autoFocus) return;
-    // A frame later: a closing menu (Edit…) hands focus back to its trigger first.
-    const raf = requestAnimationFrame(() => {
-      const el = ref.current;
-      if (!el) return;
-      el.focus();
-      // A seeded new comment ("@" from the empty state or the hint bar, #1025) starts with the caret after the seed, so
-      // the `@` picker is open before the user types; an edit keeps the browser's caret placement.
-      if (initial && !editing) {
-        el.setSelectionRange(initial.length, initial.length);
-        syncTrigger(el);
+
+  const scheduleFocusSelection = useCallback(
+    (element: HTMLTextAreaElement, selection: readonly [start: number, end: number] | null, syncMention = false) => {
+      const visit = activeVisit.current;
+      if (!visit || visit.retired || ref.current !== element || activeSubmission.current) return null;
+      cancelComposerDeferredWork(visit);
+      const owner: ComposerFocusOperation = {
+        visit,
+        element,
+        operation: ++deferredOperationSequence.current,
+        selection,
+        syncMention,
+        caretAction: caretActionSequence.current,
+        frame: null,
+      };
+      visit.focusOperation = owner;
+      owner.frame = requestAnimationFrame(() => {
+        if (owner.frame === null) return;
+        owner.frame = null;
+        if (owner.visit.focusOperation === owner) owner.visit.focusOperation = null;
+        if (
+          activeVisit.current !== owner.visit ||
+          owner.visit.retired ||
+          ref.current !== owner.element ||
+          !owner.element.isConnected ||
+          activeSubmission.current ||
+          caretActionSequence.current !== owner.caretAction
+        ) {
+          return;
+        }
+        owner.element.focus();
+        if (owner.selection) owner.element.setSelectionRange(owner.selection[0], owner.selection[1]);
+        if (owner.syncMention) syncTrigger(owner.element);
+      });
+      return owner;
+    },
+    [syncTrigger],
+  );
+
+  const recordCaretAction = (element: HTMLTextAreaElement, event: Event) => {
+    const visit = activeVisit.current;
+    if (!visit || visit.retired || ref.current !== element) return;
+    if (lastCaretEvent.current === event) return;
+    lastCaretEvent.current = event;
+    caretActionSequence.current += 1;
+    cancelComposerDeferredWork(visit);
+  };
+
+  const scheduleBlurDismissal = (element: HTMLTextAreaElement) => {
+    const visit = activeVisit.current;
+    if (!visit || visit.retired || ref.current !== element || activeSubmission.current) return;
+    if (visit.blurOperation) cancelComposerBlurOperation(visit.blurOperation);
+    const owner: ComposerBlurOperation = {
+      visit,
+      element,
+      operation: ++deferredOperationSequence.current,
+      closeMention: true,
+      caretAction: caretActionSequence.current,
+      timer: null,
+    };
+    visit.blurOperation = owner;
+    owner.timer = window.setTimeout(() => {
+      if (owner.timer === null) return;
+      owner.timer = null;
+      if (owner.visit.blurOperation === owner) owner.visit.blurOperation = null;
+      if (
+        activeVisit.current !== owner.visit ||
+        owner.visit.retired ||
+        ref.current !== owner.element ||
+        !owner.element.isConnected ||
+        activeSubmission.current ||
+        caretActionSequence.current !== owner.caretAction
+      ) {
+        return;
       }
-    });
-    return () => cancelAnimationFrame(raf);
+      setTrigger(null);
+    }, 120);
+  };
+
+  useLayoutEffect(() => {
+    if (!autoFocus) return;
+    const element = ref.current;
+    if (!element) return;
+    // A frame later: a closing menu (Edit…) hands focus back to its trigger first.
+    // A seeded new comment ("@" from the empty state or the hint bar, #1025) starts with the caret after the seed, so
+    // the `@` picker is open before the user types; an edit keeps the browser's caret placement.
+    const selection = initial && !editing ? ([initial.length, initial.length] as const) : null;
+    const owner = scheduleFocusSelection(element, selection, selection !== null);
+    return () => {
+      if (owner) cancelComposerFocusOperation(owner);
+    };
     // `initial` is read once, on mount, like useState(initial) above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoFocus]);
+  }, [autoFocus, scheduleFocusSelection]);
   // The user's own tokens join the picker the first time an `@` is typed in any composer (not on panel mount);
   // a pasted `@login/agent` counts too, so the row can appear for an agent the document has not seen yet.
   const namesAgent = request !== undefined && parseAgentMentions(value).length > 0;
@@ -1270,15 +1397,12 @@ function Composer<Result>({
   const insertSuggestion = () => {
     if (activeSubmission.current) return;
     const el = ref.current;
-    if (quote === undefined || parseSuggestionBlock(value)) return;
+    if (!el || quote === undefined || parseSuggestionBlock(value)) return;
     const next = suggestionBlockFor(quote, value);
     setValue(next);
     setTrigger(null);
     const start = next.lastIndexOf(quote);
-    requestAnimationFrame(() => {
-      el?.focus();
-      el?.setSelectionRange(start, start + quote.length);
-    });
+    scheduleFocusSelection(el, [start, start + quote.length]);
   };
 
   /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
@@ -1293,10 +1417,7 @@ function Composer<Result>({
         : wrapSelection(el.value, selectionStart, selectionEnd, kind === "bold" ? "**" : kind === "italic" ? "*" : "`");
     setValue(r.value);
     setTrigger(null);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(r.selectionStart, r.selectionEnd);
-    });
+    scheduleFocusSelection(el, [r.selectionStart, r.selectionEnd]);
   };
 
   const matches = useMemo(() => (trigger ? filterMentionCandidates(candidates, trigger.query, MAX_SUGGESTIONS) : []), [trigger, candidates]);
@@ -1347,10 +1468,7 @@ function Composer<Result>({
     }
     setValue(next);
     setTrigger(null);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(pos, pos);
-    });
+    scheduleFocusSelection(el, [pos, pos]);
   };
 
   /** Arrow keys move through the modes; a disabled mode takes focus (so its tooltip can say why) without being chosen. */
@@ -1382,10 +1500,7 @@ function Composer<Result>({
     setValue(next);
     setTrigger(null);
     const pos = trigger.start + insert.length;
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(pos, pos);
-    });
+    scheduleFocusSelection(el, [pos, pos]);
   };
 
   const submit = async () => {
@@ -1400,6 +1515,7 @@ function Composer<Result>({
       request: submittedRequest,
       agentIdentities: submittedRequest?.agents.map((agent) => agent.login) ?? [],
     };
+    cancelComposerDeferredWork(visit);
     activeSubmission.current = owner;
     setBusy(true);
     try {
@@ -1429,21 +1545,24 @@ function Composer<Result>({
             value={value}
             disabled={busy}
             aria-busy={busy || undefined}
+            onPointerDown={(e) => recordCaretAction(e.currentTarget, e.nativeEvent)}
+            onFocus={(e) => recordCaretAction(e.currentTarget, e.nativeEvent)}
             onChange={(e) => {
               if (activeSubmission.current) return;
+              recordCaretAction(e.currentTarget, e.nativeEvent);
               setValue(e.target.value);
               syncTrigger(e.target);
             }}
             onSelect={(e) => {
-              if (!activeSubmission.current) syncTrigger(e.currentTarget);
+              if (!activeSubmission.current) {
+                recordCaretAction(e.currentTarget, e.nativeEvent);
+                syncTrigger(e.currentTarget);
+              }
             }}
-            onBlur={() => {
-              const visit = activeVisit.current;
-              const operation = operationSequence.current;
-              if (!visit || activeSubmission.current) return;
-              setTimeout(() => {
-                if (activeVisit.current === visit && operationSequence.current === operation && !activeSubmission.current) setTrigger(null);
-              }, 120);
+            onBlur={(e) => {
+              if (activeSubmission.current) return;
+              recordCaretAction(e.currentTarget, e.nativeEvent);
+              scheduleBlurDismissal(e.currentTarget);
             }}
             onKeyDown={(e) => {
               if (activeSubmission.current) {
@@ -1451,6 +1570,7 @@ function Composer<Result>({
                 e.stopPropagation();
                 return;
               }
+              recordCaretAction(e.currentTarget, e.nativeEvent);
               const mod = e.metaKey || e.ctrlKey;
               if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "s" && quote !== undefined) {
                 e.preventDefault();

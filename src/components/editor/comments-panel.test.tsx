@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode, useEffect, useLayoutEffect } from "react";
+import { createRoot } from "react-dom/client";
 import * as Y from "yjs";
 
 // A provider that only supplies the awareness instance; tests drive presence by applying a remote client's
@@ -111,6 +113,115 @@ function reviewSession(docId: string) {
   return { session, user };
 }
 
+interface CapturedFrame {
+  id: number;
+  callback: FrameRequestCallback;
+  cancelled: boolean;
+}
+
+function controlledComposerFrames(reuseIds = false) {
+  let nextId = 1;
+  const captured: CapturedFrame[] = [];
+  const pending = new Set<CapturedFrame>();
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const owner = { id: reuseIds ? 7 : nextId++, callback, cancelled: false };
+    captured.push(owner);
+    pending.add(owner);
+    return owner.id;
+  });
+  const cancel = vi.fn((id: number) => {
+    const owner = [...pending].find((candidate) => candidate.id === id);
+    if (!owner) return;
+    owner.cancelled = true;
+    pending.delete(owner);
+  });
+  vi.stubGlobal("requestAnimationFrame", request);
+  vi.stubGlobal("cancelAnimationFrame", cancel);
+  return {
+    captured,
+    pending,
+    request,
+    cancel,
+    invoke(owner: CapturedFrame) {
+      pending.delete(owner);
+      owner.callback(0);
+    },
+  };
+}
+
+interface CapturedBlurTimer {
+  id: NodeJS.Timeout;
+  callback: () => void;
+  cancelled: boolean;
+  dueAt: number;
+}
+
+function controlledComposerBlurTimers() {
+  let now = 0;
+  const captured: CapturedBlurTimer[] = [];
+  const pending = new Set<CapturedBlurTimer>();
+  const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+  const reusedId = {} as NodeJS.Timeout;
+  const set = vi.spyOn(window, "setTimeout").mockImplementation((handler: (_: void) => void, delay?: number) => {
+    if (delay !== 120) return nativeSetTimeout(handler, delay);
+    const owner: CapturedBlurTimer = { id: reusedId, callback: () => handler(), cancelled: false, dueAt: now + delay };
+    captured.push(owner);
+    pending.add(owner);
+    return owner.id;
+  });
+  const clear = vi.spyOn(window, "clearTimeout").mockImplementation((id: Parameters<typeof window.clearTimeout>[0]) => {
+    const owner = [...pending].find((candidate) => candidate.id === id);
+    if (!owner) {
+      nativeClearTimeout(id);
+      return;
+    }
+    owner.cancelled = true;
+    pending.delete(owner);
+  });
+  const invoke = (owner: CapturedBlurTimer) => {
+    pending.delete(owner);
+    owner.callback();
+  };
+  return {
+    captured,
+    pending,
+    set,
+    clear,
+    invoke,
+    advance(milliseconds: number) {
+      now += milliseconds;
+      for (const owner of [...pending].filter((candidate) => candidate.dueAt <= now)) invoke(owner);
+    },
+  };
+}
+
+function ComposerBoundary({
+  session,
+  visit,
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: {
+  session: CollabSession;
+  visit: string;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  useEffect(() => onPassiveCleanup, [onPassiveCleanup, visit]);
+  return present ? (
+    <TooltipProvider>
+      <CommentsPanel key={visit} session={session} onClose={() => {}} onReveal={() => {}} />
+    </TooltipProvider>
+  ) : null;
+}
+
 describe("CommentsPanel", () => {
   let session: CollabSession | null = null;
   let auxiliarySessions: CollabSession[] = [];
@@ -122,6 +233,7 @@ describe("CommentsPanel", () => {
     session = null;
     auxiliarySessions = [];
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("uses the canonical session undo action and restores pending reply controls", async () => {
@@ -1809,6 +1921,400 @@ describe("CommentsPanel", () => {
         expect(unhandled).toEqual([]);
       } finally {
         window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+  });
+
+  describe("composer focus and selection ownership", () => {
+    const TEXT = "Intro text. The quick brown fox jumps.";
+    const AGENT = {
+      name: "Copilot CLI",
+      login: "alice/Copilot-CLI",
+      ownerLogin: "alice",
+      ownerName: "Alice",
+      present: false,
+      collaboratorsMayAsk: false,
+    };
+
+    const mountDirectComposer = (frames: ReturnType<typeof controlledComposerFrames>, visit = "A") => {
+      const fixture = reviewSession(`composer-focus-${visit}`);
+      session = fixture.session;
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 12, to: 27 });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      act(() => root.render(<ComposerBoundary session={session!} visit={visit} />));
+      const box = host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+      if (!box || frames.captured.length === 0) throw new Error("Composer did not mount with its focus frame");
+      return { box, host, root };
+    };
+
+    const focusCallsFor = (spy: ReturnType<typeof vi.spyOn>, element: HTMLTextAreaElement) =>
+      spy.mock.instances.filter((instance: unknown) => instance === element);
+
+    const replaceAtBoundary = (
+      mounted: ReturnType<typeof mountDirectComposer>,
+      transition: "replacement" | "removal",
+      onBoundary: () => void,
+      onPassiveCleanup: () => void,
+    ) => {
+      act(() => {
+        mounted.root.render(
+          <ComposerBoundary
+            session={session!}
+            visit="B"
+            present={transition === "replacement"}
+            boundary={1}
+            onBoundary={onBoundary}
+            onPassiveCleanup={onPassiveCleanup}
+          />,
+        );
+      });
+      if (transition === "removal") {
+        act(() => mounted.root.render(<ComposerBoundary session={session!} visit="B" boundary={2} onPassiveCleanup={onPassiveCleanup} />));
+      }
+      const box = mounted.host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+      if (!box) throw new Error("Current composer did not mount");
+      return box;
+    };
+
+    afterEach(() => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as CollaboratorsResponse);
+    });
+
+    it.each([
+      ["replacement", "stale-before-current"],
+      ["replacement", "current-before-stale"],
+      ["removal", "stale-before-current"],
+      ["removal", "current-before-stale"],
+    ] as const)("physically retires the initial focus frame before parent layout on %s (%s)", (transition, order) => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+      const staleBox = mounted.box;
+      const staleFrame = frames.captured[0];
+      let passiveCleanups = 0;
+
+      try {
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleFrame.cancelled).toBe(true);
+            expect(frames.pending.has(staleFrame)).toBe(false);
+            expect(passiveCleanups).toBe(0);
+          },
+          () => {
+            passiveCleanups += 1;
+          },
+        );
+        const currentFrame = frames.captured.at(-1)!;
+        expect(currentFrame).not.toBe(staleFrame);
+        expect(currentFrame.id).toBe(staleFrame.id);
+        focus.mockClear();
+        selection.mockClear();
+
+        act(() => {
+          if (order === "stale-before-current") {
+            frames.invoke(staleFrame);
+            frames.invoke(currentFrame);
+          } else {
+            frames.invoke(currentFrame);
+            frames.invoke(staleFrame);
+          }
+        });
+
+        expect(focusCallsFor(focus, staleBox)).toHaveLength(0);
+        expect(focusCallsFor(focus, currentBox)).toHaveLength(1);
+        expect(focusCallsFor(selection, staleBox)).toHaveLength(0);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it("keeps replayed visits independent when React preserves the same textarea element", () => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = reviewSession("composer-focus-replay");
+      session = fixture.session;
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 12, to: 27 });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        act(() =>
+          root.render(
+            <StrictMode>
+              <ComposerBoundary session={session!} visit="strict" />
+            </StrictMode>,
+          ),
+        );
+        const box = host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]')!;
+        const staleFrame = frames.captured[0];
+        const currentFrame = frames.captured.at(-1)!;
+        expect(currentFrame).not.toBe(staleFrame);
+        expect(currentFrame.id).toBe(staleFrame.id);
+        expect(staleFrame.cancelled).toBe(true);
+        expect(frames.pending.has(currentFrame)).toBe(true);
+        focus.mockClear();
+        act(() => {
+          frames.invoke(staleFrame);
+          frames.invoke(currentFrame);
+        });
+        expect(focusCallsFor(focus, box)).toHaveLength(1);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("applies each current suggestion and formatting range exactly once", () => {
+      const frames = controlledComposerFrames();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        focus.mockClear();
+        selection.mockClear();
+        fireEvent.click(screen.getByTestId("comment-suggest-change"));
+        const suggestionFrame = frames.captured.at(-1)!;
+        act(() => frames.invoke(suggestionFrame));
+        expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
+
+        const cases = [
+          { key: "b", value: "**draft**", range: [2, 7] },
+          { key: "i", value: "*draft*", range: [1, 6] },
+          { key: "e", value: "`draft`", range: [1, 6] },
+          { key: "k", value: "[draft]()", range: [8, 8] },
+        ] as const;
+        for (const current of cases) {
+          fireEvent.change(mounted.box, { target: { value: "draft" } });
+          mounted.box.setSelectionRange(0, 5);
+          fireEvent.select(mounted.box);
+          focus.mockClear();
+          selection.mockClear();
+          fireEvent.keyDown(mounted.box, { key: current.key, ctrlKey: true });
+          const operation = frames.captured.at(-1)!;
+          expect([...frames.pending]).toEqual([operation]);
+          act(() => frames.invoke(operation));
+          expect(mounted.box).toHaveValue(current.value);
+          expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
+          expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
+          expect(selection).toHaveBeenLastCalledWith(...current.range);
+        }
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it.each([
+      ["suggestion", "replacement"],
+      ["suggestion", "removal"],
+      ["formatting", "replacement"],
+      ["formatting", "removal"],
+    ] as const)("retires a pending %s selection before parent layout on %s and keeps B usable", (operation, transition) => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        if (operation === "suggestion") {
+          fireEvent.click(screen.getByTestId("comment-suggest-change"));
+        } else {
+          fireEvent.change(mounted.box, { target: { value: "draft" } });
+          mounted.box.setSelectionRange(0, 5);
+          fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
+        }
+        const staleFrame = frames.captured.at(-1)!;
+        expect(frames.pending.has(staleFrame)).toBe(true);
+        let passiveCleanups = 0;
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleFrame.cancelled).toBe(true);
+            expect(frames.pending.has(staleFrame)).toBe(false);
+            expect(passiveCleanups).toBe(0);
+          },
+          () => {
+            passiveCleanups += 1;
+          },
+        );
+        const currentAutoFocus = frames.captured.at(-1)!;
+        focus.mockClear();
+        selection.mockClear();
+        act(() => {
+          frames.invoke(staleFrame);
+          frames.invoke(currentAutoFocus);
+        });
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(0);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(0);
+
+        fireEvent.change(currentBox, { target: { value: "current" } });
+        currentBox.setSelectionRange(0, 7);
+        focus.mockClear();
+        selection.mockClear();
+        fireEvent.keyDown(currentBox, { key: "i", ctrlKey: true });
+        const currentFormat = frames.captured.at(-1)!;
+        act(() => frames.invoke(currentFormat));
+        expect(focusCallsFor(focus, currentBox)).toHaveLength(1);
+        expect(focusCallsFor(selection, currentBox)).toHaveLength(1);
+        expect(selection).toHaveBeenLastCalledWith(1, 8);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it.each([
+      ["instruction", "replacement"],
+      ["instruction", "removal"],
+      ["mention", "replacement"],
+      ["mention", "removal"],
+    ] as const)("retires a pending %s caret before parent layout on %s without changing B", async (operation, transition) => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: [AGENT],
+      } as unknown as CollaboratorsResponse);
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+        if (operation === "instruction") {
+          fireEvent.change(mounted.box, { target: { value: `@${AGENT.login}` } });
+          await screen.findByTestId("composer-agent-row");
+          fireEvent.click(screen.getAllByTestId("composer-chip")[0]);
+        } else {
+          fireEvent.change(mounted.box, { target: { value: "@alice/C" } });
+          fireEvent.click((await screen.findAllByTestId("mention-option"))[0]);
+        }
+        const staleFrame = frames.captured.at(-1)!;
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleFrame.cancelled).toBe(true);
+            expect(frames.pending.has(staleFrame)).toBe(false);
+          },
+          () => {},
+        );
+        const currentAutoFocus = frames.captured.at(-1)!;
+        act(() => frames.invoke(currentAutoFocus));
+        fireEvent.change(currentBox, { target: { value: "current draft" } });
+        focus.mockClear();
+        selection.mockClear();
+        act(() => frames.invoke(staleFrame));
+        expect(currentBox).toHaveValue("current draft");
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(0);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(0);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it("supersedes an older frame and preserves a newer user caret action", () => {
+      const frames = controlledComposerFrames();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        fireEvent.change(mounted.box, { target: { value: "draft" } });
+        mounted.box.setSelectionRange(0, 5);
+        fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
+        const older = frames.captured.at(-1)!;
+        fireEvent.keyDown(mounted.box, { key: "i", ctrlKey: true });
+        const newer = frames.captured.at(-1)!;
+        expect(older.cancelled).toBe(true);
+        expect([...frames.pending]).toEqual([newer]);
+
+        mounted.box.setSelectionRange(2, 2);
+        fireEvent.select(mounted.box);
+        expect(newer.cancelled).toBe(true);
+        expect(frames.pending.size).toBe(0);
+        focus.mockClear();
+        selection.mockClear();
+        act(() => {
+          frames.invoke(older);
+          frames.invoke(newer);
+        });
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(0);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(0);
+        expect(mounted.box.selectionStart).toBe(2);
+        expect(mounted.box.selectionEnd).toBe(2);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it.each(["replacement", "removal"] as const)("clears A's blur timer before parent layout on %s and leaves B's reused timer authoritative", async (transition) => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: [AGENT],
+      } as unknown as CollaboratorsResponse);
+      const frames = controlledComposerFrames(true);
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        fireEvent.change(mounted.box, { target: { value: "@alice/C" } });
+        await screen.findByTestId("mention-suggestions");
+        const timers = controlledComposerBlurTimers();
+        fireEvent.blur(mounted.box);
+        const staleTimer = timers.captured[0];
+        expect(timers.set).toHaveBeenCalledWith(expect.any(Function), 120);
+
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleTimer.cancelled).toBe(true);
+            expect(timers.pending.has(staleTimer)).toBe(false);
+          },
+          () => {},
+        );
+        act(() => frames.invoke(frames.captured.at(-1)!));
+        fireEvent.change(currentBox, { target: { value: "@alice/C" } });
+        await screen.findByTestId("mention-suggestions");
+        fireEvent.blur(currentBox);
+        const currentTimer = timers.captured.at(-1)!;
+        expect(currentTimer).not.toBe(staleTimer);
+        expect(currentTimer.id).toBe(staleTimer.id);
+
+        act(() => timers.invoke(staleTimer));
+        expect(timers.pending.has(currentTimer)).toBe(true);
+        expect(currentBox).toHaveValue("@alice/C");
+        expect(screen.getByTestId("mention-suggestions")).toBeInTheDocument();
+        act(() => timers.advance(119));
+        expect(screen.getByTestId("mention-suggestions")).toBeInTheDocument();
+        act(() => timers.advance(1));
+        expect(screen.queryByTestId("mention-suggestions")).toBeNull();
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
       }
     });
   });
