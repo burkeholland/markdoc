@@ -242,12 +242,15 @@ function Boundary({
 }
 
 interface DirectMouseEvent {
+  currentTarget: HTMLButtonElement;
   preventDefault: () => void;
 }
 
 interface CapturedControl {
-  click: () => void;
+  element: HTMLButtonElement;
+  click: (event: DirectMouseEvent) => void;
   mouseDown: (event: DirectMouseEvent) => void;
+  buttonRef: (element: HTMLButtonElement | null) => void;
 }
 
 function reactHandler<T>(element: HTMLElement, name: string): T {
@@ -260,11 +263,25 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
 }
 
 function captureControl(testId: string): CapturedControl {
-  const element = screen.getByTestId(testId);
+  const element = screen.getByTestId(testId) as HTMLButtonElement;
   return {
+    element,
     click: reactHandler(element, "onClick"),
     mouseDown: reactHandler(element, "onMouseDown"),
+    buttonRef: reactHandler(element, "ref"),
   };
+}
+
+function controlEvent(control: CapturedControl, preventDefault: () => void = vi.fn(), currentTarget = control.element): DirectMouseEvent {
+  return { currentTarget, preventDefault };
+}
+
+function click(control: CapturedControl, currentTarget = control.element) {
+  control.click(controlEvent(control, vi.fn(), currentTarget));
+}
+
+function mouseDown(control: CapturedControl, preventDefault: () => void, currentTarget = control.element) {
+  control.mouseDown(controlEvent(control, preventDefault, currentTarget));
 }
 
 function captureRepresentativeControls() {
@@ -318,10 +335,33 @@ function expectRetiredControlsDoNoWork({
   const before = observedControlWork(browser, fixtures, host, focus);
   const preventions = Object.values(controls).map(() => vi.fn());
   Object.values(controls).forEach((control, index) => {
-    control.mouseDown({ preventDefault: preventions[index] });
-    control.click();
+    mouseDown(control, preventions[index]);
+    click(control);
   });
   expect(preventions.every((preventDefault) => preventDefault.mock.calls.length === 0)).toBe(true);
+  expect(observedControlWork(browser, fixtures, host, focus)).toEqual(before);
+}
+
+function expectWrongTargetDoesNoWork({
+  control,
+  currentTarget,
+  browser,
+  fixtures,
+  host,
+  focus,
+}: {
+  control: CapturedControl;
+  currentTarget: HTMLButtonElement;
+  browser: ReturnType<typeof controlledBrowser>;
+  fixtures: Fixture[];
+  host: HTMLElement;
+  focus: ReturnType<typeof vi.spyOn>;
+}) {
+  const before = observedControlWork(browser, fixtures, host, focus);
+  const preventDefault = vi.fn();
+  control.mouseDown(controlEvent(control, preventDefault, currentTarget));
+  control.click(controlEvent(control, vi.fn(), currentTarget));
+  expect(preventDefault).not.toHaveBeenCalled();
   expect(observedControlWork(browser, fixtures, host, focus)).toEqual(before);
 }
 
@@ -528,6 +568,7 @@ describe("TableMenu geometry ownership", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
 
     try {
       act(() => root.render(<Boundary current={current} />));
@@ -547,19 +588,57 @@ describe("TableMenu geometry ownership", () => {
         ["table-align-right", "right"],
       ];
       const frozenRow = captureControl("table-row-before");
+      expectWrongTargetDoesNoWork({
+        control: frozenRow,
+        currentTarget: captureControl("table-row-after").element,
+        browser,
+        fixtures: [current],
+        host,
+        focus,
+      });
       const replacementAction = vi.fn<(command: TableCommand) => void>();
       current.actions.table = replacementAction;
-      frozenRow.click();
+      click(frozenRow);
       current.actions.table = current.tableAction;
       expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
       expect(replacementAction).not.toHaveBeenCalled();
+      current.tableAction.mockClear();
+      act(() => root.render(<Boundary current={current} boundary={1} />));
 
-      for (const [testId] of [...commands, ...alignments]) {
+      const allControls = [...commands, ...alignments];
+      const foreign = document.createElement("button");
+      for (const [index, [testId]] of allControls.entries()) {
         const button = screen.getByTestId(testId);
+        const captured = captureControl(testId);
+        const other = captureControl(allControls[(index + 1) % allControls.length][0]);
+        expectWrongTargetDoesNoWork({
+          control: captured,
+          currentTarget: other.element,
+          browser,
+          fixtures: [current],
+          host,
+          focus,
+        });
+        expectWrongTargetDoesNoWork({
+          control: captured,
+          currentTarget: foreign,
+          browser,
+          fixtures: [current],
+          host,
+          focus,
+        });
         const pointer = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
         expect(button.dispatchEvent(pointer)).toBe(false);
         expect(pointer.defaultPrevented).toBe(true);
         fireEvent.click(button);
+        expectWrongTargetDoesNoWork({
+          control: captured,
+          currentTarget: other.element,
+          browser,
+          fixtures: [current],
+          host,
+          focus,
+        });
       }
 
       expect(current.tableAction.mock.calls).toEqual(commands.map(([, command]) => [command]));
@@ -571,17 +650,18 @@ describe("TableMenu geometry ownership", () => {
       for (const [testId] of [...commands, ...alignments]) {
         const button = screen.getByTestId(testId);
         fireEvent.click(button);
-        reactHandler<() => void>(button, "onClick")();
+        const control = captureControl(testId);
+        control.click(controlEvent(control));
       }
       expect(current.tableAction).toHaveBeenCalledTimes(7);
       expect(current.alignAction).toHaveBeenCalledTimes(3);
 
       const menu = screen.getByTestId("table-menu");
       const rowBefore = screen.getByTestId("table-row-before");
-      act(() => root.render(<Boundary current={current} boundary={1} />));
+      act(() => root.render(<Boundary current={current} boundary={2} />));
       expect(screen.getByTestId("table-menu")).toBe(menu);
       expect(screen.getByTestId("table-row-before")).toBe(rowBefore);
-      reactHandler<() => void>(rowBefore, "onClick")();
+      click(captureControl("table-row-before"));
       expect(current.tableAction).toHaveBeenCalledTimes(8);
       expect(current.tableAction).toHaveBeenLastCalledWith("rowBefore");
     } finally {
@@ -643,34 +723,50 @@ describe("TableMenu geometry ownership", () => {
         expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
 
         const replacementControls = captureRepresentativeControls();
-        const retiredPrevention = vi.fn();
-        const currentPrevention = vi.fn();
+        const pairs = [
+          [retired.table, replacementControls.table],
+          [retired.alignment, replacementControls.alignment],
+          [retired.deletion, replacementControls.deletion],
+        ] as const;
+        const retiredPreventions = pairs.map(() => vi.fn());
+        const currentPreventions = pairs.map(() => vi.fn());
+        for (const [retiredControl, currentControl] of pairs) {
+          retiredControl.buttonRef(null);
+          retiredControl.buttonRef(currentControl.element);
+        }
         const staleAttempt = () => {
-          retired.table.mouseDown({ preventDefault: retiredPrevention });
-          retired.table.click();
+          pairs.forEach(([retiredControl, currentControl], index) => {
+            mouseDown(retiredControl, retiredPreventions[index], currentControl.element);
+            click(retiredControl, currentControl.element);
+          });
         };
         const currentAttempt = () => {
-          replacementControls.table.mouseDown({ preventDefault: currentPrevention });
-          replacementControls.table.click();
+          pairs.forEach(([, currentControl], index) => {
+            mouseDown(currentControl, currentPreventions[index]);
+            click(currentControl);
+          });
         };
         for (const attempt of order === "stale-before-current"
           ? [staleAttempt, currentAttempt]
           : [currentAttempt, staleAttempt]) {
           attempt();
         }
-        expect(retiredPrevention).not.toHaveBeenCalled();
-        expect(currentPrevention).toHaveBeenCalledOnce();
-        expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
-
-        replacementControls.table.click();
-        fireEvent.click(reusedRow);
-        expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
-
-        replacementControls.deletion.click();
-        captureControl("table-align-left").click();
-        replacementControls.alignment.click();
+        expect(retiredPreventions.every((preventDefault) => preventDefault.mock.calls.length === 0)).toBe(true);
+        expect(currentPreventions.every((preventDefault) => preventDefault.mock.calls.length === 1)).toBe(true);
         expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"]]);
-        expect(current.alignAction.mock.calls).toEqual([["left"], [null]]);
+        expect(current.alignAction.mock.calls).toEqual([[null]]);
+
+        click(replacementControls.table);
+        fireEvent.click(reusedRow);
+        click(replacementControls.alignment);
+        click(replacementControls.deletion);
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"]]);
+        expect(current.alignAction.mock.calls).toEqual([[null]]);
+
+        click(captureControl("table-align-left"));
+        click(captureControl("table-delete-row"));
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"], ["deleteRow"]]);
+        expect(current.alignAction.mock.calls).toEqual([[null], ["left"]]);
 
         let replacementBoundaries = 0;
         act(() => {
@@ -697,9 +793,9 @@ describe("TableMenu geometry ownership", () => {
         expect(passiveCleanups).toBe(2);
         expect(screen.getByTestId("table-menu")).toBe(reusedMenu);
         expect(screen.getByTestId("table-row-before")).toBe(reusedRow);
-        captureControl("table-row-before").click();
-        captureControl("table-row-before").click();
-        expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"], ["rowBefore"]]);
+        click(captureControl("table-row-before"));
+        click(captureControl("table-row-before"));
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"], ["deleteRow"], ["rowBefore"]]);
       } finally {
         act(() => root.unmount());
       }
@@ -819,15 +915,15 @@ describe("TableMenu geometry ownership", () => {
       const beforeDestruction = captureRepresentativeControls();
       first.destroyedRead.mockReturnValue(true);
       const destroyedPrevention = vi.fn();
-      beforeDestruction.table.mouseDown({ preventDefault: destroyedPrevention });
-      beforeDestruction.table.click();
+      mouseDown(beforeDestruction.table, destroyedPrevention);
+      click(beforeDestruction.table);
       expect(destroyedPrevention).not.toHaveBeenCalled();
       expect(first.tableAction).not.toHaveBeenCalled();
       expect(first.alignAction).not.toHaveBeenCalled();
       first.destroyedRead.mockReturnValue(false);
       const prevention = vi.fn();
-      beforeDestruction.table.mouseDown({ preventDefault: prevention });
-      beforeDestruction.table.click();
+      mouseDown(beforeDestruction.table, prevention);
+      click(beforeDestruction.table);
       expect(prevention).toHaveBeenCalledOnce();
       expect(first.tableAction.mock.calls).toEqual([["rowBefore"]]);
 
@@ -868,8 +964,8 @@ describe("TableMenu geometry ownership", () => {
       expectRetiredControlsDoNoWork({ controls: currentGeometry, browser, fixtures: [first, second], host, focus });
       browser.flush();
       const replacement = captureRepresentativeControls();
-      replacement.alignment.click();
-      replacement.deletion.click();
+      click(replacement.alignment);
+      click(replacement.deletion);
       expect(second.alignAction.mock.calls).toEqual([[null]]);
       expect(second.tableAction.mock.calls).toEqual([["deleteTable"]]);
 
@@ -924,7 +1020,7 @@ describe("TableMenu geometry ownership", () => {
       act(() => root.render(<Boundary current={current} mountKey={0} onPassiveCleanup={onPassiveCleanup} />));
       browser.flush();
       const retired = captureRepresentativeControls();
-      retired.table.click();
+      click(retired.table);
       expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
       let boundaries = 0;
       act(() => {
@@ -949,8 +1045,24 @@ describe("TableMenu geometry ownership", () => {
 
       browser.flush();
       const remounted = captureRepresentativeControls();
-      remounted.table.click();
-      remounted.alignment.click();
+      expect(remounted.table.element).not.toBe(retired.table.element);
+      expect(retired.table.element.isConnected).toBe(false);
+      for (const [retiredControl, remountedControl] of [
+        [retired.table, remounted.table],
+        [retired.alignment, remounted.alignment],
+        [retired.deletion, remounted.deletion],
+      ] as const) {
+        expectWrongTargetDoesNoWork({
+          control: retiredControl,
+          currentTarget: remountedControl.element,
+          browser,
+          fixtures: [current],
+          host,
+          focus,
+        });
+      }
+      click(remounted.table);
+      click(remounted.alignment);
       expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
       expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["rowBefore"]]);
       expect(current.alignAction.mock.calls).toEqual([[null]]);

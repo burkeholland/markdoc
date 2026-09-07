@@ -54,6 +54,7 @@ type Alignment = Exclude<TableAlign, null>;
 
 interface TableMenuControlPublication {
   identity: symbol;
+  retired: boolean;
   mount: symbol;
   geometry: TableMenuGeometry;
   authority: TableMenuAuthority;
@@ -74,6 +75,8 @@ interface TableMenuControlPublication {
 interface TableMenuControl {
   identity: symbol;
   publication: TableMenuControlPublication;
+  element: HTMLButtonElement | null;
+  buttonRef: (element: HTMLButtonElement | null) => void;
   claimed: boolean;
   invoke: () => void;
 }
@@ -91,9 +94,17 @@ interface TableMenuControls {
   deleteTable: TableMenuControl;
 }
 
+interface TableMenuElementOwner {
+  publication: TableMenuControlPublication;
+  publicationIdentity: symbol;
+  control: TableMenuControl;
+  controlIdentity: symbol;
+}
+
 class TableMenuControlCoordinator {
   #current: TableMenuControlPublication | null = null;
   #container: HTMLElement | null = null;
+  #elementOwners = new WeakMap<HTMLButtonElement, TableMenuElementOwner>();
 
   publish(publication: TableMenuControlPublication | null) {
     this.#current = publication;
@@ -101,17 +112,59 @@ class TableMenuControlCoordinator {
   }
 
   retire(publication: TableMenuControlPublication | null) {
-    if (this.#current !== publication) return;
-    this.#current = null;
-    this.#container = null;
+    if (!publication) return;
+    publication.retired = true;
+    if (this.#current === publication) {
+      this.#current = null;
+      this.#container = null;
+    }
+    for (const control of publication.controls) this.bind(control, null);
   }
 
-  owns(publication: TableMenuControlPublication) {
+  ownsPublication(publication: TableMenuControlPublication) {
     return this.#current === publication && this.#container === publication.container;
+  }
+
+  bind(control: TableMenuControl, element: HTMLButtonElement | null) {
+    const previous = control.element;
+    if (previous) {
+      const previousOwner = this.#elementOwners.get(previous);
+      if (previousOwner?.control === control && previousOwner.controlIdentity === control.identity) {
+        this.#elementOwners.delete(previous);
+      }
+    }
+    control.element = null;
+    if (!element || control.publication.retired) return;
+    this.#elementOwners.set(element, {
+      publication: control.publication,
+      publicationIdentity: control.publication.identity,
+      control,
+      controlIdentity: control.identity,
+    });
+    control.element = element;
+  }
+
+  ownsControl(publication: TableMenuControlPublication, control: TableMenuControl, element: HTMLButtonElement) {
+    if (
+      !this.ownsPublication(publication)
+      || publication.retired
+      || control.claimed
+      || control.publication !== publication
+      || control.element !== element
+      || !element.isConnected
+    ) {
+      return false;
+    }
+    const owner = this.#elementOwners.get(element);
+    return owner?.publication === publication
+      && owner.publicationIdentity === publication.identity
+      && owner.control === control
+      && owner.controlIdentity === control.identity;
   }
 }
 
 function createControlPublication({
+  coordinator,
   mount,
   geometry,
   view,
@@ -122,6 +175,7 @@ function createControlPublication({
   canEdit,
   activeSurface,
 }: {
+  coordinator: TableMenuControlCoordinator;
   mount: symbol;
   geometry: TableMenuGeometry;
   view: EditorView;
@@ -134,6 +188,7 @@ function createControlPublication({
 }): { publication: TableMenuControlPublication; controls: TableMenuControls } {
   const publication: TableMenuControlPublication = {
     identity: Symbol("table-menu-control-publication"),
+    retired: false,
     mount,
     geometry,
     authority: geometry.authority,
@@ -151,9 +206,11 @@ function createControlPublication({
     controls: new Set(),
   };
   const control = (invoke: () => void): TableMenuControl => {
-    const owned = {
+    const owned: TableMenuControl = {
       identity: Symbol("table-menu-control"),
       publication,
+      element: null,
+      buttonRef: (element) => coordinator.bind(owned, element),
       claimed: false,
       invoke,
     };
@@ -187,6 +244,7 @@ function MenuButton({
   label,
   keys,
   active,
+  buttonRef,
   onMouseDown,
   onClick,
   children,
@@ -195,14 +253,16 @@ function MenuButton({
   label: string;
   keys?: string;
   active?: boolean;
+  buttonRef: (element: HTMLButtonElement | null) => void;
   onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  onClick: () => void;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
   testId?: string;
 }) {
   return (
     <Tip label={label} shortcut={keys ? shortcut(keys) : undefined} side="top">
       <button
+        ref={buttonRef}
         type="button"
         className={cn("flex h-8 w-8 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white", active && "bg-white/20 text-white")}
         onMouseDown={onMouseDown}
@@ -363,6 +423,7 @@ export function TableMenu({
 
   const controlSet = geometry && view && geometry.authority.view === view && geometry.authority.session === session
     ? createControlPublication({
+      coordinator: controlCoordinator,
       mount: controlMount,
       geometry,
       view,
@@ -399,11 +460,11 @@ export function TableMenu({
   const { publication, controls } = controlSet;
   const { left, top, width } = publication.geometry;
 
-  const ownsControl = (control: TableMenuControl) => {
+  const ownsControl = (control: TableMenuControl, event: ReactMouseEvent<HTMLButtonElement>) => {
     if (
       control.publication !== publication
       || !publication.controls.has(control)
-      || !controlCoordinator.owns(publication)
+      || !controlCoordinator.ownsControl(publication, control, event.currentTarget)
     ) {
       return false;
     }
@@ -431,10 +492,10 @@ export function TableMenu({
     return !publication.view.isDestroyed && !isTableMenuHidden(publication.view.state);
   };
   const onMouseDown = (control: TableMenuControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
-    if (ownsControl(control)) event.preventDefault();
+    if (ownsControl(control, event)) event.preventDefault();
   };
-  const onClick = (control: TableMenuControl) => () => {
-    if (!controlCoordinator.owns(publication) || control.claimed || !ownsControl(control)) return;
+  const onClick = (control: TableMenuControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (!ownsControl(control, event)) return;
     control.claimed = true;
     control.invoke();
   };
@@ -447,37 +508,37 @@ export function TableMenu({
       role="toolbar"
       aria-label="Table"
     >
-      <MenuButton label="Row above" keys="Mod-Alt-↑" onMouseDown={onMouseDown(controls.rowBefore)} onClick={onClick(controls.rowBefore)} testId="table-row-before">
+      <MenuButton label="Row above" keys="Mod-Alt-↑" buttonRef={controls.rowBefore.buttonRef} onMouseDown={onMouseDown(controls.rowBefore)} onClick={onClick(controls.rowBefore)} testId="table-row-before">
         <ArrowUpToLine size={16} />
       </MenuButton>
-      <MenuButton label="Row below" keys="Mod-Alt-↓" onMouseDown={onMouseDown(controls.rowAfter)} onClick={onClick(controls.rowAfter)} testId="table-row-after">
+      <MenuButton label="Row below" keys="Mod-Alt-↓" buttonRef={controls.rowAfter.buttonRef} onMouseDown={onMouseDown(controls.rowAfter)} onClick={onClick(controls.rowAfter)} testId="table-row-after">
         <ArrowDownToLine size={16} />
       </MenuButton>
-      <MenuButton label="Column left" keys="Mod-Alt-←" onMouseDown={onMouseDown(controls.colBefore)} onClick={onClick(controls.colBefore)} testId="table-col-before">
+      <MenuButton label="Column left" keys="Mod-Alt-←" buttonRef={controls.colBefore.buttonRef} onMouseDown={onMouseDown(controls.colBefore)} onClick={onClick(controls.colBefore)} testId="table-col-before">
         <ArrowLeftToLine size={16} />
       </MenuButton>
-      <MenuButton label="Column right" keys="Mod-Alt-→" onMouseDown={onMouseDown(controls.colAfter)} onClick={onClick(controls.colAfter)} testId="table-col-after">
+      <MenuButton label="Column right" keys="Mod-Alt-→" buttonRef={controls.colAfter.buttonRef} onMouseDown={onMouseDown(controls.colAfter)} onClick={onClick(controls.colAfter)} testId="table-col-after">
         <ArrowRightToLine size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Delete row" keys="Mod-Alt-⌫" onMouseDown={onMouseDown(controls.deleteRow)} onClick={onClick(controls.deleteRow)} testId="table-delete-row">
+      <MenuButton label="Delete row" keys="Mod-Alt-⌫" buttonRef={controls.deleteRow.buttonRef} onMouseDown={onMouseDown(controls.deleteRow)} onClick={onClick(controls.deleteRow)} testId="table-delete-row">
         <TableRowsSplit size={16} />
       </MenuButton>
-      <MenuButton label="Delete column" keys="Mod-Alt-Shift-⌫" onMouseDown={onMouseDown(controls.deleteColumn)} onClick={onClick(controls.deleteColumn)} testId="table-delete-col">
+      <MenuButton label="Delete column" keys="Mod-Alt-Shift-⌫" buttonRef={controls.deleteColumn.buttonRef} onMouseDown={onMouseDown(controls.deleteColumn)} onClick={onClick(controls.deleteColumn)} testId="table-delete-col">
         <TableColumnsSplit size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Align left" active={format.tableAlign === "left"} onMouseDown={onMouseDown(controls.alignLeft)} onClick={onClick(controls.alignLeft)} testId="table-align-left">
+      <MenuButton label="Align left" active={format.tableAlign === "left"} buttonRef={controls.alignLeft.buttonRef} onMouseDown={onMouseDown(controls.alignLeft)} onClick={onClick(controls.alignLeft)} testId="table-align-left">
         <TextAlignStart size={16} />
       </MenuButton>
-      <MenuButton label="Align center" active={format.tableAlign === "center"} onMouseDown={onMouseDown(controls.alignCenter)} onClick={onClick(controls.alignCenter)} testId="table-align-center">
+      <MenuButton label="Align center" active={format.tableAlign === "center"} buttonRef={controls.alignCenter.buttonRef} onMouseDown={onMouseDown(controls.alignCenter)} onClick={onClick(controls.alignCenter)} testId="table-align-center">
         <TextAlignCenter size={16} />
       </MenuButton>
-      <MenuButton label="Align right" active={format.tableAlign === "right"} onMouseDown={onMouseDown(controls.alignRight)} onClick={onClick(controls.alignRight)} testId="table-align-right">
+      <MenuButton label="Align right" active={format.tableAlign === "right"} buttonRef={controls.alignRight.buttonRef} onMouseDown={onMouseDown(controls.alignRight)} onClick={onClick(controls.alignRight)} testId="table-align-right">
         <TextAlignEnd size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Delete table" onMouseDown={onMouseDown(controls.deleteTable)} onClick={onClick(controls.deleteTable)} testId="table-delete">
+      <MenuButton label="Delete table" buttonRef={controls.deleteTable.buttonRef} onMouseDown={onMouseDown(controls.deleteTable)} onClick={onClick(controls.deleteTable)} testId="table-delete">
         <Trash2 size={16} />
       </MenuButton>
     </div>
