@@ -163,6 +163,138 @@ type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
 
+interface CollaboratorFollowVisitOptions {
+  session: CollabSession;
+  actions: EditorActions;
+  richView: Pick<PMView, "dom"> | null;
+  codeView: Pick<CMView, "scrollDOM" | "contentDOM"> | null;
+  richScroller: HTMLElement | null;
+  showCode: boolean;
+  showRich: boolean;
+  syncScroll: boolean;
+  userId: string | null;
+  cursor: number | null;
+}
+
+interface CollaboratorFollowTimer {
+  readonly handle: ReturnType<typeof setTimeout>;
+  fired: boolean;
+}
+
+interface CollaboratorFollowVisit extends CollaboratorFollowVisitOptions {
+  active: boolean;
+  retired: boolean;
+  timer: CollaboratorFollowTimer | null;
+  readonly scrollers: readonly HTMLElement[];
+  readonly editors: readonly HTMLElement[];
+  readonly onWheel: (event: WheelEvent) => void;
+  readonly onTouchMove: (event: TouchEvent) => void;
+  readonly onBeforeInput: (event: InputEvent) => void;
+  readonly onKeyDown: (event: KeyboardEvent) => void;
+}
+
+/**
+ * Owns collaborator-follow scrolling and stop gestures as one layout-timed visit. Exported for the
+ * deterministic lifecycle harness; the editor shell is its only production caller.
+ */
+export function useCollaboratorFollowVisit(options: CollaboratorFollowVisitOptions) {
+  const currentRef = useRef<CollaboratorFollowVisit | null>(null);
+  const { session, actions, richView, codeView, richScroller, showCode, showRich, syncScroll, userId, cursor } = options;
+
+  useLayoutEffect(() => {
+    if (!userId) return;
+
+    const scrollers = Array.from(
+      new Set<HTMLElement>(
+        [richScroller, codeView?.scrollDOM].filter((element): element is HTMLElement => !!element),
+      ),
+    );
+    const editors = Array.from(
+      new Set<HTMLElement>(
+        [richView?.dom, codeView?.contentDOM].filter((element): element is HTMLElement => !!element),
+      ),
+    );
+    const ownsVisit = () => visit.active && !visit.retired && currentRef.current === visit;
+    const stop = (type: "user-scroll" | "typing") => {
+      if (ownsVisit()) session.dispatchFollow({ type });
+    };
+    const visit: CollaboratorFollowVisit = {
+      session,
+      actions,
+      richView,
+      codeView,
+      richScroller,
+      showCode,
+      showRich,
+      syncScroll,
+      userId,
+      cursor,
+      active: true,
+      retired: false,
+      timer: null,
+      scrollers,
+      editors,
+      onWheel: () => stop("user-scroll"),
+      onTouchMove: () => stop("user-scroll"),
+      onBeforeInput: () => stop("typing"),
+      onKeyDown: (event) => {
+        if (event.key === "Escape" && ownsVisit()) session.dispatchFollow({ type: "stop" });
+      },
+    };
+    currentRef.current = visit;
+
+    if (cursor !== null) {
+      const intent = {
+        offset: cursor,
+        code: showCode,
+        rich: showRich,
+        synced: syncScroll && showCode && showRich,
+      };
+      const run = (timer: CollaboratorFollowTimer) => {
+        if (!ownsVisit() || visit.timer !== timer || timer.fired) return;
+        timer.fired = true;
+        visit.timer = null;
+        actions.scrollToSource(intent.offset, {
+          code: intent.code,
+          rich: intent.rich,
+          synced: intent.synced,
+        });
+      };
+      const timer: CollaboratorFollowTimer = {
+        handle: setTimeout(() => run(timer), 150),
+        fired: false,
+      };
+      visit.timer = timer;
+    }
+
+    for (const element of scrollers) {
+      element.addEventListener("wheel", visit.onWheel, { passive: true });
+      element.addEventListener("touchmove", visit.onTouchMove, { passive: true });
+    }
+    for (const element of editors) element.addEventListener("beforeinput", visit.onBeforeInput, true);
+    window.addEventListener("keydown", visit.onKeyDown, true);
+
+    return () => {
+      if (visit.retired) return;
+      visit.active = false;
+      visit.retired = true;
+      const ownsRef = currentRef.current === visit;
+      if (ownsRef) currentRef.current = null;
+      const timer = visit.timer;
+      if (ownsRef && timer && visit.timer === timer) {
+        visit.timer = null;
+        clearTimeout(timer.handle);
+      }
+      for (const element of visit.scrollers) {
+        element.removeEventListener("wheel", visit.onWheel);
+        element.removeEventListener("touchmove", visit.onTouchMove);
+      }
+      for (const element of visit.editors) element.removeEventListener("beforeinput", visit.onBeforeInput, true);
+      window.removeEventListener("keydown", visit.onKeyDown, true);
+    };
+  }, [session, actions, richView, codeView, richScroller, showCode, showRich, syncScroll, userId, cursor]);
+}
+
 const subscribeResize = (notify: () => void) => {
   window.addEventListener("resize", notify);
   return () => window.removeEventListener("resize", notify);
@@ -1252,39 +1384,18 @@ export function EditorShell({
     actions.setScrollSynced(syncScroll && showCode && showRich);
   }, [actions, syncScroll, showCode, showRich]);
 
-  // Re-centre on the followed cursor (debounced) whenever it moves or the panes change.
-  useEffect(() => {
-    if (!followUserId || followedCursor === null) return;
-    const t = setTimeout(() => actions.scrollToSource(followedCursor, { code: showCode, rich: showRich, synced: syncScroll && showCode && showRich }), 150);
-    return () => clearTimeout(t);
-  }, [actions, followUserId, followedCursor, showCode, showRich, syncScroll]);
-
-  // Following stops on the user's own scroll (wheel/touch, not programmatic), typing in either pane, or Esc.
-  useEffect(() => {
-    if (!followUserId) return;
-    const stop = (event: "user-scroll" | "typing") => () => session.dispatchFollow({ type: event });
-    const onScroll = stop("user-scroll");
-    const onType = stop("typing");
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") session.dispatchFollow({ type: "stop" });
-    };
-    const scrollers = [richScroller, codeView?.scrollDOM ?? null].filter((el): el is HTMLElement => !!el);
-    const editors = [richView?.dom ?? null, codeView?.contentDOM ?? null].filter((el): el is HTMLElement => !!el);
-    for (const el of scrollers) {
-      el.addEventListener("wheel", onScroll, { passive: true });
-      el.addEventListener("touchmove", onScroll, { passive: true });
-    }
-    for (const el of editors) el.addEventListener("beforeinput", onType, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      for (const el of scrollers) {
-        el.removeEventListener("wheel", onScroll);
-        el.removeEventListener("touchmove", onScroll);
-      }
-      for (const el of editors) el.removeEventListener("beforeinput", onType, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [session, followUserId, richScroller, codeView, richView]);
+  useCollaboratorFollowVisit({
+    session,
+    actions,
+    richView,
+    codeView,
+    richScroller,
+    showCode,
+    showRich,
+    syncScroll,
+    userId: followUserId,
+    cursor: followedCursor,
+  });
   const closeSidePanel = useCallback(() => {
     restoreCommentsFocusRef.current = sidePanel === "comments";
     setSidePanel(null);
