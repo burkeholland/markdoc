@@ -774,9 +774,62 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
   );
 }
 
+type ModeSwitcherVisit = {
+  session: CollabSession;
+  editable: boolean;
+};
+
+type ModeSwitcherState = {
+  visit: ModeSwitcherVisit;
+  open: boolean;
+};
+
+function isEditMode(value: string): value is EditMode {
+  return value === "editing" || value === "suggesting" || value === "viewing";
+}
+
 export function ModeSwitcher({ session }: { session: CollabSession }) {
   const mode = useSessionValue(session, (s) => s.mode);
   const editable = session.role === "owner" || session.role === "editor";
+  const visit = useMemo<ModeSwitcherVisit>(() => ({ session, editable }), [editable, session]);
+  const initialState = useMemo<ModeSwitcherState>(() => ({ visit, open: false }), [visit]);
+  const [storedState, setStoredState] = useState<ModeSwitcherState>(initialState);
+  const state = storedState.visit === visit ? storedState : initialState;
+  const activeVisit = useRef<ModeSwitcherVisit | null>(null);
+  const ownsVisit = useCallback((owner: ModeSwitcherVisit) => activeVisit.current === owner, []);
+  const updateState = useCallback(
+    (update: (current: ModeSwitcherState) => ModeSwitcherState) => {
+      if (!ownsVisit(visit)) return;
+      setStoredState((current) => {
+        if (!ownsVisit(visit) || current.visit !== visit) return current;
+        return update(current);
+      });
+    },
+    [ownsVisit, visit],
+  );
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    setStoredState((current) => (current.visit === visit ? current : initialState));
+    return () => {
+      if (activeVisit.current === visit) activeVisit.current = null;
+    };
+  }, [initialState, visit]);
+
+  const changeOpen = useCallback(
+    (open: boolean) => updateState((current) => (current.open === open ? current : { ...current, open })),
+    [updateState],
+  );
+  const changeMode = useCallback(
+    (value: string) => {
+      if (!ownsVisit(visit) || !isEditMode(value) || (!visit.editable && value !== "viewing")) return;
+      visit.session.setMode(value);
+    },
+    [ownsVisit, visit],
+  );
+  const openReader = useCallback(() => {
+    if (!ownsVisit(visit)) return;
+    window.open(`/p/${visit.session.docId}`, "_blank", "noopener");
+  }, [ownsVisit, visit]);
   const icons: Record<EditMode, React.ReactNode> = {
     editing: <PenLine size={15} />,
     suggesting: <MessageSquarePlus size={15} />,
@@ -784,7 +837,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
   };
   const labels: Record<EditMode, string> = { editing: "Editing", suggesting: "Suggesting", viewing: "Viewing" };
   return (
-    <Menu>
+    <Menu open={state.open} onOpenChange={changeOpen}>
       <MenuTrigger asChild>
         <button
           type="button"
@@ -799,23 +852,25 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
           <ChevronDown size={14} className="text-ink-4" />
         </button>
       </MenuTrigger>
-      <MenuContent align="end" className="w-64">
-        <MenuRadioGroup value={mode} onValueChange={(v) => session.setMode(v as EditMode)}>
-          <MenuRadioItem value="editing" disabled={!editable} description="Edit the document directly">
-            Editing
-          </MenuRadioItem>
-          <MenuRadioItem value="suggesting" disabled={!editable} description="Edits become suggestions others can accept">
-            Suggesting
-          </MenuRadioItem>
-          <MenuRadioItem value="viewing" description="Read or print the final document">
-            Viewing
-          </MenuRadioItem>
-        </MenuRadioGroup>
-        <MenuSeparator />
-        <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${session.docId}`, "_blank", "noopener")} data-testid="mode-reader">
-          Open reader view
-        </MenuItem>
-      </MenuContent>
+      {state.open && (
+        <MenuContent align="end" className="w-64">
+          <MenuRadioGroup value={mode} onValueChange={changeMode}>
+            <MenuRadioItem value="editing" disabled={!editable} description="Edit the document directly">
+              Editing
+            </MenuRadioItem>
+            <MenuRadioItem value="suggesting" disabled={!editable} description="Edits become suggestions others can accept">
+              Suggesting
+            </MenuRadioItem>
+            <MenuRadioItem value="viewing" description="Read or print the final document">
+              Viewing
+            </MenuRadioItem>
+          </MenuRadioGroup>
+          <MenuSeparator />
+          <MenuItem icon={<BookOpen size={15} />} onSelect={openReader} data-testid="mode-reader">
+            Open reader view
+          </MenuItem>
+        </MenuContent>
+      )}
     </Menu>
   );
 }
