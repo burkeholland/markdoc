@@ -77,20 +77,24 @@ function groupByDay(versions: VersionSummary[]): { day: string; items: VersionSu
  * first open usually finds it warm too (task #487).
  */
 const listCache = new Map<string, VersionSummary[]>();
-const inflight = new Map<string, Promise<VersionSummary[]>>();
+const inflight = new Map<string, { owner: symbol; promise: Promise<VersionSummary[]> }>();
 
-function fetchVersions(docId: string): Promise<VersionSummary[]> {
+function fetchVersions(docId: string, options?: { fresh?: boolean; canCommit?: () => boolean }): Promise<VersionSummary[]> {
   const pending = inflight.get(docId);
-  if (pending) return pending;
-  const p = api.documents
+  if (pending && !options?.fresh) return pending.promise;
+
+  const owner = Symbol(docId);
+  const promise = api.documents
     .versions(docId)
     .then((res) => {
-      listCache.set(docId, res.versions);
+      if (inflight.get(docId)?.owner === owner && (options?.canCommit?.() ?? true)) listCache.set(docId, res.versions);
       return res.versions;
     })
-    .finally(() => inflight.delete(docId));
-  inflight.set(docId, p);
-  return p;
+    .finally(() => {
+      if (inflight.get(docId)?.owner === owner) inflight.delete(docId);
+    });
+  inflight.set(docId, { owner, promise });
+  return promise;
 }
 
 /** Warm the version list for `docId` (no-op while a fetch is already running). Errors are left to the panel. */
@@ -102,6 +106,16 @@ export function VersionsPanel(props: VersionsPanelProps) {
   return <VersionsPanelForDocument key={props.session.docId} {...props} />;
 }
 
+type VersionMutationIntent =
+  | { kind: "restore"; versionId: string }
+  | { kind: "rename"; versionId: string; title: string }
+  | { kind: "copy"; versionId: string };
+
+type VersionMutationOwner = VersionMutationIntent & {
+  operationId: number;
+  documentId: string;
+};
+
 function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
   const router = useRouter();
   const [versions, setVersions] = useState<VersionSummary[] | null>(() => listCache.get(session.docId) ?? null);
@@ -111,7 +125,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const [selected, setSelected] = useState<string | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
   const [previewBusy, setPreviewBusy] = useState<string | null>(null);
-  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [activeMutation, setActiveMutation] = useState<VersionMutationOwner | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const contentCache = useRef(new Map<string, string>());
@@ -120,7 +134,10 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const alive = useRef(true);
   const listRequest = useRef(0);
   const retryPending = useRef(false);
+  const mutationOperation = useRef(0);
+  const mutationOwner = useRef<VersionMutationOwner | null>(null);
   const canEdit = session.role === "owner" || session.role === "editor";
+  const mutationBusy = activeMutation !== null;
 
   useEffect(() => {
     alive.current = true;
@@ -128,18 +145,20 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       alive.current = false;
       previewIntent.current += 1;
       listRequest.current += 1;
+      mutationOwner.current = null;
     };
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (owner?: VersionMutationOwner) => {
     const request = ++listRequest.current;
+    const ownsRequest = () => alive.current && request === listRequest.current && (!owner || mutationOwner.current === owner);
     try {
-      const list = await fetchVersions(session.docId);
-      if (!alive.current || request !== listRequest.current) return;
+      const list = await fetchVersions(session.docId, { fresh: Boolean(owner), canCommit: ownsRequest });
+      if (!ownsRequest()) return;
       setVersions(list);
       setListError(null);
     } catch (e) {
-      if (!alive.current || request !== listRequest.current) return;
+      if (!ownsRequest()) return;
       setListError(apiErrorText(e, "Failed to load versions"));
     }
   }, [session.docId]);
@@ -225,6 +244,35 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     setPreviewBusy(null);
   }, []);
 
+  const claimMutation = useCallback(
+    (intent: VersionMutationIntent): VersionMutationOwner | null => {
+      if (!alive.current || mutationOwner.current) return null;
+      const owner: VersionMutationOwner = {
+        ...intent,
+        operationId: ++mutationOperation.current,
+        documentId: session.docId,
+      };
+      mutationOwner.current = owner;
+      setActiveMutation(owner);
+      setError(null);
+      return owner;
+    },
+    [session.docId],
+  );
+
+  const ownsMutation = useCallback((owner: VersionMutationOwner) => alive.current && mutationOwner.current === owner, []);
+
+  const releaseMutation = useCallback((owner: VersionMutationOwner) => {
+    if (mutationOwner.current !== owner) return;
+    mutationOwner.current = null;
+    setActiveMutation((current) => (current === owner ? null : current));
+  }, []);
+
+  const invalidateMutation = useCallback(() => {
+    mutationOwner.current = null;
+    setActiveMutation(null);
+  }, []);
+
   const select = async (v: VersionSummary) => {
     const next = selected === v.id ? null : v.id;
     setSelected(next);
@@ -239,19 +287,22 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   };
 
   const restore = async (v: VersionSummary) => {
+    if (!alive.current || mutationOwner.current) return;
     if (!confirm(`Restore version ${v.number}? The current text is saved as a version first.`)) return;
+    const owner = claimMutation({ kind: "restore", versionId: v.id });
+    if (!owner) return;
     invalidatePreview();
-    setActionBusy(v.id);
     try {
       await api.documents.restoreVersion(session.docId, v.id);
+      if (!ownsMutation(owner)) return;
       setSelected(null);
       setCompare([]);
       onPreview(null);
-      await load();
+      await load(owner);
     } catch (e) {
-      setError(apiErrorText(e, "Restore failed"));
+      if (ownsMutation(owner)) setError(apiErrorText(e, "Restore failed"));
     } finally {
-      setActionBusy(null);
+      releaseMutation(owner);
     }
   };
 
@@ -259,23 +310,31 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     const title = draft.trim();
     setRenaming(null);
     if (!title || title === v.title) return;
+    const owner = claimMutation({ kind: "rename", versionId: v.id, title });
+    if (!owner) return;
     try {
       await api.documents.renameVersion(session.docId, v.id, title);
-      await load();
+      if (!ownsMutation(owner)) return;
+      await load(owner);
     } catch (e) {
-      setError(apiErrorText(e, "Rename failed"));
+      if (ownsMutation(owner)) setError(apiErrorText(e, "Rename failed"));
+    } finally {
+      releaseMutation(owner);
     }
   };
 
   const copyAsNew = async (v: VersionSummary) => {
-    setActionBusy(v.id);
+    const owner = claimMutation({ kind: "copy", versionId: v.id });
+    if (!owner) return;
     try {
       const res = await api.documents.copyVersion(session.docId, v.id);
+      if (!ownsMutation(owner)) return;
       setPendingNotice(`Created “${res.title}” from version ${v.number}.`, "success");
       router.push(`/d/${res.id}`);
     } catch (e) {
-      setError(apiErrorText(e, "Could not copy the version"));
-      setActionBusy(null);
+      if (ownsMutation(owner)) setError(apiErrorText(e, "Could not copy the version"));
+    } finally {
+      releaseMutation(owner);
     }
   };
 
@@ -291,6 +350,8 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           className="icon-btn h-8 w-8"
           onClick={() => {
             invalidatePreview();
+            listRequest.current += 1;
+            invalidateMutation();
             onPreview(null);
             onClose();
           }}
@@ -376,8 +437,12 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                                 placeholder={`Name version ${v.number}`}
                                 onChange={(e) => setDraft(e.target.value)}
                                 onBlur={() => void rename(v)}
+                                disabled={mutationBusy}
                                 onKeyDown={(e) => {
-                                  if (e.key === "Enter") void rename(v);
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void rename(v);
+                                  }
                                   if (e.key === "Escape") setRenaming(null);
                                 }}
                                 onClick={(e) => e.stopPropagation()}
@@ -407,13 +472,19 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                               )}
                             </div>
                           </div>
-                          {(previewBusy === v.id || actionBusy === v.id) && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
+                          {(previewBusy === v.id || activeMutation?.versionId === v.id) && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
                         </button>
                       </div>
                       {selected === v.id && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5">
                           {canEdit && (
-                            <button type="button" className="btn btn-sm btn-primary gap-1.5" onClick={() => void restore(v)} data-testid="version-restore">
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-primary gap-1.5"
+                              onClick={() => void restore(v)}
+                              disabled={mutationBusy}
+                              data-testid="version-restore"
+                            >
                               <RotateCcw size={13} /> Restore
                             </button>
                           )}
@@ -422,9 +493,11 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                               type="button"
                               className="btn btn-sm btn-ghost gap-1.5"
                               onClick={() => {
+                                if (mutationOwner.current) return;
                                 setDraft(v.title ?? "");
                                 setRenaming(v.id);
                               }}
+                              disabled={mutationBusy}
                               data-testid="version-rename"
                             >
                               <Pencil size={13} /> {v.title ? "Rename" : "Name"}
@@ -434,6 +507,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                             type="button"
                             className="btn btn-sm btn-ghost gap-1.5"
                             onClick={() => void copyAsNew(v)}
+                            disabled={mutationBusy}
                             title="Copy this version as a new document"
                             data-testid="version-copy"
                           >
