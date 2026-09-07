@@ -2,11 +2,11 @@
 import { Dialog, DialogContent, Spinner } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signIn } from "next-auth/react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
-import { api, ApiError, apiErrorText } from "@/lib/api";
+import { api, apiErrorText } from "@/lib/api";
 
 import { cn, relativeTime } from "@/lib/utils";
 import { GITHUB_NOT_CONFIGURED } from "./labels";
@@ -70,6 +70,97 @@ interface RepoItem {
   description: string | null;
 }
 
+interface ListLoadState<T> {
+  items: T[] | null;
+  error: string | null;
+  pending: boolean;
+}
+
+function initialListLoadState<T>(): ListLoadState<T> {
+  return { items: null, error: null, pending: false };
+}
+
+function listLoadErrorText(error: unknown, fallback: string): string {
+  const reason = apiErrorText(error, "");
+  return reason ? `${fallback} ${reason}` : fallback;
+}
+
+function useListLoad<T>() {
+  const [state, setState] = useState<ListLoadState<T>>(initialListLoadState);
+  const requestSequence = useRef(0);
+  const requestPending = useRef(false);
+
+  useEffect(
+    () => () => {
+      requestSequence.current += 1;
+      requestPending.current = false;
+    },
+    [],
+  );
+
+  const load = useCallback((request: () => Promise<T[]>, fallback: string) => {
+    if (requestPending.current) return;
+    requestPending.current = true;
+    const sequence = ++requestSequence.current;
+    setState((current) => ({ ...current, pending: true }));
+
+    void (async () => {
+      try {
+        const items = await request();
+        if (sequence !== requestSequence.current) return;
+        requestPending.current = false;
+        setState({ items, error: null, pending: false });
+      } catch (error) {
+        if (sequence !== requestSequence.current) return;
+        requestPending.current = false;
+        setState({ items: null, error: listLoadErrorText(error, fallback), pending: false });
+      }
+    })();
+  }, []);
+
+  const invalidate = useCallback(() => {
+    requestSequence.current += 1;
+    requestPending.current = false;
+    setState((current) => (current.pending ? initialListLoadState<T>() : current));
+  }, []);
+
+  const reset = useCallback(() => {
+    requestSequence.current += 1;
+    requestPending.current = false;
+    setState(initialListLoadState<T>());
+  }, []);
+
+  return { state, load, invalidate, reset };
+}
+
+function ListLoadError({
+  error,
+  pending,
+  onRetry,
+  testId,
+}: {
+  error: string;
+  pending: boolean;
+  onRetry: () => void;
+  testId: string;
+}) {
+  return (
+    <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid={testId}>
+      <div>{error}</div>
+      <button
+        type="button"
+        className="btn btn-outline btn-sm mt-2 gap-1.5"
+        onClick={onRetry}
+        disabled={pending}
+        aria-busy={pending || undefined}
+      >
+        {pending && <Loader2 size={13} className="animate-spin" />}
+        {pending ? "Retrying…" : "Retry"}
+      </button>
+    </div>
+  );
+}
+
 /** Connect a document to a gist or repository file, or pick a file to import. */
 export function GitHubPicker({
   mode,
@@ -89,9 +180,11 @@ export function GitHubPicker({
   githubConfigured: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("gist");
-  const [gists, setGists] = useState<GistItem[] | null>(null);
-  const [repos, setRepos] = useState<RepoItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { state: gistList, load: startGistLoad, invalidate: invalidateGistLoad } = useListLoad<GistItem>();
+  const { state: repoList, load: startRepoLoad, invalidate: invalidateRepoLoad } = useListLoad<RepoItem>();
+  const { state: branchList, load: startBranchLoad, invalidate: invalidateBranchLoad, reset: resetBranchLoad } = useListLoad<string>();
+  const { state: fileList, load: startFileLoad, invalidate: invalidateFileLoad, reset: resetFileLoad } = useListLoad<{ path: string }>();
+  const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState("");
   // gist state
@@ -100,68 +193,110 @@ export function GitHubPicker({
   const [gistPublic, setGistPublic] = useState(false);
   // repo state
   const [repo, setRepo] = useState<RepoItem | null>(null);
-  const [branches, setBranches] = useState<string[] | null>(null);
   const [branch, setBranch] = useState("");
-  const [files, setFiles] = useState<{ path: string }[] | null>(null);
   const [path, setPath] = useState("");
+
+  const loadGists = useCallback(() => {
+    if (tab !== "gist") return;
+    startGistLoad(async () => (await api.github.gists()).gists, "Could not load gists.");
+  }, [startGistLoad, tab]);
+
+  const loadRepos = useCallback(() => {
+    if (tab !== "repo" || repo) return;
+    startRepoLoad(async () => (await api.github.repos()).repos, "Could not load repositories.");
+  }, [repo, startRepoLoad, tab]);
+
+  const loadBranches = useCallback(() => {
+    if (tab !== "repo" || !repo) return;
+    const currentRepo = repo;
+    startBranchLoad(
+      async () => (await api.github.branches(currentRepo.owner, currentRepo.name)).branches,
+      `Could not load branches for ${currentRepo.fullName}.`,
+    );
+  }, [repo, startBranchLoad, tab]);
+
+  const loadFiles = useCallback(() => {
+    if (tab !== "repo" || !repo || !branch) return;
+    const currentRepo = repo;
+    const currentBranch = branch;
+    startFileLoad(
+      async () => (await api.github.files(currentRepo.owner, currentRepo.name, currentBranch)).files,
+      `Could not load files from ${currentRepo.fullName} on ${currentBranch}.`,
+    );
+  }, [branch, repo, startFileLoad, tab]);
 
   useEffect(() => {
     if (!githubAvailable) return;
-    setError(null);
-    if (tab === "gist" && gists === null) {
-      api.github
-        .gists()
-        .then((r) => setGists(r.gists))
-        .catch((e: ApiError) => setError(e.message));
+    if (tab === "gist" && gistList.items === null && !gistList.error && !gistList.pending) {
+      loadGists();
     }
-    if (tab === "repo" && repos === null) {
-      api.github
-        .repos()
-        .then((r) => setRepos(r.repos))
-        .catch((e: ApiError) => setError(e.message));
+    if (tab === "repo" && !repo && repoList.items === null && !repoList.error && !repoList.pending) {
+      loadRepos();
     }
-  }, [tab, gists, repos, githubAvailable]);
+  }, [githubAvailable, gistList.error, gistList.items, gistList.pending, loadGists, loadRepos, repo, repoList.error, repoList.items, repoList.pending, tab]);
 
   useEffect(() => {
-    if (!repo) return;
-    setBranches(null);
-    setFiles(null);
-    setBranch(repo.defaultBranch);
-    api.github
-      .branches(repo.owner, repo.name)
-      .then((r) => setBranches(r.branches))
-      .catch((e: ApiError) => setError(e.message));
-  }, [repo]);
+    if (tab === "repo" && repo && branchList.items === null && !branchList.error && !branchList.pending) loadBranches();
+  }, [branchList.error, branchList.items, branchList.pending, loadBranches, repo, tab]);
 
   useEffect(() => {
-    if (!repo || !branch) return;
-    setFiles(null);
-    api.github
-      .files(repo.owner, repo.name, branch)
-      .then((r) => setFiles(r.files))
-      .catch((e: ApiError) => setError(e.message));
-  }, [repo, branch]);
+    if (tab === "repo" && repo && branch && fileList.items === null && !fileList.error && !fileList.pending) loadFiles();
+  }, [branch, fileList.error, fileList.items, fileList.pending, loadFiles, repo, tab]);
 
   const filteredGists = useMemo(() => {
     const q = filter.toLowerCase();
-    return (gists ?? []).filter((g) => !q || (g.description ?? "").toLowerCase().includes(q) || g.files.some((f) => f.filename.toLowerCase().includes(q)));
-  }, [gists, filter]);
+    return (gistList.items ?? []).filter((g) => !q || (g.description ?? "").toLowerCase().includes(q) || g.files.some((f) => f.filename.toLowerCase().includes(q)));
+  }, [gistList.items, filter]);
   const filteredRepos = useMemo(() => {
     const q = filter.toLowerCase();
-    return (repos ?? []).filter((r) => !q || r.fullName.toLowerCase().includes(q));
-  }, [repos, filter]);
+    return (repoList.items ?? []).filter((r) => !q || r.fullName.toLowerCase().includes(q));
+  }, [repoList.items, filter]);
   const filteredFiles = useMemo(() => {
     const q = filter.toLowerCase();
-    return (files ?? []).filter((f) => !q || f.path.toLowerCase().includes(q));
-  }, [files, filter]);
+    return (fileList.items ?? []).filter((f) => !q || f.path.toLowerCase().includes(q));
+  }, [fileList.items, filter]);
+
+  const selectTab = (nextTab: Tab) => {
+    if (nextTab === tab) return;
+    if (tab === "gist") {
+      invalidateGistLoad();
+    } else if (repo) {
+      invalidateBranchLoad();
+      invalidateFileLoad();
+    } else {
+      invalidateRepoLoad();
+    }
+    setTab(nextTab);
+    setFilter("");
+  };
+
+  const selectRepo = (nextRepo: RepoItem) => {
+    resetBranchLoad();
+    resetFileLoad();
+    setRepo(nextRepo);
+    setBranch(nextRepo.defaultBranch);
+  };
+
+  const showRepositories = () => {
+    resetBranchLoad();
+    resetFileLoad();
+    setRepo(null);
+    setBranch("");
+  };
+
+  const selectBranch = (nextBranch: string) => {
+    if (nextBranch === branch) return;
+    resetFileLoad();
+    setBranch(nextBranch);
+  };
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       await fn();
     } catch (e) {
-      setError(apiErrorText(e, "Something went wrong"));
+      setActionError(apiErrorText(e, "Something went wrong"));
     } finally {
       setBusy(false);
     }
@@ -203,10 +338,7 @@ export function GitHubPicker({
               key={t}
               type="button"
               className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === t ? "bg-inverse text-white" : "text-ink-2 hover:bg-surface-3")}
-              onClick={() => {
-                setTab(t);
-                setFilter("");
-              }}
+              onClick={() => selectTab(t)}
               data-testid={`picker-tab-${t}`}
             >
               {t === "gist" ? "Gist" : "Repository"}
@@ -218,7 +350,11 @@ export function GitHubPicker({
           <input className="input pl-9" placeholder={tab === "gist" ? "Filter gists" : repo ? "Filter files" : "Filter repositories"} value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
       </div>
-      {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
+      {actionError && (
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="github-action-error">
+          {actionError}
+        </div>
+      )}
 
       {tab === "gist" && (
         <div className="flex flex-col gap-3">
@@ -244,8 +380,10 @@ export function GitHubPicker({
             </div>
           )}
           {(mode === "import" || !newGist) && (
-            <div className="scrollbar-thin max-h-72 overflow-y-auto rounded-xl border border-line">
-              {gists === null ? (
+            <div className="scrollbar-thin max-h-72 overflow-y-auto rounded-xl border border-line" data-testid="gist-list">
+              {gistList.error ? (
+                <ListLoadError error={gistList.error} pending={gistList.pending} onRetry={loadGists} testId="gist-load-error" />
+              ) : gistList.items === null ? (
                 <div className="flex justify-center py-8">
                   <Spinner />
                 </div>
@@ -288,16 +426,20 @@ export function GitHubPicker({
       {tab === "repo" && (
         <div className="flex flex-col gap-3">
           {!repo ? (
-            <div className="scrollbar-thin max-h-80 overflow-y-auto rounded-xl border border-line">
-              {repos === null ? (
+            <div className="scrollbar-thin max-h-80 overflow-y-auto rounded-xl border border-line" data-testid="repo-list">
+              {repoList.error ? (
+                <ListLoadError error={repoList.error} pending={repoList.pending} onRetry={loadRepos} testId="repo-load-error" />
+              ) : repoList.items === null ? (
                 <div className="flex justify-center py-8">
                   <Spinner />
                 </div>
+              ) : filteredRepos.length === 0 ? (
+                <div className="px-3 py-6 text-center text-sm text-ink-3">No repositories found.</div>
               ) : (
                 <ul className="divide-y divide-line">
                   {filteredRepos.map((r) => (
                     <li key={r.fullName}>
-                      <button type="button" className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2" onClick={() => setRepo(r)} data-testid="repo-item">
+                      <button type="button" className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2" onClick={() => selectRepo(r)} data-testid="repo-item">
                         <GitHubIcon size={16} className="shrink-0 text-ink-4" />
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium text-ink">{r.fullName}</div>
@@ -316,24 +458,28 @@ export function GitHubPicker({
           ) : (
             <>
               <div className="flex items-center gap-2 text-sm">
-                <button type="button" className="btn btn-sm btn-ghost" onClick={() => setRepo(null)}>
+                <button type="button" className="btn btn-sm btn-ghost" onClick={showRepositories}>
                   ← Repositories
                 </button>
                 <span className="font-medium text-ink">{repo.fullName}</span>
-                <span className="ml-auto inline-flex items-center gap-1.5 text-ink-3">
+                <div className="ml-auto inline-flex items-center gap-1.5 text-ink-3" data-testid="branch-list">
                   <GitBranch size={14} />
-                  {branches ? (
-                    <select className="select h-8 text-xs" value={branch} onChange={(e) => setBranch(e.target.value)} data-testid="branch-select">
-                      {branches.map((b) => (
+                  {branchList.error ? (
+                    <ListLoadError error={branchList.error} pending={branchList.pending} onRetry={loadBranches} testId="branch-load-error" />
+                  ) : branchList.items === null ? (
+                    <Spinner />
+                  ) : branchList.items.length === 0 ? (
+                    <span data-testid="branch-empty">No branches found.</span>
+                  ) : (
+                    <select className="select h-8 text-xs" value={branch} onChange={(e) => selectBranch(e.target.value)} data-testid="branch-select">
+                      {branchList.items.map((b) => (
                         <option key={b} value={b}>
                           {b}
                         </option>
                       ))}
                     </select>
-                  ) : (
-                    <Spinner />
                   )}
-                </span>
+                </div>
               </div>
               {mode === "link" && (
                 <form
@@ -349,8 +495,10 @@ export function GitHubPicker({
                   </button>
                 </form>
               )}
-              <div className="scrollbar-thin max-h-64 overflow-y-auto rounded-xl border border-line">
-                {files === null ? (
+              <div className="scrollbar-thin max-h-64 overflow-y-auto rounded-xl border border-line" data-testid="file-list">
+                {fileList.error ? (
+                  <ListLoadError error={fileList.error} pending={fileList.pending} onRetry={loadFiles} testId="file-load-error" />
+                ) : fileList.items === null ? (
                   <div className="flex justify-center py-8">
                     <Spinner />
                   </div>
