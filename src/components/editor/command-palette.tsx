@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Dialog as RadixDialog } from "radix-ui";
 import {
   Activity, ArrowDownUp, ArrowLeft, Bold, BookOpen, Bot, Calendar, ChevronLeft, ChevronRight, Code, Columns2, Copy, CornerDownLeft, Download, Eye,
@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { Kbd } from "@/components/ui/primitives";
 import { focusedElement, restoreFocus } from "@/lib/a11y";
+import { apiErrorText } from "@/lib/api";
 import { cn, shortcut } from "@/lib/utils";
 import { filterCommands, groupCommands, loadRecent, pushRecent, saveRecent, withRecentFirst, type Command } from "./commands";
 
@@ -23,6 +24,16 @@ const ICONS: Record<string, LucideIcon> = {
 interface Level {
   title: string | null;
   items: Command[];
+}
+
+interface ChildLoad {
+  command: Command;
+  retry: boolean;
+}
+
+interface ChildLoadError {
+  command: Command;
+  message: string;
 }
 
 export interface CommandPaletteProps {
@@ -46,23 +57,43 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   const [stack, setStack] = useState<Level[]>([]);
   const [highlight, setHighlight] = useState(0);
   const [recent, setRecent] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [childLoad, setChildLoad] = useState<ChildLoad | null>(null);
+  const [childError, setChildError] = useState<ChildLoadError | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const openRef = useRef(open);
+  const childRequestIdRef = useRef(0);
+  const childRequestRef = useRef<{ id: number; command: Command } | null>(null);
   // Command picked but not yet run: it fires from onCloseAutoFocus, once the dialog has handed focus back.
   const pendingRef = useRef<Command | null>(null);
   // Element focused before the palette opened (editor pane, header button). Radix's modal content
   // hands focus to its Trigger on close; the palette has none, so without this focus falls to <body>.
   const returnRef = useRef<HTMLElement | null>(null);
 
+  const invalidateChildLoad = useCallback(() => {
+    childRequestIdRef.current += 1;
+    childRequestRef.current = null;
+  }, []);
+
+  const clearChildLoad = useCallback(() => {
+    invalidateChildLoad();
+    setChildLoad(null);
+    setChildError(null);
+  }, [invalidateChildLoad]);
+
+  useLayoutEffect(() => {
+    openRef.current = open;
+    if (!open) clearChildLoad();
+  }, [open, clearChildLoad]);
+
   useEffect(() => {
+    clearChildLoad();
     if (!open) return;
     setQuery("");
     setHighlight(0);
-    setLoading(false);
     setRecent(loadRecent());
     setStack([{ title: null, items: commands() }]);
-  }, [open, commands]);
+  }, [open, commands, clearChildLoad]);
 
   const level = stack[stack.length - 1];
   const atRoot = stack.length <= 1;
@@ -87,22 +118,59 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     el?.scrollIntoView({ block: "nearest" });
   }, [highlight, flat]);
 
-  const close = useCallback(() => onOpenChange(false), [onOpenChange]);
+  const changeOpen = useCallback(
+    (next: boolean) => {
+      if (!next) clearChildLoad();
+      onOpenChange(next);
+    },
+    [clearChildLoad, onOpenChange],
+  );
+
+  const close = useCallback(() => changeOpen(false), [changeOpen]);
+
+  const loadChildren = useCallback((cmd: Command, retry = false) => {
+    const provider = cmd.children;
+    if (!provider || childRequestRef.current?.command.id === cmd.id) return;
+
+    const request = ++childRequestIdRef.current;
+    childRequestRef.current = { id: request, command: cmd };
+    setChildLoad({ command: cmd, retry });
+    if (!retry) setChildError(null);
+
+    const isCurrent = () => {
+      const current = childRequestRef.current;
+      return openRef.current && current?.id === request && current.command.id === cmd.id;
+    };
+
+    void Promise.resolve()
+      .then(() => provider())
+      .then((items) => {
+        if (!isCurrent()) return;
+        childRequestRef.current = null;
+        setChildLoad(null);
+        setChildError(null);
+        setStack((s) => [...s, { title: cmd.title.replace(/…$/, ""), items }]);
+        setQuery("");
+        inputRef.current?.focus();
+      })
+      .catch((error: unknown) => {
+        if (!isCurrent()) return;
+        childRequestRef.current = null;
+        setChildLoad(null);
+        const title = cmd.title.replace(/…$/, "").trim();
+        setChildError({ command: cmd, message: apiErrorText(error, `Could not load ${title || "commands"}`) });
+        inputRef.current?.focus();
+      });
+  }, []);
 
   const pick = useCallback(
-    async (cmd: Command) => {
+    (cmd: Command) => {
+      if (childError?.command.id === cmd.id) return;
       if (cmd.children) {
-        setLoading(true);
-        try {
-          const items = await cmd.children();
-          setStack((s) => [...s, { title: cmd.title.replace(/…$/, ""), items }]);
-          setQuery("");
-        } finally {
-          setLoading(false);
-          inputRef.current?.focus();
-        }
+        loadChildren(cmd);
         return;
       }
+      clearChildLoad();
       const next = pushRecent(recent, cmd.id);
       saveRecent(next);
       setRecent(next);
@@ -111,13 +179,14 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       pendingRef.current = cmd;
       close();
     },
-    [recent, close],
+    [childError, loadChildren, clearChildLoad, recent, close],
   );
 
   const back = useCallback(() => {
+    clearChildLoad();
     setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
     setQuery("");
-  }, []);
+  }, [clearChildLoad]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
@@ -143,8 +212,9 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   };
 
   let index = -1;
+  const retrying = !!childError && childLoad?.retry === true && childLoad.command.id === childError.command.id;
   return (
-    <RadixDialog.Root open={open} onOpenChange={onOpenChange}>
+    <RadixDialog.Root open={open} onOpenChange={changeOpen}>
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="dialog-overlay animate-fade-in" />
         <RadixDialog.Content
@@ -196,10 +266,34 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
             />
             <Kbd>Esc</Kbd>
           </div>
-          <div ref={listRef} id="command-palette-list" role="listbox" aria-label="Commands" className="scrollbar-thin max-h-[min(60vh,420px)] overflow-y-auto p-1.5">
-            {loading ? (
-              <div className="px-3 py-6 text-center text-sm text-ink-3">Loading…</div>
-            ) : flat.length === 0 ? (
+          {childError && (
+            <div className="mx-1.5 mt-1.5 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+              <span className="min-w-0 flex-1">{childError.message}</span>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline shrink-0"
+                onClick={() => loadChildren(childError.command, true)}
+                disabled={retrying}
+                aria-busy={retrying || undefined}
+              >
+                {retrying ? "Retrying…" : "Retry"}
+              </button>
+            </div>
+          )}
+          <div
+            ref={listRef}
+            id="command-palette-list"
+            role="listbox"
+            aria-label="Commands"
+            aria-busy={!!childLoad || undefined}
+            className="scrollbar-thin max-h-[min(60vh,420px)] overflow-y-auto p-1.5"
+          >
+            {childLoad && !childError && (
+              <div className="px-3 py-3 text-center text-sm text-ink-3" role="status" aria-live="polite" aria-atomic="true">
+                Loading…
+              </div>
+            )}
+            {flat.length === 0 ? (
               <div className="px-3 py-6 text-center text-sm text-ink-3" data-testid="palette-empty">
                 No matching commands
               </div>
@@ -211,18 +305,24 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                     index += 1;
                     const i = index;
                     const selected = i === highlight;
+                    const unavailable = childLoad?.command.id === cmd.id || childError?.command.id === cmd.id;
                     return (
                       <div
                         key={cmd.id}
                         id={`palette-item-${cmd.id}`}
                         role="option"
                         aria-selected={selected}
+                        aria-disabled={unavailable || undefined}
                         data-index={i}
                         data-testid={`palette-item-${cmd.id}`}
-                        className={cn("flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink select-none", selected && "bg-surface-3")}
+                        className={cn(
+                          "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-ink select-none",
+                          selected && "bg-surface-3",
+                          unavailable && "cursor-default opacity-60",
+                        )}
                         onMouseEnter={() => setHighlight(i)}
                         onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => void pick(cmd)}
+                        onClick={() => pick(cmd)}
                       >
                         <CommandIcon name={cmd.icon} />
                         <span className="flex-1 truncate">{cmd.title}</span>
