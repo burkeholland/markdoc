@@ -1,7 +1,8 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import type { EditorView as CMView } from "@codemirror/view";
@@ -110,7 +111,7 @@ import { buildCommands, type EditorCommandContext } from "./commands";
 import type { NotificationDto } from "@/lib/api";
 import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
-import type { PresenceUser } from "@/editor/collab/session";
+import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import type { NoticeAction } from "@/editor/markdown/tsv";
 import { findShortcutAction, isMac } from "@/lib/utils";
 
@@ -140,6 +141,12 @@ interface Toast {
   kind: "info" | "error" | "success";
   action?: { label: string; href?: string; onClick?: () => void };
 }
+
+type PublishPullKind = "publish" | "pull";
+type EditorIdentity = { documentId: string; session: CollabSession };
+type PublishPullOwner = { editor: EditorIdentity; kind: PublishPullKind };
+
+const publishPullBusyError = () => new Error("Another publish or pull is already in progress.");
 
 type SidePanel = "comments" | "versions" | "activity" | null;
 
@@ -230,7 +237,9 @@ export function EditorShell({
   const [lineWrapping, setLineWrapping] = useState(true);
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [commitOpen, setCommitOpen] = useState(false);
-  const [publishing, setPublishing] = useState(false);
+  const [publishingOwner, setPublishingOwner] = useState<PublishPullOwner | null>(null);
+  const currentEditorRef = useRef<EditorIdentity | null>(null);
+  const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
   const [sync, setSync] = useState<SyncStatusDto | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncTick, setSyncTick] = useState(0);
@@ -246,6 +255,20 @@ export function EditorShell({
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  useLayoutEffect(() => {
+    const editor = { documentId: initialDoc.id, session };
+    currentEditorRef.current = editor;
+    publishPullOwnerRef.current = null;
+    setPublishingOwner(null);
+    return () => {
+      if (currentEditorRef.current === editor) currentEditorRef.current = null;
+      if (publishPullOwnerRef.current?.editor === editor) publishPullOwnerRef.current = null;
+    };
+  }, [initialDoc.id, session]);
+  useLayoutEffect(() => {
+    setDoc((current) => current.id === initialDoc.id ? current : initialDoc);
+  }, [initialDoc]);
+  const publishing = publishingOwner !== null && currentEditorRef.current === publishingOwner.editor;
   const richScrollRef = useRef<HTMLDivElement>(null);
   const setRichScrollRef = useCallback((el: HTMLDivElement | null) => {
     richScrollRef.current = el;
@@ -466,59 +489,128 @@ export function EditorShell({
     [actions, session, shownLayout, isPhone, setLayout],
   );
 
-  const publishNow = useCallback(
-    async (message?: string, force = false) => {
-      setPublishing(true);
-      try {
-        const res = await api.documents.publish(doc.id, message, { force });
-        if (res.document) setDoc(res.document);
-        setVersionsRefresh((n) => n + 1);
-        setSyncTick((n) => n + 1);
-        if (res.result.skipped) toast("Already up to date on GitHub.", "info");
-        else toast(doc.storage === "gist" ? "Gist updated." : "Committed to GitHub.", "success", res.result.url ? { label: "View", href: res.result.url } : undefined);
-      } catch (e) {
-        // GitHub moved since the last sync: hand the decision to the Sync dialog instead of a raw error.
-        if (e instanceof ApiError && e.status === 409 && e.body?.status) {
-          setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
-          setCommitOpen(false);
-          setSyncOpen(true);
-          throw e;
-        }
-        toast(apiErrorText(e, "Publish failed"), "error");
-        throw e;
-      } finally {
-        setPublishing(false);
-      }
+  const ownsPublishPull = useCallback(
+    (owner: PublishPullOwner) => currentEditorRef.current === owner.editor && publishPullOwnerRef.current === owner,
+    [],
+  );
+  const finishPublishPull = useCallback(
+    (owner: PublishPullOwner) => {
+      if (!ownsPublishPull(owner)) return;
+      publishPullOwnerRef.current = null;
+      setPublishingOwner((current) => current === owner ? null : current);
     },
-    [doc.id, doc.storage, toast],
+    [ownsPublishPull],
+  );
+  const beginPublishPull = useCallback(
+    <T,>(kind: PublishPullKind, request: (documentId: string) => Promise<T>) => {
+      const editor = currentEditorRef.current;
+      if (!editor || publishPullOwnerRef.current) return null;
+      const owner = { editor, kind };
+      publishPullOwnerRef.current = owner;
+      // Commit the pending UI before the initiating event can activate another surface.
+      flushSync(() => setPublishingOwner(owner));
+      let pending: Promise<T>;
+      try {
+        pending = request(editor.documentId);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      return { owner, pending };
+    },
+    [],
   );
 
-  const pull = useCallback(
-    async (options: { force?: boolean; merge?: boolean } = {}) => {
-      setPublishing(true);
-      try {
-        const res = await api.documents.pull(doc.id, options);
-        if (res.document) setDoc(res.document);
-        setVersionsRefresh((n) => n + 1);
-        setSyncTick((n) => n + 1);
-        toast(res.result.merged ? "Merged GitHub\u2019s changes — review, then publish." : res.result.changed ? "Pulled the latest version from GitHub." : "Already up to date.", "success");
-        return res;
-      } catch (e) {
-        // Local edits would be lost (or both sides changed): open the Sync dialog; the caller handles merge conflicts.
-        if (e instanceof ApiError && e.status === 409 && e.body?.status) {
-          if (e.body.status !== "conflict") {
-            setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
-            setSyncOpen(true);
+  const startPublish = useCallback(
+    (message?: string, force = false) => {
+      const operation = beginPublishPull("publish", (documentId) => api.documents.publish(documentId, message, { force }));
+      if (!operation) return null;
+      const { owner, pending } = operation;
+      return (async () => {
+        try {
+          const res = await pending;
+          if (!ownsPublishPull(owner)) return;
+          if (res.document) setDoc(res.document);
+          setVersionsRefresh((n) => n + 1);
+          setSyncTick((n) => n + 1);
+          if (res.result.skipped) toast("Already up to date on GitHub.", "info");
+          else toast(doc.storage === "gist" ? "Gist updated." : "Committed to GitHub.", "success", res.result.url ? { label: "View", href: res.result.url } : undefined);
+        } catch (e) {
+          if (ownsPublishPull(owner)) {
+            // GitHub moved since the last sync: hand the decision to the Sync dialog instead of a raw error.
+            if (e instanceof ApiError && e.status === 409 && e.body?.status) {
+              setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
+              setCommitOpen(false);
+              setSyncOpen(true);
+            } else {
+              toast(apiErrorText(e, "Publish failed"), "error");
+            }
           }
           throw e;
+        } finally {
+          finishPublishPull(owner);
         }
-        toast(apiErrorText(e, "Pull failed"), "error");
-        throw e;
-      } finally {
-        setPublishing(false);
+      })();
+    },
+    [beginPublishPull, doc.storage, finishPublishPull, ownsPublishPull, toast],
+  );
+  const publishNow = useCallback(
+    (message?: string, force = false) => startPublish(message, force) ?? Promise.reject(publishPullBusyError()),
+    [startPublish],
+  );
+
+  const beginPull = useCallback(
+    (options: { force?: boolean; merge?: boolean } = {}) =>
+      beginPublishPull("pull", (documentId) => api.documents.pull(documentId, options)),
+    [beginPublishPull],
+  );
+  const applyPullSuccess = useCallback(
+    (owner: PublishPullOwner, res: Awaited<ReturnType<typeof api.documents.pull>>) => {
+      if (!ownsPublishPull(owner)) return;
+      if (res.document) setDoc(res.document);
+      setVersionsRefresh((n) => n + 1);
+      setSyncTick((n) => n + 1);
+      toast(res.result.merged ? "Merged GitHub\u2019s changes — review, then publish." : res.result.changed ? "Pulled the latest version from GitHub." : "Already up to date.", "success");
+    },
+    [ownsPublishPull, toast],
+  );
+  const applyPullError = useCallback(
+    (owner: PublishPullOwner, error: unknown) => {
+      if (!ownsPublishPull(owner)) return;
+      // Local edits would be lost (or both sides changed): open the Sync dialog; merge handles marked conflicts below.
+      if (error instanceof ApiError && error.status === 409 && error.body?.status) {
+        if (error.body.status !== "conflict") {
+          setSync((s) => ({ ...(s ?? emptySync()), ...(error.body as Partial<SyncStatusDto>), status: error.body!.status as SyncStatusDto["status"] }));
+          setSyncOpen(true);
+        }
+      } else {
+        toast(apiErrorText(error, "Pull failed"), "error");
       }
     },
-    [doc.id, toast],
+    [ownsPublishPull, toast],
+  );
+  const startPull = useCallback(
+    (options: { force?: boolean; merge?: boolean } = {}) => {
+      const operation = beginPull(options);
+      if (!operation) return null;
+      const { owner, pending } = operation;
+      return (async () => {
+        try {
+          const res = await pending;
+          applyPullSuccess(owner, res);
+          return res;
+        } catch (error) {
+          applyPullError(owner, error);
+          throw error;
+        } finally {
+          finishPublishPull(owner);
+        }
+      })();
+    },
+    [applyPullError, applyPullSuccess, beginPull, finishPublishPull],
+  );
+  const pull = useCallback(
+    (options: { force?: boolean; merge?: boolean } = {}) => startPull(options) ?? Promise.reject(publishPullBusyError()),
+    [startPull],
   );
 
   // Poll the three-way status while the document is GitHub-backed (60 s, or SYNC_POLL_MS via the response) and
@@ -529,11 +621,16 @@ export function EditorShell({
   const syncActions = useMemo<SyncActions>(
     () => ({
       merge: async () => {
+        const operation = beginPull({ merge: true });
+        if (!operation) throw publishPullBusyError();
+        const { owner, pending } = operation;
         try {
-          await pull({ merge: true });
+          const res = await pending;
+          applyPullSuccess(owner, res);
           return 0;
         } catch (e) {
           if (e instanceof ApiError && e.status === 409 && e.body?.status === "conflict" && typeof e.body.merged === "string") {
+            if (!ownsPublishPull(owner)) throw e;
             // Put the marked text in the document so the user resolves conflicts inline (the `merge-conflict` lint flags each marker).
             session.replaceSource([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
             session.setActiveSurface("code");
@@ -541,7 +638,10 @@ export function EditorShell({
             toast(`Merged with ${e.body.conflicts} conflict${e.body.conflicts === 1 ? "" : "s"} — resolve the marked lines, then publish.`, "info");
             return Number(e.body.conflicts ?? 1);
           }
+          applyPullError(owner, e);
           throw e;
+        } finally {
+          finishPublishPull(owner);
         }
       },
       keepMine: (message: string) => publishNow(message, true),
@@ -558,7 +658,7 @@ export function EditorShell({
         });
       },
     }),
-    [pull, publishNow, session, shownLayout, isPhone, setLayout, toast, doc.id],
+    [applyPullError, applyPullSuccess, beginPull, finishPublishPull, ownsPublishPull, pull, publishNow, session, shownLayout, isPhone, setLayout, toast, doc.id],
   );
 
   const download = useCallback(
@@ -820,8 +920,18 @@ export function EditorShell({
   const openTable = useCallback(() => setDialog("table"), []);
   const openVersionName = useCallback(() => setDialog("versionName"), []);
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
-  const publishFromHeader = useCallback(() => (doc.storage === "gist" ? void publishNow() : setCommitOpen(true)), [doc.storage, publishNow]);
-  const pullFromHeader = useCallback(() => void pull().catch(() => undefined), [pull]);
+  const publishFromHeader = useCallback(() => {
+    if (doc.storage !== "gist") {
+      if (!publishPullOwnerRef.current) setCommitOpen(true);
+      return;
+    }
+    const request = startPublish();
+    if (request) void request.catch(() => undefined);
+  }, [doc.storage, startPublish]);
+  const pullFromHeader = useCallback(() => {
+    const request = startPull();
+    if (request) void request.catch(() => undefined);
+  }, [startPull]);
   const openSync = useCallback(() => setSyncOpen(true), []);
   const deleteFromHeader = useCallback(() => void deleteDoc(), [deleteDoc]);
   const duplicateFromHeader = useCallback(() => void duplicateDoc(), [duplicateDoc]);
@@ -958,6 +1068,7 @@ export function EditorShell({
   // The title lives in the shared document so everyone sees renames immediately.
   const sharedTitle = useSessionValue(session, (s) => s.title);
   const docView = useMemo(() => (sharedTitle && sharedTitle !== doc.title ? { ...doc, title: sharedTitle } : doc), [doc, sharedTitle]);
+  const operationDialogKey = `${initialDoc.id}:${user.id}:${role}:${embed ? "embed" : "page"}`;
 
   const authError = useSessionValue(session, (s) => s.authError);
   // Keep the panes covered until either the local copy or the server state is in, so a
@@ -1336,8 +1447,8 @@ export function EditorShell({
             {everOpened.publish && (
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
             )}
-            {everOpened.commit && <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
-            {everOpened.sync && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
+            {everOpened.commit && <CommitDialog key={`commit:${operationDialogKey}`} open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
+            {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
           </>
         )}
         {everOpened.link && <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />}
