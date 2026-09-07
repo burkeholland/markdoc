@@ -165,19 +165,24 @@ export function isOwnOrigin(url: URL, ownOrigins: readonly string[]): boolean {
   return ownOrigins.some((key) => key.slice(key.lastIndexOf(":") + 1) === port);
 }
 
-function validate(input: WebhookInput, ownOrigins: readonly string[]): { url: string; events: WebhookEventType[]; documentIds: string[] | null } {
+function validateWebhookUrl(input: string, ownOrigins: readonly string[]): string {
   let parsed: URL;
   try {
-    parsed = new URL(input.url.trim());
+    parsed = new URL(input.trim());
   } catch {
     throw new WebhookValidationError("Enter a valid URL");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new WebhookValidationError("Webhook URLs must be http(s)");
   if (isOwnOrigin(parsed, ownOrigins)) throw new WebhookValidationError("A webhook cannot point at Markdoc itself");
+  return parsed.toString();
+}
+
+function validate(input: WebhookInput, ownOrigins: readonly string[]): { url: string; events: WebhookEventType[]; documentIds: string[] | null } {
+  const url = validateWebhookUrl(input.url, ownOrigins);
   const events = [...new Set(input.events)].filter((e): e is WebhookEventType => (WEBHOOK_EVENTS as readonly string[]).includes(e));
   if (events.length === 0) throw new WebhookValidationError("Pick at least one event");
   const documentIds = input.documentIds && input.documentIds.length > 0 ? [...new Set(input.documentIds.map((d) => d.trim()).filter(Boolean))] : null;
-  return { url: parsed.toString(), events, documentIds };
+  return { url, events, documentIds };
 }
 
 function toDto(row: schema.Webhook, last: schema.WebhookDelivery | null): WebhookDto {
@@ -238,6 +243,35 @@ export async function deleteWebhook(userId: string, id: string): Promise<boolean
   state.cursors.delete(id);
   state.hooksCache = null;
   return deleted.length > 0;
+}
+
+/** Re-enable an owned webhook in place after rechecking that its stored URL does not target Markdoc. */
+export async function enableWebhook(userId: string, id: string, ownOrigins: readonly string[] = ownOriginKeys(null)): Promise<WebhookDto | null> {
+  const db = await getDb();
+  const [existing] = await db
+    .select()
+    .from(schema.webhooks)
+    .where(and(eq(schema.webhooks.id, id), eq(schema.webhooks.userId, userId)))
+    .limit(1);
+  if (!existing) return null;
+  validateWebhookUrl(existing.url, ownOrigins);
+
+  const [updated] = await db
+    .update(schema.webhooks)
+    .set({ active: true, failures: 0 })
+    .where(and(eq(schema.webhooks.id, id), eq(schema.webhooks.userId, userId)))
+    .returning();
+  if (!updated) return null;
+
+  state.cursors.delete(id);
+  state.hooksCache = null;
+  const [lastDelivery] = await db
+    .select()
+    .from(schema.webhookDeliveries)
+    .where(eq(schema.webhookDeliveries.webhookId, id))
+    .orderBy(desc(schema.webhookDeliveries.createdAt))
+    .limit(1);
+  return toDto(updated, lastDelivery ?? null);
 }
 
 /** Active webhooks of a user, for `/api/me` (no secret). */

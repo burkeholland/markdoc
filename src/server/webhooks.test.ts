@@ -10,17 +10,20 @@ delete process.env.DATABASE_URL;
 
 type TestActor = { id: string; login: string; name: string; image: null };
 let actor: TestActor | null = null;
+let bearer: string | null = null;
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
-vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+vi.mock("next/headers", () => ({ headers: async () => new Headers(bearer ? { authorization: `Bearer ${bearer}` } : {}) }));
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, upsertCollaborator, removeCollaborator } = await import("@/server/documents");
+const { createApiToken } = await import("@/server/tokens");
 const { createCollabServer, shutdownCollab } = await import("@/server/collab/hocuspocus");
 const { registerCollab } = await import("@/server/collab/registry");
 const { POST: postComment } = await import("@/app/api/documents/[id]/comments/route");
 const webhooks = await import("@/server/webhooks");
-const { createWebhook, listWebhooks, deleteWebhook, sendTestWebhook, deliverWebhook, sweepWebhooks, verifyWebhookSignature, signWebhookBody, setWebhookRetryDelays, settleWebhookDeliveries, stopWebhookDispatcher, startWebhookDispatcher, activeWebhooksFor, pruneDeliveries, ownOriginKeys, WebhookDocumentNotFoundError } = webhooks;
+const { createWebhook, listWebhooks, deleteWebhook, enableWebhook, sendTestWebhook, deliverWebhook, sweepWebhooks, verifyWebhookSignature, signWebhookBody, setWebhookRetryDelays, settleWebhookDeliveries, stopWebhookDispatcher, startWebhookDispatcher, activeWebhooksFor, pruneDeliveries, ownOriginKeys, WebhookDocumentNotFoundError } = webhooks;
 const { POST: postWebhook } = await import("@/app/api/webhooks/route");
+const { POST: enableWebhookRoute } = await import("@/app/api/webhooks/[id]/enable/route");
 
 interface Received {
   headers: IncomingMessage["headers"];
@@ -382,6 +385,98 @@ describe("outbound webhooks", () => {
     await new Promise((r) => setTimeout(r, 150));
     expect(received).toHaveLength(0);
     await deleteWebhook(alice.id, hook.id);
+  });
+
+  it("re-enables only an owned hook in place, is idempotent, and makes it visible to the dispatcher", async () => {
+    received.length = 0;
+    respondWith = 200;
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
+    const db = await getDb();
+    await db.update(schema.webhooks).set({ active: false, failures: 20 }).where(eq(schema.webhooks.id, created.id));
+    await db.insert(schema.webhookDeliveries).values({ id: "enable-history", webhookId: created.id, event: "comment.added", status: 500, durationMs: 12, attempt: 4 });
+
+    // Populate the dispatcher cache while this hook is inactive.
+    actor = bob;
+    await postComment(new Request(`http://localhost/api/documents/${docId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "While disabled." }) }), { params: Promise.resolve({ id: docId }) });
+    await sweepWebhooks();
+    await settleWebhookDeliveries();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(received).toHaveLength(0);
+
+    const callEnable = (id: string) => enableWebhookRoute(new Request(`http://localhost/api/webhooks/${id}/enable`, { method: "POST" }), { params: Promise.resolve({ id }) });
+    expect(await enableWebhook(bob.id, created.id)).toBeNull();
+    actor = bob;
+    const foreign = await callEnable(created.id);
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toEqual({ error: "Webhook not found" });
+    actor = alice;
+    const missing = await callEnable("missing-hook");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "Webhook not found" });
+
+    const token = await createApiToken(alice.id, "Webhook route test");
+    actor = null;
+    bearer = token.token;
+    try {
+      const agent = await callEnable(created.id);
+      expect(agent.status).toBe(403);
+      expect(await agent.json()).toEqual({ error: "Webhooks can only be managed from a signed-in browser session" });
+    } finally {
+      bearer = null;
+      actor = alice;
+    }
+
+    const [before] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    const historyBefore = await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.webhookId, created.id));
+    const enabled = await callEnable(created.id);
+    expect(enabled.status).toBe(200);
+    const body = (await enabled.json()) as { webhook: Record<string, unknown> };
+    expect(body.webhook).toMatchObject({ id: created.id, url: receiverUrl, events: ["comment.added"], documentIds: [docId], active: true, failures: 0, lastDelivery: { status: 500, attempt: 4, event: "comment.added" } });
+    expect(body.webhook).not.toHaveProperty("secret");
+
+    const [after] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    expect(after).toMatchObject({ active: true, failures: 0, secret: before.secret, url: before.url, events: before.events, documentIds: before.documentIds, createdAt: before.createdAt });
+    expect(await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.webhookId, created.id))).toEqual(historyBefore);
+    expect(await activeWebhooksFor(alice.id)).toContainEqual({ id: created.id, url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
+
+    const again = await callEnable(created.id);
+    expect(again.status).toBe(200);
+    expect((await again.json()) as { webhook: Record<string, unknown> }).toMatchObject({ webhook: { id: created.id, active: true, failures: 0 } });
+
+    received.length = 0;
+    actor = bob;
+    await postComment(new Request(`http://localhost/api/documents/${docId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "After enable." }) }), { params: Promise.resolve({ id: docId }) });
+    await waitFor(() => received.some((entry) => entry.json.body === "After enable."), 1000);
+    await settleWebhookDeliveries();
+    expect(received.some((entry) => entry.json.body === "While disabled.")).toBe(false);
+    await deleteWebhook(alice.id, created.id);
+  });
+
+  it("keeps a self-targeting stored webhook disabled and unchanged", async () => {
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["mention"] });
+    const db = await getDb();
+    await db.update(schema.webhooks).set({ active: false, failures: 20 }).where(eq(schema.webhooks.id, created.id));
+    const [before] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+
+    actor = alice;
+    const receiverPort = (receiver.address() as AddressInfo).port;
+    const previousPort = process.env.PORT;
+    process.env.PORT = String(receiverPort);
+    try {
+      await expect(enableWebhook(alice.id, created.id)).rejects.toThrow("A webhook cannot point at Markdoc itself");
+    } finally {
+      if (previousPort === undefined) delete process.env.PORT;
+      else process.env.PORT = previousPort;
+    }
+
+    const host = `localhost:${receiverPort}`;
+    const refused = await enableWebhookRoute(new Request(`http://${host}/api/webhooks/${created.id}/enable`, { method: "POST", headers: { Host: host } }), { params: Promise.resolve({ id: created.id }) });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "A webhook cannot point at Markdoc itself" });
+    const [after] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    expect(after).toEqual(before);
+    expect(await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.webhookId, created.id))).toEqual([]);
+    await deleteWebhook(alice.id, created.id);
   });
 
   it("sends a test event once, without retries, and resets the failure count on success", async () => {

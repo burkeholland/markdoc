@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { WebhooksPanel } from "./webhooks-panel";
 
@@ -9,6 +9,34 @@ const fetchMock = vi.fn<typeof fetch>();
 function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const disabledWebhook = {
+  id: "disabled-hook",
+  url: "https://receiver.example/disabled",
+  events: ["comment.added"],
+  documentIds: null,
+  active: false,
+  failures: 20,
+  createdAt: "2026-09-01T12:00:00.000Z",
+  lastDelivery: { status: 500, at: "2026-09-01T12:01:00.000Z", attempt: 4, event: "comment.added" },
+};
+
+const activeWebhook = {
+  ...disabledWebhook,
+  id: "active-hook",
+  url: "https://receiver.example/active",
+  active: true,
+  failures: 0,
+  lastDelivery: null,
+};
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -59,5 +87,46 @@ describe("Settings → Webhooks: event targets", () => {
 
     fireEvent.click(row!);
     expect(checkbox).toBeChecked();
+  });
+});
+
+describe("Settings → Webhooks: enable a disabled webhook", () => {
+  it("shows Enable only for inactive rows, locks that row while pending, and reloads the active row", async () => {
+    const pending = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, activeWebhook] }))
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(response({ webhooks: [{ ...disabledWebhook, active: true, failures: 0 }] }));
+    render(<WebhooksPanel />);
+
+    const rows = await screen.findAllByTestId("webhook-row");
+    expect(within(rows[0]).getByTestId("webhook-enable")).toBeEnabled();
+    expect(within(rows[1]).queryByTestId("webhook-enable")).toBeNull();
+    expect(screen.getAllByTestId("webhook-enable")).toHaveLength(1);
+
+    fireEvent.click(within(rows[0]).getByTestId("webhook-enable"));
+    expect(within(rows[0]).getByTestId("webhook-enable")).toBeDisabled();
+    expect(within(rows[0]).getByTestId("webhook-test")).toBeDisabled();
+    expect(within(rows[0]).getByTestId("webhook-delete")).toBeDisabled();
+    expect(within(rows[1]).getByTestId("webhook-test")).toBeEnabled();
+    expect(within(rows[1]).getByTestId("webhook-delete")).toBeEnabled();
+
+    await act(async () => pending.resolve(response({ webhook: { ...disabledWebhook, active: true, failures: 0 } })));
+    await waitFor(() => expect(screen.queryByTestId("webhook-enable")).toBeNull());
+    expect(screen.getByTestId("webhook-status")).toHaveTextContent("failed ×0");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/webhooks", "/api/webhooks/disabled-hook/enable", "/api/webhooks"]);
+    expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  });
+
+  it("shows the server reason inline and leaves the disabled row available to retry", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook] }))
+      .mockResolvedValueOnce(response({ error: "A webhook cannot point at Markdoc itself" }, 400));
+    render(<WebhooksPanel />);
+
+    fireEvent.click(await screen.findByTestId("webhook-enable"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A webhook cannot point at Markdoc itself");
+    expect(screen.getByTestId("webhook-enable")).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

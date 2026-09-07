@@ -108,6 +108,7 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   // src/app/api/tokens/[id]/*
   "replace",
   // src/app/api/webhooks/[id]/*
+  "enable",
   "test",
   // src/app/api/auth/[...nextauth]: Auth.js actions and the two provider ids (src/auth.ts)
   "callback",
