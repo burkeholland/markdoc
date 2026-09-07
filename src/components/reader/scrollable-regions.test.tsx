@@ -217,15 +217,15 @@ beforeEach(() => {
       },
     },
   });
-  vi.spyOn(Element.prototype, "getAttribute").mockImplementation(function (name) {
+  vi.spyOn(Element.prototype, "getAttribute").mockImplementation(function (this: Element, name) {
     if (name.toLowerCase() === "tabindex") tabIndexReads.push(this);
     return nativeGetAttribute.call(this, name);
   });
-  vi.spyOn(Element.prototype, "setAttribute").mockImplementation(function (name, value) {
+  vi.spyOn(Element.prototype, "setAttribute").mockImplementation(function (this: Element, name, value) {
     if (name.toLowerCase() === "tabindex") tabIndexWrites.push({ target: this, value });
     return nativeSetAttribute.call(this, name, value);
   });
-  vi.spyOn(Element.prototype, "removeAttribute").mockImplementation(function (name) {
+  vi.spyOn(Element.prototype, "removeAttribute").mockImplementation(function (this: Element, name) {
     if (name.toLowerCase() === "tabindex") tabIndexWrites.push({ target: this, value: null });
     return nativeRemoveAttribute.call(this, name);
   });
