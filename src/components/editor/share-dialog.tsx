@@ -23,6 +23,15 @@ type CollaboratorListState =
   | { documentId: string; status: "loading" }
   | { documentId: string; status: "error"; message: string; retrying: boolean }
   | { documentId: string; status: "loaded"; owner: CollaboratorOwner | null; collaborators: CollaboratorDto[] };
+type ShareVisit = { documentId: string };
+type CollaboratorListRequest = { visit: ShareVisit; request: number; documentId: string };
+type AddCollaboratorOperation = {
+  visit: ShareVisit;
+  request: number;
+  documentId: string;
+  login: string;
+  role: Exclude<Role, "owner">;
+};
 type PermissionContext = { documentId: string };
 type PermissionOperation = { context: PermissionContext; documentId: string };
 type CollaboratorPermissionOperation = PermissionOperation & { login: string; kind: "role" | "remove" };
@@ -41,15 +50,16 @@ export const ShareDialog = memo(function ShareDialog({
   isOwner: boolean;
   onDocChange: (doc: DocumentDto) => void;
 }) {
+  const shareVisit = useRef<ShareVisit | null>(null);
   const [collaboratorList, setCollaboratorList] = useState<CollaboratorListState | null>(null);
   const listRequest = useRef(0);
-  const listPending = useRef<{ request: number; documentId: string } | null>(null);
+  const listPending = useRef<CollaboratorListRequest | null>(null);
   const [login, setLogin] = useState("");
   const [role, setRole] = useState<Exclude<Role, "owner">>("editor");
   const roleSelect = useRef<HTMLSelectElement>(null);
   const [busy, setBusy] = useState(false);
   const addRequest = useRef(0);
-  const addPending = useRef<{ request: number; documentId: string } | null>(null);
+  const addPending = useRef<AddCollaboratorOperation | null>(null);
   const [addError, setAddError] = useState<{ documentId: string; message: string } | null>(null);
   const permissionContext = useRef<PermissionContext | null>(null);
   const collaboratorPermissionOwners = useRef(new Map<string, CollaboratorPermissionOperation>());
@@ -82,10 +92,21 @@ export const ShareDialog = memo(function ShareDialog({
     }
   }, [showLinkFallback]);
 
-  const loadCollaborators = useCallback(async (documentId: string, mode: "load" | "retry" = "load", supersede = false) => {
-    if (!supersede && listPending.current?.documentId === documentId) return;
+  const retireShareRequests = useCallback((expectedVisit?: ShareVisit) => {
+    if (expectedVisit && shareVisit.current !== expectedVisit) return;
+    shareVisit.current = null;
+    listRequest.current += 1;
+    listPending.current = null;
+    addRequest.current += 1;
+    addPending.current = null;
+  }, []);
 
-    const ownership = { request: ++listRequest.current, documentId };
+  const loadCollaborators = useCallback(async (documentId: string, mode: "load" | "retry" = "load", supersede = false) => {
+    const visit = shareVisit.current;
+    if (!visit || visit.documentId !== documentId) return;
+    if (!supersede && listPending.current?.visit === visit) return;
+
+    const ownership = { visit, request: ++listRequest.current, documentId };
     listPending.current = ownership;
     setCollaboratorList((current) =>
       mode === "retry" && current?.documentId === documentId && current.status === "error"
@@ -94,36 +115,30 @@ export const ShareDialog = memo(function ShareDialog({
     );
     try {
       const res = await api.documents.collaborators(documentId);
-      if (listPending.current !== ownership || listRequest.current !== ownership.request) return;
+      if (shareVisit.current !== visit || listPending.current !== ownership || listRequest.current !== ownership.request) return;
       setCollaboratorList({ documentId, status: "loaded", owner: res.owner, collaborators: res.collaborators });
     } catch (e) {
-      if (listPending.current !== ownership || listRequest.current !== ownership.request) return;
+      if (shareVisit.current !== visit || listPending.current !== ownership || listRequest.current !== ownership.request) return;
       setCollaboratorList({ documentId, status: "error", message: apiErrorText(e, "Could not load collaborators"), retrying: false });
     } finally {
-      if (listPending.current === ownership) listPending.current = null;
+      if (shareVisit.current === visit && listPending.current === ownership) listPending.current = null;
     }
   }, []);
 
   useEffect(() => {
-    listRequest.current += 1;
-    listPending.current = null;
-    addRequest.current += 1;
-    addPending.current = null;
+    retireShareRequests();
     setBusy(false);
     setAddError(null);
     if (!open) {
       setCollaboratorList(null);
       return;
     }
+    const visit = { documentId: doc.id };
+    shareVisit.current = visit;
     setCollaboratorList({ documentId: doc.id, status: "loading" });
     void loadCollaborators(doc.id);
-    return () => {
-      listRequest.current += 1;
-      listPending.current = null;
-      addRequest.current += 1;
-      addPending.current = null;
-    };
-  }, [open, doc.id, loadCollaborators]);
+    return () => retireShareRequests(visit);
+  }, [open, doc.id, loadCollaborators, retireShareRequests]);
 
   useEffect(() => {
     const context = open ? { documentId: doc.id } : null;
@@ -153,23 +168,31 @@ export const ShareDialog = memo(function ShareDialog({
   const currentLinkPermissionOperation = linkPermissionOperation?.documentId === doc.id ? linkPermissionOperation : null;
 
   const add = async () => {
-    if (!login.trim() || addPending.current) return;
-    const documentId = doc.id;
-    const ownership = { request: ++addRequest.current, documentId };
+    const visit = shareVisit.current;
+    const trimmedLogin = login.trim();
+    const selectedRole = role;
+    if (!visit || visit.documentId !== doc.id || !trimmedLogin || addPending.current) return;
+    const ownership = {
+      visit,
+      request: ++addRequest.current,
+      documentId: visit.documentId,
+      login: trimmedLogin,
+      role: selectedRole,
+    };
     addPending.current = ownership;
     setBusy(true);
     setAddError(null);
     try {
-      await api.documents.addCollaborator(documentId, login.trim(), role);
-      if (addPending.current !== ownership || addRequest.current !== ownership.request) return;
+      await api.documents.addCollaborator(ownership.documentId, ownership.login, ownership.role);
+      if (shareVisit.current !== visit || addPending.current !== ownership || addRequest.current !== ownership.request) return;
       setLogin("");
-      await loadCollaborators(documentId, "load", true);
+      await loadCollaborators(ownership.documentId, "load", true);
     } catch (e) {
-      if (addPending.current === ownership && addRequest.current === ownership.request) {
-        setAddError({ documentId, message: apiErrorText(e, "Could not add collaborator") });
+      if (shareVisit.current === visit && addPending.current === ownership && addRequest.current === ownership.request) {
+        setAddError({ documentId: ownership.documentId, message: apiErrorText(e, "Could not add collaborator") });
       }
     } finally {
-      if (addPending.current === ownership && addRequest.current === ownership.request) {
+      if (shareVisit.current === visit && addPending.current === ownership && addRequest.current === ownership.request) {
         addPending.current = null;
         setBusy(false);
       }
@@ -278,6 +301,7 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   const close = () => {
+    retireShareRequests();
     permissionContext.current = null;
     collaboratorPermissionOwners.current.clear();
     linkPermissionOwner.current = null;
