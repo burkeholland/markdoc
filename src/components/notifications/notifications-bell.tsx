@@ -6,7 +6,14 @@ import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/pr
 import { RelativeTime } from "@/components/ui/relative-time";
 import type { NotificationDto } from "@/lib/api";
 import type { NotificationKind } from "@/server/db/schema";
-import { markAllNotificationsRead, markNotificationRead, refreshNotifications, useNotifications, sentence } from "@/lib/notifications-store";
+import {
+  markAllNotificationsRead,
+  markNotificationRead,
+  refreshNotifications,
+  retryNotificationRead,
+  useNotifications,
+  sentence,
+} from "@/lib/notifications-store";
 import { cn } from "@/lib/utils";
 
 const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; className?: string }>> = {
@@ -43,12 +50,12 @@ export interface NotificationsBellProps {
 
 /** Bell with an unread badge; the popover lists the latest notifications. */
 export function NotificationsBell({ currentDocId, onOpen, ready = true }: NotificationsBellProps) {
-  const { items, unreadCount, loaded, loading, loadError } = useNotifications(ready);
+  const { items, unreadCount, loaded, loading, loadError, readAllPending, readError, readErrorPending } = useNotifications(ready);
   const [open, setOpen] = useState(false);
 
   const openItem = (n: NotificationDto) => {
-    setOpen(false);
     void markNotificationRead(n.id);
+    setOpen(false);
     onOpen(n);
   };
 
@@ -81,6 +88,21 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
           {unreadCount > 0 && <span className="text-xs text-ink-4">{unreadCount} unread</span>}
         </div>
         <ul className="scrollbar-thin max-h-[420px] overflow-y-auto py-1" aria-label="Notifications">
+          {readError && (
+            <li className="px-3 py-2">
+              <div className="flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+                <span>{readError.message}</span>
+                <button
+                  type="button"
+                  className="btn btn-outline h-7 shrink-0 px-2 text-xs"
+                  disabled={readErrorPending}
+                  onClick={() => void retryNotificationRead(readError)}
+                >
+                  {readErrorPending ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+            </li>
+          )}
           {!loaded && !loadError && loading && <li className="px-3 py-8 text-center text-sm text-ink-4">Loading notifications…</li>}
           {!loaded && loadError && (
             <li className="px-3 py-4">
@@ -133,11 +155,11 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
           <button
             type="button"
             className="btn btn-ghost h-7 gap-1.5 px-2 text-xs"
-            disabled={unreadCount === 0}
+            disabled={unreadCount === 0 || readAllPending}
             onClick={() => void markAllNotificationsRead()}
             data-testid="notifications-read-all"
           >
-            <CheckCheck size={14} /> Mark all read
+            <CheckCheck size={14} /> {readAllPending ? "Marking all…" : "Mark all read"}
           </button>
         </div>
       </PopoverContent>
