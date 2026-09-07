@@ -6,7 +6,12 @@ import { markdownBindingKey } from "../sync/markdown-binding";
 import { SUGGESTIONS_ORIGIN } from "../collab/suggestions";
 import type { TextOp } from "../sync/text-diff";
 import type { SourceHighlight } from "../codemirror/highlights";
-import { elementEditorRange, eventHighlightTarget, type HighlightClickHandler } from "../highlight-activation";
+import {
+  elementEditorRange,
+  eventHighlightTarget,
+  type HighlightClickHandler,
+  type HighlightTarget,
+} from "../highlight-activation";
 import { isRefresh, refreshNow, scheduleRefresh } from "./refresh";
 
 const key = new PluginKey<DecorationSet>("sourceHighlights");
@@ -126,6 +131,38 @@ export interface HighlightHandlers {
   getFocusSource?: () => number | null;
 }
 
+export interface PositionedHighlightTarget extends HighlightTarget {
+  sourcePosition: number;
+}
+
+function richHighlightAtPosition(
+  view: EditorView,
+  session: CollabSession,
+  event: MouseEvent,
+  position: number,
+): PositionedHighlightTarget | null {
+  const target = eventHighlightTarget(view.dom, event.target);
+  if (!target) return null;
+  const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
+  const ownsRange =
+    range &&
+    key
+      .getState(view.state)
+      ?.find(range.from, range.to, (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id)
+      .some((decoration) => decoration.from <= range.from && range.to <= decoration.to);
+  if (!ownsRange) return null;
+  return { ...target, sourcePosition: session.binding.getSourceMap().pmToSrc(position) };
+}
+
+export function richHighlightAtPointer(
+  view: EditorView,
+  session: CollabSession,
+  event: MouseEvent,
+): PositionedHighlightTarget | null {
+  const position = view.posAtCoords({ left: event.clientX, top: event.clientY });
+  return position ? richHighlightAtPosition(view, session, event, position.pos) : null;
+}
+
 /** Comments, suggestions and cross-pane focus rendered as inline decorations in the rich editor. */
 export function richHighlightsPlugin(session: CollabSession, handlers: HighlightHandlers = {}): Plugin<DecorationSet> {
   const getFocus = () => handlers.getFocusSource?.() ?? null;
@@ -144,18 +181,19 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
     props: {
       decorations: (state) => key.getState(state),
       handleClick(view, pos, event) {
-        if (event.button !== 0 || event.ctrlKey) return false;
-        const target = eventHighlightTarget(view.dom, event.target);
+        if (
+          event.button !== 0 ||
+          event.detail > 1 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey ||
+          event.shiftKey
+        ) {
+          return false;
+        }
+        const target = richHighlightAtPosition(view, session, event, pos);
         if (!target) return false;
-        const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
-        const ownsRange =
-          range &&
-          key
-            .getState(view.state)
-            ?.find(range.from, range.to, (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id)
-            .some((decoration) => decoration.from <= range.from && range.to <= decoration.to);
-        if (!ownsRange) return false;
-        handlers.onHighlightClick?.(target.kind, target.id, session.binding.getSourceMap().pmToSrc(pos));
+        handlers.onHighlightClick?.(target.kind, target.id, target.sourcePosition);
         return false;
       },
     },

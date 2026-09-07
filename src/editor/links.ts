@@ -14,7 +14,7 @@ export function safeLinkHref(href: unknown): string | undefined {
 }
 
 function isOpenClick(event: MouseEvent): boolean {
-  return event.button === 0 && !event.altKey && !event.shiftKey &&
+  return event.button === 0 && event.detail <= 1 && !event.altKey && !event.shiftKey &&
     (isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
 }
 
@@ -31,9 +31,10 @@ export function installLinkInteractions(
   dom: HTMLElement,
   hrefAt: (event: MouseEvent) => string | null,
   selectDragged: (start: MouseEvent, current: MouseEvent) => void,
+  preserveSelectionAt?: (event: MouseEvent) => boolean,
 ): () => void {
   const owner = dom.ownerDocument;
-  let pending: { start: MouseEvent; dragged: boolean } | null = null;
+  let pending: { start: MouseEvent; dragged: boolean; preserveOnly: boolean } | null = null;
   let clearTimer: ReturnType<typeof setTimeout> | undefined;
 
   const resolve = (event: MouseEvent) => {
@@ -71,22 +72,28 @@ export function installLinkInteractions(
   };
   const down = (event: MouseEvent) => {
     clear();
-    if (event.defaultPrevented || !resolve(event)) return;
-    pending = { start: event, dragged: false };
+    if (event.defaultPrevented) return;
+    const href = resolve(event);
+    const preserveOnly = !href && isOpenClick(event) && !!preserveSelectionAt?.(event);
+    if (!href && !preserveOnly) return;
+    pending = { start: event, dragged: false, preserveOnly };
     owner.addEventListener("mousemove", move, true);
     owner.addEventListener("mouseup", up, true);
     consume(event);
   };
   const click = (event: MouseEvent) => {
-    const dragged = pending?.dragged;
+    const gesture = pending;
     clear();
     if (event.defaultPrevented) return;
-    if (dragged && event.button === 0) {
+    if (gesture?.dragged && event.button === 0) {
       consume(event);
       return;
     }
     const href = resolve(event);
-    if (!href) return;
+    if (!href) {
+      if (gesture?.preserveOnly) consume(event);
+      return;
+    }
     consume(event);
     window.open(href, "_blank", "noopener");
   };

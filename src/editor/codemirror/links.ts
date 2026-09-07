@@ -1,8 +1,10 @@
 import { ViewPlugin } from "@codemirror/view";
 import type * as Md from "mdast";
 import type { CollabSession } from "../collab/session";
+import { ownsLiveHighlight } from "../highlight-activation";
 import { parseMarkdown } from "../markdown/parse";
 import { installLinkInteractions } from "../links";
+import { sourceHighlightAtPointer } from "./highlights";
 
 function definitionHref(node: Md.Nodes, identifier: string): string | null {
   if (node.type === "definition" && node.identifier === identifier) return node.url;
@@ -30,7 +32,7 @@ function linkAt(node: Md.Nodes, pos: number, tree: Md.Root): string | null {
   return null;
 }
 
-export function sourceLinks(session: Pick<CollabSession, "binding">) {
+export function sourceLinks(session: CollabSession) {
   return ViewPlugin.define((view) => {
     let fallback: { text: string; tree: Md.Root } | null = null;
     const destroy = installLinkInteractions(view.dom, (event) => {
@@ -54,6 +56,9 @@ export function sourceLinks(session: Pick<CollabSession, "binding">) {
       if (anchor === null || head === null) return;
       view.focus();
       view.dispatch({ selection: { anchor, head }, userEvent: "select.pointer", scrollIntoView: true });
+    }, (event) => {
+      const target = sourceHighlightAtPointer(view, event);
+      return !!target && ownsLiveHighlight(session, target.kind, target.id, target.sourcePosition);
     });
     return { destroy };
   });
