@@ -109,11 +109,13 @@ export function installDocumentAutosave<Context>(server: Hocuspocus<Context>) {
     return immediately ? flush(entry) : Promise.resolve();
   };
 
-  server.flushPendingStores = () => {
-    for (const entry of entries.values()) {
-      if (entry.queue.dirty) {
-        void flush(entry).catch((error: unknown) => console.error("[collab] document flush failed", error));
-      }
+  server.flushPendingStores = async () => {
+    while (true) {
+      const pending = Array.from(entries.values())
+        .filter((entry) => entry.queue.dirty)
+        .map((entry) => flush(entry));
+      if (!pending.length) return;
+      await Promise.all(pending);
     }
   };
 

@@ -171,6 +171,33 @@ describe("server-owned content persistence integration (no sockets/database)", (
     expect(f.writes).toHaveLength(1);
   });
 
+  it("keeps the shutdown flush pending until a dirty document is durably stored", async () => {
+    const f = await fixture();
+    const saving = deferred();
+    f.store.mockImplementationOnce(() => saving.promise);
+    f.text.insert(0, "pending ");
+    let settled = false;
+    const flushing = Promise.resolve(f.server.flushPendingStores()).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.writes).toHaveLength(1);
+    expect(settled).toBe(false);
+    saving.resolve();
+    await flushing;
+    expect(f.writes[0].content).toBe("pending original");
+    expect(f.server.debouncer.isDebounced("onStoreDocument-document")).toBe(false);
+  });
+
+  it("rejects the shutdown flush when a dirty store fails", async () => {
+    const f = await fixture();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    f.store.mockRejectedValueOnce(new Error("database details must remain internal"));
+    f.text.insert(0, "pending ");
+    await expect(Promise.resolve(f.server.flushPendingStores())).rejects.toThrow(
+      "database details must remain internal",
+    );
+    expect(f.server.documents.has("document")).toBe(true);
+  });
+
   it("preserves synchronous REST durability and rejects a failed direct flush without unloading data", async () => {
     const f = await fixture();
     vi.spyOn(console, "error").mockImplementation(() => {});

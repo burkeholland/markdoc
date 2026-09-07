@@ -181,19 +181,24 @@ export function createCollabServer() {
     },
 
     async onStoreDocument(payload: onStoreDocumentPayload<CollabContext>) {
-      const { documentName, lastContext } = payload;
-      const { content, title, ystate, savedAt } = documentStoreSnapshot(payload);
-      const db = await getDb();
-      const patch: Partial<typeof schema.documents.$inferInsert> = {
-        ystate,
-        content,
-        updatedAt: savedAt,
-        lastEditedBy: lastContext?.userId ?? null,
-      };
-      if (title) patch.title = title;
-      const stored = await db.update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning();
-      if (stored.length !== 1) throw new Error("Document no longer exists");
-      await maybeAutoVersion(documentName, content, lastContext ?? null);
+      try {
+        const { documentName, lastContext } = payload;
+        const { content, title, ystate, savedAt } = documentStoreSnapshot(payload);
+        const db = await getDb();
+        const patch: Partial<typeof schema.documents.$inferInsert> = {
+          ystate,
+          content,
+          updatedAt: savedAt,
+          lastEditedBy: lastContext?.userId ?? null,
+        };
+        if (title) patch.title = title;
+        const stored = await db.update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning();
+        if (stored.length !== 1) throw new Error("Document no longer exists");
+        await maybeAutoVersion(documentName, content, lastContext ?? null);
+      } catch {
+        // Hocuspocus logs hook messages; keep database and document details out of that diagnostic.
+        throw new Error("Document persistence failed");
+      }
     },
   });
   const autosave = installDocumentAutosave(hocuspocus);
@@ -212,15 +217,55 @@ async function maybeAutoVersion(docId: string, content: string, ctx: CollabConte
   await addVersion({ documentId: docId, content, kind: "auto", createdBy: ctx?.userId, createdByName: ctx?.name });
 }
 
-/** Close all connections, flush pending stores, and wait for documents to unload. */
+function settleBeforeDeadline(work: Promise<void>, deadline: number, failure: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      complete();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(failure))),
+      Math.max(0, deadline - Date.now()),
+    );
+    work.then(
+      () => finish(resolve),
+      () => finish(() => reject(new Error(failure))),
+    );
+  });
+}
+
+/** Close all connections, await pending stores, and require every document to unload. */
 export async function shutdownCollab(hocuspocus: Hocuspocus<CollabContext>, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   hocuspocus.closeConnections();
-  hocuspocus.flushPendingStores();
-  const start = Date.now();
-  while (hocuspocus.getDocumentsCount() > 0 && Date.now() - start < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  await hocuspocus.hooks("onDestroy", { instance: hocuspocus });
+  const stores = settleBeforeDeadline((async () => {
+    do {
+      await hocuspocus.flushPendingStores();
+      if (hocuspocus.getDocumentsCount() > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } while (hocuspocus.getDocumentsCount() > 0);
+  })(), deadline, "Collaboration stores did not settle");
+  const documents = settleBeforeDeadline((async () => {
+    while (hocuspocus.getDocumentsCount() > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  })(), deadline, "Collaboration documents did not drain");
+  const results = await Promise.allSettled([stores, documents]);
+  const destroyed = await Promise.resolve()
+    .then(() => hocuspocus.hooks("onDestroy", { instance: hocuspocus }))
+    .then(
+      () => ({ status: "fulfilled" as const }),
+      () => ({ status: "rejected" as const, reason: new Error("Collaboration cleanup failed") }),
+    );
+  const failures = results
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (destroyed.status === "rejected") failures.push(destroyed.reason);
+  if (failures.length) throw new AggregateError(failures, "Collaboration shutdown failed");
 }
 
 /**
