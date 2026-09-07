@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import type { DocumentDto } from "@/server/dto";
 
 const collaborators = vi.fn();
@@ -101,6 +102,31 @@ const precedes = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b
 
 function renderDialog(props: Partial<{ isOwner: boolean; doc: DocumentDto }> = {}) {
   return render(<ShareDialog open onOpenChange={vi.fn()} doc={props.doc ?? doc} isOwner={props.isOwner ?? true} onDocChange={vi.fn()} />);
+}
+
+function ShareDialogBoundary({
+  open = true,
+  currentDoc = doc,
+  present = true,
+  instance = 0,
+  boundary = 0,
+  onBoundary,
+  onOpenChange = vi.fn(),
+  onDocChange = vi.fn(),
+}: {
+  open?: boolean;
+  currentDoc?: DocumentDto;
+  present?: boolean;
+  instance?: number;
+  boundary?: number;
+  onBoundary?: () => void;
+  onOpenChange?: (open: boolean) => void;
+  onDocChange?: (doc: DocumentDto) => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <ShareDialog key={instance} open={open} onOpenChange={onOpenChange} doc={currentDoc} isOwner onDocChange={onDocChange} /> : null;
 }
 
 /** The dialog with its people list loaded (the link row sits under it). */
@@ -311,6 +337,403 @@ describe("ShareDialog collaborator list recovery", () => {
     expect(screen.getByTestId("share-login")).toHaveValue("");
     expect(addCollaborator).toHaveBeenCalledTimes(2);
     expect(collaborators).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ShareDialog authority layout boundaries", () => {
+  let unhandled: unknown[];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  const flush = async (...promises: Promise<unknown>[]) => {
+    await act(async () => {
+      await Promise.allSettled(promises);
+      await Promise.resolve();
+    });
+  };
+
+  beforeEach(() => {
+    unhandled = [];
+    process.on("unhandledRejection", onUnhandled);
+  });
+
+  afterEach(() => {
+    process.off("unhandledRejection", onUnhandled);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "retires an initial-list $settlement before a document replacement's parent layout effect",
+    async (settlement) => {
+      const oldList = deferred<CollaboratorResponse>();
+      const currentList = deferred<CollaboratorResponse>();
+      const retry = deferred<CollaboratorResponse>();
+      const nextDoc = { ...doc, id: "doc-boundary-next", title: "Boundary next" };
+      collaborators.mockReset().mockReturnValueOnce(oldList.promise).mockReturnValueOnce(currentList.promise).mockReturnValueOnce(retry.promise);
+      const view = render(<ShareDialogBoundary />);
+      expect(collaborators).toHaveBeenCalledOnce();
+
+      view.rerender(
+        <ShareDialogBoundary
+          currentDoc={nextDoc}
+          boundary={1}
+          onBoundary={() => {
+            expect(collaborators).toHaveBeenCalledTimes(2);
+            expect(collaborators).toHaveBeenLastCalledWith(nextDoc.id);
+            if (settlement === "success") oldList.resolve(collaboratorResponse("Stale owner", "Stale collaborator"));
+            else oldList.reject(new ApiError(503, "Retired initial list failed"));
+          }}
+        />,
+      );
+      await flush(oldList.promise);
+
+      expect(screen.getByTestId("collaborator-list-loading")).toBeInTheDocument();
+      expect(screen.queryByText("Stale owner")).toBeNull();
+      expect(screen.queryByText("Stale collaborator")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      currentList.reject(new ApiError(503, "Current list failed"));
+      await flush(currentList.promise);
+      expect(await screen.findByRole("alert")).toHaveTextContent("Current list failed");
+      const retryButton = screen.getByRole("button", { name: "Retry" });
+      fireEvent.click(retryButton);
+      fireEvent.click(retryButton);
+      expect(collaborators).toHaveBeenCalledTimes(3);
+      expect(collaborators).toHaveBeenLastCalledWith(nextDoc.id);
+
+      retry.resolve(collaboratorResponse("Current owner", "Current collaborator"));
+      await flush(retry.promise);
+      expect(await screen.findByText("Current collaborator")).toBeInTheDocument();
+      expect(screen.getByText("Current owner")).toBeInTheDocument();
+      expect(collaborators.mock.calls.map(([id]) => id)).toEqual([DOC_ID, nextDoc.id, nextDoc.id]);
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "retires a Retry $settlement before a same-document instance replacement's parent layout effect",
+    async (settlement) => {
+      const retiredRetry = deferred<CollaboratorResponse>();
+      const replacementList = deferred<CollaboratorResponse>();
+      collaborators
+        .mockReset()
+        .mockRejectedValueOnce(new ApiError(503, "Initial list failed"))
+        .mockReturnValueOnce(retiredRetry.promise)
+        .mockReturnValueOnce(replacementList.promise);
+      const view = render(<ShareDialogBoundary />);
+      fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+      expect(collaborators).toHaveBeenCalledTimes(2);
+
+      view.rerender(
+        <ShareDialogBoundary
+          instance={1}
+          boundary={1}
+          onBoundary={() => {
+            expect(collaborators).toHaveBeenCalledTimes(3);
+            if (settlement === "success") retiredRetry.resolve(collaboratorResponse("Stale retry owner", "Stale retry collaborator"));
+            else retiredRetry.reject(new ApiError(503, "Retired Retry failed"));
+          }}
+        />,
+      );
+      await flush(retiredRetry.promise);
+
+      expect(screen.getByTestId("collaborator-list-loading")).toBeInTheDocument();
+      expect(screen.queryByText("Stale retry owner")).toBeNull();
+      expect(screen.queryByText("Stale retry collaborator")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      replacementList.resolve(collaboratorResponse("Replacement owner", "Replacement collaborator"));
+      await flush(replacementList.promise);
+      expect(await screen.findByText("Replacement collaborator")).toBeInTheDocument();
+      expect(collaborators).toHaveBeenCalledTimes(3);
+      expect(collaborators).toHaveBeenNthCalledWith(3, DOC_ID);
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  const replacementCases = [
+    { label: "same-document instance replacement", currentDoc: doc, instance: 1 },
+    { label: "document replacement", currentDoc: { ...doc, id: "doc-operation-next", title: "Operation next" }, instance: 0 },
+  ];
+
+  it.each(replacementCases)(
+    "retires Add, role, removal, and link-access work before a $label parent layout effect",
+    async ({ currentDoc, instance }) => {
+      const oldAdd = deferred<unknown>();
+      const oldRole = deferred<unknown>();
+      const oldRemove = deferred<unknown>();
+      const oldLink = deferred<{ document: DocumentDto }>();
+      const currentList = deferred<CollaboratorResponse>();
+      const currentAdd = deferred<unknown>();
+      const currentRole = deferred<unknown>();
+      const currentRemove = deferred<unknown>();
+      const currentLink = deferred<{ document: DocumentDto }>();
+      const refresh = deferred<CollaboratorResponse>();
+      collaborators
+        .mockReset()
+        .mockResolvedValueOnce(collaboratorRows("bob", "charlie"))
+        .mockReturnValueOnce(currentList.promise)
+        .mockReturnValueOnce(refresh.promise);
+      addCollaborator
+        .mockReset()
+        .mockReturnValueOnce(oldAdd.promise)
+        .mockReturnValueOnce(oldRole.promise)
+        .mockReturnValueOnce(currentAdd.promise)
+        .mockReturnValueOnce(currentRole.promise);
+      removeCollaborator.mockReset().mockReturnValueOnce(oldRemove.promise).mockReturnValueOnce(currentRemove.promise);
+      patchDocument.mockReset().mockReturnValueOnce(oldLink.promise).mockReturnValueOnce(currentLink.promise);
+      const onDocChange = vi.fn();
+      const view = render(<ShareDialogBoundary onDocChange={onDocChange} />);
+      await screen.findByText("@charlie");
+
+      fireEvent.change(screen.getByTestId("share-login"), { target: { value: "old-user" } });
+      fireEvent.click(screen.getByTestId("share-add"));
+      fireEvent.change(within(collaboratorRow("bob")).getByRole("combobox"), { target: { value: "viewer" } });
+      fireEvent.click(within(collaboratorRow("charlie")).getByRole("button", { name: "Remove charlie" }));
+      fireEvent.change(screen.getByTestId("link-access"), { target: { value: "view" } });
+
+      view.rerender(
+        <ShareDialogBoundary
+          currentDoc={currentDoc}
+          instance={instance}
+          boundary={1}
+          onDocChange={onDocChange}
+          onBoundary={() => {
+            expect(collaborators).toHaveBeenCalledTimes(2);
+            expect(collaborators).toHaveBeenLastCalledWith(currentDoc.id);
+            oldLink.resolve({ document: { ...doc, linkAccess: "view" } });
+            oldRemove.reject(new ApiError(503, "Retired removal failed"));
+            oldAdd.resolve({});
+            oldRole.resolve({});
+          }}
+        />,
+      );
+      await flush(oldLink.promise, oldRemove.promise, oldAdd.promise, oldRole.promise);
+
+      expect(collaborators).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("collaborator-list-loading")).toBeInTheDocument();
+      expect(screen.queryByText("@old-user")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(onDocChange).not.toHaveBeenCalled();
+
+      currentList.resolve(collaboratorRows("bob", "charlie"));
+      await flush(currentList.promise);
+      await screen.findByText("@charlie");
+      fireEvent.change(screen.getByTestId("share-login"), { target: { value: "current-user" } });
+      fireEvent.change(screen.getByTestId("share-role"), { target: { value: "commenter" } });
+      fireEvent.click(screen.getByTestId("share-add"));
+      fireEvent.change(within(collaboratorRow("bob")).getByRole("combobox"), { target: { value: "viewer" } });
+      fireEvent.click(within(collaboratorRow("charlie")).getByRole("button", { name: "Remove charlie" }));
+      fireEvent.change(screen.getByTestId("link-access"), { target: { value: "edit" } });
+
+      expect(addCollaborator).toHaveBeenNthCalledWith(1, DOC_ID, "old-user", "editor");
+      expect(addCollaborator).toHaveBeenNthCalledWith(2, DOC_ID, "bob", "viewer");
+      expect(addCollaborator).toHaveBeenNthCalledWith(3, currentDoc.id, "current-user", "commenter");
+      expect(addCollaborator).toHaveBeenNthCalledWith(4, currentDoc.id, "bob", "viewer");
+      expect(removeCollaborator).toHaveBeenNthCalledWith(1, DOC_ID, "charlie");
+      expect(removeCollaborator).toHaveBeenNthCalledWith(2, currentDoc.id, "charlie");
+      expect(patchDocument).toHaveBeenNthCalledWith(1, DOC_ID, { linkAccess: "view" });
+      expect(patchDocument).toHaveBeenNthCalledWith(2, currentDoc.id, { linkAccess: "edit" });
+
+      const confirmedDoc = { ...currentDoc, linkAccess: "edit" as const };
+      currentRemove.resolve({});
+      currentRole.resolve({});
+      currentLink.resolve({ document: confirmedDoc });
+      await flush(currentRemove.promise, currentRole.promise, currentLink.promise);
+      expect(within(collaboratorRow("bob")).getByRole("combobox")).toHaveValue("viewer");
+      expect(screen.queryByText("@charlie")).toBeNull();
+      expect(onDocChange).toHaveBeenCalledOnce();
+      expect(onDocChange).toHaveBeenCalledWith(confirmedDoc);
+      expect(screen.getByTestId("link-access")).toBeEnabled();
+
+      currentAdd.resolve({});
+      await flush(currentAdd.promise);
+      await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(3));
+      expect(screen.getByTestId("share-login")).toHaveValue("");
+      fireEvent.change(screen.getByTestId("share-login"), { target: { value: "queued-user" } });
+      expect(screen.getByTestId("share-add")).toBeDisabled();
+      refresh.resolve(collaboratorRows("bob", "current-user"));
+      await flush(refresh.promise);
+      expect(await screen.findByText("@current-user")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByTestId("share-add")).toBeEnabled());
+      expect(collaborators.mock.calls.map(([id]) => id)).toEqual([DOC_ID, currentDoc.id, currentDoc.id]);
+      expect(addCollaborator).toHaveBeenCalledTimes(4);
+      expect(removeCollaborator).toHaveBeenCalledTimes(2);
+      expect(patchDocument).toHaveBeenCalledTimes(2);
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  it("retires every operation before explicit close calls onOpenChange", async () => {
+    const pendingAdd = deferred<unknown>();
+    const pendingRole = deferred<unknown>();
+    const pendingRemove = deferred<unknown>();
+    const pendingLink = deferred<unknown>();
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    addCollaborator.mockReset().mockReturnValueOnce(pendingAdd.promise).mockReturnValueOnce(pendingRole.promise);
+    removeCollaborator.mockReset().mockReturnValueOnce(pendingRemove.promise);
+    patchDocument.mockReset().mockReturnValueOnce(pendingLink.promise);
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn((nextOpen: boolean) => {
+      if (nextOpen) return;
+      pendingLink.reject(new ApiError(503, "Closed link failed"));
+      pendingRemove.resolve({});
+      pendingRole.resolve({});
+      pendingAdd.resolve({});
+    });
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByText("@charlie");
+    const loginInput = screen.getByTestId("share-login");
+    const bobRole = within(collaboratorRow("bob")).getByRole("combobox");
+    const charlieRemove = within(collaboratorRow("charlie")).getByRole("button", { name: "Remove charlie" });
+    const linkAccess = screen.getByTestId("link-access");
+
+    fireEvent.change(loginInput, { target: { value: "close-user" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    fireEvent.change(bobRole, { target: { value: "viewer" } });
+    fireEvent.click(charlieRemove);
+    fireEvent.change(linkAccess, { target: { value: "view" } });
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await flush(pendingLink.promise, pendingRemove.promise, pendingRole.promise, pendingAdd.promise);
+
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(collaborators).toHaveBeenCalledOnce();
+    expect(loginInput).toHaveValue("close-user");
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    expect(bobRole).toHaveValue("editor");
+    expect(bobRole).toBeDisabled();
+    expect(screen.getByText("@charlie")).toBeInTheDocument();
+    expect(charlieRemove).toBeDisabled();
+    expect(linkAccess).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+  });
+
+  it("retires Add before a same-document close boundary and admits one independent operation after reopen", async () => {
+    const retiredAdd = deferred<unknown>();
+    const reopenedList = deferred<CollaboratorResponse>();
+    const currentAdd = deferred<unknown>();
+    const refresh = deferred<CollaboratorResponse>();
+    collaborators
+      .mockReset()
+      .mockResolvedValueOnce(collaboratorRows("bob"))
+      .mockReturnValueOnce(reopenedList.promise)
+      .mockReturnValueOnce(refresh.promise);
+    addCollaborator.mockReset().mockReturnValueOnce(retiredAdd.promise).mockReturnValueOnce(currentAdd.promise);
+    const view = render(<ShareDialogBoundary />);
+    await screen.findByText("@bob");
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "retired-user" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+
+    view.rerender(
+      <ShareDialogBoundary
+        open={false}
+        boundary={1}
+        onBoundary={() => {
+          expect(collaborators).toHaveBeenCalledOnce();
+          retiredAdd.resolve({});
+        }}
+      />,
+    );
+    await flush(retiredAdd.promise);
+    expect(collaborators).toHaveBeenCalledOnce();
+
+    view.rerender(
+      <ShareDialogBoundary
+        boundary={2}
+        onBoundary={() => {
+          expect(collaborators).toHaveBeenCalledTimes(2);
+          expect(collaborators).toHaveBeenLastCalledWith(DOC_ID);
+        }}
+      />,
+    );
+    reopenedList.resolve(collaboratorRows("bob"));
+    await flush(reopenedList.promise);
+    expect(await screen.findByText("@bob")).toBeInTheDocument();
+    expect(screen.getByTestId("share-login")).toHaveValue("retired-user");
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "current-user" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    expect(addCollaborator).toHaveBeenNthCalledWith(1, DOC_ID, "retired-user", "editor");
+    expect(addCollaborator).toHaveBeenNthCalledWith(2, DOC_ID, "current-user", "editor");
+
+    currentAdd.resolve({});
+    await flush(currentAdd.promise);
+    await waitFor(() => expect(collaborators).toHaveBeenCalledTimes(3));
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "queued-user" } });
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    refresh.resolve(collaboratorRows("bob", "current-user"));
+    await flush(refresh.promise);
+    expect(await screen.findByText("@current-user")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("share-add")).toBeEnabled());
+    expect(collaborators).toHaveBeenCalledTimes(3);
+    expect(unhandled).toEqual([]);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "retires a pending initial-list $settlement before the parent layout effect after unmount",
+    async (settlement) => {
+      const pendingList = deferred<CollaboratorResponse>();
+      collaborators.mockReset().mockReturnValueOnce(pendingList.promise);
+      const view = render(<ShareDialogBoundary />);
+
+      view.rerender(
+        <ShareDialogBoundary
+          present={false}
+          boundary={1}
+          onBoundary={() => {
+            if (settlement === "success") pendingList.resolve(collaboratorResponse("Unmounted owner", "Unmounted collaborator"));
+            else pendingList.reject(new ApiError(503, "Unmounted list failed"));
+          }}
+        />,
+      );
+      await flush(pendingList.promise);
+
+      expect(collaborators).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.queryByText("Unmounted owner")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  it("retires Add and permission settlements before the parent layout effect after unmount", async () => {
+    const pendingAdd = deferred<unknown>();
+    const pendingRole = deferred<unknown>();
+    const pendingRemove = deferred<unknown>();
+    const pendingLink = deferred<unknown>();
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    addCollaborator.mockReset().mockReturnValueOnce(pendingAdd.promise).mockReturnValueOnce(pendingRole.promise);
+    removeCollaborator.mockReset().mockReturnValueOnce(pendingRemove.promise);
+    patchDocument.mockReset().mockReturnValueOnce(pendingLink.promise);
+    const onDocChange = vi.fn();
+    const view = render(<ShareDialogBoundary onDocChange={onDocChange} />);
+    await screen.findByText("@charlie");
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "unmounted-user" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    fireEvent.change(within(collaboratorRow("bob")).getByRole("combobox"), { target: { value: "viewer" } });
+    fireEvent.click(within(collaboratorRow("charlie")).getByRole("button", { name: "Remove charlie" }));
+    fireEvent.change(screen.getByTestId("link-access"), { target: { value: "view" } });
+
+    view.rerender(
+      <ShareDialogBoundary
+        present={false}
+        boundary={1}
+        onDocChange={onDocChange}
+        onBoundary={() => {
+          pendingLink.reject(new ApiError(503, "Unmounted link failed"));
+          pendingRemove.resolve({});
+          pendingRole.resolve({});
+          pendingAdd.resolve({});
+        }}
+      />,
+    );
+    await flush(pendingLink.promise, pendingRemove.promise, pendingRole.promise, pendingAdd.promise);
+
+    expect(collaborators).toHaveBeenCalledOnce();
+    expect(addCollaborator).toHaveBeenCalledTimes(2);
+    expect(removeCollaborator).toHaveBeenCalledOnce();
+    expect(patchDocument).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
   });
 });
 
