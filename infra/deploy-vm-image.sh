@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
-  echo 'usage: deploy-vm-image.sh <registry> <image-by-digest> <app-version> <tenant-id> [operation-id]' >&2
+if [ "$#" -ne 5 ]; then
+  echo 'usage: deploy-vm-image.sh <registry> <image-by-digest> <app-version> <tenant-id> <operation-id>' >&2
   exit 2
 fi
 
@@ -10,15 +10,11 @@ registry="$1"
 image="$2"
 app_version="$3"
 tenant_id="$4"
-operation_id="${5:-}"
-if [ -n "$operation_id" ]; then
-  if ! [[ "$operation_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-    echo 'operation id must be a UUID' >&2
-    exit 2
-  fi
-  printf 'markdoc-vm-image-operation:%s\n' "$operation_id"
+operation_id="$5"
+if ! [[ "$operation_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  echo 'operation id must be a UUID' >&2
+  exit 2
 fi
-
 case "$image" in
   "${registry}/markdoc@sha256:"*) ;;
   *)
@@ -32,6 +28,26 @@ if ! [[ "$app_version" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 test -f /etc/markdoc/markdoc.env
 test -f /etc/systemd/system/markdoc-app.service
+
+if ! declare -F run_markdoc_release_wal_gate >/dev/null; then
+  echo 'release WAL gate source is missing' >&2
+  exit 1
+fi
+unset \
+  MARKDOC_RELEASE_WAL_GATE_OPERATION \
+  MARKDOC_RELEASE_WAL_GATE_TEST_ROOT \
+  MARKDOC_RELEASE_WAL_GATE_ARCHIVE_TIMEOUT \
+  MARKDOC_RELEASE_WAL_GATE_RESTORE_TIMEOUT \
+  MARKDOC_RELEASE_WAL_GATE_START_TIMEOUT \
+  MARKDOC_RELEASE_WAL_GATE_QUERY_TIMEOUT \
+  MARKDOC_RELEASE_WAL_GATE_STOP_TIMEOUT
+run_markdoc_release_wal_gate "$operation_id"
+if [ "${MARKDOC_RELEASE_WAL_GATE_OPERATION:-}" != "$operation_id" ]; then
+  echo 'release WAL recovery evidence is missing for this operation' >&2
+  exit 1
+fi
+unset MARKDOC_RELEASE_WAL_GATE_OPERATION
+printf 'markdoc-vm-image-operation:%s\n' "$operation_id"
 
 rollback_dir="$(mktemp -d)"
 chmod 0700 "$rollback_dir"
@@ -75,9 +91,7 @@ raise SystemExit(0 if all(health.get(key) is True for key in ("ok", "db", "colla
   if [ "$status" -eq 0 ] && [ "$deployment_succeeded" = true ]; then
     printf '%s\n' "$health"
     echo markdoc-vm-image-ready
-    if [ -n "$operation_id" ]; then
-      printf 'markdoc-vm-image-operation-ready:%s\n' "$operation_id"
-    fi
+    printf 'markdoc-vm-image-operation-ready:%s\n' "$operation_id"
   fi
   exit "$status"
 }

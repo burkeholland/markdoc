@@ -333,19 +333,29 @@ readiness check, and is the release owner's action.
    not reasons to reset, reinitialize or migrate data blindly.
 3. Select the accepted ref in the manual workflow and enter `deploy`. It builds
    that checkout's `GITHUB_SHA` in ACR, pins the image digest, then sends
-   [`infra/deploy-vm-image.sh`](infra/deploy-vm-image.sh) to `markdoc-pg`.
-   The script reuses the protected `/etc/markdoc/markdoc.env`, updates
-   `APP_VERSION`, writes the application unit and restarts the single service.
-   Do not run infrastructure helpers, including `deploy/azure.ps1`, or a repair
+   [`infra/release-wal-gate.sh`](infra/release-wal-gate.sh) and
+   [`infra/deploy-vm-image.sh`](infra/deploy-vm-image.sh), in that order, through
+   one VM invocation on `markdoc-pg`. Before image pull or application change,
+   the deployment script invokes the gate: capture the primary flush LSN,
+   switch WAL, await local archive acknowledgement and require the exact
+   checksum-suffixed WAL object in the remote pgBackRest repository, then
+   restore/recover a fresh private scratch cluster from that repository to the
+   endpoint, require SQL-ready replay at or beyond it, and remove only that
+   owned scratch state. Archival, restore, startup, replay or cleanup failure
+   stops before migrations and cutover.
+4. After that proof, the script reuses the protected
+   `/etc/markdoc/markdoc.env`, updates `APP_VERSION`, writes the application
+   unit and restarts the single service. Require local and public `/api/health`
+   to report `ok`, `db`, `collab` true and the accepted full SHA as `version`;
+   retain the gate endpoint/object/replay receipt, new digest and outcome. Do
+   not run infrastructure helpers, including `deploy/azure.ps1`, or a repair
    tool or second writer alongside the release. Current main's infrastructure
    safeguards are retained: `deploy/azure.ps1` refuses non-`-InfraOnly` use and
-   database password rotation. Internal VM port 3000 is not the retired
-   Windows development server.
-4. Require local and public `/api/health` to report `ok`, `db`, `collab` true
-   and the accepted full SHA as `version`; retain the new digest and outcome.
-   The workflow checks those fields, not feature behavior or data recovery.
-   This is a restart, not a Container Apps revision/traffic swap. The release
-   owner must finish the requested feature checks before reporting success.
+   database password rotation. Internal VM port 3000 is not the retired Windows
+   development server. The workflow checks control metadata and health, not
+   feature behavior. This is a restart, not a Container Apps revision/traffic
+   swap. The release owner must finish the requested feature checks before
+   reporting success.
 
 [Rollback](docs/vm-hosting.md#rollback) is an application-image operation,
 not a PostgreSQL schema/data rollback. The script attempts recovery on failures
