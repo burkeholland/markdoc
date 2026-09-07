@@ -279,15 +279,21 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
                       data-version-number={v.number}
                     >
                       <div className="flex items-start gap-2">
-                        <input
-                          type="checkbox"
-                          className="mt-1 h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
-                          checked={compare.includes(v.id)}
-                          onChange={() => void toggleCompare(v)}
-                          aria-label={`Compare v${v.number}`}
+                        <label
+                          className="-mx-[5px] flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center"
                           title="Tick two versions to compare them"
-                          data-testid="version-compare"
-                        />
+                          data-testid="version-compare-target"
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
+                            checked={compare.includes(v.id)}
+                            onChange={() => void toggleCompare(v)}
+                            aria-label={`Compare v${v.number}`}
+                            title="Tick two versions to compare them"
+                            data-testid="version-compare"
+                          />
+                        </label>
                         <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => void select(v)}>
                           <KindIcon kind={v.kind} />
                           <div className="min-w-0 flex-1">
@@ -481,7 +487,7 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
     <div className="flex h-full min-h-0 flex-col outline-none" data-testid="version-diff" ref={rootRef} tabIndex={0} onKeyDown={onKeyDown}>
       <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-6 py-2">
         <span className="pane-label">Comparing</span>
-        <span className="text-sm text-ink-2" data-testid="diff-header">
+        <span className="min-w-0 break-words text-sm text-ink-2" data-testid="diff-header">
           {newSide ? (
             <>
               {versionLabel(oldSide.version)} → {versionLabel(newSide.version)}{" "}

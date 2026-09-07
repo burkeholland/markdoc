@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { devices, type Browser, type Locator, type Page } from "@playwright/test";
+import { devices, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { createDocument, cssPx, devLogin, focusRichEnd, selectTextInRich, uniqueLogin, waitForEditor, waitForHydration } from "./helpers";
 
@@ -131,6 +131,89 @@ const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => {
     const el = document.scrollingElement!;
     return el.scrollWidth <= window.innerWidth;
+  });
+
+/** Page-level horizontal overflow in CSS px (#1556's census read): 0 when nothing widens the page. */
+const pageOverflowX = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+
+/**
+ * A 120-character title and a 200-character first paragraph with no break opportunity at all (letters
+ * and digits only — a browser may break after a `/` or `-`, so a pasted URL is the softer case).
+ * The excerpt keeps the first 160 characters, unbroken.
+ */
+const LONG_TITLE = "TitleWordNoSpaces".repeat(8).slice(0, 120);
+const LONG_WORD = "Xk7".repeat(67).slice(0, 200);
+
+type RectGeometry = { x: number; y: number; width: number; height: number };
+type TextGeometry = { renderedWidth: number; clientWidth: number; intrinsicWidth: number; height: number };
+
+async function blockNonLoopbackTraffic(context: BrowserContext) {
+  await context.route(/^https?:\/\//, async (route) => {
+    const host = new URL(route.request().url()).hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") await route.continue();
+    else await route.abort();
+  });
+}
+
+const textGeometry = (locator: Locator): Promise<TextGeometry> =>
+  locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      renderedWidth: rect.width,
+      clientWidth: element.clientWidth,
+      intrinsicWidth: element.scrollWidth,
+      height: rect.height,
+    };
+  });
+
+function expectTextFits(value: TextGeometry, label: string) {
+  expect(value.renderedWidth, `${label}: rendered width`).toBeLessThanOrEqual(value.clientWidth + 1);
+  expect(value.intrinsicWidth, `${label}: intrinsic width`).toBeLessThanOrEqual(value.clientWidth + 1);
+}
+
+const overflowGeometry = (page: Page) =>
+  page.evaluate(() => {
+    const root = document.documentElement;
+    return { scrollWidth: root.scrollWidth, clientWidth: root.clientWidth, overflow: root.scrollWidth - root.clientWidth };
+  });
+
+function rectDelta(a: RectGeometry, b: RectGeometry) {
+  return Math.max(...(["x", "y", "width", "height"] as const).map((key) => Math.abs(a[key] - b[key])));
+}
+
+const normalCardStyleControl = (card: Locator) =>
+  card.evaluate((link) => {
+    const item = link.closest("li");
+    const title = link.querySelector("h3");
+    const excerpt = link.querySelector("p");
+    if (!(item instanceof HTMLElement) || !(title instanceof HTMLElement) || !(excerpt instanceof HTMLElement)) {
+      throw new Error("Normal document card geometry nodes are missing");
+    }
+    const elements = [item, title, excerpt];
+    const originalClasses = elements.map((element) => element.className);
+    const rect = (element: Element): RectGeometry => {
+      const value = element.getBoundingClientRect();
+      return { x: value.x, y: value.y, width: value.width, height: value.height };
+    };
+    const snapshot = () => ({ card: rect(link), title: rect(title), excerpt: rect(excerpt) });
+    const acceptedClasses = [
+      item.classList.contains("min-w-0"),
+      title.classList.contains("break-words"),
+      excerpt.classList.contains("break-words"),
+    ];
+    const accepted = snapshot();
+    let control: ReturnType<typeof snapshot> | undefined;
+    try {
+      item.classList.remove("min-w-0");
+      title.classList.remove("break-words");
+      excerpt.classList.remove("break-words");
+      control = snapshot();
+    } finally {
+      elements.forEach((element, index) => {
+        element.className = originalClasses[index];
+      });
+    }
+    return { acceptedClasses, accepted, control: control!, restored: snapshot() };
   });
 
 const settingsViewports = [
@@ -575,6 +658,103 @@ test.describe("phone", () => {
     console.log(`[1525] / phone CLS: ${cls.toFixed(3)}`);
     expect(cls).toBeLessThanOrEqual(0.1);
     await context.close();
+  });
+
+  test.describe("task 2814 dashboard geometry", () => {
+    // The synthetic document contents must not be retained in a failed-run artifact.
+    test.use({ trace: "off", screenshot: "off", video: "off" });
+
+    // One long unbroken word as a card's title or first paragraph (a pasted URL, an identifier) made the
+    // single-column grid as wide as the word. The two phone widths read every affected dashboard surface;
+    // the desktop read is a same-browser style control, not an old-release binary comparison.
+    test("[2814] dashboard long-word and normal-card geometry", async ({ browser }) => {
+      const evidence: unknown[] = [];
+      for (const viewport of [
+        { width: 393, height: 851 },
+        { width: 520, height: 720 },
+      ]) {
+        const context = await browser.newContext({ ...devices["Pixel 5"], viewport, screen: viewport });
+        await blockNonLoopbackTraffic(context);
+        const page = await context.newPage();
+        try {
+          await devLogin(page, uniqueLogin(`phone-long-word-${viewport.width}`));
+          const longId = await createDocument(page, `# ${LONG_TITLE}\n\n${LONG_WORD}\n`, LONG_TITLE);
+          await createDocument(page, "# Normal\n\nA short paragraph.\n", "Normal");
+
+          await page.goto("/");
+          await waitForHydration(page);
+          await expect(page.getByTestId("document-card")).toHaveCount(2);
+          const card = page.locator(`[data-testid="document-card"][href="/d/${longId}"]`);
+          await expect(card).toBeVisible();
+          const dashboard = {
+            overflow: await overflowGeometry(page),
+            title: await textGeometry(card.getByRole("heading")),
+            excerpt: await textGeometry(card.locator("p").first()),
+          };
+          expect(dashboard.overflow.overflow, `${viewport.width}: dashboard overflow-x`).toBe(0);
+          expectTextFits(dashboard.title, `${viewport.width}: dashboard title`);
+          expectTextFits(dashboard.excerpt, `${viewport.width}: dashboard excerpt`);
+          expect(dashboard.excerpt.height, `${viewport.width}: dashboard excerpt height`).toBeLessThanOrEqual(60);
+
+          await page.getByTestId("search").fill(LONG_WORD.slice(20, 40));
+          await expect(page.getByTestId("search-result")).toHaveCount(1);
+          const searchCard = page.locator(`[data-testid="document-card"][href="/d/${longId}"]`);
+          const search = {
+            overflow: await overflowGeometry(page),
+            title: await textGeometry(searchCard.getByRole("heading")),
+            snippet: await textGeometry(searchCard.getByTestId("search-snippet")),
+          };
+          expect(search.overflow.overflow, `${viewport.width}: search overflow-x`).toBe(0);
+          expectTextFits(search.title, `${viewport.width}: search title`);
+          expectTextFits(search.snippet, `${viewport.width}: search snippet`);
+          await page.getByTestId("search-clear").click();
+          await expect(page.getByTestId("document-card")).toHaveCount(2);
+
+          expect((await page.request.delete(`/api/documents/${longId}`)).ok()).toBeTruthy();
+          await page.getByTestId("filter-trash").click();
+          const trashCard = page.getByTestId("trash-card");
+          await expect(trashCard).toHaveCount(1);
+          const trash = {
+            overflow: await overflowGeometry(page),
+            title: await textGeometry(trashCard.getByRole("heading")),
+            excerpt: await textGeometry(trashCard.locator("p").first()),
+          };
+          expect(trash.overflow.overflow, `${viewport.width}: trash overflow-x`).toBe(0);
+          expectTextFits(trash.title, `${viewport.width}: trash title`);
+          expectTextFits(trash.excerpt, `${viewport.width}: trash excerpt`);
+          expect(trash.excerpt.height, `${viewport.width}: trash excerpt height`).toBeLessThanOrEqual(60);
+          evidence.push({ viewport, dashboard, search, trash });
+        } finally {
+          await context.close();
+        }
+      }
+
+      const desktopViewport = { width: 1280, height: 720 };
+      const desktop = await browser.newContext({ viewport: desktopViewport });
+      await blockNonLoopbackTraffic(desktop);
+      const page = await desktop.newPage();
+      try {
+        await devLogin(page, uniqueLogin("normal-card-control"));
+        await createDocument(page, `# ${LONG_TITLE}\n\n${LONG_WORD}\n`, LONG_TITLE);
+        const normalId = await createDocument(page, "# Normal\n\nA short paragraph.\n", "Normal");
+        await page.goto("/");
+        await waitForHydration(page);
+        const normalCard = page.locator(`[data-testid="document-card"][href="/d/${normalId}"]`);
+        await expect(normalCard).toBeVisible();
+        const control = await normalCardStyleControl(normalCard);
+        expect(control.acceptedClasses, "accepted sizing classes are present").toEqual([true, true, true]);
+        for (const part of ["card", "title", "excerpt"] as const) {
+          expect(rectDelta(control.accepted[part], control.control[part]), `desktop ${part}: accepted vs DOM style control`).toBeLessThanOrEqual(1);
+          expect(rectDelta(control.accepted[part], control.restored[part]), `desktop ${part}: classes restored`).toBeLessThanOrEqual(1);
+        }
+        const overflow = await overflowGeometry(page);
+        expect(overflow.overflow, "desktop dashboard overflow-x").toBe(0);
+        evidence.push({ viewport: desktopViewport, overflow, control });
+      } finally {
+        await desktop.close();
+      }
+      console.log(`[2814] dashboard geometry ${JSON.stringify(evidence)}`);
+    });
   });
 
   for (const viewport of settingsViewports) {

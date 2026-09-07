@@ -9,13 +9,14 @@ import type { SlashMenuHandlers } from "@/editor/prosemirror/slash-menu";
 import { createNodeViews } from "@/editor/prosemirror/nodeviews";
 import { refreshRichHighlights } from "@/editor/prosemirror/highlights";
 import type { NoticeAction } from "@/editor/markdown/tsv";
+import type { HighlightClickHandler } from "@/editor/highlight-activation";
 import { useSessionValue } from "./use-session";
 
 export interface RichPaneProps {
   session: CollabSession;
   onReady: (view: EditorView | null) => void;
   onSelection: (head: number, anchor: number) => void;
-  onHighlightClick: (kind: string, id: string | null) => void;
+  onHighlightClick: HighlightClickHandler;
   onLinkShortcut: () => void;
   onCommentShortcut: () => void;
   /** Uploads a pasted or dropped image and returns its URL. */
@@ -46,7 +47,7 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
     const state = createRichEditorState(session, {
       onFocus: () => session.setActiveSurface("rich"),
       onSelection: (head, anchor) => handlers.current.onSelection(head, anchor),
-      onHighlightClick: (kind, id) => handlers.current.onHighlightClick(kind, id),
+      onHighlightClick: (kind, id, sourcePosition) => handlers.current.onHighlightClick(kind, id, sourcePosition),
       onLinkShortcut: () => handlers.current.onLinkShortcut(),
       onCommentShortcut: () => handlers.current.onCommentShortcut(),
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,

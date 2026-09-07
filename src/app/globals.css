@@ -30,6 +30,10 @@
 
 :root {
   color-scheme: light;
+  --safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --safe-area-inset-right: env(safe-area-inset-right, 0px);
+  --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-inset-left: env(safe-area-inset-left, 0px);
   /* Raw palette ("Ink & teal", Burke #1205 / tasks #398 + #416). @theme inline above maps --color-* onto
      these so Tailwind utilities re-resolve when [data-theme] changes. Warm stone inks, a deep teal accent,
      a faintly warm paper behind the preview. Every pair below is WCAG AA (src/app/tokens-contrast.test.ts,
@@ -213,6 +217,32 @@
 .tb-divider {
   display: none;
 }
+.selection-bubble-layer {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 30;
+}
+.selection-bubble-layer::backdrop {
+  background: transparent;
+  pointer-events: none;
+}
+.selection-bubble {
+  pointer-events: auto;
+}
+.selection-bubble-scroll {
+  scrollbar-width: none;
+}
+.selection-bubble-scroll::-webkit-scrollbar {
+  display: none;
+}
 .rich-column {
   background: var(--p-paper);
 }
@@ -325,14 +355,14 @@ body {
   }
   /* A toggle (`role="switch"` button): the track is the button, the thumb slides across on aria-checked. */
   .switch {
-    @apply relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-line-2 bg-surface-3 transition-colors aria-checked:border-accent aria-checked:bg-accent disabled:pointer-events-none disabled:opacity-50;
+    @apply relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-line-2 bg-surface-3 transition-colors aria-checked:border-accent aria-checked:bg-accent disabled:pointer-events-none disabled:opacity-50;
   }
   .switch::after {
     content: "";
-    @apply absolute left-0.5 h-3.5 w-3.5 rounded-full bg-surface shadow-sm transition-transform;
+    @apply absolute left-0.5 h-4 w-4 rounded-full bg-surface shadow-sm transition-transform;
   }
   .switch[aria-checked="true"]::after {
-    @apply translate-x-4;
+    @apply translate-x-[22px];
   }
   /* Skip-to-content link: off-screen until it receives keyboard focus. */
   .skip-link {
@@ -736,6 +766,7 @@ body {
   right: 10px;
   top: 6px;
   width: 72px;
+  min-height: 24px;
   font-family: var(--font-sans);
   font-size: 11px;
   color: var(--color-ink-3);

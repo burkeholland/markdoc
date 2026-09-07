@@ -13,6 +13,7 @@ import type { CodeApi } from "@/editor/codemirror/api";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
+import { activateHighlight } from "@/editor/highlight-activation";
 import { api, ApiError, apiErrorText, type SyncStatusDto } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -396,15 +397,8 @@ export function EditorShell({
   }, [canDockPanel]);
 
   const onHighlightClick = useCallback(
-    (kind: string, id: string | null) => {
-      if (!id) return;
-      if (kind.startsWith("comment")) {
-        session.setActiveComment(id);
-        openAutomaticComments();
-      } else if (kind.startsWith("suggest")) {
-        session.setActiveSuggestion(id);
-        openAutomaticComments();
-      }
+    (kind: string, id: string | null, sourcePosition: number) => {
+      if (activateHighlight(session, kind, id, sourcePosition)) openAutomaticComments();
     },
     [session, openAutomaticComments],
   );
@@ -1204,7 +1198,7 @@ export function EditorShell({
               </div>
             )}
             {versionPreview ? (
-              <div className="flex h-full min-h-0 flex-col">
+              <div className="flex h-full min-h-0 min-w-0 flex-col">
                 {versionPreview.version.id === "github-remote" && (
                   <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2" data-testid="sync-compare-bar">
                     <span>Comparing GitHub\u2019s copy with this document.</span>

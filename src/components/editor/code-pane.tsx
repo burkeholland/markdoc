@@ -10,6 +10,7 @@ import type { ImageUploader } from "@/editor/prosemirror/images";
 import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlights";
 import { collectHighlights } from "@/editor/prosemirror/highlights";
 import type { NoticeAction } from "@/editor/markdown/tsv";
+import type { HighlightClickHandler } from "@/editor/highlight-activation";
 import { useSessionValue } from "./use-session";
 
 function sameHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
@@ -30,7 +31,7 @@ export interface CodePaneProps {
   /** The mounted view and the CodeMirror values the shell needs with it; both null again on unmount. */
   onReady: (view: EditorView | null, api: CodeApi | null) => void;
   onSelection: (head: number, anchor: number) => void;
-  onHighlightClick: (kind: string, id: string | null) => void;
+  onHighlightClick: HighlightClickHandler;
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
@@ -58,7 +59,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
     const setup = createCodeEditorSetup(session, {
       onFocus: () => session.setActiveSurface("code"),
       onSelection: (head, anchor) => handlers.current.onSelection(head, anchor),
-      onHighlightClick: (kind, id) => handlers.current.onHighlightClick(kind, id),
+      onHighlightClick: (kind, id, sourcePosition) => handlers.current.onHighlightClick(kind, id, sourcePosition),
       uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
       onImageError: (message) => handlers.current.onImageError?.(message),
       onNotice: (message, action) => handlers.current.onNotice?.(message, action),

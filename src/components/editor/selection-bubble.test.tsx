@@ -1,0 +1,772 @@
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { SetStateAction } from "react";
+import { EditorState, TextSelection } from "prosemirror-state";
+import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
+import type * as Y from "yjs";
+import { CollabSession } from "@/editor/collab/session";
+import { makeCollabUser } from "@/editor/collab/shared";
+import { SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
+import { schema } from "@/editor/markdown/schema";
+import { createRichEditorState } from "@/editor/prosemirror/setup";
+import { EditorActions, EMPTY_FORMAT } from "./actions";
+import { SelectionBubble } from "./selection-bubble";
+
+const screen = within(document.documentElement);
+vi.mock("@hocuspocus/provider", async () => {
+  const { Awareness } = await import("y-protocols/awareness");
+  return {
+    HocuspocusProvider: class {
+      awareness: InstanceType<typeof Awareness>;
+      constructor(options: { document: Y.Doc }) { this.awareness = new Awareness(options.document); }
+      destroy() { this.awareness.destroy(); }
+    },
+  };
+});
+const stateWrites = vi.hoisted(() => ({ count: 0 }));
+vi.mock("react", async (original) => {
+  const react = await original<typeof import("react")>();
+  return {
+    ...react,
+    useState<T>(initial: T | (() => T)) {
+      const [value, setValue] = react.useState(initial);
+      const set = react.useCallback((next: SetStateAction<T>) => {
+        stateWrites.count++;
+        setValue(next);
+      }, [setValue]);
+      return [value, set] as const;
+    },
+  };
+});
+
+const originalRangeRects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects");
+const originalFonts = Object.getOwnPropertyDescriptor(document, "fonts");
+const originalVisualViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
+const originalFullscreen = Object.getOwnPropertyDescriptor(document, "fullscreenElement");
+const originalShowPopover = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "showPopover");
+const originalHidePopover = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "hidePopover");
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  for (const [target, key, descriptor] of [
+    [Range.prototype, "getClientRects", originalRangeRects],
+    [document, "fonts", originalFonts],
+    [window, "visualViewport", originalVisualViewport],
+    [document, "fullscreenElement", originalFullscreen],
+    [HTMLElement.prototype, "showPopover", originalShowPopover],
+    [HTMLElement.prototype, "hidePopover", originalHidePopover],
+  ] as const) {
+    if (descriptor) Object.defineProperty(target, key, descriptor);
+    else Reflect.deleteProperty(target, key);
+  }
+  document.body.replaceChildren();
+  document.body.removeAttribute("style");
+});
+
+function environment({ resize = true, popover = false } = {}) {
+  let nextFrame = 1;
+  const frames = new Map<number, FrameRequestCallback>();
+  const capturedFrames: FrameRequestCallback[] = [];
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const id = nextFrame++;
+    frames.set(id, callback);
+    capturedFrames.push(callback);
+    return id;
+  });
+  const cancel = vi.fn((id: number) => frames.delete(id));
+  vi.stubGlobal("requestAnimationFrame", request);
+  vi.stubGlobal("cancelAnimationFrame", cancel);
+  const flush = () => act(() => {
+    const pending = [...frames];
+    frames.clear();
+    for (const [, callback] of pending) callback(0);
+  });
+
+  const resizes: TestResizeObserver[] = [];
+  class TestResizeObserver implements ResizeObserver {
+    targets = new Set<Element>();
+    observe = vi.fn((target: Element) => { this.targets.add(target); });
+    unobserve = vi.fn((target: Element) => { this.targets.delete(target); });
+    disconnect = vi.fn(() => { this.targets.clear(); });
+    constructor(readonly callback: ResizeObserverCallback) { resizes.push(this); }
+    fire() { this.callback([], this); }
+  }
+  vi.stubGlobal("ResizeObserver", resize ? TestResizeObserver : undefined);
+  const mutations: TestMutationObserver[] = [];
+  class TestMutationObserver implements MutationObserver {
+    targets = new Map<Node, MutationObserverInit>();
+    observe = vi.fn((target: Node, options: MutationObserverInit = {}) => { this.targets.set(target, options); });
+    disconnect = vi.fn(() => { this.targets.clear(); });
+    takeRecords = () => [];
+    constructor(readonly callback: MutationCallback) { mutations.push(this); }
+    fire(records: MutationRecord[] = []) { this.callback(records, this); }
+  }
+  vi.stubGlobal("MutationObserver", TestMutationObserver);
+
+  const visual = Object.assign(new EventTarget(), { offsetLeft: 0, offsetTop: 0, width: 800, height: 600 });
+  Object.defineProperty(window, "visualViewport", { configurable: true, value: visual });
+  const ready = Promise.withResolvers<void>();
+  const readyThen = vi.spyOn(ready.promise, "then");
+  const fonts = Object.assign(new EventTarget(), { ready: ready.promise });
+  Object.defineProperty(document, "fonts", { configurable: true, value: fonts });
+  let fullscreen: Element | null = null;
+  Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => fullscreen });
+  const enterFullscreen = (element: Element | null) => {
+    fullscreen = element;
+    document.dispatchEvent(new Event("fullscreenchange"));
+  };
+
+  const opened = new Set<HTMLElement>();
+  if (popover) {
+    Object.defineProperties(HTMLElement.prototype, {
+      showPopover: { configurable: true, value: vi.fn(function (this: HTMLElement) { opened.add(this); }) },
+      hidePopover: { configurable: true, value: vi.fn(function (this: HTMLElement) { opened.delete(this); }) },
+    });
+    const matches = Element.prototype.matches;
+    vi.spyOn(Element.prototype, "matches").mockImplementation(function (this: Element, selector) {
+      return selector === ":popover-open" ? this instanceof HTMLElement && opened.has(this) : matches.call(this, selector);
+    });
+  } else {
+    Object.defineProperty(HTMLElement.prototype, "showPopover", { configurable: true, value: undefined });
+  }
+
+  let layerRect = new DOMRect(0, 0, 800, 600);
+  const getRect = Element.prototype.getBoundingClientRect;
+  const layoutRead = vi.fn();
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    layoutRead();
+    return this.hasAttribute("data-selection-bubble-layer") ? layerRect : getRect.call(this);
+  });
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+    return this.hasAttribute("data-selection-bubble-layer") ? 800 : 0;
+  });
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.hasAttribute("data-selection-bubble-layer") ? 600 : 0;
+  });
+  let fragments = [new DOMRect(100, 200, 40, 20)];
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => Object.assign([...fragments], { item: (index: number) => fragments[index] ?? null }),
+  });
+
+  type Listener = { target: EventTarget; type: string; callback: EventListenerOrEventListenerObject; capture: boolean; removed: number };
+  const listeners: Listener[] = [];
+  const add = EventTarget.prototype.addEventListener;
+  const remove = EventTarget.prototype.removeEventListener;
+  // Ignore React's delegated handlers; track the toolbar's exact native ownership pairs.
+  const trackAdd = (target: EventTarget, type: string, callback: EventListenerOrEventListenerObject | null, options?: AddEventListenerOptions | boolean) => {
+    if (typeof callback === "function" && ["schedule", "onPointerDown", "onPointerUp", "onBlur"].includes(callback.name)) {
+      listeners.push({ target, type, callback, capture: typeof options === "boolean" ? options : !!options?.capture, removed: 0 });
+    }
+  };
+  const trackRemove = (target: EventTarget, type: string, callback: EventListenerOrEventListenerObject | null, options?: EventListenerOptions | boolean) => {
+    const capture = typeof options === "boolean" ? options : !!options?.capture;
+    const owned = listeners.findLast((entry) => entry.target === target && entry.type === type && entry.callback === callback && entry.capture === capture && !entry.removed);
+    if (owned) owned.removed++;
+  };
+  vi.spyOn(EventTarget.prototype, "addEventListener").mockImplementation(function (this: EventTarget, type, callback, options) {
+    trackAdd(this, type, callback, options);
+    add.call(this, type, callback, options);
+  });
+  vi.spyOn(EventTarget.prototype, "removeEventListener").mockImplementation(function (this: EventTarget, type, callback, options) {
+    trackRemove(this, type, callback, options);
+    remove.call(this, type, callback, options);
+  });
+  // jsdom's Window methods do not delegate through EventTarget.prototype.
+  const windowAdd = window.addEventListener;
+  const windowRemove = window.removeEventListener;
+  vi.spyOn(window, "addEventListener").mockImplementation((type, callback, options) => {
+    trackAdd(window, type, callback, options);
+    windowAdd.call(window, type, callback, options);
+  });
+  vi.spyOn(window, "removeEventListener").mockImplementation((type, callback, options) => {
+    trackRemove(window, type, callback, options);
+    windowRemove.call(window, type, callback, options);
+  });
+  const replay = () => {
+    for (const observer of resizes) observer.fire();
+    for (const observer of mutations) observer.fire();
+    for (const { target, type, callback } of listeners) {
+      const event = new Event(type);
+      if (typeof callback === "function") callback.call(target, event);
+      else callback.handleEvent(event);
+    }
+    for (const callback of capturedFrames) callback(0);
+    for (const [callback] of readyThen.mock.calls) callback?.(undefined);
+  };
+  return {
+    frames, capturedFrames, request, cancel, flush, resizes, mutations, visual, fonts, ready,
+    enterFullscreen, opened, listeners, replay, layoutRead,
+    setLayerRect: (rect: DOMRect) => { layerRect = rect; },
+    setFragments: (rects: DOMRect[]) => { fragments = rects; },
+  };
+}
+
+function fixture() {
+  const scroller = document.createElement("div");
+  const editor = document.createElement("div");
+  const paragraph = document.createElement("p");
+  paragraph.textContent = "Selected passage";
+  editor.append(paragraph);
+  scroller.append(editor);
+  document.body.append(scroller);
+  let host = new DOMRect(0, 100, 800, 500);
+  Object.defineProperty(scroller, "getBoundingClientRect", { configurable: true, value: vi.fn(() => host) });
+  const doc = schema.node("doc", null, [schema.node("paragraph", null, schema.text(paragraph.textContent))]);
+  let state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 1, 9) });
+  const stateRead = vi.fn(() => state);
+  const domRead = vi.fn(() => editor);
+  const hasFocus = vi.fn(() => true);
+  const coords = vi.fn((pos: number) => ({ left: pos === 1 ? 100 : 140, right: pos === 1 ? 100 : 140, top: 200, bottom: 220 }));
+  const view = {
+    get dom() { return domRead(); },
+    get state() { return stateRead(); },
+    isDestroyed: false,
+    hasFocus,
+    coordsAtPos: coords,
+    domAtPos: (pos: number) => ({ node: paragraph.firstChild!, offset: pos - 1 }),
+    dispatch: (transaction: Parameters<EditorView["dispatch"]>[0]) => { state = state.apply(transaction); },
+    focus: vi.fn(),
+  } as unknown as EditorView;
+  const session = { activeSurface: "rich", canEdit: true, canComment: true, undoManager: { stopCapturing: vi.fn() } } as unknown as CollabSession;
+  const actions = new EditorActions(session, vi.fn());
+  actions.setRichView(view);
+  const onLink = vi.fn();
+  const onComment = vi.fn();
+  const containerRef = { current: scroller as HTMLElement | null };
+  const props = { view, session, actions, format: EMPTY_FORMAT, containerRef, onLink, onComment };
+  return {
+    props, scroller, editor, paragraph, view, session, actions, coords, stateRead, domRead, hasFocus, onLink, onComment,
+    setHost: (rect: DOMRect) => { host = rect; },
+    select: (anchor: number, head: number) => { state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, anchor, head))); },
+    remove: () => scroller.remove(),
+  };
+}
+
+function productionFixture() {
+  const source = "alpha beta gamma";
+  const getToken = vi.fn(async (): Promise<string> => { throw new Error("Unexpected connection"); });
+  const session = new CollabSession({
+    docId: "toolbar-lifecycle",
+    user: makeCollabUser("local", "Local"),
+    role: "owner",
+    autoConnect: false,
+    deferLocal: true,
+    getToken,
+  });
+  session.keepAlive();
+  session.binding.releaseRemoteSync();
+  session.ytext.insert(0, source);
+  session.setMode("suggesting");
+  session.setActiveSurface("rich");
+  const state = createRichEditorState(session, {
+    slashMenu: { onState: vi.fn() },
+    uploadImage: async () => { throw new Error("Unexpected upload"); },
+  });
+  const constructors = state.plugins.filter((plugin) => plugin.spec.view).map((plugin) => vi.spyOn(plugin.spec, "view"));
+  const scroller = document.createElement("div");
+  document.body.append(scroller);
+  const decorations = vi.fn((current: EditorState) => DecorationSet.create(current.doc, [
+    Decoration.inline(1, 2, { "data-existing-decoration": "" }),
+  ]));
+  const view = new EditorView(scroller, { state, decorations });
+  const destroys = constructors.flatMap((constructor) => {
+    const pluginView = constructor.mock.results[0].value;
+    return pluginView.destroy ? [vi.spyOn(pluginView, "destroy")] : [];
+  });
+  Object.defineProperty(scroller, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 100, 800, 500) });
+  Object.defineProperty(view.dom, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 0, 800, 600) });
+  vi.spyOn(view, "coordsAtPos").mockImplementation((pos) => ({ left: 100 + pos, right: 100 + pos, top: 200, bottom: 220 }));
+  const origins: unknown[] = [];
+  session.ytext.observe((event) => { origins.push(event.transaction.origin); });
+  const actions = new EditorActions(session, vi.fn());
+  actions.setRichView(view);
+  const props = { view, session, actions, format: EMPTY_FORMAT, containerRef: { current: scroller }, onLink: vi.fn(), onComment: vi.fn() };
+  const select = () => {
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 6, 1)));
+    view.focus();
+  };
+  const edit = async (insert: string, from = session.ytext.length, to = from) => {
+    await act(async () => {
+      const map = session.binding.getSourceMap();
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, map.srcToPm(from), map.srcToPm(to))).insertText(insert));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const cursor = session.binding.getSourceMap().srcToPm(from + insert.length);
+    expect(view.state.selection.anchor, "suggested edit caret anchor").toBe(cursor);
+    expect(view.state.selection.head, "suggested edit caret head").toBe(cursor);
+    expect(view.hasFocus(), "suggested edit retains focus").toBe(true);
+  };
+  const assertTracked = (raw: string) => {
+    expect(session.suggestions.cleanText() === source, "accepted document must remain unchanged").toBe(true);
+    expect(session.ytext.toString() === raw, "exact shared-text character accounting").toBe(true);
+    expect(view.state.doc.textContent === raw, "exact rich-text character accounting").toBe(true);
+    expect(origins.every((origin) => origin === SUGGESTIONS_ORIGIN), "no direct accepted text transactions").toBe(true);
+  };
+  const assertViewsRetained = () => {
+    expect(view.state.plugins).toBe(state.plugins);
+    expect(session.binding.view).toBe(view);
+    for (const constructor of constructors) expect(constructor).toHaveBeenCalledTimes(1);
+    for (const destroy of destroys) expect(destroy).not.toHaveBeenCalled();
+    expect(view.dom.querySelector("[data-existing-decoration]")).not.toBeNull();
+  };
+  const destroy = () => {
+    view.destroy();
+    session.destroy();
+    scroller.remove();
+    expect(getToken).not.toHaveBeenCalled();
+    for (const dispose of destroys) expect(dispose).toHaveBeenCalledTimes(1);
+  };
+  return { props, view, session, source, decorations, select, edit, assertTracked, assertViewsRetained, destroy };
+}
+
+describe("SelectionBubble geometry scheduling", () => {
+  it("coalesces all owned signals, observes selected content, and cleans exact replacement owners", () => {
+    const env = environment();
+    const first = fixture();
+    const second = fixture();
+    const rendered = render(<SelectionBubble {...first.props} />);
+    env.flush();
+    expect(screen.getByTestId("selection-bubble").style.width).toBe("232px");
+    expect(env.resizes[0].targets).toEqual(new Set([first.scroller, first.editor, first.paragraph]));
+    expect(env.mutations[0].targets.get(first.editor)).toEqual({ childList: true, characterData: true, attributes: true, subtree: true });
+    for (const [target, options] of env.mutations[0].targets) {
+      if (target !== first.editor) expect(options.subtree).not.toBe(true);
+    }
+    first.scroller.dispatchEvent(new Event("scroll"));
+    window.dispatchEvent(new Event("resize"));
+    env.visual.dispatchEvent(new Event("scroll"));
+    document.dispatchEvent(new Event("selectionchange"));
+    document.dispatchEvent(new Event("fullscreenchange"));
+    first.editor.dispatchEvent(new Event("load"));
+    env.fonts.dispatchEvent(new Event("loadingdone"));
+    env.resizes[0].fire();
+    env.mutations[0].fire();
+    expect(env.frames.size).toBe(1);
+    rendered.rerender(<SelectionBubble {...second.props} />);
+    expect(env.frames.size).toBe(1);
+    expect(env.resizes[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(env.mutations[0].disconnect).toHaveBeenCalledTimes(1);
+    const beforeReads = first.stateRead.mock.calls.length;
+    env.resizes[0].fire();
+    env.mutations[0].fire();
+    env.capturedFrames[0](0);
+    expect(first.stateRead).toHaveBeenCalledTimes(beforeReads);
+    expect(env.frames.size).toBe(1);
+    env.flush();
+    window.dispatchEvent(new Event("resize"));
+    rendered.unmount();
+    expect(env.cancel).toHaveBeenCalledTimes(2);
+    expect(env.frames.size).toBe(0);
+    expect(env.listeners.length).toBe(30);
+    expect(env.listeners.every((listener) => listener.removed === 1)).toBe(true);
+    for (const observer of [...env.resizes, ...env.mutations]) {
+      expect(observer.targets.size).toBe(0);
+      expect(observer.disconnect).toHaveBeenCalledTimes(1);
+    }
+    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+  });
+
+  it("positions and follows existing signals without ResizeObserver", () => {
+    const env = environment({ resize: false });
+    const f = fixture();
+    const rendered = render(<SelectionBubble {...f.props} />);
+    env.flush();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+    f.setHost(new DOMRect(0, 0, 180, 500));
+    env.visual.dispatchEvent(new Event("resize"));
+    env.flush();
+    expect(screen.getByTestId("selection-bubble").style.width).toBe("164px");
+    f.select(1, 1);
+    rendered.rerender(<SelectionBubble {...f.props} format={{ ...EMPTY_FORMAT }} />);
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    rendered.unmount();
+    const requested = env.request.mock.calls.length;
+    env.replay();
+    expect(env.request).toHaveBeenCalledTimes(requested);
+  });
+
+  it("responds to image/font/attribute reflow without a scroller border-box resize", async () => {
+    const env = environment();
+    const f = fixture();
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    f.coords.mockReturnValue({ left: 100, right: 140, top: 300, bottom: 320 });
+    env.setFragments([new DOMRect(100, 300, 40, 20)]);
+    const image = document.createElement("img");
+    f.paragraph.prepend(image);
+    image.dispatchEvent(new Event("load"));
+    env.fonts.dispatchEvent(new Event("loadingdone"));
+    env.fonts.dispatchEvent(new Event("loadingerror"));
+    env.mutations[0].fire();
+    env.resizes[0].fire();
+    expect(env.frames.size).toBe(1);
+    image.remove();
+    env.flush();
+    expect(screen.getByTestId("selection-bubble").style.top).toBe("250px");
+    await act(async () => { env.ready.resolve(); await env.ready.promise; });
+    expect(env.frames.size).toBe(1);
+  });
+
+  it("replaces a scroller behind a stable ref and disconnects the precise old targets", () => {
+    const env = environment();
+    const f = fixture();
+    const rendered = render(<SelectionBubble {...f.props} />);
+    env.flush();
+    const replacement = document.createElement("div");
+    replacement.append(f.editor);
+    document.body.append(replacement);
+    Object.defineProperty(replacement, "getBoundingClientRect", { configurable: true, value: vi.fn(() => new DOMRect(50, 100, 180, 500)) });
+    f.props.containerRef.current = replacement;
+    rendered.rerender(<SelectionBubble {...f.props} />);
+    env.flush();
+    expect(env.resizes[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(env.resizes[1].targets.has(replacement)).toBe(true);
+    expect(env.resizes[1].targets.has(f.scroller)).toBe(false);
+    expect(screen.getByTestId("selection-bubble").style.width).toBe("164px");
+  });
+
+  it.each([false, true])("owns transformed-body and descendant fullscreen enter/replace/exit (popover %s)", (popover) => {
+    const env = environment({ popover });
+    const f = fixture();
+    document.body.style.transform = "translate(30px, 20px) scale(0.5)";
+    const rendered = render(<SelectionBubble {...f.props} />);
+    env.flush();
+    const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+    expect(layer.parentElement).toBe(document.documentElement);
+    expect(screen.getByTestId("selection-bubble").style.transform).toBe("scale(1, 1)");
+    if (popover) expect(env.opened.has(layer)).toBe(true);
+    const shell = document.createElement("section");
+    f.scroller.replaceWith(shell);
+    shell.append(f.scroller);
+    if (!popover) env.setLayerRect(new DOMRect(30, 20, 400, 300));
+    env.enterFullscreen(f.scroller);
+    env.flush();
+    expect(layer.parentElement).toBe(f.scroller);
+    const bubble = screen.getByTestId("selection-bubble");
+    expect(bubble.style.transform).toBe(popover ? "scale(1, 1)" : "scale(2, 2)");
+    expect(parseFloat(bubble.style.top) * (popover ? 1 : 0.5) + (popover ? 0 : 20)).toBe(150);
+    expect(layer.style.clipPath).toContain("inset(");
+    env.enterFullscreen(shell);
+    env.flush();
+    expect(layer.parentElement).toBe(shell);
+    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
+    env.setLayerRect(new DOMRect(0, 0, 800, 600));
+    env.enterFullscreen(null);
+    env.flush();
+    expect(layer.parentElement).toBe(document.documentElement);
+    rendered.unmount();
+    expect(env.opened.size).toBe(0);
+    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+  });
+
+  it("does not surface over unrelated fullscreen content", () => {
+    const env = environment({ popover: true });
+    const f = fixture();
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    const unrelated = document.createElement("section");
+    document.body.append(unrelated);
+    env.enterFullscreen(unrelated);
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    expect(env.opened.size).toBe(0);
+    env.enterFullscreen(null);
+    env.flush();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+  });
+
+  it("does not invent a transform from fractional zoom dimensions and rounded offset sizes", () => {
+    const env = environment();
+    const f = fixture();
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+    layer.style.width = "196.5px";
+    layer.style.height = "600px";
+    Object.defineProperty(layer, "offsetWidth", { value: 197 });
+    env.setLayerRect(new DOMRect(0, 0, 196.5, 600));
+    env.visual.width = 196.5;
+    window.dispatchEvent(new Event("resize"));
+    env.flush();
+    const bubble = screen.getByTestId("selection-bubble");
+    expect(bubble.style.transform).toBe("scale(1, 1)");
+    expect(bubble.style.width).toBe("180.5px");
+  });
+
+  it("keeps a fullscreen editable root's toolbar out of document edits and editor key handling", async () => {
+    const f = fixture();
+    const editorKeydown = vi.fn(() => false);
+    // Construct the editor before replacing observer globals, so its own DOM observer is real.
+    const view = new EditorView({ mount: f.editor }, { state: f.view.state, handleKeyDown: editorKeydown });
+    const initialDoc = view.state.doc;
+    const initialPlugins = view.state.plugins;
+    Object.defineProperty(view.dom, "getBoundingClientRect", { configurable: true, value: () => new DOMRect(0, 0, 800, 600) });
+    const env = environment({ popover: true });
+    vi.spyOn(view, "hasFocus").mockReturnValue(true);
+    vi.spyOn(view, "coordsAtPos").mockImplementation(f.coords);
+    const rendered = render(<SelectionBubble {...f.props} view={view} />);
+    try {
+      env.flush();
+      env.enterFullscreen(view.dom);
+      env.flush();
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      expect(view.state.doc.eq(initialDoc)).toBe(true);
+      expect(view.dom.querySelector("[data-selection-bubble-layer]")).not.toBeNull();
+      fireEvent.keyDown(screen.getByRole("button", { name: "Bold" }), { key: "Enter" });
+      expect(editorKeydown).not.toHaveBeenCalled();
+      const widgetDecorations = view.props.decorations!;
+      expect(widgetDecorations.call(view, view.state)).not.toBe(DecorationSet.empty);
+      expect(view.state.plugins).toBe(initialPlugins);
+      env.enterFullscreen(null);
+      env.flush();
+      expect(view.state.plugins).toEqual(initialPlugins);
+      expect(view.state.doc.eq(initialDoc)).toBe(true);
+      env.enterFullscreen(view.dom);
+      env.flush();
+      rendered.unmount();
+      expect(view.state.plugins).toEqual(initialPlugins);
+      expect(view.state.doc.eq(initialDoc)).toBe(true);
+      expect(widgetDecorations.call(view, view.state)).toBe(DecorationSet.empty);
+    } finally {
+      rendered.unmount();
+      view.destroy();
+    }
+  });
+
+  it("production suggesting survives repeated fullscreen entry/exit and toolbar removal", async () => {
+    // The production binding and every plugin view run with the real editor DOM observer.
+    const f = productionFixture();
+    const env = environment({ popover: true });
+    f.select();
+    const rendered = render(<SelectionBubble {...f.props} />);
+    try {
+      env.flush();
+      await f.edit("!");
+      f.assertTracked(`${f.source}!`);
+      const typingGroup = f.session.suggestions.groups()[0].id;
+      const transition = (target: Element | null) => {
+        f.select();
+        const selection = f.view.state.selection.toJSON();
+        env.enterFullscreen(target);
+        env.flush();
+        expect(f.view.state.selection.toJSON()).toEqual(selection);
+        expect(f.view.hasFocus()).toBe(true);
+        expect(document.querySelector("[data-selection-bubble-layer]")?.parentElement).toBe(target ?? document.documentElement);
+      };
+
+      transition(f.view.dom);
+      await f.edit("B", 6, 10);
+      f.assertTracked("alpha Bbeta gamma!");
+      transition(null);
+      await f.edit("?");
+      f.assertTracked("alpha Bbeta gamma!?");
+      let suffix = "!?";
+      for (const [during, after] of [["1", "a"], ["2", "b"]]) {
+        transition(f.view.dom);
+        await f.edit(during);
+        suffix += during;
+        f.assertTracked(`alpha Bbeta gamma${suffix}`);
+        transition(null);
+        await f.edit(after);
+        suffix += after;
+        f.assertTracked(`alpha Bbeta gamma${suffix}`);
+      }
+      const groups = f.session.suggestions.groups();
+      expect(groups).toHaveLength(3);
+      expect(groups.find((group) => group.id === typingGroup)?.after === suffix, "adjacent typing retains its original review group").toBe(true);
+      expect(groups.filter((group) => group.type === "delete" && group.before === "beta")).toHaveLength(1);
+      expect(groups.filter((group) => group.type === "insert" && group.after === "B")).toHaveLength(1);
+      expect(groups.every((group) => !group.outdated && group.authorId === f.session.user.id)).toBe(true);
+      f.assertViewsRetained();
+
+      transition(f.view.dom);
+      rendered.unmount();
+      expect(f.view.props.decorations).toBe(f.decorations);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+      await f.edit("Z");
+      f.assertTracked(`alpha Bbeta gamma${suffix}Z`);
+      f.assertViewsRetained();
+    } finally {
+      rendered.unmount();
+      f.destroy();
+    }
+  });
+
+  it("production suggesting survives toolbar view replacement and destroyed-view unmount", async () => {
+    const first = productionFixture();
+    const second = productionFixture();
+    const env = environment();
+    first.select();
+    const rendered = render(<SelectionBubble {...first.props} />);
+    try {
+      env.enterFullscreen(first.view.dom);
+      env.flush();
+      await first.edit("1");
+      first.assertTracked(`${first.source}1`);
+      first.select();
+      env.flush();
+      const staleDecorations = first.view.props.decorations!;
+      const staleFrames = [...env.capturedFrames];
+      second.select();
+      env.enterFullscreen(second.view.dom);
+      rendered.rerender(<SelectionBubble {...second.props} />);
+      env.flush();
+      expect(first.view.props.decorations).toBe(first.decorations);
+      expect(staleDecorations.call(first.view, first.view.state)).toBe(DecorationSet.empty);
+      for (const callback of staleFrames) callback(0);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
+      await second.edit("2");
+      second.assertTracked(`${second.source}2`);
+      first.assertViewsRetained();
+      second.assertViewsRetained();
+
+      // An intervening direct-prop owner must not be overwritten by toolbar cleanup.
+      const replacementDecorations = vi.fn(() => DecorationSet.empty);
+      second.view.setProps({ decorations: replacementDecorations });
+      rendered.rerender(<SelectionBubble {...second.props} view={null} />);
+      expect(second.view.props.decorations).toBe(replacementDecorations);
+      await second.edit("3");
+      second.assertTracked(`${second.source}23`);
+
+      second.select();
+      rendered.rerender(<SelectionBubble {...second.props} />);
+      env.flush();
+      const destroyedDecorations = second.view.props.decorations!;
+      second.view.destroy();
+      rendered.unmount();
+      expect(destroyedDecorations.call(second.view, second.view.state)).toBe(DecorationSet.empty);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+      first.select();
+      await first.edit("4");
+      first.assertTracked(`${first.source}14`);
+    } finally {
+      rendered.unmount();
+      first.destroy();
+      second.destroy();
+    }
+  });
+
+  it.each([0, 1, 16, 17, 55])("removes toolbar paint when only %ipx remain", (width) => {
+    const env = environment();
+    const f = fixture();
+    f.setHost(new DOMRect(100, 100, width, 500));
+    const rendered = render(<SelectionBubble {...f.props} />);
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    f.setHost(new DOMRect(100, 100, 56, 500));
+    window.dispatchEvent(new Event("resize"));
+    env.flush();
+    expect(screen.getByTestId("selection-bubble").style.width).toBe("40px");
+    rendered.unmount();
+  });
+
+  it("uses current selection and actual wrapped/image fragments, not only off-screen endpoints", () => {
+    const env = environment();
+    const f = fixture();
+    const rendered = render(<SelectionBubble {...f.props} />);
+    f.select(9, 1);
+    f.coords.mockImplementation((pos) => pos === 1
+      ? { left: -50, right: -50, top: 200, bottom: 220 }
+      : { left: 900, right: 900, top: 250, bottom: 270 });
+    env.setFragments([new DOMRect(-100, 200, 50, 20), new DOMRect(200, 220, 300, 20), new DOMRect(900, 250, 50, 20)]);
+    env.flush();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+    env.setFragments([new DOMRect(-100, 200, 50, 20), new DOMRect(900, 250, 50, 20)]);
+    document.dispatchEvent(new Event("selectionchange"));
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    env.setFragments([new DOMRect(120, 150, 200, 200)]);
+    document.dispatchEvent(new Event("selectionchange"));
+    env.flush();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+    f.select(1, 1);
+    rendered.rerender(<SelectionBubble {...f.props} format={{ ...EMPTY_FORMAT }} />);
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+  });
+
+  it("keeps six pointer/keyboard actions and applies Bold to the restored selection", async () => {
+    const env = environment();
+    const f = fixture();
+    const user = userEvent.setup();
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    expect(screen.getAllByRole("button")).toHaveLength(6);
+    for (const [label, mark] of [["Bold", "strong"], ["Italic", "em"], ["Strikethrough", "strikethrough"], ["Inline code", "code"]] as const) {
+      await user.click(screen.getByRole("button", { name: label }));
+      expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(true);
+      screen.getByRole("button", { name: label }).focus();
+      await user.keyboard("{Enter}");
+      expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(false);
+    }
+    for (const [label, handler] of [["Link", f.onLink], ["Comment", f.onComment]] as const) {
+      await user.click(screen.getByRole("button", { name: label }));
+      screen.getByRole("button", { name: label }).focus();
+      await user.keyboard(" ");
+      expect(handler).toHaveBeenCalledTimes(2);
+    }
+    f.setHost(new DOMRect(0, 300, 180, 200));
+    fireEvent.scroll(f.scroller);
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    f.setHost(new DOMRect(0, 100, 180, 500));
+    fireEvent.scroll(f.scroller);
+    env.flush();
+    const bold = screen.getByRole("button", { name: "Bold" });
+    expect(bold.closest('[role="toolbar"]')).toHaveClass("overflow-x-auto");
+    await user.click(bold);
+    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(true);
+    expect(f.view.state.selection.from).toBe(1);
+    expect(f.view.state.selection.to).toBe(9);
+  });
+
+  it("keeps all captured callbacks and frames inert after 1000 mount/replace/unmount cycles", async () => {
+    const env = environment({ popover: true });
+    const first = fixture();
+    const second = fixture();
+    for (let cycle = 0; cycle < 1000; cycle++) {
+      const rendered = render(<SelectionBubble {...first.props} />);
+      env.flush();
+      window.dispatchEvent(new Event("resize"));
+      rendered.rerender(<SelectionBubble {...second.props} />);
+      env.flush();
+      window.dispatchEvent(new Event("resize"));
+      rendered.unmount();
+      rendered.container.remove();
+    }
+    expect(env.resizes).toHaveLength(2000);
+    expect(env.mutations).toHaveLength(2000);
+    expect(env.listeners).toHaveLength(30000);
+    expect(env.listeners.every((entry) => entry.removed === 1)).toBe(true);
+    expect(env.resizes.every((observer) => observer.targets.size === 0 && observer.disconnect.mock.calls.length === 1)).toBe(true);
+    expect(env.mutations.every((observer) => observer.targets.size === 0 && observer.disconnect.mock.calls.length === 1)).toBe(true);
+    expect(env.opened.size).toBe(0);
+    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+    const before = {
+      frames: env.request.mock.calls.length,
+      listeners: env.listeners.length,
+      resizes: env.resizes.length,
+      mutations: env.mutations.length,
+      states: stateWrites.count,
+      reads: first.stateRead.mock.calls.length + second.stateRead.mock.calls.length + first.domRead.mock.calls.length + second.domRead.mock.calls.length + env.layoutRead.mock.calls.length,
+    };
+    env.replay();
+    await act(async () => { env.ready.resolve(); await env.ready.promise; });
+    expect(env.request).toHaveBeenCalledTimes(before.frames);
+    expect(env.listeners).toHaveLength(before.listeners);
+    expect(env.resizes).toHaveLength(before.resizes);
+    expect(env.mutations).toHaveLength(before.mutations);
+    expect(stateWrites.count).toBe(before.states);
+    expect(first.stateRead.mock.calls.length + second.stateRead.mock.calls.length + first.domRead.mock.calls.length + second.domRead.mock.calls.length + env.layoutRead.mock.calls.length).toBe(before.reads);
+    expect(env.frames.size).toBe(0);
+    expect(env.opened.size).toBe(0);
+    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+  }, 60_000);
+});

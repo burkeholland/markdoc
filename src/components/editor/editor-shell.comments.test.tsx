@@ -81,7 +81,8 @@ vi.mock("./code-pane", async (importOriginal) => {
 });
 
 import { CollabSession } from "@/editor/collab/session";
-import { makeCollabUser } from "@/editor/collab/shared";
+import { createAnchor, makeCollabUser } from "@/editor/collab/shared";
+import type { HighlightClickHandler } from "@/editor/highlight-activation";
 import { PHONE_MAX, TABLET_MAX, type Layout } from "@/lib/viewport";
 import type { DocumentDto } from "@/server/dto";
 import type { AgentRequestMirror } from "./agent-requests";
@@ -90,7 +91,7 @@ import { EditorShell } from "./editor-shell";
 let session: CollabSession;
 let rich: PMView | null = null;
 let code: CMView | null = null;
-let codeHighlight: (kind: string, id: string | null) => void;
+let codeHighlight: HighlightClickHandler;
 let threadId: string;
 const TEXT = "A commented paragraph for editing.\n\nOrdinary plain text.\n";
 const TYPED = "abcdefghijklmnopqrst";
@@ -197,6 +198,22 @@ afterEach(() => {
 });
 
 describe("responsive comment opening at the real shell boundary", () => {
+  it("keeps a stale same-ID highlight from opening automatic comments", () => {
+    mount(1280, "rich");
+    selectRich();
+    const selection = rich!.state.selection.toJSON();
+    const activate = vi.spyOn(session, "setActiveComment");
+    act(() => {
+      session.comments.ymap.get(threadId)!.set("anchor", createAnchor(session.ytext, 36, 44));
+      clickRichHighlight();
+    });
+    expect(activate).not.toHaveBeenCalled();
+    expect(session.activeCommentId).toBeNull();
+    expectClosed();
+    expect(rich!.hasFocus()).toBe(true);
+    expect(rich!.state.selection.toJSON()).toEqual(selection);
+  });
+
   it.each([
     [390, "phone", "rich"],
     [520, "phone", "rich"],
@@ -254,7 +271,7 @@ describe("responsive comment opening at the real shell boundary", () => {
     act(() => {
       code!.dispatch({ selection: { anchor: 4, head: 10 } });
       code!.focus();
-      codeHighlight("comment", threadId);
+      codeHighlight("comment", threadId, code!.state.selection.main.head);
     });
     expectClosed();
     expect(session.activeCommentId).toBe(threadId);
@@ -349,10 +366,11 @@ describe("responsive comment opening at the real shell boundary", () => {
     mount(768, "code");
     await waitFor(() => expect(code).not.toBeNull());
     act(() => session.suggestions.applyEdit({ from: 4, to: 4, insert: "proposed" }, user));
-    const suggestionId = session.suggestions.list()[0].id;
+    const suggestion = session.suggestions.list()[0];
+    const suggestionId = suggestion.id;
     act(() => {
       code!.focus();
-      codeHighlight("suggest-insert", suggestionId);
+      codeHighlight("suggest-insert", suggestionId, suggestion.from);
     });
     expectClosed();
     expect(code!.hasFocus).toBe(true);
@@ -385,7 +403,7 @@ describe("responsive comment opening at the real shell boundary", () => {
     act(() => {
       code!.dispatch({ selection: { anchor: 12, head: 5 } });
       code!.focus();
-      codeHighlight("comment", threadId);
+      codeHighlight("comment", threadId, code!.state.selection.main.head);
     });
     await expectPanel(1280);
     fireEvent.pointerDown(screen.getByTestId("comments-panel"));

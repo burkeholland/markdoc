@@ -35,11 +35,12 @@ import type { ImageUploader } from "../prosemirror/images";
 import type { NoticeAction } from "../markdown/tsv";
 import { preserveInactiveUndoScroll } from "./undo-scroll";
 import { sourceLinks } from "./links";
+import type { HighlightClickHandler } from "../highlight-activation";
 
 export interface CodeEditorHandlers {
   onFocus?: () => void;
   onSelection?: (head: number, anchor: number) => void;
-  onHighlightClick?: (kind: string, id: string | null) => void;
+  onHighlightClick?: HighlightClickHandler;
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
@@ -119,7 +120,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     sourceLinks(session),
     remoteCaretInteractions(session),
     sourceHighlights(),
-    highlightClickHandler((kind, id) => handlers.onHighlightClick?.(kind, id)),
+    highlightClickHandler((kind, id, sourcePosition) => handlers.onHighlightClick?.(kind, id, sourcePosition)),
     editable.of([EditorState.readOnly.of(!session.canEdit), EditorView.editable.of(session.canEdit)]),
     suggesting.of(session.mode === "suggesting" ? suggestingMode(session) : []),
     formattingKeymap,

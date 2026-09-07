@@ -1,0 +1,462 @@
+// @vitest-environment jsdom
+import { afterEach, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
+import { EditorState as CodeState } from "@codemirror/state";
+import { EditorView as CodeView } from "@codemirror/view";
+import { EditorState as RichState, TextSelection } from "prosemirror-state";
+import { EditorView as RichView } from "prosemirror-view";
+import { CollabSession } from "./collab/session";
+import { createAnchor, makeCollabUser } from "./collab/shared";
+import type { SuggestionType } from "./collab/suggestions";
+import { highlightClickHandler, setHighlights, sourceHighlights } from "./codemirror/highlights";
+import {
+  activateHighlight,
+  type ActivatableHighlightKind,
+  type HighlightClickHandler,
+} from "./highlight-activation";
+import { collectHighlights, richHighlightsPlugin } from "./prosemirror/highlights";
+import { markdownBindingPlugin } from "./sync/markdown-binding";
+
+type Surface = "rich" | "source";
+type Gesture = "primary" | "auxiliary" | "context" | "double";
+type Boundary = "start" | "interior" | "end" | "after";
+type Mutation = "live" | "reanchor-away" | "removed" | "kind-changed" | "range-less" | "reanchor-containing";
+
+interface Harness {
+  session: CollabSession;
+  surface: Surface;
+  kind: ActivatableHighlightKind;
+  id: string;
+  view: CodeView | RichView;
+  root: HTMLElement;
+  target: HTMLElement;
+  plainTarget: HTMLElement;
+  rawClick: MockInstance<HighlightClickHandler>;
+  setActiveComment: MockInstance<CollabSession["setActiveComment"]>;
+  setActiveSuggestion: MockInstance<CollabSession["setActiveSuggestion"]>;
+  panelIsOpen(): boolean;
+  setSourcePosition(sourcePosition: number): void;
+  destroy(): void;
+}
+
+const TEXT = "ordinary qzxvblort prefix targetword suffix remoteplace tail";
+const MISSPELLING = "qzxvblort";
+const ITEM_TEXT = "targetword";
+const AWAY_TEXT = "remoteplace";
+const ITEM_RANGE = rangeOf(ITEM_TEXT);
+const AWAY_RANGE = rangeOf(AWAY_TEXT);
+const SURFACES: Surface[] = ["rich", "source"];
+const KINDS: ActivatableHighlightKind[] = ["comment", "comment-resolved", "suggest-insert", "suggest-delete"];
+const GESTURES: Gesture[] = ["primary", "auxiliary", "context", "double"];
+const BOUNDARIES: Boundary[] = ["start", "interior", "end", "after"];
+const MUTATIONS: Mutation[] = ["live", "reanchor-away", "removed", "kind-changed", "range-less", "reanchor-containing"];
+const harnesses: Harness[] = [];
+
+let pointerTarget: HTMLElement | null = null;
+let caretNode: Node | null = null;
+let caretOffset = 0;
+
+beforeAll(() => {
+  Range.prototype.getClientRects ??= () => [] as unknown as DOMRectList;
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: () => pointerTarget,
+  });
+  Object.defineProperty(document, "caretPositionFromPoint", {
+    configurable: true,
+    value: () => (caretNode ? { offsetNode: caretNode, offset: caretOffset } : null),
+  });
+});
+
+afterEach(() => {
+  for (const harness of harnesses.splice(0)) harness.destroy();
+  pointerTarget = null;
+  caretNode = null;
+  caretOffset = 0;
+  vi.restoreAllMocks();
+});
+
+function rangeOf(text: string) {
+  const from = TEXT.indexOf(text);
+  return { from, to: from + text.length };
+}
+
+function createItem(session: CollabSession, kind: ActivatableHighlightKind, range = ITEM_RANGE): string {
+  if (kind === "comment" || kind === "comment-resolved") {
+    const id = session.comments.add({ ...range, body: `${kind} body`, author: session.user });
+    if (kind === "comment-resolved") session.comments.setResolved(id, true, session.user);
+    return id;
+  }
+
+  session.ydoc.transact(() => {
+    if (kind === "suggest-insert") session.suggestions.recordInserted(range.from, range.to - range.from, session.user);
+    else session.suggestions.markDeleted(range.from, range.to, session.user);
+  });
+  const type: SuggestionType = kind === "suggest-insert" ? "insert" : "delete";
+  const suggestion = session.suggestions.list().find((candidate) => candidate.type === type && candidate.from === range.from && candidate.to === range.to);
+  if (!suggestion) throw new Error(`failed to create ${kind}`);
+  return suggestion.id;
+}
+
+function makeHarness(surface: Surface, kind: ActivatableHighlightKind, options: { overlap?: boolean; replacement?: boolean } = {}): Harness {
+  const session = new CollabSession({
+    docId: `highlight-click-${surface}-${kind}`,
+    user: makeCollabUser("alice", "Alice"),
+    role: "owner",
+    getToken: async () => "token",
+    autoConnect: false,
+    deferLocal: true,
+  });
+  session.keepAlive();
+  session.ytext.insert(0, TEXT);
+  const id = options.replacement
+    ? session.suggestions.propose({ ...ITEM_RANGE, insert: "replacement" }, session.user)
+    : createItem(session, kind);
+  const richDoc = session.binding.initialDoc();
+  session.binding.releaseRemoteSync();
+  if (options.overlap) {
+    const overlapKind: ActivatableHighlightKind = kind.startsWith("comment") ? "suggest-insert" : "comment";
+    createItem(session, overlapKind, { from: ITEM_RANGE.from + 2, to: ITEM_RANGE.to - 2 });
+  }
+  session.setFind(MISSPELLING);
+
+  let panelOpen = false;
+  let sourcePosition = ITEM_RANGE.from;
+  const rawClick = vi.fn<HighlightClickHandler>((clickedKind, clickedId, clickedSourcePosition) => {
+    if (activateHighlight(session, clickedKind, clickedId, clickedSourcePosition)) panelOpen = true;
+  });
+  const host = document.body.appendChild(document.createElement("div"));
+  let view: CodeView | RichView;
+
+  if (surface === "source") {
+    const codeView = new CodeView({
+      state: CodeState.create({
+        doc: session.ytext.toString(),
+        extensions: [
+          sourceHighlights(),
+          highlightClickHandler(rawClick),
+          // jsdom cannot lay out text for CodeMirror's built-in mouse selection.
+          CodeView.domEventHandlers({ mousedown: () => true }),
+        ],
+      }),
+      parent: host,
+    });
+    codeView.dispatch({ effects: setHighlights.of(collectHighlights(session, { from: 0, to: 0 })) });
+    vi.spyOn(codeView, "posAtCoords").mockImplementation(() => sourcePosition);
+    view = codeView;
+  } else {
+    view = new RichView(host, {
+      state: RichState.create({
+        doc: richDoc,
+        plugins: [
+          markdownBindingPlugin(session.binding),
+          richHighlightsPlugin(session, {
+            getFocusSource: () => 0,
+            onHighlightClick: rawClick,
+          }),
+        ],
+      }),
+    });
+  }
+
+  const target = view.dom.querySelector<HTMLElement>(`[data-highlight-id="${id}"][data-highlight-kind="${kind}"]`);
+  if (!target) throw new Error(`${kind} was not rendered in ${surface}`);
+  const setActiveComment = vi.spyOn(session, "setActiveComment");
+  const setActiveSuggestion = vi.spyOn(session, "setActiveSuggestion");
+  const harness: Harness = {
+    session,
+    surface,
+    kind,
+    id,
+    view,
+    root: view.dom,
+    target,
+    plainTarget: view.dom.querySelector<HTMLElement>(surface === "source" ? ".cm-line" : "p")!,
+    rawClick,
+    setActiveComment,
+    setActiveSuggestion,
+    panelIsOpen: () => panelOpen,
+    setSourcePosition(next) {
+      sourcePosition = next;
+      pointerTarget = harness.target;
+      if (surface === "rich") {
+        const richView = view as RichView;
+        const pmPosition = session.binding.getSourceMap().srcToPm(next);
+        const domPosition = richView.domAtPos(pmPosition);
+        caretNode = domPosition.node;
+        caretOffset = domPosition.offset;
+      }
+    },
+    destroy() {
+      view.destroy();
+      host.remove();
+      session.destroy();
+    },
+  };
+  harnesses.push(harness);
+  return harness;
+}
+
+function sourcePositionAt(boundary: Boundary): number {
+  if (boundary === "start") return ITEM_RANGE.from;
+  if (boundary === "interior") return ITEM_RANGE.from + Math.floor((ITEM_RANGE.to - ITEM_RANGE.from) / 2);
+  if (boundary === "end") return ITEM_RANGE.to;
+  return ITEM_RANGE.to + 1;
+}
+
+function dispatch(target: HTMLElement, type: string, init: MouseEventInit = {}): MouseEvent {
+  pointerTarget = target;
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 10, clientY: 10, ...init });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function viewHasFocus(harness: Harness): boolean {
+  return harness.surface === "rich" ? (harness.view as RichView).hasFocus() : (harness.view as CodeView).hasFocus;
+}
+
+function mutateBeforeRouting(harness: Harness, mutation: Mutation, sourcePosition: number) {
+  if (mutation === "live") return;
+  if (harness.kind === "comment" || harness.kind === "comment-resolved") {
+    const map = harness.session.comments.ymap.get(harness.id);
+    if (!map) throw new Error("comment disappeared before mutation");
+    if (mutation === "reanchor-away") map.set("anchor", createAnchor(harness.session.ytext, AWAY_RANGE.from, AWAY_RANGE.to));
+    else if (mutation === "removed") harness.session.comments.ymap.delete(harness.id);
+    else if (mutation === "kind-changed") map.set("resolved", harness.kind === "comment");
+    else if (mutation === "range-less") map.delete("anchor");
+    else map.set("anchor", createAnchor(harness.session.ytext, Math.max(0, sourcePosition - 1), Math.min(TEXT.length, sourcePosition + 2)));
+    return;
+  }
+
+  const suggestion = harness.session.suggestions.ymap.get(harness.id);
+  if (!suggestion) throw new Error("suggestion disappeared before mutation");
+  if (mutation === "removed") {
+    harness.session.suggestions.ymap.delete(harness.id);
+    return;
+  }
+  const type: SuggestionType =
+    mutation === "kind-changed" ? (suggestion.type === "insert" ? "delete" : "insert") : suggestion.type;
+  const range =
+    mutation === "reanchor-away"
+      ? AWAY_RANGE
+      : mutation === "range-less"
+        ? { from: sourcePosition, to: sourcePosition }
+        : mutation === "reanchor-containing"
+          ? { from: Math.max(0, sourcePosition - 1), to: Math.min(TEXT.length, sourcePosition + 2) }
+          : ITEM_RANGE;
+  harness.session.suggestions.ymap.set(harness.id, {
+    ...suggestion,
+    type,
+    anchor: createAnchor(harness.session.ytext, range.from, range.to),
+    text: TEXT.slice(range.from, range.to),
+  });
+}
+
+function performInteraction(harness: Harness, gesture: Gesture, sourcePosition: number, mutation: Mutation) {
+  harness.view.focus();
+  harness.setSourcePosition(sourcePosition);
+  const button = gesture === "auxiliary" ? 1 : gesture === "context" ? 2 : 0;
+  const detail = gesture === "double" ? 2 : 1;
+  dispatch(harness.target, "pointerdown", { button, detail });
+  if (harness.surface === "source") mutateBeforeRouting(harness, mutation, sourcePosition);
+  dispatch(harness.target, "mousedown", { button, detail });
+  if (harness.surface === "rich") mutateBeforeRouting(harness, mutation, sourcePosition);
+  if (gesture === "context") {
+    dispatch(harness.target, "contextmenu", { button, detail });
+  } else if (gesture === "auxiliary") {
+    dispatch(harness.target, "auxclick", { button, detail });
+  } else {
+    dispatch(harness.target, "mouseup", { button, detail });
+    dispatch(harness.target, "click", { button, detail });
+    if (gesture === "double") dispatch(harness.target, "dblclick", { button, detail });
+  }
+  expect(viewHasFocus(harness)).toBe(true);
+}
+
+function expectedActivation(gesture: Gesture, boundary: Boundary, mutation: Mutation): boolean {
+  if (gesture === "auxiliary" || gesture === "context") return false;
+  if (mutation === "reanchor-containing") return true;
+  return mutation === "live" && (boundary === "start" || boundary === "interior");
+}
+
+describe("live highlight click ownership", () => {
+  it.each(SURFACES.flatMap((surface) => (["suggest-insert", "suggest-delete"] as const).map((kind) => [surface, kind] as const)))(
+    "%s %s validates grouped replacement members without activating their stale shared ID",
+    (surface, kind) => {
+      for (const mutation of ["live", "reanchor-away", "removed", "kind-changed", "range-less", "group-changed", "other-kind-position", "end"] as const) {
+        const harness = makeHarness(surface, kind, { replacement: true });
+        const members = harness.session.suggestions.list();
+        const member = members.find((candidate) => `suggest-${candidate.type}` === kind)!;
+        const other = members.find((candidate) => candidate.id !== member.id)!;
+        const sourcePosition =
+          mutation === "other-kind-position" ? other.from + 1 : mutation === "end" ? member.to : member.from + 1;
+        if (harness.view instanceof CodeView) {
+          harness.view.dispatch({ selection: { anchor: sourcePosition } });
+        } else {
+          const position = harness.session.binding.getSourceMap().srcToPm(sourcePosition);
+          harness.view.dispatch(harness.view.state.tr.setSelection(TextSelection.create(harness.view.state.doc, position)));
+        }
+        harness.view.focus();
+        harness.setSourcePosition(sourcePosition);
+        const selection = harness.view.state.selection.toJSON();
+        dispatch(harness.target, "pointerdown", { button: 0 });
+        if (surface === "rich") dispatch(harness.target, "mousedown", { button: 0 });
+        if (mutation === "removed") harness.session.suggestions.ymap.delete(member.id);
+        else if (mutation === "reanchor-away" || mutation === "range-less") {
+          harness.session.suggestions.ymap.set(member.id, {
+            ...member,
+            anchor: createAnchor(harness.session.ytext, other.from, mutation === "range-less" ? other.from : other.to),
+          });
+        } else if (mutation === "kind-changed" || mutation === "group-changed") {
+          harness.session.suggestions.ymap.set(member.id, {
+            ...member,
+            ...(mutation === "kind-changed" ? { type: other.type } : { groupId: "different-group" }),
+          });
+        }
+        if (surface === "source") dispatch(harness.target, "mousedown", { button: 0 });
+        dispatch(harness.target, "mouseup", { button: 0 });
+        dispatch(harness.target, "click", { button: 0 });
+
+        expect(harness.rawClick, mutation).toHaveBeenCalledOnce();
+        expect(harness.setActiveComment, mutation).not.toHaveBeenCalled();
+        expect(harness.setActiveSuggestion, mutation).toHaveBeenCalledTimes(mutation === "live" ? 1 : 0);
+        expect(harness.panelIsOpen(), mutation).toBe(mutation === "live");
+        expect(harness.session.activeSuggestionId, mutation).toBe(mutation === "live" ? harness.id : null);
+        expect(viewHasFocus(harness), mutation).toBe(true);
+        expect(harness.view.state.selection.toJSON(), mutation).toEqual(selection);
+        harness.destroy();
+        harnesses.pop();
+      }
+    },
+  );
+
+  it.each(SURFACES.flatMap((surface) => KINDS.map((kind) => [surface, kind] as const)))(
+    "%s %s runs 96 fresh gesture/boundary/mutation interactions",
+    (surface, kind) => {
+      let interactions = 0;
+      let staleActivations = 0;
+      let liveActivations = 0;
+      let lostFocus = 0;
+
+      for (const gesture of GESTURES) {
+        for (const boundary of BOUNDARIES) {
+          for (const mutation of MUTATIONS) {
+            const harness = makeHarness(surface, kind);
+            const sourcePosition = sourcePositionAt(boundary);
+            performInteraction(harness, gesture, sourcePosition, mutation);
+            const shouldActivate = expectedActivation(gesture, boundary, mutation);
+            const activeCalls =
+              kind === "comment" || kind === "comment-resolved"
+                ? harness.setActiveComment.mock.calls.length
+                : harness.setActiveSuggestion.mock.calls.length;
+            const wrongCalls =
+              kind === "comment" || kind === "comment-resolved"
+                ? harness.setActiveSuggestion.mock.calls.length
+                : harness.setActiveComment.mock.calls.length;
+
+            interactions++;
+            if (!viewHasFocus(harness)) lostFocus++;
+            if (!shouldActivate && activeCalls > 0) staleActivations += activeCalls;
+            if (shouldActivate) liveActivations += activeCalls;
+            expect(activeCalls, `${surface}/${kind}/${gesture}/${boundary}/${mutation}`).toBe(shouldActivate ? 1 : 0);
+            expect(wrongCalls).toBe(0);
+            expect(harness.panelIsOpen()).toBe(shouldActivate);
+            if (shouldActivate) {
+              expect(
+                kind === "comment" || kind === "comment-resolved"
+                  ? harness.session.activeCommentId
+                  : harness.session.activeSuggestionId,
+              ).toBe(harness.id);
+            }
+            harness.destroy();
+            harnesses.pop();
+          }
+        }
+      }
+
+      expect(interactions).toBe(96);
+      expect(staleActivations).toBe(0);
+      expect(lostFocus).toBe(0);
+      expect(liveActivations).toBe(12);
+    },
+  );
+
+  it.each(SURFACES)("keeps ordinary spelling interactions in the %s editor with Comments closed or current", (surface) => {
+    const harness = makeHarness(surface, "comment");
+    const typoPosition = rangeOf(MISSPELLING).from + 2;
+    const interactions: Gesture[] = ["primary", "double", "context", "auxiliary"];
+
+    harness.view.focus();
+    harness.session.setActiveComment(harness.id);
+    harness.setActiveComment.mockClear();
+    for (const gesture of interactions) {
+      harness.setSourcePosition(typoPosition);
+      pointerTarget = harness.plainTarget;
+      const button = gesture === "auxiliary" ? 1 : gesture === "context" ? 2 : 0;
+      const detail = gesture === "double" ? 2 : 1;
+      dispatch(harness.plainTarget, "mousedown", { button, detail });
+      if (surface === "rich" && gesture !== "context" && gesture !== "auxiliary") dispatch(harness.plainTarget, "click", { button, detail });
+    }
+
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    expect(harness.setActiveComment).not.toHaveBeenCalled();
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+    expect(harness.session.activeCommentId).toBe(harness.id);
+    expect(harness.panelIsOpen()).toBe(false);
+    expect(viewHasFocus(harness)).toBe(true);
+  });
+
+  it.each(SURFACES)("routes a nested fragment of an overlapping %s decoration exactly once", (surface) => {
+    const harness = makeHarness(surface, "comment", { overlap: true });
+    const nested = document.createElement("span");
+    nested.replaceChildren(...harness.target.childNodes);
+    harness.target.appendChild(nested);
+    harness.target = nested;
+
+    performInteraction(harness, "primary", ITEM_RANGE.from + 3, "live");
+
+    expect(harness.setActiveComment).toHaveBeenCalledOnce();
+    expect(harness.setActiveComment).toHaveBeenCalledWith(harness.id);
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("routes the current rich position after remote source-map movement while decoration refresh is deferred", () => {
+    const harness = makeHarness("rich", "comment");
+    const oldTarget = harness.target;
+    harness.session.ytext.insert(0, "remote ");
+    const live = harness.session.comments.get(harness.id)!.range!;
+    const movedTarget = harness.root.querySelector<HTMLElement>(`[data-highlight-id="${harness.id}"]`)!;
+    harness.target = movedTarget;
+
+    performInteraction(harness, "primary", live.from + 2, "live");
+
+    expect(live.from).toBe(ITEM_RANGE.from + "remote ".length);
+    expect(movedTarget).toBe(oldTarget);
+    expect(harness.rawClick).toHaveBeenCalledOnce();
+    expect(harness.rawClick.mock.calls[0]![2]).toBe(live.from + 2);
+    expect(harness.setActiveComment).toHaveBeenCalledOnce();
+    expect(harness.panelIsOpen()).toBe(true);
+    expect(viewHasFocus(harness)).toBe(true);
+  });
+
+  it.each(SURFACES)("rejects unsupported, missing, and decoration-gap targets in the %s editor", (surface) => {
+    const harness = makeHarness(surface, "comment");
+    harness.setSourcePosition(ITEM_RANGE.from + 2);
+    const originalId = harness.target.dataset.highlightId!;
+    const originalKind = harness.target.dataset.highlightKind!;
+
+    harness.target.removeAttribute("data-highlight-id");
+    performInteraction(harness, "primary", ITEM_RANGE.from + 2, "live");
+    harness.target.dataset.highlightId = originalId;
+    harness.target.dataset.highlightKind = "find";
+    performInteraction(harness, "primary", ITEM_RANGE.from + 2, "live");
+    harness.target.dataset.highlightKind = originalKind;
+    harness.plainTarget.dataset.highlightId = originalId;
+    harness.plainTarget.dataset.highlightKind = originalKind;
+    harness.target = harness.plainTarget;
+    performInteraction(harness, "primary", ITEM_RANGE.from + 2, "live");
+
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    expect(harness.setActiveComment).not.toHaveBeenCalled();
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+  });
+});
