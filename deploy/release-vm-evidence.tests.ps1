@@ -102,11 +102,36 @@ $workflowSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '.
 
 Assert-True ([regex]::Matches($releaseSource, "'vm', 'run-command', 'invoke'").Count -eq 1) 'Terminal release must retain one VM invocation.'
 Assert-True ([regex]::Matches($releaseSource, "'acr', 'build'").Count -eq 1) 'Terminal release must retain one ACR submission.'
-Assert-True ($releaseSource -match '--scripts'', "@\$walScript", "@\$vmScript"' -and
-  $workflowSource -match '--scripts @infra/release-wal-gate\.sh @infra/deploy-vm-image\.sh') 'Both callers must send the gate before deployment in one invocation.'
-Assert-True ($workflowSource.Contains(':([0-9A-F]{24}):\1-[0-9a-f]{40}')) 'The workflow must bind the remote archive object to the captured WAL segment.'
+Assert-True ([regex]::Matches($workflowSource, 'deploy/release-vm\.ps1').Count -eq 1 -and
+  $workflowSource -match '(?m)^\s*run: \./deploy/release-vm\.ps1 -ExpectedCommit \$env:GITHUB_SHA\s*$') 'The workflow must invoke the configured release entrypoint once for the checked-out exact GITHUB_SHA.'
+Assert-True ($workflowSource -match '(?m)^\s+runs-on: windows-latest\s*$' -and
+  $workflowSource -match '(?m)^\s+shell: pwsh\s*$') 'The Windows release entrypoint must run with the PowerShell already installed on the hosted Windows runner.'
+Assert-True ($workflowSource -notmatch '\baz\s+acr\s+build\b' -and
+  $workflowSource -notmatch '\baz\s+vm\s+run-command\b') 'The workflow must not duplicate either Azure write owned by the release entrypoint.'
+Assert-True ($releaseSource -match '--scripts'', "@\$walScript", "@\$vmScript"') 'The configured release must send the WAL gate before deployment in one VM invocation.'
 Assert-True ($releaseSource -match '\$ReleaseDeadlineSeconds = 2100' -and
   $releaseSource -notmatch 'Local command deadline exceeded; remote work was cancel') 'The revised deadline must stay explicit without claiming cancellation.'
+$releaseDeadline = [regex]::Match($releaseSource, '(?m)^\$ReleaseDeadlineSeconds = (?<seconds>[0-9]+)\s*$')
+$workflowTimeout = [regex]::Match($workflowSource, '(?m)^\s+timeout-minutes: (?<minutes>[0-9]+)\s*$')
+Assert-True ($releaseDeadline.Success -and $workflowTimeout.Success) 'Release and runner deadlines must remain statically identifiable.'
+$runnerMarginSeconds = ([int]$workflowTimeout.Groups['minutes'].Value * 60) - [int]$releaseDeadline.Groups['seconds'].Value
+Assert-True ($runnerMarginSeconds -ge 60 -and $runnerMarginSeconds -le 600) 'The workflow timeout must exceed the configured release deadline by a small bounded runner margin.'
+$workflowTriggers = [regex]::Match($workflowSource, '(?ms)^on:\s*\r?\n(?<body>.*?)(?=^[a-zA-Z][a-zA-Z-]*:)')
+Assert-True ($workflowTriggers.Success -and
+  [regex]::Matches($workflowTriggers.Groups['body'].Value, '(?m)^  [a-zA-Z][a-zA-Z_-]*:').Count -eq 1 -and
+  $workflowTriggers.Groups['body'].Value -match '(?m)^  workflow_dispatch:\s*$') 'Production release must remain manual-only.'
+Assert-True ($workflowSource -match '(?m)^\s+environment: production\s*$' -and
+  $workflowSource -match '(?ms)^concurrency:\s*\r?\n\s+group: markdoc-production\s*\r?\n\s+cancel-in-progress: false\s*$') 'The workflow must retain the production environment and non-cancelling concurrency.'
+Assert-True ([regex]::Matches($workflowSource, 'uses: azure/login@v2').Count -eq 1 -and
+  [regex]::Matches($workflowSource, '\$\{\{\s*secrets\.').Count -eq 3 -and
+  $workflowSource -notmatch '\$\{\{\s*vars\.' -and
+  $workflowSource -match '(?m)^  id-token: write\s*$' -and
+  $workflowSource -match '(?m)^\s+client-id: \$\{\{ secrets\.AZURE_CLIENT_ID \}\}\s*$' -and
+  $workflowSource -match '(?m)^\s+tenant-id: \$\{\{ secrets\.AZURE_TENANT_ID \}\}\s*$' -and
+  $workflowSource -match '(?m)^\s+subscription-id: \$\{\{ secrets\.AZURE_SUBSCRIPTION_ID \}\}\s*$') 'The workflow must retain one OIDC login with only the established Azure identity.'
+Assert-True ($workflowSource -notmatch '(?i)\bretr(?:y|ies)\b') 'The workflow must not add an automatic retry around the single guarded release.'
+Assert-True ($releaseSource -match '\$origin = ''https://markdoc-burkeholland\.eastus2\.cloudapp\.azure\.com''' -and
+  $releaseSource -match 'Assert-ReleaseHealth \$health \$Commit ''Public''') 'The configured release must retain exact public health verification.'
 Assert-True ($deploySource.IndexOf('MARKDOC_RELEASE_WAL_GATE_OPERATION') -lt $deploySource.IndexOf('rollback_dir=') -and
   $deploySource.IndexOf('MARKDOC_RELEASE_WAL_GATE_OPERATION') -lt $deploySource.IndexOf('aad_token=')) 'Guest deployment must check the exact receipt before mutable work.'
 Assert-True ($gateSource -match "pg_current_wal_flush_lsn\(\)" -and
