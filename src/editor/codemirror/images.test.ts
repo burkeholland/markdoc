@@ -208,6 +208,7 @@ describe("codeImageUpload", () => {
 
     view.dispatch({ effects: imageExtension.reconfigure(codeImageUpload(session, freshUpload, { onError: freshError })) });
     paste(view, [pngFile("Fresh.png")]);
+    const dispatch = vi.spyOn(view, "dispatch");
     oldPending.reject(new Error("old failure"));
     freshPending.resolve({ url: "/fresh" });
     await flush();
@@ -217,6 +218,7 @@ describe("codeImageUpload", () => {
     expect(freshError).not.toHaveBeenCalled();
     expect(oldUpload).toHaveBeenCalledTimes(1);
     expect(freshUpload).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
   it("isolates editor instances and has zero late dispatch or error effects after destroy", async () => {

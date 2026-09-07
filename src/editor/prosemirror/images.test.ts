@@ -279,17 +279,20 @@ describe("imageUploadPlugin", () => {
 
     session.canEdit = true;
     paste(view, [pngFile("Fresh.png")]);
+    const dispatch = vi.spyOn(view, "dispatch");
     oldPending[0].resolve({ url: "/stale-success" });
     oldPending[1].reject(new Error("stale failure"));
     await flush();
     expect(imageAttrs(view)).toEqual([]);
     expect(onError).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
 
     freshPending.resolve({ url: "/fresh" });
     await flush();
     expect(imageAttrs(view)).toEqual([{ src: "/fresh", alt: "Fresh" }]);
     expect(upload).toHaveBeenCalledTimes(3);
     expect(previews.revokeObjectURL).toHaveBeenCalledTimes(3);
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
   it("retires an old plugin on replacement without affecting the replacement batch", async () => {
@@ -313,6 +316,7 @@ describe("imageUploadPlugin", () => {
     paste(view, [pngFile("Fresh.png")]);
     expect(imageUploadKey.getState(view.state)!.find()).toHaveLength(1);
 
+    const dispatch = vi.spyOn(view, "dispatch");
     oldPending.reject(new Error("old failed"));
     freshPending.resolve({ url: "/fresh" });
     await flush();
@@ -320,9 +324,12 @@ describe("imageUploadPlugin", () => {
     expect(freshError).not.toHaveBeenCalled();
     expect(imageAttrs(view)).toEqual([{ src: "/fresh", alt: "Fresh" }]);
     expect(imageUploadKey.getState(view.state)!.find()).toHaveLength(0);
+    expect(previews.revokeObjectURL).toHaveBeenCalledTimes(2);
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
   it("keeps independent views isolated and dispatches nothing after destruction", async () => {
+    const previews = previewSpies();
     const firstPending = deferred<{ url: string }>();
     const secondPending = deferred<{ url: string }>();
     const firstError = vi.fn();
@@ -334,6 +341,7 @@ describe("imageUploadPlugin", () => {
     const firstDispatch = vi.spyOn(first.view, "dispatch");
 
     first.view.destroy();
+    expect(previews.revokeObjectURL).toHaveBeenCalledTimes(1);
     const dispatchesAfterDestroy = firstDispatch.mock.calls.length;
     firstPending.reject(new Error("late failure"));
     secondPending.resolve({ url: "/second" });
@@ -344,5 +352,6 @@ describe("imageUploadPlugin", () => {
     expect(first.ytext.toString()).toBe("First\n");
     expect(imageAttrs(second.view)).toEqual([{ src: "/second", alt: "Second" }]);
     expect(secondError).not.toHaveBeenCalled();
+    expect(previews.revokeObjectURL).toHaveBeenCalledTimes(2);
   });
 });
