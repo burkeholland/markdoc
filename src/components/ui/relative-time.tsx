@@ -3,34 +3,81 @@
 import { useSyncExternalStore } from "react";
 import { formatDateTime, relativeTime } from "@/lib/utils";
 
-// One shared minute ticker for every mounted <RelativeTime>: the interval runs only while at
-// least one component is subscribed, and its snapshot is the time of the last tick.
-const listeners = new Set<() => void>();
-let timer: ReturnType<typeof setInterval> | null = null;
-let lastTick = 0;
+type Listener = () => void;
 
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  if (timer === null) {
-    // Fresh clock for the first subscriber; React re-renders if the snapshot changed since render.
-    lastTick = Date.now();
-    timer = setInterval(() => {
-      lastTick = Date.now();
-      for (const l of listeners) l();
-    }, 60_000);
+interface SubscriberRegistration {
+  readonly listener: Listener;
+  readonly generation: TickerGeneration;
+  active: boolean;
+}
+
+interface TickerGeneration {
+  readonly identity: symbol;
+  readonly callback: () => void;
+  readonly registrations: Set<SubscriberRegistration>;
+  interval: ReturnType<typeof setInterval> | null;
+  active: boolean;
+}
+
+let currentGeneration: TickerGeneration | null = null;
+let currentSnapshot = 0;
+
+function isCurrentGeneration(generation: TickerGeneration): boolean {
+  return generation.active && currentGeneration?.identity === generation.identity;
+}
+
+function tick(generation: TickerGeneration): void {
+  if (!isCurrentGeneration(generation)) return;
+
+  currentSnapshot = Date.now();
+  const registrations = [...generation.registrations];
+  for (const registration of registrations) {
+    if (!isCurrentGeneration(generation)) return;
+    if (registration.active) registration.listener();
   }
+}
+
+function createGeneration(): TickerGeneration {
+  const generation: TickerGeneration = {
+    identity: Symbol("relative-time-ticker"),
+    interval: null,
+    callback: () => tick(generation),
+    active: true,
+    registrations: new Set(),
+  };
+  return generation;
+}
+
+function subscribe(listener: Listener): () => void {
+  let generation = currentGeneration;
+  if (!generation || !generation.active) {
+    generation = createGeneration();
+    currentGeneration = generation;
+  }
+
+  const registration: SubscriberRegistration = { listener, generation, active: true };
+  generation.registrations.add(registration);
+  if (generation.interval === null) {
+    currentSnapshot = Date.now();
+    generation.interval = setInterval(generation.callback, 60_000);
+  }
+
   return () => {
-    listeners.delete(listener);
-    if (listeners.size === 0 && timer !== null) {
-      clearInterval(timer);
-      timer = null;
-    }
+    if (!registration.active) return;
+
+    registration.active = false;
+    generation.registrations.delete(registration);
+    if (!generation.active || generation.registrations.size !== 0) return;
+
+    generation.active = false;
+    if (currentGeneration?.identity === generation.identity) currentGeneration = null;
+    if (generation.interval !== null) clearInterval(generation.interval);
   };
 }
 
 function getNow(): number {
-  if (lastTick === 0) lastTick = Date.now();
-  return lastTick;
+  if (currentSnapshot === 0) currentSnapshot = Date.now();
+  return currentSnapshot;
 }
 
 // The server (and the hydrating client) has no clock to agree on: render the absolute date.
