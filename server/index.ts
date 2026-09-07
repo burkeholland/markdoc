@@ -32,7 +32,7 @@ import { attachRequestErrorGuards } from "./request-guards";
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
-import { shutdownServices } from "./shutdown";
+import { createShutdownOwner } from "./shutdown";
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -98,6 +98,87 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
+type RuntimeResources = {
+  server: Server | null;
+  standby: Server | null;
+  app: ReturnType<typeof next> | null;
+  appPreparation: Promise<void> | null;
+  hocuspocus: ReturnType<typeof createCollabServer> | null;
+  collabAttachment: AbortController | null;
+  databaseInitialization: Promise<unknown> | null;
+  publishing: boolean;
+};
+
+const runtime: RuntimeResources = {
+  server: null,
+  standby: null,
+  app: null,
+  appPreparation: null,
+  hocuspocus: null,
+  collabAttachment: null,
+  databaseInitialization: null,
+  publishing: false,
+};
+
+function closeHttpIntake(server: Server | null): Promise<void> {
+  if (!server) return Promise.resolve();
+  server.removeAllListeners("upgrade");
+  server.on("upgrade", (_req, socket) => socket.destroy());
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
+      else reject(new Error("HTTP intake did not close"));
+    });
+  });
+}
+
+async function stopRuntimeIntake(): Promise<void> {
+  runtime.collabAttachment?.abort();
+  const serverResults = await Promise.allSettled([
+    closeHttpIntake(runtime.server),
+    closeHttpIntake(runtime.standby),
+  ]);
+  const preparationFailed = runtime.appPreparation
+    ? await runtime.appPreparation.then(() => false, () => true)
+    : false;
+  const frameworkFailed = runtime.app
+    ? await runtime.app.close().then(() => false, () => true)
+    : false;
+  if (preparationFailed || frameworkFailed || serverResults.some((result) => result.status === "rejected")) {
+    throw new Error("HTTP or WebSocket intake did not close");
+  }
+}
+
+async function closeRuntimeDatabase(): Promise<void> {
+  const initializationFailed = runtime.databaseInitialization
+    ? await runtime.databaseInitialization.then(() => false, () => true)
+    : false;
+  const closeFailed = await closeDb().then(() => false, () => true);
+  if (initializationFailed || closeFailed) throw new Error("Database did not close");
+}
+
+function startRuntimePublishing() {
+  startGistAutoUpdateWorker();
+  runtime.publishing = true;
+}
+
+const shutdownOwner = createShutdownOwner({
+  stopIntake: stopRuntimeIntake,
+  stopPublishing: async () => {
+    if (runtime.publishing) await stopGistAutoUpdateWorker();
+  },
+  stopCollaboration: async () => {
+    if (runtime.hocuspocus) await shutdownCollab(runtime.hocuspocus);
+  },
+  closeDatabase: closeRuntimeDatabase,
+  exit: (code) => process.exit(code),
+  log: (message) => console.log(message),
+  error: (message) => console.error(message),
+});
+
+process.on("SIGINT", () => { void shutdownOwner.request("SIGINT"); });
+process.on("SIGTERM", () => { void shutdownOwner.request("SIGTERM"); });
+
 // Standby mode (scripts/live/promote.ps1): with STANDBY_PORT set, the server comes up on
 // 127.0.0.1:<STANDBY_PORT> against a throwaway in-memory database so the ops script can compile every
 // route while the previous build keeps serving :PORT. `POST /_standby/takeover` on the standby port
@@ -129,13 +210,23 @@ if (standbyPort > 0) {
   nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: "memory://" });
 }
 
-function listenWithRetry(server: ReturnType<typeof createServer>, onPort: number, host: string, deadlineMs: number): Promise<void> {
+function listenWithRetry(
+  server: ReturnType<typeof createServer>,
+  onPort: number,
+  host: string,
+  deadlineMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
   // The old process may still be releasing the port when the takeover arrives; retry EADDRINUSE briefly.
   return new Promise((resolve, reject) => {
     const attempt = () => {
+      if (signal?.aborted) {
+        reject(new Error("Server startup was interrupted"));
+        return;
+      }
       const onError = (err: NodeJS.ErrnoException) => {
         server.off("listening", onListening);
-        if (err.code === "EADDRINUSE" && Date.now() < deadlineMs) setTimeout(attempt, 200);
+        if (err.code === "EADDRINUSE" && Date.now() < deadlineMs && !signal?.aborted) setTimeout(attempt, 200);
         else reject(err);
       };
       const onListening = () => {
@@ -170,6 +261,7 @@ async function main() {
     res.statusCode = 503;
     res.end("starting");
   });
+  runtime.server = server;
   // Start accepting TCP connections before Next prepares. Reject upgrades promptly while starting:
   // a pending HMR handshake makes Chromium queue every later /collab socket behind it.
   const rejectStartupUpgrade = (_req: IncomingMessage, socket: Duplex) => {
@@ -177,20 +269,27 @@ async function main() {
   };
   server.on("upgrade", rejectStartupUpgrade);
   const initialListen =
-    standbyPort > 0 ? null : listenWithRetry(server, port, bindHost, Date.now() + 15_000);
+    standbyPort > 0 ? null : listenWithRetry(server, port, bindHost, Date.now() + 15_000, shutdownOwner.signal);
   void initialListen?.catch(() => {});
 
   // Initialize the database before serving application traffic. The early listener only returns 503
   // until this and Next preparation have both completed.
-  await getDb();
+  runtime.databaseInitialization = getDb();
+  await runtime.databaseInitialization;
+  shutdownOwner.signal.throwIfAborted();
   const app = next({ dev, hostname, port, turbopack: dev, httpServer: server });
-  await app.prepare();
+  runtime.app = app;
+  runtime.appPreparation = app.prepare();
+  await runtime.appPreparation;
+  shutdownOwner.signal.throwIfAborted();
   const handle = app.getRequestHandler();
 
   const hocuspocus = createCollabServer();
+  runtime.hocuspocus = hocuspocus;
   registerCollab(hocuspocus);
-  if (standbyPort === 0) startGistAutoUpdateWorker();
+  if (standbyPort === 0) startRuntimePublishing();
   const collabShutdown = new AbortController();
+  runtime.collabAttachment = collabShutdown;
   // Install Next's HMR listener before reporting readiness. Next otherwise waits for the first HTTP
   // request, leaving a browser that survived a restart unable to reconnect through WebSockets alone.
   const protectCollabUpgrade = protectUpgradePath(server, COLLAB_PATH);
@@ -210,21 +309,25 @@ async function main() {
   const runTakeover = async () => {
     if (hocuspocus.getDocumentsCount() > 0) {
       hocuspocus.closeConnections();
-      hocuspocus.flushPendingStores();
+      await hocuspocus.flushPendingStores();
       const until = Date.now() + 3000;
       while (hocuspocus.getDocumentsCount() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
       if (hocuspocus.getDocumentsCount() > 0) throw new Error("standby still holds documents from the throwaway database");
     }
+    shutdownOwner.signal.throwIfAborted();
     const t0 = Date.now();
     await closeDb();
+    shutdownOwner.signal.throwIfAborted();
     if (realDataDir === undefined) delete process.env.PGLITE_DATA_DIR;
     else process.env.PGLITE_DATA_DIR = realDataDir;
     nextEnv.updateInitialEnv({ PGLITE_DATA_DIR: realDataDir ?? "" });
-    await getDb();
-    startGistAutoUpdateWorker();
+    runtime.databaseInitialization = getDb();
+    await runtime.databaseInitialization;
+    shutdownOwner.signal.throwIfAborted();
+    startRuntimePublishing();
     configureMcpInternalOrigin(port, bindHost);
     const dbMs = Date.now() - t0;
-    await listenWithRetry(server, port, bindHost, Date.now() + 15_000);
+    await listenWithRetry(server, port, bindHost, Date.now() + 15_000, shutdownOwner.signal);
     console.log(`> Standby took over :${port} (database open ${dbMs} ms, listen ${Date.now() - t0 - dbMs} ms)`);
     standby?.close();
   };
@@ -265,6 +368,7 @@ async function main() {
   // In standby the same request handler also answers on the loopback side port; closing it after the
   // takeover leaves only :PORT.
   const standby = standbyPort > 0 ? createServer((req, res) => server.emit("request", req, res)) : null;
+  runtime.standby = standby;
   if (standby) {
     standby.listen(standbyPort, "127.0.0.1", () => {
       console.log(`> Markdoc STANDBY on http://127.0.0.1:${standbyPort} (throwaway database; POST ${STANDBY_TAKEOVER_PATH} to take :${port})`);
@@ -283,29 +387,8 @@ async function main() {
     }
   }
 
-  let shuttingDown = false;
-  const shutdown = async (signal: NodeJS.Signals) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`> [exit] ${signal} after ${uptime()}; shutting down, flushing documents...`);
-    collabShutdown.abort();
-    server.close();
-    standby?.close();
-    let exitCode = 0;
-    try {
-      await shutdownServices(stopGistAutoUpdateWorker, () => shutdownCollab(hocuspocus));
-    } catch {
-      exitCode = 1;
-      console.error("> [exit] service shutdown failed; unfinished publishing requires review");
-    } finally {
-      process.exit(exitCode);
-    }
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
 }
 
-main().catch((err) => {
-  console.error(`> [exit] startup failed after ${uptime()}:`, describe(err));
-  process.exit(1);
+main().catch(() => {
+  if (!shutdownOwner.signal.aborted) void shutdownOwner.request("startup");
 });
