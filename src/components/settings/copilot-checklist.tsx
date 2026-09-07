@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, type ApiTokenDto } from "@/lib/api";
@@ -21,17 +21,31 @@ export interface ChecklistState {
   mcpCalled: boolean;
 }
 
+interface ChecklistProgress extends ChecklistState {
+  tried: boolean;
+}
+
 export function checklistState(tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "lastMcpCallAt">[]): ChecklistState {
   return { hasToken: tokens.length > 0, mcpSeen: tokens.some((t) => !!t.lastMcpSeenAt), mcpCalled: tokens.some((t) => !!t.lastMcpCallAt) };
 }
 
-function advanceChecklistState(current: ChecklistState, tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "lastMcpCallAt">[]): ChecklistState {
-  const next = checklistState(tokens);
-  return {
+function advanceChecklistState(
+  current: ChecklistProgress,
+  next: ChecklistState,
+  hasAgentRequests = false,
+): ChecklistProgress {
+  const advanced = {
     hasToken: current.hasToken || next.hasToken,
     mcpSeen: current.mcpSeen || next.mcpSeen,
     mcpCalled: current.mcpCalled || next.mcpCalled,
+    tried: current.tried || next.mcpCalled || hasAgentRequests,
   };
+  return advanced.hasToken === current.hasToken &&
+    advanced.mcpSeen === current.mcpSeen &&
+    advanced.mcpCalled === current.mcpCalled &&
+    advanced.tried === current.tried
+    ? current
+    : advanced;
 }
 
 /**
@@ -39,8 +53,10 @@ function advanceChecklistState(current: ChecklistState, tokens: Pick<ApiTokenDto
  * state — a token exists, an MCP client listed the tools with it (`lastMcpSeenAt`), a tool call went
  * through (`lastMcpCallAt`, so the permission prompt was answered) or a request was sent from the editor.
  */
-export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs = 5000 }: CopilotChecklistProps) {
-  const [state, setState] = useState(() => checklistState(initialTokens));
+export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 5000 }: CopilotChecklistProps) {
+  const settlementGeneration = useRef(0);
+  const initial = checklistState(initialTokens ?? []);
+  const [state, setState] = useState<ChecklistProgress>(() => ({ ...initial, tried: initial.mcpCalled || hasAgentRequests }));
   const steps: { id: string; label: string; detail: React.ReactNode; done: boolean }[] = [
     { id: "token", label: "Create a token", detail: <>Below: name it after the agent (e.g. “GitHub Copilot CLI”) and copy the secret once.</>, done: state.hasToken },
     {
@@ -67,23 +83,44 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs 
       id: "try",
       label: "Try “read my doc”",
       detail: <>Ask Copilot to read one of your documents, or send a request from the editor (mention it in a comment). Turns green after the first tool call or request.</>,
-      done: state.mcpCalled || hasAgentRequests,
+      done: state.tried,
     },
   ];
   const allDone = steps.every((s) => s.done);
 
   useEffect(() => {
+    settlementGeneration.current++;
+    setState((current) =>
+      advanceChecklistState(
+        current,
+        { hasToken: initial.hasToken, mcpSeen: initial.mcpSeen, mcpCalled: initial.mcpCalled },
+        hasAgentRequests,
+      ),
+    );
+  }, [hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen]);
+
+  useEffect(() => {
     if (allDone || pollMs <= 0) return;
     let cancelled = false;
-    const load = () =>
-      api.tokens
+    let pending = false;
+    const load = () => {
+      if (cancelled || pending) return;
+      pending = true;
+      const generation = settlementGeneration.current;
+      void api.tokens
         .list()
         .then((r) => {
-          if (!cancelled) setState((current) => advanceChecklistState(current, r.tokens));
+          if (!cancelled && generation === settlementGeneration.current) {
+            setState((current) => advanceChecklistState(current, checklistState(r.tokens)));
+          }
         })
-        .catch(() => {});
-    void load();
-    const timer = setInterval(() => void load(), pollMs);
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) pending = false;
+        });
+    };
+    load();
+    const timer = setInterval(load, pollMs);
     return () => {
       cancelled = true;
       clearInterval(timer);
