@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, ExternalLink, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
@@ -12,6 +12,33 @@ export const TOKEN_PLACEHOLDER = "MARKDOC_TOKEN";
 export const COPILOT_APP_INSTALL = "mkdir -p ~/.copilot/extensions/markdoc && cp -R extensions/markdoc/. ~/.copilot/extensions/markdoc/";
 const COPILOT_APP_DOCS = "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md#inside-the-copilot-app";
 type ConnectTarget = "copilot-cli" | "mcp-clients" | "other-clients" | "copilot-app";
+type ConnectTargetDefinition = { id: ConnectTarget; label: string };
+
+const CONNECT_TARGETS: ConnectTargetDefinition[] = [
+  { id: "copilot-cli", label: "Copilot CLI" },
+  { id: "mcp-clients", label: "VS Code" },
+  { id: "other-clients", label: "Other MCP clients" },
+  { id: "copilot-app", label: "Copilot app" },
+];
+
+interface AgentConnectAuthority {
+  mount: symbol;
+  origin: string;
+  scope: TokenScopeName | null | undefined;
+  onCreateToken: (() => void) | undefined;
+  onDismiss: (() => void) | undefined;
+  hideTokenStep: boolean | undefined;
+}
+
+interface TabOwner {
+  authority: AgentConnectAuthority;
+  element: HTMLButtonElement;
+}
+
+interface ControlOwner {
+  authority: AgentConnectAuthority;
+  element: HTMLButtonElement;
+}
 
 /**
  * The MCP config for clients using mcpServers, pointing at this server's remote
@@ -108,33 +135,115 @@ export interface AgentConnectCardProps {
 export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hideTokenStep, className }: AgentConnectCardProps) {
   const base = origin;
   const [target, setTarget] = useState<ConnectTarget>("copilot-cli");
+  const [mount] = useState(() => Symbol("agent-connect-card"));
+  const authority = useMemo<AgentConnectAuthority>(
+    () => ({ mount, origin, scope, onCreateToken, onDismiss, hideTokenStep }),
+    [hideTokenStep, mount, onCreateToken, onDismiss, origin, scope],
+  );
+  const authorityRef = useRef<AgentConnectAuthority | null>(null);
+  const tabOwnersRef = useRef(new Map<ConnectTarget, TabOwner>());
+  const createTokenOwnerRef = useRef<ControlOwner | null>(null);
+  const dismissOwnerRef = useRef<ControlOwner | null>(null);
+  const selectedTargetRef = useRef<ConnectTarget>("copilot-cli");
   const stdioConfig = mcpConfigFor(base, TOKEN_PLACEHOLDER, target === "mcp-clients" ? "servers" : "mcpServers");
   const tabsId = useId();
-  const targets: { id: ConnectTarget; label: string }[] = [
-    { id: "copilot-cli", label: "Copilot CLI" },
-    { id: "mcp-clients", label: "VS Code" },
-    { id: "other-clients", label: "Other MCP clients" },
-    { id: "copilot-app", label: "Copilot app" },
-  ];
   const config = target === "mcp-clients" ? mcpVsCodeConfigFor(base) : mcpHttpConfigFor(base);
-  const selectTarget = (next: ConnectTarget, focus = false) => {
+  const ownsAuthority = (candidate: AgentConnectAuthority) =>
+    authorityRef.current === candidate &&
+    candidate.mount === mount &&
+    candidate.origin === origin &&
+    Object.is(candidate.scope, scope) &&
+    candidate.onCreateToken === onCreateToken &&
+    candidate.onDismiss === onDismiss &&
+    Object.is(candidate.hideTokenStep, hideTokenStep);
+  const ownsTab = (candidate: AgentConnectAuthority, tab: ConnectTarget, element: HTMLButtonElement) => {
+    const owner = tabOwnersRef.current.get(tab);
+    return ownsAuthority(candidate) && owner?.authority === candidate && owner.element === element && element.isConnected;
+  };
+  const setTabElement = useCallback((candidate: AgentConnectAuthority, tab: ConnectTarget, element: HTMLButtonElement | null) => {
+    if (element) {
+      tabOwnersRef.current.set(tab, { authority: candidate, element });
+    } else if (tabOwnersRef.current.get(tab)?.authority === candidate) {
+      tabOwnersRef.current.delete(tab);
+    }
+  }, []);
+  const setControlElement = useCallback((
+    ownerRef: React.RefObject<ControlOwner | null>,
+    candidate: AgentConnectAuthority,
+    element: HTMLButtonElement | null,
+  ) => {
+    if (element) {
+      ownerRef.current = { authority: candidate, element };
+    } else if (ownerRef.current?.authority === candidate) {
+      ownerRef.current = null;
+    }
+  }, []);
+  const selectTarget = (candidate: AgentConnectAuthority, next: ConnectTarget, element: HTMLButtonElement) => {
+    if (!ownsTab(candidate, next, element) || selectedTargetRef.current === next) return;
+    selectedTargetRef.current = next;
     setTarget(next);
-    if (focus) document.getElementById(`${tabsId}-${next}`)?.focus();
   };
-  const moveTarget = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+  const moveTarget = (candidate: AgentConnectAuthority, current: ConnectTarget, event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!ownsTab(candidate, current, event.currentTarget)) return;
+    const index = CONNECT_TARGETS.findIndex(({ id }) => id === current);
+    if (index < 0) return;
     let next = index;
-    if (event.key === "ArrowRight") next = (index + 1) % targets.length;
-    else if (event.key === "ArrowLeft") next = (index - 1 + targets.length) % targets.length;
+    if (event.key === "ArrowRight") next = (index + 1) % CONNECT_TARGETS.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + CONNECT_TARGETS.length) % CONNECT_TARGETS.length;
     else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = targets.length - 1;
+    else if (event.key === "End") next = CONNECT_TARGETS.length - 1;
     else return;
+    const nextTarget = CONNECT_TARGETS[next]?.id;
+    const destination = nextTarget ? tabOwnersRef.current.get(nextTarget) : undefined;
+    if (
+      !nextTarget ||
+      nextTarget === selectedTargetRef.current ||
+      destination?.authority !== candidate ||
+      !destination.element.isConnected ||
+      !ownsAuthority(candidate)
+    ) return;
     event.preventDefault();
-    selectTarget(targets[next].id, true);
+    selectedTargetRef.current = nextTarget;
+    setTarget(nextTarget);
+    destination.element.focus();
   };
+
+  useLayoutEffect(() => {
+    const tabOwners = tabOwnersRef.current;
+    authorityRef.current = authority;
+    return () => {
+      if (authorityRef.current === authority) authorityRef.current = null;
+      for (const target of CONNECT_TARGETS) {
+        if (tabOwners.get(target.id)?.authority === authority) tabOwners.delete(target.id);
+      }
+      if (createTokenOwnerRef.current?.authority === authority) createTokenOwnerRef.current = null;
+      if (dismissOwnerRef.current?.authority === authority) dismissOwnerRef.current = null;
+    };
+  }, [authority]);
+
+  useLayoutEffect(() => {
+    if (authorityRef.current === authority) selectedTargetRef.current = target;
+  }, [authority, target]);
+
   return (
     <section className={cn("relative min-w-0 rounded-xl border border-violet-200 bg-violet-50/60 p-3 dark:border-violet-900 dark:bg-violet-950/30", className)} data-testid="agent-connect-card" aria-label="Connect an MCP client">
       {onDismiss && (
-        <button type="button" className="icon-btn absolute right-2 top-2 h-7 w-7" onClick={onDismiss} aria-label="Dismiss setup steps" data-testid="agent-connect-dismiss">
+        <button
+          ref={(element) => setControlElement(dismissOwnerRef, authority, element)}
+          type="button"
+          className="icon-btn absolute right-2 top-2 h-7 w-7"
+          onClick={(event) => {
+            if (
+              !ownsAuthority(authority) ||
+              dismissOwnerRef.current?.authority !== authority ||
+              dismissOwnerRef.current.element !== event.currentTarget ||
+              authority.onDismiss !== onDismiss
+            ) return;
+            authority.onDismiss();
+          }}
+          aria-label="Dismiss setup steps"
+          data-testid="agent-connect-dismiss"
+        >
           <X size={14} />
         </button>
       )}
@@ -151,9 +260,10 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
         the Markdoc side; your agent does the work and proposes it back as suggestions.
       </p>
       <div className="mt-3 flex flex-wrap gap-1 rounded-lg bg-surface-2 p-1" role="tablist" aria-label="Agent client">
-        {targets.map((item, index) => (
+        {CONNECT_TARGETS.map((item) => (
           <button
             key={item.id}
+            ref={(element) => setTabElement(authority, item.id, element)}
             id={`${tabsId}-${item.id}`}
             type="button"
             role="tab"
@@ -161,8 +271,8 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
             aria-controls={`${tabsId}-panel`}
             tabIndex={target === item.id ? 0 : -1}
             className={cn("rounded-md px-2.5 py-1.5 text-xs font-medium", target === item.id ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink")}
-            onClick={() => selectTarget(item.id)}
-            onKeyDown={(event) => moveTarget(event, index)}
+            onClick={(event) => selectTarget(authority, item.id, event.currentTarget)}
+            onKeyDown={(event) => moveTarget(authority, item.id, event)}
             data-testid={`agent-connect-tab-${item.id}`}
           >
             {item.label}
@@ -176,7 +286,22 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
             <div className="flex flex-1 flex-wrap items-center gap-2">
               <span>Create an API token for the agent.</span>
               {onCreateToken ? (
-                <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={onCreateToken} data-testid="agent-connect-create-token">
+                <button
+                  ref={(element) => setControlElement(createTokenOwnerRef, authority, element)}
+                  type="button"
+                  className="btn btn-outline btn-sm gap-1.5"
+                  onClick={(event) => {
+                    if (
+                      !ownsAuthority(authority) ||
+                      authority.hideTokenStep ||
+                      createTokenOwnerRef.current?.authority !== authority ||
+                      createTokenOwnerRef.current.element !== event.currentTarget ||
+                      authority.onCreateToken !== onCreateToken
+                    ) return;
+                    authority.onCreateToken();
+                  }}
+                  data-testid="agent-connect-create-token"
+                >
                   <KeyRound size={14} /> Create token
                 </button>
               ) : (
