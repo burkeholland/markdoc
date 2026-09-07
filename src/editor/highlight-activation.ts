@@ -34,13 +34,20 @@ function ownsSourcePosition(range: { from: number; to: number } | null, sourcePo
   return !!range && range.to > range.from && sourcePosition >= range.from && sourcePosition < range.to;
 }
 
-export function activateHighlight(session: CollabSession, kind: string, id: string | null, sourcePosition: number): boolean {
-  if (!id || !isActivatableHighlightKind(kind) || !Number.isInteger(sourcePosition)) return false;
+function liveHighlightOwner(
+  session: CollabSession,
+  kind: string,
+  id: string | null,
+  sourcePosition: number,
+): "comment" | "suggestion" | null {
+  if (!id || !isActivatableHighlightKind(kind) || !Number.isInteger(sourcePosition)) return null;
   if (kind === "comment" || kind === "comment-resolved") {
     const thread = session.comments.get(id);
-    if (!thread || (thread.resolved ? "comment-resolved" : "comment") !== kind || !ownsSourcePosition(thread.range, sourcePosition)) return false;
-    session.setActiveComment(id);
-    return true;
+    return thread &&
+      (thread.resolved ? "comment-resolved" : "comment") === kind &&
+      ownsSourcePosition(thread.range, sourcePosition)
+      ? "comment"
+      : null;
   }
   // Grouped replacements share a highlight ID, but only a live member of the clicked kind owns it.
   const suggestion = session.suggestions.list().find(
@@ -49,7 +56,17 @@ export function activateHighlight(session: CollabSession, kind: string, id: stri
       (candidate.type === "insert" ? "suggest-insert" : "suggest-delete") === kind &&
       ownsSourcePosition(candidate, sourcePosition),
   );
-  if (!suggestion) return false;
-  session.setActiveSuggestion(id);
+  return suggestion ? "suggestion" : null;
+}
+
+export function ownsLiveHighlight(session: CollabSession, kind: string, id: string | null, sourcePosition: number): boolean {
+  return liveHighlightOwner(session, kind, id, sourcePosition) !== null;
+}
+
+export function activateHighlight(session: CollabSession, kind: string, id: string | null, sourcePosition: number): boolean {
+  const owner = liveHighlightOwner(session, kind, id, sourcePosition);
+  if (!owner || !id) return false;
+  if (owner === "comment") session.setActiveComment(id);
+  else session.setActiveSuggestion(id);
   return true;
 }

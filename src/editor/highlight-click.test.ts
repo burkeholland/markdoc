@@ -273,7 +273,7 @@ function performInteraction(harness: Harness, gesture: Gesture, sourcePosition: 
 }
 
 function expectedActivation(gesture: Gesture, boundary: Boundary, mutation: Mutation): boolean {
-  if (gesture === "auxiliary" || gesture === "context") return false;
+  if (gesture !== "primary") return false;
   if (mutation === "reanchor-containing") return true;
   return mutation === "live" && (boundary === "start" || boundary === "interior");
 }
@@ -298,8 +298,8 @@ describe("live highlight click ownership", () => {
         harness.view.focus();
         harness.setSourcePosition(sourcePosition);
         const selection = harness.view.state.selection.toJSON();
-        dispatch(harness.target, "pointerdown", { button: 0 });
-        if (surface === "rich") dispatch(harness.target, "mousedown", { button: 0 });
+        dispatch(harness.target, "pointerdown", { button: 0, detail: 1 });
+        if (surface === "rich") dispatch(harness.target, "mousedown", { button: 0, detail: 1 });
         if (mutation === "removed") harness.session.suggestions.ymap.delete(member.id);
         else if (mutation === "reanchor-away" || mutation === "range-less") {
           harness.session.suggestions.ymap.set(member.id, {
@@ -312,9 +312,9 @@ describe("live highlight click ownership", () => {
             ...(mutation === "kind-changed" ? { type: other.type } : { groupId: "different-group" }),
           });
         }
-        if (surface === "source") dispatch(harness.target, "mousedown", { button: 0 });
-        dispatch(harness.target, "mouseup", { button: 0 });
-        dispatch(harness.target, "click", { button: 0 });
+        if (surface === "source") dispatch(harness.target, "mousedown", { button: 0, detail: 1 });
+        dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
+        dispatch(harness.target, "click", { button: 0, detail: 1 });
 
         expect(harness.rawClick, mutation).toHaveBeenCalledOnce();
         expect(harness.setActiveComment, mutation).not.toHaveBeenCalled();
@@ -376,7 +376,7 @@ describe("live highlight click ownership", () => {
       expect(interactions).toBe(96);
       expect(staleActivations).toBe(0);
       expect(lostFocus).toBe(0);
-      expect(liveActivations).toBe(12);
+      expect(liveActivations).toBe(6);
     },
   );
 

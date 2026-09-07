@@ -1,7 +1,10 @@
 import { Plugin, TextSelection } from "prosemirror-state";
+import type { CollabSession } from "../collab/session";
+import { ownsLiveHighlight } from "../highlight-activation";
 import { installLinkInteractions } from "../links";
+import { richHighlightAtPointer } from "./highlights";
 
-export function richLinksPlugin(): Plugin {
+export function richLinksPlugin(session: CollabSession): Plugin {
   return new Plugin({
     view(view) {
       const destroy = installLinkInteractions(view.dom, (event) => {
@@ -18,6 +21,9 @@ export function richLinksPlugin(): Plugin {
         view.dispatch(view.state.tr.setSelection(TextSelection.between(
           view.state.doc.resolve(anchor.pos), view.state.doc.resolve(head.pos),
         )).setMeta("pointer", true).scrollIntoView());
+      }, (event) => {
+        const target = richHighlightAtPointer(view, session, event);
+        return !!target && ownsLiveHighlight(session, target.kind, target.id, target.sourcePosition);
       });
       return { destroy };
     },

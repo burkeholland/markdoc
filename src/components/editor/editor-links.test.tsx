@@ -24,6 +24,7 @@ vi.mock("@hocuspocus/provider", async () => {
 
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
+import { activateHighlight } from "@/editor/highlight-activation";
 import { refreshRichHighlights } from "@/editor/prosemirror/highlights";
 import { RichPane } from "./rich-pane";
 import { CodePane } from "./code-pane";
@@ -93,10 +94,18 @@ function gesture(target: EventTarget, init: MouseEventInit) {
   return { down, up, click };
 }
 
-function mountEditor(surface: "rich" | "source", source = SOURCE, role: "owner" | "viewer" = "owner") {
+function mountEditor(
+  surface: "rich" | "source",
+  source = SOURCE,
+  role: "owner" | "viewer" = "owner",
+  activateHighlights = false,
+) {
   const session = openSession(source, role);
   const onSelection = vi.fn();
-  const onHighlightClick = vi.fn();
+  let highlightOpens = 0;
+  const onHighlightClick = vi.fn((kind: string, id: string | null, sourcePosition: number) => {
+    if (activateHighlights && activateHighlight(session, kind, id, sourcePosition)) highlightOpens++;
+  });
   const onLinkShortcut = vi.fn();
   const onCommentShortcut = vi.fn();
   let rich: RichView | null = null;
@@ -138,12 +147,74 @@ function mountEditor(surface: "rich" | "source", source = SOURCE, role: "owner" 
   return {
     session, dom, rich: richView, code: codeView, selection, selectElsewhere, target,
     onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, parentClick, parentDown,
+    highlightOpens: () => highlightOpens,
+    focus: () => act(() => {
+      if (richView) richView.focus();
+      else codeView!.focus();
+      onSelection.mockClear();
+    }),
     rerender: () => mounted.rerender(ui()),
     unmount: () => mounted.unmount(),
   };
 }
 
+function addLiveHighlight(
+  session: CollabSession,
+  kind: "comment" | "suggest-insert",
+  from: number,
+  to: number,
+): string {
+  if (kind === "comment") return session.comments.add({ from, to, body: "A comment", author: session.user });
+  session.suggestions.recordInserted(from, to - from, session.user);
+  const suggestion = session.suggestions.list().find((candidate) => candidate.type === "insert" && candidate.from === from && candidate.to === to);
+  if (!suggestion) throw new Error("Suggestion fixture was not created");
+  return suggestion.groupId ?? suggestion.id;
+}
+
 describe.each(["rich", "source"] as const)("%s editor link input", (surface) => {
+  it.each([
+    ["comment", false],
+    ["comment", true],
+    ["suggest-insert", false],
+    ["suggest-insert", true],
+  ] as const)("preserves a platform-modified live non-link %s and keeps ordinary activation (Mac=%s)", async (kind, mac) => {
+    platform.mac = mac;
+    const editor = mountEditor(surface, "Before highlighted comment after", "owner", true);
+    const from = editor.session.ytext.toString().indexOf("highlighted");
+    let id = "";
+    act(() => {
+      id = addLiveHighlight(editor.session, kind, from, from + "highlighted".length);
+      if (editor.rich) refreshRichHighlights(editor.rich);
+    });
+    const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+    await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+    editor.selectElsewhere();
+    editor.focus();
+    const before = editor.selection();
+    const focused = document.activeElement;
+    const markdown = editor.session.ytext.toString();
+    const modifier = { [mac ? "metaKey" : "ctrlKey"]: true };
+    const target = editor.dom.querySelector(selector)!;
+
+    const modified = gesture(target, { clientX: from + 2, ...modifier });
+
+    expect(modified.down.defaultPrevented).toBe(true);
+    expect(modified.click.defaultPrevented).toBe(true);
+    expect(editor.onHighlightClick).not.toHaveBeenCalled();
+    expect(editor.highlightOpens()).toBe(0);
+    expect(editor.session.activeCommentId).toBeNull();
+    expect(editor.session.activeSuggestionId).toBeNull();
+    expect(editor.selection()).toEqual(before);
+    expect(document.activeElement).toBe(focused);
+    expect(editor.session.ytext.toString()).toBe(markdown);
+    expect(window.open).not.toHaveBeenCalled();
+
+    gesture(target, { clientX: from + 2 });
+    expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith(kind, id, from + 2);
+    expect(editor.highlightOpens()).toBe(1);
+    expect(kind === "comment" ? editor.session.activeCommentId : editor.session.activeSuggestionId).toBe(id);
+  });
+
   it.each([false, true])("opens exactly once without changing text, selection, focus or parent UI (Mac=%s)", (mac) => {
     platform.mac = mac;
     const editor = mountEditor(surface);
@@ -244,26 +315,95 @@ describe.each(["rich", "source"] as const)("%s editor link input", (surface) => 
     expect(window.open).not.toHaveBeenCalled();
   });
 
-  it("wins over overlapping comment/suggestion decorations without changing their plain-click behavior", async () => {
-    const editor = mountEditor(surface);
+  it.each([false, true])("wins over overlapping highlights without changing their plain-click behavior (Mac=%s)", async (mac) => {
+    platform.mac = mac;
+    const editor = mountEditor(surface, SOURCE, "owner", true);
     const from = SOURCE.indexOf("nested");
+    let suggestionId = "";
     act(() => {
       editor.session.comments.add({ from, to: from + 6, body: "A comment", author: editor.session.user });
-      editor.session.suggestions.recordInserted(from + 1, 3, editor.session.user);
+      suggestionId = addLiveHighlight(editor.session, "suggest-insert", from + 1, from + 4);
       if (editor.rich) refreshRichHighlights(editor.rich);
     });
     await waitFor(() => expect(editor.dom.querySelector(".md-suggest-insert")).not.toBeNull());
-    const target = editor.dom.querySelector(".md-suggest-insert");
+    const target = editor.dom.querySelector<HTMLElement>(".md-suggest-insert");
     expect(target).not.toBeNull();
+    const targetKind = target!.dataset.highlightKind!;
+    const targetId = target!.dataset.highlightId!;
     editor.selectElsewhere();
+    editor.focus();
     const before = editor.selection();
-    gesture(target!, { clientX: from + 2, ctrlKey: true });
+    const focused = document.activeElement;
+    const markdown = editor.session.ytext.toString();
+    gesture(target!, { clientX: from + 2, [mac ? "metaKey" : "ctrlKey"]: true });
     expect(window.open).toHaveBeenCalledTimes(1);
     expect(editor.onHighlightClick).not.toHaveBeenCalled();
+    expect(editor.highlightOpens()).toBe(0);
     expect(editor.selection()).toEqual(before);
+    expect(document.activeElement).toBe(focused);
+    expect(editor.session.ytext.toString()).toBe(markdown);
     gesture(target!, { clientX: from + 2 });
-    expect(editor.onHighlightClick).toHaveBeenCalledTimes(1);
+    expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith(targetKind, targetId, from + 2);
+    expect(editor.highlightOpens()).toBe(1);
+    expect(
+      targetKind.startsWith("comment") ? editor.session.activeCommentId : editor.session.activeSuggestionId,
+    ).toBe(targetId);
+    expect([suggestionId, editor.session.comments.list()[0].id]).toContain(targetId);
     expect(window.open).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["comment", "suggest-insert"] as const)("turns a modified non-link %s drag into selection without opening", async (kind) => {
+    const source = "Before highlighted passage after";
+    const editor = mountEditor(surface, source, "owner", true);
+    const from = source.indexOf("highlighted");
+    act(() => {
+      addLiveHighlight(editor.session, kind, from, from + "highlighted".length);
+      if (editor.rich) refreshRichHighlights(editor.rich);
+    });
+    const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+    await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+    editor.selectElsewhere();
+    editor.focus();
+    const before = editor.selection();
+    const target = editor.dom.querySelector(selector)!;
+
+    mouse(target, "mousedown", { clientX: from + 1, ctrlKey: true, buttons: 1 });
+    mouse(target, "mousemove", { clientX: from + 7, ctrlKey: true, buttons: 1 });
+    mouse(target, "mouseup", { clientX: from + 7, ctrlKey: true });
+    mouse(target, "click", { clientX: from + 7, ctrlKey: true });
+
+    expect(editor.selection()).not.toEqual(before);
+    expect(document.activeElement).toBe(editor.dom);
+    expect(editor.session.ytext.toString()).toBe(source);
+    expect(editor.onHighlightClick).not.toHaveBeenCalled();
+    expect(editor.highlightOpens()).toBe(0);
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["wrong platform", { metaKey: true }],
+    ["with Alt", { ctrlKey: true, altKey: true }],
+    ["with Shift", { ctrlKey: true, shiftKey: true }],
+    ["auxiliary", { button: 1, ctrlKey: true }],
+    ["context", { button: 2, ctrlKey: true }],
+    ["double", { detail: 2, ctrlKey: true }],
+  ] as const)("does not add highlight behavior for %s gestures", async (_label, init) => {
+    const source = "Before highlighted passage after";
+    const editor = mountEditor(surface, source, "owner", true);
+    const from = source.indexOf("highlighted");
+    act(() => {
+      addLiveHighlight(editor.session, "comment", from, from + "highlighted".length);
+      if (editor.rich) refreshRichHighlights(editor.rich);
+    });
+    await waitFor(() => expect(editor.dom.querySelector(".md-comment")).not.toBeNull());
+
+    gesture(editor.dom.querySelector(".md-comment")!, { clientX: from + 2, ...init });
+
+    expect(editor.onHighlightClick).not.toHaveBeenCalled();
+    expect(editor.highlightOpens()).toBe(0);
+    expect(editor.session.activeCommentId).toBeNull();
+    expect(editor.session.ytext.toString()).toBe(source);
+    expect(window.open).not.toHaveBeenCalled();
   });
 
   it("reads current destinations after a remote edit and rerender, including edits during a gesture", () => {

@@ -341,7 +341,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     doc: session.binding.initialDoc(),
     plugins: [
       editablePlugin(session.canEdit),
-      richLinksPlugin(),
+      richLinksPlugin(session),
       tableMenuPlugin(),
       ...(handlers.slashMenu ? [slashMenuPlugin(handlers.slashMenu)] : []),
       markdownBindingPlugin(session.binding),
