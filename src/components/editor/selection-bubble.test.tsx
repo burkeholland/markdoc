@@ -17,7 +17,12 @@ import { SelectionBubble } from "./selection-bubble";
 
 const screen = within(document.documentElement);
 type SelectionBubbleProps = ComponentProps<typeof SelectionBubble>;
-type ClickHandler = () => void;
+type CapturedMouseEvent = {
+  currentTarget: EventTarget | null;
+  preventDefault: ReturnType<typeof vi.fn>;
+};
+type MouseHandler = (event: CapturedMouseEvent) => void;
+type ButtonRef = (element: HTMLButtonElement | null) => void;
 const TOOLBAR_LABELS = ["Bold", "Italic", "Strikethrough", "Inline code", "Link", "Comment"] as const;
 
 vi.mock("@hocuspocus/provider", async () => {
@@ -269,25 +274,39 @@ function BubbleBoundary({
   return present ? <SelectionBubble {...bubble} /> : null;
 }
 
-function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElement, name: string): T {
+function reactProperty<T>(element: HTMLElement, name: string): T | undefined {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error(`React props were not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
   const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  const handler = props?.[name];
+  return props?.[name] as T | undefined;
+}
+
+function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElement, name: string): T {
+  const handler = reactProperty<T>(element, name);
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
-  return handler as T;
+  return handler;
 }
 
 function captureToolbar() {
   return TOOLBAR_LABELS.map((label) => {
-    const element = screen.getByRole("button", { name: label });
+    const element = screen.getByRole("button", { name: label }) as HTMLButtonElement;
     expect(element).toHaveClass("h-[32px]", "w-[32px]");
-    return { label, element, click: reactHandler<ClickHandler>(element, "onClick") };
+    return {
+      label,
+      element,
+      click: reactHandler<MouseHandler>(element, "onClick"),
+      mouseDown: reactHandler<MouseHandler>(element, "onMouseDown"),
+      buttonRef: reactProperty<ButtonRef>(element, "ref"),
+    };
   });
 }
 
+function mouseEvent(currentTarget: EventTarget | null): CapturedMouseEvent {
+  return { currentTarget, preventDefault: vi.fn() };
+}
+
 function invokeToolbar(toolbar: ReturnType<typeof captureToolbar>) {
-  for (const action of toolbar) action.click();
+  for (const action of toolbar) action.click(mouseEvent(action.element));
 }
 
 function instrumentActions() {
@@ -299,13 +318,20 @@ function instrumentActions() {
 }
 
 function instrumentPermissions(session: CollabSession, canEdit = true, canComment = true) {
-  const editReads = vi.fn(() => canEdit);
-  const commentReads = vi.fn(() => canComment);
+  let editable = canEdit;
+  let commentable = canComment;
+  const editReads = vi.fn(() => editable);
+  const commentReads = vi.fn(() => commentable);
   Object.defineProperties(session, {
     canEdit: { configurable: true, get: editReads },
     canComment: { configurable: true, get: commentReads },
   });
-  return { editReads, commentReads };
+  return {
+    editReads,
+    commentReads,
+    setCanEdit: (value: boolean) => { editable = value; },
+    setCanComment: (value: boolean) => { commentable = value; },
+  };
 }
 
 function toolbarSession() {
@@ -575,8 +601,8 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(retiredPermissions.editReads).not.toHaveBeenCalled();
       expect(retiredPermissions.commentReads).not.toHaveBeenCalled();
       expectToolbarCalls(currentActions, currentLink, currentComment);
-      expect(currentPermissions.editReads).toHaveBeenCalledTimes(5);
-      expect(currentPermissions.commentReads).toHaveBeenCalledTimes(1);
+      expect(currentPermissions.editReads).toHaveBeenCalledTimes(6);
+      expect(currentPermissions.commentReads).toHaveBeenCalledTimes(6);
     },
   );
 
@@ -662,14 +688,378 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(retiredLink).not.toHaveBeenCalled();
       expect(retiredComment).not.toHaveBeenCalled();
       expectToolbarCalls(currentActions, currentLink, currentComment);
-      expect(permissions.editReads).toHaveBeenCalledTimes(5);
-      expect(permissions.commentReads).toHaveBeenCalledTimes(1);
+      expect(permissions.editReads).toHaveBeenCalledTimes(6);
+      expect(permissions.commentReads).toHaveBeenCalledTimes(6);
       expect(env.resizes[0].disconnect).not.toHaveBeenCalled();
       expect(env.mutations[0].disconnect).not.toHaveBeenCalled();
       expect(env.listeners.every((listener) => listener.removed === 0)).toBe(true);
       expect(env.opened).toEqual(new Set([layer]));
     },
   );
+
+  it("requires each exact current button, consumes each mouse event once, and claims controls independently", () => {
+    const env = environment();
+    const f = fixture();
+    const actions = instrumentActions();
+    const permissions = instrumentPermissions(f.session);
+    const onLink = vi.fn();
+    const onComment = vi.fn();
+    render(<SelectionBubble {...f.props} actions={actions.actions} onLink={onLink} onComment={onComment} />);
+    env.flush();
+    const toolbar = captureToolbar();
+    const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+    const layerContains = vi.spyOn(layer, "contains");
+    const foreign = document.createElement("button");
+    const detached = document.createElement("button");
+    const replacement = document.createElement("button");
+    document.body.append(foreign, replacement);
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    layerContains.mockClear();
+
+    for (const control of [toolbar[0], toolbar[4], toolbar[5]]) {
+      const sibling = toolbar[control === toolbar[0] ? 1 : 0];
+      for (const target of [sibling.element, foreign, detached, replacement]) {
+        const down = mouseEvent(target);
+        control.mouseDown(down);
+        control.click(mouseEvent(target));
+        expect(down.preventDefault).not.toHaveBeenCalled();
+      }
+    }
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+    expect(onLink).not.toHaveBeenCalled();
+    expect(onComment).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+    expect(layerContains).not.toHaveBeenCalled();
+    expect(f.view.focus).not.toHaveBeenCalled();
+
+    const competingMouseEvent = mouseEvent(toolbar[0].element);
+    toolbar[0].mouseDown(competingMouseEvent);
+    competingMouseEvent.currentTarget = toolbar[1].element;
+    toolbar[1].mouseDown(competingMouseEvent);
+    expect(competingMouseEvent.preventDefault).toHaveBeenCalledTimes(1);
+
+    const acceptedMouseEvents: CapturedMouseEvent[] = [];
+    for (const control of toolbar) {
+      const down = mouseEvent(control.element);
+      acceptedMouseEvents.push(down);
+      control.mouseDown(down);
+      control.mouseDown(down);
+      control.click(mouseEvent(control.element));
+      control.click(mouseEvent(control.element));
+    }
+    for (const event of acceptedMouseEvents) expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expectToolbarCalls(actions, onLink, onComment);
+    expect(permissions.editReads).toHaveBeenCalledTimes(13);
+    expect(permissions.commentReads).toHaveBeenCalledTimes(13);
+  });
+
+  it("rejects detached and replacement exact-control sources before permission or destination work", () => {
+    const env = environment();
+    const f = fixture();
+    const actions = instrumentActions();
+    const permissions = instrumentPermissions(f.session);
+    const onLink = vi.fn();
+    const onComment = vi.fn();
+    render(<SelectionBubble {...f.props} actions={actions.actions} onLink={onLink} onComment={onComment} />);
+    env.flush();
+    const toolbar = captureToolbar();
+    const bold = toolbar[0];
+    const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+    const layerContains = vi.spyOn(layer, "contains");
+    const replacement = bold.element.cloneNode(true) as HTMLButtonElement;
+    bold.element.replaceWith(replacement);
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    layerContains.mockClear();
+
+    const detachedDown = mouseEvent(bold.element);
+    const replacementDown = mouseEvent(replacement);
+    bold.mouseDown(detachedDown);
+    bold.mouseDown(replacementDown);
+    bold.click(mouseEvent(bold.element));
+    bold.click(mouseEvent(replacement));
+
+    expect(detachedDown.preventDefault).not.toHaveBeenCalled();
+    expect(replacementDown.preventDefault).not.toHaveBeenCalled();
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+    expect(onLink).not.toHaveBeenCalled();
+    expect(onComment).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+    expect(layerContains).not.toHaveBeenCalled();
+    expect(f.view.focus).not.toHaveBeenCalled();
+
+    const link = toolbar[4];
+    document.body.append(link.element);
+    layerContains.mockClear();
+    link.click(mouseEvent(link.element));
+    expect(onLink).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+  });
+
+  it.each(["retired-before-current", "current-before-retired"] as const)(
+    "reuses exact button, layer, method, and callbacks without restoring retired format controls (%s)",
+    (order) => {
+      const env = environment();
+      const f = fixture();
+      const actions = instrumentActions();
+      const permissions = instrumentPermissions(f.session);
+      const onLink = vi.fn();
+      const onComment = vi.fn();
+      const firstFormat = { ...EMPTY_FORMAT };
+      const firstBubble = { ...f.props, actions: actions.actions, format: firstFormat, onLink, onComment };
+      const rendered = render(<BubbleBoundary bubble={firstBubble} />);
+      env.flush();
+      const retired = captureToolbar();
+      const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+      const secondFormat = { ...firstFormat, strong: true };
+      let current: ReturnType<typeof captureToolbar> | null = null;
+      permissions.editReads.mockClear();
+      permissions.commentReads.mockClear();
+
+      rendered.rerender(
+        <BubbleBoundary
+          bubble={{ ...firstBubble, format: secondFormat }}
+          boundary={1}
+          onBoundary={() => {
+            current = captureToolbar();
+            expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
+            expect(current.map(({ element }) => element)).toEqual(retired.map(({ element }) => element));
+            retired[0].buttonRef?.(null);
+            const invoke = (toolbar: ReturnType<typeof captureToolbar>) => {
+              for (const index of [0, 4, 5]) toolbar[index].click(mouseEvent(toolbar[index].element));
+            };
+            if (order === "retired-before-current") {
+              invoke(retired);
+              invoke(current);
+            } else {
+              invoke(current);
+              invoke(retired);
+            }
+          }}
+        />,
+      );
+
+      expect(current).not.toBeNull();
+      expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
+      expect(onLink).toHaveBeenCalledTimes(1);
+      expect(onComment).toHaveBeenCalledTimes(1);
+      expect(permissions.editReads).toHaveBeenCalledTimes(5);
+      expect(permissions.commentReads).toHaveBeenCalledTimes(5);
+    },
+  );
+
+  it.each(["retired-before-current", "current-before-retired"] as const)(
+    "retires exact controls across same-layer geometry replacement (%s)",
+    (order) => {
+      const env = environment();
+      const f = fixture();
+      const actions = instrumentActions();
+      const permissions = instrumentPermissions(f.session);
+      const onLink = vi.fn();
+      const onComment = vi.fn();
+      render(<SelectionBubble {...f.props} actions={actions.actions} onLink={onLink} onComment={onComment} />);
+      env.flush();
+      const retired = captureToolbar();
+      const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+      window.dispatchEvent(new Event("resize"));
+      env.flush();
+      const current = captureToolbar();
+      expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
+      expect(current.map(({ element }) => element)).toEqual(retired.map(({ element }) => element));
+      permissions.editReads.mockClear();
+      permissions.commentReads.mockClear();
+
+      const invoke = (toolbar: ReturnType<typeof captureToolbar>) => {
+        for (const index of [1, 4, 5]) toolbar[index].click(mouseEvent(toolbar[index].element));
+      };
+      if (order === "retired-before-current") {
+        invoke(retired);
+        invoke(current);
+      } else {
+        invoke(current);
+        invoke(retired);
+      }
+
+      expect(actions.toggleMark.mock.calls).toEqual([["em"]]);
+      expect(onLink).toHaveBeenCalledTimes(1);
+      expect(onComment).toHaveBeenCalledTimes(1);
+      expect(permissions.editReads).toHaveBeenCalledTimes(3);
+      expect(permissions.commentReads).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each(["retired-before-current", "current-before-retired"] as const)(
+    "keeps an equal-looking remount separate from every retired control (%s)",
+    (order) => {
+      const env = environment();
+      const f = fixture();
+      const actions = instrumentActions();
+      const permissions = instrumentPermissions(f.session);
+      const onLink = vi.fn();
+      const onComment = vi.fn();
+      const bubble = { ...f.props, actions: actions.actions, onLink, onComment };
+      const first = render(<SelectionBubble {...bubble} />);
+      env.flush();
+      const retired = captureToolbar();
+      first.unmount();
+      const second = render(<SelectionBubble {...bubble} />);
+      env.flush();
+      const current = captureToolbar();
+      for (const [index, control] of current.entries()) {
+        expect(control.element).not.toBe(retired[index].element);
+      }
+      permissions.editReads.mockClear();
+      permissions.commentReads.mockClear();
+
+      const invoke = (toolbar: ReturnType<typeof captureToolbar>) => {
+        for (const index of [3, 4, 5]) toolbar[index].click(mouseEvent(toolbar[index].element));
+      };
+      if (order === "retired-before-current") {
+        invoke(retired);
+        invoke(current);
+      } else {
+        invoke(current);
+        invoke(retired);
+      }
+
+      expect(actions.toggleMark.mock.calls).toEqual([["code"]]);
+      expect(onLink).toHaveBeenCalledTimes(1);
+      expect(onComment).toHaveBeenCalledTimes(1);
+      expect(permissions.editReads).toHaveBeenCalledTimes(3);
+      expect(permissions.commentReads).toHaveBeenCalledTimes(3);
+      second.unmount();
+    },
+  );
+
+  it("fails closed for disabled publications and restores only later eligible controls", () => {
+    const env = environment();
+    const f = fixture();
+    const actions = instrumentActions();
+    const permissions = instrumentPermissions(f.session, false, true);
+    const onLink = vi.fn();
+    const onComment = vi.fn();
+    const bubble = { ...f.props, actions: actions.actions, onLink, onComment };
+    const rendered = render(<SelectionBubble {...bubble} />);
+    env.flush();
+    const retired = captureToolbar();
+    expect(retired[0].element).toBeDisabled();
+    expect(retired[5].element).toBeEnabled();
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    const disabledEdit = mouseEvent(retired[0].element);
+    retired[0].mouseDown(disabledEdit);
+    retired[0].click(mouseEvent(retired[0].element));
+    expect(disabledEdit.preventDefault).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+
+    permissions.setCanEdit(true);
+    permissions.setCanComment(false);
+    rendered.rerender(<SelectionBubble {...bubble} />);
+    const current = captureToolbar();
+    expect(current[0].element).toBeEnabled();
+    expect(current[5].element).toBeDisabled();
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    const disabledComment = mouseEvent(current[5].element);
+    retired[5].click(mouseEvent(retired[5].element));
+    current[5].mouseDown(disabledComment);
+    current[5].click(mouseEvent(current[5].element));
+    current[0].click(mouseEvent(current[0].element));
+    expect(disabledComment.preventDefault).not.toHaveBeenCalled();
+    expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
+    expect(onComment).not.toHaveBeenCalled();
+    expect(permissions.editReads).toHaveBeenCalledTimes(1);
+    expect(permissions.commentReads).toHaveBeenCalledTimes(1);
+
+    permissions.setCanComment(true);
+    rendered.rerender(<SelectionBubble {...bubble} />);
+    const restored = captureToolbar();
+    restored[5].click(mouseEvent(restored[5].element));
+    restored[5].click(mouseEvent(restored[5].element));
+    expect(onComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects silent format, method, and pre-commit permission drift before restoring a later publication", () => {
+    const env = environment();
+    const f = fixture();
+    const actions = instrumentActions();
+    const permissions = instrumentPermissions(f.session);
+    const format = { ...EMPTY_FORMAT };
+    const bubble = { ...f.props, actions: actions.actions, format };
+    const rendered = render(<BubbleBoundary bubble={bubble} />);
+    env.flush();
+    const formatStale = captureToolbar();
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    format.strong = true;
+    formatStale[0].click(mouseEvent(formatStale[0].element));
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+
+    rendered.rerender(<BubbleBoundary bubble={bubble} />);
+    const methodStale = captureToolbar();
+    const replacementToggle = vi.fn();
+    actions.actions.toggleMark = replacementToggle;
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    methodStale[1].click(mouseEvent(methodStale[1].element));
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+    expect(replacementToggle).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+
+    rendered.rerender(<BubbleBoundary bubble={bubble} />);
+    let permissionStale: ReturnType<typeof captureToolbar> | null = null;
+    rendered.rerender(
+      <BubbleBoundary
+        bubble={bubble}
+        boundary={1}
+        onBoundary={() => {
+          permissionStale = captureToolbar();
+          permissions.setCanEdit(false);
+        }}
+      />,
+    );
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    permissionStale![2].click(mouseEvent(permissionStale![2].element));
+    expect(replacementToggle).not.toHaveBeenCalled();
+    expect(permissions.editReads).toHaveBeenCalledTimes(1);
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+
+    permissions.setCanEdit(true);
+    rendered.rerender(<BubbleBoundary bubble={bubble} boundary={2} />);
+    const restored = captureToolbar();
+    restored[1].click(mouseEvent(restored[1].element));
+    restored[1].click(mouseEvent(restored[1].element));
+    expect(replacementToggle.mock.calls).toEqual([["em"]]);
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+  });
+
+  it("claims before destination reentrancy while leaving a distinct current control usable", () => {
+    const env = environment();
+    const f = fixture();
+    let reenter: () => void = () => undefined;
+    const toggleMark = vi.fn(() => reenter());
+    const actions = { toggleMark } as unknown as EditorActions;
+    const onLink = vi.fn();
+    render(<SelectionBubble {...f.props} actions={actions} onLink={onLink} />);
+    env.flush();
+    const toolbar = captureToolbar();
+    reenter = () => toolbar[0].click(mouseEvent(toolbar[0].element));
+
+    toolbar[0].click(mouseEvent(toolbar[0].element));
+    toolbar[4].click(mouseEvent(toolbar[4].element));
+
+    expect(toggleMark.mock.calls).toEqual([["strong"]]);
+    expect(onLink).toHaveBeenCalledTimes(1);
+  });
 
   it("retires publication and captured actions before the parent removal layout boundary", () => {
     const env = environment({ popover: true });
@@ -781,19 +1171,32 @@ describe("SelectionBubble geometry scheduling", () => {
   it("replaces a scroller behind a stable ref and disconnects the precise old targets", () => {
     const env = environment();
     const f = fixture();
-    const rendered = render(<SelectionBubble {...f.props} />);
+    const actions = instrumentActions();
+    const permissions = instrumentPermissions(f.session);
+    const rendered = render(<SelectionBubble {...f.props} actions={actions.actions} />);
     env.flush();
+    const retired = captureToolbar();
+    const retiredLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
     const replacement = document.createElement("div");
     replacement.append(f.editor);
     document.body.append(replacement);
     Object.defineProperty(replacement, "getBoundingClientRect", { configurable: true, value: vi.fn(() => new DOMRect(50, 100, 180, 500)) });
     f.props.containerRef.current = replacement;
-    rendered.rerender(<SelectionBubble {...f.props} />);
+    rendered.rerender(<SelectionBubble {...f.props} actions={actions.actions} />);
     env.flush();
+    const current = captureToolbar();
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    retired[0].click(mouseEvent(retired[0].element));
+    current[0].click(mouseEvent(current[0].element));
     expect(env.resizes[0].disconnect).toHaveBeenCalledTimes(1);
     expect(env.resizes[1].targets.has(replacement)).toBe(true);
     expect(env.resizes[1].targets.has(f.scroller)).toBe(false);
+    expect(document.querySelector("[data-selection-bubble-layer]")).not.toBe(retiredLayer);
     expect(screen.getByTestId("selection-bubble").style.width).toBe("164px");
+    expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
+    expect(permissions.editReads).toHaveBeenCalledTimes(1);
+    expect(permissions.commentReads).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])("owns transformed-body and descendant fullscreen enter/replace/exit (popover %s)", (popover) => {
@@ -1056,7 +1459,7 @@ describe("SelectionBubble geometry scheduling", () => {
     expect(screen.queryByTestId("selection-bubble")).toBeNull();
   });
 
-  it("keeps six pointer/keyboard actions and applies Bold to the restored selection", async () => {
+  it("keeps six pointer/keyboard actions single-use and applies Bold to a restored publication", async () => {
     const env = environment();
     const f = fixture();
     const user = userEvent.setup();
@@ -1068,13 +1471,13 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(true);
       screen.getByRole("button", { name: label }).focus();
       await user.keyboard("{Enter}");
-      expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(false);
+      expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(true);
     }
     for (const [label, handler] of [["Link", f.onLink], ["Comment", f.onComment]] as const) {
       await user.click(screen.getByRole("button", { name: label }));
       screen.getByRole("button", { name: label }).focus();
       await user.keyboard(" ");
-      expect(handler).toHaveBeenCalledTimes(2);
+      expect(handler).toHaveBeenCalledTimes(1);
     }
     f.setHost(new DOMRect(0, 300, 180, 200));
     fireEvent.scroll(f.scroller);
@@ -1086,7 +1489,7 @@ describe("SelectionBubble geometry scheduling", () => {
     const bold = screen.getByRole("button", { name: "Bold" });
     expect(bold.closest('[role="toolbar"]')).toHaveClass("overflow-x-auto");
     await user.click(bold);
-    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(true);
+    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(false);
     expect(f.view.state.selection.from).toBe(1);
     expect(f.view.state.selection.to).toBe(9);
   });
