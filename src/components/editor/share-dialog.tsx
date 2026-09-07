@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { BookOpen, Bot, Check, ChevronDown, Copy, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
@@ -101,6 +101,14 @@ export const ShareDialog = memo(function ShareDialog({
     addPending.current = null;
   }, []);
 
+  const retirePermissionOperations = useCallback((expectedContext?: PermissionContext) => {
+    if (expectedContext && permissionContext.current !== expectedContext) return;
+    permissionContext.current = null;
+    collaboratorPermissionOwners.current.clear();
+    linkPermissionOwner.current = null;
+    permissionFeedbackOwner.current = null;
+  }, []);
+
   const loadCollaborators = useCallback(async (documentId: string, mode: "load" | "retry" = "load", supersede = false) => {
     const visit = shareVisit.current;
     if (!visit || visit.documentId !== documentId) return;
@@ -125,7 +133,7 @@ export const ShareDialog = memo(function ShareDialog({
     }
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     retireShareRequests();
     setBusy(false);
     setAddError(null);
@@ -140,25 +148,17 @@ export const ShareDialog = memo(function ShareDialog({
     return () => retireShareRequests(visit);
   }, [open, doc.id, loadCollaborators, retireShareRequests]);
 
-  useEffect(() => {
-    const context = open ? { documentId: doc.id } : null;
-    const collaboratorOwners = collaboratorPermissionOwners.current;
-    permissionContext.current = context;
-    collaboratorOwners.clear();
-    linkPermissionOwner.current = null;
-    permissionFeedbackOwner.current = null;
+  useLayoutEffect(() => {
+    retirePermissionOperations();
     setCollaboratorPermissionOperations(new Map());
     setLinkPermissionOperation(null);
     setActionError(null);
 
-    return () => {
-      if (permissionContext.current !== context) return;
-      permissionContext.current = null;
-      collaboratorOwners.clear();
-      linkPermissionOwner.current = null;
-      permissionFeedbackOwner.current = null;
-    };
-  }, [open, doc.id]);
+    if (!open) return;
+    const context = { documentId: doc.id };
+    permissionContext.current = context;
+    return () => retirePermissionOperations(context);
+  }, [open, doc.id, retirePermissionOperations]);
 
   const currentList = collaboratorList?.documentId === doc.id ? collaboratorList : null;
   const collabs = currentList?.status === "loaded" ? currentList.collaborators : null;
@@ -302,10 +302,7 @@ export const ShareDialog = memo(function ShareDialog({
 
   const close = () => {
     retireShareRequests();
-    permissionContext.current = null;
-    collaboratorPermissionOwners.current.clear();
-    linkPermissionOwner.current = null;
-    permissionFeedbackOwner.current = null;
+    retirePermissionOperations();
     onOpenChange(false);
   };
 
