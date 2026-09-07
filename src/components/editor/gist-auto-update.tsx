@@ -22,7 +22,7 @@ import {
 type Action =
   | { kind: "status"; serial: number; explicit: boolean }
   | { kind: "preview" | "disable" | "retry"; serial: number }
-  | { kind: "enable"; serial: number; destination: GistAutoUpdateDestination };
+  | { kind: "enable"; serial: number; destination: DestinationSnapshot };
 type Problem = { status: "failed" | "conflict"; message: string; source: Action["kind"] | "destination" };
 type AuthorityStamp = { mount: symbol; serial: number; visibilityGeneration: number };
 type RequestOwner = AuthorityStamp & { token: symbol; kind: Action["kind"] };
@@ -41,36 +41,52 @@ type ControlAuthority = {
 };
 type SettingsButtonName = "refresh" | "preview" | "enable" | "retry" | "disable";
 type SettingsControlName = SettingsButtonName | "acknowledgement";
-type SettingsButtonFacts = {
+type DestinationSnapshot = Readonly<{
+  gistId: string;
+  filename: string;
+  url: string;
+  visibility: GistAutoUpdateDestination["visibility"];
+  owner: string;
+}>;
+type StatusSnapshot = Readonly<{
+  enabled: boolean;
+  status: GistAutoUpdateStatus["status"];
+  syncedAt: string | null;
+  message: string | null;
+  pending: boolean;
+  destination: DestinationSnapshot | null;
+}>;
+type ProblemSnapshot = Readonly<Problem>;
+type SettingsButtonFacts = Readonly<{
   name: SettingsButtonName;
   kind: Action["kind"];
   eligible: boolean;
-  destination: GistAutoUpdateDestination | null;
-};
-type AcknowledgementFacts = {
+  destination: DestinationSnapshot | null;
+}>;
+type AcknowledgementFacts = Readonly<{
   name: "acknowledgement";
   eligible: boolean;
-  destination: GistAutoUpdateDestination;
-};
-type SettingsPresentation = {
+  destination: DestinationSnapshot;
+}>;
+type SettingsPresentation = Readonly<{
   mount: symbol;
   identity: string;
   documentId: string;
   gistId: string;
   filename: string;
   url: string;
-  status: GistAutoUpdateStatus | null;
-  preview: GistAutoUpdateDestination | null;
-  problem: Problem | null;
+  status: StatusSnapshot | null;
+  preview: DestinationSnapshot | null;
+  problem: ProblemSnapshot | null;
   busy: Action["kind"] | null;
   acknowledged: boolean;
   enabled: boolean;
   state: Problem["status"] | GistAutoUpdateStatus["status"] | undefined;
   blocked: boolean;
   canRetry: boolean;
-  buttons: Record<SettingsButtonName, SettingsButtonFacts | null>;
+  buttons: Readonly<Record<SettingsButtonName, SettingsButtonFacts | null>>;
   acknowledgement: AcknowledgementFacts | null;
-};
+}>;
 type SettingsPresentationRuntime = {
   active: boolean;
   root: HTMLElement | null;
@@ -80,6 +96,69 @@ type SettingsPresentationRuntime = {
 const SETTINGS_BUTTON_NAMES: readonly SettingsButtonName[] = ["refresh", "preview", "enable", "retry", "disable"];
 
 const LABELS = { off: "Off", pending: "Pending", syncing: "Syncing", synced: "Synced", failed: "Failed", conflict: "Conflict" };
+
+function snapshotDestination(destination: Readonly<GistAutoUpdateDestination>): DestinationSnapshot {
+  return Object.freeze({
+    gistId: destination.gistId,
+    filename: destination.filename,
+    url: destination.url,
+    visibility: destination.visibility,
+    owner: destination.owner,
+  });
+}
+
+function destinationMatchesSnapshot(
+  destination: Readonly<GistAutoUpdateDestination> | null,
+  snapshot: DestinationSnapshot | null,
+) {
+  return destination === null
+    ? snapshot === null
+    : snapshot !== null
+      && destination.gistId === snapshot.gistId
+      && destination.filename === snapshot.filename
+      && destination.url === snapshot.url
+      && destination.visibility === snapshot.visibility
+      && destination.owner === snapshot.owner;
+}
+
+function snapshotStatus(status: Readonly<GistAutoUpdateStatus> | null): StatusSnapshot | null {
+  if (!status) return null;
+  return Object.freeze({
+    enabled: status.enabled,
+    status: status.status,
+    syncedAt: status.syncedAt,
+    message: status.message,
+    pending: status.pending,
+    destination: status.destination ? snapshotDestination(status.destination) : null,
+  });
+}
+
+function statusMatchesSnapshot(status: Readonly<GistAutoUpdateStatus> | null, snapshot: StatusSnapshot | null) {
+  return status === null
+    ? snapshot === null
+    : snapshot !== null
+      && status.enabled === snapshot.enabled
+      && status.status === snapshot.status
+      && status.syncedAt === snapshot.syncedAt
+      && status.message === snapshot.message
+      && status.pending === snapshot.pending
+      && destinationMatchesSnapshot(status.destination, snapshot.destination);
+}
+
+function snapshotProblem(problem: Readonly<Problem> | null): ProblemSnapshot | null {
+  return problem
+    ? Object.freeze({ status: problem.status, message: problem.message, source: problem.source })
+    : null;
+}
+
+function problemMatchesSnapshot(problem: Readonly<Problem> | null, snapshot: ProblemSnapshot | null) {
+  return problem === null
+    ? snapshot === null
+    : snapshot !== null
+      && problem.status === snapshot.status
+      && problem.message === snapshot.message
+      && problem.source === snapshot.source;
+}
 
 function clearAuthorityTimer(authority: ControlAuthority) {
   if (authority.timer !== undefined) clearTimeout(authority.timer);
@@ -434,9 +513,9 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
       || candidate.gistId !== gistId
       || candidate.filename !== filename
       || candidate.url !== url
-      || candidate.status !== status
-      || candidate.preview !== preview
-      || candidate.problem !== problem
+      || !statusMatchesSnapshot(status, candidate.status)
+      || !destinationMatchesSnapshot(preview, candidate.preview)
+      || !problemMatchesSnapshot(problem, candidate.problem)
       || candidate.busy !== busy
       || candidate.acknowledged !== acknowledged
       || candidate.enabled !== enabled
@@ -540,7 +619,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
       setAcknowledged(false);
     }
     setAction(kind === "enable"
-      ? { kind, serial: nextSerial, destination: control.destination! }
+      ? { kind, serial: nextSerial, destination: snapshotDestination(control.destination!) }
       : kind === "status"
         ? { kind, serial: nextSerial, explicit: true }
         : { kind, serial: nextSerial });
@@ -579,72 +658,77 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
     const enableEligible = !busy && !!status && !!preview && acknowledged && !blocked && problem?.source !== "status";
     const retryEligible = !busy;
     const disableEligible = !busy;
-    const candidate: SettingsPresentation = {
+    const statusSnapshot = snapshotStatus(status);
+    const previewSnapshot = preview ? snapshotDestination(preview) : null;
+    const problemSnapshot = snapshotProblem(problem);
+    const buttons: SettingsPresentation["buttons"] = Object.freeze({
+      refresh: problem && !blocked
+        ? Object.freeze({
+            name: "refresh",
+            kind: "status",
+            eligible: refreshEligible,
+            destination: null,
+          })
+        : null,
+      preview: !enabled
+        ? Object.freeze({
+            name: "preview",
+            kind: "preview",
+            eligible: previewEligible,
+            destination: null,
+          })
+        : null,
+      enable: !enabled
+        ? Object.freeze({
+            name: "enable",
+            kind: "enable",
+            eligible: enableEligible,
+            destination: previewSnapshot,
+          })
+        : null,
+      retry: canRetry
+        ? Object.freeze({
+            name: "retry",
+            kind: "retry",
+            eligible: retryEligible,
+            destination: null,
+          })
+        : null,
+      disable: enabled
+        ? Object.freeze({
+            name: "disable",
+            kind: "disable",
+            eligible: disableEligible,
+            destination: null,
+          })
+        : null,
+    });
+    const acknowledgement = !enabled && previewSnapshot
+      ? Object.freeze({
+          name: "acknowledgement" as const,
+          eligible: acknowledgementEligible,
+          destination: previewSnapshot,
+        })
+      : null;
+    const candidate: SettingsPresentation = Object.freeze({
       mount: settingsMount,
       identity,
       documentId,
       gistId,
       filename,
       url,
-      status,
-      preview,
-      problem,
+      status: statusSnapshot,
+      preview: previewSnapshot,
+      problem: problemSnapshot,
       busy,
       acknowledged,
       enabled,
       state,
       blocked,
       canRetry,
-      buttons: {
-        refresh: problem && !blocked
-          ? {
-              name: "refresh",
-              kind: "status",
-              eligible: refreshEligible,
-              destination: null,
-            }
-          : null,
-        preview: !enabled
-          ? {
-              name: "preview",
-              kind: "preview",
-              eligible: previewEligible,
-              destination: null,
-            }
-          : null,
-        enable: !enabled
-          ? {
-              name: "enable",
-              kind: "enable",
-              eligible: enableEligible,
-              destination: preview,
-            }
-          : null,
-        retry: canRetry
-          ? {
-              name: "retry",
-              kind: "retry",
-              eligible: retryEligible,
-              destination: null,
-            }
-          : null,
-        disable: enabled
-          ? {
-              name: "disable",
-              kind: "disable",
-              eligible: disableEligible,
-              destination: null,
-            }
-          : null,
-      },
-      acknowledgement: !enabled && preview
-        ? {
-            name: "acknowledgement",
-            eligible: acknowledgementEligible,
-            destination: preview,
-          }
-        : null,
-    };
+      buttons,
+      acknowledgement,
+    });
     return candidate;
   }, [
     acknowledged,

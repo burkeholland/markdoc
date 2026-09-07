@@ -1276,4 +1276,74 @@ describe("gist auto-update settings publication ownership", () => {
       replacementRoot.remove();
     },
   );
+
+  it.each(["status", "status destination", "preview destination"] as const)(
+    "rejects exact current controls after an API-owned %s mutates in place",
+    async (mutation) => {
+      const mutableStatus: GistAutoUpdateStatus = mutation === "status destination"
+        ? { ...PENDING, destination: { ...DESTINATION } }
+        : { ...OFF };
+      const mutablePreview = { ...DESTINATION };
+      serverStatus = mutableStatus;
+      vi.mocked(api.documents.gistAutoUpdatePreview).mockResolvedValueOnce({ destination: mutablePreview });
+      renderDirect(<GistAutoUpdateControl doc={DOC} isOwner />);
+      await settle();
+
+      if (mutation === "status destination") {
+        const presentation = capturePresentation();
+        const disable = capturedButton(presentation, "Disable auto-update");
+        const operations = externalOperations();
+        mutableStatus.destination!.owner = "mutated-status-owner";
+
+        act(() => invokeButton(disable));
+        expect(externalOperations()).toBe(operations);
+        expect(disable.element).toBeEnabled();
+        return;
+      }
+
+      if (mutation === "status") {
+        const presentation = capturePresentation();
+        const check = capturedButton(presentation, "Check linked gist");
+        const operations = externalOperations();
+        mutableStatus.status = "failed";
+
+        act(() => invokeButton(check));
+        expect(externalOperations()).toBe(operations);
+        expect(check.element).toBeEnabled();
+        return;
+      }
+
+      await click("Check linked gist");
+      const presentation = capturePresentation();
+      const acknowledgement = presentation.checkbox!;
+      const operations = externalOperations();
+      mutablePreview.owner = "mutated-preview-owner";
+
+      act(() => invokeCheckbox(acknowledgement, true));
+      expect(externalOperations()).toBe(operations);
+      expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeDisabled();
+    },
+  );
+
+  it("freezes the accepted Enable destination before its API-owned preview mutates", async () => {
+    const mutablePreview = { ...DESTINATION };
+    vi.mocked(api.documents.gistAutoUpdatePreview).mockResolvedValueOnce({ destination: mutablePreview });
+    renderDirect(<GistAutoUpdateControl doc={DOC} isOwner />);
+    await settle();
+    await consent();
+    const enable = capturedButton(capturePresentation(), "Enable auto-update");
+
+    act(() => {
+      invokeButton(enable);
+      mutablePreview.owner = "mutated-after-enable";
+      mutablePreview.url = "https://gist.github.com/mutated-after-enable";
+    });
+    await settle();
+
+    expect(api.documents.setGistAutoUpdate).toHaveBeenCalledExactlyOnceWith(DOC.id, {
+      enabled: true,
+      acknowledgeRisk: true,
+      destination: DESTINATION,
+    });
+  });
 });
