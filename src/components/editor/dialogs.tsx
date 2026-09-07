@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
@@ -10,14 +10,42 @@ import { findReplaceShortcut, shortcut } from "@/lib/utils";
  * Editor actions picked in a dialog run after the dialog has closed and let go of focus (see
  * `DialogContent.onClosed`), so the caret ends up in the editor, not on the toolbar button.
  */
-function useAfterClose() {
-  const pending = useRef<(() => void) | null>(null);
-  const onClosed = () => {
-    const run = pending.current;
+type DialogActionVisit = object;
+
+function useAfterClose(visit: DialogActionVisit, activeVisit: React.RefObject<DialogActionVisit | null>) {
+  const pending = useRef<{ visit: DialogActionVisit; run: () => void } | null>(null);
+  useLayoutEffect(
+    () => () => {
+      if (pending.current?.visit === visit) pending.current = null;
+    },
+    [visit],
+  );
+  const onClosed = useCallback(() => {
+    const action = pending.current;
+    if (!action || action.visit !== visit || activeVisit.current !== visit) return;
     pending.current = null;
-    run?.();
-  };
-  return { defer: (run: () => void) => void (pending.current = run), onClosed };
+    action.run();
+  }, [activeVisit, visit]);
+  const defer = useCallback(
+    (run: () => void) => {
+      if (activeVisit.current === visit) pending.current = { visit, run };
+    },
+    [activeVisit, visit],
+  );
+  return { defer, onClosed };
+}
+
+interface LinkDraft {
+  visit: DialogActionVisit;
+  open: boolean;
+  initialHref: string;
+  initialText: string;
+  href: string;
+  text: string;
+}
+
+function linkDraft(visit: DialogActionVisit, open: boolean, href: string, text: string): LinkDraft {
+  return { visit, open, initialHref: href, initialText: text, href, text };
 }
 
 export const LinkDialog = memo(function LinkDialog({
@@ -33,14 +61,27 @@ export const LinkDialog = memo(function LinkDialog({
   onSubmit: (href: string, text: string) => void;
   onRemove?: () => void;
 }) {
-  const [href, setHref] = useState("");
-  const [text, setText] = useState("");
-  useEffect(() => {
-    if (open) {
-      setHref(initial?.href ?? "");
-      setText(initial?.text ?? "");
-    }
-  }, [open, initial]);
+  const visit = useMemo<DialogActionVisit>(() => ({ onOpenChange, onRemove, onSubmit }), [onOpenChange, onRemove, onSubmit]);
+  const activeVisit = useRef<DialogActionVisit | null>(null);
+  const openRef = useRef(false);
+  const initialHref = initial?.href ?? "";
+  const initialText = initial?.text ?? "";
+  const [storedDraft, setDraft] = useState<LinkDraft>(() => linkDraft(visit, open, initialHref, initialText));
+  let draft = storedDraft;
+  if (draft.visit !== visit || draft.open !== open || draft.initialHref !== initialHref || draft.initialText !== initialText) {
+    draft = linkDraft(visit, open, initialHref, initialText);
+    setDraft(draft);
+  }
+  const { href, text } = draft;
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    return () => {
+      if (activeVisit.current === visit) activeVisit.current = null;
+    };
+  }, [visit]);
+  useLayoutEffect(() => {
+    openRef.current = open;
+  }, [open]);
   const normalize = (v: string) => {
     const t = v.trim();
     if (!t) return t;
@@ -48,27 +89,53 @@ export const LinkDialog = memo(function LinkDialog({
     if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(t)) return `https://${t}`;
     return t;
   };
-  const after = useAfterClose();
+  const after = useAfterClose(visit, activeVisit);
+  const setOpen = (nextOpen: boolean) => {
+    if (activeVisit.current !== visit) return;
+    onOpenChange(nextOpen);
+  };
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent title={initial?.href ? "Edit link" : "Insert link"} onClosed={after.onClosed}>
         <form
           className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
+            if (activeVisit.current !== visit || !openRef.current) return;
             if (!href.trim()) return;
             const [h, t] = [normalize(href), text.trim()];
             after.defer(() => onSubmit(h, t));
-            onOpenChange(false);
+            setOpen(false);
           }}
         >
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             URL
-            <input className="input" placeholder="https://example.com" value={href} onChange={(e) => setHref(e.target.value)} autoFocus data-testid="link-url" />
+            <input
+              className="input"
+              placeholder="https://example.com"
+              value={href}
+              onChange={(e) => {
+                if (activeVisit.current !== visit || !openRef.current) return;
+                const value = e.target.value;
+                setDraft((current) => (current.visit === visit ? { ...current, href: value } : current));
+              }}
+              autoFocus
+              data-testid="link-url"
+            />
           </label>
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             Text
-            <input className="input" placeholder="Link text (optional)" value={text} onChange={(e) => setText(e.target.value)} data-testid="link-text" />
+            <input
+              className="input"
+              placeholder="Link text (optional)"
+              value={text}
+              onChange={(e) => {
+                if (activeVisit.current !== visit || !openRef.current) return;
+                const value = e.target.value;
+                setDraft((current) => (current.visit === visit ? { ...current, text: value } : current));
+              }}
+              data-testid="link-text"
+            />
           </label>
           <div className="flex items-center justify-between pt-1">
             {initial?.href && onRemove ? (
@@ -76,8 +143,9 @@ export const LinkDialog = memo(function LinkDialog({
                 type="button"
                 className="btn btn-ghost text-danger"
                 onClick={() => {
+                  if (activeVisit.current !== visit || !openRef.current) return;
                   after.defer(() => onRemove());
-                  onOpenChange(false);
+                  setOpen(false);
                 }}
               >
                 Remove link
@@ -86,7 +154,7 @@ export const LinkDialog = memo(function LinkDialog({
               <span />
             )}
             <div className="flex gap-2">
-              <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
+              <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
                 Cancel
               </button>
               <button type="submit" className="btn btn-primary" disabled={!href.trim()} data-testid="link-submit">
@@ -100,6 +168,26 @@ export const LinkDialog = memo(function LinkDialog({
   );
 });
 
+interface ImageDraft {
+  visit: DialogActionVisit;
+  open: boolean;
+  src: string;
+  alt: string;
+  uploading: boolean;
+  error: string | null;
+  altRevision: number;
+}
+
+interface ImageUploadOwner {
+  visit: DialogActionVisit;
+  id: number;
+  altRevision: number;
+}
+
+function imageDraft(visit: DialogActionVisit, open: boolean): ImageDraft {
+  return { visit, open, src: "", alt: "", uploading: false, error: null, altRevision: 0 };
+}
+
 export const ImageDialog = memo(function ImageDialog({
   open,
   onOpenChange,
@@ -112,65 +200,66 @@ export const ImageDialog = memo(function ImageDialog({
   /** Uploads a chosen file and returns the URL to use; when absent the Upload button is hidden. */
   onUpload?: (file: File) => Promise<{ url: string; alt?: string }>;
 }) {
-  const [src, setSrc] = useState("");
-  const [alt, setAlt] = useState("");
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const visit = useMemo<DialogActionVisit>(() => ({ onOpenChange, onSubmit, onUpload }), [onOpenChange, onSubmit, onUpload]);
+  const activeVisit = useRef<DialogActionVisit | null>(null);
+  const openRef = useRef(false);
+  const [storedDraft, setDraft] = useState<ImageDraft>(() => imageDraft(visit, open));
+  let draft = storedDraft;
+  if (draft.visit !== visit || draft.open !== open) {
+    draft = imageDraft(visit, open);
+    setDraft(draft);
+  }
+  const { src, alt, uploading, error } = draft;
   const fileInput = useRef<HTMLInputElement>(null);
-  const uploadVisit = useRef(0);
   const uploadSequence = useRef(0);
-  const activeUpload = useRef<number | null>(null);
-  const altEditRevision = useRef(0);
-  const invalidateUpload = useCallback(() => {
-    uploadVisit.current += 1;
-    activeUpload.current = null;
-  }, []);
+  const activeUpload = useRef<ImageUploadOwner | null>(null);
   useLayoutEffect(() => {
-    invalidateUpload();
-    return invalidateUpload;
-  }, [open, invalidateUpload]);
-  useEffect(() => {
-    if (open) {
-      setSrc("");
-      setAlt("");
-      setError(null);
-      setUploading(false);
-      altEditRevision.current = 0;
+    activeVisit.current = visit;
+    return () => {
+      if (activeVisit.current === visit) activeVisit.current = null;
+      if (activeUpload.current?.visit === visit) activeUpload.current = null;
+    };
+  }, [visit]);
+  useLayoutEffect(() => {
+    openRef.current = open;
+    if (!open) {
+      if (activeUpload.current?.visit === visit) activeUpload.current = null;
     }
-  }, [open]);
+  }, [open, visit]);
   const chooseFile = async (file: File | undefined) => {
-    if (!file || !onUpload || !open || activeUpload.current !== null) return;
-    const visit = uploadVisit.current;
-    const upload = ++uploadSequence.current;
-    const altRevision = altEditRevision.current;
-    activeUpload.current = upload;
-    setError(null);
-    setUploading(true);
-    const isCurrent = () => uploadVisit.current === visit && activeUpload.current === upload;
+    if (!file || !onUpload || activeVisit.current !== visit || !openRef.current || activeUpload.current !== null) return;
+    const owner = { visit, id: ++uploadSequence.current, altRevision: draft.altRevision };
+    activeUpload.current = owner;
+    setDraft((current) => (current.visit === visit ? { ...current, error: null, uploading: true } : current));
+    const isCurrent = () => activeVisit.current === visit && activeUpload.current === owner;
     try {
       const result = await onUpload(file);
       if (!isCurrent()) return;
-      setSrc(result.url);
-      setAlt((current) => {
-        if (altEditRevision.current !== altRevision || current) return current;
-        return result.alt || file.name.replace(/\.[a-z0-9]{2,5}$/i, "");
+      const resultUrl = result.url;
+      const resultAlt = result.alt;
+      setDraft((current) => {
+        if (current.visit !== visit) return current;
+        const nextAlt = current.altRevision !== owner.altRevision || current.alt ? current.alt : resultAlt || file.name.replace(/\.[a-z0-9]{2,5}$/i, "");
+        return { ...current, src: resultUrl, alt: nextAlt };
       });
     } catch (e) {
       if (!isCurrent()) return;
-      setError(apiErrorText(e, "Upload failed"));
+      const message = apiErrorText(e, "Upload failed");
+      setDraft((current) => (current.visit === visit ? { ...current, error: message } : current));
     } finally {
       if (isCurrent()) {
         activeUpload.current = null;
-        setUploading(false);
+        setDraft((current) => (current.visit === visit ? { ...current, uploading: false } : current));
         if (fileInput.current) fileInput.current.value = "";
       }
     }
   };
   const setOpen = (nextOpen: boolean) => {
-    if (!nextOpen) invalidateUpload();
+    if (activeVisit.current !== visit) return;
+    if (!nextOpen && activeUpload.current?.visit === visit) activeUpload.current = null;
     onOpenChange(nextOpen);
   };
-  const after = useAfterClose();
+  const after = useAfterClose(visit, activeVisit);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent title="Insert image" description="Paste the address of an image or upload one. Alt text describes the image for people who can't see it." onClosed={after.onClosed}>
@@ -178,7 +267,7 @@ export const ImageDialog = memo(function ImageDialog({
           className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            if (activeUpload.current !== null || uploading || !src.trim()) return;
+            if (activeVisit.current !== visit || !openRef.current || activeUpload.current !== null || uploading || !src.trim()) return;
             const [s, a] = [src.trim(), alt.trim()];
             after.defer(() => onSubmit(s, a));
             setOpen(false);
@@ -187,10 +276,29 @@ export const ImageDialog = memo(function ImageDialog({
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             Image URL
             <div className="flex gap-2">
-              <input className="input flex-1" placeholder="https://…/image.png" value={src} onChange={(e) => setSrc(e.target.value)} autoFocus data-testid="image-url" />
+              <input
+                className="input flex-1"
+                placeholder="https://…/image.png"
+                value={src}
+                onChange={(e) => {
+                  if (activeVisit.current !== visit || !openRef.current) return;
+                  const value = e.target.value;
+                  setDraft((current) => (current.visit === visit ? { ...current, src: value } : current));
+                }}
+                autoFocus
+                data-testid="image-url"
+              />
               {onUpload && (
                 <>
-                  <button type="button" className="btn btn-outline shrink-0" onClick={() => fileInput.current?.click()} disabled={uploading} data-testid="image-upload">
+                  <button
+                    type="button"
+                    className="btn btn-outline shrink-0"
+                    onClick={() => {
+                      if (activeVisit.current === visit && openRef.current) fileInput.current?.click();
+                    }}
+                    disabled={uploading}
+                    data-testid="image-upload"
+                  >
                     {uploading ? "Uploading…" : "Upload…"}
                   </button>
                   <input
@@ -217,15 +325,23 @@ export const ImageDialog = memo(function ImageDialog({
               placeholder="Describe the image"
               value={alt}
               onChange={(e) => {
-                altEditRevision.current += 1;
-                setAlt(e.target.value);
+                if (activeVisit.current !== visit || !openRef.current) return;
+                const value = e.target.value;
+                setDraft((current) => (current.visit === visit ? { ...current, alt: value, altRevision: current.altRevision + 1 } : current));
               }}
               data-testid="image-alt"
             />
           </label>
           {src.trim() && (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={src.trim()} alt="" className="max-h-40 rounded-lg border border-line object-contain" onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
+            <img
+              src={src.trim()}
+              alt=""
+              className="max-h-40 rounded-lg border border-line object-contain"
+              onError={(e) => {
+                if (activeVisit.current === visit) (e.target as HTMLImageElement).style.display = "none";
+              }}
+            />
           )}
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
@@ -244,37 +360,77 @@ export const ImageDialog = memo(function ImageDialog({
 const GRID_ROWS = 6;
 const GRID_COLS = 8;
 
+interface TableDraft {
+  visit: DialogActionVisit;
+  open: boolean;
+  focused: GridCell;
+  hover: GridCell | null;
+}
+
+interface TableCellOwner {
+  visit: DialogActionVisit;
+  element: HTMLButtonElement;
+}
+
+function tableDraft(visit: DialogActionVisit, open: boolean): TableDraft {
+  return { visit, open, focused: { row: 0, col: 0 }, hover: null };
+}
+
 /**
  * Size picker as a WAI-ARIA grid (issue #160): one Tab stop (the focused cell is the only `tabIndex=0`),
  * arrows / Home / End move focus, the "rows × columns" label follows the keyboard as well as the mouse,
  * Enter or a click inserts, Tab leaves straight for the dialog's Close button.
  */
 export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; onSubmit: (rows: number, cols: number) => void }) {
-  const [focused, setFocused] = useState<GridCell>({ row: 0, col: 0 });
-  // Mouse hover overrides the label and highlight while the pointer is over the grid; null = follow focus.
-  const [hover, setHover] = useState<GridCell | null>(null);
-  const cells = useRef<(HTMLButtonElement | null)[]>([]);
-  const after = useAfterClose();
-  useEffect(() => {
-    if (!open) {
-      setFocused({ row: 0, col: 0 });
-      setHover(null);
-    }
+  const visit = useMemo<DialogActionVisit>(() => ({ onOpenChange, onSubmit }), [onOpenChange, onSubmit]);
+  const activeVisit = useRef<DialogActionVisit | null>(null);
+  const openRef = useRef(false);
+  const [storedDraft, setDraft] = useState<TableDraft>(() => tableDraft(visit, open));
+  let draft = storedDraft;
+  if (draft.visit !== visit || draft.open !== open) {
+    draft = tableDraft(visit, open);
+    setDraft(draft);
+  }
+  const { focused, hover } = draft;
+  const cells = useRef<(TableCellOwner | null)[]>([]);
+  const after = useAfterClose(visit, activeVisit);
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    return () => {
+      if (activeVisit.current === visit) activeVisit.current = null;
+    };
+  }, [visit]);
+  useLayoutEffect(() => {
+    openRef.current = open;
   }, [open]);
   const shown = hover ?? focused;
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (activeVisit.current !== visit || !openRef.current) return;
     const next = gridCell(e.key, focused, GRID_ROWS, GRID_COLS, { ctrl: e.ctrlKey || e.metaKey });
     if (!next) return;
     e.preventDefault();
-    setFocused(next);
-    setHover(null);
-    cells.current[next.row * GRID_COLS + next.col]?.focus();
+    setDraft((current) => (current.visit === visit ? { ...current, focused: next, hover: null } : current));
+    const cell = cells.current[next.row * GRID_COLS + next.col];
+    if (cell?.visit === visit) cell.element.focus();
+  };
+  const setOpen = (nextOpen: boolean) => {
+    if (activeVisit.current === visit) onOpenChange(nextOpen);
   };
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent title="Insert table" description="Pick a size. The first row becomes the header." onClosed={after.onClosed}>
         <div className="flex flex-col items-center gap-3">
-          <div className="flex flex-col gap-1" role="grid" aria-label="Table size" onMouseLeave={() => setHover(null)} onKeyDown={onKeyDown} data-testid="table-grid">
+          <div
+            className="flex flex-col gap-1"
+            role="grid"
+            aria-label="Table size"
+            onMouseLeave={() => {
+              if (activeVisit.current !== visit || !openRef.current) return;
+              setDraft((current) => (current.visit === visit ? { ...current, hover: null } : current));
+            }}
+            onKeyDown={onKeyDown}
+            data-testid="table-grid"
+          >
             {Array.from({ length: GRID_ROWS }, (_, r) => (
               <div key={r} role="row" className="flex gap-1">
                 {Array.from({ length: GRID_COLS }, (_, c) => {
@@ -283,19 +439,25 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
                     <div key={c} role="gridcell">
                       <button
                         ref={(el) => {
-                          cells.current[r * GRID_COLS + c] = el;
+                          const index = r * GRID_COLS + c;
+                          if (el) cells.current[index] = { visit, element: el };
+                          else if (cells.current[index]?.visit === visit) cells.current[index] = null;
                         }}
                         type="button"
                         tabIndex={isFocused ? 0 : -1}
                         className={`block h-6 w-6 rounded border ${r < shown.row + 1 && c < shown.col + 1 ? "border-accent bg-accent-soft" : "border-line-2 bg-surface"}`}
-                        onMouseEnter={() => setHover({ row: r, col: c })}
+                        onMouseEnter={() => {
+                          if (activeVisit.current !== visit || !openRef.current) return;
+                          setDraft((current) => (current.visit === visit ? { ...current, hover: { row: r, col: c } } : current));
+                        }}
                         onFocus={() => {
-                          setFocused({ row: r, col: c });
-                          setHover(null);
+                          if (activeVisit.current !== visit || !openRef.current) return;
+                          setDraft((current) => (current.visit === visit ? { ...current, focused: { row: r, col: c }, hover: null } : current));
                         }}
                         onClick={() => {
+                          if (activeVisit.current !== visit || !openRef.current) return;
                           after.defer(() => onSubmit(r + 1, c + 1));
-                          onOpenChange(false);
+                          setOpen(false);
                         }}
                         aria-label={`${r + 1} by ${c + 1}`}
                       />
