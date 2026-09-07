@@ -98,27 +98,57 @@ export function prefetchVersions(docId: string): void {
   void fetchVersions(docId).catch(() => {});
 }
 
-export function VersionsPanel({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
+export function VersionsPanel(props: VersionsPanelProps) {
+  return <VersionsPanelForDocument key={props.session.docId} {...props} />;
+}
+
+function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
   const router = useRouter();
   const [versions, setVersions] = useState<VersionSummary[] | null>(() => listCache.get(session.docId) ?? null);
   const [error, setError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const contentCache = useRef(new Map<string, string>());
+  const alive = useRef(true);
+  const listRequest = useRef(0);
+  const retryPending = useRef(false);
   const canEdit = session.role === "owner" || session.role === "editor";
 
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      listRequest.current += 1;
+    };
+  }, []);
+
   const load = useCallback(async () => {
+    const request = ++listRequest.current;
     try {
       const list = await fetchVersions(session.docId);
+      if (!alive.current || request !== listRequest.current) return;
       setVersions(list);
-      setError(null);
+      setListError(null);
     } catch (e) {
-      setError(apiErrorText(e, "Failed to load versions"));
+      if (!alive.current || request !== listRequest.current) return;
+      setListError(apiErrorText(e, "Failed to load versions"));
     }
   }, [session.docId]);
+
+  const retry = useCallback(() => {
+    if (retryPending.current) return;
+    retryPending.current = true;
+    setRetrying(true);
+    void load().finally(() => {
+      retryPending.current = false;
+      if (alive.current) setRetrying(false);
+    });
+  }, [load]);
 
   useEffect(() => {
     void load();
@@ -238,6 +268,15 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
         </button>
       </div>
       <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
+        {listError && (
+          <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+            <div>{listError}</div>
+            <button type="button" className="btn btn-outline btn-sm mt-2 gap-1.5" onClick={retry} disabled={retrying}>
+              {retrying && <Loader2 size={13} className="animate-spin" />}
+              {retrying ? "Retrying…" : "Retry"}
+            </button>
+          </div>
+        )}
         {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger">{error}</div>}
         {compareHint && (
           <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
@@ -254,15 +293,15 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
             </button>
           </div>
         )}
-        {versions === null ? (
+        {versions === null && !listError ? (
           <div className="flex justify-center py-10">
             <Spinner />
           </div>
-        ) : versions.length === 0 ? (
+        ) : versions?.length === 0 ? (
           <EmptyState icon={<History size={28} />} title="No versions yet">
             Versions are captured automatically while you edit, and whenever you publish.
           </EmptyState>
-        ) : (
+        ) : versions ? (
           groups.map((g) => (
             <div key={g.day} className="mb-4">
               <div className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-ink-4">{g.day}</div>
@@ -376,7 +415,7 @@ export function VersionsPanel({ session, onClose, onPreview, refreshKey }: Versi
               </ul>
             </div>
           ))
-        )}
+        ) : null}
       </div>
     </aside>
   );

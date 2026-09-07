@@ -130,34 +130,66 @@ function ActorAvatar({ item }: { item: ActivityItemDto }) {
   return <Avatar name={item.actorName} size={28} />;
 }
 
-export function ActivityPanel({ session, onClose }: ActivityPanelProps) {
+export function ActivityPanel(props: ActivityPanelProps) {
+  return <ActivityPanelForDocument key={props.session.docId} {...props} />;
+}
+
+function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [items, setItems] = useState<ActivityItemDto[] | null>(null);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const expanded = useRef(false);
+  const alive = useRef(true);
+  const listRequest = useRef(0);
+  const retryPending = useRef(false);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      listRequest.current += 1;
+    };
+  }, []);
 
   // Reload the first page; older pages the user has already expanded are kept below it.
   const refresh = useCallback(async () => {
+    const request = ++listRequest.current;
     try {
       const page = await api.documents.activity(session.docId, { limit: PAGE });
+      if (!alive.current || request !== listRequest.current) return;
       setItems((prev) => {
         if (!prev || !expanded.current) return page.items;
         const seen = new Set(page.items.map((i) => i.id));
         return [...page.items, ...prev.filter((i) => !seen.has(i.id))];
       });
       if (!expanded.current) setNextBefore(page.nextBefore);
-      setError(null);
+      setListError(null);
       setNow(Date.now());
     } catch (e) {
-      setError(apiErrorText(e, "Failed to load activity"));
+      if (!alive.current || request !== listRequest.current) return;
+      setListError(apiErrorText(e, "Failed to load activity"));
     }
   }, [session.docId]);
 
+  const retry = useCallback(() => {
+    if (retryPending.current) return;
+    retryPending.current = true;
+    setRetrying(true);
+    void refresh().finally(() => {
+      retryPending.current = false;
+      if (alive.current) setRetrying(false);
+    });
+  }, [refresh]);
+
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
+    const timer = setInterval(() => {
+      if (!retryPending.current) void refresh();
+    }, REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh]);
 
@@ -190,16 +222,25 @@ export function ActivityPanel({ session, onClose }: ActivityPanelProps) {
         </button>
       </div>
       <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
+        {listError && (
+          <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+            <div>{listError}</div>
+            <button type="button" className="btn btn-outline btn-sm mt-2 gap-1.5" onClick={retry} disabled={retrying}>
+              {retrying && <Loader2 size={13} className="animate-spin" />}
+              {retrying ? "Retrying…" : "Retry"}
+            </button>
+          </div>
+        )}
         {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40">{error}</div>}
-        {items === null ? (
+        {items === null && !listError ? (
           <div className="flex justify-center py-10">
             <Spinner />
           </div>
-        ) : items.length === 0 ? (
+        ) : items?.length === 0 ? (
           <EmptyState icon={<ActivityIcon size={28} />} title="No activity yet">
             Edits, comments, versions and shares by people and agents show up here.
           </EmptyState>
-        ) : (
+        ) : items ? (
           <>
             {groups.map((g) => (
               <div key={g.day} className="mb-4">
@@ -242,7 +283,7 @@ export function ActivityPanel({ session, onClose }: ActivityPanelProps) {
               </button>
             )}
           </>
-        )}
+        ) : null}
       </div>
     </aside>
   );
