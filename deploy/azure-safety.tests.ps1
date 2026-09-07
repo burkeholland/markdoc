@@ -19,9 +19,12 @@ $deploymentSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure.ps1
 $sharedSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'azure-postgres-network.ps1') -Raw
 $workflowSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', '.github', 'workflows', 'deploy.yml')) -Raw
 $vmDeploySource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'deploy-vm-image.sh')) -Raw
+$releaseSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-vm.ps1') -Raw
 Assert-True ($deploymentSource -match "(?s)if \(-not \`$InfraOnly\).*?Production is VM-hosted") 'The legacy full deployment driver must fail closed instead of recreating the retired Container App.'
-Assert-True ($workflowSource -notmatch '\baz containerapp\b' -and $workflowSource -match 'az vm run-command invoke') 'The release workflow must deploy through VM Run Command and must not call Container Apps.'
-Assert-True ($workflowSource -match '--scripts @infra/release-wal-gate\.sh @infra/deploy-vm-image\.sh' -and $workflowSource -match '\$IMAGE') 'The release workflow must send the WAL gate before the reviewed VM deployment script and immutable image digest in one invocation.'
+Assert-True ($workflowSource -notmatch '\baz (?:containerapp|acr build|vm run-command)\b' -and
+  [regex]::Matches($workflowSource, 'deploy/release-vm\.ps1').Count -eq 1) 'The release workflow must use only the configured VM release entrypoint, never a duplicate Azure deployment path.'
+Assert-True ($releaseSource -match '--scripts'', "@\$walScript", "@\$vmScript"' -and
+  $releaseSource -match '\$image = "\$registry/markdoc@\$digest"') 'The configured release must send the WAL gate before the reviewed VM deployment script and immutable image digest in one invocation.'
 Assert-True ($vmDeploySource -match 'deployment_succeeded=false' -and $vmDeploySource -match 'markdoc-vm-image-rollback-ready') 'A failed VM image rollout must restore and verify the previous systemd unit and environment.'
 Assert-True ($vmDeploySource -match 'markdoc@sha256:' -and $vmDeploySource -match 'markdoc-vm-image-ready') 'The VM deployment script must require an immutable Markdoc digest and emit an explicit success marker.'
 Assert-True ($deploymentSource -match '\$temporaryPackageEgress = \[bool\]\(\$InitializeDatabase -or \$ConfigureRecovery\)') 'Initialization and recovery must both register temporary-egress cleanup.'
