@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { useLayoutEffect } from "react";
+import {
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type RefCallback,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RenderedHeading } from "@/server/export/html";
@@ -89,6 +95,96 @@ function ReaderBoundary({
 
 const currentLinks = () => screen.queryAllByRole("link").filter((link) => link.getAttribute("aria-current") === "location");
 
+type DirectView = { root: Root; host: HTMLDivElement; active: boolean };
+type ClickHandler<T extends HTMLElement = HTMLElement> = (event: ReactMouseEvent<T>) => void;
+type KeyHandler = (event: ReactKeyboardEvent<HTMLElement>) => void;
+
+const directViews: DirectView[] = [];
+
+function directRoot(node: React.ReactNode): DirectView {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { root: createRoot(host), host, active: true };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
+
+function reactHandler<T>(element: Element, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  return handler as T;
+}
+
+function clickEvent<T extends HTMLElement>(currentTarget: T) {
+  const preventDefault = vi.fn();
+  const event = {
+    type: "click",
+    currentTarget,
+    target: currentTarget,
+    nativeEvent: new window.MouseEvent("click", { bubbles: true, cancelable: true }),
+    preventDefault,
+  } as unknown as ReactMouseEvent<T>;
+  return { event, preventDefault };
+}
+
+function escapeEvent(currentTarget: HTMLElement, target: EventTarget) {
+  const preventDefault = vi.fn();
+  const event = {
+    type: "keydown",
+    key: "Escape",
+    currentTarget,
+    target,
+    nativeEvent: new window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }),
+    preventDefault,
+  } as unknown as ReactKeyboardEvent<HTMLElement>;
+  return { event, preventDefault };
+}
+
+function directControls(host: HTMLElement) {
+  const nav = host.querySelector<HTMLElement>('[data-testid="reader-toc"]');
+  const toggle = host.querySelector<HTMLButtonElement>('[data-testid="reader-toc-toggle"]');
+  const list = host.querySelector<HTMLOListElement>("#reader-toc-list");
+  const links = Array.from(host.querySelectorAll<HTMLAnchorElement>('[data-testid="reader-toc-entry"]'));
+  if (!nav || !toggle || !list) throw new Error("The reader TOC was not fully rendered");
+  return { nav, toggle, list, links };
+}
+
+function DirectReaderBoundary({
+  currentHeadings,
+  present = true,
+  domKey,
+  boundary = 0,
+  onLayout,
+}: {
+  currentHeadings: TestHeading[];
+  present?: boolean;
+  domKey?: string;
+  boundary?: number;
+  onLayout?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onLayout?.();
+  }, [boundary, onLayout]);
+
+  if (!present) return null;
+  return (
+    <>
+      <article>
+        {currentHeadings.map((heading) => (
+          <div id={heading.id} data-heading-top={heading.top} key={heading.id}>
+            {heading.text}
+          </div>
+        ))}
+      </article>
+      <ReaderToc key={domKey} headings={currentHeadings} />
+    </>
+  );
+}
+
 beforeEach(() => {
   InstrumentedIntersectionObserver.instances = [];
   vi.stubGlobal("IntersectionObserver", InstrumentedIntersectionObserver);
@@ -109,6 +205,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const view of directViews.splice(0)) {
+    if (!view.active) continue;
+    act(() => view.root.unmount());
+    view.active = false;
+    view.host.remove();
+  }
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -279,4 +381,356 @@ describe("ReaderToc headings visit authority", () => {
     expect(InstrumentedIntersectionObserver.instances.filter((observer) => observer.connected)).toHaveLength(0);
     expect(screen.queryByTestId("reader-toc")).not.toBeInTheDocument();
   });
+});
+
+describe("ReaderToc exact DOM publications", () => {
+  const wrongSources = ["sibling", "foreign", "detached", "replacement", "cross-row", "wrong-order"] as const;
+
+  it.each(wrongSources)("rejects a %s link source without consuming the current publication", (sourceKind) => {
+    const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} />);
+    fireEvent.click(directControls(view.host).toggle);
+    const { links, list, toggle } = directControls(view.host);
+    const first = links[0];
+    const second = links[1];
+    const firstItem = first.parentElement as HTMLLIElement;
+    const secondItem = second.parentElement as HTMLLIElement;
+    const select = reactHandler<ClickHandler<HTMLAnchorElement>>(first, "onClick");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let source: HTMLAnchorElement = first;
+    let restore: () => void = () => {};
+
+    if (sourceKind === "sibling") {
+      source = first.cloneNode(true) as HTMLAnchorElement;
+      document.body.append(source);
+      restore = () => source.remove();
+    } else if (sourceKind === "foreign") {
+      const foreignDocument = document.implementation.createHTMLDocument("foreign");
+      source = foreignDocument.createElement("a");
+      source.href = "#alpha";
+      foreignDocument.body.append(source);
+    } else if (sourceKind === "detached") {
+      firstItem.remove();
+      restore = () => {
+        list.insertBefore(firstItem, list.firstElementChild);
+      };
+    } else if (sourceKind === "replacement") {
+      source = first.cloneNode(true) as HTMLAnchorElement;
+      first.replaceWith(source);
+      restore = () => source.replaceWith(first);
+    } else if (sourceKind === "cross-row") {
+      source = second;
+    } else {
+      list.insertBefore(secondItem, firstItem);
+      restore = () => {
+        list.insertBefore(firstItem, secondItem);
+      };
+    }
+
+    const probe = clickEvent(source);
+    const before = {
+      markup: view.host.innerHTML,
+      activeElement: document.activeElement,
+      observers: InstrumentedIntersectionObserver.instances.length,
+      disconnects: InstrumentedIntersectionObserver.instances.map((observer) => observer.disconnect.mock.calls.length),
+    };
+    act(() => select(probe.event));
+
+    expect(probe.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect({
+      markup: view.host.innerHTML,
+      activeElement: document.activeElement,
+      observers: InstrumentedIntersectionObserver.instances.length,
+      disconnects: InstrumentedIntersectionObserver.instances.map((observer) => observer.disconnect.mock.calls.length),
+    }).toEqual(before);
+
+    restore();
+    const current = clickEvent(first);
+    act(() => select(current.event));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(list).toHaveClass("hidden");
+    expect(current.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it.each(["A-before-B", "B-before-A"] as const)(
+    "rejects A-handler/B-control and B-handler/A-control pairings %s",
+    (order) => {
+      const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} domKey="a" />);
+      const a = directControls(view.host);
+      const aToggle = reactHandler<ClickHandler<HTMLButtonElement>>(a.toggle, "onClick");
+      const aLink = reactHandler<ClickHandler<HTMLAnchorElement>>(a.links[0], "onClick");
+      const aEscape = reactHandler<KeyHandler>(a.nav, "onKeyDown");
+
+      act(() => view.root.render(<DirectReaderBoundary currentHeadings={documentB} domKey="b" />));
+      const b = directControls(view.host);
+      const bToggle = reactHandler<ClickHandler<HTMLButtonElement>>(b.toggle, "onClick");
+      const bLink = reactHandler<ClickHandler<HTMLAnchorElement>>(b.links[0], "onClick");
+      const bEscape = reactHandler<KeyHandler>(b.nav, "onKeyDown");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const escapeAOnB = escapeEvent(b.nav, b.links[0]);
+      const escapeBOnA = escapeEvent(a.nav, a.links[0]);
+      const aOnB = () => {
+        aToggle(clickEvent(b.toggle).event);
+        aLink(clickEvent(b.links[0]).event);
+        aEscape(escapeAOnB.event);
+      };
+      const bOnA = () => {
+        bToggle(clickEvent(a.toggle).event);
+        bLink(clickEvent(a.links[0]).event);
+        bEscape(escapeBOnA.event);
+      };
+
+      document.body.append(a.nav);
+      try {
+        const before = view.host.innerHTML;
+        act(() => {
+          if (order === "A-before-B") {
+            aOnB();
+            bOnA();
+          } else {
+            bOnA();
+            aOnB();
+          }
+        });
+        expect(view.host.innerHTML).toBe(before);
+        expect(escapeAOnB.preventDefault).not.toHaveBeenCalled();
+        expect(escapeBOnA.preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        act(() => bToggle(clickEvent(b.toggle).event));
+        expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+        const currentLink = reactHandler<ClickHandler<HTMLAnchorElement>>(b.links[0], "onClick");
+        act(() => currentLink(clickEvent(b.links[0]).event));
+        expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+
+        fireEvent.click(b.toggle);
+        b.links[0].focus();
+        focus.mockClear();
+        const currentEscape = reactHandler<KeyHandler>(b.nav, "onKeyDown");
+        const currentEvent = escapeEvent(b.nav, b.links[0]);
+        act(() => currentEscape(currentEvent.event));
+        expect(currentEvent.preventDefault).toHaveBeenCalledOnce();
+        expect(b.toggle).toHaveFocus();
+      } finally {
+        a.nav.remove();
+      }
+    },
+  );
+
+  it.each(["retired-first", "current-first"] as const)(
+    "keeps reused equal-looking DOM bound to the current callbacks with %s invocation",
+    (order) => {
+      const equalA = documentA.map((heading) => ({ ...heading }));
+      const equalB = documentA.map((heading) => ({ ...heading }));
+      const view = directRoot(<DirectReaderBoundary currentHeadings={equalA} />);
+      const a = directControls(view.host);
+      const aToggle = reactHandler<ClickHandler<HTMLButtonElement>>(a.toggle, "onClick");
+      const aLink = reactHandler<ClickHandler<HTMLAnchorElement>>(a.links[0], "onClick");
+      const aEscape = reactHandler<KeyHandler>(a.nav, "onKeyDown");
+      const retiredRefs = [
+        reactHandler<RefCallback<Element>>(a.nav, "ref"),
+        reactHandler<RefCallback<Element>>(a.toggle, "ref"),
+        reactHandler<RefCallback<Element>>(a.list, "ref"),
+        ...a.links.map((link) => reactHandler<RefCallback<Element>>(link, "ref")),
+      ];
+
+      act(() => view.root.render(<DirectReaderBoundary currentHeadings={equalB} boundary={1} />));
+      const b = directControls(view.host);
+      expect(b.nav).toBe(a.nav);
+      expect(b.toggle).toBe(a.toggle);
+      expect(b.list).toBe(a.list);
+      expect(b.links).toEqual(a.links);
+      const bToggle = reactHandler<ClickHandler<HTMLButtonElement>>(b.toggle, "onClick");
+      const staleEscape = escapeEvent(b.nav, b.links[0]);
+      const staleWork = () => {
+        aToggle(clickEvent(b.toggle).event);
+        aLink(clickEvent(b.links[0]).event);
+        aEscape(staleEscape.event);
+      };
+
+      act(() => {
+        if (order === "retired-first") staleWork();
+        else bToggle(clickEvent(b.toggle).event);
+      });
+      if (order === "retired-first") expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+      else expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+      expect(staleEscape.preventDefault).not.toHaveBeenCalled();
+
+      act(() => retiredRefs.forEach((ref) => ref(null)));
+      if (order === "retired-first") {
+        act(() => bToggle(clickEvent(b.toggle).event));
+        expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+      } else {
+        act(staleWork);
+        expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+        const currentToggle = reactHandler<ClickHandler<HTMLButtonElement>>(b.toggle, "onClick");
+        act(() => currentToggle(clickEvent(b.toggle).event));
+        expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+      }
+    },
+  );
+
+  it("invalidates an in-place-mutated headings producer and publishes only frozen replacement values", () => {
+    const mutable: TestHeading[] = documentA.map((heading) => ({ ...heading }));
+    const view = directRoot(<DirectReaderBoundary currentHeadings={mutable} />);
+    const a = directControls(view.host);
+    const staleToggle = reactHandler<ClickHandler<HTMLButtonElement>>(a.toggle, "onClick");
+    const staleLink = reactHandler<ClickHandler<HTMLAnchorElement>>(a.links[0], "onClick");
+    const oldObserver = InstrumentedIntersectionObserver.instances[0];
+    const oldHeading = document.getElementById("alpha");
+    const staleObserver = oldObserver.capture([{ target: oldHeading!, isIntersecting: true }]);
+
+    Object.assign(mutable[0], { id: "changed-alpha", level: 3, text: "Changed Alpha", top: 140 });
+    Object.assign(mutable[1], { id: "changed-shared", level: 2, text: "Changed Shared", top: 260 });
+    act(() => view.root.render(<DirectReaderBoundary currentHeadings={mutable} />));
+
+    const b = directControls(view.host);
+    expect(b.nav).toBe(a.nav);
+    expect(b.toggle).toBe(a.toggle);
+    expect(b.list).toBe(a.list);
+    expect(b.links.map((link) => link.getAttribute("href"))).toEqual(["#changed-alpha", "#changed-shared"]);
+    expect(b.links.map((link) => link.textContent)).toEqual(["Changed Alpha", "Changed Shared"]);
+    expect(b.links[0]).toHaveClass("pl-5");
+    expect(b.links[1]).toHaveClass("pl-2");
+    expect(oldObserver.disconnect).toHaveBeenCalledOnce();
+    expect(InstrumentedIntersectionObserver.instances).toHaveLength(2);
+
+    const before = view.host.innerHTML;
+    act(() => {
+      staleToggle(clickEvent(b.toggle).event);
+      staleLink(clickEvent(b.links[0]).event);
+      staleObserver();
+    });
+    expect(view.host.innerHTML).toBe(before);
+
+    fireEvent.click(b.toggle);
+    expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(b.links[0]);
+    expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(InstrumentedIntersectionObserver.instances[1].disconnect).not.toHaveBeenCalled();
+  });
+
+  it("allows only one toggle, link, or Escape claim per publication and keeps the observer usable", () => {
+    const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} />);
+    const observer = InstrumentedIntersectionObserver.instances[0];
+    let controls = directControls(view.host);
+    const toggleA = reactHandler<ClickHandler<HTMLButtonElement>>(controls.toggle, "onClick");
+    const toggleEvent = clickEvent(controls.toggle);
+    act(() => {
+      toggleA(toggleEvent.event);
+      toggleA(toggleEvent.event);
+    });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    act(() => toggleA(toggleEvent.event));
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+    const linkA = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
+    const linkEvent = clickEvent(controls.links[0]);
+    act(() => {
+      linkA(linkEvent.event);
+      linkA(linkEvent.event);
+    });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(linkEvent.preventDefault).not.toHaveBeenCalled();
+
+    fireEvent.click(controls.toggle);
+    controls = directControls(view.host);
+    controls.links[0].focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const escape = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const firstEscape = escapeEvent(controls.nav, controls.links[0]);
+    const competingEscape = escapeEvent(controls.nav, controls.links[0]);
+    act(() => {
+      escape(firstEscape.event);
+      escape(competingEscape.event);
+    });
+    expect(firstEscape.preventDefault).toHaveBeenCalledOnce();
+    expect(competingEscape.preventDefault).not.toHaveBeenCalled();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(controls.toggle).toHaveFocus();
+
+    expect(InstrumentedIntersectionObserver.instances).toEqual([observer]);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+    observer.publish([{ target: document.getElementById("shared")!, isIntersecting: true }]);
+    expect(directControls(view.host).links[1]).toHaveAttribute("aria-current", "location");
+    expect(observer.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel Escape or focus from an unpublished descendant", () => {
+    const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} />);
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const escape = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const icon = controls.toggle.querySelector("svg");
+    if (!icon) throw new Error("The Contents icon was not rendered");
+    const descendantEscape = escapeEvent(controls.nav, icon);
+
+    act(() => escape(descendantEscape.event));
+    expect(descendantEscape.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    expect(controls.links[0]).toHaveFocus();
+
+    const currentEscape = escapeEvent(controls.nav, controls.links[0]);
+    act(() => escape(currentEscape.event));
+    expect(currentEscape.preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(controls.toggle).toHaveFocus();
+  });
+
+  it.each(["replacement", "removal"] as const)(
+    "retires callbacks and observers before a parent layout sees %s",
+    (kind) => {
+      const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} />);
+      const a = directControls(view.host);
+      const staleToggle = reactHandler<ClickHandler<HTMLButtonElement>>(a.toggle, "onClick");
+      const staleLink = reactHandler<ClickHandler<HTMLAnchorElement>>(a.links[0], "onClick");
+      const staleEscape = reactHandler<KeyHandler>(a.nav, "onKeyDown");
+      const observer = InstrumentedIntersectionObserver.instances[0];
+      const oldHeading = document.getElementById("alpha");
+      const staleObserver = observer.capture([{ target: oldHeading!, isIntersecting: true }]);
+      const preventions: ReturnType<typeof escapeEvent>[] = [];
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      let boundaryRan = false;
+
+      act(() => {
+        view.root.render(
+          <DirectReaderBoundary
+            currentHeadings={kind === "replacement" ? documentB : documentA}
+            present={kind === "replacement"}
+            boundary={1}
+            onLayout={() => {
+              boundaryRan = true;
+              expect(observer.disconnect).toHaveBeenCalledOnce();
+              const current = kind === "replacement" ? directControls(view.host) : a;
+              const escapeProbe = escapeEvent(current.nav, current.links[0]);
+              preventions.push(escapeProbe);
+              staleToggle(clickEvent(current.toggle).event);
+              staleLink(clickEvent(current.links[0]).event);
+              staleEscape(escapeProbe.event);
+              staleObserver();
+            }}
+          />,
+        );
+      });
+
+      expect(boundaryRan).toBe(true);
+      expect(preventions[0].preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(observer.disconnect).toHaveBeenCalledOnce();
+      if (kind === "replacement") {
+        const b = directControls(view.host);
+        expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+        expect(InstrumentedIntersectionObserver.instances).toHaveLength(2);
+        fireEvent.click(b.toggle);
+        expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+        expect(InstrumentedIntersectionObserver.instances[1].disconnect).not.toHaveBeenCalled();
+      } else {
+        expect(view.host).toBeEmptyDOMElement();
+        expect(InstrumentedIntersectionObserver.instances).toHaveLength(1);
+      }
+    },
+  );
 });
