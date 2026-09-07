@@ -54,6 +54,117 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Settings → Webhooks: list recovery", () => {
+  it("replaces a settled initial failure with its API reason and one atomic Retry alert", async () => {
+    fetchMock.mockResolvedValueOnce(response({ error: "Webhook service unavailable" }, 503));
+    render(<WebhooksPanel />);
+
+    const errorBlock = await screen.findByTestId("webhooks-list-error");
+    const alert = within(errorBlock).getByRole("alert");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(alert).toHaveTextContent("Webhook service unavailable");
+    expect(within(errorBlock).getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    expect(screen.queryByText("Loading…")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("guards Retry while pending and recovers to the genuine empty state", async () => {
+    const retry = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ error: "Try again" }, 503)).mockReturnValueOnce(retry.promise);
+    render(<WebhooksPanel />);
+
+    const retryButton = within(await screen.findByTestId("webhooks-list-error")).getByRole("button", { name: "Retry" });
+    fireEvent.click(retryButton);
+    fireEvent.click(retryButton);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    expect(screen.queryByText("Loading…")).toBeNull();
+
+    await act(async () => retry.resolve(response({ webhooks: [] })));
+    expect(await screen.findByTestId("webhooks-empty")).toHaveTextContent("No webhooks yet.");
+    expect(screen.queryByTestId("webhooks-list-error")).toBeNull();
+  });
+
+  it("recovers from an initial failure to the populated list", async () => {
+    fetchMock.mockResolvedValueOnce(response({ error: "Try again" }, 503)).mockResolvedValueOnce(response({ webhooks: [activeWebhook] }));
+    render(<WebhooksPanel />);
+
+    fireEvent.click(within(await screen.findByTestId("webhooks-list-error")).getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByTestId("webhook-row")).toHaveTextContent(activeWebhook.url);
+    expect(screen.queryByTestId("webhooks-list-error")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps cached rows visible when a later refresh fails with the fallback reason", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [activeWebhook] }))
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockRejectedValueOnce("offline");
+    render(<WebhooksPanel />);
+
+    const row = await screen.findByTestId("webhook-row");
+    fireEvent.click(within(row).getByTestId("webhook-test"));
+
+    expect(await screen.findByTestId("webhooks-list-error")).toHaveTextContent("Failed to load webhooks");
+    expect(screen.getByTestId("webhook-row")).toHaveTextContent(activeWebhook.url);
+    expect(screen.queryByText("Loading…")).toBeNull();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/webhooks", "/api/webhooks/active-hook/test", "/api/webhooks"]);
+  });
+
+  it("keeps list and action errors separate and clears only the list error after a successful Retry", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ error: "List unavailable" }, 503))
+      .mockResolvedValueOnce(response({ error: "Receiver URL is not allowed" }, 400))
+      .mockResolvedValueOnce(response({ webhooks: [] }));
+    render(<WebhooksPanel />);
+
+    await screen.findByTestId("webhooks-list-error");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: "https://receiver.example/hook" } });
+    fireEvent.click(screen.getByTestId("webhook-create"));
+
+    expect(await screen.findByTestId("webhook-action-error")).toHaveTextContent("Receiver URL is not allowed");
+    expect(screen.getByTestId("webhooks-list-error")).toHaveTextContent("List unavailable");
+
+    fireEvent.click(within(screen.getByTestId("webhooks-list-error")).getByRole("button", { name: "Retry" }));
+    await screen.findByTestId("webhooks-empty");
+
+    expect(screen.queryByTestId("webhooks-list-error")).toBeNull();
+    expect(screen.getByTestId("webhook-action-error")).toHaveTextContent("Receiver URL is not allowed");
+  });
+
+  it("ignores an older list success after a newer list failure", async () => {
+    const firstEnable = deferred<Response>();
+    const secondEnable = deferred<Response>();
+    const staleList = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, otherDisabledWebhook] }))
+      .mockReturnValueOnce(firstEnable.promise)
+      .mockReturnValueOnce(secondEnable.promise)
+      .mockReturnValueOnce(staleList.promise)
+      .mockResolvedValueOnce(response({ error: "Newest refresh failed" }, 503));
+    render(<WebhooksPanel />);
+
+    const rows = await screen.findAllByTestId("webhook-row");
+    fireEvent.click(within(rows[0]).getByTestId("webhook-enable"));
+    fireEvent.click(within(rows[1]).getByTestId("webhook-enable"));
+
+    await act(async () => firstEnable.resolve(response({ webhook: { ...disabledWebhook, active: true, failures: 0 } })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await act(async () => secondEnable.resolve(response({ webhook: { ...otherDisabledWebhook, active: true, failures: 0 } })));
+    expect(await screen.findByTestId("webhooks-list-error")).toHaveTextContent("Newest refresh failed");
+
+    await act(async () => staleList.resolve(response({ webhooks: [{ ...disabledWebhook, active: true, failures: 0 }] })));
+
+    expect(screen.getByTestId("webhooks-list-error")).toHaveTextContent("Newest refresh failed");
+    expect(screen.getAllByTestId("webhook-row")).toHaveLength(2);
+    expect(screen.getByText(disabledWebhook.url)).toBeInTheDocument();
+    expect(screen.getByText(otherDisabledWebhook.url)).toBeInTheDocument();
+  });
+});
+
 describe("Settings → Webhooks: the add form shows the validation reason (#1480)", () => {
   it("shows the URL rule, not the bare \"Invalid request\", when the server rejects the new webhook", async () => {
     // `handler()` answers a zod failure with `400 { error: "Invalid request", issues }`; the panel's `request()` turns
