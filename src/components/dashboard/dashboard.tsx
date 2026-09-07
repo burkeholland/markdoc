@@ -1,5 +1,5 @@
 "use client";
-import { Avatar, Dialog, DialogContent, DialogTrigger, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider } from "@/components/ui/primitives";
+import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
@@ -30,6 +30,12 @@ const SEARCH_DEBOUNCE_MS = 250;
 const MIN_QUERY_LENGTH = 2;
 const STARRED_STRIP_MAX = 6;
 const DASHBOARD_GROUPS = ["Recent", "Create", "Navigation", "Account"] as const;
+const SEARCH_SHORTCUT_BLOCKED = 'input, textarea, select, dialog, [role="dialog"], [data-testid="command-palette"], [contenteditable]:not([contenteditable="false"])';
+
+function isSearchShortcut(event: KeyboardEvent): boolean {
+  if (event.key !== "/" || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return false;
+  return !(event.target instanceof Element && event.target.closest(SEARCH_SHORTCUT_BLOCKED));
+}
 
 function readSortCookie(): string | null {
   const prefix = `${SORT_COOKIE}=`;
@@ -206,6 +212,16 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const router = useRouter();
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (!isSearchShortcut(event)) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+      searchRef.current?.select();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
   const clearSearch = useCallback(() => {
     setQuery("");
     searchRef.current?.focus();
@@ -214,6 +230,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [filter, setFilter] = useState<Filter>("all");
   const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<{ query: string; message: string } | null>(null);
+  const searchRequestId = useRef(0);
+  const activeSearch = useRef<AbortController | null>(null);
 
   // One-shot message from the page we came from (e.g. the editor after "Move to trash").
   const [notice, setNotice] = useState<PendingNotice | null>(null);
@@ -317,29 +336,68 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const trimmed = query.trim();
   const serverQuery = useDebounced(trimmed.length >= MIN_QUERY_LENGTH ? trimmed : "", SEARCH_DEBOUNCE_MS);
 
-  useEffect(() => {
-    if (!serverQuery) {
-      setSearching(false);
-      return;
-    }
+  const runSearch = useCallback((requestedQuery: string) => {
+    activeSearch.current?.abort();
     const controller = new AbortController();
+    const requestId = ++searchRequestId.current;
+    activeSearch.current = controller;
     setSearching(true);
-    api.documents
-      .search(serverQuery, { signal: controller.signal })
-      .then((res) => setResults({ query: res.query, documents: res.documents }))
+
+    const isCurrent = () => !controller.signal.aborted && activeSearch.current === controller && searchRequestId.current === requestId;
+    void api.documents
+      .search(requestedQuery, { signal: controller.signal })
+      .then((res) => {
+        if (!isCurrent()) return;
+        setResults({ query: res.query, documents: res.documents });
+        setSearchError(null);
+      })
       .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
+        if (!isCurrent()) return;
         console.error(err);
+        setSearchError({ query: requestedQuery, message: apiErrorText(err, "Could not search document content") });
       })
       .finally(() => {
-        if (!controller.signal.aborted) setSearching(false);
+        if (!isCurrent()) return;
+        activeSearch.current = null;
+        setSearching(false);
       });
-    return () => controller.abort();
-  }, [serverQuery]);
+
+    return () => {
+      controller.abort();
+      if (activeSearch.current === controller) {
+        activeSearch.current = null;
+        searchRequestId.current += 1;
+      }
+    };
+  }, []);
+
+  // A changed query immediately retires both a debounced request and an explicit retry.
+  useEffect(() => {
+    if (activeSearch.current) {
+      activeSearch.current.abort();
+      activeSearch.current = null;
+      searchRequestId.current += 1;
+      setSearching(false);
+    }
+    setSearchError((current) => (current?.query === trimmed ? current : null));
+  }, [trimmed]);
+
+  useEffect(() => {
+    if (!serverQuery || serverQuery !== trimmed) return;
+    return runSearch(serverQuery);
+  }, [serverQuery, trimmed, runSearch]);
+
+  useEffect(() => () => activeSearch.current?.abort(), []);
+
+  const currentSearchError = searchError?.query === trimmed ? searchError : null;
+  const retrySearch = useCallback(() => {
+    if (!currentSearchError || currentSearchError.query !== trimmed || searching) return;
+    runSearch(currentSearchError.query);
+  }, [currentSearchError, trimmed, searching, runSearch]);
 
   // Server results for the current query win; otherwise filter the loaded list by title so typing
   // feels instant while the request is in flight (or for queries too short to send).
-  const serverResults = results && trimmed.length >= MIN_QUERY_LENGTH && results.query === trimmed ? results.documents : null;
+  const serverResults = !currentSearchError && results && trimmed.length >= MIN_QUERY_LENGTH && results.query === trimmed ? results.documents : null;
   const pending = trimmed.length >= MIN_QUERY_LENGTH && !serverResults && (searching || serverQuery !== trimmed);
   const filtered = useMemo<(Doc & { snippet?: string | null })[]>(() => {
     const matchesFilter = (d: Doc) => {
@@ -441,8 +499,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               <Search size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
               <input
                 ref={searchRef}
-                className={cn("input pl-9", query && searching ? "pr-16" : "pr-9")}
+                className={cn("input pl-9", query && searching ? "pr-16" : query ? "pr-9" : "pr-9 sm:pr-12")}
                 placeholder="Search documents"
+                aria-label="Search documents"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => {
@@ -454,6 +513,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 }}
                 data-testid="search"
               />
+              {!query && (
+                <span className="pointer-events-none absolute right-3 top-2 hidden text-ink-4 sm:block" aria-hidden="true">
+                  <Kbd>/</Kbd>
+                </span>
+              )}
               {searching && <Loader2 size={16} className={cn("pointer-events-none absolute top-2.5 animate-spin text-ink-4", query ? "right-9" : "right-3")} data-testid="search-loading" />}
               {query && (
                 <button
@@ -630,6 +694,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             </div>
           </div>
 
+          {currentSearchError && (
+            <div className="mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="search-error">
+              <span className="min-w-0 flex-1">
+                Content search failed: {currentSearchError.message}. Showing title matches only.
+              </span>
+              <button type="button" className="btn btn-sm btn-outline shrink-0" onClick={retrySearch} disabled={searching} aria-busy={searching || undefined}>
+                {searching ? "Retrying…" : "Retry"}
+              </button>
+            </div>
+          )}
+
           {filter === "trash" ? (
             <TrashView documents={trash} busy={trashBusy} onRestore={restore} onPurge={purge} />
           ) : filtered.length === 0 && !trimmed && documents.length === 0 ? (
@@ -655,10 +730,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
               <FileText className="mx-auto mb-3 text-ink-4" size={28} />
               <p className="text-sm font-medium text-ink-2">
-                {pending ? `Searching for "${trimmed}"…` : trimmed ? `No matches for "${trimmed}"` : filter === "starred" ? "No starred documents" : "No matches"}
+                {pending ? `Searching for "${trimmed}"…` : currentSearchError ? `No title matches for "${trimmed}"` : trimmed ? `No matches for "${trimmed}"` : filter === "starred" ? "No starred documents" : "No matches"}
               </p>
               <p className="mt-1 text-sm text-ink-3">
-                {pending ? "Looking through titles and content." : filter === "starred" && !trimmed ? "Hover a document and click the star to keep it close." : "Try a different search."}
+                {pending ? "Looking through titles and content." : currentSearchError ? "Content results are unavailable. Retry the search above." : filter === "starred" && !trimmed ? "Hover a document and click the star to keep it close." : "Try a different search."}
               </p>
               {trimmed && !pending && (
                 <button type="button" className="mt-3 text-sm font-medium text-accent hover:underline" onClick={clearSearch} data-testid="empty-state-clear-search">
@@ -780,5 +855,4 @@ function TrashView({ documents, busy, onRestore, onPurge }: { documents: Doc[] |
     </div>
   );
 }
-
 
