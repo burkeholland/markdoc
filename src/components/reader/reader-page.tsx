@@ -8,6 +8,7 @@ import { ReaderToc } from "./toc";
 import { UpdatePill } from "./update-pill";
 import { DownloadMenu } from "./download-menu";
 import { ReaderScrollableRegions } from "./scrollable-regions";
+import { ReaderCopyLink } from "./copy-link";
 
 export interface ReaderPageProps {
   docId: string;
@@ -52,6 +53,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
               <span className="sm:hidden">Edit</span>
             </Link>
           )}
+          <ReaderCopyLink docId={docId} />
           <DownloadMenu docId={docId} />
         </div>
       </header>
