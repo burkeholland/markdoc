@@ -143,14 +143,35 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   return handler as T;
 }
 
+type HintMouseHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
+
+function hintMouseEvent(
+  currentTarget: HTMLButtonElement,
+  preventDefault = vi.fn(),
+): React.MouseEvent<HTMLButtonElement> {
+  return { currentTarget, preventDefault } as unknown as React.MouseEvent<HTMLButtonElement>;
+}
+
 function captureHintCallbacks() {
+  const actionElement = screen.getByTestId("hint-action") as HTMLButtonElement;
+  const dismissElement = screen.getByTestId("hint-dismiss") as HTMLButtonElement;
+  const actionHandler = reactHandler<HintMouseHandler>(actionElement, "onClick");
+  const actionMouseDownHandler = reactHandler<HintMouseHandler>(actionElement, "onMouseDown");
+  const dismissHandler = reactHandler<HintMouseHandler>(dismissElement, "onClick");
   return {
-    action: reactHandler<() => void>(screen.getByTestId("hint-action"), "onClick"),
-    actionMouseDown: reactHandler<(event: { preventDefault: () => void }) => void>(
-      screen.getByTestId("hint-action"),
-      "onMouseDown",
-    ),
-    dismiss: reactHandler<() => void>(screen.getByTestId("hint-dismiss"), "onClick"),
+    actionElement,
+    dismissElement,
+    actionHandler,
+    actionMouseDownHandler,
+    dismissHandler,
+    action: (currentTarget = actionElement) =>
+      actionHandler(hintMouseEvent(currentTarget)),
+    actionMouseDown: (
+      currentTarget = actionElement,
+      preventDefault = vi.fn(),
+    ) => actionMouseDownHandler(hintMouseEvent(currentTarget, preventDefault)),
+    dismiss: (currentTarget = dismissElement) =>
+      dismissHandler(hintMouseEvent(currentTarget)),
   };
 }
 
@@ -496,7 +517,7 @@ describe("HintBar collaborator discovery", () => {
     expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", id);
     const callbacks = captureHintCallbacks();
     const preventDefault = vi.fn();
-    callbacks.actionMouseDown({ preventDefault });
+    callbacks.actionMouseDown(callbacks.actionElement, preventDefault);
     expect(preventDefault).toHaveBeenCalledOnce();
 
     act(() => {
@@ -605,7 +626,7 @@ describe("HintBar collaborator discovery", () => {
           onPassiveCleanup={onPassiveCleanup}
           onBoundary={() => {
             expect(passiveCleanups).toBe(0);
-            stale.actionMouseDown({ preventDefault });
+            stale.actionMouseDown(stale.actionElement, preventDefault);
             stale.action();
             stale.dismiss();
             expect(storageWrites).not.toHaveBeenCalled();
@@ -625,6 +646,10 @@ describe("HintBar collaborator discovery", () => {
         expect(screen.getByTestId("hint-bar")).toBe(publicationA);
       }
       const current = captureHintCallbacks();
+      if (replacement !== "session/document") {
+        expect(current.actionElement).toBe(stale.actionElement);
+        expect(current.dismissElement).toBe(stale.dismissElement);
+      }
       if (currentActivation === "dismiss") screen.getByTestId("hint-dismiss").focus();
 
       act(() => {
@@ -706,6 +731,123 @@ describe("HintBar collaborator discovery", () => {
       expect(storageWrites).toHaveBeenCalledOnce();
       expect(comment).toHaveBeenCalledOnce();
       expect(actions.focus).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["stale-before-current", false],
+    ["current-before-stale", true],
+  ] as const)(
+    "requires exact publication controls across a ref replacement in $0 order",
+    async (_order, currentFirst) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({ dismissed: ["collab-agent"], agentSeen: false }),
+      );
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+      const session = fakeSession("control-identity", { threads: 1 });
+      const commentA = vi.fn();
+      const commentB = vi.fn();
+      const foreign = document.createElement("button");
+      document.body.append(foreign);
+      const root = createHintRoot();
+      let passiveCleanups = 0;
+      const prevented = vi.fn();
+      const invokeStaleWithWrongControls = (
+        stale: ReturnType<typeof captureHintCallbacks>,
+        current: ReturnType<typeof captureHintCallbacks> | null,
+      ) => {
+        stale.actionMouseDown(stale.dismissElement, prevented);
+        if (current) stale.actionMouseDown(current.actionElement, prevented);
+        stale.actionMouseDown(foreign, prevented);
+        stale.action(stale.actionElement);
+        stale.action(stale.dismissElement);
+        if (current) stale.action(current.actionElement);
+        stale.action(foreign);
+        stale.dismiss(stale.dismissElement);
+        stale.dismiss(stale.actionElement);
+        if (current) stale.dismiss(current.dismissElement);
+        stale.dismiss(foreign);
+      };
+
+      try {
+        await renderHintRoot(
+          root,
+          <HintBoundary
+            instance="control-A"
+            session={session}
+            comment={commentA}
+            onPassiveCleanup={() => {
+              passiveCleanups++;
+            }}
+          />,
+        );
+        const stale = captureHintCallbacks();
+
+        await renderHintRoot(
+          root,
+          <HintBoundary
+            instance="control-B"
+            session={session}
+            comment={commentB}
+            boundary={1}
+            onPassiveCleanup={() => {
+              passiveCleanups++;
+            }}
+            onBoundary={() => {
+              expect(passiveCleanups).toBe(0);
+              invokeStaleWithWrongControls(stale, null);
+              expect(prevented).not.toHaveBeenCalled();
+              expect(storageWrites).not.toHaveBeenCalled();
+              expect(commentA).not.toHaveBeenCalled();
+              expect(commentB).not.toHaveBeenCalled();
+              expect(actions.focus).not.toHaveBeenCalled();
+            }}
+          />,
+        );
+        expect(passiveCleanups).toBe(1);
+        const current = captureHintCallbacks();
+        expect(current.actionElement).not.toBe(stale.actionElement);
+        expect(current.dismissElement).not.toBe(stale.dismissElement);
+
+        act(() => {
+          invokeStaleWithWrongControls(stale, current);
+          current.actionMouseDown(current.dismissElement, prevented);
+          current.actionMouseDown(stale.actionElement, prevented);
+          current.actionMouseDown(foreign, prevented);
+          current.action(current.dismissElement);
+          current.action(stale.actionElement);
+          current.action(foreign);
+          current.dismiss(current.actionElement);
+          current.dismiss(stale.dismissElement);
+          current.dismiss(foreign);
+        });
+        expect(prevented).not.toHaveBeenCalled();
+        expect(storageWrites).not.toHaveBeenCalled();
+        expect(commentA).not.toHaveBeenCalled();
+        expect(commentB).not.toHaveBeenCalled();
+        expect(actions.focus).not.toHaveBeenCalled();
+        expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+          "data-hint",
+          "mention-copilot",
+        );
+
+        act(() => {
+          if (currentFirst) current.action();
+          invokeStaleWithWrongControls(stale, current);
+          if (!currentFirst) current.action();
+        });
+
+        expect(prevented).not.toHaveBeenCalled();
+        expect(storageWrites).toHaveBeenCalledOnce();
+        expect(commentA).not.toHaveBeenCalled();
+        expect(commentB).toHaveBeenCalledOnce();
+        expect(actions.focus).not.toHaveBeenCalled();
+        expect(onShare).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("hint-bar")).toBeNull();
+      } finally {
+        foreign.remove();
+      }
     },
   );
 
@@ -802,7 +944,7 @@ describe("HintBar collaborator discovery", () => {
         onPassiveCleanup={onPassiveCleanup}
         onBoundary={() => {
           expect(passiveCleanups).toBe(0);
-          stale.actionMouseDown({ preventDefault });
+          stale.actionMouseDown(stale.actionElement, preventDefault);
           stale.action();
           stale.dismiss();
           expect(storageWrites).not.toHaveBeenCalled();
@@ -812,7 +954,7 @@ describe("HintBar collaborator discovery", () => {
     expect(passiveCleanups).toBe(1);
 
     act(() => {
-      stale.actionMouseDown({ preventDefault });
+      stale.actionMouseDown(stale.actionElement, preventDefault);
       stale.action();
       stale.dismiss();
     });

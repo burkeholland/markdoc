@@ -103,8 +103,12 @@ interface HintPublicationAuthority {
 
 interface HintPublicationRuntime {
   element: HTMLDivElement | null;
+  actionElement: HTMLButtonElement | null;
+  dismissElement: HTMLButtonElement | null;
   discovery: DiscoveryAuthority | null;
 }
+
+type HintPublicationControl = "action" | "dismiss";
 
 /**
  * One-line, once-only hints under the toolbar for the agent/collaboration features. Reads session
@@ -367,6 +371,8 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
   const shown = pinned?.key === discoveryKey && !record.dismissed.includes(pinned.id) && active ? pinned.id : null;
 
   const barRef = useRef<HTMLDivElement>(null);
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const dismissRef = useRef<HTMLButtonElement>(null);
   const [publicationMount] = useState(() => Symbol("hint publication mount"));
   const publicationRef = useRef<HintPublicationAuthority | null>(null);
   const publication = useMemo<HintPublicationAuthority | null>(
@@ -395,6 +401,8 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     const publicationRuntimes = publicationRuntimeRef.current;
     publicationRuntimes.set(publication, {
       element: barRef.current,
+      actionElement: actionRef.current,
+      dismissElement: dismissRef.current,
       discovery:
         publication.id === "collab-agent" &&
         discoveryAuthority?.key === publication.key &&
@@ -418,9 +426,26 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     [publicationMount],
   );
 
+  const isExactPublicationControl = useCallback(
+    (
+      authority: HintPublicationAuthority,
+      control: HintPublicationControl,
+      element: HTMLButtonElement,
+    ) => {
+      if (!isActionablePublication(authority)) return false;
+      const runtime = publicationRuntimeRef.current.get(authority);
+      return element === (control === "action" ? runtime?.actionElement : runtime?.dismissElement);
+    },
+    [isActionablePublication],
+  );
+
   const activatePublication = useCallback(
-    (authority: HintPublicationAuthority, action: boolean) => {
-      if (!isActionablePublication(authority)) return;
+    (
+      authority: HintPublicationAuthority,
+      control: HintPublicationControl,
+      element: HTMLButtonElement,
+    ) => {
+      if (!isExactPublicationControl(authority, control, element)) return;
       const runtime = publicationRuntimeRef.current.get(authority);
       if (!runtime) return;
       claimedPublicationsRef.current.add(authority);
@@ -428,7 +453,7 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
       setPinned((current) => (current === authority.pin ? null : current));
       writeHintsRecord(window.localStorage, authority.dismissedRecord);
       if (runtime.discovery) retireDiscovery(runtime.discovery);
-      if (action) {
+      if (control === "action") {
         if (authority.id === "collab-agent") authority.onShare();
         else authority.onComment();
       } else if (
@@ -438,19 +463,24 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
         authority.actions.focus();
       }
     },
-    [isActionablePublication, retireDiscovery],
+    [isExactPublicationControl, retireDiscovery],
   );
-  const act = useCallback(() => {
-    if (publication) activatePublication(publication, true);
+  const act = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    if (publication) activatePublication(publication, "action", event.currentTarget);
   }, [activatePublication, publication]);
-  const dismiss = useCallback(() => {
-    if (publication) activatePublication(publication, false);
+  const dismiss = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    if (publication) activatePublication(publication, "dismiss", event.currentTarget);
   }, [activatePublication, publication]);
   const keepEditorFocus = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
-      if (publication && isActionablePublication(publication)) event.preventDefault();
+      if (
+        publication &&
+        isExactPublicationControl(publication, "action", event.currentTarget)
+      ) {
+        event.preventDefault();
+      }
     },
-    [isActionablePublication, publication],
+    [isExactPublicationControl, publication],
   );
 
   if (!shown) return null;
@@ -467,10 +497,10 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     >
       <Icon size={14} className="shrink-0 text-accent" aria-hidden />
       <span className="min-w-0 truncate">{copy.message}</span>
-      <button type="button" className="btn btn-sm btn-outline ml-auto h-6 shrink-0 px-2 text-xs" onMouseDown={keepEditorFocus} onClick={act} data-testid="hint-action">
+      <button ref={actionRef} type="button" className="btn btn-sm btn-outline ml-auto h-6 shrink-0 px-2 text-xs" onMouseDown={keepEditorFocus} onClick={act} data-testid="hint-action">
         {copy.action}
       </button>
-      <button type="button" className="icon-btn h-6 w-6 shrink-0 text-ink-3 hover:text-ink" onClick={dismiss} aria-label="Dismiss hint" data-testid="hint-dismiss">
+      <button ref={dismissRef} type="button" className="icon-btn h-6 w-6 shrink-0 text-ink-3 hover:text-ink" onClick={dismiss} aria-label="Dismiss hint" data-testid="hint-dismiss">
         <X size={14} />
       </button>
     </div>
