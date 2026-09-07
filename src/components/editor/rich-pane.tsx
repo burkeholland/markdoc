@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
 import { createRichEditorState, setEditable } from "@/editor/prosemirror/setup";
@@ -31,64 +31,139 @@ export interface RichPaneProps {
   hidden?: boolean;
 }
 
+interface RichPaneHandlers {
+  onSelection: RichPaneProps["onSelection"];
+  onHighlightClick: RichPaneProps["onHighlightClick"];
+  onLinkShortcut: RichPaneProps["onLinkShortcut"];
+  onCommentShortcut: RichPaneProps["onCommentShortcut"];
+  uploadImage: RichPaneProps["uploadImage"];
+  onImageError: RichPaneProps["onImageError"];
+  onNotice: RichPaneProps["onNotice"];
+  onMarkdownFileDrop: RichPaneProps["onMarkdownFileDrop"];
+}
+
+interface RichViewVisit {
+  session: CollabSession;
+  host: HTMLDivElement;
+  view: EditorView | null;
+  handlers: RichPaneHandlers;
+  focusSource: number | null;
+  unbindComposition: (() => void) | null;
+  onReady: RichPaneProps["onReady"];
+  installing: boolean;
+  retired: boolean;
+}
+
 export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop, slashMenu, hidden = false }: RichPaneProps) {
   // Source offset of the code pane's cursor while the code pane is active (for the focus block).
   const focusSource = useSessionValue(session, (s) => (s.activeSurface === "code" ? s.localCursor.code : null));
+  const canEdit = useSessionValue(session, (s) => s.canEdit);
   const host = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<EditorView | null>(null);
-  const handlers = useRef({ onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
-  useEffect(() => {
-    handlers.current = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
-  }, [onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop]);
-  const focusRef = useRef<number | null>(null);
+  const activeVisit = useRef<RichViewVisit | null>(null);
+  const readyVisit = useRef<RichViewVisit | null>(null);
+  const nextHandlers = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
 
-  useEffect(() => {
-    if (!host.current) return;
+  useLayoutEffect(() => {
+    const visit = activeVisit.current;
+    if (visit && !visit.retired && visit.session === session && visit.host === host.current && visit.view) {
+      visit.handlers = nextHandlers;
+    }
+  });
+
+  useLayoutEffect(() => {
+    const mount = host.current;
+    if (!mount) return;
+    const visit: RichViewVisit = {
+      session,
+      host: mount,
+      view: null,
+      handlers: nextHandlers,
+      focusSource,
+      unbindComposition: null,
+      onReady,
+      installing: true,
+      retired: false,
+    };
+    const currentHandlers = () =>
+      activeVisit.current === visit && !visit.retired && visit.host === host.current && visit.view ? visit.handlers : null;
+    const isCurrent = () => currentHandlers() !== null;
     const state = createRichEditorState(session, {
-      onFocus: () => session.setActiveSurface("rich"),
-      onSelection: (head, anchor) => handlers.current.onSelection(head, anchor),
-      onHighlightClick: (kind, id, sourcePosition) => handlers.current.onHighlightClick(kind, id, sourcePosition),
-      onLinkShortcut: () => handlers.current.onLinkShortcut(),
-      onCommentShortcut: () => handlers.current.onCommentShortcut(),
-      uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
-      onImageError: (message) => handlers.current.onImageError?.(message),
-      onNotice: (message, action) => handlers.current.onNotice?.(message, action),
-      onMarkdownFileDrop: (file, pos) => handlers.current.onMarkdownFileDrop?.(file, pos),
-      getFocusSource: () => (session.activeSurface === "code" ? focusRef.current : null),
+      onFocus: () => {
+        if (isCurrent()) visit.session.setActiveSurface("rich");
+      },
+      onSelection: (head, anchor) => currentHandlers()?.onSelection(head, anchor),
+      onHighlightClick: (kind, id, sourcePosition) => currentHandlers()?.onHighlightClick(kind, id, sourcePosition),
+      onLinkShortcut: () => currentHandlers()?.onLinkShortcut(),
+      onCommentShortcut: () => currentHandlers()?.onCommentShortcut(),
+      uploadImage: uploadImage
+        ? async (file) => {
+            const handler = currentHandlers()?.uploadImage;
+            if (!handler) throw new Error("Rich editor view is no longer current");
+            return handler(file);
+          }
+        : undefined,
+      onImageError: (message) => currentHandlers()?.onImageError?.(message),
+      onNotice: (message, action) => currentHandlers()?.onNotice?.(message, action),
+      onMarkdownFileDrop: (file, pos) => currentHandlers()?.onMarkdownFileDrop?.(file, pos),
+      getFocusSource: () => (isCurrent() && visit.session.activeSurface === "code" ? visit.focusSource : null),
       slashMenu,
     });
-    const view = new EditorView(host.current, {
+    const view = new EditorView(mount, {
       state,
-      nodeViews: createNodeViews(() => session.canEdit),
+      nodeViews: createNodeViews(
+        () =>
+          !visit.retired &&
+          visit.host === host.current &&
+          ((visit.installing && activeVisit.current === null) || isCurrent()) &&
+          visit.session.canEdit,
+      ),
     });
-    viewRef.current = view;
-    const unbindComposition = session.bindContentComposition(view.dom);
+    visit.view = view;
+    visit.installing = false;
+    activeVisit.current = visit;
+    visit.unbindComposition = session.bindContentComposition(view.dom);
+    readyVisit.current = visit;
     onReady(view);
     if (process.env.NODE_ENV !== "production") {
       // Like `__markdocSession`: lets e2e tests wait for ProseMirror's own selection, not just the DOM's.
       (window as unknown as { __markdocRichView?: EditorView }).__markdocRichView = view;
     }
     return () => {
-      onReady(null);
-      unbindComposition();
+      if (visit.retired) return;
+      visit.retired = true;
+      if (activeVisit.current === visit) activeVisit.current = null;
+      visit.unbindComposition?.();
+      visit.unbindComposition = null;
       view.destroy();
-      viewRef.current = null;
-      if (process.env.NODE_ENV !== "production") delete (window as unknown as { __markdocRichView?: EditorView }).__markdocRichView;
+      visit.view = null;
+      if (process.env.NODE_ENV !== "production") {
+        const testWindow = window as unknown as { __markdocRichView?: EditorView };
+        if (testWindow.__markdocRichView === view) delete testWindow.__markdocRichView;
+      }
+      if (readyVisit.current === visit) {
+        readyVisit.current = null;
+        visit.onReady(null);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  const canEdit = useSessionValue(session, (s) => s.canEdit);
-  useEffect(() => {
-    if (viewRef.current) setEditable(viewRef.current, canEdit);
-  }, [canEdit]);
+  useLayoutEffect(() => {
+    const visit = activeVisit.current;
+    if (visit && !visit.retired && visit.session === session && visit.host === host.current && visit.view) {
+      setEditable(visit.view, canEdit);
+    }
+  }, [session, canEdit]);
 
   // Highlights that depend on the session refresh themselves (see richHighlightsPlugin);
   // only the cross-pane focus block needs a push from here.
-  useEffect(() => {
-    focusRef.current = focusSource;
-    if (viewRef.current) refreshRichHighlights(viewRef.current);
-  }, [focusSource]);
+  useLayoutEffect(() => {
+    const visit = activeVisit.current;
+    if (visit && !visit.retired && visit.session === session && visit.host === host.current && visit.view) {
+      visit.focusSource = focusSource;
+      refreshRichHighlights(visit.view);
+    }
+  }, [session, focusSource]);
 
   return <div ref={host} className={hidden ? "relative hidden h-full min-h-0 w-full" : "relative h-full min-h-0 w-full"} data-testid="rich-pane" />;
 }
