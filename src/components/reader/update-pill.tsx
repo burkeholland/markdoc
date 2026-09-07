@@ -14,32 +14,49 @@ export function UpdatePill({ docId, initialHash, pollMs }: { docId: string; init
     if (stale) return;
     let timer: ReturnType<typeof setInterval> | null = null;
     let cancelled = false;
-    const check = async () => {
-      try {
-        const res = await fetch(`/api/documents/${docId}/content`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as { contentHash?: string };
-        if (!cancelled && data.contentHash && data.contentHash !== initialHash) setStale(true);
-      } catch {
-        // Offline or transient error: try again on the next tick.
-      }
-    };
-    const start = () => {
-      if (timer !== null) return;
-      timer = setInterval(() => void check(), pollMs);
-    };
-    const stop = () => {
+    let activeRequest: AbortController | null = null;
+    const stopTimer = () => {
       if (timer === null) return;
       clearInterval(timer);
       timer = null;
     };
+    const stop = () => {
+      stopTimer();
+      const request = activeRequest;
+      activeRequest = null;
+      request?.abort();
+    };
+    const check = async () => {
+      if (cancelled || activeRequest !== null || document.visibilityState !== "visible") return;
+      const request = new AbortController();
+      activeRequest = request;
+      try {
+        const res = await fetch(`/api/documents/${docId}/content`, { cache: "no-store", signal: request.signal });
+        if (!res.ok) return;
+        const data = (await res.json()) as { contentHash?: string };
+        if (cancelled || request.signal.aborted || activeRequest !== request || document.visibilityState !== "visible") return;
+        if (data.contentHash && data.contentHash !== initialHash) {
+          stopTimer();
+          setStale(true);
+        }
+      } catch {
+        // Offline or transient error: try again on the next tick.
+      } finally {
+        if (activeRequest === request) activeRequest = null;
+      }
+    };
+    const start = () => {
+      if (cancelled || document.visibilityState !== "visible") return;
+      void check();
+      if (timer !== null) return;
+      timer = setInterval(() => void check(), pollMs);
+    };
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        void check();
         start();
       } else stop();
     };
-    if (document.visibilityState === "visible") start();
+    start();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
