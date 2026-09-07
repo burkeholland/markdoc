@@ -256,7 +256,7 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 - **Comments and suggestions are annotations** stored in Yjs maps with relative-position anchors (`src/editor/collab/`). They survive concurrent edits and render identically in both panes. Suggesting mode intercepts edits: deletions are kept and marked, insertions are recorded; accepting or rejecting applies the final text.
 - **Open documents are mirrored to IndexedDB** (`src/editor/collab/offline.ts`, one `markdoc:<docId>` database per document via `y-indexeddb`), so edits made offline survive a refresh or closed tab and merge into the server copy on reconnect; the header chip stays on "Saving…" while you type and reads "Saved" about a second after you stop (every keystroke still syncs at once; only the chip settles), shows the unsaved count while offline and confirms "All changes saved" once they land. The local copy is deleted when the document is deleted or access is revoked.
 - **One server process.** `server/index.ts` hosts Next.js and the collaboration WebSocket (`/collab`) on one port. `src/server/collab/hocuspocus.ts` authenticates with short-lived JWTs minted by `/api/documents/:id/collab-token`, loads documents from Postgres and persists them (debounced) with automatic versioning. API edits go through the same live document (`src/server/livedoc.ts`), so an agent's `suggest` shows up in open editors immediately.
-- **Baseline security headers.** `server/index.ts` puts `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin` and `Permissions-Policy: camera=(), microphone=(), geolocation=()` on every response — pages, `/api/*`, `/_next/static/*` (the brotli branch included) — and `Strict-Transport-Security: max-age=31536000` only when the request arrived over HTTPS (`x-forwarded-proto: https` from the Container Apps ingress; never on plain HTTP, so local dev and the e2e server send none). `src/proxy.ts` adds `Content-Security-Policy: frame-ancestors 'none'` to every page except the embedded document: `/d/<id>?embed=1` with a valid `markdoc.embed-session` cookie keeps `frame-ancestors <parentOrigin>` for the Copilot canvas, `/api/*` keeps its own headers (`/api/assets` sandboxes SVGs) and the handoff route `/embed/<nonce>` is left frameable. Without a valid embed cookie that URL is an ordinary page (or a redirect to `/login`) and the browser blocks it inside the canvas frame until the shell reloads it through a fresh handoff. `e2e/security-headers.spec.ts` checks the set; `curl -sI https://<fqdn>/login` shows it in production.
+- **Baseline security headers.** `server/index.ts` puts `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin` and `Permissions-Policy: camera=(), microphone=(), geolocation=()` on every response — pages, `/api/*`, `/_next/static/*` (the brotli branch included) — and `Strict-Transport-Security: max-age=31536000` only when the request arrived over HTTPS (`x-forwarded-proto: https` from the VM's nginx proxy; never on plain HTTP, so local dev and the e2e server send none). `src/proxy.ts` adds `Content-Security-Policy: frame-ancestors 'none'` to every page except the embedded document: `/d/<id>?embed=1` with a valid `markdoc.embed-session` cookie keeps `frame-ancestors <parentOrigin>` for the Copilot canvas, `/api/*` keeps its own headers (`/api/assets` sandboxes SVGs) and the handoff route `/embed/<nonce>` is left frameable. Without a valid embed cookie that URL is an ordinary page (or a redirect to `/login`) and the browser blocks it inside the canvas frame until the shell reloads it through a fresh handoff. `e2e/security-headers.spec.ts` checks the set; `curl -sI https://<fqdn>/login` shows it in production.
 - **Activity is watched, not logged by the client.** `src/server/activity.ts` records rows from API routes and from a watcher on the live Hocuspocus document (typing is coalesced into one row per actor per ten minutes); the Activity panel reads `GET /api/documents/:id/activity`. Notifications (`src/server/notifications.ts`) are produced the same way, from the comment, suggestion and share routes and from the live document: replies, resolves, suggestion decisions, shares and @mentions, never for the actor; `GET /api/notifications` feeds the bell and the dashboard strip.
 - **Assets live in Postgres.** Pasted or uploaded images are stored as `asset` rows (bytes, SHA-256, MIME) and served from `/api/assets/:id` with the owning document's access check; identical bytes within a document share one row, and "make a copy" copies the referenced ones.
 - **Export and the reader view share one renderer.** `src/server/export/html.ts` turns clean Markdown into the standalone HTML page; `/p/:id` (`src/components/reader`) reuses `renderMarkdownBody` and the `contentHash` to show a "new version" pill, and PDF export prints the same HTML through Chromium. The Markdown → HTML pipeline itself lives in `render-markdown.ts` and runs on a worker thread (`render-pool.ts`, one lazy worker, 15 s budget, `dist/render-worker.mjs` in production) behind a linear guard (`src/editor/markdown/renderable.ts`) that refuses paragraphs with more than 1 000 `]` or 2 000 `*`/`_` — micromark resolves those quadratically and 80 KB of unbalanced brackets used to block the whole process for 38 s; refused documents answer `422 { error: "Document is not renderable" }`.
@@ -310,71 +310,81 @@ removed; the protected rollback bundle and recovery/upgrade limits are unchanged
 
 ### Production runbook: VM application releases
 
-Use [Deploy to Azure (manual)](.github/workflows/deploy.yml). Nothing deploys
-on a push. Dispatching the workflow is itself a production mutation, not a
-readiness check, and is the release owner's action.
+Production is the existing Linux VM **`markdoc-pg` in `markdoc-rg`**. It runs
+PostgreSQL and the Docker-backed `markdoc-app.service` on the same host; nginx
+terminates public HTTPS for
+`https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. The application
+continues to use the existing root-owned `/etc/markdoc/markdoc.env` and the
+VM's managed identity to pull from
+`markdocacrmnd542unepl56.azurecr.io`. This is one systemd service restart on a
+VM, not a Container Apps revision or traffic operation.
 
-1. Accept an exact release commit that includes the requested features and
-   the VM deployment path. This source composition preserves the accepted
-   feature candidate and current main's hosting infrastructure, but **does not
-   establish production acceptance**. The retained historical evidence in
-   [Source selection and schema boundary](docs/vm-hosting.md#source-selection-and-schema-boundary)
-   records the earlier candidate's maximum-latency failure and unmeasured
-   final runtime; recovery/upgrade work remains incomplete. This integration
-   adds no runtime evidence and does not supersede later producer results.
-   Retain the previous immutable image digest and matching full source SHA;
-   the current process's source association remains a self-report.
-2. Resolve the database and recovery requirements first. Both pending migrations
-   `0019` and `0020` must be assessed; the candidate is not schema-neutral.
-   The app runs Drizzle migrations when opening its database, even though the
-   deployment script has no migration command. Match the final accepted
-   migration hashes to the observed ledger and reviewed pending SQL. Additive
-   DDL still takes locks and adds a document-update trigger; unresolved upgrade,
-   rollback or recovery requirements are reasons not to start the candidate,
-   not reasons to reset, reinitialize or migrate data blindly.
-3. Select the accepted ref in the manual workflow and enter `deploy`. It builds
-   that checkout's `GITHUB_SHA` in ACR, pins the image digest, then sends
-   [`infra/release-wal-gate.sh`](infra/release-wal-gate.sh) and
-   [`infra/deploy-vm-image.sh`](infra/deploy-vm-image.sh), in that order, through
-   one VM invocation on `markdoc-pg`. Before image pull or application change,
-   the deployment script invokes the gate: capture the primary flush LSN,
-   switch WAL, await local archive acknowledgement and require the exact
-   checksum-suffixed WAL object in the remote pgBackRest repository, then
-   restore/recover a fresh private scratch cluster from that repository to the
-   endpoint, require SQL-ready replay at or beyond it, and remove only that
-   owned scratch state. Archival, restore, startup, replay or cleanup failure
-   stops before migrations and cutover.
-4. After that proof, the script reuses the protected
-   `/etc/markdoc/markdoc.env`, updates `APP_VERSION`, writes the application
-   unit and restarts the single service. Require local and public `/api/health`
-   to report `ok`, `db`, `collab` true and the accepted full SHA as `version`;
-   retain the gate endpoint/object/replay receipt, new digest and outcome. Do
-   not run infrastructure helpers, including `deploy/azure.ps1`, or a repair
-   tool or second writer alongside the release. Current main's infrastructure
-   safeguards are retained: `deploy/azure.ps1` refuses non-`-InfraOnly` use and
-   database password rotation. Internal VM port 3000 is not the retired Windows
-   development server. The workflow checks control metadata and health, not
-   feature behavior. This is a restart, not a Container Apps revision/traffic
-   swap. The release owner must finish the requested feature checks before
-   reporting success.
+Only the release owner runs the configured, mutating entrypoint from the
+project root:
 
-[Rollback](docs/vm-hosting.md#rollback) is an application-image operation,
-not a PostgreSQL schema/data rollback. The script attempts recovery on failures
-before local readiness; a subsequent public health failure does not
-automatically restore the old image. Its temporary configuration copies are
-still deleted; the separately retained bundle does not change that behavior.
-The accepted release SHA/new digest, image-load/old-binary compatibility,
-independent custody and artifact-backed recoverability remain to be established.
-Neither the same-host bundle nor the process-reported version proves registry
-availability or an acceptable recovery point. Use
-[bounded nonsecret diagnostics](docs/vm-hosting.md#health-and-safe-diagnostics);
-the script's journal output on failure is not guaranteed safe to copy.
+```powershell
+pwsh -NoProfile -NonInteractive -File .\deploy\release-vm.ps1
+```
 
-Infrastructure, OS patching, repair and recovery require separate coordinated
-work, never an overlapping release. [Infrastructure scope and historical
-measurements](docs/infra-deploy.md) are not current deployment expectations.
-Do not recreate the retired maintenance job, restart the retired local
-Windows server, or use its PGlite recovery as a production database fallback.
+The Board release runner supplies `RELEASE_SHA`; a separately authorized
+operator may supply the same full 40-character value as `-ExpectedCommit`.
+Prerequisites are a clean exact `main` checkout at that commit, including no
+untracked files, and zero-advisory admitted dependencies for which `npm audit`
+has reported `found 0 vulnerabilities`. The schema and recovery decisions must
+also be complete. The latest production ledger observation has 19 applied
+migrations, `0000` through `0018`; **`0019_agent_request_addressee` and
+`0020_gist_auto_update` remain pending**. Starting the candidate can apply both.
+Their SQL, locks, trigger behavior, previous-image compatibility and recovery
+requirements have not been accepted or exercised here. This documentation
+does not grant release permission or report a successful release.
+
+The entrypoint performs one bounded attempt:
+
+1. It rechecks the clean exact `main` source, the configured Azure
+   subscription/tenant, ACR, Linux VM/NIC/public-IP association and stable
+   public origin. It builds an immutable archive of that commit and makes
+   one ACR submission with full-SHA, 12-character and unique submission tags.
+   A lost or failed submission is reconciled by its identifiers; it is not
+   submitted again.
+2. After ACR reports success, it requires one unambiguous digest for the
+   full-SHA tag and verifies that digest against that build's output. It then
+   sends [`infra/release-wal-gate.sh`](infra/release-wal-gate.sh) and
+   [`infra/deploy-vm-image.sh`](infra/deploy-vm-image.sh), in that order, in
+   one VM invocation through Run Command on `markdoc-pg`.
+3. Before image pull, environment change, migration or service cutover, the
+   operation-bound WAL gate captures the primary flush endpoint, switches WAL,
+   waits for its exact local archive completion and checksum-suffixed remote
+   pgBackRest object, then restores that repository into a fresh private
+   invocation-owned cluster. It requires SQL readiness with archiving and
+   network listening disabled, replay at or beyond the captured endpoint, and
+   exact cleanup of the scratch process and directory. Archive, restore,
+   readiness, replay or cleanup failure stops the cutover.
+4. Only after that ordered proof does the guest pull the immutable digest,
+   preserve the existing environment, update `APP_VERSION`, replace the
+   application unit and restart `markdoc-app`. Guest success requires the
+   operation-bound WAL receipt and cleanup marker followed by exact local
+   `/api/health` and guest-ready markers. The entrypoint then makes a
+   non-redirected public health request and requires boolean `ok`, `db` and
+   `collab` values of `true` plus `version` equal to the full release SHA.
+   Health is necessary evidence, not a substitute for the requested feature
+   checks.
+
+The local deadline is 35 minutes. A timeout leaves unverified remote work; it is
+not cancellation. Cloud build or VM work may outlive the command; reconcile the
+printed submission/run and guest invocation identifiers before any further
+action, and do not retry the release. A failure before local readiness makes
+the guest script attempt to restore the previous environment, unit and
+application image. A public-health failure after guest readiness does not
+trigger that rollback automatically. Image/configuration rollback is not
+schema or data rollback: migrations already applied remain in place.
+
+Retain the prior immutable image and protected
+[same-host rollback bundle](docs/vm-hosting.md#rollback), but do not treat that
+bundle as off-host custody, a tested image load or database recovery proof.
+Infrastructure, OS patching, repair and recovery are separate coordinated
+operations and must not overlap this release. The detailed target assertions,
+failure boundaries and remaining recovery evidence are in the
+[VM hosting runbook](docs/vm-hosting.md).
 
 <details>
 <summary>Historical Container Apps deployment notes (not current operating instructions)</summary>
@@ -389,7 +399,7 @@ not authorize an infrastructure operation or make these archived commands
 current. Use the VM runbook above; these notes remain only to explain earlier
 decisions.
 
-The target is **Azure Container Apps** with PostgreSQL. `infra/main.bicep` describes the whole environment (Container App, ACR, Key Vault, managed identity, Log Analytics, and a private PostgreSQL VM that has no public IP after bootstrap and accepts TLS connections only from the Container Apps subnet); `deploy/azure.ps1` provisions it and builds the image in Azure Container Registry (no local Docker). Nothing deploys automatically; `.github/workflows/deploy.yml` is a manual workflow. The image (`Dockerfile`) is `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; validate changes to it with `npm run build` + the production smoke above and `hadolint Dockerfile` (no local Docker needed).
+The retired target was **Azure Container Apps** with PostgreSQL. `infra/main.bicep` described that environment (Container App, ACR, Key Vault, managed identity, Log Analytics, and a private PostgreSQL VM that had no public IP after bootstrap and accepted TLS connections only from the Container Apps subnet); `deploy/azure.ps1` provisioned it and built the image in Azure Container Registry (no local Docker). Nothing deployed automatically; `.github/workflows/deploy.yml` was a manual workflow. The image (`Dockerfile`) was `node:22-alpine` with Alpine's Chromium for PDF export and a `HEALTHCHECK` on `/api/health`; the historical validation used `npm run build`, the production smoke and `hadolint Dockerfile` when that tool was available.
 
 Two health checks, two probes. `GET /api/health` is the full check — one database round trip, reported as `latencyMs`, plus the collaboration server's counters — and answers `503 { ok: false, error }` when PostgreSQL does not; the **Startup** probe, the release runbook below and the ops scripts wait on its `ok:true, db:true`. `GET /api/health?probe=live` answers `{ ok: true, probe: "live", collab, version }` from the process alone and never opens a database connection; it is the **Liveness** probe (`infra/main.bicep`), so a slow or restarting PostgreSQL cannot make the platform kill a healthy replica (the previous liveness probe was the full check under the platform's default 1 s timeout, and a cold connection to the database VM alone takes ~45 ms plus TLS jitter; both probes now allow `timeoutSeconds: 5`). There is no readiness probe: the app runs one replica. Inside the app, the PostgreSQL pool logs `[db] idle client error: <message>` and carries on when the server drops an idle connection (a restart, `pg_terminate_backend`, VM patching); before, that event was an uncaught exception that took the whole process down and lost the edits still in the collaboration server's debounce window. Failed requests leave one stderr line each, `[http] <status> <METHOD> <route shape> <ms>ms` (`server/request-log.ts`), for every response with a status ≥ 500 and every 4xx except 401 and 404, plus status `0` when the client went away before any header was written; 2xx, 3xx, 101, 401 and 404 log nothing, and the route shape (`server/route-shape.ts`) drops the query string, keeps only known static segments, and replaces ids with `:id` and anything else with `:x` — so `[http] 5` in the console log is every server error by route and duration, and no login, title or token is ever in a line (a *thrown* handler error still logs `[http] request failed` with the stack, followed by its `[http] 500 …` line).
 
@@ -401,17 +411,17 @@ A release never overlaps another mutation on `markdoc-rg` — no `deploy/azure.p
 
 The other production mutation, an **infrastructure deployment** (`deploy/azure.ps1 -InfraOnly -SecretsPath <clixml>`: alert rules, the NSG rule-write tripwire, subnets, network policies — never the image, a revision or the database), is never part of a release and has its own runbook, [`docs/infra-deploy.md`](docs/infra-deploy.md): preflight checklist, what a what-if cannot prove, the `Step` lines to expect, verification, and rollback (forward fixes only — the last deployed template `1975b96` must never be redeployed).
 
-Production is the one Container App `markdoc` in `markdoc-rg` (East US 2), and it already exists. A release changes **only its image**: it does not rerun the Bicep template or `deploy/azure.ps1`, the one-time PGlite data migration (`scripts/migrate-pglite-to-postgres.mts`, and never its `--replace` mode), credential rotation, or provisioning; the app's own Drizzle schema migrations still run at container startup, as on every start. PostgreSQL stays authoritative throughout, and the app image is the only thing that rolls forward or back. `.github/workflows/deploy.yml` is the in-repo implementation of steps 1–3; the same commands work from a workstation. Before the release day, rehearse the candidate image once in ACR — build it as `rehearsal-<12-char>` and start it with `az acr run` — as described in [`docs/release-rehearsal.md`](docs/release-rehearsal.md); the release spec quotes that run as its start-up evidence.
+The retired deployment used one Container App `markdoc` in `markdoc-rg` (East US 2). A release changed only its image rather than rerunning the Bicep template, `deploy/azure.ps1`, the one-time PGlite data migration, credential rotation or provisioning; the app's Drizzle schema migrations still ran at container startup. PostgreSQL remained authoritative. `.github/workflows/deploy.yml` implemented that historical release, and the separately authorized ACR rehearsal in [`docs/release-rehearsal.md`](docs/release-rehearsal.md) supplied dated image start-up evidence.
 
 1. Pick the exact accepted `main` commit (full 40-character SHA) and build from a clean checkout of it in ACR (`az acr build`), tagging the image with the full SHA and its 12-character prefix and passing `--build-arg APP_VERSION=<sha>` so `/api/health` reports it. The image no longer carries `.next/cache` (Turbopack's persistent build cache, ≈ 200 MB that only a following build would read; the build stage deletes it right after `npm run build`), so it is **310 MB (31 %) smaller** than revision 29 and earlier — `994 587 108 B` (revision 29, `6e251b1d047e`) → `684 568 023 B` (`rehearsal-e74e4f39c582`, the rehearsal build of `e74e4f3`), because the cache had sat in two layers (the `.next` COPY 174.0 → 18.9 MB and the `chown -R` copy-up 299.3 → 144.3 MB); read sizes with `az acr manifest list-metadata -r <acr> -n markdoc` (`imageSize` per tag), since `az acr repository show --image` reports no size. (`deploy/azure.ps1 -SourceCommit <sha>` builds the same way from a clean deployment checkout and refuses when that checkout differs from the commit in application files, but as a full-template run it is not the release path for the existing app.) `hadolint` is not available through npm on this machine (the wrapper's binary download 404s); lint the Dockerfile with the official `hadolint/hadolint` image or GitHub Action when one is available. `npm audit` must print `found 0 vulnerabilities`; the `overrides` block in `package.json` exists only to replace the never-executed `esbuild@0.18` nested under drizzle-kit's deprecated `@esbuild-kit` loader — remove it when drizzle-kit drops that dependency (drizzle-team/drizzle-orm#5689). The preflight also runs the one real-GitHub unit file, which an ordinary `npm test` skips: `MARKDOC_GITHUB_INTEGRATION=1 npm run test:github` must report 2 passed (it commits to and cleans up `burkeholland/markdoc-scratch`). On Windows `az.cmd` crashes client-side at the `▲` glyph of the Next banner while streaming the build log (cp1252 console encoding; `PYTHONUTF8` is ignored because the bundled Python runs with `-I`) — the build in ACR continues unaffected; read any run's log afterwards with `$env:AZ_INSTALLER='MSI'; & "C:\Program Files\Microsoft SDKs\Azure\CLI2\python.exe" -X utf8 -IBm azure.cli acr task logs -r markdocacrmnd542unepl56 --run-id <id>`.
    The runtime stage also copies every shipped payload with `COPY --chown=node:node` and runs its `npm ci` as `node`, so the final recursive `chown` that re-wrote all of `/app` is gone; the remaining pre-install ownership step touches only ≈ 230 KB. The measured image size is `684 568 023 B` (`rehearsal-e74e4f39c582`) → `540 506 283 B` (`rehearsal-chown-d21c2d5ac1bd`), a reduction of `144 061 740 B` (21.0 %).
 
-2. Resolve the tag's immutable digest (`az acr manifest list-metadata -r <acr> -n markdoc`) and update the existing app by digest: `az containerapp update -n markdoc -g markdoc-rg --image <loginServer>/markdoc@sha256:… --set-env-vars APP_VERSION=<sha>`. Change nothing else: the Key Vault-backed `database-url` secret reference, the `auth-secret` and `github-client-secret` secrets, `AUTH_URL`, ingress (HTTPS only), 0.5 vCPU / 1 GiB, and `minReplicas`/`maxReplicas` of 1/1 stay as they are, and `AUTH_DEV_LOGIN` stays unset.
+2. The historical release resolved the tag's immutable digest and changed the existing app's image and `APP_VERSION` only. Its Key Vault-backed database and application secrets, `AUTH_URL`, HTTPS ingress, resources and one-replica scale settings stayed unchanged. The executable update command is intentionally not retained as a current instruction.
 3. The app runs in single-revision mode, so Container Apps moves 100% of traffic once the new revision's startup probe passes. Wait for it to be Healthy with one replica, then probe `https://<fqdn>/api/health` until it returns `ok=true`, `db=true` and `version=<sha>` (the workflow asserts the same); also check that HTTP redirects to HTTPS, `/login` returns 200, a bare `/collab` WebSocket completes its `101` upgrade and then closes `4401` in under five seconds without an application frame, a separate invalid-token Hocuspocus client reaches `authenticationFailed`, and that `curl -sI -H "Accept-Encoding: br" https://<fqdn>/_next/static/chunks/<a chunk named in the /login HTML>.js` answers `content-encoding: br` (the precompressed assets; if the ingress ever normalised `br` out of the request's `Accept-Encoding`, the origin would fall through to Next — identity for a br-only request, gzip for a browser, which never sends `br` alone).
 
    Then prove that the served build is the one you built. `npm run release:verify -- --base https://<fqdn> --sha <sha> --dist <local .next of that sha>` runs every check in this paragraph and the redirect/health/live/WebSocket checks above as one table (exit 0 = all pass; `--wait-flip S` samples the cutover first) — the text that follows is what it checks. The same table also asserts the JSON 404 catch-all (`GET /api/nonexistent-<random>` must answer `404` `application/json` with `{ error, path }`, never Next's HTML page — that would mean the `[...rest]` route is gone from the build) and the MCP liveness card (`GET /api/mcp` with a plain `Accept` → 200 JSON with `name` `markdoc`, the `tools` count > 0 and `transport` `streamable-http`), so those two by-hand probes of the checklist are covered. **Chunks:** build the released SHA locally (`npm run build` in a clean checkout), fetch the public `/login` HTML and list every `/_next/static/chunks/*.js` it references; fetch each one with **no** `Accept-Encoding` header and compare byte count and SHA-256 with the same file under `.next/static/chunks` — every pair must match. Fetch by name, and compare the same way, the largest chunks the HTML does not reference: the editor route's (the largest file listed only for `/d/[id]` in its `page_client-reference-manifest.js`), the lazy CodeMirror chunks (the `.js` files under `static/chunks` that contain `cm-content` and appear in no route's entry list) and the lazy grammar chunk (the one containing `Visual Basic .NET`); a 404 or a size difference means the wrong SHA was built. The comparison is always *your local build vs production*, never production vs the previous revision: chunk names change whenever client code changes. **Manifest vs HTML:** the number the bundle tasks report is the manifest sum — the page and layout entries ∪ `rootMainFiles` of `.next/server/app/**/page_client-reference-manifest.js` — e.g. `/login` = 455 186 B at `5f9eb0d`; the HTML also references the `not-found` boundary chunk (`8 895 B`) and the `noModule` polyfill (112 594 B, downloaded by legacy browsers only), so "entry JS by manifest" is not "bytes a modern browser downloads" (464 081 B over 7 chunks for `/login` at `5f9eb0d`) — say which one a number is. **Brotli:** with `Accept-Encoding: br`, every `.js`/`.css` chunk of 1 kB or more must answer `content-encoding: br` with `content-length` equal to the `.br` sibling in your local `.next/static/chunks`, and the body (`curl -s -D - -o <file>`; never a client that auto-decodes) must decompress (`zlib.brotliDecompressSync`) to the identity bytes, SHA-256 equal to the plain fetch. Known non-findings: a `HEAD` with `Accept-Encoding: gzip` shows no `content-encoding` on any revision (Next's `compression` skips HEAD — check gzip with a GET), a `Range` request answers `206` identity, `curl --path-as-is` on `/_next/static/../package.json` gets Next's 404 page, and `.map` files are 404. **CSS:** the Tailwind chunk's name differs between a Windows worktree and the image. `.dockerignore` drops `scripts/*.mts` and `*.md`, which Tailwind's source scan sees locally, so the local file has a few extra utility rules (3 at `5f9eb0d`: `.list-item`, `.\[dev\:port\]`, `.\[seed\:burke-scale\]`; 981 rules against the image's 978 as `release:verify` counts them — top-level brace groups, an `@media`/`@supports` block being one rule and `@layer` wrappers transparent, plus top-level statements such as `@layer a, b;`) and a different hash, and one `@supports (color:lab())` block differs only in oxide's float formatting. Compare rule by rule; ≤ 5 local-only utility rules and formatting-only differences are not a stop. **Which chunk is "the shared chunk":** since `5f9eb0d` (the CodeMirror pane behind `next/dynamic`) the largest chunk listed for every route is the React/Next runtime in `rootMainFiles` (229 280 B), while the largest **application** chunk (335 989 B) is shared by `/` and `/d/[id]` but not by `/login` — say which one a size refers to.
-4. Keep the previous revision, now inactive at its own digest, as the rollback. Reactivate it (`az containerapp revision activate --revision <previous>`), or run `az containerapp update --image` with the previous digest and `APP_VERSION`; either way only the application changes and the database is untouched. Never reverse the database because an app image failed: if the new revision may have accepted writes, PostgreSQL still holds them and the previous image keeps serving them.
-5. Record the source SHA, image digest, the new and previous revision names, the flip time (from issuing `az containerapp update` to the first `/api/health` 200 at the new `version`: 47.75–50.45 s on the last five releases) and the cutover poll result (2 s `/api/health` samples from before the `update` until the version flips; count the non-200 answers — 0 on the last four releases), and check that the before/after `az containerapp show` diff (the same picture taken before step 2 and after step 3: revision name, image, scale, env and secret names, probes) is `image`, `latestRevisionName` and `APP_VERSION` only, with the probes byte-identical. The flip time is a different clock from the Startup probe window: it runs from issuing the update through secrets sync, scheduling, the ≈ 13 s image pull and container start to the traffic switch, while the probe window (65 s: initial delay 5 s + 12 × 5 s) only covers container start → first `/api/health` 200, which took ≈ 12 s at revision 29.
+4. The historical rollback kept the previous inactive revision at its digest and restored that application revision or image when needed. It did not reverse the database: PostgreSQL retained writes and any startup migrations.
+5. The historical record kept the source SHA, image digest, new and previous revision names and the time from issuing the image update to the first `/api/health` 200 at the new `version`: 47.75–50.45 s on the last five releases. Two-second cutover sampling observed zero non-200 answers on the last four releases. The before/after Container App metadata diff was limited to image, latest revision and `APP_VERSION`, with probes unchanged. The 65-second Startup probe window was a different clock and covered only container start to first full health, ≈ 12 s at revision 29.
 
 Facts about the current deployment, recorded here rather than proposed for change: everything, including the database, lives in `markdoc-rg` (East US 2) on the same VNet (`markdoc-vnet`). The authoritative production database is the private PostgreSQL VM `markdoc-pg` that `infra/main.bicep` describes: Standard_B1ms, Ubuntu 24.04, no public IP, NIC in the `markdoc-vnet/postgres` subnet, NSG `markdoc-pg-nsg` allowing TCP 5432 only from the Container Apps subnet `10.42.0.0/23`, protected by pgBackRest plus the Recovery Services vault `markdoc-backup` (policy `daily-7-days`). The app reaches PostgreSQL over TLS on the VM's private address through the Key Vault `database-url` secret with `DATABASE_SSL=1`; warm `/api/health` reports `latencyMs` of 1–3 ms. Because `infra/main.bicep` composes `database-url` from that private address whenever `configureDatabase`, `commitDatabasePassword` or `restoreDatabasePassword` is set, the `-InitializeDatabase`, `-RotateDatabasePassword` and recovery flags below act on the production database VM and are production-affecting operations; an app-only release never runs them. Database rollback or restore uses the VM's pgBackRest backups and WAL archive (`infra/postgres-recovery.sh`, `-VerifyRecovery`), not a managed-service point-in-time restore.
 
