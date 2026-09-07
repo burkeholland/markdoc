@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiTokenDto } from "@/lib/api";
 import { CopilotChecklist } from "./copilot-checklist";
@@ -39,6 +40,15 @@ async function settle(action: () => void) {
 
 function expectProgress(done: number) {
   expect(screen.getByTestId("copilot-checklist-progress")).toHaveTextContent(`${done} of 4`);
+}
+
+function checklistWithBoundary(boundary: string, hasAgentRequests: boolean, pollMs = 1_000) {
+  return (
+    <>
+      <span key={boundary} data-testid={`boundary-${boundary}`} />
+      <CopilotChecklist hasAgentRequests={hasAgentRequests} pollMs={pollMs} />
+    </>
+  );
 }
 
 beforeEach(() => {
@@ -206,6 +216,47 @@ describe("Copilot setup checklist polling", () => {
     await advance(10_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it.each(["success", "failure"] as const)(
+    "invalidates a stale %s after DOM replacement but before passive effects, then polls once",
+    async (settlement) => {
+      const stale = deferred();
+      const current = deferred();
+      fetchMock.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      await act(async () => root.render(checklistWithBoundary("old", false)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const replaced = new Promise<void>((resolve) => {
+        const observer = new MutationObserver(() => {
+          observer.disconnect();
+          if (settlement === "success") stale.resolve(response([calledToken]));
+          else stale.reject(new Error("stale before passive effects"));
+          resolve();
+        });
+        observer.observe(host, { childList: true });
+      });
+      root.render(checklistWithBoundary("new", true));
+      try {
+        await replaced;
+        await act(async () => {});
+
+        expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("1 of 4");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(1);
+
+        await advance(1_000);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        await settle(() => current.resolve(response([])));
+        expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("1 of 4");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 
   it.each(["success", "failure"] as const)("ignores post-unmount %s settlements and issues no more calls", async (settlement) => {
     const pending = deferred();
