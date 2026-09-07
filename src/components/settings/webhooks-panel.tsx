@@ -17,6 +17,16 @@ interface WebhookRow {
   lastDelivery: { status: number; at: string; attempt: number; event: string } | null;
 }
 
+interface Operation {
+  sequence: number;
+  generation: number;
+}
+
+interface RowOperation extends Operation {
+  webhookId: string;
+  kind: "test" | "enable" | "delete";
+}
+
 /** Checkbox labels; `suggestion` covers both decisions like the long-poll does. */
 const EVENT_CHOICES: { id: string; label: string; types: string[] }[] = [
   { id: "request.created", label: "request.created", types: ["request.created"] },
@@ -73,34 +83,43 @@ export function WebhooksPanel() {
   const [url, setUrl] = useState("");
   const [choices, setChoices] = useState<string[]>(DEFAULT_CHOICES);
   const [docs, setDocs] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [testing, setTesting] = useState<string | null>(null);
-  const [enabling, setEnabling] = useState<string[]>([]);
+  const [createOperation, setCreateOperation] = useState<Operation | null>(null);
+  const [rowOperations, setRowOperations] = useState<Map<string, RowOperation>>(() => new Map());
   const [error, setError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [created, setCreated] = useState<{ id: string; secret: string; url: string } | null>(null);
-  const alive = useRef(true);
+  const mountedGeneration = useRef(0);
+  const operationSequence = useRef(0);
+  const createOwner = useRef<Operation | null>(null);
+  const rowOwners = useRef(new Map<string, RowOperation>());
+  const feedbackOwner = useRef<Operation | null>(null);
   const listRequest = useRef(0);
   const retryPending = useRef(false);
 
   useEffect(() => {
-    alive.current = true;
+    const generation = ++mountedGeneration.current;
+    const owners = rowOwners.current;
     return () => {
-      alive.current = false;
+      if (mountedGeneration.current !== generation) return;
+      mountedGeneration.current += 1;
       listRequest.current += 1;
+      createOwner.current = null;
+      owners.clear();
+      feedbackOwner.current = null;
     };
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (continuationIsCurrent: () => boolean = () => true) => {
+    const generation = mountedGeneration.current;
     const currentRequest = ++listRequest.current;
     try {
       const res = await request<{ webhooks: WebhookRow[] }>("/api/webhooks");
-      if (!alive.current || currentRequest !== listRequest.current) return;
+      if (generation !== mountedGeneration.current || currentRequest !== listRequest.current || !continuationIsCurrent()) return;
       setHooks(res.webhooks);
       setListError(null);
     } catch (e) {
-      if (!alive.current || currentRequest !== listRequest.current) return;
+      if (generation !== mountedGeneration.current || currentRequest !== listRequest.current || !continuationIsCurrent()) return;
       setListError(apiErrorText(e, "Failed to load webhooks"));
     }
   }, []);
@@ -108,10 +127,12 @@ export function WebhooksPanel() {
   const retry = useCallback(() => {
     if (retryPending.current) return;
     retryPending.current = true;
+    const generation = mountedGeneration.current;
     setRetrying(true);
     void load().finally(() => {
+      if (generation !== mountedGeneration.current) return;
       retryPending.current = false;
-      if (alive.current) setRetrying(false);
+      setRetrying(false);
     });
   }, [load]);
 
@@ -119,9 +140,54 @@ export function WebhooksPanel() {
     void load();
   }, [load]);
 
-  const add = async () => {
-    setBusy(true);
+  const isCreateCurrent = (operation: Operation) =>
+    operation.generation === mountedGeneration.current && createOwner.current === operation;
+
+  const isRowCurrent = (operation: RowOperation) =>
+    operation.generation === mountedGeneration.current && rowOwners.current.get(operation.webhookId) === operation;
+
+  const nextOperation = (): Operation => ({
+    sequence: ++operationSequence.current,
+    generation: mountedGeneration.current,
+  });
+
+  const claimFeedback = (operation: Operation) => {
+    feedbackOwner.current = operation;
     setError(null);
+  };
+
+  const beginRowOperation = (webhookId: string, kind: RowOperation["kind"]): RowOperation | null => {
+    if (rowOwners.current.has(webhookId)) return null;
+    const operation = { ...nextOperation(), webhookId, kind };
+    claimFeedback(operation);
+    rowOwners.current.set(webhookId, operation);
+    setRowOperations((current) => new Map(current).set(webhookId, operation));
+    return operation;
+  };
+
+  const finishRowOperation = (operation: RowOperation) => {
+    if (!isRowCurrent(operation)) return;
+    rowOwners.current.delete(operation.webhookId);
+    setRowOperations((current) => {
+      if (current.get(operation.webhookId) !== operation) return current;
+      const next = new Map(current);
+      next.delete(operation.webhookId);
+      return next;
+    });
+  };
+
+  const setOperationError = (operation: Operation, message: string) => {
+    if (operation.generation === mountedGeneration.current && feedbackOwner.current === operation) {
+      setError(message);
+    }
+  };
+
+  const add = async () => {
+    if (createOwner.current) return;
+    const operation = nextOperation();
+    claimFeedback(operation);
+    createOwner.current = operation;
+    setCreateOperation(operation);
     try {
       const events = EVENT_CHOICES.filter((c) => choices.includes(c.id)).flatMap((c) => c.types);
       const documentIds = docs
@@ -132,48 +198,72 @@ export function WebhooksPanel() {
         method: "POST",
         body: JSON.stringify({ url, events, documentIds: documentIds.length ? documentIds : null }),
       });
+      if (!isCreateCurrent(operation)) return;
       setCreated({ id: res.webhook.id, secret: res.webhook.secret, url: res.webhook.url });
       setUrl("");
       setDocs("");
       setAdding(false);
-      await load();
+      await load(() => isCreateCurrent(operation));
     } catch (e) {
-      setError(apiErrorText(e, "Could not add webhook"));
+      if (isCreateCurrent(operation)) {
+        setOperationError(operation, apiErrorText(e, "Could not add webhook"));
+      }
     } finally {
-      setBusy(false);
+      if (isCreateCurrent(operation)) {
+        createOwner.current = null;
+        setCreateOperation((current) => (current === operation ? null : current));
+      }
     }
   };
 
   const remove = async (h: WebhookRow) => {
+    if (rowOwners.current.has(h.id)) return;
     if (!confirm(`Delete the webhook to ${h.url}?`)) return;
-    await request(`/api/webhooks/${h.id}`, { method: "DELETE" });
-    if (created?.id === h.id) setCreated(null);
-    await load();
+    const operation = beginRowOperation(h.id, "delete");
+    if (!operation) return;
+    try {
+      await request(`/api/webhooks/${h.id}`, { method: "DELETE" });
+      if (!isRowCurrent(operation)) return;
+      setCreated((current) => (current?.id === h.id ? null : current));
+      await load(() => isRowCurrent(operation));
+    } catch (e) {
+      if (isRowCurrent(operation)) {
+        setOperationError(operation, apiErrorText(e, "Could not delete webhook"));
+      }
+    } finally {
+      finishRowOperation(operation);
+    }
   };
 
   const test = async (h: WebhookRow) => {
-    setTesting(h.id);
-    setError(null);
+    const operation = beginRowOperation(h.id, "test");
+    if (!operation) return;
     try {
       await request(`/api/webhooks/${h.id}/test`, { method: "POST" });
-      await load();
+      if (!isRowCurrent(operation)) return;
+      await load(() => isRowCurrent(operation));
     } catch (e) {
-      setError(apiErrorText(e, "Test failed"));
+      if (isRowCurrent(operation)) {
+        setOperationError(operation, apiErrorText(e, "Test failed"));
+      }
     } finally {
-      setTesting(null);
+      finishRowOperation(operation);
     }
   };
 
   const enable = async (h: WebhookRow) => {
-    setEnabling((ids) => [...ids, h.id]);
-    setError(null);
+    const operation = beginRowOperation(h.id, "enable");
+    if (!operation) return;
     try {
       await request<{ webhook: WebhookRow }>(`/api/webhooks/${h.id}/enable`, { method: "POST" });
-      await load();
+      if (!isRowCurrent(operation)) return;
+      await load(() => isRowCurrent(operation));
     } catch (e) {
-      setError(apiErrorText(e, "Could not enable webhook"));
+      if (isRowCurrent(operation)) {
+        setOperationError(operation, apiErrorText(e, "Could not enable webhook"));
+      }
     } finally {
-      setEnabling((ids) => ids.filter((id) => id !== h.id));
+      finishRowOperation(operation);
     }
   };
 
@@ -181,7 +271,15 @@ export function WebhooksPanel() {
     <div className="rounded-2xl border border-line bg-surface" id="webhooks" data-testid="webhooks-card">
       <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-sm font-semibold text-ink">
         <Webhook size={16} className="text-ink-3" /> Webhooks
-        <button type="button" className="btn btn-outline btn-sm ml-auto gap-1.5" onClick={() => setAdding((v) => !v)} data-testid="webhook-add">
+        <button
+          type="button"
+          className="btn btn-outline btn-sm ml-auto gap-1.5"
+          onClick={() => {
+            if (!createOwner.current) setAdding((v) => !v);
+          }}
+          disabled={createOperation !== null}
+          data-testid="webhook-add"
+        >
           <Plus size={14} /> Add webhook
         </button>
       </div>
@@ -195,6 +293,7 @@ export function WebhooksPanel() {
         <form
           className="m-5 flex flex-col gap-3 rounded-xl border border-line bg-surface-2 p-4"
           data-testid="webhook-form"
+          aria-busy={createOperation !== null || undefined}
           onSubmit={(e) => {
             e.preventDefault();
             void add();
@@ -202,9 +301,17 @@ export function WebhooksPanel() {
         >
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">
             URL
-            <input className="input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/markdoc" data-testid="webhook-url" required />
+            <input
+              className="input"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/markdoc"
+              data-testid="webhook-url"
+              disabled={createOperation !== null}
+              required
+            />
           </label>
-          <fieldset className="flex flex-col gap-1 text-xs font-medium text-ink-3">
+          <fieldset className="flex flex-col gap-1 text-xs font-medium text-ink-3" disabled={createOperation !== null}>
             <legend className="mb-1">Events</legend>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5">
               {EVENT_CHOICES.map((c) => (
@@ -222,13 +329,27 @@ export function WebhooksPanel() {
           </fieldset>
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">
             Only these documents (optional: ids or links, comma or space separated)
-            <input className="input" value={docs} onChange={(e) => setDocs(e.target.value)} placeholder="Leave empty for every document you can see" data-testid="webhook-docs" />
+            <input
+              className="input"
+              value={docs}
+              onChange={(e) => setDocs(e.target.value)}
+              placeholder="Leave empty for every document you can see"
+              data-testid="webhook-docs"
+              disabled={createOperation !== null}
+            />
           </label>
           <div className="flex items-center gap-2">
-            <button type="submit" className="btn btn-primary btn-sm gap-1.5" disabled={busy || !url.trim() || choices.length === 0} data-testid="webhook-create">
-              {busy ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Add webhook
+            <button type="submit" className="btn btn-primary btn-sm gap-1.5" disabled={createOperation !== null || !url.trim() || choices.length === 0} data-testid="webhook-create">
+              {createOperation ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Add webhook
             </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAdding(false)}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                if (!createOwner.current) setAdding(false);
+              }}
+              disabled={createOperation !== null}
+            >
               Cancel
             </button>
           </div>
@@ -287,7 +408,7 @@ export function WebhooksPanel() {
         <ul className="mt-3 divide-y divide-line border-t border-line">
           {hooks.map((h) => {
             const status = deliveryLabel(h);
-            const enablePending = enabling.includes(h.id);
+            const rowOperation = rowOperations.get(h.id);
             return (
               <li key={h.id} className="flex items-center gap-4 px-5 py-3" data-testid="webhook-row">
                 <div className="min-w-0 flex-1">
@@ -301,14 +422,14 @@ export function WebhooksPanel() {
                   {status.text}
                 </div>
                 {!h.active && (
-                  <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void enable(h)} disabled={enablePending} data-testid="webhook-enable">
-                    {enablePending ? <Loader2 size={14} className="animate-spin" /> : <Power size={14} />} Enable
+                  <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void enable(h)} disabled={Boolean(rowOperation)} data-testid="webhook-enable">
+                    {rowOperation?.kind === "enable" ? <Loader2 size={14} className="animate-spin" /> : <Power size={14} />} Enable
                   </button>
                 )}
-                <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void test(h)} disabled={testing === h.id || enablePending} data-testid="webhook-test">
-                  {testing === h.id ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Send test
+                <button type="button" className="btn btn-outline btn-sm gap-1.5" onClick={() => void test(h)} disabled={Boolean(rowOperation)} data-testid="webhook-test">
+                  {rowOperation?.kind === "test" ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Send test
                 </button>
-                <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void remove(h)} disabled={enablePending} aria-label={`Delete webhook ${h.url}`} data-testid="webhook-delete">
+                <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void remove(h)} disabled={Boolean(rowOperation)} aria-label={`Delete webhook ${h.url}`} data-testid="webhook-delete">
                   <Trash2 size={15} />
                 </button>
               </li>
