@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { startTransition, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
 
 type SearchResponse = { query: string; documents: SearchResultDto[] };
 type ListOptions = { starred?: boolean; trash?: boolean };
 type ListResponse = { documents: DocumentSummaryDto[] };
+type CreateResponse = { document: { id: string; title: string } };
 const searchDocuments = vi.fn<(query: string, init?: RequestInit) => Promise<SearchResponse>>();
 const listDocuments = vi.fn<(options?: ListOptions) => Promise<ListResponse>>();
+const createDocument = vi.fn<(body?: { template?: string }) => Promise<CreateResponse>>();
+const restoreDocument = vi.fn<(id: string) => Promise<{ ok: true }>>();
+const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => Promise<{ ok: true; permanent: boolean }>>();
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
@@ -25,6 +30,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
         ...actual.api.documents,
         search: (query: string, init?: RequestInit) => searchDocuments(query, init),
         list: (options?: ListOptions) => listDocuments(options),
+        create: (body?: { template?: string }) => createDocument(body),
+        restore: (id: string) => restoreDocument(id),
+        delete: (id: string, options?: { permanent?: boolean }) => purgeDocument(id, options),
         star: (id: string) => starDocument(id),
         unstar: (id: string) => unstarDocument(id),
       },
@@ -82,12 +90,28 @@ function renderDashboard(children?: React.ReactNode, documents = DOCUMENTS) {
   );
 }
 
+function TransitionUnmount({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(true);
+  return (
+    <>
+      <button type="button" data-testid="unmount-dashboard" onClick={() => startTransition(() => setMounted(false))}>
+        Unmount dashboard
+      </button>
+      {mounted ? children : null}
+    </>
+  );
+}
+
 function openTrash() {
   fireEvent.click(screen.getByTestId("filter-trash"));
 }
 
 function leaveTrash() {
   fireEvent.click(screen.getByTestId("filter-all"));
+}
+
+function trashButton(title: string, action: "restore-button" | "purge-button") {
+  return within(screen.getByText(title).closest('[data-testid="trash-card"]')!).getByTestId(action);
 }
 
 async function settleSearch() {
@@ -114,14 +138,27 @@ function documentStar(title: string) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   searchDocuments.mockReset();
   searchDocuments.mockImplementation(async (query) => ({ query, documents: [] }));
   listDocuments.mockReset();
   listDocuments.mockResolvedValue({ documents: [] });
+  createDocument.mockReset();
+  createDocument.mockResolvedValue({ document: { id: "created", title: "Untitled" } });
+  restoreDocument.mockReset();
+  restoreDocument.mockResolvedValue({ ok: true });
+  purgeDocument.mockReset();
+  purgeDocument.mockResolvedValue({ ok: true, permanent: true });
   starDocument.mockReset();
   starDocument.mockResolvedValue({ starred: true });
   unstarDocument.mockReset();
   unstarDocument.mockResolvedValue({ starred: false });
+  router.push.mockReset();
+  router.replace.mockReset();
+  router.refresh.mockReset();
+  router.prefetch.mockReset();
+  router.back.mockReset();
+  router.forward.mockReset();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -266,6 +303,109 @@ describe("dashboard content-search recovery", () => {
     expect(screen.getByRole("link", { name: /Gamma result/ })).toBeInTheDocument();
     expect(screen.queryByText(/Stale alpha result/)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("dashboard create ownership", () => {
+  it("gives immediate blank, welcome, template, and palette activations one request and one navigation", async () => {
+    const pending = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(pending.promise);
+    renderDashboard(undefined, []);
+    const blank = screen.getByTestId("new-document");
+    const welcome = screen.getByTestId("start-guided-doc");
+    const template = screen.getByTestId("template-meeting-notes");
+
+    act(() => {
+      blank.click();
+      welcome.click();
+      template.click();
+    });
+
+    expect(createDocument).toHaveBeenCalledTimes(1);
+    expect(createDocument).toHaveBeenLastCalledWith({});
+    expect(blank).toBeDisabled();
+    expect(welcome).toBeDisabled();
+    expect(template).toBeDisabled();
+
+    fireEvent.keyDown(window, { key: "p", ctrlKey: true, shiftKey: true });
+    fireEvent.click(screen.getByTestId("palette-item-dash:new"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(createDocument).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({ document: { id: "one-created", title: "Untitled" } });
+      await pending.promise;
+    });
+
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenLastCalledWith("/d/one-created");
+    expect(blank).toBeEnabled();
+  });
+
+  it("shows the current failure, restores every control, and retries to one navigation", async () => {
+    const failed = deferred<CreateResponse>();
+    const retry = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    renderDashboard(undefined, []);
+
+    fireEvent.click(screen.getByTestId("start-guided-doc"));
+    expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+    await act(async () => {
+      failed.reject(new ApiError(503, "Create service unavailable"));
+      await Promise.allSettled([failed.promise]);
+    });
+
+    expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", "error");
+    expect(screen.getByTestId("toast")).toHaveTextContent("Create service unavailable");
+    expect(screen.getByTestId("new-document")).toBeEnabled();
+    expect(screen.getByTestId("start-guided-doc")).toBeEnabled();
+    expect(screen.getByTestId("template-meeting-notes")).toBeEnabled();
+
+    const retryButton = screen.getByTestId("template-meeting-notes");
+    act(() => {
+      retryButton.click();
+      screen.getByTestId("new-document").click();
+    });
+    expect(createDocument).toHaveBeenCalledTimes(2);
+    expect(createDocument).toHaveBeenLastCalledWith({ template: "meeting-notes" });
+
+    await act(async () => {
+      retry.resolve({ document: { id: "retry-created", title: "Meeting notes" } });
+      await retry.promise;
+    });
+
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenLastCalledWith("/d/retry-created");
+    expect(console.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a replacement dashboard create while the old success and finalizer stay inert", async () => {
+    const stale = deferred<CreateResponse>();
+    const current = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+    const view = render(<Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />);
+    fireEvent.click(screen.getByTestId("new-document"));
+
+    const replacementUser = { ...USER, id: "replacement-owner", login: "replacement-owner" };
+    view.rerender(<Dashboard user={replacementUser} documents={DOCUMENTS} githubAvailable githubConfigured />);
+    fireEvent.click(screen.getByTestId("new-document"));
+    expect(createDocument).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      stale.resolve({ document: { id: "stale-created", title: "Stale" } });
+      await stale.promise;
+    });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(screen.getByTestId("new-document")).toBeDisabled();
+
+    await act(async () => {
+      current.resolve({ document: { id: "current-created", title: "Current" } });
+      await current.promise;
+    });
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenLastCalledWith("/d/current-created");
   });
 });
 
@@ -589,5 +729,325 @@ describe("dashboard trash recovery", () => {
     expect(screen.getByText("Current trash row")).toBeInTheDocument();
     expect(screen.queryByText("Stale trash row")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("owns two immediate Restore activations and commits the exact row once", async () => {
+    const pending = deferred<{ ok: true }>();
+    restoreDocument.mockReturnValueOnce(pending.promise);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("restore-me", "Restore me"), trashedDoc("keep-me", "Keep me")] });
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+    const restore = trashButton("Restore me", "restore-button");
+
+    act(() => {
+      restore.click();
+      restore.click();
+    });
+
+    expect(restoreDocument).toHaveBeenCalledTimes(1);
+    expect(restoreDocument).toHaveBeenLastCalledWith("restore-me");
+    expect(trashButton("Keep me", "restore-button")).toBeDisabled();
+
+    await act(async () => {
+      pending.resolve({ ok: true });
+      await pending.promise;
+    });
+
+    expect(screen.queryByText("Restore me")).toBeNull();
+    expect(screen.getByText("Keep me")).toBeInTheDocument();
+    expect(screen.getByTestId("toast")).toHaveTextContent("“Restore me” was restored.");
+    expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", "success");
+    expect(router.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("declines Delete without ownership, then keeps confirmed failure and retry single-owner", async () => {
+    const failed = deferred<{ ok: true; permanent: boolean }>();
+    const retry = deferred<{ ok: true; permanent: boolean }>();
+    purgeDocument.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    const confirmDelete = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("purge-me", "Purge me"), trashedDoc("keep-me", "Keep me")] });
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+    const purge = trashButton("Purge me", "purge-button");
+
+    fireEvent.click(purge);
+    expect(confirmDelete).toHaveBeenCalledTimes(1);
+    expect(purgeDocument).not.toHaveBeenCalled();
+    expect(purge).toBeEnabled();
+
+    fireEvent.click(purge);
+    expect(confirmDelete).toHaveBeenCalledTimes(2);
+    expect(purgeDocument).toHaveBeenCalledTimes(1);
+    expect(purgeDocument).toHaveBeenLastCalledWith("purge-me", { permanent: true });
+    await act(async () => {
+      failed.reject(new ApiError(503, "Delete service unavailable"));
+      await Promise.allSettled([failed.promise]);
+    });
+
+    expect(screen.getByTestId("toast")).toHaveTextContent("Delete service unavailable");
+    expect(purge).toBeEnabled();
+    act(() => {
+      purge.click();
+      purge.click();
+    });
+    expect(confirmDelete).toHaveBeenCalledTimes(3);
+    expect(purgeDocument).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      retry.resolve({ ok: true, permanent: true });
+      await retry.promise;
+    });
+
+    expect(screen.queryByText("Purge me")).toBeNull();
+    expect(screen.getByText("Keep me")).toBeInTheDocument();
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it("lets a re-entered visit fail while an older success and finalizer stay inert", async () => {
+    const staleSuccess = deferred<{ ok: true }>();
+    const currentFailure = deferred<{ ok: true }>();
+    const currentList = deferred<ListResponse>();
+    restoreDocument.mockReturnValueOnce(staleSuccess.promise).mockReturnValueOnce(currentFailure.promise);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("same-row", "Same row")] }).mockReturnValueOnce(currentList.promise);
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+
+    fireEvent.click(trashButton("Same row", "restore-button"));
+    leaveTrash();
+    openTrash();
+    fireEvent.click(trashButton("Same row", "restore-button"));
+    expect(restoreDocument).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      staleSuccess.resolve({ ok: true });
+      await staleSuccess.promise;
+    });
+    expect(screen.getByText("Same row")).toBeInTheDocument();
+    expect(screen.queryByTestId("toast")).toBeNull();
+    expect(router.refresh).not.toHaveBeenCalled();
+    expect(trashButton("Same row", "restore-button")).toBeDisabled();
+
+    await act(async () => {
+      currentFailure.reject(new ApiError(503, "Current restore failed"));
+      await Promise.allSettled([currentFailure.promise]);
+    });
+    expect(screen.getByText("Same row")).toBeInTheDocument();
+    expect(screen.getByTestId("toast")).toHaveTextContent("Current restore failed");
+    expect(trashButton("Same row", "restore-button")).toBeEnabled();
+    expect(router.refresh).not.toHaveBeenCalled();
+
+    await act(async () => {
+      currentList.resolve({ documents: [trashedDoc("same-row", "Stale list row")] });
+      await currentList.promise;
+    });
+    expect(screen.getByText("Same row")).toBeInTheDocument();
+    expect(screen.queryByText("Stale list row")).toBeNull();
+  });
+
+  it("lets current Restore win before an older failure without stale notice, refresh, or finalizer work", async () => {
+    const staleFailure = deferred<{ ok: true }>();
+    const currentSuccess = deferred<{ ok: true }>();
+    const currentList = deferred<ListResponse>();
+    restoreDocument.mockReturnValueOnce(staleFailure.promise).mockReturnValueOnce(currentSuccess.promise);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("same-row", "Same row"), trashedDoc("keep-me", "Keep me")] }).mockReturnValueOnce(currentList.promise);
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+
+    fireEvent.click(trashButton("Same row", "restore-button"));
+    leaveTrash();
+    openTrash();
+    fireEvent.click(trashButton("Same row", "restore-button"));
+
+    await act(async () => {
+      currentSuccess.resolve({ ok: true });
+      await currentSuccess.promise;
+    });
+    expect(screen.queryByText("Same row")).toBeNull();
+    expect(screen.getByText("Keep me")).toBeInTheDocument();
+    expect(screen.getByTestId("toast")).toHaveTextContent("“Same row” was restored.");
+    expect(router.refresh).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      staleFailure.reject(new ApiError(503, "Obsolete restore failed"));
+      await Promise.allSettled([staleFailure.promise]);
+      currentList.resolve({ documents: [trashedDoc("same-row", "Reintroduced row"), trashedDoc("keep-me", "Keep me")] });
+      await currentList.promise;
+    });
+    expect(screen.queryByText("Reintroduced row")).toBeNull();
+    expect(screen.getByTestId("toast")).toHaveTextContent("“Same row” was restored.");
+    expect(router.refresh).toHaveBeenCalledTimes(1);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("retires a pending list at the successful action boundary so it cannot reintroduce the row", async () => {
+    const refresh = deferred<ListResponse>();
+    const deletion = deferred<{ ok: true; permanent: boolean }>();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("pending-row", "Pending row")] }).mockReturnValueOnce(refresh.promise);
+    purgeDocument.mockReturnValueOnce(deletion.promise);
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+    leaveTrash();
+    openTrash();
+    expect(screen.getByTestId("trash-view")).toHaveAttribute("aria-busy", "true");
+
+    fireEvent.click(trashButton("Pending row", "purge-button"));
+    expect(screen.getByTestId("trash-view")).not.toHaveAttribute("aria-busy");
+    await act(async () => {
+      deletion.resolve({ ok: true, permanent: true });
+      await deletion.promise;
+    });
+    expect(screen.queryByText("Pending row")).toBeNull();
+
+    await act(async () => {
+      refresh.resolve({ documents: [trashedDoc("pending-row", "Reintroduced row")] });
+      await refresh.promise;
+    });
+    expect(screen.queryByText("Reintroduced row")).toBeNull();
+    expect(screen.getByText("The trash is empty")).toBeInTheDocument();
+    expect(purgeDocument).toHaveBeenCalledTimes(1);
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an action whose target disappears on a later visit", async () => {
+    const stale = deferred<{ ok: true }>();
+    restoreDocument.mockReturnValueOnce(stale.promise);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("removed-row", "Removed row")] }).mockResolvedValueOnce({ documents: [] });
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+    fireEvent.click(trashButton("Removed row", "restore-button"));
+
+    leaveTrash();
+    openTrash();
+    await act(async () => {});
+    expect(screen.getByText("The trash is empty")).toBeInTheDocument();
+
+    await act(async () => {
+      stale.reject(new ApiError(503, "Removed target failed"));
+      await Promise.allSettled([stale.promise]);
+    });
+    expect(screen.getByText("The trash is empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("toast")).toBeNull();
+    expect(router.refresh).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("ignores pending Create and Restore work after unmount", async () => {
+    const create = deferred<CreateResponse>();
+    const restore = deferred<{ ok: true }>();
+    createDocument.mockReturnValueOnce(create.promise);
+    restoreDocument.mockReturnValueOnce(restore.promise);
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("unmounted-row", "Unmounted row")] });
+    const view = renderDashboard();
+    fireEvent.click(screen.getByTestId("new-document"));
+    openTrash();
+    await act(async () => {});
+    fireEvent.click(trashButton("Unmounted row", "restore-button"));
+
+    view.unmount();
+    await act(async () => {
+      create.reject(new ApiError(503, "Unmounted create failed"));
+      restore.reject(new ApiError(503, "Unmounted restore failed"));
+      await Promise.allSettled([create.promise, restore.promise]);
+    });
+
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("retires pending Restore and Delete ownership at the layout unmount boundary", async () => {
+    vi.useRealTimers();
+    const restore = deferred<{ ok: true }>();
+    const deletion = deferred<{ ok: true; permanent: boolean }>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: PromiseRejectionEvent) => {
+      unhandled.push(event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    restoreDocument.mockReturnValueOnce(restore.promise);
+    purgeDocument.mockReturnValueOnce(deletion.promise);
+    listDocuments
+      .mockResolvedValueOnce({ documents: [trashedDoc("restore-boundary", "Restore boundary")] })
+      .mockResolvedValueOnce({ documents: [trashedDoc("delete-boundary", "Delete boundary")] });
+
+    const unmountAndSettle = async (
+      title: string,
+      action: "restore-button" | "purge-button",
+      settle: () => void,
+      pending: Promise<unknown>,
+    ) => {
+      const view = render(
+        <TransitionUnmount>
+          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+        </TransitionUnmount>,
+      );
+      openTrash();
+      await act(async () => {});
+      fireEvent.click(trashButton(title, action));
+      const removed = deferred<void>();
+      const settled = Promise.allSettled([pending]);
+      let settledAtRemoval = false;
+      let postRemovalMutations = 0;
+      const observer = new MutationObserver((records) => {
+        if (document.querySelector('[data-testid="trash-view"]')) return;
+        if (!settledAtRemoval) {
+          settledAtRemoval = true;
+          settle();
+          removed.resolve();
+          return;
+        }
+        postRemovalMutations += records.length;
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      const actEnvironment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+
+      try {
+        screen.getByTestId("unmount-dashboard").click();
+        await removed.promise;
+        await settled;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(screen.queryByTestId("trash-view")).toBeNull();
+        expect(screen.queryByTestId("trash-card")).toBeNull();
+        expect(screen.queryByTestId("toast")).toBeNull();
+        return postRemovalMutations;
+      } finally {
+        actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+        observer.disconnect();
+        view.unmount();
+      }
+    };
+
+    try {
+      const restoreMutations = await unmountAndSettle("Restore boundary", "restore-button", () => restore.resolve({ ok: true }), restore.promise);
+      const deleteMutations = await unmountAndSettle(
+        "Delete boundary",
+        "purge-button",
+        () => deletion.reject(new ApiError(503, "Unmounted delete failed")),
+        deletion.promise,
+      );
+
+      expect(restoreDocument).toHaveBeenCalledTimes(1);
+      expect(restoreDocument).toHaveBeenLastCalledWith("restore-boundary");
+      expect(purgeDocument).toHaveBeenCalledTimes(1);
+      expect(purgeDocument).toHaveBeenLastCalledWith("delete-boundary", { permanent: true });
+      expect(restoreMutations + deleteMutations).toBe(0);
+      expect(router.refresh).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(console.error).not.toHaveBeenCalled();
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
   });
 });

@@ -3,7 +3,7 @@ import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, M
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -153,6 +153,20 @@ export interface DashboardProps {
 }
 
 type Filter = "all" | "mine" | "shared" | "starred" | "trash";
+type TrashActionKind = "restore" | "purge";
+
+interface TrashActionOperation {
+  visit: number;
+  documentId: string;
+  kind: TrashActionKind;
+  document: Doc;
+}
+
+interface CreateOperation {
+  ownerId: string;
+  key: string;
+}
+
 const FILTERS: { value: Filter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "mine", label: "Owned by me" },
@@ -249,24 +263,39 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
   // The trash is loaded on demand; `initialDocuments` never contains trashed documents.
   const [trash, setTrash] = useState<Doc[] | null>(null);
-  const [trashBusy, setTrashBusy] = useState<string | null>(null);
+  const trashRef = useRef<Doc[] | null>(null);
+  const [trashBusyOperation, setTrashBusyOperation] = useState<TrashActionOperation | null>(null);
   const [trashLoading, setTrashLoading] = useState(false);
   const [trashError, setTrashError] = useState<string | null>(null);
+  const trashVisitId = useRef(0);
   const trashRequestId = useRef(0);
   const trashRequestPending = useRef(false);
+  const trashAction = useRef<TrashActionOperation | null>(null);
+  const trashBusy = trashBusyOperation?.documentId ?? null;
+
+  const replaceTrash = useCallback((documents: Doc[]) => {
+    const operation = trashAction.current;
+    trashRef.current = documents;
+    if (operation && !documents.some((document) => document === operation.document)) {
+      trashAction.current = null;
+      setTrashBusyOperation((current) => (current === operation ? null : current));
+    }
+    setTrash(documents);
+  }, []);
 
   const loadTrash = useCallback(() => {
-    if (filterRef.current !== "trash" || trashRequestPending.current) return;
+    if (filterRef.current !== "trash" || trashRequestPending.current || trashAction.current) return;
+    const visit = trashVisitId.current;
     const requestId = ++trashRequestId.current;
     trashRequestPending.current = true;
     setTrashLoading(true);
-    const isCurrent = () => filterRef.current === "trash" && requestId === trashRequestId.current;
+    const isCurrent = () => filterRef.current === "trash" && visit === trashVisitId.current && requestId === trashRequestId.current;
 
     void api.documents
       .list({ trash: true })
       .then((res) => {
         if (!isCurrent()) return;
-        setTrash(res.documents);
+        replaceTrash(res.documents);
         setTrashError(null);
       })
       .catch((err: unknown) => {
@@ -279,14 +308,20 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         trashRequestPending.current = false;
         setTrashLoading(false);
       });
-  }, []);
+  }, [replaceTrash]);
 
   const changeFilter = useCallback((next: Filter) => {
-    const leavingTrash = filterRef.current === "trash" && next !== "trash";
+    const previous = filterRef.current;
+    const leavingTrash = previous === "trash" && next !== "trash";
+    const enteringTrash = previous !== "trash" && next === "trash";
     filterRef.current = next;
+    if (enteringTrash) trashVisitId.current += 1;
     if (leavingTrash) {
       trashRequestId.current += 1;
       trashRequestPending.current = false;
+      const operation = trashAction.current;
+      trashAction.current = null;
+      setTrashBusyOperation((current) => (current === operation ? null : current));
       setTrashLoading(false);
       setTrashError(null);
     }
@@ -298,11 +333,14 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     loadTrash();
   }, [filter, loadTrash]);
 
-  useEffect(
+  useLayoutEffect(
     () => () => {
       filterRef.current = "all";
+      trashVisitId.current += 1;
       trashRequestId.current += 1;
       trashRequestPending.current = false;
+      trashAction.current = null;
+      trashRef.current = null;
     },
     [],
   );
@@ -312,36 +350,53 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     loadTrash();
   }, [trashError, loadTrash]);
 
-  const restore = useCallback(
-    async (doc: Doc) => {
-      setTrashBusy(doc.id);
-      try {
-        await api.documents.restore(doc.id);
-        setTrash((t) => t?.filter((d) => d.id !== doc.id) ?? null);
+  const runTrashAction = useCallback(async (doc: Doc, kind: TrashActionKind) => {
+    if (filterRef.current !== "trash" || trashAction.current || !trashRef.current?.some((document) => document === doc)) return;
+    const operation: TrashActionOperation = { visit: trashVisitId.current, documentId: doc.id, kind, document: doc };
+    trashAction.current = operation;
+    trashRequestId.current += 1;
+    trashRequestPending.current = false;
+    setTrashLoading(false);
+    setTrashBusyOperation(operation);
+    const isCurrent = () =>
+      filterRef.current === "trash" &&
+      operation.visit === trashVisitId.current &&
+      trashAction.current === operation &&
+      trashRef.current?.some((document) => document === operation.document);
+
+    try {
+      if (kind === "restore") await api.documents.restore(doc.id);
+      else await api.documents.delete(doc.id, { permanent: true });
+      if (!isCurrent()) return;
+      const documents = trashRef.current!.filter((document) => document.id !== operation.documentId);
+      trashRef.current = documents;
+      setTrash(documents);
+      if (kind === "restore") {
         setNotice({ message: `“${doc.title}” was restored.`, kind: "success" });
         router.refresh();
-      } catch (err) {
-        console.error(err);
-        setNotice({ message: apiErrorText(err, "Could not restore the document"), kind: "error" });
-      } finally {
-        setTrashBusy(null);
       }
-    },
-    [router],
-  );
-  const purge = useCallback(async (doc: Doc) => {
-    if (!confirm(`Delete “${doc.title}” forever? This cannot be undone.`)) return;
-    setTrashBusy(doc.id);
-    try {
-      await api.documents.delete(doc.id, { permanent: true });
-      setTrash((t) => t?.filter((d) => d.id !== doc.id) ?? null);
     } catch (err) {
+      if (!isCurrent()) return;
       console.error(err);
-      setNotice({ message: apiErrorText(err, "Could not delete the document"), kind: "error" });
+      setNotice({
+        message: apiErrorText(err, kind === "restore" ? "Could not restore the document" : "Could not delete the document"),
+        kind: "error",
+      });
     } finally {
-      setTrashBusy(null);
+      if (trashAction.current !== operation) return;
+      trashAction.current = null;
+      setTrashBusyOperation((current) => (current === operation ? null : current));
     }
-  }, []);
+  }, [router]);
+  const restore = useCallback((doc: Doc) => void runTrashAction(doc, "restore"), [runTrashAction]);
+  const purge = useCallback(
+    (doc: Doc) => {
+      if (filterRef.current !== "trash" || trashAction.current || !trashRef.current?.some((document) => document === doc)) return;
+      if (!confirm(`Delete “${doc.title}” forever? This cannot be undone.`)) return;
+      void runTrashAction(doc, "purge");
+    },
+    [runTrashAction],
+  );
 
   // One shared state per id keeps duplicate cards in lockstep and synchronously rejects overlapping writes.
   const [starStates, setStarStates] = useState<Record<string, { confirmed: boolean; value: boolean; pending: boolean }>>({});
@@ -521,22 +576,51 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
   const showStrip = filter === "all" && !trimmed && starred.length > 0;
 
-  const [creating, setCreating] = useState<string | null>(null);
+  const createOwner = useRef(user.id);
+  const createOperation = useRef<CreateOperation | null>(null);
+  const [createBusyOperation, setCreateBusyOperation] = useState<CreateOperation | null>(null);
+  const creating = createBusyOperation?.ownerId === user.id ? createBusyOperation.key : null;
   const [openTemplates, setOpenTemplates] = useState(false);
+
+  useLayoutEffect(() => {
+    const previousOwner = createOwner.current;
+    createOwner.current = user.id;
+    if (previousOwner === user.id) return;
+    const operation = createOperation.current;
+    createOperation.current = null;
+    setCreateBusyOperation((current) => (current === operation ? null : current));
+  }, [user.id]);
+
+  useLayoutEffect(
+    () => () => {
+      createOperation.current = null;
+    },
+    [],
+  );
 
   const create = useCallback(
     async (template?: Template) => {
+      if (createOperation.current || createOwner.current !== user.id) return;
       const key = template?.id ?? "blank";
-      setCreating(key);
+      const operation: CreateOperation = { ownerId: user.id, key };
+      createOperation.current = operation;
+      setCreateBusyOperation(operation);
+      const isCurrent = () => createOwner.current === user.id && createOperation.current === operation;
       try {
         const res = await api.documents.create(template ? { template: template.id } : {});
+        if (!isCurrent()) return;
         router.push(`/d/${res.document.id}`);
       } catch (err) {
+        if (!isCurrent()) return;
         console.error(err);
-        setCreating(null);
+        setNotice({ message: apiErrorText(err, "Could not create the document"), kind: "error" });
+      } finally {
+        if (createOperation.current !== operation) return;
+        createOperation.current = null;
+        setCreateBusyOperation((current) => (current === operation ? null : current));
       }
     },
-    [router],
+    [router, user.id],
   );
 
   // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
