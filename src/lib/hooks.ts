@@ -1,14 +1,21 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { COPY_FALLBACK_HINT, copyText, selectContents } from "@/lib/clipboard";
 
 const noopSubscribe = () => () => {};
 
 export type CopyStatus = "idle" | "copied" | "fallback";
 
-interface CopyOperation {
+interface CopyAuthority {
+  mount: symbol;
   text: string;
+  target: RefObject<HTMLElement | null> | undefined;
+  idleLabel: string;
+}
+
+interface CopyOperation {
+  authority: CopyAuthority;
   target: HTMLElement | null;
   pending: boolean;
   timer: ReturnType<typeof setTimeout> | null;
@@ -27,56 +34,71 @@ interface CopyFeedback {
  */
 export function useCopy(text: string, target?: RefObject<HTMLElement | null>, idleLabel = "Copy") {
   const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
-  const mounted = useRef(false);
+  const [mount] = useState(() => Symbol("copy"));
+  const authority = useMemo<CopyAuthority>(
+    () => ({ mount, text, target, idleLabel }),
+    [idleLabel, mount, target, text],
+  );
+  const authorityRef = useRef<CopyAuthority | null>(null);
   const operation = useRef<CopyOperation | null>(null);
 
   useLayoutEffect(() => {
-    mounted.current = true;
+    authorityRef.current = authority;
     return () => {
-      mounted.current = false;
+      if (authorityRef.current === authority) authorityRef.current = null;
       const current = operation.current;
-      if (current?.timer) clearTimeout(current.timer);
+      if (current?.authority !== authority) return;
       operation.current = null;
+      if (current.timer !== null) {
+        const timer = current.timer;
+        current.timer = null;
+        clearTimeout(timer);
+      }
     };
-  }, [text]);
+  }, [authority]);
 
   const copy = () => {
+    if (authorityRef.current !== authority) return;
     const current = operation.current;
-    if (current?.pending && current.text === text) return;
-    if (current?.timer) clearTimeout(current.timer);
+    if (current?.authority === authority && current.pending) return;
+    if (current?.authority === authority && current.timer !== null) {
+      const timer = current.timer;
+      current.timer = null;
+      clearTimeout(timer);
+      if (authorityRef.current !== authority || operation.current !== current) return;
+    }
 
     const owned: CopyOperation = {
-      text,
-      target: target?.current ?? null,
+      authority,
+      target: authority.target?.current ?? null,
       pending: true,
       timer: null,
     };
     operation.current = owned;
-    const attempt = copyText(owned.text);
-    setFeedback(null);
+    const attempt = copyText(authority.text);
+    const ownsOperation = () => authorityRef.current === authority && operation.current === owned;
 
     const settle = (ok: boolean) => {
-      if (!mounted.current || operation.current !== owned) return;
+      if (!ownsOperation()) return;
       owned.pending = false;
       if (!ok) {
         selectContents(owned.target);
-        if (!mounted.current || operation.current !== owned) return;
+        if (!ownsOperation()) return;
       }
       setFeedback({ operation: owned, status: ok ? "copied" : "fallback" });
       owned.timer = setTimeout(() => {
-        if (!mounted.current || operation.current !== owned) return;
+        if (!ownsOperation()) return;
         operation.current = null;
         owned.timer = null;
-        setFeedback(null);
+        setFeedback((currentFeedback) => (currentFeedback?.operation === owned ? null : currentFeedback));
       }, ok ? 1500 : 2000);
     };
 
     void attempt.then(settle, () => settle(false));
+    if (ownsOperation()) setFeedback(null);
   };
-  // Retire presentation during render so a replacement cannot revive it if the text later cycles back.
-  if (feedback && feedback.operation.text !== text) setFeedback(null);
-  const status: CopyStatus = feedback?.operation.text === text ? feedback.status : "idle";
-  const label = status === "copied" ? "Copied" : status === "fallback" ? COPY_FALLBACK_HINT : idleLabel;
+  const status: CopyStatus = feedback?.operation.authority === authority ? feedback.status : "idle";
+  const label = status === "copied" ? "Copied" : status === "fallback" ? COPY_FALLBACK_HINT : authority.idleLabel;
   return { status, copy, label, copied: status === "copied" };
 }
 
