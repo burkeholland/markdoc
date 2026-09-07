@@ -14,12 +14,48 @@ import { GistAutoUpdateControl } from "./gist-auto-update";
 
 type Tab = "gist" | "repo";
 
+interface GitHubSignInOperation {
+  readonly owner: symbol;
+  readonly redirectTo: string;
+}
+
 /**
  * Empty state of the GitHub picker for an account without a GitHub token (#162): the action the
  * sentence names, or why there is none. `redirectTo` defaults to the page the user is on.
  */
 export function GitHubSignInPrompt({ githubConfigured, redirectTo }: { githubConfigured: boolean; redirectTo?: string }) {
-  const [busy, setBusy] = useState(false);
+  const promptOwner = useRef<symbol | null>(null);
+  const activeSignIn = useRef<GitHubSignInOperation | null>(null);
+  const [busyOperation, setBusyOperation] = useState<GitHubSignInOperation | null>(null);
+
+  useLayoutEffect(() => {
+    const owner = Symbol("github-sign-in-prompt");
+    promptOwner.current = owner;
+    activeSignIn.current = null;
+    setBusyOperation(null);
+    return () => {
+      if (promptOwner.current === owner) promptOwner.current = null;
+      if (activeSignIn.current?.owner === owner) activeSignIn.current = null;
+    };
+  }, []);
+
+  const beginSignIn = () => {
+    const owner = promptOwner.current;
+    if (!owner || activeSignIn.current) return;
+    const operation: GitHubSignInOperation = {
+      owner,
+      redirectTo: redirectTo ?? window.location.href,
+    };
+    activeSignIn.current = operation;
+    setBusyOperation(operation);
+    void signIn("github", { redirectTo: operation.redirectTo }).catch(() => {
+      if (promptOwner.current !== owner || activeSignIn.current !== operation) return;
+      activeSignIn.current = null;
+      setBusyOperation((current) => (current === operation ? null : current));
+    });
+  };
+
+  const busy = busyOperation !== null;
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-2 p-6 text-center text-sm text-ink-3" data-testid="github-signin-prompt">
       <GitHubIcon className="text-ink-4" size={24} />
@@ -32,10 +68,7 @@ export function GitHubSignInPrompt({ githubConfigured, redirectTo }: { githubCon
             type="button"
             className="btn btn-primary gap-2"
             disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void signIn("github", { redirectTo: redirectTo ?? window.location.href }).catch(() => setBusy(false));
-            }}
+            onClick={beginSignIn}
             data-testid="github-signin"
           >
             {busy ? <Loader2 size={16} className="animate-spin" /> : <GitHubIcon size={16} />} Sign in with GitHub
