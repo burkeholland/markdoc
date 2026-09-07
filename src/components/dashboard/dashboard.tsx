@@ -91,15 +91,6 @@ export function Highlight({ text, needle }: { text: string; needle: string }) {
   return <>{parts}</>;
 }
 
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return debounced;
-}
-
 const TEMPLATE_ICONS: Record<TemplateIcon, typeof File> = {
   File,
   Users,
@@ -165,6 +156,35 @@ interface TrashActionOperation {
 interface CreateOperation {
   ownerId: string;
   key: string;
+}
+
+interface SearchAuthority {
+  mount: symbol;
+  userId: string;
+}
+
+interface SearchDebounceOwner {
+  authority: SearchAuthority;
+  query: string;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface SearchRequestOwner {
+  authority: SearchAuthority;
+  query: string;
+  controller: AbortController;
+}
+
+interface SearchResults {
+  authority: SearchAuthority;
+  query: string;
+  documents: SearchDoc[];
+}
+
+interface SearchError {
+  authority: SearchAuthority;
+  query: string;
+  message: string;
 }
 
 const FILTERS: { value: Filter; label: string }[] = [
@@ -245,11 +265,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [openPicker, setOpenPicker] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
-  const [results, setResults] = useState<{ query: string; documents: SearchDoc[] } | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [searchError, setSearchError] = useState<{ query: string; message: string } | null>(null);
-  const searchRequestId = useRef(0);
-  const activeSearch = useRef<AbortController | null>(null);
+  const [searchMount] = useState(() => Symbol("dashboard-search"));
+  const searchAuthority = useMemo<SearchAuthority>(() => ({ mount: searchMount, userId: user.id }), [searchMount, user.id]);
+  const searchAuthorityRef = useRef<SearchAuthority | null>(null);
+  const searchDebounceOwner = useRef<SearchDebounceOwner | null>(null);
+  const searchRequestOwner = useRef<SearchRequestOwner | null>(null);
+  const [debouncedSearch, setDebouncedSearch] = useState<SearchDebounceOwner | null>(null);
+  const [results, setResults] = useState<SearchResults | null>(null);
+  const [searchingOwner, setSearchingOwner] = useState<SearchRequestOwner | null>(null);
+  const [searchError, setSearchError] = useState<SearchError | null>(null);
 
   // One-shot message from the page we came from (e.g. the editor after "Move to trash").
   const [notice, setNotice] = useState<PendingNotice | null>(null);
@@ -468,71 +492,123 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   };
 
   const trimmed = query.trim();
-  const serverQuery = useDebounced(trimmed.length >= MIN_QUERY_LENGTH ? trimmed : "", SEARCH_DEBOUNCE_MS);
 
-  const runSearch = useCallback((requestedQuery: string) => {
-    activeSearch.current?.abort();
-    const controller = new AbortController();
-    const requestId = ++searchRequestId.current;
-    activeSearch.current = controller;
-    setSearching(true);
-
-    const isCurrent = () => !controller.signal.aborted && activeSearch.current === controller && searchRequestId.current === requestId;
-    void api.documents
-      .search(requestedQuery, { signal: controller.signal })
-      .then((res) => {
-        if (!isCurrent()) return;
-        setResults({ query: res.query, documents: res.documents });
-        setSearchError(null);
-      })
-      .catch((err: unknown) => {
-        if (!isCurrent()) return;
-        console.error(err);
-        setSearchError({ query: requestedQuery, message: apiErrorText(err, "Could not search document content") });
-      })
-      .finally(() => {
-        if (!isCurrent()) return;
-        activeSearch.current = null;
-        setSearching(false);
-      });
-
-    return () => {
-      controller.abort();
-      if (activeSearch.current === controller) {
-        activeSearch.current = null;
-        searchRequestId.current += 1;
-      }
-    };
+  const retireSearchDebounce = useCallback((owner: SearchDebounceOwner) => {
+    if (owner.timer !== null) {
+      clearTimeout(owner.timer);
+      owner.timer = null;
+    }
+    if (searchDebounceOwner.current === owner) searchDebounceOwner.current = null;
   }, []);
 
-  // A changed query immediately retires both a debounced request and an explicit retry.
-  useEffect(() => {
-    if (activeSearch.current) {
-      activeSearch.current.abort();
-      activeSearch.current = null;
-      searchRequestId.current += 1;
-      setSearching(false);
-    }
-    setSearchError((current) => (current?.query === trimmed ? current : null));
-  }, [trimmed]);
+  const retireSearchRequest = useCallback((owner: SearchRequestOwner) => {
+    if (searchRequestOwner.current !== owner) return;
+    searchRequestOwner.current = null;
+    owner.controller.abort();
+  }, []);
+
+  useLayoutEffect(() => {
+    searchAuthorityRef.current = searchAuthority;
+    return () => {
+      if (searchAuthorityRef.current === searchAuthority) searchAuthorityRef.current = null;
+      const debounce = searchDebounceOwner.current;
+      if (debounce?.authority === searchAuthority) retireSearchDebounce(debounce);
+      const request = searchRequestOwner.current;
+      if (request?.authority === searchAuthority) retireSearchRequest(request);
+    };
+  }, [retireSearchDebounce, retireSearchRequest, searchAuthority]);
+
+  // Query and user changes synchronously retire their exact timer and request before parent layout effects run.
+  useLayoutEffect(() => {
+    setSearchingOwner((current) => (current?.authority === searchAuthority && current.query === trimmed ? current : null));
+    if (searchAuthorityRef.current !== searchAuthority || trimmed.length < MIN_QUERY_LENGTH) return;
+    const owner: SearchDebounceOwner = { authority: searchAuthority, query: trimmed, timer: null };
+    owner.timer = setTimeout(() => {
+      if (searchAuthorityRef.current !== searchAuthority || searchDebounceOwner.current !== owner) return;
+      owner.timer = null;
+      searchDebounceOwner.current = null;
+      setDebouncedSearch(owner);
+    }, SEARCH_DEBOUNCE_MS);
+    searchDebounceOwner.current = owner;
+
+    return () => {
+      retireSearchDebounce(owner);
+      const request = searchRequestOwner.current;
+      if (request?.authority === searchAuthority && request.query === owner.query) retireSearchRequest(request);
+    };
+  }, [retireSearchDebounce, retireSearchRequest, searchAuthority, trimmed]);
+
+  const runSearch = useCallback(
+    (authority: SearchAuthority, requestedQuery: string) => {
+      if (searchAuthorityRef.current !== authority || authority !== searchAuthority || authority.userId !== user.id) return;
+      const previous = searchRequestOwner.current;
+      if (previous) {
+        if (previous.authority === authority && previous.query === requestedQuery) return;
+        retireSearchRequest(previous);
+      }
+
+      const owner: SearchRequestOwner = { authority, query: requestedQuery, controller: new AbortController() };
+      searchRequestOwner.current = owner;
+      setSearchingOwner(owner);
+      const ownsRequest = () =>
+        searchAuthorityRef.current === authority &&
+        searchRequestOwner.current === owner &&
+        !owner.controller.signal.aborted;
+
+      void api.documents
+        .search(requestedQuery, { signal: owner.controller.signal })
+        .then((res) => {
+          if (!ownsRequest()) return;
+          setResults({ authority, query: res.query, documents: res.documents });
+          setSearchError(null);
+        })
+        .catch((err: unknown) => {
+          if (!ownsRequest()) return;
+          console.error(err);
+          setSearchError({ authority, query: requestedQuery, message: apiErrorText(err, "Could not search document content") });
+        })
+        .finally(() => {
+          if (!ownsRequest()) return;
+          searchRequestOwner.current = null;
+          setSearchingOwner((current) => (current === owner ? null : current));
+        });
+
+      return () => retireSearchRequest(owner);
+    },
+    [retireSearchRequest, searchAuthority, user.id],
+  );
 
   useEffect(() => {
-    if (!serverQuery || serverQuery !== trimmed) return;
-    return runSearch(serverQuery);
-  }, [serverQuery, trimmed, runSearch]);
+    if (debouncedSearch?.authority !== searchAuthority || debouncedSearch.query !== trimmed) return;
+    return runSearch(debouncedSearch.authority, debouncedSearch.query);
+  }, [debouncedSearch, runSearch, searchAuthority, trimmed]);
 
-  useEffect(() => () => activeSearch.current?.abort(), []);
+  useEffect(() => {
+    setSearchError((current) => (current?.authority === searchAuthority && current.query === trimmed ? current : null));
+  }, [searchAuthority, trimmed]);
 
-  const currentSearchError = searchError?.query === trimmed ? searchError : null;
+  const searching =
+    searchingOwner?.authority === searchAuthority &&
+    searchingOwner.query === trimmed;
+  const currentSearchError = searchError?.authority === searchAuthority && searchError.query === trimmed ? searchError : null;
   const retrySearch = useCallback(() => {
-    if (!currentSearchError || currentSearchError.query !== trimmed || searching) return;
-    runSearch(currentSearchError.query);
-  }, [currentSearchError, trimmed, searching, runSearch]);
+    if (!currentSearchError || currentSearchError.authority !== searchAuthority || currentSearchError.query !== trimmed || searchRequestOwner.current) return;
+    runSearch(searchAuthority, currentSearchError.query);
+  }, [currentSearchError, trimmed, runSearch, searchAuthority]);
 
   // Server results for the current query win; otherwise filter the loaded list by title so typing
   // feels instant while the request is in flight (or for queries too short to send).
-  const serverResults = !currentSearchError && results && trimmed.length >= MIN_QUERY_LENGTH && results.query === trimmed ? results.documents : null;
-  const pending = trimmed.length >= MIN_QUERY_LENGTH && !serverResults && (searching || serverQuery !== trimmed);
+  const serverResults =
+    !currentSearchError &&
+    results?.authority === searchAuthority &&
+    trimmed.length >= MIN_QUERY_LENGTH &&
+    results.query === trimmed
+      ? results.documents
+      : null;
+  const pending =
+    trimmed.length >= MIN_QUERY_LENGTH &&
+    !serverResults &&
+    (searching || debouncedSearch?.authority !== searchAuthority || debouncedSearch.query !== trimmed);
   useEffect(() => {
     if (starPropsRef.current !== initialDocuments) {
       starPropsRef.current = initialDocuments;
