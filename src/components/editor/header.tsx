@@ -2,7 +2,7 @@
 import { Avatar, Menu, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -463,40 +463,167 @@ export interface PresenceStackProps {
   onKeepAgent?: () => void;
 }
 
+interface PresenceVisit {
+  session: CollabSession;
+  onJump: PresenceStackProps["onJump"];
+  onCancelRequest: PresenceStackProps["onCancelRequest"];
+  onKeepAgent: PresenceStackProps["onKeepAgent"];
+}
+
+interface PresenceVisitState {
+  visit: PresenceVisit;
+  open: boolean;
+  cancelling: ReadonlySet<string>;
+  now: number;
+}
+
+interface CancellationGraceOwner {
+  visit: PresenceVisit;
+  requestId: string;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface FreshnessOwner {
+  visit: PresenceVisit;
+  timer: ReturnType<typeof setInterval> | null;
+}
+
+interface PendingRequestsOwner {
+  visit: PresenceVisit;
+  ids: ReadonlySet<string>;
+}
+
 /**
  * Everyone in the document, agents included: agents are bot avatars with a spinner badge while they work,
  * and the popover carries their status, the open requests and the way to put an agent here (task #981).
  */
 export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }: PresenceStackProps) {
+  const visit = useMemo<PresenceVisit>(
+    () => ({ session, onJump, onCancelRequest, onKeepAgent }),
+    [session, onJump, onCancelRequest, onKeepAgent],
+  );
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const followUserId = useSessionValue(session, (s) => s.followUserId);
   const requests = useAgentRequests(session);
   const activity = useAgentActivity(session);
-  const [open, setOpen] = useState(false);
+  const initialState = useMemo<PresenceVisitState>(
+    () => ({ visit, open: false, cancelling: new Set(), now: 0 }),
+    [visit],
+  );
+  const [storedState, setStoredState] = useState<PresenceVisitState>(
+    () => ({ ...initialState, now: Date.now() }),
+  );
+  const state = storedState.visit === visit ? storedState : initialState;
+  const activeVisit = useRef<PresenceVisit | null>(null);
+  const cancellationGrace = useRef(new Map<string, CancellationGraceOwner>());
+  const freshnessOwner = useRef<FreshnessOwner | null>(null);
+  const pendingRequestsOwner = useRef<PendingRequestsOwner | null>(null);
+  const ownsVisit = useCallback((owner: PresenceVisit) => activeVisit.current === owner, []);
+  const retireVisit = useCallback((owner: PresenceVisit) => {
+    if (activeVisit.current !== owner) return;
+    activeVisit.current = null;
+    if (pendingRequestsOwner.current?.visit === owner) pendingRequestsOwner.current = null;
+    for (const [requestId, grace] of cancellationGrace.current) {
+      if (grace.visit !== owner) continue;
+      if (grace.timer !== null) clearTimeout(grace.timer);
+      if (cancellationGrace.current.get(requestId) === grace) cancellationGrace.current.delete(requestId);
+    }
+    const freshness = freshnessOwner.current;
+    if (freshness?.visit === owner) {
+      freshnessOwner.current = null;
+      if (freshness.timer !== null) clearInterval(freshness.timer);
+    }
+  }, []);
+  const updateState = useCallback(
+    (update: (current: PresenceVisitState) => PresenceVisitState) => {
+      if (!ownsVisit(visit)) return;
+      setStoredState((current) => {
+        if (!ownsVisit(visit) || current.visit !== visit) return current;
+        return update(current);
+      });
+    },
+    [ownsVisit, visit],
+  );
+  const finishCancellation = useCallback(
+    (grace: CancellationGraceOwner) => {
+      if (!ownsVisit(grace.visit) || cancellationGrace.current.get(grace.requestId) !== grace) return;
+      cancellationGrace.current.delete(grace.requestId);
+      if (grace.timer !== null) {
+        clearTimeout(grace.timer);
+        grace.timer = null;
+      }
+      setStoredState((current) => {
+        if (!ownsVisit(grace.visit) || current.visit !== grace.visit || !current.cancelling.has(grace.requestId)) return current;
+        const cancelling = new Set(current.cancelling);
+        cancelling.delete(grace.requestId);
+        return { ...current, cancelling };
+      });
+    },
+    [ownsVisit],
+  );
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    setStoredState((current) => (current.visit === visit ? current : { ...initialState, now: Date.now() }));
+    return () => retireVisit(visit);
+  }, [initialState, retireVisit, visit]);
+
   // Cancel is optimistic: the row and the placeholder go at once; the mirror catches up a moment later. If the
   // server refuses (editor-shell toasts the error) the request is still pending after the grace period and returns.
-  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(() => new Set());
-  const pending = pendingRequests(requests).filter((r) => !cancelling.has(r.id));
-  useEffect(() => {
-    if (cancelling.size === 0) return;
-    const stillPending = new Set(pendingRequests(requests).map((r) => r.id));
-    if ([...cancelling].every((id) => stillPending.has(id))) return;
-    setCancelling(new Set([...cancelling].filter((id) => stillPending.has(id))));
-  }, [requests, cancelling]);
+  const pending = pendingRequests(requests).filter((r) => !state.cancelling.has(r.id));
+  useLayoutEffect(() => {
+    if (!ownsVisit(visit)) return;
+    const owner: PendingRequestsOwner = {
+      visit,
+      ids: new Set(pendingRequests(requests).map((request) => request.id)),
+    };
+    pendingRequestsOwner.current = owner;
+    for (const grace of cancellationGrace.current.values()) {
+      if (grace.visit === visit && !owner.ids.has(grace.requestId)) finishCancellation(grace);
+    }
+    return () => {
+      if (pendingRequestsOwner.current === owner) pendingRequestsOwner.current = null;
+    };
+  }, [finishCancellation, ownsVisit, requests, visit]);
   const cancelRequest = (id: string) => {
-    setCancelling((prev) => new Set(prev).add(id));
-    onCancelRequest?.(id);
-    setTimeout(() => setCancelling((prev) => (prev.has(id) ? new Set([...prev].filter((x) => x !== id)) : prev)), CANCEL_GRACE_MS);
+    const currentPending = pendingRequestsOwner.current;
+    if (!ownsVisit(visit) || !visit.onCancelRequest || currentPending?.visit !== visit || !currentPending.ids.has(id)) return;
+    const existing = cancellationGrace.current.get(id);
+    if (existing?.visit === visit) return;
+    const grace: CancellationGraceOwner = { visit, requestId: id, timer: null };
+    cancellationGrace.current.set(id, grace);
+    grace.timer = setTimeout(() => finishCancellation(grace), CANCEL_GRACE_MS);
+    updateState((current) => {
+      if (current.cancelling.has(id)) return current;
+      const cancelling = new Set(current.cancelling);
+      cancelling.add(id);
+      return { ...current, cancelling };
+    });
+    visit.onCancelRequest(id);
   };
   // Idle dimming is time-based; re-evaluate it every 15 s while the stack is mounted. A fresh agent
   // activity ("proposed changes · 12 s ago") ticks every 5 s for the 45 s it shows.
-  const [now, setNow] = useState(() => Date.now());
+  const now = state.now;
   const activityFresh = isRecentActivity(activity, now);
-  useEffect(() => {
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), activityFresh ? 5_000 : 15_000);
-    return () => clearInterval(t);
-  }, [activityFresh, activity]);
+  useLayoutEffect(() => {
+    if (!ownsVisit(visit)) return;
+    const owner: FreshnessOwner = { visit, timer: null };
+    freshnessOwner.current = owner;
+    const currentNow = Date.now();
+    const tick = () => {
+      if (!ownsVisit(visit) || freshnessOwner.current !== owner) return;
+      updateState((current) => {
+        const nextNow = Date.now();
+        return current.now === nextNow ? current : { ...current, now: nextNow };
+      });
+    };
+    tick();
+    owner.timer = setInterval(tick, isRecentActivity(activity, currentNow) ? 5_000 : 15_000);
+    return () => {
+      if (freshnessOwner.current !== owner) return;
+      freshnessOwner.current = null;
+      if (owner.timer !== null) clearInterval(owner.timer);
+    };
+  }, [activity, activityFresh, ownsVisit, updateState, visit]);
   const shown = users.slice(0, 3);
   const extra = users.length - shown.length;
   const others = users.filter((u) => !u.isLocal);
@@ -513,22 +640,27 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
   const waiting = noAgent && !unseenWorker;
   const nameOf = (userId: string) => users.find((u) => !u.isAgent && u.id === userId)?.name ?? null;
   const jump = (u: PresenceUser) => {
-    if (u.cursor === null) return;
-    onJump?.(u);
-    setOpen(false);
+    if (!ownsVisit(visit) || u.cursor === null) return;
+    visit.onJump?.(u);
+    updateState((current) => (current.open ? { ...current, open: false } : current));
   };
   const follow = (u: PresenceUser) => {
-    session.follow(followUserId === u.id ? null : u.id);
-    setOpen(false);
+    if (!ownsVisit(visit)) return;
+    visit.session.follow(followUserId === u.id ? null : u.id);
+    updateState((current) => (current.open ? { ...current, open: false } : current));
   };
   const keepAgent = () => {
-    setOpen(false);
-    onKeepAgent?.();
+    if (!ownsVisit(visit)) return;
+    updateState((current) => (current.open ? { ...current, open: false } : current));
+    visit.onKeepAgent?.();
+  };
+  const changeOpen = (open: boolean) => {
+    updateState((current) => (current.open === open ? current : { ...current, open }));
   };
   const roleLabel: Record<string, string> = { owner: "Owner", editor: "Editor", commenter: "Commenter", viewer: "Viewer" };
   const label = (u: PresenceUser) => (u.isLocal ? `${u.name} (you)` : u.isAgent ? `${agentName(u)} (agent${u.status ? `: ${u.status}` : ""})` : u.name);
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={state.open} onOpenChange={changeOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
