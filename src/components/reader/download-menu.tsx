@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { ChevronDown, Download, FileCode2, FileText } from "lucide-react";
-import { navigateTo } from "@/lib/nav";
 
 type Format = "md" | "html" | "pdf";
 const ROWS: { format: Format; label: string; Icon: typeof Download }[] = [
@@ -78,10 +77,10 @@ export function DownloadMenu({ docId }: { docId: string }) {
 
   return (
     <div ref={rootRef} className="relative flex items-stretch" onKeyDown={onRootKeyDown} onBlur={onRootBlur}>
-      <button type="button" className="btn btn-sm btn-outline reader-split-main gap-1.5" aria-label="Download Markdown" onClick={() => navigateTo(href("md"))} data-testid="reader-download">
+      <a href={href("md")} className="btn btn-sm btn-outline reader-split-main gap-1.5" aria-label="Download Markdown" data-testid="reader-download">
         <Download size={14} />
         <span className="hidden sm:inline">Download</span>
-      </button>
+      </a>
       <button
         ref={toggleRef}
         type="button"
