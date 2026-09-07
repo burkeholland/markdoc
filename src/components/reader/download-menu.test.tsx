@@ -1,12 +1,60 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { DownloadMenu } from "./download-menu";
 
 const DOC_ID = "doc-919";
 const downloadHref = (format: "md" | "html" | "pdf") => `/api/documents/${DOC_ID}/export?format=${format}&download=1`;
 
-afterEach(cleanup);
+function BoundaryHarness({
+  docId,
+  present = true,
+  boundary,
+  onBoundary,
+}: {
+  docId: string;
+  present?: boolean;
+  boundary: number;
+  onBoundary: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary();
+  }, [boundary, onBoundary]);
+  return present ? <DownloadMenu docId={docId} /> : null;
+}
+
+function trackPointerListeners() {
+  const active = new Set<EventListenerOrEventListenerObject>();
+  const captured: EventListener[] = [];
+  const add = document.addEventListener.bind(document);
+  const remove = document.removeEventListener.bind(document);
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+    if (type === "pointerdown") {
+      active.add(listener);
+      if (typeof listener === "function") captured.push(listener);
+    }
+    add(type, listener, options);
+  });
+  vi.spyOn(document, "removeEventListener").mockImplementation((type, listener, options) => {
+    if (type === "pointerdown") active.delete(listener);
+    remove(type, listener, options);
+  });
+  return { active, captured };
+}
+
+function captureClick(element: HTMLElement) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the download link");
+  const props = (element as unknown as Record<string, { onClick?: () => void } | undefined>)[propsKey];
+  if (!props?.onClick) throw new Error("The download link did not have an onClick handler");
+  return props.onClick;
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("DownloadMenu", () => {
   it("renders the primary Markdown download as a native link", () => {
@@ -126,5 +174,101 @@ describe("DownloadMenu", () => {
     expect(list).toBeVisible();
     fireEvent.pointerDown(outside);
     expect(list).not.toBeVisible();
+  });
+
+  it("retires a changed document before the parent layout boundary and ignores its captured callbacks", () => {
+    const pointers = trackPointerListeners();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const boundaryListeners: number[] = [];
+    const onBoundary = () => boundaryListeners.push(pointers.active.size);
+    const view = render(<BoundaryHarness docId="doc-a" boundary={0} onBoundary={onBoundary} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Download as…" }));
+    const oldPointer = pointers.captured.at(-1);
+    const oldCloseAndFocus = captureClick(screen.getByTestId("reader-download-md"));
+    expect(oldPointer).toBeDefined();
+    expect(pointers.active.size).toBe(1);
+
+    view.rerender(<BoundaryHarness docId="doc-b" boundary={1} onBoundary={onBoundary} />);
+
+    expect(boundaryListeners).toEqual([0]);
+    expect(screen.getByTestId("reader-download-list")).not.toBeVisible();
+    expect(screen.getByRole("button", { name: "Download as…" })).toHaveAttribute("aria-expanded", "false");
+    for (const format of ["md", "html", "pdf"] as const) {
+      const links = screen.getAllByTestId(`reader-download-${format}`);
+      expect(links).toHaveLength(1);
+      expect(links[0]).toHaveAttribute("href", `/api/documents/doc-b/export?format=${format}&download=1`);
+    }
+    expect(pointers.active.size).toBe(0);
+
+    focus.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Download as…" }));
+    const currentMarkdown = screen.getByTestId("reader-download-md");
+    expect(currentMarkdown).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(pointers.active.size).toBe(1);
+
+    act(() => {
+      oldPointer?.(new Event("pointerdown"));
+      oldCloseAndFocus();
+    });
+    expect(screen.getByTestId("reader-download-list")).toBeVisible();
+    expect(currentMarkdown).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(pointers.active.size).toBe(1);
+  });
+
+  it("retires listeners on removal and keeps a remounted document usable across reopen", () => {
+    const pointers = trackPointerListeners();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const boundaryListeners: number[] = [];
+    const onBoundary = () => boundaryListeners.push(pointers.active.size);
+    const view = render(<BoundaryHarness docId="doc-a" boundary={0} onBoundary={onBoundary} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Download as…" }));
+    const oldPointer = pointers.captured.at(-1);
+    const oldCloseAndFocus = captureClick(screen.getByTestId("reader-download-md"));
+    expect(oldPointer).toBeDefined();
+    expect(pointers.active.size).toBe(1);
+
+    focus.mockClear();
+    view.rerender(<BoundaryHarness docId="doc-a" present={false} boundary={1} onBoundary={onBoundary} />);
+    act(() => {
+      oldPointer?.(new Event("pointerdown"));
+      oldCloseAndFocus();
+    });
+    expect(boundaryListeners).toEqual([0]);
+    expect(focus).not.toHaveBeenCalled();
+    expect(pointers.active.size).toBe(0);
+
+    view.rerender(<BoundaryHarness docId="doc-b" boundary={2} onBoundary={onBoundary} />);
+    const toggle = screen.getByRole("button", { name: "Download as…" });
+    expect(screen.getByTestId("reader-download-list")).not.toBeVisible();
+    expect(boundaryListeners).toEqual([0, 0]);
+
+    fireEvent.click(toggle);
+    const currentMarkdown = screen.getByTestId("reader-download-md");
+    expect(currentMarkdown).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(pointers.active.size).toBe(1);
+
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("reader-download-list")).not.toBeVisible();
+    expect(pointers.active.size).toBe(0);
+    focus.mockClear();
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("reader-download-list")).toBeVisible();
+    expect(currentMarkdown).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(pointers.active.size).toBe(1);
+
+    act(() => {
+      oldPointer?.(new Event("pointerdown"));
+      oldCloseAndFocus();
+    });
+    expect(screen.getByTestId("reader-download-list")).toBeVisible();
+    expect(currentMarkdown).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(pointers.active.size).toBe(1);
   });
 });
