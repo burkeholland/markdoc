@@ -189,7 +189,7 @@ export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "sn
     case "request.done":
       return `finished your request${n.snippet ? `: ${n.snippet}` : ""}`;
     case "webhook.disabled":
-      return `disabled your webhook after 20 failed deliveries${n.snippet ? ` (${n.snippet})` : ""} \u2014 re-add it in Settings`;
+      return `disabled your webhook after 20 failed deliveries${n.snippet ? ` (${n.snippet})` : ""} \u2014 enable the existing hook in Settings`;
   }
 }
 
