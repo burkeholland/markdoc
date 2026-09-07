@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { COPY_FALLBACK_HINT, copyText, selectContents } from "@/lib/clipboard";
 
 const noopSubscribe = () => () => {};
 
 export type CopyStatus = "idle" | "copied" | "fallback";
+
+interface CopyOperation {
+  text: string;
+  target: HTMLElement | null;
+  pending: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+}
 
 /**
  * State for a Copy button. `copy()` must be called straight from the click handler (it calls
@@ -15,20 +22,52 @@ export type CopyStatus = "idle" | "copied" | "fallback";
  */
 export function useCopy(text: string, target?: RefObject<HTMLElement | null>, idleLabel = "Copy") {
   const [status, setStatus] = useState<CopyStatus>("idle");
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
+  const mounted = useRef(false);
+  const operation = useRef<CopyOperation | null>(null);
+
+  useLayoutEffect(() => {
+    mounted.current = true;
+    setStatus("idle");
+    return () => {
+      mounted.current = false;
+      const current = operation.current;
+      if (current?.timer) clearTimeout(current.timer);
+      operation.current = null;
+    };
+  }, [text]);
+
   const copy = () => {
-    void copyText(text).then((ok) => {
-      if (!ok) selectContents(target?.current ?? null);
+    const current = operation.current;
+    if (current?.pending && current.text === text) return;
+    if (current?.timer) clearTimeout(current.timer);
+
+    const owned: CopyOperation = {
+      text,
+      target: target?.current ?? null,
+      pending: true,
+      timer: null,
+    };
+    operation.current = owned;
+    const attempt = copyText(owned.text);
+    setStatus("idle");
+
+    const settle = (ok: boolean) => {
+      if (!mounted.current || operation.current !== owned) return;
+      owned.pending = false;
+      if (!ok) {
+        selectContents(owned.target);
+        if (!mounted.current || operation.current !== owned) return;
+      }
       setStatus(ok ? "copied" : "fallback");
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => setStatus("idle"), ok ? 1500 : 2000);
-    });
+      owned.timer = setTimeout(() => {
+        if (!mounted.current || operation.current !== owned) return;
+        operation.current = null;
+        owned.timer = null;
+        setStatus("idle");
+      }, ok ? 1500 : 2000);
+    };
+
+    void attempt.then(settle, () => settle(false));
   };
   const label = status === "copied" ? "Copied" : status === "fallback" ? COPY_FALLBACK_HINT : idleLabel;
   return { status, copy, label, copied: status === "copied" };
