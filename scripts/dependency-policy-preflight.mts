@@ -9,7 +9,7 @@ import {
   runDependencyAudit,
   type AuditExecutor,
   type DependencyPolicyReport,
-} from "./lib/dependency-policy";
+} from "./lib/dependency-policy.ts";
 
 interface CliOutput {
   log(message: string): void;
