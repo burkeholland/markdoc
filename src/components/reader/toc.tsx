@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ChevronDown, List } from "lucide-react";
 import type { RenderedHeading } from "@/server/export/html";
 import { cn } from "@/lib/utils";
@@ -46,9 +46,17 @@ function useActiveHeading(headings: RenderedHeading[]): string | null {
 export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
   const active = useActiveHeading(headings);
   const [open, setOpen] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!open || event.key !== "Escape") return;
+    event.preventDefault();
+    setOpen(false);
+    toggleRef.current?.focus();
+  };
   return (
-    <nav className="reader-toc lg:sticky lg:top-20" aria-label="Table of contents" data-testid="reader-toc">
+    <nav className="reader-toc lg:sticky lg:top-20" aria-label="Table of contents" onKeyDown={onKeyDown} data-testid="reader-toc">
       <button
+        ref={toggleRef}
         type="button"
         className="flex w-full items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 lg:hidden"
         aria-expanded={open}

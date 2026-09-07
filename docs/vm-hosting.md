@@ -180,6 +180,20 @@ GitHub OIDC setup, new identity, secret copy or infrastructure command is involv
 The release owner must resolve the source/performance/schema/recovery requirements
 above before executing it. Adding this entrypoint is not a deployment or approval.
 
+The configured workflow supplies pinned Node 22 before the command. Its policy
+CLI runs directly from repository source and needs no repository dependency
+install. Before Azure resource validation or any source archive/build, VM,
+database or production mutation, the command binds the working
+`package-lock.json` to the exact bytes committed at the selected SHA, runs one
+package audit with no retry, rechecks the lock and withholds raw output. It
+accepts only the bounded pass report with an empty package list and all blocked,
+severity, vulnerability, reported and omitted counts equal to zero.
+
+The current lock is intentionally blocked because it contains
+`fast-uri@3.1.5` and `qs@6.15.3`. **Do not run the release command until trusted
+replacement integrity is admitted.** Workflow setup, a merge, audit evidence
+or this documentation update neither invokes nor approves a release.
+
 The Board release command (run from the composed project's root) is:
 
 ```powershell
