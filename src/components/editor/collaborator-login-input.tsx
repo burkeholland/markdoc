@@ -1,18 +1,6 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ChangeEvent,
-  type FocusEvent,
-  type KeyboardEvent,
-  type MouseEvent,
-} from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { Loader2, UserPlus } from "lucide-react";
 import { api, apiErrorText, type GitHubUserDto } from "@/lib/api";
 import { Avatar } from "@/components/ui/primitives";
@@ -41,7 +29,12 @@ type InputScope = {
 
 type LookupState =
   | { query: QueryAuthority; status: "loading" }
-  | { query: QueryAuthority; status: "error"; message: string; retrying: boolean };
+  | {
+      query: QueryAuthority;
+      status: "error";
+      message: string;
+      retrying: boolean;
+    };
 
 type TimerAuthority = {
   query: QueryAuthority;
@@ -80,12 +73,36 @@ type VisiblePublication = {
   lookup: LookupState | null;
 };
 
+type ControlBinding = {
+  scope: InputScope;
+};
+
+type RetryPublication = {
+  error: Extract<LookupState, { status: "error" }>;
+};
+
+type SuggestionRowPublication = {
+  candidate: GitHubUserDto;
+  index: number;
+  optionId: string;
+  login: string;
+  name: string | null;
+  avatarUrl: string;
+};
+
+type SuggestionListPublication = {
+  rows: SuggestionRowPublication[];
+};
+
 type InputVisit = {
   scope: InputScope;
+  binding: ControlBinding;
   control: HTMLDivElement | null;
   input: HTMLInputElement | null;
   query: QueryAuthority | null;
   publication: VisiblePublication;
+  retry: RetryPublication | null;
+  list: SuggestionListPublication | null;
 };
 
 /**
@@ -118,15 +135,15 @@ export function CollaboratorLoginInput({
   const excluded = useMemo<ReadonlySet<string>>(() => new Set(exclusionKey ? exclusionKey.split("\0") : []), [exclusionKey]);
   const scope = useMemo<InputScope>(() => ({ value, onChange, onPick, excluded, query }), [value, onChange, onPick, excluded, query]);
 
-  const controlNode = useRef<HTMLDivElement | null>(null);
-  const inputNode = useRef<HTMLInputElement | null>(null);
   const [controlElement, setControlElement] = useState<HTMLDivElement | null>(null);
   const [inputElement, setInputElement] = useState<HTMLInputElement | null>(null);
-  const committedScope = useRef<InputScope | null>(null);
-  const committedControl = useRef<HTMLDivElement | null>(null);
-  const committedInput = useRef<HTMLInputElement | null>(null);
+  const currentBinding = useRef<ControlBinding | null>(null);
   const currentVisit = useRef<InputVisit | null>(null);
   const currentQuery = useRef<QueryAuthority | null>(null);
+  const controlNodes = useRef(new WeakMap<ControlBinding, HTMLDivElement>());
+  const inputNodes = useRef(new WeakMap<ControlBinding, HTMLInputElement>());
+  const publicationNodes = useRef(new WeakMap<RetryPublication | SuggestionListPublication | SuggestionRowPublication, HTMLElement>());
+  const claimedPublications = useRef(new WeakSet<object>());
   const cache = useRef(new Map<string, GitHubUserDto[]>());
   // The login a pick just wrote into the box: it is not searched again (its owner is about to press Add).
   const picked = useRef<string | null>(null);
@@ -135,21 +152,11 @@ export function CollaboratorLoginInput({
   const [published, setPublished] = useState<PublishedState | null>(null);
 
   const state = published?.scope === scope ? published : null;
-  const visible = useMemo(
-    () => (state ? state.options.filter((candidate) => !scope.excluded.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX) : []),
-    [scope, state],
-  );
+  const visible = useMemo(() => (state ? state.options.filter((candidate) => !scope.excluded.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX) : []), [scope, state]);
   const expanded = !!state?.open && visible.length > 0;
   const activeIndex = state && state.active >= 0 && state.active < visible.length ? state.active : -1;
   const currentLookup = state && state.lookup?.query === state.query ? state.lookup : null;
-  const publication = useMemo<VisiblePublication>(
-    () => ({ state, visible, expanded, activeIndex, lookup: currentLookup }),
-    [activeIndex, currentLookup, expanded, state, visible],
-  );
-  const visit = useMemo<InputVisit>(
-    () => ({ scope, control: controlElement, input: inputElement, query: state?.query ?? null, publication }),
-    [controlElement, inputElement, publication, scope, state?.query],
-  );
+  const publication = useMemo<VisiblePublication>(() => ({ state, visible, expanded, activeIndex, lookup: currentLookup }), [activeIndex, currentLookup, expanded, state, visible]);
 
   const cancelTimer = useCallback((owner: QueryAuthority, timer: TimerAuthority) => {
     if (owner.timer !== timer || !timer.pending) return;
@@ -172,74 +179,102 @@ export function CollaboratorLoginInput({
     [cancelTimer],
   );
 
-  const ownsVisitIdentity = useCallback(
-    (owner: InputVisit) =>
-      currentVisit.current === owner &&
-      owner.control !== null &&
-      owner.input !== null &&
-      controlNode.current === owner.control &&
-      inputNode.current === owner.input,
-    [],
-  );
+  const retireVisitPublication = useCallback((owner: InputVisit) => {
+    if (currentVisit.current === owner) currentVisit.current = null;
+  }, []);
 
-  const ownsVisit = useCallback(
-    (owner: InputVisit) => ownsVisitIdentity(owner) && owner.query === currentQuery.current,
-    [ownsVisitIdentity],
-  );
-
-  const ownsQuery = useCallback(
-    (owner: QueryAuthority) =>
-      !owner.retired &&
-      currentQuery.current === owner &&
-      currentVisit.current?.scope === owner.scope &&
-      ownsVisitIdentity(currentVisit.current),
-    [ownsVisitIdentity],
-  );
-
-  const ownsRequest = useCallback(
-    (owner: QueryAuthority, request: RequestAuthority) => ownsQuery(owner) && owner.request === request && request.query === owner,
-    [ownsQuery],
-  );
-
-  const retireVisit = useCallback(
-    (owner: InputVisit) => {
-      if (currentVisit.current === owner) currentVisit.current = null;
+  const retireControlBinding = useCallback(
+    (owner: ControlBinding) => {
+      if (currentBinding.current !== owner) return;
+      const visitOwner = currentVisit.current;
+      if (visitOwner?.binding === owner) currentVisit.current = null;
+      currentBinding.current = null;
       const queryOwner = currentQuery.current;
       if (queryOwner?.scope === owner.scope) retireQuery(queryOwner);
     },
     [retireQuery],
   );
 
-  const retireCommittedNodes = useCallback(() => {
-    const owner = currentVisit.current;
-    if (owner) retireVisit(owner);
-    else if (currentQuery.current) retireQuery(currentQuery.current);
-    committedScope.current = null;
-    committedControl.current = null;
-    committedInput.current = null;
-  }, [retireQuery, retireVisit]);
+  const binding = useMemo<ControlBinding>(() => ({ scope }), [scope]);
 
-  const setControlRef = useCallback(
+  const setControlNode = useCallback(
     (node: HTMLDivElement | null) => {
-      const previous = controlNode.current;
+      const previous = controlNodes.current.get(binding) ?? null;
       if (previous === node) return;
-      if (previous && committedControl.current === previous) retireCommittedNodes();
-      controlNode.current = node;
-      setControlElement(node);
+      if (node) controlNodes.current.set(binding, node);
+      else controlNodes.current.delete(binding);
+      if (previous) retireControlBinding(binding);
+      if (node && (currentBinding.current === null || currentBinding.current === binding)) setControlElement(node);
     },
-    [retireCommittedNodes],
+    [binding, retireControlBinding],
   );
 
-  const setInputRef = useCallback(
+  const setInputNode = useCallback(
     (node: HTMLInputElement | null) => {
-      const previous = inputNode.current;
+      const previous = inputNodes.current.get(binding) ?? null;
       if (previous === node) return;
-      if (previous && committedInput.current === previous) retireCommittedNodes();
-      inputNode.current = node;
-      setInputElement(node);
+      if (node) inputNodes.current.set(binding, node);
+      else inputNodes.current.delete(binding);
+      if (previous) retireControlBinding(binding);
+      if (node && (currentBinding.current === null || currentBinding.current === binding)) setInputElement(node);
     },
-    [retireCommittedNodes],
+    [binding, retireControlBinding],
   );
+
+  const isVisitDomCurrent = useCallback(
+    (owner: InputVisit) => {
+      const control = owner.control;
+      const input = owner.input;
+      if (controlNodes.current.get(owner.binding) !== control || inputNodes.current.get(owner.binding) !== input || !control || !input || !control.isConnected || !input.isConnected || input.parentElement !== control) {
+        return false;
+      }
+
+      const error = owner.publication.lookup?.status === "error" ? owner.publication.lookup : null;
+      if (error) {
+        const retryPublication = owner.retry;
+        const retryNode = retryPublication ? publicationNodes.current.get(retryPublication) : null;
+        if (!retryPublication || retryPublication.error !== error || !retryNode || !retryNode.isConnected || !control.contains(retryNode)) {
+          return false;
+        }
+      } else if (owner.retry) {
+        return false;
+      }
+
+      if (!owner.publication.expanded) return owner.list === null;
+      const listPublication = owner.list;
+      const listNode = listPublication ? publicationNodes.current.get(listPublication) : null;
+      if (!listPublication || !listNode || !listNode.isConnected || listNode.parentElement !== control || listPublication.rows.length !== owner.publication.visible.length) {
+        return false;
+      }
+      return listPublication.rows.every((row, index) => {
+        const candidate = owner.publication.visible[index];
+        const rowNode = publicationNodes.current.get(row);
+        return (
+          row.index === index &&
+          row.candidate === candidate &&
+          row.login === candidate?.login &&
+          row.name === candidate?.name &&
+          row.avatarUrl === candidate?.avatarUrl &&
+          row.optionId === `${listId}-option-${index}` &&
+          rowNode instanceof HTMLLIElement &&
+          rowNode.isConnected &&
+          rowNode.parentElement === listNode &&
+          listNode.children.item(index) === rowNode &&
+          rowNode.id === row.optionId &&
+          rowNode.dataset.login === row.login
+        );
+      });
+    },
+    [listId],
+  );
+
+  const ownsVisitIdentity = useCallback((owner: InputVisit) => currentVisit.current === owner && currentBinding.current === owner.binding && owner.binding.scope === owner.scope && isVisitDomCurrent(owner), [isVisitDomCurrent]);
+
+  const ownsVisit = useCallback((owner: InputVisit) => ownsVisitIdentity(owner) && owner.query === currentQuery.current, [ownsVisitIdentity]);
+
+  const ownsQuery = useCallback((owner: QueryAuthority) => !owner.retired && currentQuery.current === owner && currentVisit.current?.scope === owner.scope && ownsVisitIdentity(currentVisit.current), [ownsVisitIdentity]);
+
+  const ownsRequest = useCallback((owner: QueryAuthority, request: RequestAuthority) => ownsQuery(owner) && owner.request === request && request.query === owner, [ownsQuery]);
 
   const makeQuery = useCallback((ownerScope: InputScope, started = false): QueryAuthority | null => {
     if (!ownerScope.query || ownerScope.query === picked.current || noToken.current) return null;
@@ -253,24 +288,93 @@ export function CollaboratorLoginInput({
     };
   }, []);
 
+  const visit = useMemo<InputVisit>(() => {
+    const retryPublication: RetryPublication | null =
+      publication.lookup?.status === "error"
+        ? {
+            error: publication.lookup,
+          }
+        : null;
+    const listPublication: SuggestionListPublication | null = publication.expanded
+      ? {
+          rows: publication.visible.map((candidate, index) => ({
+            candidate,
+            index,
+            optionId: `${listId}-option-${index}`,
+            login: candidate.login,
+            name: candidate.name,
+            avatarUrl: candidate.avatarUrl,
+          })),
+        }
+      : null;
+    return {
+      scope,
+      binding,
+      control: controlElement,
+      input: inputElement,
+      query: state?.query ?? null,
+      publication,
+      retry: retryPublication,
+      list: listPublication,
+    };
+  }, [binding, controlElement, inputElement, listId, publication, scope, state?.query]);
+
+  const setRetryNode = useCallback(
+    (owner: InputVisit, node: HTMLButtonElement | null) => {
+      const retryPublication = owner.retry;
+      if (!retryPublication) return;
+      const previous = publicationNodes.current.get(retryPublication) ?? null;
+      if (previous === node) return;
+      if (node) publicationNodes.current.set(retryPublication, node);
+      else publicationNodes.current.delete(retryPublication);
+      if (previous) retireVisitPublication(owner);
+    },
+    [retireVisitPublication],
+  );
+
+  const setListNode = useCallback(
+    (owner: InputVisit, node: HTMLUListElement | null) => {
+      const listPublication = owner.list;
+      if (!listPublication) return;
+      const previous = publicationNodes.current.get(listPublication) ?? null;
+      if (previous === node) return;
+      if (node) publicationNodes.current.set(listPublication, node);
+      else publicationNodes.current.delete(listPublication);
+      if (previous) retireVisitPublication(owner);
+    },
+    [retireVisitPublication],
+  );
+
+  const setRowNode = useCallback(
+    (owner: InputVisit, index: number, node: HTMLLIElement | null) => {
+      const row = owner.list?.rows[index];
+      if (!row) return;
+      const previous = publicationNodes.current.get(row) ?? null;
+      if (previous === node) return;
+      if (node) publicationNodes.current.set(row, node);
+      else publicationNodes.current.delete(row);
+      if (previous) retireVisitPublication(owner);
+    },
+    [retireVisitPublication],
+  );
+
   useLayoutEffect(() => {
-    const control = controlElement;
-    const input = inputElement;
     const previous = currentVisit.current;
-    if (!control || !input) {
-      retireCommittedNodes();
+    if (previous) retireVisitPublication(previous);
+    const control = visit.control;
+    const input = visit.input;
+    if (!control || !input || controlNodes.current.get(binding) !== control || inputNodes.current.get(binding) !== input || !control.isConnected || !input.isConnected || input.parentElement !== control) {
+      if (currentBinding.current === binding) retireControlBinding(binding);
       return;
     }
 
-    const replaced = committedScope.current !== scope || committedControl.current !== control || committedInput.current !== input;
-    if (previous && currentVisit.current === previous) currentVisit.current = null;
-
+    const replaced = currentBinding.current !== binding;
     if (replaced) {
+      const previousBinding = currentBinding.current;
+      if (previousBinding) retireControlBinding(previousBinding);
       const previousQuery = currentQuery.current;
       if (previousQuery) retireQuery(previousQuery);
-      committedScope.current = scope;
-      committedControl.current = control;
-      committedInput.current = input;
+      currentBinding.current = binding;
       const owner = makeQuery(scope);
       currentQuery.current = owner;
       setPublished({
@@ -284,11 +388,9 @@ export function CollaboratorLoginInput({
     }
 
     const owner = currentQuery.current?.scope === scope ? currentQuery.current : null;
-    currentVisit.current =
-      visit.control === control && visit.input === input && visit.query === owner
-        ? visit
-        : null;
-  }, [controlElement, inputElement, makeQuery, retireCommittedNodes, retireQuery, scope, visit]);
+    currentVisit.current = visit.binding === binding && visit.control === control && visit.input === input && visit.query === owner && isVisitDomCurrent(visit) ? visit : null;
+    return () => retireVisitPublication(visit);
+  }, [binding, isVisitDomCurrent, makeQuery, retireControlBinding, retireQuery, retireVisitPublication, scope, visit]);
 
   const publishForQuery = useCallback(
     (owner: QueryAuthority, update: (previous: PublishedState) => PublishedState) => {
@@ -330,7 +432,14 @@ export function CollaboratorLoginInput({
             noToken.current = true;
             setPublished((previous) =>
               previous?.scope === owner.scope && previous.query === owner
-                ? { scope: owner.scope, query: null, options: [], open: false, active: -1, lookup: null }
+                ? {
+                    scope: owner.scope,
+                    query: null,
+                    options: [],
+                    open: false,
+                    active: -1,
+                    lookup: null,
+                  }
                 : previous,
             );
             retireQuery(owner);
@@ -364,9 +473,7 @@ export function CollaboratorLoginInput({
             lookup: {
               query: owner,
               status: "error",
-              message: reason
-                ? `GitHub suggestions for @${owner.query}: ${reason}`
-                : `GitHub suggestions for @${owner.query} are temporarily unavailable.`,
+              message: reason ? `GitHub suggestions for @${owner.query}: ${reason}` : `GitHub suggestions for @${owner.query} are temporarily unavailable.`,
               retrying: false,
             },
           }));
@@ -420,7 +527,13 @@ export function CollaboratorLoginInput({
       if (queryOwner?.scope === owner.scope) retireQuery(queryOwner);
       setPublished((previous) =>
         ownsVisitIdentity(owner) && previous === ownedState
-          ? { ...ownedState, query: null, open: false, active: -1, lookup: null }
+          ? {
+              ...ownedState,
+              query: null,
+              open: false,
+              active: -1,
+              lookup: null,
+            }
           : previous,
       );
     },
@@ -428,27 +541,41 @@ export function CollaboratorLoginInput({
   );
 
   const ownsOption = useCallback(
-    (owner: InputVisit, ownerPublication: VisiblePublication, index: number, candidate: GitHubUserDto) =>
+    (owner: InputVisit, row: SuggestionRowPublication) =>
       ownsVisit(owner) &&
-      owner.publication === ownerPublication &&
-      ownerPublication.visible[index] === candidate &&
-      !owner.scope.excluded.has(candidate.login.toLowerCase()),
+      owner.publication.expanded &&
+      owner.list?.rows[row.index] === row &&
+      owner.publication.visible[row.index] === row.candidate &&
+      row.login === row.candidate.login &&
+      row.name === row.candidate.name &&
+      row.avatarUrl === row.candidate.avatarUrl &&
+      !owner.scope.excluded.has(row.login.toLowerCase()) &&
+      !claimedPublications.current.has(owner) &&
+      !claimedPublications.current.has(row),
     [ownsVisit],
   );
 
   const pick = useCallback(
-    (owner: InputVisit, ownerPublication: VisiblePublication, index: number, candidate: GitHubUserDto) => {
-      if (!ownsOption(owner, ownerPublication, index, candidate) || !ownerPublication.state) return;
-      const ownedState = ownerPublication.state;
-      picked.current = candidate.login;
+    (owner: InputVisit, row: SuggestionRowPublication) => {
+      if (!ownsOption(owner, row) || !owner.publication.state) return;
+      claimedPublications.current.add(owner);
+      claimedPublications.current.add(row);
+      const ownedState = owner.publication.state;
+      picked.current = row.login;
       setPublished((previous) =>
         ownsVisitIdentity(owner) && previous === ownedState
-          ? { ...ownedState, query: null, open: false, active: -1, lookup: null }
+          ? {
+              ...ownedState,
+              query: null,
+              open: false,
+              active: -1,
+              lookup: null,
+            }
           : previous,
       );
-      owner.scope.onChange(candidate.login);
+      owner.scope.onChange(row.login);
       if (!ownsVisitIdentity(owner)) return;
-      owner.scope.onPick?.(candidate.login);
+      owner.scope.onPick?.(row.login);
       if (!ownsVisitIdentity(owner)) return;
       const queryOwner = currentQuery.current;
       if (queryOwner?.scope === owner.scope) retireQuery(queryOwner);
@@ -457,11 +584,18 @@ export function CollaboratorLoginInput({
   );
 
   const retry = useCallback(
-    (owner: InputVisit, ownerPublication: VisiblePublication, error: Extract<LookupState, { status: "error" }>) => {
+    (owner: InputVisit, retryPublication: RetryPublication, event: MouseEvent<HTMLButtonElement>) => {
+      const button = event.currentTarget;
+      const error = retryPublication.error;
       if (
         !ownsVisit(owner) ||
-        owner.publication !== ownerPublication ||
-        ownerPublication.lookup !== error ||
+        owner.retry !== retryPublication ||
+        publicationNodes.current.get(retryPublication) !== button ||
+        !button.isConnected ||
+        !owner.control?.contains(button) ||
+        button.disabled ||
+        claimedPublications.current.has(retryPublication) ||
+        owner.publication.lookup !== error ||
         error.query !== currentQuery.current ||
         error.query.scope !== owner.scope ||
         error.query.query !== owner.scope.query ||
@@ -472,6 +606,7 @@ export function CollaboratorLoginInput({
         return;
       }
 
+      claimedPublications.current.add(retryPublication);
       owner.input?.focus();
       if (!ownsVisit(owner)) return;
       retireQuery(error.query);
@@ -479,14 +614,19 @@ export function CollaboratorLoginInput({
       if (!next) return;
       currentQuery.current = next;
       setPublished((previous) =>
-        previous === ownerPublication.state
+        previous === owner.publication.state
           ? {
               scope: owner.scope,
               query: next,
               options: [],
               open: false,
               active: -1,
-              lookup: { query: next, status: "error", message: error.message, retrying: true },
+              lookup: {
+                query: next,
+                status: "error",
+                message: error.message,
+                retrying: true,
+              },
             }
           : previous,
       );
@@ -496,25 +636,33 @@ export function CollaboratorLoginInput({
   );
 
   const leaveControl = (owner: InputVisit, event: FocusEvent<HTMLDivElement>) => {
+    const source = event.currentTarget;
     const control = owner.control;
-    if (!control || !ownsVisit(owner)) return;
+    if (!control || source !== control || !source.isConnected || !ownsVisit(owner)) return;
     if (event.relatedTarget instanceof Node && control.contains(event.relatedTarget)) return;
     cancelVisitLookup(owner);
   };
 
   const changeInput = (owner: InputVisit, event: ChangeEvent<HTMLInputElement>) => {
-    if (!ownsVisit(owner)) return;
+    const source = event.currentTarget;
+    if (source !== owner.input || !source.isConnected || !owner.control?.contains(source) || !ownsVisit(owner)) return;
+    if (event.target !== source) return;
     picked.current = null;
-    owner.scope.onChange(event.target.value);
+    owner.scope.onChange(source.value);
   };
 
-  const focusInput = (owner: InputVisit, ownerPublication: VisiblePublication) => {
-    if (!ownsVisit(owner) || owner.publication !== ownerPublication || ownerPublication.visible.length === 0) return;
+  const focusInput = (owner: InputVisit, event: FocusEvent<HTMLInputElement>) => {
+    const source = event.currentTarget;
+    if (source !== owner.input || !source.isConnected || !owner.control?.contains(source) || !ownsVisit(owner) || owner.publication.visible.length === 0) {
+      return;
+    }
     updateVisitState(owner, (previous) => ({ ...previous, open: true }));
   };
 
-  const onKeyDown = (owner: InputVisit, ownerPublication: VisiblePublication, event: KeyboardEvent<HTMLInputElement>) => {
-    if (!ownsVisit(owner) || owner.publication !== ownerPublication) return;
+  const onKeyDown = (owner: InputVisit, event: KeyboardEvent<HTMLInputElement>) => {
+    const source = event.currentTarget;
+    if (source !== owner.input || !source.isConnected || !owner.control?.contains(source) || !ownsVisit(owner)) return;
+    const ownerPublication = owner.publication;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       const count = ownerPublication.visible.length;
       if (count === 0) return;
@@ -522,43 +670,46 @@ export function CollaboratorLoginInput({
       updateVisitState(owner, (previous) => ({
         ...previous,
         open: true,
-        active:
-          event.key === "ArrowDown"
-            ? (ownerPublication.activeIndex + 1) % count
-            : ownerPublication.activeIndex <= 0
-              ? count - 1
-              : ownerPublication.activeIndex - 1,
+        active: event.key === "ArrowDown" ? (ownerPublication.activeIndex + 1) % count : ownerPublication.activeIndex <= 0 ? count - 1 : ownerPublication.activeIndex - 1,
       }));
       return;
     }
     if (event.key === "Enter" && ownerPublication.expanded && ownerPublication.activeIndex >= 0) {
-      const candidate = ownerPublication.visible[ownerPublication.activeIndex];
-      if (!candidate || !ownsOption(owner, ownerPublication, ownerPublication.activeIndex, candidate)) return;
+      const row = owner.list?.rows[ownerPublication.activeIndex];
+      if (!row || !ownsOption(owner, row)) return;
       event.preventDefault();
-      pick(owner, ownerPublication, ownerPublication.activeIndex, candidate);
+      pick(owner, row);
       return;
     }
     if (event.key === "Escape" && ownerPublication.expanded) {
       // DialogContent leaves this Escape to the expanded combobox (see primitives.tsx), so only the list closes.
       event.preventDefault();
-      updateVisitState(owner, (previous) => ({ ...previous, open: false, active: -1 }));
+      updateVisitState(owner, (previous) => ({
+        ...previous,
+        open: false,
+        active: -1,
+      }));
     }
   };
 
   const optionId = (index: number) => `${listId}-option-${index}`;
+  const ownsRowEvent = (owner: InputVisit, row: SuggestionRowPublication, source: HTMLLIElement) => {
+    const listNode = owner.list ? publicationNodes.current.get(owner.list) : null;
+    return publicationNodes.current.get(row) === source && source.isConnected && listNode?.contains(source) === true && ownsOption(owner, row);
+  };
 
   return (
-    <div ref={setControlRef} className="relative flex-1" onBlur={(event) => leaveControl(visit, event)}>
+    <div ref={setControlNode} className="relative flex-1" onBlur={(event) => leaveControl(visit, event)}>
       <UserPlus size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
       <input
-        ref={setInputRef}
+        ref={setInputNode}
         className="input pl-9"
         placeholder="GitHub handle, e.g. octocat"
         aria-label="GitHub handle"
         value={value}
         onChange={(event) => changeInput(visit, event)}
-        onKeyDown={(event) => onKeyDown(visit, publication, event)}
-        onFocus={() => focusInput(visit, publication)}
+        onKeyDown={(event) => onKeyDown(visit, event)}
+        onFocus={(event) => focusInput(visit, event)}
         role="combobox"
         aria-autocomplete="list"
         aria-expanded={expanded}
@@ -579,9 +730,12 @@ export function CollaboratorLoginInput({
         <div id={feedbackId} className="mt-1 flex items-center gap-2 text-xs text-danger" role="alert" aria-atomic="true" data-testid="share-login-error">
           <span className="min-w-0 flex-1">{currentLookup.message}</span>
           <button
+            ref={(node) => setRetryNode(visit, node)}
             type="button"
             className="btn btn-outline btn-sm h-6 shrink-0 px-2"
-            onClick={() => retry(visit, publication, currentLookup)}
+            onClick={(event) => {
+              if (visit.retry) retry(visit, visit.retry, event);
+            }}
             disabled={currentLookup.retrying}
             aria-busy={currentLookup.retrying || undefined}
           >
@@ -590,9 +744,10 @@ export function CollaboratorLoginInput({
         </div>
       )}
       {expanded && (
-        <ul id={listId} role="listbox" aria-label="Matching GitHub accounts" className="menu absolute left-0 right-0 top-full mt-1 max-h-80 overflow-y-auto" data-testid="share-login-suggestions">
+        <ul ref={(node) => setListNode(visit, node)} id={listId} role="listbox" aria-label="Matching GitHub accounts" className="menu absolute left-0 right-0 top-full mt-1 max-h-80 overflow-y-auto" data-testid="share-login-suggestions">
           {visible.map((candidate, index) => (
             <li
+              ref={(node) => setRowNode(visit, index, node)}
               key={candidate.login}
               id={optionId(index)}
               role="option"
@@ -600,14 +755,23 @@ export function CollaboratorLoginInput({
               className={cn("menu-item py-1.5", index === activeIndex && "bg-surface-3")}
               // Keep focus (and the list) in place while the pointer is down; the click then picks.
               onMouseDown={(event: MouseEvent<HTMLLIElement>) => {
-                if (!ownsOption(visit, publication, index, candidate)) return;
+                const row = visit.list?.rows[index];
+                if (!row || row.candidate !== candidate || !ownsRowEvent(visit, row, event.currentTarget)) return;
                 event.preventDefault();
               }}
-              onMouseEnter={() => {
-                if (!ownsOption(visit, publication, index, candidate)) return;
-                updateVisitState(visit, (previous) => ({ ...previous, active: index }));
+              onMouseEnter={(event: MouseEvent<HTMLLIElement>) => {
+                const row = visit.list?.rows[index];
+                if (!row || row.candidate !== candidate || !ownsRowEvent(visit, row, event.currentTarget)) return;
+                updateVisitState(visit, (previous) => ({
+                  ...previous,
+                  active: index,
+                }));
               }}
-              onClick={() => pick(visit, publication, index, candidate)}
+              onClick={(event: MouseEvent<HTMLLIElement>) => {
+                const row = visit.list?.rows[index];
+                if (!row || row.candidate !== candidate || !ownsRowEvent(visit, row, event.currentTarget)) return;
+                pick(visit, row);
+              }}
               data-testid="share-login-option"
               data-login={candidate.login}
             >
