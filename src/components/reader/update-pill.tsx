@@ -4,8 +4,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 type DocumentAuthority = {
+  mount: symbol;
   docId: string;
   initialHash: string;
+};
+
+type RefreshPublication = {
+  document: DocumentAuthority;
 };
 
 type PollingAuthority = {
@@ -28,12 +33,24 @@ type RequestOwner = {
  * changed. No WebSocket: a reader does not need live cursors, only to know it is stale.
  */
 export function UpdatePill({ docId, initialHash, pollMs }: { docId: string; initialHash: string; pollMs: number }) {
-  const documentAuthority = useMemo<DocumentAuthority>(() => ({ docId, initialHash }), [docId, initialHash]);
+  const [mount] = useState(() => Symbol("reader-update-pill"));
+  const documentAuthority = useMemo<DocumentAuthority>(() => ({ mount, docId, initialHash }), [mount, docId, initialHash]);
   const authority = useMemo<PollingAuthority>(() => ({ document: documentAuthority, pollMs }), [documentAuthority, pollMs]);
+  const documentAuthorityRef = useRef<DocumentAuthority | null>(null);
   const authorityRef = useRef<PollingAuthority | null>(null);
   const pollingOwnerRef = useRef<PollingOwner | null>(null);
   const requestOwnerRef = useRef<RequestOwner | null>(null);
-  const [staleDocument, setStaleDocument] = useState<DocumentAuthority | null>(null);
+  const refreshPublicationRef = useRef<RefreshPublication | null>(null);
+  const [refreshPublication, setRefreshPublication] = useState<RefreshPublication | null>(null);
+
+  useLayoutEffect(() => {
+    documentAuthorityRef.current = documentAuthority;
+
+    return () => {
+      if (documentAuthorityRef.current === documentAuthority) documentAuthorityRef.current = null;
+      if (refreshPublicationRef.current?.document === documentAuthority) refreshPublicationRef.current = null;
+    };
+  }, [documentAuthority]);
 
   useLayoutEffect(() => {
     authorityRef.current = authority;
@@ -53,7 +70,7 @@ export function UpdatePill({ docId, initialHash, pollMs }: { docId: string; init
 
   useEffect(() => {
     const hasAuthority = () => authorityRef.current === authority;
-    if (!hasAuthority() || staleDocument === authority.document) return;
+    if (!hasAuthority() || refreshPublication?.document === authority.document) return;
 
     let timer: ReturnType<typeof setInterval> | null = null;
     let retired = false;
@@ -94,7 +111,9 @@ export function UpdatePill({ docId, initialHash, pollMs }: { docId: string; init
         if (data.contentHash && data.contentHash !== authority.document.initialHash) {
           changed = true;
           stopTimer();
-          setStaleDocument(authority.document);
+          const publication: RefreshPublication = { document: authority.document };
+          refreshPublicationRef.current = publication;
+          setRefreshPublication(publication);
         }
       } catch {
         // Offline or transient error: try again on the next tick.
@@ -126,15 +145,25 @@ export function UpdatePill({ docId, initialHash, pollMs }: { docId: string; init
     start();
     document.addEventListener("visibilitychange", onVisibility);
     return retire;
-  }, [authority, staleDocument]);
+  }, [authority, refreshPublication]);
 
-  if (staleDocument !== documentAuthority) return null;
+  const currentPublication = refreshPublication?.document === documentAuthority ? refreshPublication : null;
+  if (!currentPublication) return null;
   return (
     <div className="reader-pill pointer-events-none fixed inset-x-0 top-16 z-20 flex justify-center" role="status" data-testid="reader-updated">
       <button
         type="button"
         className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-line-2 bg-surface px-3.5 py-1.5 text-sm font-medium text-ink shadow-md hover:bg-surface-2"
-        onClick={() => window.location.reload()}
+        onClick={() => {
+          if (
+            documentAuthorityRef.current !== currentPublication.document ||
+            authorityRef.current?.document !== currentPublication.document ||
+            refreshPublicationRef.current !== currentPublication
+          )
+            return;
+          refreshPublicationRef.current = null;
+          window.location.reload();
+        }}
       >
         <span className="text-ink-3">Updated</span>
         <span aria-hidden className="text-ink-4">
