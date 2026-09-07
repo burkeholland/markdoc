@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect, useLayoutEffect, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
 import type { DocumentDto } from "@/server/dto";
 
 const signIn = vi.fn(() => new Promise<void>(() => {}));
@@ -102,6 +104,11 @@ function repoFile(path: string): RepoFile {
 }
 
 const currentRepo = repository();
+const unhandledRejections: unknown[] = [];
+
+function recordUnhandledRejection(reason: unknown) {
+  unhandledRejections.push(reason);
+}
 
 function documentDto(id = "doc-current", title = "Current document"): DocumentDto {
   return {
@@ -132,9 +139,14 @@ beforeEach(() => {
   importDocument.mockReset().mockResolvedValue({ document: { id: "imported", title: "Imported" } });
   linkDocument.mockReset().mockResolvedValue({ document: documentDto() });
   signIn.mockReset().mockImplementation(() => new Promise<void>(() => {}));
+  unhandledRejections.length = 0;
+  process.on("unhandledRejection", recordUnhandledRejection);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  process.off("unhandledRejection", recordUnhandledRejection);
+});
 
 function renderPicker() {
   return render(<GitHubPicker mode="import" githubAvailable githubConfigured />);
@@ -146,6 +158,38 @@ async function selectRepository(name = currentRepo.fullName) {
   const item = items.find((candidate) => candidate.textContent?.includes(name));
   expect(item).toBeDefined();
   fireEvent.click(item!);
+}
+
+function PickerLayoutBoundary({
+  boundary = 0,
+  onBoundary,
+  children,
+}: {
+  boundary?: number;
+  onBoundary?: () => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return children;
+}
+
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
+}
+
+function PickerSlot({ name, githubAvailable = true }: { name: string; githubAvailable?: boolean }) {
+  return (
+    <section data-testid={`picker-slot-${name}`}>
+      <GitHubPicker mode="import" githubAvailable={githubAvailable} githubConfigured />
+    </section>
+  );
+}
+
+function pickerSlot(name: string) {
+  return within(screen.getByTestId(`picker-slot-${name}`));
 }
 
 // The empty state of the GitHub picker for an account without a GitHub token (#162): it used to be a
@@ -498,6 +542,285 @@ describe("GitHubPicker list recovery", () => {
     expect(screen.queryByTestId("repo-load-error")).toBeNull();
     expect(screen.getByTestId("github-action-error")).toHaveTextContent("Import was rejected");
     expect(importDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "retires a replaced gist %s before the parent layout boundary and preserves the current owner",
+    async (outcome) => {
+      const oldGists = deferred<{ gists: Gist[] }>();
+      const currentGists = deferred<{ gists: Gist[] }>();
+      gists.mockReset().mockReturnValueOnce(oldGists.promise).mockReturnValueOnce(currentGists.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <PickerLayoutBoundary>
+              <PickerSlot key="old-gist-picker" name="old-gist" />
+              <PickerSlot key="current-gist-picker" name="current-gist" />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </PickerLayoutBoundary>,
+          );
+        });
+        expect(gists.mock.calls).toEqual([[], []]);
+        expect(repos).not.toHaveBeenCalled();
+        expect(branches).not.toHaveBeenCalled();
+        expect(files).not.toHaveBeenCalled();
+        const currentFilter = pickerSlot("current-gist").getByPlaceholderText("Filter gists");
+        currentFilter.focus();
+
+        let boundaryReached!: () => void;
+        const atBoundary = new Promise<void>((resolve) => {
+          boundaryReached = resolve;
+        });
+        root.render(
+          <PickerLayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (outcome === "success") {
+                oldGists.resolve({ gists: [gist("retired-gist", "retired-gist.md")] });
+              } else {
+                oldGists.reject(new Error("Retired gist failure"));
+              }
+              boundaryReached();
+            }}
+          >
+            <PickerSlot key="current-gist-picker" name="current-gist" />
+          </PickerLayoutBoundary>,
+        );
+        await atBoundary;
+        await act(async () => {
+          await Promise.allSettled([oldGists.promise]);
+          await Promise.resolve();
+        });
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(gists.mock.calls).toEqual([[], []]);
+        expect(pickerSlot("current-gist").getByTestId("gist-list").querySelector(".animate-spin")).not.toBeNull();
+        expect(screen.queryByText("retired-gist.md")).toBeNull();
+        expect(screen.queryByText("Retired gist failure")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+        expect(document.activeElement).toBe(currentFilter);
+        fireEvent.click(pickerSlot("current-gist").getByTestId("picker-tab-gist"));
+        fireEvent.click(pickerSlot("current-gist").getByTestId("picker-tab-gist"));
+        expect(gists.mock.calls).toEqual([[], []]);
+
+        await act(async () => {
+          currentGists.resolve({ gists: [gist("current-gist", "current-gist.md")] });
+          await currentGists.promise;
+        });
+        expect(pickerSlot("current-gist").getByText("current-gist.md")).toBeInTheDocument();
+        expect(pickerSlot("current-gist").getByTestId("gist-list").querySelector(".animate-spin")).toBeNull();
+        expect(gists.mock.calls).toEqual([[], []]);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "retires a repository %s when GitHub availability changes without releasing the current owner",
+    async (outcome) => {
+      const oldRepos = deferred<{ repos: Repo[] }>();
+      const currentRepos = deferred<{ repos: Repo[] }>();
+      gists.mockReset().mockResolvedValue({ gists: [] });
+      repos.mockReset().mockReturnValueOnce(oldRepos.promise).mockReturnValueOnce(currentRepos.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      let passiveCleanupsAtBoundary = -1;
+      const recordPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <PickerLayoutBoundary>
+              <PickerSlot key="availability-picker" name="availability" />
+              <PickerSlot key="current-repo-picker" name="current-repo" />
+              <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+            </PickerLayoutBoundary>,
+          );
+        });
+        fireEvent.click(pickerSlot("availability").getByTestId("picker-tab-repo"));
+        fireEvent.click(pickerSlot("current-repo").getByTestId("picker-tab-repo"));
+        await waitFor(() => expect(repos).toHaveBeenCalledTimes(2));
+        expect(gists.mock.calls).toEqual([[], []]);
+        expect(repos.mock.calls).toEqual([[], []]);
+        expect(branches).not.toHaveBeenCalled();
+        expect(files).not.toHaveBeenCalled();
+        const currentFilter = pickerSlot("current-repo").getByPlaceholderText("Filter repositories");
+        currentFilter.focus();
+
+        let boundaryReached!: () => void;
+        const atBoundary = new Promise<void>((resolve) => {
+          boundaryReached = resolve;
+        });
+        root.render(
+          <PickerLayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              passiveCleanupsAtBoundary = passiveCleanups;
+              if (outcome === "success") {
+                oldRepos.resolve({ repos: [repository("retired-repository")] });
+              } else {
+                oldRepos.reject(new Error("Retired repository failure"));
+              }
+              boundaryReached();
+            }}
+          >
+            <PickerSlot key="availability-picker" name="availability" githubAvailable={false} />
+            <PickerSlot key="current-repo-picker" name="current-repo" />
+          </PickerLayoutBoundary>,
+        );
+        await atBoundary;
+        await act(async () => {
+          await Promise.allSettled([oldRepos.promise]);
+          await Promise.resolve();
+        });
+
+        expect(passiveCleanupsAtBoundary).toBe(0);
+        expect(pickerSlot("availability").getByTestId("github-signin-prompt")).toBeInTheDocument();
+        expect(pickerSlot("current-repo").getByTestId("repo-list").querySelector(".animate-spin")).not.toBeNull();
+        expect(screen.queryByText("octo/retired-repository")).toBeNull();
+        expect(screen.queryByText("Retired repository failure")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+        expect(document.activeElement).toBe(currentFilter);
+        fireEvent.click(pickerSlot("current-repo").getByTestId("picker-tab-repo"));
+        fireEvent.click(pickerSlot("current-repo").getByTestId("picker-tab-repo"));
+        expect(repos.mock.calls).toEqual([[], []]);
+
+        await act(async () => {
+          currentRepos.resolve({ repos: [repository("current-repository")] });
+          await currentRepos.promise;
+        });
+        expect(pickerSlot("current-repo").getByText("octo/current-repository")).toBeInTheDocument();
+        expect(pickerSlot("current-repo").getByTestId("repo-list").querySelector(".animate-spin")).toBeNull();
+        expect(repos.mock.calls).toEqual([[], []]);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retires branch success and file failure at picker removal without disturbing current pending sources", async () => {
+    const oldRepo = repository("retired-source");
+    const replacementRepo = repository("replacement-source", "trunk");
+    const oldBranches = deferred<{ branches: string[] }>();
+    const currentBranches = deferred<{ branches: string[] }>();
+    const oldFiles = deferred<{ files: RepoFile[] }>();
+    const currentFiles = deferred<{ files: RepoFile[] }>();
+    gists.mockReset().mockResolvedValue({ gists: [] });
+    repos.mockReset().mockResolvedValueOnce({ repos: [oldRepo] }).mockResolvedValueOnce({ repos: [replacementRepo] });
+    branches.mockImplementation((_owner, name) => (name === oldRepo.name ? oldBranches.promise : currentBranches.promise));
+    files.mockImplementation((_owner, name) => (name === oldRepo.name ? oldFiles.promise : currentFiles.promise));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+    let passiveCleanupsAtBoundary = -1;
+    const recordPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <PickerLayoutBoundary>
+            <PickerSlot key="old-source-picker" name="old-source" />
+            <PickerSlot key="replacement-source-picker" name="replacement-source" />
+            <PassiveCleanupProbe onCleanup={recordPassiveCleanup} />
+          </PickerLayoutBoundary>,
+        );
+      });
+      fireEvent.click(pickerSlot("old-source").getByTestId("picker-tab-repo"));
+      fireEvent.click(pickerSlot("replacement-source").getByTestId("picker-tab-repo"));
+      const oldRepoItem = await pickerSlot("old-source").findByText(oldRepo.fullName);
+      const currentRepoItem = await pickerSlot("replacement-source").findByText(replacementRepo.fullName);
+      fireEvent.click(oldRepoItem);
+      fireEvent.click(currentRepoItem);
+      await waitFor(() => {
+        expect(branches).toHaveBeenCalledTimes(2);
+        expect(files).toHaveBeenCalledTimes(2);
+      });
+      expect(gists.mock.calls).toEqual([[], []]);
+      expect(repos.mock.calls).toEqual([[], []]);
+      expect(branches.mock.calls).toEqual([
+        [oldRepo.owner, oldRepo.name],
+        [replacementRepo.owner, replacementRepo.name],
+      ]);
+      expect(files.mock.calls).toEqual([
+        [oldRepo.owner, oldRepo.name, oldRepo.defaultBranch],
+        [replacementRepo.owner, replacementRepo.name, replacementRepo.defaultBranch],
+      ]);
+      const currentFilter = pickerSlot("replacement-source").getByPlaceholderText("Filter files");
+      currentFilter.focus();
+
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+      root.render(
+        <PickerLayoutBoundary
+          boundary={1}
+          onBoundary={() => {
+            passiveCleanupsAtBoundary = passiveCleanups;
+            oldBranches.resolve({ branches: ["legacy"] });
+            oldFiles.reject(new Error("Retired file failure"));
+            boundaryReached();
+          }}
+        >
+          <PickerSlot key="replacement-source-picker" name="replacement-source" />
+        </PickerLayoutBoundary>,
+      );
+      await atBoundary;
+      await act(async () => {
+        await Promise.allSettled([oldBranches.promise, oldFiles.promise]);
+        await Promise.resolve();
+      });
+
+      expect(passiveCleanupsAtBoundary).toBe(0);
+      expect(pickerSlot("replacement-source").getByTestId("branch-list").querySelector(".animate-spin")).not.toBeNull();
+      expect(pickerSlot("replacement-source").getByTestId("file-list").querySelector(".animate-spin")).not.toBeNull();
+      expect(screen.queryByRole("option", { name: "legacy" })).toBeNull();
+      expect(screen.queryByText("Retired file failure")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+      expect(document.activeElement).toBe(currentFilter);
+      expect(branches).toHaveBeenCalledTimes(2);
+      expect(files).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        currentBranches.resolve({ branches: ["trunk", "release"] });
+        currentFiles.resolve({ files: [repoFile("docs/current.md")] });
+        await Promise.all([currentBranches.promise, currentFiles.promise]);
+      });
+      expect(pickerSlot("replacement-source").getByTestId("branch-select")).toHaveValue("trunk");
+      expect(pickerSlot("replacement-source").getByRole("option", { name: "release" })).toBeInTheDocument();
+      expect(pickerSlot("replacement-source").getByText("docs/current.md")).toBeInTheDocument();
+      expect(branches).toHaveBeenCalledTimes(2);
+      expect(files).toHaveBeenCalledTimes(2);
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
 
