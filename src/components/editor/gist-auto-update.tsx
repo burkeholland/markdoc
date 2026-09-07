@@ -1,6 +1,16 @@
 "use client";
 
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, apiErrorText } from "@/lib/api";
 import {
@@ -29,6 +39,45 @@ type ControlAuthority = {
   timerOwner: TimerOwner | null;
   runQueuedStatus: (() => void) | null;
 };
+type SettingsButtonName = "refresh" | "preview" | "enable" | "retry" | "disable";
+type SettingsControlName = SettingsButtonName | "acknowledgement";
+type SettingsButtonFacts = {
+  name: SettingsButtonName;
+  kind: Action["kind"];
+  eligible: boolean;
+  destination: GistAutoUpdateDestination | null;
+};
+type AcknowledgementFacts = {
+  name: "acknowledgement";
+  eligible: boolean;
+  destination: GistAutoUpdateDestination;
+};
+type SettingsPresentation = {
+  mount: symbol;
+  identity: string;
+  documentId: string;
+  gistId: string;
+  filename: string;
+  url: string;
+  status: GistAutoUpdateStatus | null;
+  preview: GistAutoUpdateDestination | null;
+  problem: Problem | null;
+  busy: Action["kind"] | null;
+  acknowledged: boolean;
+  enabled: boolean;
+  state: Problem["status"] | GistAutoUpdateStatus["status"] | undefined;
+  blocked: boolean;
+  canRetry: boolean;
+  buttons: Record<SettingsButtonName, SettingsButtonFacts | null>;
+  acknowledgement: AcknowledgementFacts | null;
+};
+type SettingsPresentationRuntime = {
+  active: boolean;
+  root: HTMLElement | null;
+  elements: Record<SettingsControlName, HTMLElement | null>;
+};
+
+const SETTINGS_BUTTON_NAMES: readonly SettingsButtonName[] = ["refresh", "preview", "enable", "retry", "disable"];
 
 const LABELS = { off: "Off", pending: "Pending", syncing: "Syncing", synced: "Synced", failed: "Failed", conflict: "Conflict" };
 
@@ -61,6 +110,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
   url: string;
 }) {
   const id = useId();
+  const [settingsMount] = useState(() => Symbol(identity));
   const serial = useRef(0);
   const authorityRef = useRef<ControlAuthority>({
     identity,
@@ -80,10 +130,57 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
   const [preview, setPreview] = useState<GistAutoUpdateDestination | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
+  const activePresentationRef = useRef<SettingsPresentation | null>(null);
+  const presentationRuntimesRef = useRef(new WeakMap<SettingsPresentation, SettingsPresentationRuntime>());
+
+  const runtimeFor = useCallback((candidate: SettingsPresentation) => {
+    const runtimes = presentationRuntimesRef.current;
+    let runtime = runtimes.get(candidate);
+    if (!runtime) {
+      runtime = {
+        active: false,
+        root: null,
+        elements: {
+          refresh: null,
+          preview: null,
+          acknowledgement: null,
+          enable: null,
+          retry: null,
+          disable: null,
+        },
+      };
+      runtimes.set(candidate, runtime);
+    }
+    return runtime;
+  }, []);
+
+  const retirePresentation = useCallback((candidate: SettingsPresentation) => {
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    if (runtime) runtime.active = false;
+    if (activePresentationRef.current === candidate) activePresentationRef.current = null;
+  }, []);
+
+  const bindRoot = useCallback((candidate: SettingsPresentation, element: HTMLElement | null) => {
+    const runtime = runtimeFor(candidate);
+    if (runtime.active && runtime.root !== element) retirePresentation(candidate);
+    runtime.root = element;
+    if (!element) retirePresentation(candidate);
+  }, [retirePresentation, runtimeFor]);
+
+  const bindControl = useCallback((
+    candidate: SettingsPresentation,
+    name: SettingsControlName,
+    element: HTMLElement | null,
+  ) => {
+    const runtime = runtimeFor(candidate);
+    if (runtime.active && runtime.elements[name] !== element) retirePresentation(candidate);
+    runtime.elements[name] = element;
+    if (!element) retirePresentation(candidate);
+  }, [retirePresentation, runtimeFor]);
 
   useLayoutEffect(() => {
     const authority = authorityRef.current;
-    const mount = Symbol(identity);
+    const mount = settingsMount;
     authority.mount = mount;
     authority.visible = document.visibilityState === "visible";
 
@@ -115,7 +212,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
       authority.runQueuedStatus = null;
       clearAuthorityTimer(authority);
     };
-  }, [identity]);
+  }, [identity, settingsMount]);
 
   useEffect(() => {
     const authority = authorityRef.current;
@@ -319,15 +416,113 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
     };
   }, [action, documentId, filename, gistId, identity]);
 
-  function start(kind: Action["kind"]) {
+  const enabled = status?.enabled ?? false;
+  const state = problem?.status ?? status?.status;
+  const blocked = problem?.source === "destination";
+  const canRetry = enabled && !blocked && (status?.status === "failed" || status?.status === "conflict" || problem?.source === "retry");
+  const ownsPresentation = useCallback((candidate: SettingsPresentation) => {
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const root = runtime?.root;
+    if (
+      activePresentationRef.current !== candidate
+      || runtime?.active !== true
+      || !root
+      || !root.isConnected
+      || candidate.mount !== settingsMount
+      || candidate.identity !== identity
+      || candidate.documentId !== documentId
+      || candidate.gistId !== gistId
+      || candidate.filename !== filename
+      || candidate.url !== url
+      || candidate.status !== status
+      || candidate.preview !== preview
+      || candidate.problem !== problem
+      || candidate.busy !== busy
+      || candidate.acknowledged !== acknowledged
+      || candidate.enabled !== enabled
+      || candidate.state !== state
+      || candidate.blocked !== blocked
+      || candidate.canRetry !== canRetry
+    ) return false;
+    for (const name of SETTINGS_BUTTON_NAMES) {
+      const control = candidate.buttons[name];
+      const element = runtime.elements[name];
+      if (control && (!element || !element.isConnected || !root.contains(element))) return false;
+      if (!control && element) return false;
+    }
+    const acknowledgementElement = runtime.elements.acknowledgement;
+    if (
+      candidate.acknowledgement
+        ? !acknowledgementElement
+          || !acknowledgementElement.isConnected
+          || !root.contains(acknowledgementElement)
+        : acknowledgementElement !== null
+    ) return false;
+    const authority = authorityRef.current;
+    return authority.identity === candidate.identity && authority.mount === candidate.mount;
+  }, [
+    acknowledged,
+    blocked,
+    busy,
+    canRetry,
+    documentId,
+    enabled,
+    filename,
+    gistId,
+    identity,
+    preview,
+    problem,
+    settingsMount,
+    state,
+    status,
+    url,
+  ]);
+
+  const ownsButton = useCallback((
+    candidate: SettingsPresentation,
+    name: SettingsButtonName,
+    element: HTMLButtonElement,
+  ) => {
+    const control = candidate.buttons[name];
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const root = runtime?.root;
+    return (
+      control?.name === name
+      && control.eligible
+      && runtime?.elements[name] === element
+      && element.isConnected
+      && !element.disabled
+      && !!root
+      && root.contains(element)
+      && ownsPresentation(candidate)
+    );
+  }, [ownsPresentation]);
+
+  const start = useCallback((
+    candidate: SettingsPresentation,
+    name: SettingsButtonName,
+    element: HTMLButtonElement,
+  ) => {
+    if (!ownsButton(candidate, name, element)) return;
+    const control = candidate.buttons[name]!;
     const authority = authorityRef.current;
     const mount = authority.mount;
     if (
-      authority.identity !== identity
-      || mount === null
+      mount !== candidate.mount
       || authority.busy !== null
-      || (kind === "enable" && (!preview || !acknowledged || status?.enabled))
+      || (
+        control.kind === "enable"
+        && (
+          !control.destination
+          || control.destination !== candidate.preview
+          || !candidate.acknowledged
+          || candidate.status?.enabled
+        )
+      )
     ) return;
+
+    const kind = control.kind;
+    authority.busy = kind;
     const queued = authority.queuedStatus;
     const preserveQueuedStatus = queued
       && queued.mount === mount
@@ -338,7 +533,6 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
     authority.queuedStatus = preserveQueuedStatus
       ? { mount, serial: nextSerial, visibilityGeneration: authority.visibilityGeneration }
       : null;
-    authority.busy = kind;
     setBusy(kind);
     setProblem(null);
     if (kind === "preview") {
@@ -346,19 +540,193 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
       setAcknowledged(false);
     }
     setAction(kind === "enable"
-      ? { kind, serial: nextSerial, destination: preview! }
+      ? { kind, serial: nextSerial, destination: control.destination! }
       : kind === "status"
         ? { kind, serial: nextSerial, explicit: true }
-      : { kind, serial: nextSerial });
-  }
+        : { kind, serial: nextSerial });
+  }, [ownsButton]);
 
-  const enabled = status?.enabled ?? false;
-  const state = problem?.status ?? status?.status;
+  const changeAcknowledgement = useCallback((
+    candidate: SettingsPresentation,
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const control = candidate.acknowledgement;
+    const element = event.currentTarget;
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const root = runtime?.root;
+    if (
+      !control
+      || control.name !== "acknowledgement"
+      || !control.eligible
+      || runtime?.elements.acknowledgement !== element
+      || !element.isConnected
+      || element.disabled
+      || !root
+      || !root.contains(element)
+      || control.destination !== candidate.preview
+      || !ownsPresentation(candidate)
+    ) return;
+    const checked = element.checked;
+    if (checked === candidate.acknowledged) return;
+    retirePresentation(candidate);
+    setAcknowledged(checked);
+  }, [ownsPresentation, retirePresentation]);
+
+  const presentation = useMemo<SettingsPresentation>(() => {
+    const refreshEligible = !busy;
+    const previewEligible = !busy && !!status && !blocked;
+    const acknowledgementEligible = !busy;
+    const enableEligible = !busy && !!status && !!preview && acknowledged && !blocked && problem?.source !== "status";
+    const retryEligible = !busy;
+    const disableEligible = !busy;
+    const candidate: SettingsPresentation = {
+      mount: settingsMount,
+      identity,
+      documentId,
+      gistId,
+      filename,
+      url,
+      status,
+      preview,
+      problem,
+      busy,
+      acknowledged,
+      enabled,
+      state,
+      blocked,
+      canRetry,
+      buttons: {
+        refresh: problem && !blocked
+          ? {
+              name: "refresh",
+              kind: "status",
+              eligible: refreshEligible,
+              destination: null,
+            }
+          : null,
+        preview: !enabled
+          ? {
+              name: "preview",
+              kind: "preview",
+              eligible: previewEligible,
+              destination: null,
+            }
+          : null,
+        enable: !enabled
+          ? {
+              name: "enable",
+              kind: "enable",
+              eligible: enableEligible,
+              destination: preview,
+            }
+          : null,
+        retry: canRetry
+          ? {
+              name: "retry",
+              kind: "retry",
+              eligible: retryEligible,
+              destination: null,
+            }
+          : null,
+        disable: enabled
+          ? {
+              name: "disable",
+              kind: "disable",
+              eligible: disableEligible,
+              destination: null,
+            }
+          : null,
+      },
+      acknowledgement: !enabled && preview
+        ? {
+            name: "acknowledgement",
+            eligible: acknowledgementEligible,
+            destination: preview,
+          }
+        : null,
+    };
+    return candidate;
+  }, [
+    acknowledged,
+    blocked,
+    busy,
+    canRetry,
+    documentId,
+    enabled,
+    filename,
+    gistId,
+    identity,
+    preview,
+    problem,
+    settingsMount,
+    state,
+    status,
+    url,
+  ]);
+  const rootCallback = useCallback(
+    (element: HTMLElement | null) => bindRoot(presentation, element),
+    [bindRoot, presentation],
+  );
+  const refreshRef = useCallback(
+    (element: HTMLButtonElement | null) => bindControl(presentation, "refresh", element),
+    [bindControl, presentation],
+  );
+  const previewRef = useCallback(
+    (element: HTMLButtonElement | null) => bindControl(presentation, "preview", element),
+    [bindControl, presentation],
+  );
+  const acknowledgementRef = useCallback(
+    (element: HTMLInputElement | null) => bindControl(presentation, "acknowledgement", element),
+    [bindControl, presentation],
+  );
+  const enableRef = useCallback(
+    (element: HTMLButtonElement | null) => bindControl(presentation, "enable", element),
+    [bindControl, presentation],
+  );
+  const retryRef = useCallback(
+    (element: HTMLButtonElement | null) => bindControl(presentation, "retry", element),
+    [bindControl, presentation],
+  );
+  const disableRef = useCallback(
+    (element: HTMLButtonElement | null) => bindControl(presentation, "disable", element),
+    [bindControl, presentation],
+  );
+  const refreshClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => start(presentation, "refresh", event.currentTarget),
+    [presentation, start],
+  );
+  const previewClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => start(presentation, "preview", event.currentTarget),
+    [presentation, start],
+  );
+  const enableClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => start(presentation, "enable", event.currentTarget),
+    [presentation, start],
+  );
+  const retryClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => start(presentation, "retry", event.currentTarget),
+    [presentation, start],
+  );
+  const disableClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => start(presentation, "disable", event.currentTarget),
+    [presentation, start],
+  );
+  const acknowledgementChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => changeAcknowledgement(presentation, event),
+    [changeAcknowledgement, presentation],
+  );
+
+  useLayoutEffect(() => {
+    const previous = activePresentationRef.current;
+    if (previous && previous !== presentation) retirePresentation(previous);
+    const runtime = runtimeFor(presentation);
+    runtime.active = true;
+    activePresentationRef.current = presentation;
+    return () => retirePresentation(presentation);
+  }, [presentation, retirePresentation, runtimeFor]);
   const destination = enabled ? status?.destination : preview;
-  const blocked = problem?.source === "destination";
-  const canRetry = enabled && !blocked && (status?.status === "failed" || status?.status === "conflict" || problem?.source === "retry");
   return (
-    <section aria-labelledby={`${id}-title`} className="mb-4 flex flex-col gap-2 rounded-xl border border-line bg-surface-2 p-3 text-sm" data-testid="gist-auto-update">
+    <section ref={rootCallback} aria-labelledby={`${id}-title`} className="mb-4 flex flex-col gap-2 rounded-xl border border-line bg-surface-2 p-3 text-sm" data-testid="gist-auto-update">
       <div className="flex items-center gap-2 font-medium text-ink">
         <h3 id={`${id}-title`}>Auto-update gist</h3>
         <span className="ml-auto text-xs text-ink-3" role="status" data-testid="gist-auto-update-state" data-status={state ?? "loading"}>
@@ -390,34 +758,34 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
       )}
       {state === "conflict" && <p className="text-xs text-ink-3">Publishing is paused for a conflict. Manually reconcile the Markdoc and GitHub versions before retrying. Retry does not force an overwrite or resolve a known conflict.</p>}
       {problem && !blocked && (
-        <button type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy} onClick={() => start("status")}>Refresh status</button>
+        <button ref={refreshRef} type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy} onClick={refreshClick}>Refresh status</button>
       )}
       {!enabled && (
         <>
           <p className="text-xs text-ink-3" data-testid="gist-auto-update-preview" data-status={busy === "preview" ? "checking" : preview ? "checked" : "unchecked"}>
             {busy === "preview" ? "Checking the linked gist (no publishing)…" : preview ? "Review this checked destination and acknowledge the risks before enabling." : "Check the linked gist to review its current visibility and GitHub account before enabling."}
           </p>
-          <button type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy || !status || blocked} onClick={() => start("preview")}>
+          <button ref={previewRef} type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy || !status || blocked} onClick={previewClick}>
             {preview ? "Recheck linked gist" : "Check linked gist"}
           </button>
           {preview && (
             <label className="flex items-start gap-2 text-xs text-ink-2">
-              <input type="checkbox" checked={acknowledged} disabled={!!busy} aria-describedby={`${id}-notice ${id}-destination`} onChange={(event) => setAcknowledged(event.target.checked)} />
+              <input ref={acknowledgementRef} type="checkbox" checked={acknowledged} disabled={!!busy} aria-describedby={`${id}-notice ${id}-destination`} onChange={acknowledgementChange} />
               I acknowledge the sharing and overwrite risks.
             </label>
           )}
-          <button type="button" className="btn btn-sm btn-primary self-start" disabled={!!busy || !status || !preview || !acknowledged || blocked || problem?.source === "status"} onClick={() => start("enable")}>
+          <button ref={enableRef} type="button" className="btn btn-sm btn-primary self-start" disabled={!!busy || !status || !preview || !acknowledged || blocked || problem?.source === "status"} onClick={enableClick}>
             {busy === "enable" ? "Enabling…" : "Enable auto-update"}
           </button>
         </>
       )}
       {canRetry && (
-        <button type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy} onClick={() => start("retry")}>
+        <button ref={retryRef} type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy} onClick={retryClick}>
           {busy === "retry" ? "Requesting retry…" : "Retry latest saved version"}
         </button>
       )}
       {enabled && (
-        <button type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy} onClick={() => start("disable")}>
+        <button ref={disableRef} type="button" className="btn btn-sm btn-outline self-start" disabled={!!busy} onClick={disableClick}>
           {busy === "disable" ? "Disabling…" : "Disable auto-update"}
         </button>
       )}

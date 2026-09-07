@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  type ChangeEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { api, ApiError } from "@/lib/api";
@@ -65,11 +73,15 @@ async function consent() {
 function GistBoundary({
   doc,
   show = true,
+  mount = "initial",
+  passiveVisit = 0,
   onLayout,
   onPassiveCleanup,
 }: {
   doc: DocumentDto;
   show?: boolean;
+  mount?: "initial" | "replacement";
+  passiveVisit?: number;
   onLayout?: (doc: DocumentDto, show: boolean) => void;
   onPassiveCleanup?: (doc: DocumentDto, show: boolean) => void;
 }) {
@@ -78,8 +90,121 @@ function GistBoundary({
   }, [doc, onLayout, show]);
   useEffect(() => {
     return () => onPassiveCleanup?.(doc, show);
-  }, [doc, onPassiveCleanup, show]);
-  return show ? <GistAutoUpdateControl doc={doc} isOwner /> : null;
+  }, [doc, onPassiveCleanup, passiveVisit, show]);
+  if (!show) return null;
+  return mount === "initial"
+    ? <InitialGistControl doc={doc} />
+    : <ReplacementGistControl doc={doc} />;
+}
+
+function InitialGistControl({ doc }: { doc: DocumentDto }) {
+  return <GistAutoUpdateControl doc={doc} isOwner />;
+}
+
+function ReplacementGistControl({ doc }: { doc: DocumentDto }) {
+  return <GistAutoUpdateControl doc={doc} isOwner />;
+}
+
+type ButtonHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type CheckboxHandler = (event: ChangeEvent<HTMLInputElement>) => void;
+
+interface CapturedButton {
+  element: HTMLButtonElement;
+  onClick: ButtonHandler;
+  ref: RefCallback<HTMLButtonElement>;
+}
+
+interface CapturedCheckbox {
+  element: HTMLInputElement;
+  onChange: CheckboxHandler;
+  ref: RefCallback<HTMLInputElement>;
+}
+
+interface CapturedPresentation {
+  root: HTMLElement;
+  rootRef: RefCallback<HTMLElement>;
+  buttons: CapturedButton[];
+  checkbox: CapturedCheckbox | null;
+}
+
+interface DirectView {
+  host: HTMLDivElement;
+  root: Root;
+}
+
+const directViews: DirectView[] = [];
+const mutationObservers: MutationObserver[] = [];
+
+function renderDirect(node: ReactNode): DirectView {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { host, root: createRoot(host) };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
+
+function observeMutations(target: Node = document.body) {
+  const observer = new MutationObserver(() => {});
+  observer.observe(target, { attributes: true, characterData: true, childList: true, subtree: true });
+  mutationObservers.push(observer);
+  return observer;
+}
+
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return value as T;
+}
+
+function captureButton(element: HTMLButtonElement): CapturedButton {
+  return {
+    element,
+    onClick: reactProp<ButtonHandler>(element, "onClick"),
+    ref: reactProp<RefCallback<HTMLButtonElement>>(element, "ref"),
+  };
+}
+
+function capturePresentation(): CapturedPresentation {
+  const root = screen.getByTestId("gist-auto-update");
+  const checkboxElement = within(root).queryByRole("checkbox") as HTMLInputElement | null;
+  return {
+    root,
+    rootRef: reactProp<RefCallback<HTMLElement>>(root, "ref"),
+    buttons: within(root).getAllByRole("button").map((element) => captureButton(element as HTMLButtonElement)),
+    checkbox: checkboxElement
+      ? {
+          element: checkboxElement,
+          onChange: reactProp<CheckboxHandler>(checkboxElement, "onChange"),
+          ref: reactProp<RefCallback<HTMLInputElement>>(checkboxElement, "ref"),
+        }
+      : null,
+  };
+}
+
+function capturedButton(presentation: CapturedPresentation, name: string) {
+  const button = presentation.buttons.find((candidate) => candidate.element.textContent?.trim() === name);
+  if (!button) throw new Error(`Button "${name}" was not captured`);
+  return button;
+}
+
+function invokeButton(button: CapturedButton, currentTarget: HTMLElement = button.element) {
+  button.onClick({ currentTarget } as ReactMouseEvent<HTMLButtonElement>);
+}
+
+function invokeCheckbox(checkbox: CapturedCheckbox, checked: boolean, currentTarget: HTMLInputElement = checkbox.element) {
+  currentTarget.checked = checked;
+  checkbox.onChange({ currentTarget, target: currentTarget } as ChangeEvent<HTMLInputElement>);
+}
+
+function externalOperations() {
+  return vi.mocked(api.documents.gistAutoUpdate).mock.calls.length
+    + vi.mocked(api.documents.gistAutoUpdatePreview).mock.calls.length
+    + vi.mocked(api.documents.setGistAutoUpdate).mock.calls.length
+    + vi.mocked(api.documents.retryGistAutoUpdate).mock.calls.length;
 }
 
 beforeEach(() => {
@@ -100,6 +225,11 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  for (const view of directViews.splice(0)) {
+    act(() => view.root.unmount());
+    view.host.remove();
+  }
+  for (const observer of mutationObservers.splice(0)) observer.disconnect();
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -762,4 +892,388 @@ describe("gist auto-update request lifetimes", () => {
     expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("gist-auto-update")).toBeNull();
   });
+});
+
+describe("gist auto-update settings publication ownership", () => {
+  it.each([
+    ["status", "Refresh status"],
+    ["preview", "Check linked gist"],
+    ["enable", "Enable auto-update"],
+    ["retry", "Retry latest saved version"],
+    ["disable", "Disable auto-update"],
+  ] as const)("accepts %s only from its exact current button and synchronously rejects every competitor", async (kind, label) => {
+    if (kind === "status") {
+      vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, "Status unavailable."));
+    } else if (kind === "retry") {
+      serverStatus = { ...PENDING, status: "failed", message: "Retry this version." };
+    } else if (kind === "disable") {
+      serverStatus = { ...PENDING };
+    }
+
+    renderDirect(<GistAutoUpdateControl doc={DOC} isOwner />);
+    await settle();
+    if (kind === "enable") await consent();
+
+    const presentation = capturePresentation();
+    const selected = capturedButton(presentation, label);
+    const competitors = presentation.buttons.filter((button) => button !== selected);
+    const foreign = document.createElement("button");
+    const containedReplacement = document.createElement("button");
+    const detached = document.createElement("button");
+    document.body.append(foreign);
+    presentation.root.append(containedReplacement);
+
+    const operationsBeforeWrongSources = externalOperations();
+    const timersBeforeWrongSources = vi.getTimerCount();
+    selected.element.disabled = true;
+    act(() => invokeButton(selected));
+    selected.element.disabled = false;
+    const observer = observeMutations(presentation.root);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const markup = presentation.root.innerHTML;
+
+    act(() => {
+      for (const competitor of competitors) invokeButton(selected, competitor.element);
+      if (presentation.checkbox) {
+        invokeButton(selected, presentation.checkbox.element);
+      }
+      invokeButton(selected, foreign);
+      invokeButton(selected, detached);
+      invokeButton(selected, containedReplacement);
+    });
+
+    expect(externalOperations()).toBe(operationsBeforeWrongSources);
+    expect(vi.getTimerCount()).toBe(timersBeforeWrongSources);
+    expect(presentation.root.innerHTML).toBe(markup);
+    expect(observer.takeRecords()).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+    presentation.root.removeChild(containedReplacement);
+
+    await act(async () => {
+      invokeButton(selected);
+      invokeButton(selected);
+      for (const competitor of competitors) invokeButton(competitor);
+    });
+    expect(externalOperations()).toBe(operationsBeforeWrongSources + 1);
+    foreign.remove();
+  });
+
+  it.each([
+    ["document", { ...DOC, id: "publication-document" }, "initial"],
+    ["gist", { ...DOC, gistId: "publication-gist" }, "initial"],
+    ["file", { ...DOC, gistFile: "publication.md" }, "initial"],
+    ["url", { ...DOC, githubUrl: "https://gist.github.com/publication-url" }, "initial"],
+    ["identity", { ...DOC, ownerId: "publication-owner" }, "initial"],
+    ["equal-looking remount", DOC, "replacement"],
+  ] as const)(
+    "retires callbacks before the parent layout boundary for a %s replacement and keeps B usable",
+    async (_change, nextDoc, nextMount) => {
+      let replacing = false;
+      let passiveCleanups = 0;
+      const onPassiveCleanup = () => { passiveCleanups++; };
+      let stale: CapturedPresentation | null = null;
+      const observer = observeMutations();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const foreignCheckbox = document.createElement("input");
+      foreignCheckbox.type = "checkbox";
+      document.body.append(foreignCheckbox);
+      const onLayout = () => {
+        if (!replacing) return;
+        expect(passiveCleanups).toBe(0);
+        const current = capturePresentation();
+        const currentPreview = capturedButton(current, "Check linked gist");
+        observer.takeRecords();
+        focus.mockClear();
+        const operations = externalOperations();
+        const timers = vi.getTimerCount();
+        for (const button of stale!.buttons) {
+          invokeButton(button);
+          invokeButton(button, currentPreview.element);
+          button.ref(currentPreview.element);
+          button.ref(null);
+        }
+        if (stale!.checkbox) {
+          invokeCheckbox(stale!.checkbox, true, foreignCheckbox);
+          stale!.checkbox.ref(foreignCheckbox);
+          stale!.checkbox.ref(null);
+        }
+        stale!.rootRef(current.root);
+        stale!.rootRef(null);
+        expect(externalOperations()).toBe(operations);
+        expect(vi.getTimerCount()).toBe(timers);
+        expect(observer.takeRecords()).toHaveLength(0);
+        expect(focus).not.toHaveBeenCalled();
+      };
+      const view = renderDirect(
+        <GistBoundary doc={DOC} onLayout={onLayout} onPassiveCleanup={onPassiveCleanup} />,
+      );
+      await settle();
+      await consent();
+      stale = capturePresentation();
+      const operationsBeforeReplacement = externalOperations();
+
+      replacing = true;
+      act(() => {
+        view.root.render(
+          <GistBoundary
+            doc={nextDoc}
+            mount={nextMount}
+            passiveVisit={1}
+            onLayout={onLayout}
+            onPassiveCleanup={onPassiveCleanup}
+          />,
+        );
+      });
+      await settle();
+
+      expect(passiveCleanups).toBe(1);
+      expect(externalOperations()).toBe(operationsBeforeReplacement + 1);
+      const current = capturePresentation();
+      const currentPreview = capturedButton(current, "Check linked gist");
+      const operationsBeforeCurrent = externalOperations();
+      await act(async () => {
+        invokeButton(currentPreview);
+        invokeButton(currentPreview);
+        for (const button of stale!.buttons) invokeButton(button, currentPreview.element);
+      });
+      expect(externalOperations()).toBe(operationsBeforeCurrent + 1);
+      foreignCheckbox.remove();
+    },
+  );
+
+  it("retires removed controls before the parent layout boundary without timer, state, event, focus, or DOM work", async () => {
+    let passiveCleanups = 0;
+    let removing = false;
+    const onPassiveCleanup = () => { passiveCleanups++; };
+    let stale: CapturedPresentation | null = null;
+    const observer = observeMutations();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onLayout = (_doc: DocumentDto, show: boolean) => {
+      if (!removing || show) return;
+      expect(passiveCleanups).toBe(0);
+      expect(screen.queryByTestId("gist-auto-update")).toBeNull();
+      observer.takeRecords();
+      focus.mockClear();
+      const operations = externalOperations();
+      for (const button of stale!.buttons) {
+        invokeButton(button);
+        button.ref(null);
+      }
+      if (stale!.checkbox) {
+        invokeCheckbox(stale!.checkbox, false);
+        stale!.checkbox.ref(null);
+      }
+      stale!.rootRef(null);
+      expect(externalOperations()).toBe(operations);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(focus).not.toHaveBeenCalled();
+    };
+    const view = renderDirect(
+      <GistBoundary doc={DOC} onLayout={onLayout} onPassiveCleanup={onPassiveCleanup} />,
+    );
+    await settle();
+    await consent();
+    stale = capturePresentation();
+    const operations = externalOperations();
+
+    removing = true;
+    act(() => {
+      view.root.render(
+        <GistBoundary
+          doc={DOC}
+          show={false}
+          passiveVisit={1}
+          onLayout={onLayout}
+          onPassiveCleanup={onPassiveCleanup}
+        />,
+      );
+    });
+    await settle();
+    expect(passiveCleanups).toBe(1);
+    expect(externalOperations()).toBe(operations);
+
+    act(() => {
+      for (const button of stale!.buttons) invokeButton(button);
+      if (stale!.checkbox) invokeCheckbox(stale!.checkbox, false);
+    });
+    expect(externalOperations()).toBe(operations);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("accepts current acknowledgement true and false once and rejects wrong or retired checkbox sources", async () => {
+    renderDirect(<GistAutoUpdateControl doc={DOC} isOwner />);
+    await settle();
+    await click("Check linked gist");
+    const unchecked = capturePresentation();
+    const staleCheckbox = unchecked.checkbox!;
+    const enable = capturedButton(unchecked, "Enable auto-update");
+    const foreign = document.createElement("input");
+    const detached = document.createElement("input");
+    foreign.type = "checkbox";
+    detached.type = "checkbox";
+    document.body.append(foreign);
+    const operations = externalOperations();
+
+    act(() => {
+      invokeCheckbox(staleCheckbox, true, foreign);
+      invokeCheckbox(staleCheckbox, true, detached);
+      invokeCheckbox(staleCheckbox, true, enable.element as unknown as HTMLInputElement);
+    });
+    expect(staleCheckbox.element).not.toBeChecked();
+    expect(enable.element).toBeDisabled();
+    expect(externalOperations()).toBe(operations);
+    foreign.remove();
+
+    act(() => {
+      invokeCheckbox(staleCheckbox, true);
+      invokeCheckbox(staleCheckbox, true);
+    });
+    expect(screen.getByRole("checkbox")).toBeChecked();
+    expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeEnabled();
+
+    const checked = capturePresentation();
+    const currentCheckbox = checked.checkbox!;
+    act(() => {
+      invokeCheckbox(staleCheckbox, false, currentCheckbox.element);
+      currentCheckbox.element.checked = true;
+    });
+    expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeEnabled();
+
+    act(() => {
+      invokeCheckbox(currentCheckbox, false);
+      invokeCheckbox(currentCheckbox, false);
+    });
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeDisabled();
+  });
+
+  it("does not let stale acknowledgement or Enable callbacks cross a preview destination replacement", async () => {
+    renderDirect(<GistAutoUpdateControl doc={DOC} isOwner />);
+    await settle();
+    await consent();
+    const stale = capturePresentation();
+    const staleCheckbox = stale.checkbox!;
+    const staleEnable = capturedButton(stale, "Enable auto-update");
+    const recheck = capturedButton(stale, "Recheck linked gist");
+    const replacementDestination = {
+      ...DESTINATION,
+      url: "https://gist.github.com/gist-auto-test?revision=2",
+      visibility: "public" as const,
+      owner: "replacement-owner",
+    };
+    vi.mocked(api.documents.gistAutoUpdatePreview).mockResolvedValueOnce({ destination: replacementDestination });
+
+    await act(async () => invokeButton(recheck));
+    const replacement = capturePresentation();
+    const replacementCheckbox = replacement.checkbox!;
+    const replacementEnable = capturedButton(replacement, "Enable auto-update");
+    const mutationsBeforeStale = externalOperations();
+    act(() => {
+      invokeCheckbox(staleCheckbox, true, replacementCheckbox.element);
+      replacementCheckbox.element.checked = false;
+      invokeButton(staleEnable, replacementEnable.element);
+    });
+    expect(replacementEnable.element).toBeDisabled();
+    expect(externalOperations()).toBe(mutationsBeforeStale);
+
+    act(() => invokeCheckbox(replacementCheckbox, true));
+    const currentEnable = capturedButton(capturePresentation(), "Enable auto-update");
+    const request = deferred<GistAutoUpdateStatus>();
+    vi.mocked(api.documents.setGistAutoUpdate).mockReturnValueOnce(request.promise);
+    act(() => {
+      invokeButton(staleEnable, currentEnable.element);
+      invokeButton(currentEnable);
+      invokeButton(currentEnable);
+    });
+    expect(api.documents.setGistAutoUpdate).toHaveBeenCalledExactlyOnceWith(DOC.id, {
+      enabled: true,
+      acknowledgeRisk: true,
+      destination: replacementDestination,
+    });
+    await act(async () => request.resolve({ ...PENDING, destination: replacementDestination }));
+  });
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "keeps a reused Check/Recheck button bound only to B in %s order",
+    async (order) => {
+      const firstRequest = deferred<{ destination: GistAutoUpdateDestination }>();
+      vi.mocked(api.documents.gistAutoUpdatePreview).mockReturnValueOnce(firstRequest.promise);
+      renderDirect(<GistAutoUpdateControl doc={DOC} isOwner />);
+      await settle();
+      const stale = capturePresentation();
+      const staleCheck = capturedButton(stale, "Check linked gist");
+
+      act(() => invokeButton(staleCheck));
+      await act(async () => firstRequest.resolve({ destination: DESTINATION }));
+      const current = capturePresentation();
+      const currentRecheck = capturedButton(current, "Recheck linked gist");
+      expect(current.root).toBe(stale.root);
+      expect(currentRecheck.element).toBe(staleCheck.element);
+
+      const secondRequest = deferred<{ destination: GistAutoUpdateDestination }>();
+      vi.mocked(api.documents.gistAutoUpdatePreview).mockReturnValueOnce(secondRequest.promise);
+      const calls = vi.mocked(api.documents.gistAutoUpdatePreview).mock.calls.length;
+      act(() => {
+        const invokeStale = () => {
+          invokeButton(staleCheck, currentRecheck.element);
+          staleCheck.ref(currentRecheck.element);
+          staleCheck.ref(null);
+          stale.rootRef(current.root);
+          stale.rootRef(null);
+        };
+        if (order === "stale-before-current") {
+          invokeStale();
+          invokeButton(currentRecheck);
+        } else {
+          invokeButton(currentRecheck);
+          invokeStale();
+        }
+        invokeButton(currentRecheck);
+      });
+      expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(calls + 1);
+      await act(async () => secondRequest.resolve({ destination: DESTINATION }));
+      expect(screen.getByRole("button", { name: "Recheck linked gist" })).toBeEnabled();
+    },
+  );
+
+  it.each(["root", "control"] as const)(
+    "retires a publication when its exact %s DOM ref is replaced and stale detach cannot clear B",
+    async (replacement) => {
+      const view = renderDirect(<InitialGistControl doc={DOC} />);
+      await settle();
+      const stale = capturePresentation();
+      const staleCheck = capturedButton(stale, "Check linked gist");
+      const replacementRoot = document.createElement("section");
+      const replacementButton = document.createElement("button");
+      replacementRoot.append(replacementButton);
+      document.body.append(replacementRoot);
+      const operations = externalOperations();
+
+      act(() => {
+        if (replacement === "root") stale.rootRef(replacementRoot);
+        else staleCheck.ref(replacementButton);
+        invokeButton(staleCheck, replacement === "root" ? staleCheck.element : replacementButton);
+      });
+      expect(externalOperations()).toBe(operations);
+
+      act(() => view.root.render(<ReplacementGistControl doc={DOC} />));
+      await settle();
+      const current = capturePresentation();
+      const currentCheck = capturedButton(current, "Check linked gist");
+      act(() => {
+        stale.rootRef(null);
+        staleCheck.ref(null);
+        invokeButton(staleCheck, currentCheck.element);
+      });
+      expect(externalOperations()).toBe(operations + 1);
+
+      await act(async () => {
+        invokeButton(currentCheck);
+        invokeButton(currentCheck);
+      });
+      expect(externalOperations()).toBe(operations + 2);
+      replacementRoot.remove();
+    },
+  );
 });
