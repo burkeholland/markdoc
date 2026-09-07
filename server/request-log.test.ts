@@ -50,7 +50,7 @@ describe("formatRequestLine", () => {
   });
 
   it("never carries a login or token from the URL", () => {
-    const line = formatRequestLine({ status: 403, method: "GET", url: "/api/github/repos/octocat/secret-repo?token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", ms: 5 });
+    const line = formatRequestLine({ status: 403, method: "GET", url: "/api/github/repos/octocat/secret-repo?token=test-access-token", ms: 5 });
     expect(line).toBe("[http] 403 GET /api/github/repos/:x/:x 5ms");
   });
 });
