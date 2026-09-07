@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { NotificationDto, NotificationsPageDto } from "./api";
@@ -421,6 +422,11 @@ describe("notification read ownership", () => {
       refIds: ["thread-a"],
     });
 
+    await act(async () => {
+      await store.markRefsRead(ITEM.documentId, ["thread-a", "thread-b"]);
+    });
+    expect(notificationApi.readRefs).toHaveBeenCalledTimes(2);
+
     let retryOperation!: Promise<void>;
     act(() => {
       retryOperation = store.retryNotificationRead(result.current.readError!);
@@ -440,6 +446,91 @@ describe("notification read ownership", () => {
     expect(result.current.unreadCount).toBe(0);
     expect(result.current.readError).toBeNull();
     expect(result.current.readErrorPending).toBe(false);
+  });
+
+  it("holds a failed active-thread effect for explicit retry while unrelated refs keep progressing", async () => {
+    const first = deferred<{ ok: true; count: number }>();
+    const unrelated = deferred<{ ok: true; count: number }>();
+    const retry = deferred<{ ok: true; count: number }>();
+    const unexpected = deferred<{ ok: true; count: number }>();
+    let failedRefCalls = 0;
+    notificationApi.readRefs.mockImplementation((_documentId: string, refIds: string[]) => {
+      if (!refIds.includes("thread-a")) return unrelated.promise;
+      failedRefCalls++;
+      if (failedRefCalls === 1) return first.promise;
+      if (failedRefCalls === 2) return retry.promise;
+      return unexpected.promise;
+    });
+    const { store, result } = await mountLoaded({ items: [REF_ITEMS[0]!, REF_ITEMS[1]!], unreadCount: 2 });
+    const unhandled = vi.fn();
+    window.addEventListener("unhandledrejection", unhandled);
+
+    function useActiveThreadRead() {
+      const unreadRefs = store.useUnreadRefs(ITEM.documentId);
+      const unread = unreadRefs.has("thread-a");
+      useEffect(() => {
+        if (unread) void store.markRefsRead(ITEM.documentId, ["thread-a"]);
+      }, [unread]);
+    }
+    const activeThread = renderHook(useActiveThreadRead);
+    await waitFor(() => expect(failedRefCalls).toBe(1));
+
+    await act(async () => {
+      first.reject(new Error("thread read failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.readError).toMatchObject({ operation: "refs", refIds: ["thread-a"] }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(failedRefCalls).toBe(1);
+    expect(notificationApi.readRefs).toHaveBeenCalledOnce();
+    expect(result.current.items.find((notification) => notification.refId === "thread-a")?.readAt).toBeNull();
+    expect(result.current.unreadCount).toBe(2);
+
+    let unrelatedOperation!: Promise<void>;
+    act(() => {
+      unrelatedOperation = store.markRefsRead(ITEM.documentId, ["thread-b"]);
+    });
+    expect(notificationApi.readRefs).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      unrelated.resolve({ ok: true, count: 1 });
+      await unrelatedOperation;
+    });
+    expect(result.current.items.find((notification) => notification.refId === "thread-b")?.readAt).not.toBeNull();
+    expect(result.current.readError).toMatchObject({ operation: "refs", refIds: ["thread-a"] });
+
+    const firstFailure = result.current.readError!;
+    let retryOperation!: Promise<void>;
+    act(() => {
+      retryOperation = store.retryNotificationRead(firstFailure);
+    });
+    expect(failedRefCalls).toBe(2);
+    expect(notificationApi.readRefs).toHaveBeenCalledTimes(3);
+    expect(notificationApi.readRefs).toHaveBeenLastCalledWith(ITEM.documentId, ["thread-a"]);
+    expect(result.current.readErrorPending).toBe(true);
+
+    await act(async () => {
+      retry.reject(new Error("thread retry failed"));
+      await retryOperation;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(failedRefCalls).toBe(2);
+    expect(notificationApi.readRefs).toHaveBeenCalledTimes(3);
+    expect(result.current.readError).toMatchObject({ operation: "refs", refIds: ["thread-a"] });
+    expect(result.current.readError?.id).not.toBe(firstFailure.id);
+    expect(result.current.readErrorPending).toBe(false);
+    expect(result.current.items.find((notification) => notification.refId === "thread-a")?.readAt).toBeNull();
+    expect(result.current.unreadCount).toBe(1);
+    expect(unhandled).not.toHaveBeenCalled();
+
+    activeThread.unmount();
+    window.removeEventListener("unhandledrejection", unhandled);
   });
 
   it("clears an older single-read failure after read-all confirms it", async () => {

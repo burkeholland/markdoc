@@ -445,12 +445,22 @@ export function markAllNotificationsRead(): Promise<void> {
 }
 
 /** Mark read everything about a thread (its id and its replies' ids) in a document. */
-export function markRefsRead(documentId: string, refIds: string[]): Promise<void> {
+function markRefsReadOwned(documentId: string, refIds: string[], retry: boolean): Promise<void> {
   if (refIds.length === 0) return Promise.resolve();
   const normalizedRefs = [...new Set(refIds)].sort();
   const key = refKey(documentId, normalizedRefs);
   const current = refReads.get(key);
   if (current) return current.promise;
+  const failed = state.readError;
+  // Active thread effects see rollback as unread again; only the explicit Retry may reclaim a failed scope.
+  if (
+    !retry &&
+    failed?.operation === "refs" &&
+    failed.documentId === documentId &&
+    normalizedRefs.some((refId) => failed.refIds.includes(refId))
+  ) {
+    return Promise.resolve();
+  }
   const requestedRefs = new Set(normalizedRefs);
   const pred = (notification: NotificationDto) => notification.documentId === documentId && requestedRefs.has(notification.refId);
   // Unread rows beyond the loaded page may exist; ask the server regardless of the local view.
@@ -469,10 +479,14 @@ export function markRefsRead(documentId: string, refIds: string[]): Promise<void
   );
 }
 
+export function markRefsRead(documentId: string, refIds: string[]): Promise<void> {
+  return markRefsReadOwned(documentId, refIds, false);
+}
+
 export function retryNotificationRead(error: NotificationReadError): Promise<void> {
   if (state.readError?.id !== error.id) return Promise.resolve();
   if (error.operation === "single") return markNotificationRead(error.notificationId);
-  if (error.operation === "refs") return markRefsRead(error.documentId, error.refIds);
+  if (error.operation === "refs") return markRefsReadOwned(error.documentId, error.refIds, true);
   return markAllNotificationsRead();
 }
 
