@@ -200,7 +200,7 @@ interface PreviewPublication {
   readonly range: VersionPreview["range"];
   readonly setRoot: (element: HTMLDivElement | null) => void;
   readonly setBackControl: (element: HTMLButtonElement | null) => void;
-  readonly activateBack: () => void;
+  readonly activateBack: (event: React.MouseEvent<HTMLButtonElement>) => void;
   root: HTMLDivElement | null;
   backControl: HTMLButtonElement | null;
 }
@@ -502,7 +502,7 @@ export function EditorShell({
     [ownsPreviewVisit],
   );
   const activatePreviewBack = useCallback(
-    (publication: PreviewPublication) => {
+    (publication: PreviewPublication, event: React.MouseEvent<HTMLButtonElement>) => {
       const root = publication.root;
       const control = publication.backControl;
       if (
@@ -510,8 +510,10 @@ export function EditorShell({
         !ownsPreviewPublication(publication) ||
         !root ||
         !control ||
+        event.currentTarget !== control ||
         !root.isConnected ||
-        !control.isConnected
+        !control.isConnected ||
+        !root.contains(control)
       ) {
         return;
       }
@@ -545,8 +547,8 @@ export function EditorShell({
           publication.backControl = null;
         }
       }
-      function activateBack() {
-        activatePreviewBack(publication);
+      function activateBack(event: React.MouseEvent<HTMLButtonElement>) {
+        activatePreviewBack(publication, event);
       }
       const publication: PreviewPublication = {
         visit,

@@ -488,10 +488,16 @@ function startCompare(producer: CompareProducer = syncDialogProps.actions.compar
   return pending;
 }
 
-function captureClick(element: HTMLElement) {
+type BackMouseHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
+
+function backMouseEvent(currentTarget: HTMLButtonElement): React.MouseEvent<HTMLButtonElement> {
+  return { currentTarget } as unknown as React.MouseEvent<HTMLButtonElement>;
+}
+
+function captureClick(element: HTMLButtonElement): BackMouseHandler {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the Back control");
-  const props = (element as unknown as Record<string, { onClick?: () => void } | undefined>)[propsKey];
+  const props = (element as unknown as Record<string, { onClick?: BackMouseHandler } | undefined>)[propsKey];
   if (!props?.onClick) throw new Error("The Back control did not have an onClick handler");
   return props.onClick;
 }
@@ -1033,13 +1039,14 @@ describe("EditorShell comparison preview ownership", () => {
     expect(screen.getByTestId("sync-compare-bar")).toHaveTextContent("Comparing GitHub\\u2019s copy with this document.");
     expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("# GitHub copy");
 
-    const back = captureClick(screen.getByTestId("sync-compare-close"));
+    const backControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const back = captureClick(backControl);
     const focusOwner = document.createElement("button");
     document.body.append(focusOwner);
     focusOwner.focus();
     act(() => {
-      back();
-      back();
+      back(backMouseEvent(backControl));
+      back(backMouseEvent(backControl));
     });
 
     expectEditingPanes();
@@ -1047,6 +1054,136 @@ describe("EditorShell comparison preview ownership", () => {
     expect(focusOwner).toHaveFocus();
     focusOwner.remove();
   });
+
+  it("requires the current Back handler's exact connected control inside its recorded preview root", async () => {
+    vi.mocked(api.documents.sync).mockResolvedValueOnce(syncResponse("Control-bound preview"));
+    const view = await mount();
+    await openSync();
+    await act(async () => {
+      await startCompare();
+    });
+
+    const control = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const back = captureClick(control);
+    const root = screen.getByTestId("sync-compare-bar").parentElement;
+    if (!(root instanceof HTMLDivElement)) throw new Error("The preview root was not rendered");
+    const foreign = document.createElement("button");
+    const sibling = document.createElement("button");
+    const detached = document.createElement("button");
+    const replacement = control.cloneNode(true) as HTMLButtonElement;
+    const focusOwner = document.createElement("button");
+    document.body.append(foreign, focusOwner);
+    root.append(sibling);
+    focusOwner.focus();
+
+    try {
+      const preview = versionDiffProps.preview;
+      const markup = view.container.innerHTML;
+      act(() => {
+        back(backMouseEvent(foreign));
+        back(backMouseEvent(sibling));
+        back(backMouseEvent(detached));
+      });
+      expect(view.container.innerHTML).toBe(markup);
+      expect(versionDiffProps.preview).toBe(preview);
+      expect(screen.getByTestId("sync-compare-close")).toBe(control);
+      expect(focusOwner).toHaveFocus();
+
+      control.replaceWith(replacement);
+      document.body.append(control);
+      const replacedMarkup = view.container.innerHTML;
+      act(() => {
+        back(backMouseEvent(control));
+        back(backMouseEvent(replacement));
+      });
+      expect(view.container.innerHTML).toBe(replacedMarkup);
+      expect(versionDiffProps.preview).toBe(preview);
+      expect(root.querySelector("[data-testid='sync-compare-close']")).toBe(replacement);
+      expect(focusOwner).toHaveFocus();
+
+      act(() => {
+        replacement.replaceWith(control);
+        back(backMouseEvent(control));
+        back(backMouseEvent(control));
+      });
+      expectEditingPanes();
+      const editingMarkup = view.container.innerHTML;
+      act(() => {
+        back(backMouseEvent(control));
+        back(backMouseEvent(replacement));
+      });
+      expect(view.container.innerHTML).toBe(editingMarkup);
+      expect(focusOwner).toHaveFocus();
+    } finally {
+      foreign.remove();
+      sibling.remove();
+      control.remove();
+      replacement.remove();
+      focusOwner.remove();
+    }
+  });
+
+  it.each([
+    ["stale before current", false],
+    ["current before stale", true],
+  ] as const)(
+    "keeps equal-looking publications distinct when their Back handlers reuse the same element: %s",
+    async (_name, currentFirst) => {
+      const remote = { ...REMOTE, updatedAt: "2026-09-07T16:30:00.000Z" };
+      vi.mocked(api.documents.sync)
+        .mockResolvedValueOnce(syncResponse("Same-element preview", remote))
+        .mockResolvedValueOnce(syncResponse("Same-element preview", remote));
+      const view = await mount();
+      await openSync();
+      await act(async () => {
+        await startCompare();
+      });
+      const staleControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+      const staleBack = captureClick(staleControl);
+      const stalePreview = versionDiffProps.preview;
+
+      await act(async () => {
+        await startCompare();
+      });
+      const currentControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+      const currentBack = captureClick(currentControl);
+      const currentPreview = versionDiffProps.preview;
+      expect(currentControl).toBe(staleControl);
+      expect(currentBack).not.toBe(staleBack);
+      expect(currentPreview).toEqual(stalePreview);
+      expect(currentPreview).not.toBe(stalePreview);
+
+      const focusOwner = document.createElement("button");
+      document.body.append(focusOwner);
+      focusOwner.focus();
+      const previewMarkup = view.container.innerHTML;
+      const invokeStale = () => staleBack(backMouseEvent(currentControl));
+      const invokeCurrent = () => currentBack(backMouseEvent(staleControl));
+
+      if (currentFirst) {
+        act(invokeCurrent);
+        const editingMarkup = view.container.innerHTML;
+        act(invokeStale);
+        expect(view.container.innerHTML).toBe(editingMarkup);
+      } else {
+        act(invokeStale);
+        expect(view.container.innerHTML).toBe(previewMarkup);
+        expect(versionDiffProps.preview).toBe(currentPreview);
+        act(invokeCurrent);
+      }
+
+      expectEditingPanes();
+      const editingMarkup = view.container.innerHTML;
+      act(() => {
+        invokeStale();
+        invokeCurrent();
+      });
+      expect(view.container.innerHTML).toBe(editingMarkup);
+      expect(focusOwner).toHaveFocus();
+      expect(api.documents.sync).toHaveBeenCalledTimes(2);
+      focusOwner.remove();
+    },
+  );
 
   it("publishes and clears exact Version-panel values while replacing equal-looking publications by identity", async () => {
     await mount();
@@ -1118,7 +1255,8 @@ describe("EditorShell comparison preview ownership", () => {
       await act(async () => {
         await startCompare(oldCompare);
       });
-      const oldBack = captureClick(screen.getByTestId("sync-compare-close"));
+      const oldBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+      const oldBack = captureClick(oldBackControl);
       const retiredRequest = startCompare(oldCompare);
       expect(api.documents.sync).toHaveBeenCalledTimes(2);
 
@@ -1137,7 +1275,7 @@ describe("EditorShell comparison preview ownership", () => {
               expect(passiveCleanups).toBe(0);
               expect(screen.queryByTestId("version-diff-mock")).toBeNull();
               oldProducer(versionPreview("Equal remote content"));
-              oldBack();
+              oldBack(backMouseEvent(oldBackControl));
               oldPending.resolve(syncResponse("Late old remote"));
             }}
           />,
@@ -1159,7 +1297,18 @@ describe("EditorShell comparison preview ownership", () => {
       expect(api.documents.sync).toHaveBeenNthCalledWith(3, SECOND_DOC.id, { fresh: true, content: true });
       expect(versionDiffProps.session).toBe(session);
       expect(versionDiffProps.preview.content).toBe("Equal remote content");
-      const currentBack = captureClick(screen.getByTestId("sync-compare-close"));
+      const currentBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+      const currentBack = captureClick(currentBackControl);
+      expect(currentBackControl).not.toBe(oldBackControl);
+      const currentPreview = versionDiffProps.preview;
+      const previewMarkup = view.container.innerHTML;
+      act(() => {
+        oldBack(backMouseEvent(currentBackControl));
+        currentBack(backMouseEvent(oldBackControl));
+      });
+      expect(view.container.innerHTML).toBe(previewMarkup);
+      expect(versionDiffProps.preview).toBe(currentPreview);
+      expect(focusOwner).toHaveFocus();
 
       const runStale = () => {
         const markup = view.container.innerHTML;
@@ -1167,15 +1316,17 @@ describe("EditorShell comparison preview ownership", () => {
         const focused = document.activeElement;
         oldProducer(versionPreview("Equal remote content"));
         oldProducer(null);
-        oldBack();
+        oldBack(backMouseEvent(oldBackControl));
+        oldBack(backMouseEvent(currentBackControl));
+        currentBack(backMouseEvent(oldBackControl));
         void oldCompare();
         expect(view.container.innerHTML).toBe(markup);
         expect(api.documents.sync).toHaveBeenCalledTimes(calls);
         expect(document.activeElement).toBe(focused);
       };
       const runCurrent = () => {
-        currentBack();
-        currentBack();
+        currentBack(backMouseEvent(currentBackControl));
+        currentBack(backMouseEvent(currentBackControl));
       };
 
       act(() => {
@@ -1190,6 +1341,14 @@ describe("EditorShell comparison preview ownership", () => {
       });
 
       expectEditingPanes();
+      const editingMarkup = view.container.innerHTML;
+      act(() => {
+        oldBack(backMouseEvent(oldBackControl));
+        oldBack(backMouseEvent(currentBackControl));
+        currentBack(backMouseEvent(oldBackControl));
+        currentBack(backMouseEvent(currentBackControl));
+      });
+      expect(view.container.innerHTML).toBe(editingMarkup);
       expect(api.documents.sync).toHaveBeenCalledTimes(3);
       expect(focusOwner).toHaveFocus();
       focusOwner.remove();
@@ -1213,7 +1372,8 @@ describe("EditorShell comparison preview ownership", () => {
     await act(async () => {
       await startCompare(oldCompare);
     });
-    const oldBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const oldBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const oldBack = captureClick(oldBackControl);
     const retiredRequest = startCompare(oldCompare);
     const replacementDoc: DocumentDto = {
       ...DOC,
@@ -1232,7 +1392,7 @@ describe("EditorShell comparison preview ownership", () => {
             expect(passiveCleanups).toBe(0);
             expect(screen.queryByTestId("version-diff-mock")).toBeNull();
             oldProducer(versionPreview("Same-looking preview"));
-            oldBack();
+            oldBack(backMouseEvent(oldBackControl));
             oldPending.reject(new ApiError(502, "Retired compare failed"));
           }}
         />,
@@ -1250,19 +1410,22 @@ describe("EditorShell comparison preview ownership", () => {
     await act(async () => {
       await startCompare(currentCompare);
     });
-    const currentBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const currentBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const currentBack = captureClick(currentBackControl);
     const markup = view.container.innerHTML;
     act(() => {
       oldProducer(versionPreview("Same-looking preview"));
       oldProducer(null);
-      oldBack();
+      oldBack(backMouseEvent(oldBackControl));
+      oldBack(backMouseEvent(currentBackControl));
+      currentBack(backMouseEvent(oldBackControl));
     });
     expect(view.container.innerHTML).toBe(markup);
     expect(versionDiffProps.preview.content).toBe("Same-looking preview");
 
     act(() => {
-      currentBack();
-      oldBack();
+      currentBack(backMouseEvent(currentBackControl));
+      oldBack(backMouseEvent(oldBackControl));
     });
     expectEditingPanes();
     expect(api.documents.sync).toHaveBeenCalledTimes(3);
@@ -1282,7 +1445,8 @@ describe("EditorShell comparison preview ownership", () => {
     await act(async () => {
       await startCompare(oldCompare);
     });
-    const oldBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const oldBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const oldBack = captureClick(oldBackControl);
     const retiredRequest = startCompare(oldCompare);
     let passiveCleanups = 0;
 
@@ -1299,7 +1463,7 @@ describe("EditorShell comparison preview ownership", () => {
           onBoundary={() => {
             expect(passiveCleanups).toBe(0);
             oldProducer(versionPreview("Late session preview"));
-            oldBack();
+            oldBack(backMouseEvent(oldBackControl));
             oldPending.reject(new ApiError(503, "Old session failed"));
           }}
         />,
@@ -1317,7 +1481,9 @@ describe("EditorShell comparison preview ownership", () => {
     });
     expect(versionDiffProps.session).toBe(session);
     expect(versionDiffProps.preview.content).toBe("Current session preview");
-    act(() => captureClick(screen.getByTestId("sync-compare-close"))());
+    const currentBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const currentBack = captureClick(currentBackControl);
+    act(() => currentBack(backMouseEvent(currentBackControl)));
     expectEditingPanes();
     expect(api.documents.sync).toHaveBeenCalledTimes(3);
   });
@@ -1338,7 +1504,8 @@ describe("EditorShell comparison preview ownership", () => {
     await act(async () => {
       await startCompare(staleCompare);
     });
-    const staleBack = captureClick(screen.getByTestId("sync-compare-close"));
+    const staleBackControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const staleBack = captureClick(staleBackControl);
     const retiredRequest = startCompare(staleCompare);
     const focusOwner = document.createElement("button");
     document.body.append(focusOwner);
@@ -1355,7 +1522,7 @@ describe("EditorShell comparison preview ownership", () => {
             expect(view.container.innerHTML).toBe("");
             staleProducer(versionPreview("Boundary publication"));
             staleProducer(null);
-            staleBack();
+            staleBack(backMouseEvent(staleBackControl));
             oldPending.reject(new ApiError(503, "Removed compare failed"));
           }}
         />,
@@ -1371,7 +1538,7 @@ describe("EditorShell comparison preview ownership", () => {
     act(() => {
       staleProducer(versionPreview("After cleanup publication"));
       staleProducer(null);
-      staleBack();
+      staleBack(backMouseEvent(staleBackControl));
       void staleCompare();
     });
     expect(view.container.innerHTML).toBe(removedMarkup);
