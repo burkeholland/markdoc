@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, GitCommit, History, Loader2, MoveVertical, Pencil, RotateCcw, Tag, Upload, X, Download } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -61,16 +72,6 @@ function KindIcon({ kind }: { kind: VersionSummary["kind"] }) {
   }
 }
 
-function groupByDay(versions: VersionSummary[]): { day: string; items: VersionSummary[] }[] {
-  const groups = new Map<string, VersionSummary[]>();
-  for (const v of versions) {
-    const key = formatDayHeading(v.createdAt);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(v);
-  }
-  return Array.from(groups, ([day, items]) => ({ day, items }));
-}
-
 /**
  * Last list seen per document, shared by every panel mount. A re-open renders the rows from here in
  * the same frame and refreshes behind them; `prefetchVersions` fills it while the ⋯ menu is open so the
@@ -111,194 +112,963 @@ type VersionMutationIntent =
   | { kind: "rename"; versionId: string; title: string }
   | { kind: "copy"; versionId: string };
 
+type VersionsRouter = ReturnType<typeof useRouter>;
+
+interface PanelAuthority {
+  mount: symbol;
+  session: CollabSession;
+  documentId: string;
+  role: CollabSession["role"];
+  onClose: () => void;
+  onPreview: (preview: VersionPreview | null) => void;
+  router: VersionsRouter;
+  routerPush: VersionsRouter["push"];
+}
+
+interface VersionRowPublication {
+  index: number;
+  version: VersionSummary;
+  id: string;
+  number: number;
+  title: string | null;
+  kind: VersionSummary["kind"];
+  createdBy: string | null;
+  createdByName: string | null;
+  commitSha: string | null;
+  createdAt: string;
+  size: number;
+}
+
+interface VersionGroupPublication {
+  day: string;
+  rows: VersionRowPublication[];
+}
+
+interface PreviewOperation {
+  operationId: number;
+  activation: PanelRenderPublication;
+  authority: PanelAuthority;
+  root: HTMLElement;
+  versions: VersionSummary[] | null;
+  rows: VersionRowPublication[];
+  compare: string[];
+  selected: string | null;
+  busyVersionId: string | null;
+}
+
 type VersionMutationOwner = VersionMutationIntent & {
   operationId: number;
-  documentId: string;
+  authority: PanelAuthority;
+  root: HTMLElement;
+  row: VersionRowPublication;
+  source: HTMLButtonElement | HTMLInputElement;
+  control: "restore" | "renameInput" | "copy";
+  phase: "request" | "reload";
 };
+
+interface ListOperation {
+  operationId: number;
+  authority: PanelAuthority;
+  root: HTMLElement;
+  refreshKey: number;
+  retry: boolean;
+  mutation: VersionMutationOwner | null;
+}
+
+interface PanelRenderPublication {
+  mount: symbol;
+  authority: PanelAuthority;
+  refreshKey: number;
+  versions: VersionSummary[] | null;
+  rows: VersionRowPublication[];
+  groups: VersionGroupPublication[];
+  error: string | null;
+  listError: string | null;
+  retry: ListOperation | null;
+  selected: string | null;
+  compare: string[];
+  compareValues: string[];
+  preview: PreviewOperation | null;
+  mutation: VersionMutationOwner | null;
+  renaming: string | null;
+  draft: string;
+  canEdit: boolean;
+  revision: number;
+}
+
+interface VersionRowElements {
+  item: HTMLDivElement | null;
+  checkbox: HTMLInputElement | null;
+  select: HTMLButtonElement | null;
+  restore: HTMLButtonElement | null;
+  startRename: HTMLButtonElement | null;
+  renameInput: HTMLInputElement | null;
+  copy: HTMLButtonElement | null;
+}
+
+interface PanelPublicationRuntime {
+  active: boolean;
+  root: HTMLElement | null;
+  close: HTMLButtonElement | null;
+  retry: HTMLButtonElement | null;
+  clear: HTMLButtonElement | null;
+  groupLists: Array<HTMLUListElement | null>;
+  rows: VersionRowElements[];
+}
+
+type PanelControl = "close" | "retry" | "clear";
+type RowControl = Exclude<keyof VersionRowElements, "item">;
+
+function snapshotVersion(version: VersionSummary, index: number): VersionRowPublication {
+  return {
+    index,
+    version,
+    id: version.id,
+    number: version.number,
+    title: version.title,
+    kind: version.kind,
+    createdBy: version.createdBy,
+    createdByName: version.createdByName,
+    commitSha: version.commitSha,
+    createdAt: version.createdAt,
+    size: version.size,
+  };
+}
+
+function versionSnapshotIsCurrent(row: VersionRowPublication): boolean {
+  const version = row.version;
+  return (
+    version.id === row.id &&
+    version.number === row.number &&
+    version.title === row.title &&
+    version.kind === row.kind &&
+    version.createdBy === row.createdBy &&
+    version.createdByName === row.createdByName &&
+    version.commitSha === row.commitSha &&
+    version.createdAt === row.createdAt &&
+    version.size === row.size
+  );
+}
+
+function sameVersionPresentation(
+  versions: VersionSummary[] | null,
+  rows: VersionRowPublication[],
+  publication: PanelRenderPublication,
+): boolean {
+  if (
+    publication.versions !== versions ||
+    publication.rows.length !== rows.length ||
+    (versions !== null && versions.length !== rows.length)
+  ) {
+    return false;
+  }
+  return rows.every((row, index) => {
+    const current = publication.rows[index];
+    return (
+      versions?.[index] === row.version &&
+      current.version === row.version &&
+      current.index === row.index &&
+      versionSnapshotIsCurrent(row)
+    );
+  });
+}
+
+function groupPublishedVersions(rows: VersionRowPublication[]): VersionGroupPublication[] {
+  const groups = new Map<string, VersionRowPublication[]>();
+  for (const row of rows) {
+    const day = formatDayHeading(row.createdAt);
+    if (!groups.has(day)) groups.set(day, []);
+    groups.get(day)!.push(row);
+  }
+  return Array.from(groups, ([day, groupedRows]) => ({ day, rows: groupedRows }));
+}
+
+function collectInteractiveElements(root: HTMLElement): Array<HTMLButtonElement | HTMLInputElement> {
+  const elements: Array<HTMLButtonElement | HTMLInputElement> = [];
+  const visit = (parent: Element) => {
+    for (const child of parent.children) {
+      if (child instanceof HTMLButtonElement || child instanceof HTMLInputElement) elements.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return elements;
+}
+
+function emptyRowElements(): VersionRowElements {
+  return {
+    item: null,
+    checkbox: null,
+    select: null,
+    restore: null,
+    startRename: null,
+    renameInput: null,
+    copy: null,
+  };
+}
+
+function rowForId(publication: PanelRenderPublication, id: string): VersionRowPublication | undefined {
+  return publication.rows.find((row) => row.id === id);
+}
+
+function mutationMatchesPresentation(owner: VersionMutationOwner, publication: PanelRenderPublication): boolean {
+  const row = publication.rows[owner.row.index];
+  return (
+    publication.authority === owner.authority &&
+    row?.version === owner.row.version &&
+    row.id === owner.row.id &&
+    versionSnapshotIsCurrent(owner.row) &&
+    (owner.kind === "copy" || publication.canEdit)
+  );
+}
+
+function previewMatchesPresentation(owner: PreviewOperation, publication: PanelRenderPublication): boolean {
+  return (
+    publication.authority === owner.authority &&
+    sameVersionPresentation(owner.versions, owner.rows, publication) &&
+    publication.selected === owner.selected &&
+    publication.compare === owner.compare
+  );
+}
+
+function retryMatchesPresentation(owner: ListOperation, publication: PanelRenderPublication): boolean {
+  return publication.authority === owner.authority && publication.refreshKey === owner.refreshKey && owner.retry;
+}
 
 function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
   const router = useRouter();
+  const routerPush = router.push;
+  const [mount] = useState(() => Symbol("versions-panel"));
   const [versions, setVersions] = useState<VersionSummary[] | null>(() => listCache.get(session.docId) ?? null);
   const [error, setError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
+  const [retryState, setRetryState] = useState<ListOperation | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
-  const [previewBusy, setPreviewBusy] = useState<string | null>(null);
-  const [activeMutation, setActiveMutation] = useState<VersionMutationOwner | null>(null);
+  const [previewState, setPreviewState] = useState<PreviewOperation | null>(null);
+  const [mutationState, setMutationState] = useState<VersionMutationOwner | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [publicationRevision, setPublicationRevision] = useState(0);
   const contentCache = useRef(new Map<string, string>());
   const contentRequests = useRef(new Map<string, Promise<string>>());
-  const previewIntent = useRef(0);
-  const alive = useRef(true);
-  const listRequest = useRef(0);
-  const retryPending = useRef(false);
+  const authorityRef = useRef<PanelAuthority | null>(null);
+  const activePublicationRef = useRef<PanelRenderPublication | null>(null);
+  const lastPublicationRef = useRef<PanelRenderPublication | null>(null);
+  const publicationRuntimesRef = useRef(new WeakMap<PanelRenderPublication, PanelPublicationRuntime>());
+  const claimedPublicationsRef = useRef(new WeakSet<PanelRenderPublication>());
+  const listOperation = useRef<ListOperation | null>(null);
+  const listSequence = useRef(0);
+  const previewOperation = useRef<PreviewOperation | null>(null);
+  const previewSequence = useRef(0);
   const mutationOperation = useRef(0);
   const mutationOwner = useRef<VersionMutationOwner | null>(null);
-  const canEdit = session.role === "owner" || session.role === "editor";
-  const mutationBusy = activeMutation !== null;
+  const automaticLoadRef = useRef<{ authority: PanelAuthority; refreshKey: number } | null>(null);
+  const documentId = session.docId;
+  const role = session.role;
+  const canEdit = role === "owner" || role === "editor";
+  const authority = useMemo<PanelAuthority>(
+    () => ({
+      mount,
+      session,
+      documentId,
+      role,
+      onClose,
+      onPreview,
+      router,
+      routerPush,
+    }),
+    [documentId, mount, onClose, onPreview, role, router, routerPush, session],
+  );
+  const rows = (versions ?? []).map(snapshotVersion);
+  const currentPreview =
+    previewState &&
+    previewMatchesPresentation(previewState, {
+      mount,
+      authority,
+      refreshKey,
+      versions,
+      rows,
+      groups: [],
+      error,
+      listError,
+      retry: null,
+      selected,
+      compare,
+      compareValues: compare,
+      preview: previewState,
+      mutation: null,
+      renaming,
+      draft,
+      canEdit,
+      revision: publicationRevision,
+    })
+      ? previewState
+      : null;
+  const currentMutation =
+    mutationState &&
+    mutationMatchesPresentation(mutationState, {
+      mount,
+      authority,
+      refreshKey,
+      versions,
+      rows,
+      groups: [],
+      error,
+      listError,
+      retry: null,
+      selected,
+      compare,
+      compareValues: compare,
+      preview: currentPreview,
+      mutation: mutationState,
+      renaming,
+      draft,
+      canEdit,
+      revision: publicationRevision,
+    })
+      ? mutationState
+      : null;
+  const currentRetry =
+    retryState &&
+    retryMatchesPresentation(retryState, {
+      mount,
+      authority,
+      refreshKey,
+      versions,
+      rows,
+      groups: [],
+      error,
+      listError,
+      retry: retryState,
+      selected,
+      compare,
+      compareValues: compare,
+      preview: currentPreview,
+      mutation: currentMutation,
+      renaming,
+      draft,
+      canEdit,
+      revision: publicationRevision,
+    })
+      ? retryState
+      : null;
+  const mutationBusy = currentMutation !== null;
+  const previewBusy = currentPreview?.busyVersionId ?? null;
+  const retrying = currentRetry !== null;
+  // Equal-looking renders are separate authorities so retained handlers cannot cross a commit boundary.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const publication: PanelRenderPublication = {
+    mount,
+    authority,
+    refreshKey,
+    versions,
+    rows,
+    groups: groupPublishedVersions(rows),
+    error,
+    listError,
+    retry: currentRetry,
+    selected,
+    compare,
+    compareValues: [...compare],
+    preview: currentPreview,
+    mutation: currentMutation,
+    renaming,
+    draft,
+    canEdit,
+    revision: publicationRevision,
+  };
 
-  useLayoutEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-      previewIntent.current += 1;
-      listRequest.current += 1;
-      mutationOwner.current = null;
-    };
+  const runtimeFor = useCallback((candidate: PanelRenderPublication) => {
+    const runtimes = publicationRuntimesRef.current;
+    let runtime = runtimes.get(candidate);
+    if (!runtime) {
+      runtime = {
+        active: false,
+        root: null,
+        close: null,
+        retry: null,
+        clear: null,
+        groupLists: candidate.groups.map(() => null),
+        rows: candidate.rows.map(() => emptyRowElements()),
+      };
+      runtimes.set(candidate, runtime);
+    }
+    return runtime;
   }, []);
 
-  const load = useCallback(async (owner?: VersionMutationOwner) => {
-    const request = ++listRequest.current;
-    const ownsRequest = () => alive.current && request === listRequest.current && (!owner || mutationOwner.current === owner);
+  const retirePublication = useCallback((candidate: PanelRenderPublication) => {
+    const runtime = publicationRuntimesRef.current.get(candidate);
+    if (runtime) runtime.active = false;
+    if (activePublicationRef.current === candidate) activePublicationRef.current = null;
+  }, []);
+
+  const bindPanelControl = useCallback(
+    (candidate: PanelRenderPublication, control: PanelControl, element: HTMLButtonElement | null) => {
+      const runtime = runtimeFor(candidate);
+      runtime[control] = element;
+      if (!element) retirePublication(candidate);
+    },
+    [retirePublication, runtimeFor],
+  );
+
+  const bindRoot = useCallback(
+    (candidate: PanelRenderPublication, element: HTMLElement | null) => {
+      const runtime = runtimeFor(candidate);
+      runtime.root = element;
+      if (!element) retirePublication(candidate);
+    },
+    [retirePublication, runtimeFor],
+  );
+
+  const bindGroupList = useCallback(
+    (candidate: PanelRenderPublication, index: number, element: HTMLUListElement | null) => {
+      const runtime = runtimeFor(candidate);
+      runtime.groupLists[index] = element;
+      if (!element) retirePublication(candidate);
+    },
+    [retirePublication, runtimeFor],
+  );
+
+  const bindRowElement = useCallback(
+    <K extends keyof VersionRowElements>(
+      candidate: PanelRenderPublication,
+      row: VersionRowPublication,
+      control: K,
+      element: VersionRowElements[K],
+    ) => {
+      const runtime = runtimeFor(candidate);
+      runtime.rows[row.index][control] = element;
+      if (!element) retirePublication(candidate);
+    },
+    [retirePublication, runtimeFor],
+  );
+
+  const authorityIsCurrent = useCallback((candidate: PanelAuthority) => {
+    return (
+      authorityRef.current === candidate &&
+      candidate.mount === mount &&
+      candidate.session.docId === candidate.documentId &&
+      candidate.session.role === candidate.role &&
+      candidate.router.push === candidate.routerPush
+    );
+  }, [mount]);
+
+  const publicationDomIsCurrent = useCallback(
+    (candidate: PanelRenderPublication, allowClaimed = false) => {
+      if (
+        activePublicationRef.current !== candidate ||
+        candidate.mount !== mount ||
+        !authorityIsCurrent(candidate.authority) ||
+        (!allowClaimed && claimedPublicationsRef.current.has(candidate))
+      ) {
+        return false;
+      }
+      if (
+        candidate.compare.length !== candidate.compareValues.length ||
+        candidate.compare.some((id, index) => id !== candidate.compareValues[index]) ||
+        !sameVersionPresentation(candidate.versions, candidate.rows, candidate)
+      ) {
+        return false;
+      }
+
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      const root = runtime?.root;
+      const close = runtime?.close;
+      if (!runtime?.active || !root?.isConnected || !close?.isConnected || !root.contains(close)) return false;
+      const header = root.firstElementChild;
+      const body = root.children.item(1);
+      if (
+        root.children.length !== 2 ||
+        header?.parentElement !== root ||
+        body?.parentElement !== root ||
+        header.children.length !== 2 ||
+        header.lastElementChild !== close ||
+        close.parentElement !== header
+      ) {
+        return false;
+      }
+
+      const expected = new Set<HTMLButtonElement | HTMLInputElement>([close]);
+      if (candidate.listError) {
+        const alert = runtime.retry?.parentElement;
+        if (
+          !runtime.retry?.isConnected ||
+          alert?.getAttribute("role") !== "alert" ||
+          alert.parentElement !== body
+        ) {
+          return false;
+        }
+        expected.add(runtime.retry);
+      } else if (runtime.retry !== null) {
+        return false;
+      }
+      if (candidate.compare.length > 0) {
+        const hint = runtime.clear?.parentElement;
+        if (
+          !runtime.clear?.isConnected ||
+          hint?.getAttribute("data-testid") !== "compare-hint" ||
+          hint.parentElement !== body ||
+          hint.lastElementChild !== runtime.clear
+        ) {
+          return false;
+        }
+        expected.add(runtime.clear);
+      } else if (runtime.clear !== null) {
+        return false;
+      }
+
+      if (runtime.groupLists.length !== candidate.groups.length || runtime.rows.length !== candidate.rows.length) return false;
+      for (let groupIndex = 0; groupIndex < candidate.groups.length; groupIndex++) {
+        const group = candidate.groups[groupIndex];
+        const list = runtime.groupLists[groupIndex];
+        if (
+          !list?.isConnected ||
+          list.parentElement?.parentElement !== body ||
+          list.children.length !== group.rows.length
+        ) {
+          return false;
+        }
+        const previousList = runtime.groupLists[groupIndex - 1];
+        if (
+          previousList &&
+          !(previousList.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING)
+        ) {
+          return false;
+        }
+        for (let rowIndex = 0; rowIndex < group.rows.length; rowIndex++) {
+          const row = group.rows[rowIndex];
+          const elements = runtime.rows[row.index];
+          const item = elements?.item;
+          const checkbox = elements?.checkbox;
+          const selectControl = elements?.select;
+          const listItem = list.children.item(rowIndex);
+          const rowTop = item?.firstElementChild;
+          const checkboxLabel = checkbox?.parentElement;
+          if (
+            !versionSnapshotIsCurrent(row) ||
+            !(listItem instanceof HTMLLIElement) ||
+            !item?.isConnected ||
+            !checkbox?.isConnected ||
+            !selectControl?.isConnected ||
+            listItem.children.length !== 1 ||
+            listItem.firstElementChild !== item ||
+            item.parentElement !== listItem ||
+            rowTop?.parentElement !== item ||
+            rowTop.children.length !== 2 ||
+            rowTop.children.item(0) !== checkboxLabel ||
+            rowTop.children.item(1) !== selectControl ||
+            checkboxLabel?.parentElement !== rowTop ||
+            checkboxLabel.children.length !== 1 ||
+            checkbox.parentElement !== checkboxLabel ||
+            selectControl.parentElement !== rowTop
+          ) {
+            return false;
+          }
+          expected.add(checkbox);
+          expected.add(selectControl);
+
+          const isSelected = candidate.selected === row.id;
+          const actionContainer = item.children.item(1);
+          if (!isSelected) {
+            if (
+              elements.restore !== null ||
+              elements.startRename !== null ||
+              elements.copy !== null ||
+              actionContainer !== null
+            ) {
+              return false;
+            }
+          } else {
+            if (!actionContainer?.isConnected || actionContainer.parentElement !== item) return false;
+            const actionControls = candidate.canEdit
+              ? [elements.restore, elements.startRename, elements.copy]
+              : [elements.copy];
+            if (
+              actionControls.some((element) => !element?.isConnected || element.parentElement !== actionContainer) ||
+              actionContainer.children.length !== actionControls.length ||
+              actionControls.some((element, index) => actionContainer.children.item(index) !== element)
+            ) {
+              return false;
+            }
+            for (const element of actionControls) expected.add(element!);
+            if (!candidate.canEdit && (elements.restore !== null || elements.startRename !== null)) return false;
+          }
+
+          if (candidate.renaming === row.id) {
+            if (!elements.renameInput?.isConnected || !selectControl.contains(elements.renameInput)) return false;
+            expected.add(elements.renameInput);
+          } else if (elements.renameInput !== null) {
+            return false;
+          }
+        }
+      }
+
+      const actual = collectInteractiveElements(root);
+      return actual.length === expected.size && actual.every((element) => expected.has(element));
+    },
+    [authorityIsCurrent, mount],
+  );
+
+  const claimPanelControl = useCallback(
+    (candidate: PanelRenderPublication, control: PanelControl, source: HTMLButtonElement) => {
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      const expected = runtime?.[control];
+      if (
+        expected !== source ||
+        source.disabled ||
+        !publicationDomIsCurrent(candidate)
+      ) {
+        return false;
+      }
+      claimedPublicationsRef.current.add(candidate);
+      return true;
+    },
+    [publicationDomIsCurrent],
+  );
+
+  const claimRowControl = useCallback(
+    (
+      candidate: PanelRenderPublication,
+      row: VersionRowPublication,
+      control: RowControl,
+      source: HTMLButtonElement | HTMLInputElement,
+    ) => {
+      const publishedRow = candidate.rows[row.index];
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      const expected = runtime?.rows[row.index]?.[control];
+      if (
+        publishedRow !== row ||
+        expected !== source ||
+        source.disabled ||
+        !publicationDomIsCurrent(candidate)
+      ) {
+        return false;
+      }
+      claimedPublicationsRef.current.add(candidate);
+      return true;
+    },
+    [publicationDomIsCurrent],
+  );
+
+  const currentPublicationFor = useCallback(
+    (candidate: PanelAuthority, root: HTMLElement, allowClaimed = true) => {
+      const current = activePublicationRef.current;
+      return current &&
+        current.authority === candidate &&
+        publicationRuntimesRef.current.get(current)?.root === root &&
+        publicationDomIsCurrent(current, allowClaimed)
+        ? current
+        : null;
+    },
+    [publicationDomIsCurrent],
+  );
+
+  const ownsMutation = useCallback(
+    (owner: VersionMutationOwner) => {
+      const current = currentPublicationFor(owner.authority, owner.root);
+      if (!current || mutationOwner.current !== owner) return false;
+      if (owner.phase === "request" && owner.kind !== "rename") {
+        const currentSource = publicationRuntimesRef.current.get(current)?.rows[owner.row.index]?.[owner.control];
+        if (currentSource !== owner.source) return false;
+      }
+      return mutationMatchesPresentation(owner, current);
+    },
+    [currentPublicationFor],
+  );
+
+  const ownsListOperation = useCallback(
+    (operation: ListOperation) => {
+      if (
+        listOperation.current !== operation ||
+        operation.refreshKey !== refreshKey ||
+        !currentPublicationFor(operation.authority, operation.root)
+      ) {
+        return false;
+      }
+      return !operation.mutation || ownsMutation(operation.mutation);
+    },
+    [currentPublicationFor, ownsMutation, refreshKey],
+  );
+
+  const load = useCallback(async (
+    loadAuthority: PanelAuthority,
+    loadRefreshKey: number,
+    options?: { retry?: boolean; mutation?: VersionMutationOwner },
+  ) => {
+    const current = activePublicationRef.current;
+    const runtime = current ? publicationRuntimesRef.current.get(current) : null;
+    if (
+      !current ||
+      current.authority !== loadAuthority ||
+      !runtime?.root ||
+      !publicationDomIsCurrent(current, true) ||
+      (!options?.mutation && !options?.retry && mutationOwner.current !== null) ||
+      (options?.mutation && !ownsMutation(options.mutation))
+    ) {
+      return false;
+    }
+    const operation: ListOperation = {
+      operationId: ++listSequence.current,
+      authority: loadAuthority,
+      root: runtime.root,
+      refreshKey: loadRefreshKey,
+      retry: options?.retry === true,
+      mutation: options?.mutation ?? null,
+    };
+    listOperation.current = operation;
+    if (operation.retry) setRetryState(operation);
+    const ownsRequest = () => ownsListOperation(operation);
     try {
-      const list = await fetchVersions(session.docId, { fresh: Boolean(owner), canCommit: ownsRequest });
-      if (!ownsRequest()) return;
+      const list = await fetchVersions(loadAuthority.documentId, {
+        fresh: Boolean(operation.mutation),
+        canCommit: ownsRequest,
+      });
+      if (!ownsRequest()) return false;
+      const currentPublication = activePublicationRef.current;
+      if (currentPublication && currentPublication.versions !== list) {
+        previewOperation.current = null;
+        setPreviewState((candidate) => (candidate?.authority === loadAuthority ? null : candidate));
+        if (mutationOwner.current && mutationOwner.current !== operation.mutation) {
+          mutationOwner.current = null;
+          setMutationState((candidate) => (candidate?.authority === loadAuthority ? null : candidate));
+        }
+      }
       setVersions(list);
       setListError(null);
+      return true;
     } catch (e) {
-      if (!ownsRequest()) return;
+      if (!ownsRequest()) return false;
       setListError(apiErrorText(e, "Failed to load versions"));
+      return true;
+    } finally {
+      if (listOperation.current === operation && ownsListOperation(operation)) {
+        listOperation.current = null;
+        if (operation.retry) setRetryState((candidate) => (candidate === operation ? null : candidate));
+      }
     }
-  }, [session.docId]);
-
-  const retry = useCallback(() => {
-    if (retryPending.current) return;
-    retryPending.current = true;
-    setRetrying(true);
-    void load().finally(() => {
-      retryPending.current = false;
-      if (alive.current) setRetrying(false);
-    });
-  }, [load]);
+  }, [ownsListOperation, ownsMutation, publicationDomIsCurrent]);
 
   useEffect(() => {
-    void load();
-  }, [load, refreshKey]);
+    const previous = automaticLoadRef.current;
+    automaticLoadRef.current = { authority, refreshKey };
+    const firstLoad = previous === null;
+    const refreshChanged = previous !== null && previous.refreshKey !== refreshKey;
+    const emptyAuthorityReplacement =
+      previous !== null &&
+      previous.authority !== authority &&
+      versions === null;
+    if (firstLoad || refreshChanged || emptyAuthorityReplacement) {
+      void load(authority, refreshKey);
+    }
+  }, [authority, load, refreshKey, versions]);
 
   const contentOf = useCallback(
-    async (v: VersionSummary) => {
-      const cached = contentCache.current.get(v.id);
+    async (contentAuthority: PanelAuthority, row: VersionRowPublication) => {
+      const cached = contentCache.current.get(row.id);
       if (cached !== undefined) return cached;
-      const pending = contentRequests.current.get(v.id);
+      const pending = contentRequests.current.get(row.id);
       if (pending) return pending;
 
-      const request = api.documents.version(session.docId, v.id).then((res) => {
-        contentCache.current.set(v.id, res.version.content);
+      const request = api.documents.version(contentAuthority.documentId, row.id).then((res) => {
+        contentCache.current.set(row.id, res.version.content);
         return res.version.content;
       });
-      contentRequests.current.set(v.id, request);
+      contentRequests.current.set(row.id, request);
       void request.then(
         () => {
-          if (contentRequests.current.get(v.id) === request) contentRequests.current.delete(v.id);
+          if (contentRequests.current.get(row.id) === request) contentRequests.current.delete(row.id);
         },
         () => {
-          if (contentRequests.current.get(v.id) === request) contentRequests.current.delete(v.id);
+          if (contentRequests.current.get(row.id) === request) contentRequests.current.delete(row.id);
         },
       );
       return request;
     },
-    [session.docId],
+    [],
+  );
+
+  const ownsPreview = useCallback(
+    (owner: PreviewOperation) => {
+      const current = currentPublicationFor(owner.authority, owner.root);
+      return (
+        previewOperation.current === owner &&
+        !!current &&
+        (current === owner.activation || previewMatchesPresentation(owner, current))
+      );
+    },
+    [currentPublicationFor],
   );
 
   /** Two ticked versions → old→new compare; otherwise fall back to the clicked row vs current, or nothing. */
   const showPreview = useCallback(
-    async (compareIds: string[], selectedId: string | null) => {
-      const intent = ++previewIntent.current;
-      const all = versions ?? [];
-      const picked = compareIds.map((id) => all.find((v) => v.id === id)).filter((v): v is VersionSummary => Boolean(v));
+    async (
+      candidate: PanelRenderPublication,
+      compareIds: string[],
+      selectedId: string | null,
+    ) => {
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      if (!runtime?.root) return;
+      const picked = compareIds.map((id) => rowForId(candidate, id)).filter((row): row is VersionRowPublication => Boolean(row));
       const pair = picked.length === 2 ? [...picked].sort((a, b) => a.number - b.number) : null;
-      const single = selectedId ? all.find((v) => v.id === selectedId) : undefined;
-      const ownsIntent = () => alive.current && previewIntent.current === intent;
-
+      const single = selectedId ? rowForId(candidate, selectedId) : undefined;
+      const owner: PreviewOperation = {
+        operationId: ++previewSequence.current,
+        activation: candidate,
+        authority: candidate.authority,
+        root: runtime.root,
+        versions: candidate.versions,
+        rows: candidate.rows,
+        compare: compareIds,
+        selected: selectedId,
+        busyVersionId: pair ? pair[1].id : single?.id ?? null,
+      };
+      previewOperation.current = owner;
+      setPreviewState(owner);
       setError(null);
-      setPreviewBusy(pair ? pair[1].id : single?.id ?? null);
       try {
         if (pair) {
           const [older, newer] = pair;
-          const [oldContent, newContent] = await Promise.all([contentOf(older), contentOf(newer)]);
-          if (!ownsIntent()) return;
-          const range = all.filter((v) => v.number > older.number && v.number <= newer.number);
-          onPreview({ version: newer, content: newContent, base: { version: older, content: oldContent }, range });
+          const [oldContent, newContent] = await Promise.all([
+            contentOf(owner.authority, older),
+            contentOf(owner.authority, newer),
+          ]);
+          if (!ownsPreview(owner)) return;
+          const range = owner.rows
+            .filter((row) => row.number > older.number && row.number <= newer.number)
+            .map((row) => row.version);
+          owner.authority.onPreview({
+            version: newer.version,
+            content: newContent,
+            base: { version: older.version, content: oldContent },
+            range,
+          });
           return;
         }
         if (single) {
-          const content = await contentOf(single);
-          if (!ownsIntent()) return;
-          onPreview({ version: single, content });
+          const content = await contentOf(owner.authority, single);
+          if (!ownsPreview(owner)) return;
+          owner.authority.onPreview({ version: single.version, content });
           return;
         }
-        onPreview(null);
+        if (ownsPreview(owner)) owner.authority.onPreview(null);
       } catch (e) {
-        if (ownsIntent()) setError(apiErrorText(e, "Failed to load version"));
+        if (ownsPreview(owner)) setError(apiErrorText(e, "Failed to load version"));
       } finally {
-        if (ownsIntent()) setPreviewBusy(null);
+        if (previewOperation.current === owner && ownsPreview(owner)) {
+          previewOperation.current = null;
+          setPreviewState((current) => (current === owner ? null : current));
+        }
       }
     },
-    [versions, contentOf, onPreview],
+    [contentOf, ownsPreview],
   );
 
   const invalidatePreview = useCallback(() => {
-    previewIntent.current += 1;
-    setPreviewBusy(null);
+    previewOperation.current = null;
+    setPreviewState(null);
   }, []);
 
   const claimMutation = useCallback(
-    (intent: VersionMutationIntent): VersionMutationOwner | null => {
-      if (!alive.current || mutationOwner.current) return null;
+    (
+      candidate: PanelRenderPublication,
+      row: VersionRowPublication,
+      intent: VersionMutationIntent,
+      source: HTMLButtonElement | HTMLInputElement,
+      control: "restore" | "renameInput" | "copy",
+    ): VersionMutationOwner | null => {
+      const runtime = publicationRuntimesRef.current.get(candidate);
+      if (
+        !runtime?.root ||
+        mutationOwner.current ||
+        runtime.rows[row.index]?.[control] !== source ||
+        source.disabled ||
+        !publicationDomIsCurrent(candidate, true)
+      ) {
+        return null;
+      }
       const owner: VersionMutationOwner = {
         ...intent,
         operationId: ++mutationOperation.current,
-        documentId: session.docId,
+        authority: candidate.authority,
+        root: runtime.root,
+        row,
+        source,
+        control,
+        phase: "request",
       };
       mutationOwner.current = owner;
-      setActiveMutation(owner);
+      setMutationState(owner);
       setError(null);
       return owner;
     },
-    [session.docId],
+    [publicationDomIsCurrent],
   );
 
-  const ownsMutation = useCallback((owner: VersionMutationOwner) => alive.current && mutationOwner.current === owner, []);
-
   const releaseMutation = useCallback((owner: VersionMutationOwner) => {
-    if (mutationOwner.current !== owner) return;
+    if (mutationOwner.current !== owner || !ownsMutation(owner)) return;
     mutationOwner.current = null;
-    setActiveMutation((current) => (current === owner ? null : current));
-  }, []);
+    setMutationState((current) => (current === owner ? null : current));
+  }, [ownsMutation]);
 
   const invalidateMutation = useCallback(() => {
     mutationOwner.current = null;
-    setActiveMutation(null);
+    setMutationState(null);
   }, []);
 
-  const select = async (v: VersionSummary) => {
-    const next = selected === v.id ? null : v.id;
+  const select = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "select", event.currentTarget)) return;
+    const next = candidate.selected === row.id ? null : row.id;
+    const nextCompare = candidate.compare;
     setSelected(next);
-    await showPreview(compare, next);
+    setPublicationRevision((current) => current + 1);
+    void showPreview(candidate, nextCompare, next);
   };
 
-  const toggleCompare = async (v: VersionSummary) => {
+  const toggleCompare = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "checkbox", event.currentTarget)) return;
     // Keep at most two ticked; ticking a third replaces the older tick.
-    const next = compare.includes(v.id) ? compare.filter((id) => id !== v.id) : [...compare.slice(-1), v.id];
+    const next = candidate.compare.includes(row.id)
+      ? candidate.compare.filter((id) => id !== row.id)
+      : [...candidate.compare.slice(-1), row.id];
     setCompare(next);
-    await showPreview(next, selected);
+    setPublicationRevision((current) => current + 1);
+    void showPreview(candidate, next, candidate.selected);
   };
 
-  const restore = async (v: VersionSummary) => {
-    if (!alive.current || mutationOwner.current) return;
-    if (!confirm(`Restore version ${v.number}? The current text is saved as a version first.`)) return;
-    const owner = claimMutation({ kind: "restore", versionId: v.id });
+  const restore = async (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "restore", event.currentTarget)) return;
+    setPublicationRevision((current) => current + 1);
+    if (!window.confirm(`Restore version ${row.number}? The current text is saved as a version first.`)) return;
+    const owner = claimMutation(
+      candidate,
+      row,
+      { kind: "restore", versionId: row.id },
+      event.currentTarget,
+      "restore",
+    );
     if (!owner) return;
     invalidatePreview();
     try {
-      await api.documents.restoreVersion(session.docId, v.id);
+      await api.documents.restoreVersion(owner.authority.documentId, owner.row.id);
       if (!ownsMutation(owner)) return;
+      owner.phase = "reload";
       setSelected(null);
       setCompare([]);
-      onPreview(null);
-      await load(owner);
+      owner.authority.onPreview(null);
+      await load(owner.authority, candidate.refreshKey, { mutation: owner });
     } catch (e) {
       if (ownsMutation(owner)) setError(apiErrorText(e, "Restore failed"));
     } finally {
@@ -306,16 +1076,28 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     }
   };
 
-  const rename = async (v: VersionSummary) => {
-    const title = draft.trim();
+  const rename = async (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    source: HTMLInputElement,
+  ) => {
+    const title = candidate.draft.trim();
     setRenaming(null);
-    if (!title || title === v.title) return;
-    const owner = claimMutation({ kind: "rename", versionId: v.id, title });
+    setPublicationRevision((current) => current + 1);
+    if (!title || title === row.title) return;
+    const owner = claimMutation(
+      candidate,
+      row,
+      { kind: "rename", versionId: row.id, title },
+      source,
+      "renameInput",
+    );
     if (!owner) return;
     try {
-      await api.documents.renameVersion(session.docId, v.id, title);
+      await api.documents.renameVersion(owner.authority.documentId, owner.row.id, title);
       if (!ownsMutation(owner)) return;
-      await load(owner);
+      owner.phase = "reload";
+      await load(owner.authority, candidate.refreshKey, { mutation: owner });
     } catch (e) {
       if (ownsMutation(owner)) setError(apiErrorText(e, "Rename failed"));
     } finally {
@@ -323,14 +1105,26 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     }
   };
 
-  const copyAsNew = async (v: VersionSummary) => {
-    const owner = claimMutation({ kind: "copy", versionId: v.id });
+  const copyAsNew = async (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "copy", event.currentTarget)) return;
+    setPublicationRevision((current) => current + 1);
+    const owner = claimMutation(
+      candidate,
+      row,
+      { kind: "copy", versionId: row.id },
+      event.currentTarget,
+      "copy",
+    );
     if (!owner) return;
     try {
-      const res = await api.documents.copyVersion(session.docId, v.id);
+      const res = await api.documents.copyVersion(owner.authority.documentId, owner.row.id);
       if (!ownsMutation(owner)) return;
-      setPendingNotice(`Created “${res.title}” from version ${v.number}.`, "success");
-      router.push(`/d/${res.id}`);
+      setPendingNotice(`Created “${res.title}” from version ${owner.row.number}.`, "success");
+      owner.authority.routerPush.call(owner.authority.router, `/d/${res.id}`);
     } catch (e) {
       if (ownsMutation(owner)) setError(apiErrorText(e, "Could not copy the version"));
     } finally {
@@ -338,23 +1132,175 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     }
   };
 
-  const groups = useMemo(() => groupByDay(versions ?? []), [versions]);
-  const compareHint = compare.length === 1 ? "Tick one more version to compare" : compare.length === 2 ? "Comparing two versions" : null;
+  const close = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
+    if (!claimPanelControl(candidate, "close", event.currentTarget)) return;
+    retirePublication(candidate);
+    listOperation.current = null;
+    setRetryState(null);
+    invalidatePreview();
+    invalidateMutation();
+    candidate.authority.onPreview(null);
+    candidate.authority.onClose();
+  };
+
+  const retry = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
+    if (!claimPanelControl(candidate, "retry", event.currentTarget)) return;
+    setPublicationRevision((current) => current + 1);
+    void load(candidate.authority, candidate.refreshKey, { retry: true });
+  };
+
+  const clearComparison = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
+    if (!claimPanelControl(candidate, "clear", event.currentTarget)) return;
+    const next: string[] = [];
+    setCompare(next);
+    setPublicationRevision((current) => current + 1);
+    void showPreview(candidate, next, candidate.selected);
+  };
+
+  const startRename = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "startRename", event.currentTarget)) return;
+    setDraft(row.title ?? "");
+    setRenaming(row.id);
+    setPublicationRevision((current) => current + 1);
+  };
+
+  const changeRename = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    setDraft(event.currentTarget.value);
+    setPublicationRevision((current) => current + 1);
+  };
+
+  const blurRename = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: FocusEvent<HTMLInputElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    void rename(candidate, row, event.currentTarget);
+  };
+
+  const keyDownRename = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: KeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (event.key !== "Enter" && event.key !== "Escape") return;
+    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void rename(candidate, row, event.currentTarget);
+    } else {
+      setRenaming(null);
+      setPublicationRevision((current) => current + 1);
+    }
+  };
+
+  const clickRename = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    event: MouseEvent<HTMLInputElement>,
+  ) => {
+    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    setPublicationRevision((current) => current + 1);
+    event.stopPropagation();
+  };
+
+  useLayoutEffect(() => {
+    const previous = lastPublicationRef.current;
+    const runtime = runtimeFor(publication);
+    const previousRoot = previous
+      ? publicationRuntimesRef.current.get(previous)?.root
+      : null;
+    const authorityChanged = authorityRef.current !== publication.authority;
+    const refreshChanged =
+      previous?.authority === publication.authority &&
+      previous.refreshKey !== publication.refreshKey;
+    const listChanged =
+      previous?.authority === publication.authority &&
+      !sameVersionPresentation(previous.versions, previous.rows, publication);
+    const rootChanged =
+      previous?.authority === publication.authority &&
+      previousRoot !== null &&
+      previousRoot !== runtime.root;
+
+    if (authorityChanged) {
+      authorityRef.current = publication.authority;
+      listOperation.current = null;
+      previewOperation.current = null;
+      mutationOwner.current = null;
+      if (retryState?.authority !== publication.authority) setRetryState(null);
+      if (previewState?.authority !== publication.authority) setPreviewState(null);
+      if (mutationState?.authority !== publication.authority) setMutationState(null);
+    } else {
+      const pendingList = listOperation.current;
+      if (pendingList && (pendingList.refreshKey !== publication.refreshKey || rootChanged)) {
+        listOperation.current = null;
+        setRetryState((candidate) => (candidate === pendingList ? null : candidate));
+      }
+      const pendingPreview = previewOperation.current;
+      if (
+        pendingPreview &&
+        (refreshChanged ||
+          listChanged ||
+          rootChanged ||
+          (pendingPreview.activation !== previous && !previewMatchesPresentation(pendingPreview, publication)))
+      ) {
+        previewOperation.current = null;
+        setPreviewState((candidate) => (candidate === pendingPreview ? null : candidate));
+      }
+      const pendingMutation = mutationOwner.current;
+      if (
+        pendingMutation &&
+        (refreshChanged || listChanged || rootChanged || !mutationMatchesPresentation(pendingMutation, publication))
+      ) {
+        mutationOwner.current = null;
+        setMutationState((candidate) => (candidate === pendingMutation ? null : candidate));
+      }
+    }
+
+    runtime.active = true;
+    activePublicationRef.current = publication;
+    if (!publicationDomIsCurrent(publication, true)) retirePublication(publication);
+    lastPublicationRef.current = publication;
+    return () => retirePublication(publication);
+  }, [
+    mutationState?.authority,
+    previewState?.authority,
+    publication,
+    publicationDomIsCurrent,
+    retirePublication,
+    retryState?.authority,
+    runtimeFor,
+  ]);
+
+  const compareHint =
+    publication.compare.length === 1
+      ? "Tick one more version to compare"
+      : publication.compare.length === 2
+        ? "Comparing two versions"
+        : null;
 
   return (
-    <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="versions-panel">
+    <aside
+      ref={(element) => bindRoot(publication, element)}
+      className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2"
+      data-testid="versions-panel"
+    >
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Version history</span>
         <button
+          ref={(element) => bindPanelControl(publication, "close", element)}
           type="button"
           className="icon-btn h-8 w-8"
-          onClick={() => {
-            invalidatePreview();
-            listRequest.current += 1;
-            invalidateMutation();
-            onPreview(null);
-            onClose();
-          }}
+          onClick={(event) => close(publication, event)}
           aria-label="Close version history"
         >
           <X size={16} />
@@ -364,7 +1310,13 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
         {listError && (
           <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
             <div>{listError}</div>
-            <button type="button" className="btn btn-outline btn-sm mt-2 gap-1.5" onClick={retry} disabled={retrying}>
+            <button
+              ref={(element) => bindPanelControl(publication, "retry", element)}
+              type="button"
+              className="btn btn-outline btn-sm mt-2 gap-1.5"
+              onClick={(event) => retry(publication, event)}
+              disabled={retrying}
+            >
               {retrying && <Loader2 size={13} className="animate-spin" />}
               {retrying ? "Retrying…" : "Retry"}
             </button>
@@ -375,12 +1327,10 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
             <span>{compareHint}</span>
             <button
+              ref={(element) => bindPanelControl(publication, "clear", element)}
               type="button"
               className="text-accent hover:underline"
-              onClick={() => {
-                setCompare([]);
-                void showPreview([], selected);
-              }}
+              onClick={(event) => clearComparison(publication, event)}
             >
               Clear
             </button>
@@ -395,20 +1345,24 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
             Versions are captured automatically while you edit, and whenever you publish.
           </EmptyState>
         ) : versions ? (
-          groups.map((g) => (
-            <div key={g.day} className="mb-4">
-              <div className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-ink-4">{g.day}</div>
-              <ul className="flex flex-col gap-1">
-                {g.items.map((v) => (
-                  <li key={v.id}>
+          publication.groups.map((group, groupIndex) => (
+            <div key={group.day} className="mb-4">
+              <div className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-ink-4">{group.day}</div>
+              <ul
+                ref={(element) => bindGroupList(publication, groupIndex, element)}
+                className="flex flex-col gap-1"
+              >
+                {group.rows.map((row) => (
+                  <li key={row.id}>
                     <div
+                      ref={(element) => bindRowElement(publication, row, "item", element)}
                       className={cn(
                         "group rounded-lg border px-2 py-2 transition-colors",
-                        selected === v.id || compare.includes(v.id) ? "border-accent bg-surface shadow-sm" : "border-transparent hover:border-line hover:bg-surface",
+                        selected === row.id || compare.includes(row.id) ? "border-accent bg-surface shadow-sm" : "border-transparent hover:border-line hover:bg-surface",
                       )}
                       data-testid="version-item"
-                      data-version-kind={v.kind}
-                      data-version-number={v.number}
+                      data-version-kind={row.kind}
+                      data-version-number={row.number}
                     >
                       <div className="flex items-start gap-2">
                         <label
@@ -417,71 +1371,73 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                           data-testid="version-compare-target"
                         >
                           <input
+                            ref={(element) => bindRowElement(publication, row, "checkbox", element)}
                             type="checkbox"
                             className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
-                            checked={compare.includes(v.id)}
-                            onChange={() => void toggleCompare(v)}
-                            aria-label={`Compare v${v.number}`}
+                            checked={compare.includes(row.id)}
+                            onChange={(event) => toggleCompare(publication, row, event)}
+                            aria-label={`Compare v${row.number}`}
                             title="Tick two versions to compare them"
                             data-testid="version-compare"
                           />
                         </label>
-                        <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => void select(v)}>
-                          <KindIcon kind={v.kind} />
+                        <button
+                          ref={(element) => bindRowElement(publication, row, "select", element)}
+                          type="button"
+                          className="flex min-w-0 flex-1 items-start gap-2 text-left"
+                          onClick={(event) => select(publication, row, event)}
+                        >
+                          <KindIcon kind={row.kind} />
                           <div className="min-w-0 flex-1">
-                            {renaming === v.id ? (
+                            {renaming === row.id ? (
                               <input
+                                ref={(element) => bindRowElement(publication, row, "renameInput", element)}
                                 autoFocus
                                 className="input h-7 text-[13px]"
                                 value={draft}
-                                placeholder={`Name version ${v.number}`}
-                                onChange={(e) => setDraft(e.target.value)}
-                                onBlur={() => void rename(v)}
+                                placeholder={`Name version ${row.number}`}
+                                onChange={(event) => changeRename(publication, row, event)}
+                                onBlur={(event) => blurRename(publication, row, event)}
                                 disabled={mutationBusy}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    void rename(v);
-                                  }
-                                  if (e.key === "Escape") setRenaming(null);
-                                }}
-                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(event) => keyDownRename(publication, row, event)}
+                                onClick={(event) => clickRename(publication, row, event)}
                                 data-testid="version-rename-input"
                               />
                             ) : (
                               <div className="flex items-center gap-1.5">
-                                <span className="truncate text-[13px] font-medium text-ink">{v.title ?? KIND_LABEL[v.kind]}</span>
-                                {v.title && (
+                                <span className="truncate text-[13px] font-medium text-ink">{row.title ?? KIND_LABEL[row.kind]}</span>
+                                {row.title && (
                                   <span
                                     className="shrink-0 rounded border border-line px-1 text-[10px] font-medium uppercase tracking-wide text-ink-3"
                                     data-testid="version-kind"
                                   >
-                                    {KIND_TAG[v.kind]}
+                                    {KIND_TAG[row.kind]}
                                   </span>
                                 )}
                               </div>
                             )}
                             <div className="mt-0.5 flex items-center gap-1.5 text-xs text-ink-3">
-                              <span className="font-mono text-[11px] text-ink-4">v{v.number}</span>
-                              <span title={formatDateTime(v.createdAt)}>· {relativeTime(v.createdAt)}</span>
-                              {v.createdByName && <span>· {v.createdByName}</span>}
-                              {v.commitSha && (
-                                <span className="inline-flex items-center gap-0.5 font-mono text-[11px]" title={v.commitSha}>
-                                  <GitCommit size={11} /> {v.commitSha.slice(0, 7)}
+                              <span className="font-mono text-[11px] text-ink-4">v{row.number}</span>
+                              <span title={formatDateTime(row.createdAt)}>· {relativeTime(row.createdAt)}</span>
+                              {row.createdByName && <span>· {row.createdByName}</span>}
+                              {row.commitSha && (
+                                <span className="inline-flex items-center gap-0.5 font-mono text-[11px]" title={row.commitSha}>
+                                  <GitCommit size={11} /> {row.commitSha.slice(0, 7)}
                                 </span>
                               )}
                             </div>
                           </div>
-                          {(previewBusy === v.id || activeMutation?.versionId === v.id) && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
+                          {(previewBusy === row.id || currentMutation?.versionId === row.id) && <Loader2 size={14} className="mt-1 animate-spin text-ink-4" />}
                         </button>
                       </div>
-                      {selected === v.id && (
+                      {selected === row.id && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5">
                           {canEdit && (
                             <button
+                              ref={(element) => bindRowElement(publication, row, "restore", element)}
                               type="button"
                               className="btn btn-sm btn-primary gap-1.5"
-                              onClick={() => void restore(v)}
+                              onClick={(event) => void restore(publication, row, event)}
                               disabled={mutationBusy}
                               data-testid="version-restore"
                             >
@@ -490,23 +1446,21 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                           )}
                           {canEdit && (
                             <button
+                              ref={(element) => bindRowElement(publication, row, "startRename", element)}
                               type="button"
                               className="btn btn-sm btn-ghost gap-1.5"
-                              onClick={() => {
-                                if (mutationOwner.current) return;
-                                setDraft(v.title ?? "");
-                                setRenaming(v.id);
-                              }}
+                              onClick={(event) => startRename(publication, row, event)}
                               disabled={mutationBusy}
                               data-testid="version-rename"
                             >
-                              <Pencil size={13} /> {v.title ? "Rename" : "Name"}
+                              <Pencil size={13} /> {row.title ? "Rename" : "Name"}
                             </button>
                           )}
                           <button
+                            ref={(element) => bindRowElement(publication, row, "copy", element)}
                             type="button"
                             className="btn btn-sm btn-ghost gap-1.5"
-                            onClick={() => void copyAsNew(v)}
+                            onClick={(event) => void copyAsNew(publication, row, event)}
                             disabled={mutationBusy}
                             title="Copy this version as a new document"
                             data-testid="version-copy"
