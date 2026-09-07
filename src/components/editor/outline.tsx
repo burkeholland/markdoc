@@ -8,7 +8,7 @@ import { rovingIndex } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
 import { RAIL_BOX, RAIL_COLLAPSED_BOX } from "./chrome-classes";
-import { memo, type KeyboardEvent, useEffect, useRef } from "react";
+import { memo, type KeyboardEvent, useCallback, useLayoutEffect, useRef, useState } from "react";
 
 export interface OutlineProps {
   session: CollabSession;
@@ -20,6 +20,25 @@ export interface OutlineProps {
 }
 
 const EMPTY_HEADINGS: HeadingInfo[] = [];
+
+interface OutlineVisit {
+  session: CollabSession;
+  open: boolean;
+  identity: number;
+}
+
+interface ActiveItemOwner {
+  visit: OutlineVisit;
+  element: HTMLButtonElement;
+}
+
+function useOutlineVisit(session: CollabSession, open: boolean): OutlineVisit {
+  const [visit, setVisit] = useState<OutlineVisit>(() => ({ session, open, identity: 0 }));
+  if (visit.session === session && visit.open === open) return visit;
+  const next = { session, open, identity: visit.identity + 1 };
+  setVisit(next);
+  return next;
+}
 
 function sameHeadings(a: HeadingInfo[], b: HeadingInfo[]): boolean {
   if (a === b) return true;
@@ -52,6 +71,7 @@ export function nextOutlineIndex(key: string, current: number, count: number): n
 }
 
 export function OutlinePanel({ session, open, onToggle, onSelect, className }: OutlineProps) {
+  const visit = useOutlineVisit(session, open);
   // IndexedDB can fill the document before React hydrates; keep the first client render
   // identical to the server (no headings) and switch in the next render.
   const hydrated = useHydrated();
@@ -59,11 +79,46 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
   const headings = hydrated ? liveHeadings : EMPTY_HEADINGS;
   // Only the active index matters: the panel re-renders when the caret crosses a heading, not per keystroke.
   const active = useSessionValue(session, (s) => activeHeadingIndex(headings, s.cursorSource));
+  const activeVisit = useRef<OutlineVisit | null>(null);
+  const activeItem = useRef<ActiveItemOwner | null>(null);
+  const previous = useRef<{ visit: OutlineVisit; headings: HeadingInfo[]; active: number } | null>(null);
+  const ownsVisit = useCallback((owner: OutlineVisit) => activeVisit.current === owner, []);
+  const retireVisit = useCallback((owner: OutlineVisit) => {
+    if (activeVisit.current === owner) activeVisit.current = null;
+    if (activeItem.current?.visit === owner) activeItem.current = null;
+  }, []);
+  const setActiveItem = useCallback((owner: OutlineVisit, element: HTMLButtonElement | null) => {
+    if (element) {
+      activeItem.current = { visit: owner, element };
+    } else if (activeItem.current?.visit === owner) {
+      activeItem.current = null;
+    }
+  }, []);
+  const toggle = useCallback(() => {
+    if (!ownsVisit(visit)) return;
+    retireVisit(visit);
+    onToggle();
+  }, [onToggle, ownsVisit, retireVisit, visit]);
+
+  useLayoutEffect(() => {
+    activeVisit.current = visit;
+    return () => retireVisit(visit);
+  }, [retireVisit, visit]);
+
+  useLayoutEffect(() => {
+    if (!ownsVisit(visit)) return;
+    const before = previous.current;
+    previous.current = { visit, headings, active };
+    if (!open || !before || before.visit !== visit || active < 0 || active === before.active || headings !== before.headings) return;
+    const item = activeItem.current;
+    if (item?.visit !== visit) return;
+    item.element.scrollIntoView({ block: "nearest" });
+  }, [active, headings, open, ownsVisit, visit]);
 
   if (!open) {
     return (
       <div className={cn(RAIL_COLLAPSED_BOX, className)} data-testid="outline-collapsed">
-        <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Show outline" title="Show outline">
+        <button type="button" className="icon-btn h-8 w-8" onClick={toggle} aria-label="Show outline" title="Show outline">
           <ChevronsRight size={16} />
         </button>
       </div>
@@ -76,12 +131,19 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
     <aside className={cn(RAIL_BOX, className)} data-testid="outline">
       <div className="flex h-12 items-center justify-between pl-6 pr-2">
         <span className="pane-label">Outline</span>
-        <button type="button" className="icon-btn h-8 w-8" onClick={onToggle} aria-label="Hide outline" title="Hide outline">
+        <button type="button" className="icon-btn h-8 w-8" onClick={toggle} aria-label="Hide outline" title="Hide outline">
           <ChevronsLeft size={16} />
         </button>
       </div>
       <nav className="scrollbar-thin flex-1 overflow-y-auto pb-6 pr-2" aria-label="Document outline">
-        <OutlineList headings={headings} active={active} onSelect={onSelect} />
+        <OutlineList
+          visit={visit}
+          headings={headings}
+          active={active}
+          ownsVisit={ownsVisit}
+          setActiveItem={setActiveItem}
+          onSelect={onSelect}
+        />
         {hydrated && headings.length === 0 && <p className="px-6 pt-1 text-[13px] leading-5 text-ink-4">Headings you add will show up here.</p>}
       </nav>
     </aside>
@@ -92,21 +154,28 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
  * The heading list only depends on the headings and the active index, not on the cursor offset,
  * so typing inside a section does not re-render a 140-item list on every keystroke (task #357).
  */
-const OutlineList = memo(function OutlineList({ headings, active, onSelect }: { headings: HeadingInfo[]; active: number; onSelect: (heading: HeadingInfo) => void }) {
+const OutlineList = memo(function OutlineList({
+  visit,
+  headings,
+  active,
+  ownsVisit,
+  setActiveItem,
+  onSelect,
+}: {
+  visit: OutlineVisit;
+  headings: HeadingInfo[];
+  active: number;
+  ownsVisit: (visit: OutlineVisit) => boolean;
+  setActiveItem: (visit: OutlineVisit, element: HTMLButtonElement | null) => void;
+  onSelect: (heading: HeadingInfo) => void;
+}) {
   const minLevel = headings.reduce((m, h) => Math.min(m, h.level), 6);
   // Roving tabindex: the active heading (or the first one) is the list's single tab stop.
   const tabStop = active >= 0 ? active : 0;
-  const activeItemRef = useRef<HTMLButtonElement>(null);
-  const previous = useRef({ headings, active });
-
-  useEffect(() => {
-    const before = previous.current;
-    previous.current = { headings, active };
-    if (active < 0 || active === before.active || headings !== before.headings) return;
-    activeItemRef.current?.scrollIntoView({ block: "nearest" });
-  }, [active, headings]);
+  const activeItemRef = useCallback((element: HTMLButtonElement | null) => setActiveItem(visit, element), [setActiveItem, visit]);
 
   const onListKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
+    if (!ownsVisit(visit)) return;
     const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-outline-item]"));
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     const next = nextOutlineIndex(e.key, current, items.length);
@@ -118,11 +187,13 @@ const OutlineList = memo(function OutlineList({ headings, active, onSelect }: { 
   return (
     <ul className="flex flex-col" onKeyDown={onListKeyDown}>
       {headings.map((h, i) => (
-        <li key={`${h.from}-${i}`}>
+        <li key={`${visit.identity}-${h.from}-${i}`}>
           <button
             type="button"
             ref={i === active ? activeItemRef : undefined}
-            onClick={() => onSelect(h)}
+            onClick={() => {
+              if (ownsVisit(visit)) onSelect(h);
+            }}
             className={cn(
               "relative flex w-full items-start truncate py-2.5 pr-3 text-left text-[15px] leading-5 transition-colors hover:text-ink",
               i === active ? "font-medium text-accent" : "text-ink-2",
