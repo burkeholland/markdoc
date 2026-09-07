@@ -146,6 +146,16 @@ interface Toast {
 type PublishPullKind = "publish" | "pull";
 type EditorIdentity = { documentId: string; session: CollabSession };
 type PublishPullOwner = { editor: EditorIdentity; kind: PublishPullKind };
+type DocumentMutationAction = "delete" | "duplicate";
+type DocumentMutationOwner = {
+  editor: EditorIdentity;
+  session: CollabSession;
+  documentId: string;
+  title: string;
+  storage: DocumentDto["storage"];
+  action: DocumentMutationAction;
+  operation: number;
+};
 
 const publishPullBusyError = () => new Error("Another publish or pull is already in progress.");
 
@@ -243,9 +253,13 @@ export function EditorShell({
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [commitOpen, setCommitOpen] = useState(false);
   const [publishingOwner, setPublishingOwner] = useState<PublishPullOwner | null>(null);
+  const [documentMutationOwner, setDocumentMutationOwner] = useState<DocumentMutationOwner | null>(null);
   const [nameVersionVisit, setNameVersionVisit] = useState<NameVersionVisit | null>(null);
   const currentEditorRef = useRef<EditorIdentity | null>(null);
   const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
+  const documentMutationOwnerRef = useRef<DocumentMutationOwner | null>(null);
+  const documentMutationSequence = useRef(0);
+  const leavingEditorRef = useRef<EditorIdentity | null>(null);
   const currentNameVersionVisitRef = useRef<NameVersionVisit | null>(null);
   const namedVersionOwnerRef = useRef<NameVersionSaveOwner | null>(null);
   const nameVersionVisitSequence = useRef(0);
@@ -269,6 +283,8 @@ export function EditorShell({
     currentEditorRef.current = editorIdentity;
     publishPullOwnerRef.current = null;
     setPublishingOwner(null);
+    documentMutationOwnerRef.current = null;
+    setDocumentMutationOwner(null);
     const previousVisit = currentNameVersionVisitRef.current;
     if (previousVisit && previousVisit.editor !== editorIdentity) {
       const replacement = {
@@ -283,6 +299,8 @@ export function EditorShell({
     return () => {
       if (currentEditorRef.current === editorIdentity) currentEditorRef.current = null;
       if (publishPullOwnerRef.current?.editor === editorIdentity) publishPullOwnerRef.current = null;
+      if (documentMutationOwnerRef.current?.editor === editorIdentity) documentMutationOwnerRef.current = null;
+      if (leavingEditorRef.current === editorIdentity) leavingEditorRef.current = null;
     };
   }, [editorIdentity]);
   useLayoutEffect(() => () => {
@@ -293,6 +311,12 @@ export function EditorShell({
     setDoc((current) => current.id === initialDoc.id ? current : initialDoc);
   }, [initialDoc]);
   const publishing = publishingOwner !== null && currentEditorRef.current === publishingOwner.editor;
+  const documentMutation =
+    documentMutationOwner !== null &&
+    currentEditorRef.current === documentMutationOwner.editor &&
+    documentMutationOwnerRef.current === documentMutationOwner
+      ? documentMutationOwner.action
+      : null;
   const richScrollRef = useRef<HTMLDivElement>(null);
   const setRichScrollRef = useCallback((el: HTMLDivElement | null) => {
     richScrollRef.current = el;
@@ -775,43 +799,112 @@ export function EditorShell({
     [session, guardImport],
   );
 
-  // Set once this client has decided to leave (own delete or server eviction) so the two paths do not race.
-  const leavingRef = useRef(false);
-  const deleteDoc = useCallback(async () => {
+  const ownsDocumentMutation = useCallback(
+    (owner: DocumentMutationOwner) =>
+      currentEditorRef.current === owner.editor &&
+      owner.editor.session === owner.session &&
+      owner.editor.documentId === owner.documentId &&
+      documentMutationOwnerRef.current === owner,
+    [],
+  );
+  const finishDocumentMutation = useCallback(
+    (owner: DocumentMutationOwner) => {
+      if (!ownsDocumentMutation(owner)) return;
+      documentMutationOwnerRef.current = null;
+      setDocumentMutationOwner((current) => current === owner ? null : current);
+    },
+    [ownsDocumentMutation],
+  );
+  const beginDocumentMutation = useCallback(
+    <T,>(action: DocumentMutationAction, request: (documentId: string) => Promise<T>) => {
+      const editor = currentEditorRef.current;
+      if (
+        !editor ||
+        editor !== editorIdentity ||
+        editor.session !== session ||
+        editor.documentId !== doc.id ||
+        documentMutationOwnerRef.current
+      ) {
+        return null;
+      }
+      const owner: DocumentMutationOwner = {
+        editor,
+        session,
+        documentId: doc.id,
+        title: doc.title,
+        storage: doc.storage,
+        action,
+        operation: ++documentMutationSequence.current,
+      };
+      documentMutationOwnerRef.current = owner;
+      flushSync(() => setDocumentMutationOwner(owner));
+      let pending: Promise<T>;
+      try {
+        pending = request(owner.documentId);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      return { owner, pending };
+    },
+    [doc.id, doc.storage, doc.title, editorIdentity, session],
+  );
+
+  // Set once this editor has decided to leave (own delete or server eviction) so the two paths do not race.
+  const deleteDoc = useCallback(() => {
+    if (currentEditorRef.current !== editorIdentity || documentMutationOwnerRef.current) return;
     if (!confirm(`Move “${doc.title}” to trash? You can restore it from the dashboard for 30 days.`)) return;
-    try {
-      await api.documents.delete(doc.id);
-    } catch (e) {
-      toast(apiErrorText(e, "Could not move to trash"), "error");
-      return;
-    }
-    leavingRef.current = true;
-    setPendingNotice(`“${doc.title}” was moved to the trash.`, "success");
-    await session.clearLocal();
-    router.push("/");
-  }, [doc.id, doc.title, router, session, toast]);
+    const mutation = beginDocumentMutation("delete", (documentId) => api.documents.delete(documentId));
+    if (!mutation) return;
+    const { owner, pending } = mutation;
+    void (async () => {
+      try {
+        await pending;
+        if (!ownsDocumentMutation(owner)) return;
+        leavingEditorRef.current = owner.editor;
+        setPendingNotice(`“${owner.title}” was moved to the trash.`, "success");
+        await owner.session.clearLocal();
+        if (!ownsDocumentMutation(owner)) return;
+        router.push("/");
+      } catch (error) {
+        if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not move to trash"), "error");
+      } finally {
+        finishDocumentMutation(owner);
+      }
+    })();
+  }, [beginDocumentMutation, doc.title, editorIdentity, finishDocumentMutation, ownsDocumentMutation, router, toast]);
 
   // Another owner session (or this one, via the API) trashed the document: leave with a notice.
   const trashed = useSessionValue(session, (s) => s.trashed);
   useEffect(() => {
-    if (!trashed || leavingRef.current) return;
-    leavingRef.current = true;
+    if (!trashed || leavingEditorRef.current === editorIdentity) return;
+    leavingEditorRef.current = editorIdentity;
     setPendingNotice("This document was moved to the trash.", "info");
-    void session.clearLocal().finally(() => router.push("/"));
-  }, [trashed, session, router]);
+    const leaveIfCurrent = () => {
+      if (currentEditorRef.current === editorIdentity && leavingEditorRef.current === editorIdentity) router.push("/");
+    };
+    void session.clearLocal().then(leaveIfCurrent, leaveIfCurrent);
+  }, [editorIdentity, trashed, session, router]);
 
-  const duplicateDoc = useCallback(async () => {
-    try {
-      const res = await api.documents.duplicate(doc.id);
-      setPendingNotice(
-        doc.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
-        "success",
-      );
-      router.push(`/d/${res.id}`);
-    } catch (e) {
-      toast(apiErrorText(e, "Could not make a copy"), "error");
-    }
-  }, [doc.id, doc.storage, router, toast]);
+  const duplicateDoc = useCallback(() => {
+    const mutation = beginDocumentMutation("duplicate", (documentId) => api.documents.duplicate(documentId));
+    if (!mutation) return;
+    const { owner, pending } = mutation;
+    void (async () => {
+      try {
+        const res = await pending;
+        if (!ownsDocumentMutation(owner)) return;
+        setPendingNotice(
+          owner.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
+          "success",
+        );
+        router.push(`/d/${res.id}`);
+      } catch (error) {
+        if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not make a copy"), "error");
+      } finally {
+        finishDocumentMutation(owner);
+      }
+    })();
+  }, [beginDocumentMutation, finishDocumentMutation, ownsDocumentMutation, router, toast]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(
@@ -1343,6 +1436,7 @@ export function EditorShell({
           onDownload={download}
           onCopyMarkdown={copyFromHeader}
           onNameVersion={openVersionName}
+          documentMutation={documentMutation}
           publishing={publishing}
           isOwner={isOwner}
           githubConfigured={githubConfigured}

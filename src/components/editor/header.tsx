@@ -680,6 +680,7 @@ export interface HeaderProps {
   onDownload: (format: ExportFormat, withSuggestions: boolean) => void;
   onCopyMarkdown: () => void;
   onNameVersion: () => void;
+  documentMutation: "delete" | "duplicate" | null;
   publishing: boolean;
   isOwner: boolean;
   /** The server has a GitHub OAuth app; without it the GitHub entries are disabled and say why (#162). */
@@ -922,8 +923,14 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem icon={<Copy size={15} />} onSelect={props.onCopyMarkdown}>
               Copy Markdown
             </MenuItem>
-            <MenuItem icon={<Files size={15} />} onSelect={props.onDuplicate} data-testid="menu-duplicate">
-              Make a copy
+            <MenuItem
+              icon={props.documentMutation === "duplicate" ? <Loader2 size={15} className="animate-spin" /> : <Files size={15} />}
+              onSelect={props.onDuplicate}
+              disabled={props.documentMutation !== null}
+              aria-busy={props.documentMutation === "duplicate" || undefined}
+              data-testid="menu-duplicate"
+            >
+              {props.documentMutation === "duplicate" ? "Making a copy…" : "Make a copy"}
             </MenuItem>
             <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${doc.id}`, "_blank", "noopener")} data-testid="menu-reader">
               Open reader view
@@ -963,8 +970,15 @@ export const Header = memo(function Header(props: HeaderProps) {
             {props.isOwner && (
               <>
                 <MenuSeparator />
-                <MenuItem icon={<Trash2 size={15} />} className="text-danger" onSelect={props.onDelete} data-testid="menu-delete">
-                  Move to trash
+                <MenuItem
+                  icon={props.documentMutation === "delete" ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                  className="text-danger"
+                  onSelect={props.onDelete}
+                  disabled={props.documentMutation !== null}
+                  aria-busy={props.documentMutation === "delete" || undefined}
+                  data-testid="menu-delete"
+                >
+                  {props.documentMutation === "delete" ? "Moving to trash…" : "Move to trash"}
                 </MenuItem>
               </>
             )}
