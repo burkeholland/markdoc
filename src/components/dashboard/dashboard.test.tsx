@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
 
 type SearchResponse = { query: string; documents: SearchResultDto[] };
+type ListOptions = { starred?: boolean; trash?: boolean };
+type ListResponse = { documents: DocumentSummaryDto[] };
 const searchDocuments = vi.fn<(query: string, init?: RequestInit) => Promise<SearchResponse>>();
+const listDocuments = vi.fn<(options?: ListOptions) => Promise<ListResponse>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
@@ -19,6 +22,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       documents: {
         ...actual.api.documents,
         search: (query: string, init?: RequestInit) => searchDocuments(query, init),
+          list: (options?: ListOptions) => listDocuments(options),
       },
     },
   };
@@ -56,6 +60,10 @@ function result(id: string, title: string, snippet: string | null): SearchResult
   return { ...doc(id, title), snippet };
 }
 
+function trashedDoc(id: string, title: string): DocumentSummaryDto {
+  return { ...doc(id, title), deletedAt: "2026-09-07T13:00:00.000Z" };
+}
+
 const DOCUMENTS = [
   doc("alpha-title", "Alpha planning", "Safe title match"),
   doc("notes", "Meeting notes", "An ordinary excerpt"),
@@ -68,6 +76,14 @@ function renderDashboard(children?: React.ReactNode) {
       {children}
     </>,
   );
+}
+
+function openTrash() {
+  fireEvent.click(screen.getByTestId("filter-trash"));
+}
+
+function leaveTrash() {
+  fireEvent.click(screen.getByTestId("filter-all"));
 }
 
 async function settleSearch() {
@@ -90,6 +106,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   searchDocuments.mockReset();
   searchDocuments.mockImplementation(async (query) => ({ query, documents: [] }));
+  listDocuments.mockReset();
+  listDocuments.mockResolvedValue({ documents: [] });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -233,6 +251,119 @@ describe("dashboard content-search recovery", () => {
     expect(searchDocuments).toHaveBeenCalledTimes(3);
     expect(screen.getByRole("link", { name: /Gamma result/ })).toBeInTheDocument();
     expect(screen.queryByText(/Stale alpha result/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("dashboard trash recovery", () => {
+  it("keeps the first load pending, then announces the API reason without false empty copy", async () => {
+    const initial = deferred<ListResponse>();
+    listDocuments.mockReturnValueOnce(initial.promise);
+    renderDashboard();
+
+    openTrash();
+    expect(screen.getByText("Loading trash…")).toBeInTheDocument();
+    expect(screen.queryByText("The trash is empty")).toBeNull();
+
+    await act(async () => {
+      initial.reject(new ApiError(503, "Trash service unavailable"));
+      await Promise.allSettled([initial.promise]);
+    });
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(alert).toHaveTextContent("Trash service unavailable");
+    expect(within(alert).getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.queryByText("Loading trash…")).toBeNull();
+    expect(screen.queryByText("The trash is empty")).toBeNull();
+    expect(listDocuments).toHaveBeenCalledTimes(1);
+    expect(listDocuments).toHaveBeenLastCalledWith({ trash: true });
+  });
+
+  it("guards one pending Retry and recovers to both successful empty and populated states", async () => {
+    const retry = deferred<ListResponse>();
+    listDocuments
+      .mockRejectedValueOnce(new ApiError(503, "Trash service unavailable"))
+      .mockReturnValueOnce(retry.promise)
+      .mockResolvedValueOnce({ documents: [trashedDoc("restored-list", "Recovered document")] });
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+
+    const retryButton = within(screen.getByRole("alert")).getByRole("button", { name: "Retry" });
+    fireEvent.click(retryButton);
+    fireEvent.click(retryButton);
+
+    expect(listDocuments).toHaveBeenCalledTimes(2);
+    expect(listDocuments.mock.calls[1]?.[0]).toEqual({ trash: true });
+    expect(screen.getByTestId("trash-view")).toHaveAttribute("aria-busy", "true");
+    expect(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+    await act(async () => {
+      retry.resolve({ documents: [] });
+      await retry.promise;
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("The trash is empty")).toBeInTheDocument();
+
+    leaveTrash();
+    openTrash();
+    await act(async () => {});
+    expect(listDocuments).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText("The trash is empty")).toBeNull();
+    expect(screen.getByText("Recovered document")).toBeInTheDocument();
+  });
+
+  it("keeps cached rows visible below a retryable refresh failure", async () => {
+    listDocuments
+      .mockResolvedValueOnce({ documents: [trashedDoc("cached", "Cached trash row")] })
+      .mockRejectedValueOnce(new ApiError(503, "Refresh failed"));
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+    expect(screen.getByText("Cached trash row")).toBeInTheDocument();
+
+    leaveTrash();
+    openTrash();
+    await act(async () => {});
+
+    const alert = screen.getByRole("alert");
+    const list = screen.getByTestId("trash-list");
+    expect(alert).toHaveTextContent("Refresh failed");
+    expect(within(alert).getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.getByText("Cached trash row")).toBeInTheDocument();
+    expect(alert.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("isolates late rows and errors from earlier visits after leaving and re-entering Trash", async () => {
+    const staleRows = deferred<ListResponse>();
+    const staleError = deferred<ListResponse>();
+    const current = deferred<ListResponse>();
+    listDocuments
+      .mockReturnValueOnce(staleRows.promise)
+      .mockReturnValueOnce(staleError.promise)
+      .mockReturnValueOnce(current.promise);
+    renderDashboard();
+
+    openTrash();
+    leaveTrash();
+    openTrash();
+    leaveTrash();
+    openTrash();
+    expect(listDocuments).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      current.resolve({ documents: [trashedDoc("current", "Current trash row")] });
+      await current.promise;
+    });
+    await act(async () => {
+      staleRows.resolve({ documents: [trashedDoc("stale", "Stale trash row")] });
+      staleError.reject(new ApiError(503, "Stale visit failure"));
+      await Promise.allSettled([staleRows.promise, staleError.promise]);
+    });
+
+    expect(screen.getByText("Current trash row")).toBeInTheDocument();
+    expect(screen.queryByText("Stale trash row")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
