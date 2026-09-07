@@ -136,15 +136,27 @@ export interface EditorShellProps {
   initialHtml?: string | null;
 }
 
-interface Toast {
-  id: number;
-  message: string;
-  kind: "info" | "error" | "success";
-  action?: { label: string; href?: string; onClick?: () => void };
-}
-
 type PublishPullKind = "publish" | "pull";
 type EditorIdentity = { documentId: string; session: CollabSession };
+type ToastKind = "info" | "error" | "success";
+interface ToastAction {
+  readonly label: string;
+  readonly href?: string;
+  readonly onClick?: () => void;
+}
+interface ToastAuthority {
+  readonly mount: symbol;
+  readonly editor: EditorIdentity;
+  readonly userId: string;
+  readonly role: Role;
+}
+interface ToastPublication {
+  readonly authority: ToastAuthority;
+  readonly message: string;
+  readonly kind: ToastKind;
+  readonly action?: ToastAction;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
 type PublishPullOwner = { editor: EditorIdentity; kind: PublishPullKind };
 type DocumentMutationAction = "delete" | "duplicate";
 type DocumentMutationOwner = {
@@ -340,6 +352,11 @@ export function EditorShell({
     () => ({ documentId: initialDoc.id, session }),
     [initialDoc.id, session],
   );
+  const [toastMount] = useState(() => Symbol("editor-toasts"));
+  const toastAuthority = useMemo<ToastAuthority>(
+    () => Object.freeze({ mount: toastMount, editor: editorIdentity, userId: user.id, role }),
+    [editorIdentity, role, toastMount, user.id],
+  );
   const [doc, setDoc] = useState(initialDoc);
   const [layout, setLayoutState] = useState<Layout>("split");
   const [outlineOpen, setOutlineOpen] = useState(true);
@@ -399,7 +416,13 @@ export function EditorShell({
   const [sync, setSync] = useState<SyncStatusDto | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncTick, setSyncTick] = useState(0);
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastAuthorityRef = useRef<ToastAuthority | null>(null);
+  const pendingNoticeConsumedRef = useRef<ToastAuthority | null>(null);
+  const toastPublicationsRef = useRef<readonly ToastPublication[]>([]);
+  const toastTimersRef = useRef<Set<ToastPublication>>(new Set());
+  const toastRenderKeysRef = useRef<WeakMap<ToastPublication, string>>(new WeakMap());
+  const toastRenderKeySequence = useRef(0);
+  const [toastPublications, setToastPublications] = useState<readonly ToastPublication[]>([]);
   const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
@@ -411,6 +434,36 @@ export function EditorShell({
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const dismissToast = useCallback((publication: ToastPublication, timerFired = false) => {
+    if (
+      toastAuthorityRef.current !== publication.authority ||
+      !toastPublicationsRef.current.includes(publication)
+    ) {
+      return false;
+    }
+    toastPublicationsRef.current = toastPublicationsRef.current.filter((current) => current !== publication);
+    const timerPending = toastTimersRef.current.delete(publication);
+    if (timerPending && !timerFired) clearTimeout(publication.timer);
+    setToastPublications((current) => current.filter((candidate) => candidate !== publication));
+    return true;
+  }, []);
+  const retireToastAuthority = useCallback((authority: ToastAuthority) => {
+    const retiring = toastPublicationsRef.current.filter((publication) => publication.authority === authority);
+    if (retiring.length === 0) return;
+    const retiringSet = new Set(retiring);
+    toastPublicationsRef.current = toastPublicationsRef.current.filter((publication) => !retiringSet.has(publication));
+    for (const publication of retiring) {
+      if (toastTimersRef.current.delete(publication)) clearTimeout(publication.timer);
+    }
+    setToastPublications((current) => current.filter((publication) => publication.authority !== authority));
+  }, []);
+  const toastRenderKey = useCallback((publication: ToastPublication) => {
+    const existing = toastRenderKeysRef.current.get(publication);
+    if (existing) return existing;
+    const key = `toast-${++toastRenderKeySequence.current}`;
+    toastRenderKeysRef.current.set(publication, key);
+    return key;
+  }, []);
   useLayoutEffect(() => {
     currentEditorRef.current = editorIdentity;
     publishPullOwnerRef.current = null;
@@ -435,6 +488,20 @@ export function EditorShell({
       if (leavingEditorRef.current === editorIdentity) leavingEditorRef.current = null;
     };
   }, [editorIdentity]);
+  useLayoutEffect(() => {
+    toastAuthorityRef.current = toastAuthority;
+    setToastPublications((current) =>
+      current.filter(
+        (publication) =>
+          publication.authority === toastAuthority &&
+          toastPublicationsRef.current.includes(publication),
+      ),
+    );
+    return () => {
+      if (toastAuthorityRef.current === toastAuthority) toastAuthorityRef.current = null;
+      retireToastAuthority(toastAuthority);
+    };
+  }, [retireToastAuthority, toastAuthority]);
   useLayoutEffect(() => () => {
     currentNameVersionVisitRef.current = null;
     namedVersionOwnerRef.current = null;
@@ -572,17 +639,42 @@ export function EditorShell({
     actions.setRichScroller(richScroller);
   }, [actions, richScroller]);
 
-  const toast = useCallback((message: string, kind: Toast["kind"] = "info", action?: Toast["action"]) => {
-    const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, message, kind, action }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 8000 : 4500);
-  }, []);
+  const toast = useCallback((message: string, kind: ToastKind = "info", action?: ToastAction) => {
+    if (toastAuthorityRef.current !== toastAuthority) return;
+    const immutableAction = action
+      ? Object.freeze({ label: action.label, href: action.href, onClick: action.onClick })
+      : undefined;
+    const publication: ToastPublication = Object.freeze({
+      authority: toastAuthority,
+      message,
+      kind,
+      action: immutableAction,
+      timer: setTimeout(() => {
+        dismissToast(publication, true);
+      }, kind === "error" ? 8000 : 4500),
+    });
+    toastTimersRef.current.add(publication);
+    toastPublicationsRef.current = [...toastPublicationsRef.current, publication];
+    setToastPublications((current) => [...current, publication]);
+  }, [dismissToast, toastAuthority]);
+  const activateToastAction = useCallback((publication: ToastPublication) => {
+    const action = publication.action?.onClick;
+    if (!action || !dismissToast(publication)) return;
+    action();
+  }, [dismissToast]);
 
   // A message left by the previous page (e.g. "Copy created" after "Make a copy").
   useEffect(() => {
+    if (
+      toastAuthorityRef.current !== toastAuthority ||
+      pendingNoticeConsumedRef.current === toastAuthority
+    ) {
+      return;
+    }
+    pendingNoticeConsumedRef.current = toastAuthority;
     const notice = takePendingNotice();
     if (notice) toast(notice.message, notice.kind);
-  }, [toast, doc.id]);
+  }, [toast, toastAuthority]);
 
   // Toolbar state is derived from the live editors. Caret moves reach the session too (setLocalCursor),
   // so the selector runs after selection changes as well as text changes; the shallow comparison keeps
@@ -1766,40 +1858,43 @@ export function EditorShell({
         {everOpened.palette && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />}
 
         <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              className={cn(
-                "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
-                t.kind === "error" ? "bg-red-600 text-white" : "bg-inverse text-white",
-              )}
-              role="status"
-              data-testid="toast"
-            >
-              <span>{t.message}</span>
-              {t.action?.href && (
-                <a className="font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
-                  {t.action.label}
-                </a>
-              )}
-              {t.action?.onClick && (
-                <button
-                  type="button"
-                  className="font-semibold underline decoration-white/40 underline-offset-2"
-                  onClick={() => {
-                    t.action?.onClick?.();
-                    setToasts((list) => list.filter((x) => x.id !== t.id));
-                  }}
-                  data-testid="toast-action"
-                >
-                  {t.action.label}
+          {toastPublications
+            .filter(
+              (publication) =>
+                publication.authority === toastAuthority &&
+                toastPublicationsRef.current.includes(publication),
+            )
+            .map((t) => (
+              <div
+                key={toastRenderKey(t)}
+                className={cn(
+                  "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
+                  t.kind === "error" ? "bg-red-600 text-white" : "bg-inverse text-white",
+                )}
+                role="status"
+                data-testid="toast"
+              >
+                <span>{t.message}</span>
+                {t.action?.href && (
+                  <a className="font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
+                    {t.action.label}
+                  </a>
+                )}
+                {t.action?.onClick && (
+                  <button
+                    type="button"
+                    className="font-semibold underline decoration-white/40 underline-offset-2"
+                    onClick={() => activateToastAction(t)}
+                    data-testid="toast-action"
+                  >
+                    {t.action.label}
+                  </button>
+                )}
+                <button type="button" className="text-white/60 hover:text-white" onClick={() => dismissToast(t)} aria-label="Dismiss">
+                  <X size={14} />
                 </button>
-              )}
-              <button type="button" className="text-white/60 hover:text-white" onClick={() => setToasts((list) => list.filter((x) => x.id !== t.id))} aria-label="Dismiss">
-                <X size={14} />
-              </button>
-            </div>
-          ))}
+              </div>
+            ))}
         </div>
       </div>
     </TooltipProvider>
