@@ -1530,6 +1530,289 @@ describe("CommentsPanel", () => {
     });
   });
 
+  describe("composer submission ownership", () => {
+    const TEXT = "Intro text. The quick brown fox jumps.";
+    const AGENTS = [
+      { name: "First agent", login: "alice/First", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false },
+      { name: "Second agent", login: "alice/Second", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false },
+    ];
+
+    const mountComposer = async (
+      opts: {
+        documentComposer?: CommentsPanelProps["documentComposer"];
+        onClose?: () => void;
+      } = {},
+    ) => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      session = new CollabSession({ docId: "composer-doc", user, role: "owner", getToken: async () => "token", autoConnect: false });
+      session.keepAlive();
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: AGENTS,
+      } as unknown as CollaboratorsResponse);
+      const add = vi.spyOn(session.comments, "add");
+      const onPendingDone = vi.fn();
+      const props = (documentComposer: CommentsPanelProps["documentComposer"]) => (
+        <TooltipProvider>
+          <CommentsPanel
+            session={session!}
+            onClose={opts.onClose ?? (() => {})}
+            onReveal={() => {}}
+            onPendingDone={onPendingDone}
+            documentComposer={documentComposer}
+          />
+        </TooltipProvider>
+      );
+      const view = render(props(opts.documentComposer ?? null));
+      if (!opts.documentComposer) act(() => session!.setPendingComment({ from: 0, to: 5 }));
+      const box = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      return {
+        add,
+        box,
+        onPendingDone,
+        user,
+        view,
+        setDocumentComposer: (next: CommentsPanelProps["documentComposer"]) => view.rerender(props(next)),
+      };
+    };
+
+    const invokeSubmitHandler = (button: HTMLElement): Promise<void> => {
+      const propsKey = Object.keys(button).find((key) => key.startsWith("__reactProps$"));
+      if (!propsKey) throw new Error("React props were not attached to the submit button");
+      const props = (button as unknown as Record<string, { onClick?: () => Promise<void> } | undefined>)[propsKey];
+      const result = props?.onClick?.();
+      if (!result) throw new Error("The submit button did not return its submission");
+      return result;
+    };
+
+    afterEach(() => {
+      vi.mocked(api.documents.createRequest).mockReset().mockResolvedValue({ request: { id: "req" } } as never);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as CollaboratorsResponse);
+    });
+
+    it("claims mixed Enter/click activation once and freezes body, mode and ordered agent intent while pending", async () => {
+      const request = deferred<string>();
+      const { add, box, onPendingDone, user } = await mountComposer();
+      add.mockReturnValue(request.promise as unknown as string);
+      const submitted = "  @alice/First @alice/Second draft  ";
+      fireEvent.change(box, { target: { value: submitted } });
+      await screen.findByTestId("composer-agent-row");
+      fireEvent.click(screen.getByTestId("composer-mode-rewrite"));
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
+
+      const submit = screen.getByTestId("comment-submit");
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      const suggestion = screen.getByTestId("comment-suggest-change");
+      const chip = screen.getAllByTestId("composer-chip")[0];
+      act(() => {
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        fireEvent.change(box, { target: { value: "changed after claim" } });
+        screen.getByTestId("composer-mode-comment").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        chip.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        suggestion.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        cancel.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "b", ctrlKey: true, bubbles: true, cancelable: true }));
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith({ from: 0, to: 5, body: submitted.trim(), author: user });
+      expect(box).toHaveValue(submitted);
+      expect(box).toBeDisabled();
+      expect(submit).toBeDisabled();
+      expect(cancel).toBeDisabled();
+      expect(suggestion).toBeDisabled();
+      expect(chip).toBeDisabled();
+      expect(screen.getByTestId("composer-mode-comment")).toBeDisabled();
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
+      expect(onPendingDone).not.toHaveBeenCalled();
+
+      await act(async () => request.resolve("thread-1"));
+      await waitFor(() =>
+        expect(api.documents.createRequest).toHaveBeenCalledWith("composer-doc", {
+          mode: "rewrite",
+          instruction: "draft",
+          selection: { from: 0, to: 5, quote: "Intro" },
+          threadId: "thread-1",
+          agent: "alice/First",
+        }),
+      );
+      expect(onPendingDone).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("claims two immediate clicks as one physical submission and clears current work once", async () => {
+      const request = deferred<string>();
+      const { add, box, onPendingDone, user } = await mountComposer();
+      add.mockReturnValue(request.promise as unknown as string);
+      fireEvent.change(box, { target: { value: "@ali" } });
+      await screen.findByTestId("mention-suggestions");
+      const submit = screen.getByTestId("comment-submit");
+      const mention = screen.getAllByTestId("mention-option")[0];
+
+      act(() => {
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        mention.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith({ from: 0, to: 5, body: "@ali", author: user });
+      expect(box).toHaveValue("@ali");
+      expect(onPendingDone).not.toHaveBeenCalled();
+      await act(async () => request.resolve("thread-1"));
+      expect(onPendingDone).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("retains a current failed draft, releases its controls and allows one deliberate retry", async () => {
+      const first = deferred<string>();
+      const retry = deferred<string>();
+      const failure = new Error("submit failed");
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        const { add, box, onPendingDone, user } = await mountComposer();
+        add.mockReturnValueOnce(first.promise as unknown as string).mockReturnValueOnce(retry.promise as unknown as string);
+        fireEvent.change(box, { target: { value: "retry this" } });
+        let currentSubmission!: Promise<void>;
+        act(() => {
+          currentSubmission = invokeSubmitHandler(screen.getByTestId("comment-submit"));
+        });
+        expect(add).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          const rejection = expect(currentSubmission).rejects.toBe(failure);
+          first.reject(failure);
+          await rejection;
+        });
+        await waitFor(() => expect(screen.getByTestId("comment-submit")).toBeEnabled());
+        expect(box).toBeEnabled();
+        expect(box).toHaveValue("retry this");
+        expect(onPendingDone).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        expect(add).toHaveBeenCalledTimes(2);
+        expect(add).toHaveBeenNthCalledWith(1, { from: 0, to: 5, body: "retry this", author: user });
+        expect(add).toHaveBeenNthCalledWith(2, { from: 0, to: 5, body: "retry this", author: user });
+        await act(async () => retry.resolve("thread-2"));
+        expect(onPendingDone).toHaveBeenCalledTimes(1);
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it("keeps a keyed replacement draft locked until its own later success when the old success settles first", async () => {
+      const oldRequest = deferred<string>();
+      const currentRequest = deferred<string>();
+      const { add, box: oldBox, onPendingDone, setDocumentComposer } = await mountComposer({ documentComposer: { mention: false, nonce: 1 } });
+      add.mockReturnValueOnce(oldRequest.promise as unknown as string).mockReturnValueOnce(currentRequest.promise as unknown as string);
+      fireEvent.change(oldBox, { target: { value: "old draft" } });
+      fireEvent.click(screen.getByTestId("comment-submit"));
+
+      setDocumentComposer({ mention: false, nonce: 2 });
+      const currentBox = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      expect(currentBox).not.toBe(oldBox);
+      fireEvent.change(currentBox, { target: { value: "current draft" } });
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      expect(add).toHaveBeenCalledTimes(2);
+
+      await act(async () => oldRequest.resolve("old-thread"));
+      expect(currentBox).toHaveValue("current draft");
+      expect(currentBox).toBeDisabled();
+      expect(screen.getByTestId("comment-submit")).toBeDisabled();
+      expect(onPendingDone).not.toHaveBeenCalled();
+
+      await act(async () => currentRequest.resolve("current-thread"));
+      expect(onPendingDone).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("lets current replacement success retire first, then consumes the old rejection without stale or unhandled effects", async () => {
+      const oldRequest = deferred<string>();
+      const currentRequest = deferred<string>();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        const { add, box: oldBox, onPendingDone, setDocumentComposer } = await mountComposer({ documentComposer: { mention: false, nonce: 1 } });
+        add.mockReturnValueOnce(oldRequest.promise as unknown as string).mockReturnValueOnce(currentRequest.promise as unknown as string);
+        fireEvent.change(oldBox, { target: { value: "old draft" } });
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        setDocumentComposer({ mention: false, nonce: 2 });
+        const currentBox = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+        fireEvent.change(currentBox, { target: { value: "current draft" } });
+        fireEvent.click(screen.getByTestId("comment-submit"));
+
+        await act(async () => currentRequest.resolve("current-thread"));
+        expect(onPendingDone).toHaveBeenCalledTimes(1);
+        expect(screen.queryByTestId("pending-comment")).toBeNull();
+        await act(async () => {
+          oldRequest.reject(new Error("old failure"));
+          await Promise.allSettled([oldRequest.promise]);
+        });
+        expect(onPendingDone).toHaveBeenCalledTimes(1);
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it.each(["removal", "close", "layout unmount"] as const)("retires pending ownership on %s before a late rejection", async (retirement) => {
+      const request = deferred<string>();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      let removePanel = () => {};
+      try {
+        const mounted = await mountComposer({ onClose: () => removePanel() });
+        removePanel = () => mounted.view.unmount();
+        mounted.add.mockReturnValue(request.promise as unknown as string);
+        fireEvent.change(mounted.box, { target: { value: "retired draft" } });
+        fireEvent.click(screen.getByTestId("comment-submit"));
+
+        if (retirement === "removal") {
+          act(() => session!.setPendingComment(null));
+          await waitFor(() => expect(screen.queryByTestId("pending-comment")).toBeNull());
+        }
+        else if (retirement === "close") fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
+        else mounted.view.unmount();
+
+        if (retirement === "removal") {
+          act(() => session!.setPendingComment({ from: 0, to: 5 }));
+          const replacement = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+          fireEvent.change(replacement, { target: { value: "replacement draft" } });
+          expect(replacement).toBeEnabled();
+          await act(async () => {
+            request.reject(new Error("removed failure"));
+            await Promise.allSettled([request.promise]);
+          });
+          expect(replacement).toHaveValue("replacement draft");
+          expect(replacement).toBeEnabled();
+        } else {
+          await act(async () => {
+            request.reject(new Error("unmounted failure"));
+            await Promise.allSettled([request.promise]);
+          });
+          expect(screen.queryByTestId("comments-panel")).toBeNull();
+        }
+        expect(mounted.add).toHaveBeenCalledTimes(1);
+        expect(mounted.onPendingDone).not.toHaveBeenCalled();
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+  });
+
   describe("agent requests from comments (#1024)", () => {
     // As the collaborators route lists it (#1296): whose it is, and — off by default — whether others may ask it.
     const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false };
