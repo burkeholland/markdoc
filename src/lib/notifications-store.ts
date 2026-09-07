@@ -13,44 +13,163 @@ interface State {
   loaded: boolean;
   loading: boolean;
   loadError: boolean;
+  readAllPending: boolean;
+  readError: NotificationReadError | null;
+  readErrorPending: boolean;
+}
+
+export type NotificationReadError =
+  | { id: number; operationId: number; operation: "single"; message: string; notificationId: string }
+  | { id: number; operationId: number; operation: "all"; message: string }
+  | { id: number; operationId: number; operation: "refs"; message: string; documentId: string; refIds: string[] };
+
+type OperationScope =
+  | { kind: "all" }
+  | { kind: "ids"; ids: Set<string> }
+  | { kind: "refs"; documentId: string; refIds: Set<string> };
+
+interface ReadOperation {
+  id: number;
+  key: string;
+  operation: NotificationReadError["operation"];
+  scope: OperationScope;
+  cacheRevision: number;
+  superseded: boolean;
+  retryErrorId: number | null;
+  optimisticAt: string;
+  promise: Promise<void>;
+  notificationId?: string;
+  documentId?: string;
+  refIds?: string[];
+  localChanged: number;
+}
+
+type ReadOperationInit = Omit<ReadOperation, "id" | "cacheRevision" | "superseded" | "retryErrorId" | "optimisticAt" | "promise">;
+
+interface RefreshOperation {
+  id: number;
+  cacheRevision: number;
+  promise: Promise<void>;
 }
 
 /**
  * One shared, polled copy of the signed-in user's notifications for every bell, strip and
  * comment card on the page. Polls while the tab is visible and at least one component is mounted.
  */
-let state: State = { items: [], unreadCount: 0, loaded: false, loading: true, loadError: false };
+let cache = { items: [] as NotificationDto[], unreadCount: 0 };
+let state: State = {
+  items: [],
+  unreadCount: 0,
+  loaded: false,
+  loading: true,
+  loadError: false,
+  readAllPending: false,
+  readError: null,
+  readErrorPending: false,
+};
 const listeners = new Set<() => void>();
 let subscribers = 0;
 let timer: ReturnType<typeof setInterval> | null = null;
-let inflight: Promise<void> | null = null;
+let inflight: RefreshOperation | null = null;
 let enabled = true;
+let cacheRevision = 0;
+let nextOperationId = 0;
+let nextErrorId = 0;
+const singleReads = new Map<string, ReadOperation>();
+const refReads = new Map<string, ReadOperation>();
+let readAll: ReadOperation | null = null;
 
-function set(next: Partial<State>) {
-  state = { ...state, ...next };
+function operations(): ReadOperation[] {
+  return [...singleReads.values(), ...refReads.values(), ...(readAll ? [readAll] : [])];
+}
+
+function affects(op: ReadOperation, notification: NotificationDto): boolean {
+  if (op.scope.kind === "all") return true;
+  if (op.scope.kind === "ids") return op.scope.ids.has(notification.id);
+  return notification.documentId === op.scope.documentId && op.scope.refIds.has(notification.refId);
+}
+
+function isPending(error: NotificationReadError | null): boolean {
+  if (!error) return false;
+  if (error.operation === "all") return readAll?.retryErrorId === error.id;
+  if (error.operation === "single") return singleReads.get(error.notificationId)?.retryErrorId === error.id;
+  return refReads.get(refKey(error.documentId, error.refIds))?.retryErrorId === error.id;
+}
+
+function publish(next: Partial<State> = {}) {
+  const active = operations();
+  let changed = 0;
+  const items = cache.items.map((notification) => {
+    if (notification.readAt) return notification;
+    const owner = active.find((op) => affects(op, notification));
+    if (!owner) return notification;
+    changed++;
+    return { ...notification, readAt: owner.optimisticAt };
+  });
+  const unreadCount = readAll ? 0 : Math.max(0, cache.unreadCount - changed);
+  const readError = Object.prototype.hasOwnProperty.call(next, "readError") ? (next.readError ?? null) : state.readError;
+  state = {
+    ...state,
+    ...next,
+    items,
+    unreadCount,
+    readAllPending: readAll !== null,
+    readError,
+    readErrorPending: isPending(readError),
+  };
   for (const l of listeners) l();
 }
 
 export function refreshNotifications(): Promise<void> {
   if (!enabled) return Promise.resolve();
-  if (inflight) return inflight;
-  set({ loading: true });
-  inflight = api.notifications
-    .list({ limit: PAGE })
-    .then((page) => set({ items: page.items, unreadCount: page.unreadCount, loaded: true, loading: false, loadError: false }))
-    .catch((err) => {
+  if (inflight) return inflight.promise;
+
+  let resolveOwner!: () => void;
+  let rejectOwner!: (reason?: unknown) => void;
+  const shared = new Promise<void>((resolve, reject) => {
+    resolveOwner = resolve;
+    rejectOwner = reject;
+  });
+  const owner: RefreshOperation = {
+    id: ++nextOperationId,
+    cacheRevision,
+    promise: shared,
+  };
+  inflight = owner;
+  publish({ loading: true });
+
+  let request: ReturnType<typeof api.notifications.list>;
+  try {
+    request = api.notifications.list({ limit: PAGE });
+  } catch (error) {
+    request = Promise.reject(error);
+  }
+
+  const settlement = request
+    .then((page) => {
+      if (inflight !== owner || owner.cacheRevision !== cacheRevision) return;
+      cache = { items: page.items, unreadCount: page.unreadCount };
+      cacheRevision++;
+      for (const operation of operations()) operation.superseded = true;
+      publish({ loaded: true, loadError: false, readError: null });
+    })
+    .catch((err: unknown) => {
+      if (inflight !== owner || owner.cacheRevision !== cacheRevision) return;
       // Anonymous link visitors have no notifications; stop asking.
       if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
         enabled = false;
-        set({ loading: false, loadError: false });
+        publish({ loadError: false });
         return;
       }
-      set({ loading: false, loadError: !state.loaded });
+      publish({ loadError: !state.loaded });
     })
     .finally(() => {
+      if (inflight !== owner) return;
       inflight = null;
+      publish({ loading: false });
     });
-  return inflight;
+  void settlement.then(resolveOwner, rejectOwner);
+  return owner.promise;
 }
 
 function start() {
@@ -89,53 +208,227 @@ function subscribe(listener: () => void) {
 }
 
 const getSnapshot = () => state;
-const SERVER: State = { items: [], unreadCount: 0, loaded: false, loading: false, loadError: false };
+const SERVER: State = {
+  items: [],
+  unreadCount: 0,
+  loaded: false,
+  loading: false,
+  loadError: false,
+  readAllPending: false,
+  readError: null,
+  readErrorPending: false,
+};
 const getServerSnapshot = () => SERVER;
 
-function markLocal(pred: (n: NotificationDto) => boolean) {
+function scopesOverlap(left: OperationScope, right: OperationScope): boolean {
+  if (left.kind === "all" || right.kind === "all") return true;
+  if (left.kind === "refs" && right.kind === "refs") {
+    if (left.documentId !== right.documentId) return false;
+    for (const refId of left.refIds) {
+      if (right.refIds.has(refId)) return true;
+    }
+    return false;
+  }
+  if (left.kind === "ids" && right.kind === "ids") {
+    for (const id of left.ids) {
+      if (right.ids.has(id)) return true;
+    }
+    return false;
+  }
+  const ids = left.kind === "ids" ? left.ids : right.kind === "ids" ? right.ids : new Set<string>();
+  const refs = left.kind === "refs" ? left : right.kind === "refs" ? right : null;
+  return refs !== null && cache.items.some((notification) => ids.has(notification.id) && notification.documentId === refs.documentId && refs.refIds.has(notification.refId));
+}
+
+function commitRead(owner: ReadOperation, pred: (notification: NotificationDto) => boolean, scope: OperationScope, all = false) {
   const now = new Date().toISOString();
   let changed = 0;
-  const items = state.items.map((n) => {
-    if (n.readAt || !pred(n)) return n;
+  const items = cache.items.map((notification) => {
+    if (notification.readAt || !pred(notification)) return notification;
     changed++;
-    return { ...n, readAt: now };
+    return { ...notification, readAt: now };
   });
-  if (changed) set({ items, unreadCount: Math.max(0, state.unreadCount - changed) });
-  return changed;
-}
+  cache = {
+    items,
+    unreadCount: all ? 0 : Math.max(0, cache.unreadCount - changed),
+  };
+  cacheRevision++;
 
-export async function markNotificationRead(id: string) {
-  markLocal((n) => n.id === id);
-  try {
-    await api.notifications.read(id);
-  } catch {
-    // Already read or gone.
+  for (const operation of operations()) {
+    if (operation === owner) {
+      operation.cacheRevision = cacheRevision;
+    } else if (scopesOverlap(operation.scope, scope)) {
+      operation.superseded = true;
+    } else if (!operation.superseded) {
+      operation.cacheRevision = cacheRevision;
+    }
   }
 }
 
-export async function markAllNotificationsRead() {
-  markLocal(() => true);
-  set({ unreadCount: 0 });
-  try {
-    await api.notifications.readAll();
-  } catch {
-    // Transient; the next poll reconciles.
+function isOwner(operation: ReadOperation): boolean {
+  if (operation.operation === "all") return readAll === operation;
+  if (operation.operation === "single") return singleReads.get(operation.key) === operation;
+  return refReads.get(operation.key) === operation;
+}
+
+function unregister(operation: ReadOperation) {
+  if (operation.operation === "all") {
+    if (readAll === operation) readAll = null;
+  } else if (operation.operation === "single") {
+    if (singleReads.get(operation.key) === operation) singleReads.delete(operation.key);
+  } else if (refReads.get(operation.key) === operation) {
+    refReads.delete(operation.key);
   }
+}
+
+function failureMatches(error: NotificationReadError | null, operation: Pick<ReadOperation, "operation" | "notificationId" | "key">): boolean {
+  if (!error || error.operation !== operation.operation) return false;
+  if (error.operation === "all") return true;
+  if (error.operation === "single") return error.notificationId === operation.notificationId;
+  return refKey(error.documentId, error.refIds) === operation.key;
+}
+
+function failureFor(operation: ReadOperation): NotificationReadError {
+  const id = ++nextErrorId;
+  if (operation.operation === "single") {
+    return {
+      id,
+      operationId: operation.id,
+      operation: "single",
+      message: "Couldn't mark this notification as read.",
+      notificationId: operation.notificationId!,
+    };
+  }
+  if (operation.operation === "refs") {
+    return {
+      id,
+      operationId: operation.id,
+      operation: "refs",
+      message: "Couldn't mark these notifications as read.",
+      documentId: operation.documentId!,
+      refIds: operation.refIds!,
+    };
+  }
+  return { id, operationId: operation.id, operation: "all", message: "Couldn't mark all notifications as read." };
+}
+
+function beginRead<T>(
+  operation: ReadOperationInit,
+  register: (owner: ReadOperation) => void,
+  request: () => Promise<T>,
+  onSuccess: (result: T, owner: ReadOperation) => void,
+): Promise<void> {
+  const retryError = state.readError;
+  let resolveOwner!: () => void;
+  let rejectOwner!: (reason?: unknown) => void;
+  const shared = new Promise<void>((resolve, reject) => {
+    resolveOwner = resolve;
+    rejectOwner = reject;
+  });
+  const owner: ReadOperation = {
+    ...operation,
+    id: ++nextOperationId,
+    cacheRevision,
+    superseded: false,
+    retryErrorId: retryError && failureMatches(retryError, operation) ? retryError.id : null,
+    optimisticAt: new Date().toISOString(),
+    promise: shared,
+  };
+  register(owner);
+  publish();
+
+  let pending: Promise<T>;
+  try {
+    pending = request();
+  } catch (error) {
+    pending = Promise.reject(error);
+  }
+
+  const settlement = pending
+    .then(
+      (result) => {
+        if (!isOwner(owner) || owner.superseded || owner.cacheRevision !== cacheRevision) return;
+        onSuccess(result, owner);
+        const readError = state.readError?.id === owner.retryErrorId ? null : state.readError;
+        publish({ readError });
+      },
+      () => {
+        if (!isOwner(owner) || owner.superseded || owner.cacheRevision !== cacheRevision) return;
+        const current = state.readError;
+        if (current && current.operationId > owner.id) return;
+        publish({ readError: failureFor(owner) });
+      },
+    )
+    .finally(() => {
+      if (!isOwner(owner)) return;
+      unregister(owner);
+      publish();
+    });
+  void settlement.then(resolveOwner, rejectOwner);
+  return owner.promise;
+}
+
+function idsFor(pred: (notification: NotificationDto) => boolean): Set<string> {
+  return new Set(cache.items.filter((notification) => !notification.readAt && pred(notification)).map((notification) => notification.id));
+}
+
+function refKey(documentId: string, refIds: string[]): string {
+  return JSON.stringify([documentId, [...new Set(refIds)].sort()]);
+}
+
+export function markNotificationRead(id: string): Promise<void> {
+  const current = singleReads.get(id);
+  if (current) return current.promise;
+  const scope: OperationScope = { kind: "ids", ids: idsFor((notification) => notification.id === id) };
+  return beginRead(
+    { key: id, operation: "single", scope, notificationId: id, localChanged: scope.ids.size },
+    (owner) => singleReads.set(id, owner),
+    () => api.notifications.read(id),
+    (_result, owner) => commitRead(owner, (notification) => notification.id === id, { kind: "ids", ids: new Set([id]) }),
+  );
+}
+
+export function markAllNotificationsRead(): Promise<void> {
+  if (readAll) return readAll.promise;
+  return beginRead(
+    { key: "all", operation: "all", scope: { kind: "all" }, localChanged: state.unreadCount },
+    (owner) => {
+      readAll = owner;
+    },
+    () => api.notifications.readAll(),
+    (_result, owner) => commitRead(owner, () => true, { kind: "all" }, true),
+  );
 }
 
 /** Mark read everything about a thread (its id and its replies' ids) in a document. */
-export async function markRefsRead(documentId: string, refIds: string[]) {
-  if (refIds.length === 0) return;
-  const refs = new Set(refIds);
+export function markRefsRead(documentId: string, refIds: string[]): Promise<void> {
+  if (refIds.length === 0) return Promise.resolve();
+  const normalizedRefs = [...new Set(refIds)].sort();
+  const key = refKey(documentId, normalizedRefs);
+  const current = refReads.get(key);
+  if (current) return current.promise;
+  const refs = new Set(normalizedRefs);
+  const pred = (notification: NotificationDto) => notification.documentId === documentId && refs.has(notification.refId);
   // Unread rows beyond the loaded page may exist; ask the server regardless of the local view.
-  const local = markLocal((n) => n.documentId === documentId && refs.has(n.refId));
-  if (local === 0 && state.loaded && state.unreadCount === 0) return;
-  try {
-    const res = await api.notifications.readRefs(documentId, refIds);
-    if (res.count > local) void refreshNotifications();
-  } catch {
-    // Transient; the next poll reconciles.
-  }
+  const local = state.items.filter((notification) => !notification.readAt && pred(notification)).length;
+  if (local === 0 && state.loaded && state.unreadCount === 0) return Promise.resolve();
+  const scope: OperationScope = { kind: "refs", documentId, refIds: refs };
+  return beginRead(
+    { key, operation: "refs", scope, documentId, refIds: normalizedRefs, localChanged: local },
+    (owner) => refReads.set(key, owner),
+    () => api.notifications.readRefs(documentId, normalizedRefs),
+    (result, owner) => {
+      commitRead(owner, pred, scope);
+      if (result.count > owner.localChanged) void refreshNotifications();
+    },
+  );
+}
+
+export function retryNotificationRead(error: NotificationReadError): Promise<void> {
+  if (state.readError?.id !== error.id) return Promise.resolve();
+  if (error.operation === "single") return markNotificationRead(error.notificationId);
+  if (error.operation === "refs") return markRefsRead(error.documentId, error.refIds);
+  return markAllNotificationsRead();
 }
 
 const noopSubscribe = () => () => {};
