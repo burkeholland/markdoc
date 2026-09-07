@@ -77,16 +77,44 @@ export function WebhooksPanel() {
   const [testing, setTesting] = useState<string | null>(null);
   const [enabling, setEnabling] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const [created, setCreated] = useState<{ id: string; secret: string; url: string } | null>(null);
+  const alive = useRef(true);
+  const listRequest = useRef(0);
+  const retryPending = useRef(false);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      listRequest.current += 1;
+    };
+  }, []);
 
   const load = useCallback(async () => {
+    const currentRequest = ++listRequest.current;
     try {
       const res = await request<{ webhooks: WebhookRow[] }>("/api/webhooks");
+      if (!alive.current || currentRequest !== listRequest.current) return;
       setHooks(res.webhooks);
+      setListError(null);
     } catch (e) {
-      setError(apiErrorText(e, "Failed to load webhooks"));
+      if (!alive.current || currentRequest !== listRequest.current) return;
+      setListError(apiErrorText(e, "Failed to load webhooks"));
     }
   }, []);
+
+  const retry = useCallback(() => {
+    if (retryPending.current) return;
+    retryPending.current = true;
+    setRetrying(true);
+    void load().finally(() => {
+      retryPending.current = false;
+      if (alive.current) setRetrying(false);
+    });
+  }, [load]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -206,8 +234,27 @@ export function WebhooksPanel() {
           </div>
         </form>
       )}
+      {listError && (
+        <div
+          className="mx-5 mt-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+          data-testid="webhooks-list-error"
+        >
+          <span className="min-w-0 flex-1" role="alert" aria-atomic="true">
+            {listError}
+          </span>
+          <button type="button" className="btn btn-outline btn-sm shrink-0 gap-1.5" onClick={retry} disabled={retrying} aria-busy={retrying || undefined}>
+            {retrying && <Loader2 size={14} className="animate-spin" />}
+            {retrying ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
       {error && (
-        <div className="mx-5 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+        <div
+          className="mx-5 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+          role="alert"
+          aria-atomic="true"
+          data-testid="webhook-action-error"
+        >
           {error}
         </div>
       )}
@@ -229,7 +276,9 @@ export function WebhooksPanel() {
       )}
 
       {hooks === null ? (
-        <div className="px-5 py-6 text-sm text-ink-3">Loading…</div>
+        listError ? null : (
+          <div className="px-5 py-6 text-sm text-ink-3">Loading…</div>
+        )
       ) : hooks.length === 0 ? (
         <div className="px-5 py-6 text-sm text-ink-3" data-testid="webhooks-empty">
           No webhooks yet.
