@@ -235,8 +235,23 @@ type HeaderStarError = {
   message: string;
 };
 
+type HeaderStarAuthority = {
+  mount: symbol;
+  docId: string;
+};
+
+type HeaderStarOperation = {
+  authority: HeaderStarAuthority;
+  operation: number;
+  retry: boolean;
+} & (
+  | { action: "load"; confirmed: null }
+  | { action: "star" | "unstar"; confirmed: boolean }
+);
+
 interface HeaderStarState {
   docId: string;
+  confirmed: boolean | null;
   starred: boolean | null;
   pending: "load" | "toggle" | null;
   error: HeaderStarError | null;
@@ -244,6 +259,7 @@ interface HeaderStarState {
 
 const emptyHeaderStarState = (docId: string): HeaderStarState => ({
   docId,
+  confirmed: null,
   starred: null,
   pending: null,
   error: null,
@@ -251,45 +267,104 @@ const emptyHeaderStarState = (docId: string): HeaderStarState => ({
 
 export function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) {
   const [state, setState] = useState<HeaderStarState>(() => emptyHeaderStarState(docId));
-  const requestId = useRef(0);
+  const [mount] = useState(() => Symbol("header-star"));
+  const authority = useRef<HeaderStarAuthority | null>(null);
+  const owner = useRef<HeaderStarOperation | null>(null);
+  const nextOperation = useRef(0);
 
-  const load = useCallback((retry = false) => {
-    if (!ready) return;
-    const request = ++requestId.current;
-    setState((previous) => ({
-      docId,
-      starred: null,
-      pending: "load",
-      error: retry && previous.docId === docId && previous.error?.action === "load" ? previous.error : null,
-    }));
-    void api.documents.starred(docId).then(
-      ({ starred }) => {
-        if (requestId.current !== request) return;
-        setState({ docId, starred, pending: null, error: null });
-      },
-      (error: unknown) => {
-        if (requestId.current !== request) return;
-        setState({
-          docId,
+  const owns = useCallback(
+    (operation: HeaderStarOperation) => authority.current === operation.authority && owner.current === operation,
+    [],
+  );
+
+  useLayoutEffect(() => {
+    const currentAuthority: HeaderStarAuthority | null = ready ? { mount, docId } : null;
+    authority.current = currentAuthority;
+    owner.current = null;
+    setState((current) => {
+      if (current.docId === docId && current.confirmed === null && current.starred === null && current.pending === null && current.error === null) return current;
+      return emptyHeaderStarState(docId);
+    });
+    return () => {
+      if (authority.current === currentAuthority) authority.current = null;
+      if (owner.current?.authority === currentAuthority) owner.current = null;
+    };
+  }, [docId, mount, ready]);
+
+  const start = useCallback(
+    (request: { action: "load"; confirmed: null; retry: boolean } | { action: "star" | "unstar"; confirmed: boolean; retry: boolean }) => {
+      const currentAuthority = authority.current;
+      if (!ready || !currentAuthority || currentAuthority.mount !== mount || currentAuthority.docId !== docId || owner.current) return;
+      const operation: HeaderStarOperation = {
+        authority: currentAuthority,
+        operation: ++nextOperation.current,
+        ...request,
+      };
+      owner.current = operation;
+
+      if (operation.action === "load") {
+        setState((previous) => ({
+          docId: operation.authority.docId,
+          confirmed: null,
           starred: null,
-          pending: null,
-          error: { action: "load", message: apiErrorText(error, "Could not load star status") },
+          pending: "load",
+          error: operation.retry && previous.docId === operation.authority.docId && previous.error?.action === "load" ? previous.error : null,
+        }));
+      } else {
+        setState({
+          docId: operation.authority.docId,
+          confirmed: operation.confirmed,
+          starred: operation.action === "star",
+          pending: "toggle",
+          error: null,
         });
-      },
-    );
-  }, [docId, ready]);
+      }
+
+      void (async () => {
+        try {
+          const result = operation.action === "load"
+            ? await api.documents.starred(operation.authority.docId)
+            : operation.action === "star"
+              ? await api.documents.star(operation.authority.docId)
+              : await api.documents.unstar(operation.authority.docId);
+          if (!owns(operation)) return;
+          setState({
+            docId: operation.authority.docId,
+            confirmed: result.starred,
+            starred: result.starred,
+            pending: null,
+            error: null,
+          });
+        } catch (error: unknown) {
+          if (!owns(operation)) return;
+          setState({
+            docId: operation.authority.docId,
+            confirmed: operation.confirmed,
+            starred: operation.confirmed,
+            pending: null,
+            error: {
+              action: operation.action,
+              message: apiErrorText(
+                error,
+                operation.action === "load"
+                  ? "Could not load star status"
+                  : operation.action === "star"
+                    ? "Could not star document"
+                    : "Could not unstar document",
+              ),
+            },
+          });
+        } finally {
+          if (authority.current === operation.authority && owner.current === operation) owner.current = null;
+        }
+      })();
+    },
+    [docId, mount, owns, ready],
+  );
 
   useEffect(() => {
-    if (!ready) {
-      requestId.current += 1;
-      setState(emptyHeaderStarState(docId));
-      return;
-    }
-    load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [docId, ready, load]);
+    if (ready) start({ action: "load", confirmed: null, retry: false });
+  }, [ready, start]);
 
   if (!ready) return null;
   const current = state.docId === docId ? state : emptyHeaderStarState(docId);
@@ -304,7 +379,7 @@ export function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) 
         <Tip label={retrying ? "Retrying star status…" : `${current.error.message}. Retry.`}>
           <button
             type="button"
-            onClick={() => load(true)}
+            onClick={() => start({ action: "load", confirmed: null, retry: true })}
             disabled={retrying}
             className="icon-btn h-8 w-8 shrink-0 text-danger max-md:hidden"
             aria-label={retrying ? "Retrying star status" : "Retry star status"}
@@ -320,31 +395,12 @@ export function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) 
   }
 
   const toggle = () => {
-    if (current.pending) return;
-    const previous = current.starred;
-    const next = !previous;
-    const action = next ? "star" : "unstar";
-    const request = ++requestId.current;
-    setState({ docId, starred: next, pending: "toggle", error: null });
-    const update: Promise<{ starred: boolean }> = next ? api.documents.star(docId) : api.documents.unstar(docId);
-    void update.then(
-      ({ starred }) => {
-        if (requestId.current !== request) return;
-        setState({ docId, starred, pending: null, error: null });
-      },
-      (error: unknown) => {
-        if (requestId.current !== request) return;
-        setState({
-          docId,
-          starred: previous,
-          pending: null,
-          error: {
-            action,
-            message: apiErrorText(error, next ? "Could not star document" : "Could not unstar document"),
-          },
-        });
-      },
-    );
+    if (current.confirmed === null) return;
+    start({
+      action: current.starred ? "unstar" : "star",
+      confirmed: current.confirmed,
+      retry: retryAction !== null,
+    });
   };
 
   const retryAction = current.error?.action === "star" || current.error?.action === "unstar" ? current.error.action : null;
