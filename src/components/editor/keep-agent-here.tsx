@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, ExternalLink, Radio } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { api, apiErrorText } from "@/lib/api";
@@ -38,56 +38,96 @@ interface TokenSetupCheck {
   retry: () => void;
 }
 
-/** The user's last confirmed token state, plus the active panel generation's request state. */
+interface TokenCheckVisit {
+  waitingFor: TokenListRequest | null;
+}
+
+interface TokenListRequest {
+  visit: TokenCheckVisit | null;
+  requiresFreshVisit: boolean;
+}
+
+/** The user's last confirmed token state, plus the exact active panel visit's request state. */
 function useHasTokens(active: boolean): TokenSetupCheck {
   const [hasTokens, setHasTokens] = useState<boolean | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const activeRef = useRef(false);
-  const generationRef = useRef(0);
-  const requestRef = useRef<{ generation: number } | null>(null);
+  const visitRef = useRef<TokenCheckVisit | null>(null);
+  const requestRef = useRef<TokenListRequest | null>(null);
 
-  const check = useCallback((generation: number) => {
-    if (!activeRef.current || generation !== generationRef.current || requestRef.current) return;
-    const request = { generation };
-    requestRef.current = request;
-    setPending(true);
-
-    void (async () => {
-      try {
-        const res = await api.tokens.list();
-        if (!activeRef.current || generation !== generationRef.current || requestRef.current !== request) return;
-        setHasTokens(res.tokens.length > 0);
-        setError(null);
-      } catch (reason) {
-        if (!activeRef.current || generation !== generationRef.current || requestRef.current !== request) return;
-        setError(apiErrorText(reason, "Could not check token setup"));
-      } finally {
-        if (!activeRef.current || generation !== generationRef.current || requestRef.current !== request) return;
-        requestRef.current = null;
-        setPending(false);
+  const check = useCallback((visit: TokenCheckVisit) => {
+    function run(currentVisit: TokenCheckVisit): void {
+      if (visitRef.current !== currentVisit) return;
+      const running = requestRef.current;
+      if (running) {
+        if (running.visit !== currentVisit) {
+          if (running.requiresFreshVisit) currentVisit.waitingFor = running;
+          else running.visit = currentVisit;
+        }
+        setPending(true);
+        return;
       }
-    })();
+
+      currentVisit.waitingFor = null;
+      const request: TokenListRequest = { visit: currentVisit, requiresFreshVisit: false };
+      requestRef.current = request;
+      setPending(true);
+
+      void (async () => {
+        try {
+          const res = await api.tokens.list();
+          if (requestRef.current !== request || !request.visit || request.visit !== visitRef.current) return;
+          setHasTokens(res.tokens.length > 0);
+          setError(null);
+        } catch (reason) {
+          if (requestRef.current !== request || !request.visit || request.visit !== visitRef.current) return;
+          setError(apiErrorText(reason, "Could not check token setup"));
+        } finally {
+          if (requestRef.current !== request) return;
+          requestRef.current = null;
+          const requestVisit = request.visit;
+          request.visit = null;
+          if (requestVisit && visitRef.current === requestVisit) {
+            setPending(false);
+            return;
+          }
+
+          const waitingVisit = visitRef.current;
+          if (!waitingVisit || waitingVisit.waitingFor !== request) return;
+          waitingVisit.waitingFor = null;
+          run(waitingVisit);
+        }
+      })();
+    }
+
+    run(visit);
   }, []);
 
-  useEffect(() => {
-    const generation = ++generationRef.current;
-    activeRef.current = active;
-    requestRef.current = null;
+  const retire = useCallback((visit: TokenCheckVisit) => {
+    visit.waitingFor = null;
+    if (requestRef.current?.visit === visit) requestRef.current.visit = null;
+    if (visitRef.current === visit) visitRef.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
     if (!active) {
+      if (requestRef.current) requestRef.current.requiresFreshVisit = true;
       setPending(false);
       setError(null);
       return;
     }
-    check(generation);
-    return () => {
-      activeRef.current = false;
-      if (generationRef.current === generation) generationRef.current += 1;
-      if (requestRef.current?.generation === generation) requestRef.current = null;
-    };
-  }, [active, check]);
 
-  const retry = useCallback(() => check(generationRef.current), [check]);
+    const visit: TokenCheckVisit = { waitingFor: null };
+    visitRef.current = visit;
+    setError(null);
+    check(visit);
+    return () => retire(visit);
+  }, [active, check, retire]);
+
+  const retry = useCallback(() => {
+    const visit = visitRef.current;
+    if (visit) check(visit);
+  }, [check]);
   return { hasTokens, pending, error, retry };
 }
 
@@ -104,12 +144,19 @@ export interface KeepAgentHerePanelProps {
 }
 
 /** The "Keep an agent here" contents: the Connect-an-agent card for first-timers, then the sentence and a Copy button. */
-export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, hideHeading = false }: KeepAgentHerePanelProps) {
+function KeepAgentHerePanelContent({
+  doc,
+  onCreateToken,
+  onBack,
+  active,
+  hideHeading,
+  tokenSetup,
+}: KeepAgentHerePanelProps & { active: boolean; hideHeading: boolean; tokenSetup: TokenSetupCheck }) {
   const prompt = keepAgentPrompt(doc);
   const pre = useRef<HTMLPreElement>(null);
   const { copy, label, copied } = useCopy(prompt, pre);
   const origin = useOrigin();
-  const { hasTokens, pending: tokenCheckPending, error: tokenCheckError, retry: retryTokenCheck } = useHasTokens(active);
+  const { hasTokens, pending: tokenCheckPending, error: tokenCheckError, retry: retryTokenCheck } = tokenSetup;
   const [dismissed, setDismissed] = useState(true);
   useEffect(() => {
     if (active) setDismissed(readDismissed());
@@ -193,6 +240,20 @@ export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, 
   );
 }
 
+export function KeepAgentHerePanel({ doc, onCreateToken, onBack, active = true, hideHeading = false }: KeepAgentHerePanelProps) {
+  const tokenSetup = useHasTokens(active);
+  return (
+    <KeepAgentHerePanelContent
+      doc={doc}
+      onCreateToken={onCreateToken}
+      onBack={onBack}
+      active={active}
+      hideHeading={hideHeading}
+      tokenSetup={tokenSetup}
+    />
+  );
+}
+
 export interface KeepAgentHereDialogProps {
   doc: { id: string; title: string };
   open: boolean;
@@ -205,11 +266,12 @@ export interface KeepAgentHereDialogProps {
  * the presence popover, the command palette (`doc:keep-agent`) and the editor's `/agent` slash item.
  */
 export function KeepAgentHereDialog({ doc, open, onOpenChange, onCreateToken }: KeepAgentHereDialogProps) {
+  const tokenSetup = useHasTokens(open);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Keep an agent here" className="max-h-[calc(100dvh-2rem)] w-[min(94vw,520px)] overflow-y-auto">
         <div data-testid="keep-agent-dialog">
-          <KeepAgentHerePanel doc={doc} onCreateToken={onCreateToken} active={open} hideHeading />
+          <KeepAgentHerePanelContent doc={doc} onCreateToken={onCreateToken} active={open} hideHeading tokenSetup={tokenSetup} />
         </div>
       </DialogContent>
     </Dialog>
