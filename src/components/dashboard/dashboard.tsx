@@ -160,7 +160,27 @@ interface CreateOperation {
 
 interface SearchAuthority {
   mount: symbol;
+  visit: symbol;
+  user: DashboardProps["user"];
   userId: string;
+}
+
+interface SearchShortcutOwner {
+  active: boolean;
+  readonly authority: SearchAuthority;
+  readonly user: DashboardProps["user"];
+  readonly target: Window;
+  readonly input: HTMLInputElement;
+  readonly onKeyDown: (event: KeyboardEvent) => void;
+}
+
+interface PaletteShortcutOwner {
+  active: boolean;
+  open: boolean;
+  readonly authority: SearchAuthority;
+  readonly user: DashboardProps["user"];
+  readonly target: Window;
+  readonly onKeyDown: (event: KeyboardEvent) => void;
 }
 
 interface SearchDebounceOwner {
@@ -259,16 +279,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const router = useRouter();
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    const focusSearch = (event: KeyboardEvent) => {
-      if (!isSearchShortcut(event)) return;
-      event.preventDefault();
-      searchRef.current?.focus();
-      searchRef.current?.select();
-    };
-    window.addEventListener("keydown", focusSearch);
-    return () => window.removeEventListener("keydown", focusSearch);
-  }, []);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteOpenRef = useRef(false);
   const clearSearch = useCallback(() => {
     setQuery("");
     searchRef.current?.focus();
@@ -277,8 +289,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
   const [searchMount] = useState(() => Symbol("dashboard-search"));
-  const searchAuthority = useMemo<SearchAuthority>(() => ({ mount: searchMount, userId: user.id }), [searchMount, user.id]);
+  const searchAuthority = useMemo<SearchAuthority>(
+    () => ({ mount: searchMount, visit: Symbol("dashboard-user-visit"), user, userId: user.id }),
+    [searchMount, user],
+  );
   const searchAuthorityRef = useRef<SearchAuthority | null>(null);
+  const searchShortcutOwnerRef = useRef<SearchShortcutOwner | null>(null);
+  const paletteShortcutOwnerRef = useRef<PaletteShortcutOwner | null>(null);
   const searchDebounceOwner = useRef<SearchDebounceOwner | null>(null);
   const searchRequestOwner = useRef<SearchRequestOwner | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState<SearchDebounceOwner | null>(null);
@@ -588,6 +605,45 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     };
   }, [retireSearchDebounce, retireSearchRequest, searchAuthority]);
 
+  useLayoutEffect(() => {
+    const target = window;
+    const input = searchRef.current;
+    if (!input) return;
+    const ownsListener = () =>
+      owner.active &&
+      owner.target === window &&
+      owner.input.isConnected &&
+      searchRef.current === owner.input &&
+      searchShortcutOwnerRef.current === owner &&
+      searchAuthorityRef.current === owner.authority &&
+      owner.authority === searchAuthority &&
+      owner.authority.user === owner.user &&
+      owner.user === user &&
+      owner.authority.userId === user.id;
+    const owner: SearchShortcutOwner = {
+      active: true,
+      authority: searchAuthority,
+      user,
+      target,
+      input,
+      onKeyDown: (event) => {
+        if (!ownsListener() || paletteOpenRef.current || !isSearchShortcut(event)) return;
+        event.preventDefault();
+        if (!ownsListener() || paletteOpenRef.current) return;
+        owner.input.focus();
+        if (!ownsListener() || paletteOpenRef.current) return;
+        owner.input.select();
+      },
+    };
+    searchShortcutOwnerRef.current = owner;
+    target.addEventListener("keydown", owner.onKeyDown);
+    return () => {
+      owner.active = false;
+      if (searchShortcutOwnerRef.current === owner) searchShortcutOwnerRef.current = null;
+      owner.target.removeEventListener("keydown", owner.onKeyDown);
+    };
+  }, [searchAuthority, user]);
+
   // Query and user changes synchronously retire their exact timer and request before parent layout effects run.
   useLayoutEffect(() => {
     setSearchingOwner((current) => (current?.authority === searchAuthority && current.query === trimmed ? current : null));
@@ -770,7 +826,6 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   );
 
   // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
-  const [paletteOpen, setPaletteOpen] = useState(false);
   // Local files dropped on the page or picked with "Open file…": one file opens straight away,
   // several stay listed in the dialog while the list behind it refreshes — as does a batch with a
   // failure in it, so the failed file stays visible.
@@ -782,16 +837,54 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     onError: (message) => publishNotice({ message, kind: "error" }),
   });
   const pickFile = fileImport.pick;
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (paletteOpen || !isPaletteShortcut(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      setPaletteOpen(true);
+  useLayoutEffect(() => {
+    paletteOpenRef.current = paletteOpen;
+    const owner = paletteShortcutOwnerRef.current;
+    if (
+      owner?.active &&
+      owner.authority === searchAuthority &&
+      owner.user === user &&
+      searchAuthorityRef.current === searchAuthority
+    ) {
+      owner.open = paletteOpen;
+    }
+  }, [paletteOpen, searchAuthority, user]);
+  useLayoutEffect(() => {
+    const target = window;
+    const ownsListener = () =>
+      owner.active &&
+      owner.target === window &&
+      paletteShortcutOwnerRef.current === owner &&
+      searchAuthorityRef.current === owner.authority &&
+      owner.authority === searchAuthority &&
+      owner.authority.user === owner.user &&
+      owner.user === user &&
+      owner.authority.userId === user.id;
+    const owner: PaletteShortcutOwner = {
+      active: true,
+      open: paletteOpenRef.current,
+      authority: searchAuthority,
+      user,
+      target,
+      onKeyDown: (event) => {
+        if (!ownsListener() || owner.open || paletteOpenRef.current || !isPaletteShortcut(event)) return;
+        owner.open = true;
+        paletteOpenRef.current = true;
+        event.preventDefault();
+        if (!ownsListener() || !owner.open || !paletteOpenRef.current) return;
+        event.stopPropagation();
+        if (!ownsListener() || !owner.open || !paletteOpenRef.current) return;
+        setPaletteOpen(true);
+      },
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [paletteOpen]);
+    paletteShortcutOwnerRef.current = owner;
+    target.addEventListener("keydown", owner.onKeyDown, true);
+    return () => {
+      owner.active = false;
+      if (paletteShortcutOwnerRef.current === owner) paletteShortcutOwnerRef.current = null;
+      owner.target.removeEventListener("keydown", owner.onKeyDown, true);
+    };
+  }, [searchAuthority, user]);
   const listDocs = useCallback(async (qs: string) => {
     const res = await fetch(`/api/documents${qs}`);
     if (!res.ok) throw new Error(`Could not load documents (${res.status})`);
