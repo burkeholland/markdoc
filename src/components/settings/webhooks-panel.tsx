@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, Copy, Loader2, Plus, Power, Send, Trash2, Webhook } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
@@ -97,13 +97,14 @@ export function WebhooksPanel() {
   const listRequest = useRef(0);
   const retryPending = useRef(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const generation = ++mountedGeneration.current;
     const owners = rowOwners.current;
     return () => {
       if (mountedGeneration.current !== generation) return;
       mountedGeneration.current += 1;
       listRequest.current += 1;
+      retryPending.current = false;
       createOwner.current = null;
       owners.clear();
       feedbackOwner.current = null;

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 
 import { WebhooksPanel } from "./webhooks-panel";
 
@@ -18,6 +19,23 @@ function deferred<T>() {
     reject = fail;
   });
   return { promise, resolve, reject };
+}
+
+function BoundaryHarness({
+  cardKey = 0,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  cardKey?: number;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <WebhooksPanel key={cardKey} /> : null;
 }
 
 const disabledWebhook = {
@@ -562,5 +580,188 @@ describe("Settings → Webhooks: action ownership", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(unhandled).not.toHaveBeenCalled();
     window.removeEventListener("unhandledrejection", unhandled);
+  });
+});
+
+describe("Settings → Webhooks: layout retirement", () => {
+  it.each([
+    {
+      label: "success",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ webhooks: [disabledWebhook] })),
+    },
+    {
+      label: "failure",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ error: "Retired list failed" }, 503)),
+    },
+  ])("retires an initial list $label before replacing the card", async ({ settle }) => {
+    const retiredList = deferred<Response>();
+    const currentList = deferred<Response>();
+    const currentAction = deferred<Response>();
+    fetchMock.mockReturnValueOnce(retiredList.promise).mockReturnValueOnce(currentList.promise).mockReturnValueOnce(currentAction.promise);
+    const view = render(<BoundaryHarness cardKey={1} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    view.rerender(<BoundaryHarness cardKey={2} boundary={1} onBoundary={() => settle(retiredList)} />);
+    await act(async () => {
+      await retiredList.promise;
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.queryByTestId("webhooks-list-error")).toBeNull();
+    expect(screen.queryByTestId("webhook-row")).toBeNull();
+
+    await act(async () => currentList.resolve(response({ webhooks: [activeWebhook] })));
+    const testButton = within(await screen.findByTestId("webhook-row")).getByTestId("webhook-test");
+    fireEvent.click(testButton);
+    expect(testButton).toBeDisabled();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/webhooks", "/api/webhooks", "/api/webhooks/active-hook/test"]);
+
+    await act(async () => currentAction.resolve(response({ error: "Current test failed" }, 503)));
+    expect(await screen.findByTestId("webhook-action-error")).toHaveTextContent("Current test failed");
+    expect(screen.getByTestId("webhook-test")).toBeEnabled();
+  });
+
+  it.each([
+    {
+      label: "success",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ webhooks: [activeWebhook] })),
+    },
+    {
+      label: "failure",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ error: "Retired Retry failed" }, 503)),
+    },
+  ])("retires a pending Retry $label without clearing the replacement Retry owner", async ({ settle }) => {
+    const retiredRetry = deferred<Response>();
+    const currentRetry = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ error: "Retired initial failure" }, 503))
+      .mockReturnValueOnce(retiredRetry.promise)
+      .mockResolvedValueOnce(response({ error: "Current initial failure" }, 503))
+      .mockReturnValueOnce(currentRetry.promise);
+    const view = render(<BoundaryHarness cardKey={1} />);
+
+    fireEvent.click(within(await screen.findByTestId("webhooks-list-error")).getByRole("button", { name: "Retry" }));
+    view.rerender(<BoundaryHarness cardKey={2} boundary={1} onBoundary={() => settle(retiredRetry)} />);
+    await act(async () => {
+      await Promise.allSettled([retiredRetry.promise]);
+      await Promise.resolve();
+    });
+
+    const currentRetryButton = within(await screen.findByTestId("webhooks-list-error")).getByRole("button", { name: "Retry" });
+    expect(screen.getByTestId("webhooks-list-error")).toHaveTextContent("Current initial failure");
+    fireEvent.click(currentRetryButton);
+    fireEvent.click(currentRetryButton);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+    await act(async () => currentRetry.resolve(response({ webhooks: [] })));
+    expect(await screen.findByTestId("webhooks-empty")).toHaveTextContent("No webhooks yet.");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/webhooks", "/api/webhooks", "/api/webhooks", "/api/webhooks"]);
+  });
+
+  it.each([
+    {
+      label: "success with a returned secret",
+      settle: (pending: ReturnType<typeof deferred<Response>>) =>
+        pending.resolve(response({ webhook: { ...activeWebhook, id: "retired-created-hook", secret: "whsec_retired" } })),
+    },
+    {
+      label: "failure",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.reject(new Error("Retired create failed")),
+    },
+  ])("retires an Add $label at the removed-card boundary", async ({ settle }) => {
+    const retiredCreate = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [] }))
+      .mockReturnValueOnce(retiredCreate.promise)
+      .mockResolvedValue(response({ webhooks: [activeWebhook] }));
+    const view = render(<BoundaryHarness />);
+
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: "https://receiver.example/retired-create" } });
+    fireEvent.submit(screen.getByTestId("webhook-form"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    view.rerender(<BoundaryHarness present={false} boundary={1} onBoundary={() => settle(retiredCreate)} />);
+    await act(async () => {
+      await Promise.allSettled([retiredCreate.promise]);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId("webhooks-card")).toBeNull();
+    expect(screen.queryByTestId("webhook-created")).toBeNull();
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      label: "Test success",
+      hook: activeWebhook,
+      control: "webhook-test",
+      actionUrl: "/api/webhooks/active-hook/test",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ ok: true })),
+    },
+    {
+      label: "Test failure",
+      hook: activeWebhook,
+      control: "webhook-test",
+      actionUrl: "/api/webhooks/active-hook/test",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ error: "Retired test failed" }, 503)),
+    },
+    {
+      label: "Enable success",
+      hook: disabledWebhook,
+      control: "webhook-enable",
+      actionUrl: "/api/webhooks/disabled-hook/enable",
+      settle: (pending: ReturnType<typeof deferred<Response>>) =>
+        pending.resolve(response({ webhook: { ...disabledWebhook, active: true, failures: 0 } })),
+    },
+    {
+      label: "Enable failure",
+      hook: disabledWebhook,
+      control: "webhook-enable",
+      actionUrl: "/api/webhooks/disabled-hook/enable",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ error: "Retired enable failed" }, 503)),
+    },
+    {
+      label: "Delete success",
+      hook: activeWebhook,
+      control: "webhook-delete",
+      actionUrl: "/api/webhooks/active-hook",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.resolve(response({ ok: true })),
+    },
+    {
+      label: "Delete failure",
+      hook: activeWebhook,
+      control: "webhook-delete",
+      actionUrl: "/api/webhooks/active-hook",
+      settle: (pending: ReturnType<typeof deferred<Response>>) => pending.reject(new Error("Retired delete failed")),
+    },
+  ])("retires a pending $label at the removed-card boundary", async ({ hook, control, actionUrl, settle }) => {
+    const retiredAction = deferred<Response>();
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [hook] }))
+      .mockReturnValueOnce(retiredAction.promise)
+      .mockResolvedValue(response({ webhooks: [activeWebhook] }));
+    const view = render(<BoundaryHarness />);
+
+    fireEvent.click(await screen.findByTestId(control));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    view.rerender(<BoundaryHarness present={false} boundary={1} onBoundary={() => settle(retiredAction)} />);
+    await act(async () => {
+      await Promise.allSettled([retiredAction.promise]);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId("webhooks-card")).toBeNull();
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === actionUrl)).toHaveLength(1);
   });
 });
