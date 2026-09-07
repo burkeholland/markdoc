@@ -35,12 +35,12 @@ export interface SlashMenuController {
   handlers: SlashMenuHandlers;
   subscribe: (listener: (state: SlashState | null) => void) => () => void;
   getState: () => SlashState | null;
-  setKeyHandler: (handler: ((key: SlashKey) => boolean) | null) => void;
+  setKeyHandler: (handler: (key: SlashKey) => boolean) => () => void;
 }
 
 export function createSlashMenuController(): SlashMenuController {
   let state: SlashState | null = null;
-  let keyHandler: ((key: SlashKey) => boolean) | null = null;
+  let keyOwner: { handler: (key: SlashKey) => boolean } | null = null;
   const listeners = new Set<(state: SlashState | null) => void>();
   return {
     handlers: {
@@ -48,7 +48,7 @@ export function createSlashMenuController(): SlashMenuController {
         state = next;
         for (const l of listeners) l(next);
       },
-      onKey: (key) => keyHandler?.(key) ?? false,
+      onKey: (key) => keyOwner?.handler(key) ?? false,
     },
     subscribe: (listener) => {
       listeners.add(listener);
@@ -56,7 +56,11 @@ export function createSlashMenuController(): SlashMenuController {
     },
     getState: () => state,
     setKeyHandler: (handler) => {
-      keyHandler = handler;
+      const owner = { handler };
+      keyOwner = owner;
+      return () => {
+        if (keyOwner === owner) keyOwner = null;
+      };
     },
   };
 }
@@ -72,6 +76,33 @@ function selectCurrentBlock(view: EditorView) {
   const end = $from.end();
   if (end > start) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, start, end)));
 }
+
+type SlashMenuAuthority = {
+  controller: SlashMenuController;
+  view: EditorView;
+  session: CollabSession;
+};
+
+type SlashMenuSnapshot = {
+  authority: SlashMenuAuthority;
+  state: SlashState | null;
+};
+
+type HighlightOwner = {
+  authority: SlashMenuAuthority;
+  query: string;
+  index: number;
+};
+
+type PositionOwner = {
+  snapshot: SlashMenuSnapshot;
+  value: { left: number; top: number; width: number; maxHeight: number };
+};
+
+type KeyOwner = {
+  authority: SlashMenuAuthority;
+  retire: () => void;
+};
 
 export function SlashMenu({
   view,
@@ -93,29 +124,82 @@ export function SlashMenu({
   /** `/agent`: opens the "Keep an agent here" dialog. */
   onKeepAgent: () => void;
 }) {
-  const [state, setState] = useState<SlashState | null>(() => controller.getState());
-  const [index, setIndex] = useState(0);
-  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  const authority = useMemo<SlashMenuAuthority | null>(
+    () => (view ? { controller, view, session } : null),
+    [controller, view, session],
+  );
+  const authorityRef = useRef<SlashMenuAuthority | null>(null);
+  const retiredControllersRef = useRef(new WeakSet<SlashMenuController>());
+  const keyOwnerRef = useRef<KeyOwner | null>(null);
+  const [snapshot, setSnapshot] = useState<SlashMenuSnapshot | null>(() =>
+    authority ? { authority, state: controller.getState() } : null,
+  );
+  const currentSnapshot = snapshot?.authority === authority ? snapshot : null;
+  const state = currentSnapshot?.state ?? null;
+  const query = state ? `${state.from}:${state.query}` : "";
+  const [highlight, setHighlight] = useState<HighlightOwner | null>(null);
+  const index = highlight?.authority === authority && highlight.query === query ? highlight.index : 0;
+  const [position, setPosition] = useState<PositionOwner | null>(null);
+  const pos = position?.snapshot === currentSnapshot ? position.value : null;
   const listRef = useRef<HTMLDivElement>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const canComment = useSessionValue(session, (s) => s.canComment);
 
-  useEffect(() => controller.subscribe(setState), [controller]);
+  useLayoutEffect(() => {
+    const retiredControllers = retiredControllersRef.current;
+    if (!authority) {
+      setSnapshot(null);
+      return;
+    }
+
+    authorityRef.current = authority;
+    const publish = (next: SlashState | null) => {
+      if (authorityRef.current !== authority) return;
+      setSnapshot({ authority, state: next });
+    };
+    const unsubscribe = controller.subscribe(publish);
+    setSnapshot((current) => {
+      if (current?.authority === authority) return current;
+      // A shared controller still contains the retired view's last publication.
+      // Its replacement visit starts closed until that view publishes for itself.
+      const retired = current?.authority.controller === controller || retiredControllers.has(controller);
+      const next = retired ? null : controller.getState();
+      return { authority, state: next };
+    });
+    return () => {
+      retiredControllers.add(controller);
+      if (authorityRef.current === authority) authorityRef.current = null;
+      const keyOwner = keyOwnerRef.current;
+      if (keyOwner?.authority === authority) keyOwner.retire();
+      unsubscribe();
+    };
+  }, [authority, controller]);
 
   const where: SlashWhere = useMemo(() => ({ inTable: !!(view && state && tableAt(view.state)), canComment }), [view, state, canComment]);
   const items = useMemo(() => (state ? filterSlashItems(state.query, SLASH_ITEMS, where) : []), [state, where]);
   const open = !!state && canEdit && !!view;
 
-  // Reset the highlight whenever the query changes.
-  useEffect(() => {
-    setIndex(0);
-  }, [state?.query, state?.from]);
+  const setCurrentIndex = useCallback(
+    (update: (current: number) => number) => {
+      if (!authority || authorityRef.current !== authority) return;
+      setHighlight((current) => {
+        if (authorityRef.current !== authority) return current;
+        const value = current?.authority === authority && current.query === query ? current.index : 0;
+        const next = update(value);
+        if (current?.authority === authority && current.query === query && current.index === next) return current;
+        return { authority, query, index: next };
+      });
+    },
+    [authority, query],
+  );
 
   const apply = useCallback(
     (item: SlashItem | undefined) => {
-      if (!view) return;
+      if (!view || !authority || authorityRef.current !== authority) return;
+      const current = controller.getState();
+      if (!current || current !== state) return;
       if (!item) return closeSlashMenu(view);
-      const arg = splitSlashQuery(controller.getState()?.query ?? "").arg;
+      const arg = splitSlashQuery(current.query).arg;
       if (item.command) {
         // One transaction for the /query removal and the edit: a single undo step.
         applySlashCommand(view, item.command(arg), session.undoManager);
@@ -141,22 +225,34 @@ export function SlashMenu({
         session.undoManager,
       );
     },
-    [view, controller, where, onImage, onLink, onComment, onKeepAgent, session],
+    [view, authority, controller, state, where, onImage, onLink, onComment, onKeepAgent, session],
   );
+  useLayoutEffect(() => {
+    if (!open || !authority || authorityRef.current !== authority) return;
+    const previous = keyOwnerRef.current;
+    if (previous) previous.retire();
 
-  useEffect(() => {
-    if (!open) {
-      controller.setKeyHandler(null);
-      return;
-    }
-    controller.setKeyHandler((key) => {
-      if (key === "ArrowDown") setIndex((i) => (items.length ? (i + 1) % items.length : 0));
-      else if (key === "ArrowUp") setIndex((i) => (items.length ? (i - 1 + items.length) % items.length : 0));
+    let active = true;
+    const handler = (key: SlashKey) => {
+      if (!active || authorityRef.current !== authority || keyOwnerRef.current !== owner) return false;
+      if (key === "ArrowDown") setCurrentIndex((i) => (items.length ? (i + 1) % items.length : 0));
+      else if (key === "ArrowUp") setCurrentIndex((i) => (items.length ? (i - 1 + items.length) % items.length : 0));
       else apply(items[index]);
       return true;
-    });
-    return () => controller.setKeyHandler(null);
-  }, [open, controller, items, index, apply]);
+    };
+    const clear = controller.setKeyHandler(handler);
+    const owner: KeyOwner = {
+      authority,
+      retire: () => {
+        if (!active) return;
+        active = false;
+        if (keyOwnerRef.current === owner) keyOwnerRef.current = null;
+        clear();
+      },
+    };
+    keyOwnerRef.current = owner;
+    return owner.retire;
+  }, [open, authority, controller, items, index, apply, setCurrentIndex]);
 
   // Keep the highlighted row visible while navigating with the keyboard.
   useEffect(() => {
@@ -166,8 +262,8 @@ export function SlashMenu({
 
   useLayoutEffect(() => {
     const container = containerRef.current;
-    if (!open || !state || !container) {
-      setPos(null);
+    if (!open || !state || !currentSnapshot || !container) {
+      setPosition((current) => (current?.snapshot === currentSnapshot ? null : current));
       return;
     }
     const host = container.getBoundingClientRect();
@@ -180,8 +276,8 @@ export function SlashMenu({
     const box = clampToViewport({ left: state.coords.left, top: below ? state.coords.bottom + 6 : state.coords.top - 6 - height, width: MENU_WIDTH, height }, viewport);
     const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
     const top = box.top - host.top + container.scrollTop;
-    setPos({ left, top, width: box.width, maxHeight: box.height });
-  }, [open, state, items, containerRef]);
+    setPosition({ snapshot: currentSnapshot, value: { left, top, width: box.width, maxHeight: box.height } });
+  }, [open, state, currentSnapshot, items, containerRef]);
 
   if (!open || !pos) return null;
 
@@ -220,7 +316,7 @@ export function SlashMenu({
                 data-testid={`slash-item-${item.id}`}
                 className={cn("flex w-full items-center gap-3 px-3 text-left text-sm text-ink-2", active && "bg-accent-soft text-ink")}
                 style={{ height: rowHeight(item) }}
-                onMouseEnter={() => setIndex(i)}
+                onMouseEnter={() => setCurrentIndex(() => i)}
                 onClick={() => apply(item)}
               >
                 <Icon size={16} className="shrink-0 text-ink-3" />
