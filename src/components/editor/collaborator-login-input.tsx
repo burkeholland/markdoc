@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { Loader2, UserPlus } from "lucide-react";
 import { api, apiErrorText, type GitHubUserDto } from "@/lib/api";
 import { Avatar } from "@/components/ui/primitives";
@@ -22,6 +22,17 @@ export function suggestQuery(value: string): string | null {
 type LookupState =
   | { query: string; status: "loading" }
   | { query: string; status: "error"; message: string; retrying: boolean };
+
+type QueryAuthority = {
+  seq: number;
+  query: string;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+type RequestAuthority = {
+  query: QueryAuthority;
+  controller: AbortController;
+};
 
 /**
  * The Share dialog's handle box with GitHub-account suggestions: an ARIA combobox over a listbox of
@@ -54,9 +65,9 @@ export function CollaboratorLoginInput({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const [lookup, setLookup] = useState<LookupState | null>(null);
-  // Every query change bumps `seq`; a response whose seq is no longer current is dropped.
   const seq = useRef(0);
-  const request = useRef<{ seq: number; query: string; controller: AbortController } | null>(null);
+  const authority = useRef<QueryAuthority | null>(null);
+  const request = useRef<RequestAuthority | null>(null);
   const cache = useRef(new Map<string, GitHubUserDto[]>());
   // The login a pick just wrote into the box: it is not searched again (its owner is about to press Add).
   const picked = useRef<string | null>(null);
@@ -65,13 +76,6 @@ export function CollaboratorLoginInput({
   const mounted = useRef(false);
   const query = suggestQuery(value);
 
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-
   const show = useCallback((users: GitHubUserDto[]) => {
     setOptions(users);
     setActive(-1);
@@ -79,95 +83,133 @@ export function CollaboratorLoginInput({
     setOpen(users.length > 0 && document.activeElement === inputRef.current);
   }, []);
 
-  const cancelLookup = useCallback(() => {
-    seq.current += 1;
-    request.current?.controller.abort();
-    request.current = null;
-    setLookup(null);
+  const retire = useCallback((owner: QueryAuthority) => {
+    if (owner.timer !== null) {
+      clearTimeout(owner.timer);
+      owner.timer = null;
+    }
+    if (request.current?.query === owner) {
+      const retiredRequest = request.current;
+      request.current = null;
+      retiredRequest.controller.abort();
+    }
+    if (authority.current === owner) {
+      authority.current = null;
+      seq.current += 1;
+    }
   }, []);
 
-  const silenceSuggestions = useCallback(() => {
-    noToken.current = true;
-    seq.current += 1;
-    request.current?.controller.abort();
-    request.current = null;
+  const ownsQuery = useCallback(
+    (owner: QueryAuthority) => mounted.current && authority.current === owner && seq.current === owner.seq,
+    [],
+  );
+
+  const ownsRequest = useCallback(
+    (owner: QueryAuthority, currentRequest: RequestAuthority) => ownsQuery(owner) && request.current === currentRequest,
+    [ownsQuery],
+  );
+
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (authority.current) retire(authority.current);
+    };
+  }, [retire]);
+
+  const cancelLookup = useCallback(() => {
+    if (authority.current) retire(authority.current);
     setLookup(null);
-    show([]);
-  }, [show]);
+  }, [retire]);
+
+  const silenceSuggestions = useCallback(
+    (owner: QueryAuthority, currentRequest: RequestAuthority) => {
+      if (!ownsRequest(owner, currentRequest)) return;
+      noToken.current = true;
+      retire(owner);
+      setLookup(null);
+      show([]);
+    },
+    [ownsRequest, retire, show],
+  );
 
   const runLookup = useCallback(
-    (currentQuery: string, current: number) => {
-      if (noToken.current || seq.current !== current || request.current) return;
+    (owner: QueryAuthority) => {
+      if (noToken.current || !ownsQuery(owner) || request.current) return;
       const controller = new AbortController();
-      const ownership = { seq: current, query: currentQuery, controller };
-      request.current = ownership;
+      const currentRequest = { query: owner, controller };
+      request.current = currentRequest;
       api.github
-        .searchUsers(currentQuery, { signal: controller.signal })
+        .searchUsers(owner.query, { signal: controller.signal })
         .then((res) => {
-          // "No token" is true of the session, not of this query: even a superseded answer settles it.
+          if (!ownsRequest(owner, currentRequest)) return;
           if (res.reason === "no-github-token") {
-            if (mounted.current) silenceSuggestions();
+            silenceSuggestions(owner, currentRequest);
             return;
           }
-          if (seq.current !== current || request.current !== ownership) return;
           if (res.limited) {
             show([]);
             setLookup({
-              query: currentQuery,
+              query: owner.query,
               status: "error",
-              message: `GitHub suggestions for @${currentQuery} are temporarily unavailable.`,
+              message: `GitHub suggestions for @${owner.query} are temporarily unavailable.`,
               retrying: false,
             });
             return;
           }
-          cache.current.set(currentQuery.toLowerCase(), res.users);
+          cache.current.set(owner.query.toLowerCase(), res.users);
           show(res.users);
           setLookup(null);
         })
         .catch((error: unknown) => {
-          if (controller.signal.aborted || seq.current !== current || request.current !== ownership) return;
+          if (controller.signal.aborted || !ownsRequest(owner, currentRequest)) return;
           const reason = apiErrorText(error, "");
           show([]);
           setLookup({
-            query: currentQuery,
+            query: owner.query,
             status: "error",
-            message: reason ? `GitHub suggestions for @${currentQuery}: ${reason}` : `GitHub suggestions for @${currentQuery} are temporarily unavailable.`,
+            message: reason ? `GitHub suggestions for @${owner.query}: ${reason}` : `GitHub suggestions for @${owner.query} are temporarily unavailable.`,
             retrying: false,
           });
         })
         .finally(() => {
-          if (request.current === ownership) request.current = null;
+          if (ownsRequest(owner, currentRequest)) request.current = null;
         });
     },
-    [show, silenceSuggestions],
+    [ownsQuery, ownsRequest, show, silenceSuggestions],
   );
 
-  useEffect(() => {
-    const current = ++seq.current;
-    request.current?.controller.abort();
-    request.current = null;
+  useLayoutEffect(() => {
+    if (authority.current) retire(authority.current);
+    show([]);
     setLookup(null);
-    if (!query || query === picked.current || noToken.current) {
-      show([]);
-      return;
-    }
+    if (!query || query === picked.current || noToken.current) return;
+
+    const owner = { seq: ++seq.current, query, timer: null };
+    authority.current = owner;
+    return () => retire(owner);
+  }, [query, retire, show]);
+
+  useEffect(() => {
+    const owner = authority.current;
+    if (!query || !owner || owner.query !== query || !ownsQuery(owner)) return;
     const cached = cache.current.get(query.toLowerCase());
     if (cached) {
       show(cached);
       return;
     }
-    show([]);
     setLookup({ query, status: "loading" });
-    const timer = setTimeout(() => runLookup(query, current), SUGGEST_DEBOUNCE_MS);
+    owner.timer = setTimeout(() => {
+      owner.timer = null;
+      runLookup(owner);
+    }, SUGGEST_DEBOUNCE_MS);
     return () => {
-      clearTimeout(timer);
-      if (seq.current === current) seq.current += 1;
-      if (request.current?.seq === current) {
-        request.current.controller.abort();
-        request.current = null;
+      if (owner.timer !== null) {
+        clearTimeout(owner.timer);
+        owner.timer = null;
       }
     };
-  }, [query, runLookup, show]);
+  }, [ownsQuery, query, runLookup, show]);
 
   const excluded = new Set(exclude.map((l) => l.toLowerCase()));
   const visible = options.filter((u) => !excluded.has(u.login.toLowerCase())).slice(0, SUGGEST_MAX);
@@ -186,12 +228,15 @@ export function CollaboratorLoginInput({
   };
 
   const retry = () => {
-    if (!query || currentLookup?.status !== "error" || currentLookup.retrying || noToken.current || request.current) return;
+    const previous = authority.current;
+    if (!query || previous?.query !== query || currentLookup?.status !== "error" || currentLookup.retrying || noToken.current || request.current) return;
     inputRef.current?.focus();
-    const current = ++seq.current;
+    retire(previous);
+    const owner = { seq: ++seq.current, query, timer: null };
+    authority.current = owner;
     show([]);
     setLookup({ ...currentLookup, retrying: true });
-    runLookup(query, current);
+    runLookup(owner);
   };
 
   const leaveControl = (e: FocusEvent<HTMLDivElement>) => {
