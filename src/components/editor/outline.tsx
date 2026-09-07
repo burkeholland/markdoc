@@ -8,7 +8,7 @@ import { rovingIndex } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
 import { RAIL_BOX, RAIL_COLLAPSED_BOX } from "./chrome-classes";
-import { memo, type KeyboardEvent } from "react";
+import { memo, type KeyboardEvent, useEffect, useRef } from "react";
 
 export interface OutlineProps {
   session: CollabSession;
@@ -96,6 +96,15 @@ const OutlineList = memo(function OutlineList({ headings, active, onSelect }: { 
   const minLevel = headings.reduce((m, h) => Math.min(m, h.level), 6);
   // Roving tabindex: the active heading (or the first one) is the list's single tab stop.
   const tabStop = active >= 0 ? active : 0;
+  const activeItemRef = useRef<HTMLButtonElement>(null);
+  const previous = useRef({ headings, active });
+
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = { headings, active };
+    if (active < 0 || active === before.active || headings !== before.headings) return;
+    activeItemRef.current?.scrollIntoView({ block: "nearest" });
+  }, [active, headings]);
 
   const onListKeyDown = (e: KeyboardEvent<HTMLUListElement>) => {
     const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-outline-item]"));
@@ -112,6 +121,7 @@ const OutlineList = memo(function OutlineList({ headings, active, onSelect }: { 
         <li key={`${h.from}-${i}`}>
           <button
             type="button"
+            ref={i === active ? activeItemRef : undefined}
             onClick={() => onSelect(h)}
             className={cn(
               "relative flex w-full items-start truncate py-2.5 pr-3 text-left text-[15px] leading-5 transition-colors hover:text-ink",
