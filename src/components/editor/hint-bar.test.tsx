@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import type { CollabSession } from "@/editor/collab/session";
 import { HINTS_STORAGE_KEY, readHintsRecord } from "@/lib/hints";
 import type { EditorActions } from "./actions";
@@ -86,6 +87,23 @@ function mount(session = fakeSession("doc-1")) {
   return render(<HintBar session={session} actions={actions} onShare={onShare} onComment={onComment} />);
 }
 
+function HintBoundary({
+  session,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  session: CollabSession;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <HintBar session={session} actions={actions} onShare={onShare} onComment={onComment} /> : null;
+}
+
 async function flushPromises() {
   await act(async () => {
     await Promise.resolve();
@@ -132,6 +150,7 @@ describe("HintBar collaborator discovery", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    vi.restoreAllMocks();
     if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
     else Reflect.deleteProperty(window, "matchMedia");
     if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
@@ -250,6 +269,107 @@ describe("HintBar collaborator discovery", () => {
     expect(collaborators).toHaveBeenCalledOnce();
     expect(tokens).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retires both old source owners at the replacement layout boundary before admitting one request per source", async () => {
+    const oldShare = deferred<ReturnType<typeof collaboratorResult>>();
+    const oldTokens = deferred<ReturnType<typeof tokenResult>>();
+    const newShare = deferred<ReturnType<typeof collaboratorResult>>();
+    const newTokens = deferred<ReturnType<typeof tokenResult>>();
+    collaborators.mockReturnValueOnce(oldShare.promise).mockReturnValueOnce(newShare.promise);
+    tokens.mockReturnValueOnce(oldTokens.promise).mockReturnValueOnce(newTokens.promise);
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+    const timers = vi.spyOn(globalThis, "setTimeout");
+
+    const rendered = render(<HintBoundary session={fakeSession("boundary-old")} />);
+    expect(collaborators).toHaveBeenCalledTimes(1);
+    expect(tokens).toHaveBeenCalledTimes(1);
+    rendered.rerender(
+      <HintBoundary
+        session={fakeSession("boundary-new")}
+        boundary={1}
+        onBoundary={() => {
+          expect(collaborators).toHaveBeenCalledTimes(1);
+          expect(tokens).toHaveBeenCalledTimes(1);
+          oldShare.resolve(collaboratorResult(2, true));
+          oldTokens.reject(new Error("retired token lookup failed"));
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.allSettled([oldShare.promise, oldTokens.promise]);
+      await Promise.resolve();
+    });
+
+    expect(collaborators.mock.calls.map(([document]) => document)).toEqual(["boundary-old", "boundary-new"]);
+    expect(tokens).toHaveBeenCalledTimes(2);
+    expect(storageWrites).toHaveBeenCalledTimes(0);
+    expect(readHintsRecord(window.localStorage).agentSeen).toBe(false);
+    expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
+    expect(timers.mock.calls.filter(([, delay]) => delay === COLLAB_HINT_RETRY_MS)).toHaveLength(0);
+
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await act(() => vi.advanceTimersByTimeAsync(COLLAB_HINT_RETRY_MS * 3));
+    expect(collaborators).toHaveBeenCalledTimes(2);
+    expect(tokens).toHaveBeenCalledTimes(2);
+
+    newShare.resolve(collaboratorResult());
+    newTokens.resolve(tokenResult());
+    await flushPromises();
+    expect(collaborators).toHaveBeenCalledTimes(2);
+    expect(tokens).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+    expect(storageWrites).toHaveBeenCalledTimes(0);
+    expect(timers.mock.calls.filter(([, delay]) => delay === COLLAB_HINT_RETRY_MS)).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retires both sources before success and failure settle at the removal layout boundary", async () => {
+    const oldShare = deferred<ReturnType<typeof collaboratorResult>>();
+    const oldTokens = deferred<ReturnType<typeof tokenResult>>();
+    collaborators.mockReturnValue(oldShare.promise);
+    tokens.mockReturnValue(oldTokens.promise);
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
+    process.on("unhandledRejection", onUnhandledRejection);
+    let timersAtBoundary = -1;
+
+    try {
+      const rendered = render(<HintBoundary session={fakeSession("boundary-removed")} />);
+      expect(collaborators).toHaveBeenCalledTimes(1);
+      expect(tokens).toHaveBeenCalledTimes(1);
+      rendered.rerender(
+        <HintBoundary
+          session={fakeSession("boundary-removed")}
+          present={false}
+          boundary={1}
+          onBoundary={() => {
+            timersAtBoundary = vi.getTimerCount();
+            oldShare.resolve(collaboratorResult(2, true));
+            oldTokens.reject(new Error("removed token lookup failed"));
+          }}
+        />,
+      );
+      await act(async () => {
+        await Promise.allSettled([oldShare.promise, oldTokens.promise]);
+        await Promise.resolve();
+      });
+
+      setVisibility("hidden");
+      setVisibility("visible");
+      await act(() => vi.advanceTimersByTimeAsync(COLLAB_HINT_RETRY_MS * 3));
+      expect(timersAtBoundary).toBe(0);
+      expect(collaborators).toHaveBeenCalledTimes(1);
+      expect(tokens).toHaveBeenCalledTimes(1);
+      expect(storageWrites).toHaveBeenCalledTimes(0);
+      expect(readHintsRecord(window.localStorage).agentSeen).toBe(false);
+      expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
   });
 
   it("ignores stale settlements after a document/session change", async () => {
