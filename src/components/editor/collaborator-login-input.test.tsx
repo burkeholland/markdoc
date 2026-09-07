@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { useLayoutEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  useLayoutEffect,
+  useState,
+  type ChangeEvent,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 
 type SearchAnswer = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: "no-github-token" };
 const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<SearchAnswer>>();
@@ -68,6 +76,31 @@ function BoundaryHarness({
   return present ? <CollaboratorLoginInput value={value} onChange={() => {}} exclude={[]} /> : null;
 }
 
+function AuthorityBoundary({
+  instance,
+  value,
+  onChange,
+  onPick,
+  exclude,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  instance: string;
+  value: string;
+  onChange: (value: string) => void;
+  onPick?: (login: string) => void;
+  exclude: string[];
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <CollaboratorLoginInput key={instance} value={value} onChange={onChange} onPick={onPick} exclude={exclude} /> : null;
+}
+
 type PendingSearch = {
   promise: Promise<SearchAnswer>;
   resolve: (value: SearchAnswer) => void;
@@ -107,6 +140,56 @@ const options = () => screen.queryAllByTestId("share-login-option").map((el) => 
 /** The listbox's options only (the harness select has <option>s of its own). */
 const listOptions = () => within(screen.getByTestId("share-login-suggestions")).getAllByRole("option");
 
+function reactHandler<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  return handler as T;
+}
+
+type DebounceTimerRecord = {
+  callback: () => void;
+  handle: ReturnType<typeof setTimeout>;
+  pending: boolean;
+  cleared: boolean;
+};
+
+function trackDebounceTimers(reuseHandle = false) {
+  const records: DebounceTimerRecord[] = [];
+  const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+  const reused = 3102 as unknown as ReturnType<typeof setTimeout>;
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    if (delay !== SUGGEST_DEBOUNCE_MS || typeof callback !== "function") return nativeSetTimeout(callback, delay, ...args);
+    const record = {
+      callback: () => callback(...args),
+      handle: reuseHandle ? reused : ((3102 + records.length) as unknown as ReturnType<typeof setTimeout>),
+      pending: true,
+      cleared: false,
+    };
+    records.push(record);
+    return record.handle;
+  }) as typeof setTimeout);
+  vi.spyOn(globalThis, "clearTimeout").mockImplementation((handle) => {
+    const record = records.findLast((candidate) => candidate.pending && candidate.handle === handle);
+    if (!record) {
+      nativeClearTimeout(handle);
+      return;
+    }
+    record.pending = false;
+    record.cleared = true;
+  });
+  return {
+    records,
+    pending: () => records.filter((record) => record.pending),
+    fire(record: DebounceTimerRecord) {
+      record.callback();
+    },
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   searchUsers.mockReset();
@@ -114,6 +197,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -663,4 +747,490 @@ describe("CollaboratorLoginInput", () => {
       window.removeEventListener("unhandledrejection", onUnhandled);
     }
   });
+
+  it("keeps one timer for equal normalized exclusions with different array identity", async () => {
+    const timers = trackDebounceTimers(true);
+    const onChange = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    let pendingAtBoundary = -1;
+
+    try {
+      await act(async () => {
+        root.render(
+          <AuthorityBoundary
+            instance="same"
+            value="octo"
+            onChange={onChange}
+            exclude={["@OCTOCAT", "octodog", "octodog"]}
+          />,
+        );
+      });
+      expect(timers.records).toHaveLength(1);
+      const exactTimer = timers.records[0];
+
+      await act(async () => {
+        root.render(
+          <AuthorityBoundary
+            instance="same"
+            value="octo"
+            onChange={onChange}
+            exclude={["octodog", "octocat"]}
+            boundary={1}
+            onBoundary={() => {
+              pendingAtBoundary = timers.pending().length;
+            }}
+          />,
+        );
+      });
+
+      expect(pendingAtBoundary).toBe(1);
+      expect(timers.records).toEqual([exactTimer]);
+      expect(exactTimer.cleared).toBe(false);
+      await act(async () => {
+        timers.fire(exactTimer);
+        await Promise.resolve();
+      });
+      expect(searchUsers).toHaveBeenCalledTimes(1);
+      expect(searchUsers).toHaveBeenCalledWith("octo", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("cancels only A's timer when callback replacement reuses its handle, and B still searches once", async () => {
+    const timers = trackDebounceTimers(true);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onChangeA = vi.fn();
+    const onChangeB = vi.fn();
+    searchUsers.mockImplementation(() => answer("octocat"));
+    let pendingAtBoundary = -1;
+    let retiredClearedAtBoundary = false;
+
+    try {
+      await act(async () => {
+        root.render(<AuthorityBoundary instance="same" value="octo" onChange={onChangeA} exclude={[]} />);
+      });
+      const retiredTimer = timers.records[0];
+      expect(retiredTimer.pending).toBe(true);
+
+      await act(async () => {
+        root.render(
+          <AuthorityBoundary
+            instance="same"
+            value="octo"
+            onChange={onChangeB}
+            exclude={[]}
+            boundary={1}
+            onBoundary={() => {
+              pendingAtBoundary = timers.pending().length;
+              retiredClearedAtBoundary = retiredTimer.cleared;
+              timers.fire(retiredTimer);
+            }}
+          />,
+        );
+      });
+
+      expect(pendingAtBoundary).toBe(0);
+      expect(retiredClearedAtBoundary).toBe(true);
+      expect(searchUsers).not.toHaveBeenCalled();
+      expect(timers.records).toHaveLength(2);
+      const currentTimer = timers.records[1];
+      expect(currentTimer.handle).toBe(retiredTimer.handle);
+      expect(currentTimer.pending).toBe(true);
+      expect(currentTimer.cleared).toBe(false);
+
+      await act(async () => {
+        timers.fire(retiredTimer);
+        timers.fire(currentTimer);
+        await Promise.resolve();
+      });
+      expect(searchUsers).toHaveBeenCalledTimes(1);
+      expect(searchUsers.mock.calls[0][0]).toBe("octo");
+      expect(currentTimer.cleared).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["stale-first", "current-first"] as const)(
+    "isolates equal-query requests and equal users across callback replacement ($order)",
+    async (order) => {
+      const retired = deferred<SearchAnswer>();
+      const current = deferred<SearchAnswer>();
+      searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onChangeA = vi.fn();
+      const onChangeB = vi.fn();
+      const onPickA = vi.fn();
+      const onPickB = vi.fn();
+      let abortedAtBoundary = false;
+      let aborts = 0;
+      let reusedInput = false;
+
+      try {
+        await act(async () => {
+          root.render(
+            <AuthorityBoundary
+              instance="same"
+              value="octo"
+              onChange={onChangeA}
+              onPick={onPickA}
+              exclude={[]}
+            />,
+          );
+        });
+        const exactInput = input();
+        exactInput.focus();
+        await settle();
+        const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+        retiredSignal?.addEventListener("abort", () => {
+          aborts++;
+        });
+
+        await act(async () => {
+          root.render(
+            <AuthorityBoundary
+              instance="same"
+              value="octo"
+              onChange={onChangeB}
+              onPick={onPickB}
+              exclude={[]}
+              boundary={1}
+              onBoundary={() => {
+                abortedAtBoundary = retiredSignal?.aborted === true;
+                reusedInput = input() === exactInput;
+              }}
+            />,
+          );
+        });
+        expect(abortedAtBoundary).toBe(true);
+        expect(aborts).toBe(1);
+        expect(reusedInput).toBe(true);
+        await settle();
+        expect(searchUsers).toHaveBeenCalledTimes(2);
+        const currentSignal = searchUsers.mock.calls[1][1]?.signal;
+        expect(currentSignal?.aborted).toBe(false);
+
+        const settleRetired = async () => {
+          retired.resolve({ users: [{ ...user("octocat") }], limited: false });
+          await retired.promise;
+          await Promise.resolve();
+        };
+        const settleCurrent = async () => {
+          current.resolve({ users: [{ ...user("octocat") }], limited: false });
+          await current.promise;
+          await Promise.resolve();
+        };
+
+        if (order === "stale-first") {
+          await act(settleRetired);
+          expect(options()).toEqual([]);
+          expect(screen.getByRole("status")).toHaveTextContent("@octo");
+          expect(currentSignal?.aborted).toBe(false);
+          await act(settleCurrent);
+        } else {
+          await act(settleCurrent);
+          expect(options()).toEqual(["octocat"]);
+          await act(settleRetired);
+        }
+
+        expect(options()).toEqual(["octocat"]);
+        expect(currentSignal?.aborted).toBe(false);
+        expect(aborts).toBe(1);
+        expect(onChangeA).not.toHaveBeenCalled();
+        expect(onPickA).not.toHaveBeenCalled();
+        expect(onChangeB).not.toHaveBeenCalled();
+        expect(onPickB).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each([
+    { label: "equal-query value replacement", value: " @octo ", exclude: [] },
+    { label: "exclusion replacement", value: "octo", exclude: ["octocat"] },
+  ])("retires the exact pending request for $label", async ({ value: nextValue, exclude: nextExclude }) => {
+    const retired = deferred<SearchAnswer>();
+    const current = deferred<SearchAnswer>();
+    searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    const onChange = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let abortedAtBoundary = false;
+
+    try {
+      await act(async () => {
+        root.render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} exclude={[]} />);
+      });
+      input().focus();
+      await settle();
+      const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+
+      await act(async () => {
+        root.render(
+          <AuthorityBoundary
+            instance="same"
+            value={nextValue}
+            onChange={onChange}
+            exclude={nextExclude}
+            boundary={1}
+            onBoundary={() => {
+              abortedAtBoundary = retiredSignal?.aborted === true;
+            }}
+          />,
+        );
+      });
+      expect(abortedAtBoundary).toBe(true);
+      await settle();
+      expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octo", "octo"]);
+      expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(false);
+
+      await act(async () => {
+        retired.resolve({ users: [user("retired-user")], limited: false });
+        current.resolve({ users: [user("octocat"), user("octodog")], limited: false });
+        await Promise.all([retired.promise, current.promise]);
+      });
+      expect(options()).toEqual(nextExclude.length ? ["octodog"] : ["octocat", "octodog"]);
+      expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("gates every captured A input and option handler while reused-DOM B remains usable", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChangeA = vi.fn();
+    const onPickA = vi.fn();
+    const onChangeB = vi.fn();
+    const onPickB = vi.fn();
+    const rendered = render(
+      <AuthorityBoundary
+        instance="same"
+        value="octo"
+        onChange={onChangeA}
+        onPick={onPickA}
+        exclude={[]}
+      />,
+    );
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    const control = exactInput.parentElement as HTMLDivElement;
+    const retiredOption = screen.getAllByTestId("share-login-option")[0];
+    const stale = {
+      change: reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(exactInput, "onChange"),
+      focus: reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onFocus"),
+      keydown: reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown"),
+      blur: reactHandler<(event: FocusEvent<HTMLDivElement>) => void>(control, "onBlur"),
+      enter: reactHandler<() => void>(retiredOption, "onMouseEnter"),
+      down: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onMouseDown"),
+      click: reactHandler<() => void>(retiredOption, "onClick"),
+    };
+    const keyPrevent = vi.fn();
+    const pointerPrevent = vi.fn();
+    let reusedInputAtBoundary = false;
+    let emptyAtBoundary = false;
+
+    rendered.rerender(
+      <AuthorityBoundary
+        instance="same"
+        value="octo"
+        onChange={onChangeB}
+        onPick={onPickB}
+        exclude={["OCTOCAT"]}
+        boundary={1}
+        onBoundary={() => {
+          reusedInputAtBoundary = input() === exactInput;
+          emptyAtBoundary = screen.queryByTestId("share-login-option") === null;
+          stale.change({ currentTarget: exactInput, target: exactInput } as ChangeEvent<HTMLInputElement>);
+          stale.focus({ currentTarget: exactInput, target: exactInput } as FocusEvent<HTMLInputElement>);
+          stale.keydown({
+            key: "ArrowDown",
+            currentTarget: exactInput,
+            target: exactInput,
+            preventDefault: keyPrevent,
+          } as unknown as KeyboardEvent<HTMLInputElement>);
+          stale.blur({
+            currentTarget: control,
+            target: control,
+            relatedTarget: null,
+          } as unknown as FocusEvent<HTMLDivElement>);
+          stale.enter();
+          stale.down({
+            currentTarget: retiredOption,
+            target: retiredOption,
+            preventDefault: pointerPrevent,
+          } as unknown as MouseEvent<HTMLLIElement>);
+          stale.click();
+        }}
+      />,
+    );
+
+    expect(reusedInputAtBoundary).toBe(true);
+    expect(emptyAtBoundary).toBe(true);
+    expect(keyPrevent).not.toHaveBeenCalled();
+    expect(pointerPrevent).not.toHaveBeenCalled();
+    expect(onChangeA).not.toHaveBeenCalled();
+    expect(onPickA).not.toHaveBeenCalled();
+    expect(onChangeB).not.toHaveBeenCalled();
+    expect(onPickB).not.toHaveBeenCalled();
+    expect(options()).toEqual(["octodog"]);
+    expect(input()).toHaveFocus();
+
+    const currentOption = screen.getByTestId("share-login-option");
+    fireEvent.mouseEnter(currentOption);
+    expect(currentOption).toHaveAttribute("aria-selected", "true");
+    expect(fireEvent.mouseDown(currentOption)).toBe(false);
+    fireEvent.click(currentOption);
+    expect(onChangeB).toHaveBeenCalledOnce();
+    expect(onChangeB).toHaveBeenCalledWith("octodog");
+    expect(onPickB).toHaveBeenCalledOnce();
+    expect(onPickB).toHaveBeenCalledWith("octodog");
+    expect(onChangeA).not.toHaveBeenCalled();
+    expect(onPickA).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("binds Retry to its exact error and callback set and starts one current request", async () => {
+    const currentRetry = deferred<SearchAnswer>();
+    searchUsers
+      .mockRejectedValueOnce(new ApiError(503, "A failed"))
+      .mockRejectedValueOnce(new ApiError(503, "B failed"))
+      .mockReturnValueOnce(currentRetry.promise);
+    const onChangeA = vi.fn();
+    const onChangeB = vi.fn();
+    const rendered = render(<AuthorityBoundary instance="same" value="octo" onChange={onChangeA} exclude={[]} />);
+    input().focus();
+    await settle();
+    const staleRetry = reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let requestsAtBoundary = -1;
+
+    rendered.rerender(
+      <AuthorityBoundary
+        instance="same"
+        value="octo"
+        onChange={onChangeB}
+        exclude={[]}
+        boundary={1}
+        onBoundary={() => {
+          staleRetry();
+          staleRetry();
+          requestsAtBoundary = searchUsers.mock.calls.length;
+        }}
+      />,
+    );
+
+    expect(requestsAtBoundary).toBe(1);
+    expect(focus).not.toHaveBeenCalled();
+    await settle();
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert")).toHaveTextContent("B failed");
+    const retryB = reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick");
+    act(() => {
+      retryB();
+      retryB();
+    });
+    expect(searchUsers).toHaveBeenCalledTimes(3);
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octo", "octo", "octo"]);
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+
+    await act(async () => {
+      currentRetry.resolve({ users: [user("octodog")], limited: false });
+      await currentRetry.promise;
+    });
+    expect(options()).toEqual(["octodog"]);
+    expect(onChangeA).not.toHaveBeenCalled();
+    expect(onChangeB).not.toHaveBeenCalled();
+  });
+
+  it.each(["DOM replacement", "removal"] as const)(
+    "retires A's exact request before the parent layout boundary on $transition",
+    async (transition) => {
+      const retired = deferred<SearchAnswer>();
+      const current = deferred<SearchAnswer>();
+      searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onChangeA = vi.fn();
+      const onChangeB = vi.fn();
+      let aborts = 0;
+      let abortedAtBoundary = false;
+      let stalePreventedAtBoundary = false;
+      let inputAbsentAtBoundary = false;
+
+      try {
+        await act(async () => {
+          root.render(<AuthorityBoundary instance="A" value="octo" onChange={onChangeA} exclude={[]} />);
+        });
+        const retiredInput = input();
+        retiredInput.focus();
+        await settle();
+        const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+        retiredSignal?.addEventListener("abort", () => {
+          aborts++;
+        });
+        const staleChange = reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(retiredInput, "onChange");
+        const staleKeydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(retiredInput, "onKeyDown");
+
+        await act(async () => {
+          root.render(
+            <AuthorityBoundary
+              instance="B"
+              value="octo"
+              onChange={onChangeB}
+              exclude={[]}
+              present={transition === "DOM replacement"}
+              boundary={1}
+              onBoundary={() => {
+                abortedAtBoundary = retiredSignal?.aborted === true;
+                const preventDefault = vi.fn();
+                staleChange({ currentTarget: retiredInput, target: retiredInput } as ChangeEvent<HTMLInputElement>);
+                staleKeydown({
+                  key: "ArrowDown",
+                  currentTarget: retiredInput,
+                  target: retiredInput,
+                  preventDefault,
+                } as unknown as KeyboardEvent<HTMLInputElement>);
+                stalePreventedAtBoundary = preventDefault.mock.calls.length > 0;
+                inputAbsentAtBoundary = screen.queryByTestId("share-login") === null;
+              }}
+            />,
+          );
+        });
+
+        expect(abortedAtBoundary).toBe(true);
+        expect(aborts).toBe(1);
+        expect(stalePreventedAtBoundary).toBe(false);
+        expect(onChangeA).not.toHaveBeenCalled();
+        expect(onChangeB).not.toHaveBeenCalled();
+        expect(inputAbsentAtBoundary).toBe(transition === "removal");
+        if (transition === "DOM replacement") expect(input()).not.toBe(retiredInput);
+
+        await act(async () => {
+          retired.resolve({ users: [user("retired-user")], limited: false });
+          await retired.promise;
+        });
+        expect(screen.queryByText("@retired-user")).toBeNull();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 });
