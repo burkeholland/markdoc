@@ -23,6 +23,10 @@ type CollaboratorListState =
   | { documentId: string; status: "loading" }
   | { documentId: string; status: "error"; message: string; retrying: boolean }
   | { documentId: string; status: "loaded"; owner: CollaboratorOwner | null; collaborators: CollaboratorDto[] };
+type PermissionContext = { documentId: string };
+type PermissionOperation = { context: PermissionContext; documentId: string };
+type CollaboratorPermissionOperation = PermissionOperation & { login: string; kind: "role" | "remove" };
+type LinkPermissionOperation = PermissionOperation & { kind: "link" };
 
 export const ShareDialog = memo(function ShareDialog({
   open,
@@ -47,6 +51,13 @@ export const ShareDialog = memo(function ShareDialog({
   const addRequest = useRef(0);
   const addPending = useRef<{ request: number; documentId: string } | null>(null);
   const [addError, setAddError] = useState<{ documentId: string; message: string } | null>(null);
+  const permissionContext = useRef<PermissionContext | null>(null);
+  const collaboratorPermissionOwners = useRef(new Map<string, CollaboratorPermissionOperation>());
+  const linkPermissionOwner = useRef<LinkPermissionOperation | null>(null);
+  const permissionFeedbackOwner = useRef<PermissionOperation | null>(null);
+  const [collaboratorPermissionOperations, setCollaboratorPermissionOperations] = useState<Map<string, CollaboratorPermissionOperation>>(() => new Map());
+  const [linkPermissionOperation, setLinkPermissionOperation] = useState<LinkPermissionOperation | null>(null);
+  const [actionError, setActionError] = useState<{ operation: PermissionOperation; message: string } | null>(null);
   const [origin, setOrigin] = useState("");
   useEffect(() => setOrigin(window.location.origin), []);
   const readerLink = `${origin}/p/${doc.id}`;
@@ -114,10 +125,32 @@ export const ShareDialog = memo(function ShareDialog({
     };
   }, [open, doc.id, loadCollaborators]);
 
+  useEffect(() => {
+    const context = open ? { documentId: doc.id } : null;
+    const collaboratorOwners = collaboratorPermissionOwners.current;
+    permissionContext.current = context;
+    collaboratorOwners.clear();
+    linkPermissionOwner.current = null;
+    permissionFeedbackOwner.current = null;
+    setCollaboratorPermissionOperations(new Map());
+    setLinkPermissionOperation(null);
+    setActionError(null);
+
+    return () => {
+      if (permissionContext.current !== context) return;
+      permissionContext.current = null;
+      collaboratorOwners.clear();
+      linkPermissionOwner.current = null;
+      permissionFeedbackOwner.current = null;
+    };
+  }, [open, doc.id]);
+
   const currentList = collaboratorList?.documentId === doc.id ? collaboratorList : null;
   const collabs = currentList?.status === "loaded" ? currentList.collaborators : null;
   const owner = currentList?.status === "loaded" ? currentList.owner : null;
   const currentAddError = addError?.documentId === doc.id ? addError.message : null;
+  const currentActionError = actionError?.operation.documentId === doc.id ? actionError.message : null;
+  const currentLinkPermissionOperation = linkPermissionOperation?.documentId === doc.id ? linkPermissionOperation : null;
 
   const add = async () => {
     if (!login.trim() || addPending.current) return;
@@ -143,29 +176,105 @@ export const ShareDialog = memo(function ShareDialog({
     }
   };
 
+  const isCollaboratorPermissionCurrent = (operation: CollaboratorPermissionOperation) =>
+    permissionContext.current === operation.context && collaboratorPermissionOwners.current.get(operation.login) === operation;
+
+  const isLinkPermissionCurrent = (operation: LinkPermissionOperation) =>
+    permissionContext.current === operation.context && linkPermissionOwner.current === operation;
+
+  const claimPermissionFeedback = (operation: PermissionOperation) => {
+    permissionFeedbackOwner.current = operation;
+    setActionError(null);
+  };
+
+  const setPermissionError = (operation: PermissionOperation, message: string) => {
+    if (permissionContext.current === operation.context && permissionFeedbackOwner.current === operation) {
+      setActionError({ operation, message });
+    }
+  };
+
+  const beginCollaboratorPermission = (login: string, kind: CollaboratorPermissionOperation["kind"]) => {
+    const context = permissionContext.current;
+    if (!context || context.documentId !== doc.id || collaboratorPermissionOwners.current.has(login)) return null;
+    const operation = { context, documentId: doc.id, login, kind };
+    collaboratorPermissionOwners.current.set(login, operation);
+    claimPermissionFeedback(operation);
+    setCollaboratorPermissionOperations((current) => new Map(current).set(login, operation));
+    return operation;
+  };
+
+  const finishCollaboratorPermission = (operation: CollaboratorPermissionOperation) => {
+    if (!isCollaboratorPermissionCurrent(operation)) return;
+    collaboratorPermissionOwners.current.delete(operation.login);
+    setCollaboratorPermissionOperations((current) => {
+      if (current.get(operation.login) !== operation) return current;
+      const next = new Map(current);
+      next.delete(operation.login);
+      return next;
+    });
+  };
+
   const changeRole = async (c: CollaboratorDto, next: Exclude<Role, "owner">) => {
-    const documentId = doc.id;
-    await api.documents.addCollaborator(documentId, c.login, next);
-    setCollaboratorList((current) =>
-      current?.documentId === documentId && current.status === "loaded"
-        ? { ...current, collaborators: current.collaborators.map((x) => (x.login === c.login ? { ...x, role: next } : x)) }
-        : current,
-    );
+    const operation = beginCollaboratorPermission(c.login, "role");
+    if (!operation) return;
+    try {
+      await api.documents.addCollaborator(operation.documentId, c.login, next);
+      if (!isCollaboratorPermissionCurrent(operation)) return;
+      setCollaboratorList((current) =>
+        current?.documentId === operation.documentId && current.status === "loaded"
+          ? { ...current, collaborators: current.collaborators.map((x) => (x.login === c.login ? { ...x, role: next } : x)) }
+          : current,
+      );
+    } catch (e) {
+      if (isCollaboratorPermissionCurrent(operation)) {
+        setPermissionError(operation, apiErrorText(e, "Could not change collaborator role"));
+      }
+    } finally {
+      finishCollaboratorPermission(operation);
+    }
   };
 
   const remove = async (c: CollaboratorDto) => {
-    const documentId = doc.id;
-    await api.documents.removeCollaborator(documentId, c.login);
-    setCollaboratorList((current) =>
-      current?.documentId === documentId && current.status === "loaded"
-        ? { ...current, collaborators: current.collaborators.filter((x) => x.login !== c.login) }
-        : current,
-    );
+    const operation = beginCollaboratorPermission(c.login, "remove");
+    if (!operation) return;
+    try {
+      await api.documents.removeCollaborator(operation.documentId, c.login);
+      if (!isCollaboratorPermissionCurrent(operation)) return;
+      setCollaboratorList((current) =>
+        current?.documentId === operation.documentId && current.status === "loaded"
+          ? { ...current, collaborators: current.collaborators.filter((x) => x.login !== c.login) }
+          : current,
+      );
+    } catch (e) {
+      if (isCollaboratorPermissionCurrent(operation)) {
+        setPermissionError(operation, apiErrorText(e, "Could not remove collaborator"));
+      }
+    } finally {
+      finishCollaboratorPermission(operation);
+    }
   };
 
   const setLink = async (value: DocumentDto["linkAccess"]) => {
-    const res = await api.documents.patch(doc.id, { linkAccess: value });
-    onDocChange(res.document);
+    const context = permissionContext.current;
+    if (!context || context.documentId !== doc.id || linkPermissionOwner.current) return;
+    const operation: LinkPermissionOperation = { context, documentId: doc.id, kind: "link" };
+    linkPermissionOwner.current = operation;
+    claimPermissionFeedback(operation);
+    setLinkPermissionOperation(operation);
+    try {
+      const res = await api.documents.patch(operation.documentId, { linkAccess: value });
+      if (!isLinkPermissionCurrent(operation)) return;
+      onDocChange(res.document);
+    } catch (e) {
+      if (isLinkPermissionCurrent(operation)) {
+        setPermissionError(operation, apiErrorText(e, "Could not change link access"));
+      }
+    } finally {
+      if (isLinkPermissionCurrent(operation)) {
+        linkPermissionOwner.current = null;
+        setLinkPermissionOperation((current) => (current === operation ? null : current));
+      }
+    }
   };
 
   const linkOption = LINK_OPTIONS.find((o) => o.value === doc.linkAccess);
@@ -202,6 +311,11 @@ export const ShareDialog = memo(function ShareDialog({
             {currentAddError}
           </div>
         )}
+        {currentActionError && (
+          <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="share-action-error">
+            {currentActionError}
+          </div>
+        )}
 
         <div className="mt-5">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-3">People with access</div>
@@ -236,29 +350,45 @@ export const ShareDialog = memo(function ShareDialog({
                 <span className="text-xs font-medium text-ink-3">Owner</span>
               </li>
             )}
-            {collabs?.map((c) => (
-              <li key={c.login} className="flex items-center gap-3 px-3 py-2.5" data-testid="collaborator-row">
-                <Avatar name={c.name ?? c.login} src={c.image ?? `https://avatars.githubusercontent.com/${c.login}?s=64`} size={32} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-ink">{c.name ?? c.login}</div>
-                  <div className="truncate text-xs text-ink-3">@{c.login}</div>
-                </div>
-                {isOwner ? (
-                  <>
-                    <select className="select h-8 text-xs" value={c.role} onChange={(e) => void changeRole(c, e.target.value as Exclude<Role, "owner">)} aria-label={`Role for ${c.login}`}>
-                      <option value="editor">Editor</option>
-                      <option value="commenter">Commenter</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
-                    <button type="button" className="icon-btn h-8 w-8 text-ink-3 hover:text-danger" onClick={() => void remove(c)} aria-label={`Remove ${c.login}`}>
-                      <Trash2 size={15} />
-                    </button>
-                  </>
-                ) : (
-                  <span className="text-xs font-medium capitalize text-ink-3">{c.role}</span>
-                )}
-              </li>
-            ))}
+            {collabs?.map((c) => {
+              const operation = collaboratorPermissionOperations.get(c.login);
+              const pending = operation?.documentId === doc.id;
+              return (
+                <li key={c.login} className="flex items-center gap-3 px-3 py-2.5" data-testid="collaborator-row">
+                  <Avatar name={c.name ?? c.login} src={c.image ?? `https://avatars.githubusercontent.com/${c.login}?s=64`} size={32} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-ink">{c.name ?? c.login}</div>
+                    <div className="truncate text-xs text-ink-3">@{c.login}</div>
+                  </div>
+                  {isOwner ? (
+                    <>
+                      <select
+                        className="select h-8 text-xs"
+                        value={c.role}
+                        onChange={(e) => void changeRole(c, e.target.value as Exclude<Role, "owner">)}
+                        aria-label={`Role for ${c.login}`}
+                        disabled={pending}
+                      >
+                        <option value="editor">Editor</option>
+                        <option value="commenter">Commenter</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
+                        onClick={() => void remove(c)}
+                        aria-label={`Remove ${c.login}`}
+                        disabled={pending}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-xs font-medium capitalize text-ink-3">{c.role}</span>
+                  )}
+                </li>
+              );
+            })}
             {collabs && collabs.length === 0 && <li className="px-3 py-3 text-sm text-ink-3">Nobody else has been added yet.</li>}
           </ul>
           {/* The link the people above open, in the same shape as the Reader link row under General access. */}
@@ -296,9 +426,16 @@ export const ShareDialog = memo(function ShareDialog({
             </span>
             <div className="min-w-0 flex-1">
               {isOwner ? (
-                <select className="select w-full" value={doc.linkAccess} onChange={(e) => void setLink(e.target.value as DocumentDto["linkAccess"])} aria-label="Link access" data-testid="link-access">
+                <select
+                  className="select w-full"
+                  value={doc.linkAccess}
+                  onChange={(e) => void setLink(e.target.value as DocumentDto["linkAccess"])}
+                  aria-label="Link access"
+                  data-testid="link-access"
+                  disabled={currentLinkPermissionOperation !== null}
+                >
                   {LINK_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
+                    <option key={o.value} value={o.value} disabled={currentLinkPermissionOperation !== null}>
                       {o.label}
                     </option>
                   ))}
