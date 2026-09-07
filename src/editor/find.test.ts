@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { carryActiveIndex, DEFAULT_FIND_OPTIONS, expandReplacement, findMatches, matchIndexAfter } from "./find";
+import { carryActiveIndex, compileFindRegex, DEFAULT_FIND_OPTIONS, expandReplacement, findMatches, matchIndexAfter } from "./find";
 
 const opts = DEFAULT_FIND_OPTIONS;
 
@@ -37,6 +37,15 @@ describe("findMatches", () => {
     expect(findMatches("abc", "", opts)).toEqual([]);
     expect(findMatches("abc", "(", { ...opts, regex: true })).toEqual([]);
     expect(findMatches("aab", "a*", { ...opts, regex: true })).toEqual([{ from: 0, to: 2 }]);
+  });
+
+  it("distinguishes invalid regex syntax from empty and literal queries", () => {
+    expect(compileFindRegex("", { ...opts, regex: true })).toEqual({ regex: null, invalid: false });
+    expect(compileFindRegex("(", { ...opts, regex: true })).toEqual({ regex: null, invalid: true });
+
+    const literal = compileFindRegex("(", opts);
+    expect(literal.invalid).toBe(false);
+    expect(literal.regex?.exec("(")?.[0]).toBe("(");
   });
 });
 

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CaseSensitive, ChevronDown, ChevronUp, Regex, Replace, WholeWord, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
-import type { FindMatch, FindOptions } from "@/editor/find";
+import { compileFindRegex, type FindMatch, type FindOptions } from "@/editor/find";
 import { Tip } from "@/components/ui/primitives";
 import { cn, findReplaceShortcut, shortcut } from "@/lib/utils";
 import { shallowEqual, useSessionValue } from "./use-session";
@@ -60,6 +60,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
 
   const query = find?.query ?? "";
   const options = find?.options;
+  const invalidRegex = options ? compileFindRegex(query, options).invalid : false;
 
   const update = useCallback(
     (nextQuery: string, nextOptions?: FindOptions) => {
@@ -103,13 +104,14 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      step(e.shiftKey ? -1 : 1);
+      if (!invalidRegex) step(e.shiftKey ? -1 : 1);
     }
   };
 
   const onReplaceKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
+      if (invalidRegex) return;
       if (e.shiftKey) step(-1);
       else replaceOne();
     }
@@ -119,6 +121,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
 
   const counter = query ? `${total === 0 ? 0 : active + 1} of ${total}` : "";
   const noMatches = total === 0;
+  const actionsDisabled = invalidRegex || noMatches;
   const showReplace = replaceVisible && canEdit;
 
   return (
@@ -142,6 +145,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
             spellCheck={false}
             autoComplete="off"
             aria-label="Find"
+            aria-invalid={invalidRegex}
+            aria-describedby={invalidRegex ? "find-regex-error" : undefined}
             data-testid="find-input"
           />
           <OptionToggle label="Match case" active={options.matchCase} onClick={() => toggle("matchCase")} testId="find-match-case">
@@ -154,16 +159,22 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
             <Regex size={15} />
           </OptionToggle>
         </div>
-        <span className={cn("min-w-[72px] px-1 tabular-nums", noMatches && query ? "text-danger" : "text-ink-3")} aria-live="polite" data-testid="find-count">
-          {counter}
-        </span>
+        {invalidRegex ? (
+          <span id="find-regex-error" className="min-w-[72px] whitespace-nowrap px-1 text-danger" role="status" data-testid="find-regex-error">
+            Invalid regular expression
+          </span>
+        ) : (
+          <span className={cn("min-w-[72px] px-1 tabular-nums", noMatches && query ? "text-danger" : "text-ink-3")} aria-live="polite" data-testid="find-count">
+            {counter}
+          </span>
+        )}
         <Tip label="Previous match" shortcut={shortcut("Shift-Enter")}>
-          <button type="button" className="icon-btn h-7 w-7 rounded-md" disabled={noMatches} onMouseDown={(e) => e.preventDefault()} onClick={() => step(-1)} aria-label="Previous match" data-testid="find-prev">
+          <button type="button" className="icon-btn h-7 w-7 rounded-md" disabled={actionsDisabled} onMouseDown={(e) => e.preventDefault()} onClick={() => step(-1)} aria-label="Previous match" data-testid="find-prev">
             <ChevronUp size={16} />
           </button>
         </Tip>
         <Tip label="Next match" shortcut="Enter">
-          <button type="button" className="icon-btn h-7 w-7 rounded-md" disabled={noMatches} onMouseDown={(e) => e.preventDefault()} onClick={() => step(1)} aria-label="Next match" data-testid="find-next">
+          <button type="button" className="icon-btn h-7 w-7 rounded-md" disabled={actionsDisabled} onMouseDown={(e) => e.preventDefault()} onClick={() => step(1)} aria-label="Next match" data-testid="find-next">
             <ChevronDown size={16} />
           </button>
         </Tip>
@@ -212,10 +223,10 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
               data-testid="replace-input"
             />
           </div>
-          <button type="button" className="btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]" disabled={noMatches} onClick={replaceOne} data-testid="replace-one">
+          <button type="button" className="btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]" disabled={actionsDisabled} onClick={replaceOne} data-testid="replace-one">
             Replace
           </button>
-          <button type="button" className="btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]" disabled={noMatches} onClick={replaceAll} data-testid="replace-all">
+          <button type="button" className="btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]" disabled={actionsDisabled} onClick={replaceAll} data-testid="replace-all">
             Replace all
           </button>
         </div>
