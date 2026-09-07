@@ -863,6 +863,45 @@ export const GitHubDialog = memo(function GitHubDialog({
   );
 });
 
+interface CommitDialogTimerOwner {
+  handle: ReturnType<typeof setTimeout> | undefined;
+}
+
+interface CommitDialogOperation {
+  readonly visit: CommitDialogVisit;
+  readonly message: string;
+  readonly commit: (message: string) => Promise<void>;
+}
+
+interface CommitDialogVisit {
+  readonly token: symbol;
+  readonly destination: string;
+  readonly doc: DocumentDto;
+  readonly onCommit: (message: string) => Promise<void>;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly isOwner: boolean;
+  operation: CommitDialogOperation | null;
+  closeTimer: CommitDialogTimerOwner | null;
+}
+
+interface CommitDialogPresentation {
+  readonly visit: CommitDialogVisit;
+  readonly message: string;
+  readonly busy: boolean;
+  readonly error: string | null;
+  readonly done: boolean;
+}
+
+function initialCommitDialogPresentation(visit: CommitDialogVisit): CommitDialogPresentation {
+  return {
+    visit,
+    message: `Update ${visit.doc.repoPath ?? visit.doc.gistFile ?? "document"}`,
+    busy: false,
+    error: null,
+    done: false,
+  };
+}
+
 export const CommitDialog = memo(function CommitDialog({
   open,
   onOpenChange,
@@ -876,49 +915,140 @@ export const CommitDialog = memo(function CommitDialog({
   onCommit: (message: string) => Promise<void>;
   isOwner: boolean;
 }) {
-  const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
-  useEffect(() => {
-    if (open) {
-      setMessage(`Update ${doc.repoPath ?? doc.gistFile ?? "document"}`);
-      setDone(false);
-      setError(null);
+  const latestDoc = useRef(doc);
+  latestDoc.current = doc;
+  const destination = JSON.stringify([
+    doc.id,
+    doc.storage,
+    doc.repoOwner,
+    doc.repoName,
+    doc.repoBranch,
+    doc.repoPath,
+    doc.gistId,
+    doc.gistFile,
+    doc.githubUrl,
+    doc.ownerId,
+    Boolean(doc.publishedAt),
+  ]);
+  const visit = useMemo<CommitDialogVisit | null>(
+    () =>
+      open
+        ? {
+            token: Symbol("commit-dialog-visit"),
+            destination,
+            doc: latestDoc.current,
+            onCommit,
+            onOpenChange,
+            isOwner,
+            operation: null,
+            closeTimer: null,
+          }
+        : null,
+    [destination, isOwner, onCommit, onOpenChange, open],
+  );
+  const currentVisit = useRef<CommitDialogVisit | null>(null);
+  const [presentation, setPresentation] = useState<CommitDialogPresentation | null>(() =>
+    visit ? initialCommitDialogPresentation(visit) : null,
+  );
+  const retire = useCallback((candidate: CommitDialogVisit) => {
+    if (currentVisit.current === candidate) currentVisit.current = null;
+    candidate.operation = null;
+    const timer = candidate.closeTimer;
+    candidate.closeTimer = null;
+    if (timer?.handle !== undefined) clearTimeout(timer.handle);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!visit) {
+      setPresentation((current) => (current === null ? current : null));
+      return;
     }
-  }, [open, doc.repoPath, doc.gistFile]);
+    currentVisit.current = visit;
+    setPresentation((current) => (current?.visit === visit ? current : initialCommitDialogPresentation(visit)));
+    return () => retire(visit);
+  }, [retire, visit]);
+
+  const shown = visit && presentation?.visit === visit ? presentation : visit ? initialCommitDialogPresentation(visit) : null;
+  const shownDoc = visit?.doc ?? doc;
+  const changeOpen = (nextOpen: boolean) => {
+    if (!visit || currentVisit.current !== visit) return;
+    if (!nextOpen) retire(visit);
+    visit.onOpenChange(nextOpen);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={doc.storage === "gist" ? "Update gist" : "Commit to GitHub"} description={doc.storage === "gist" ? "Publishes the current text to the gist." : `Creates a commit on ${doc.repoBranch} in ${doc.repoOwner}/${doc.repoName}.`}>
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <DialogContent title={shownDoc.storage === "gist" ? "Update gist" : "Commit to GitHub"} description={shownDoc.storage === "gist" ? "Publishes the current text to the gist." : `Creates a commit on ${shownDoc.repoBranch} in ${shownDoc.repoOwner}/${shownDoc.repoName}.`}>
         <form
           className="flex flex-col gap-3"
-          onSubmit={async (e) => {
+          onSubmit={(e) => {
             e.preventDefault();
-            setBusy(true);
-            setError(null);
-            try {
-              await onCommit(message.trim());
-              setDone(true);
-              setTimeout(() => onOpenChange(false), 900);
-            } catch (err) {
-              setError(apiErrorText(err, "Publish failed"));
-            } finally {
-              setBusy(false);
-            }
+            if (!visit || !shown || currentVisit.current !== visit || visit.operation) return;
+            const operation: CommitDialogOperation = {
+              visit,
+              message: shown.message.trim(),
+              commit: visit.onCommit,
+            };
+            visit.operation = operation;
+            setPresentation((current) =>
+              current?.visit === visit ? { ...current, busy: true, error: null } : current,
+            );
+            const ownsOperation = () => currentVisit.current === visit && visit.operation === operation;
+            void (async () => {
+              let succeeded = false;
+              try {
+                await operation.commit(operation.message);
+                if (!ownsOperation()) return;
+                succeeded = true;
+                setPresentation((current) =>
+                  current?.visit === visit ? { ...current, done: true } : current,
+                );
+                const timerOwner: CommitDialogTimerOwner = { handle: undefined };
+                visit.closeTimer = timerOwner;
+                timerOwner.handle = setTimeout(() => {
+                  if (!ownsOperation() || visit.closeTimer !== timerOwner) return;
+                  visit.closeTimer = null;
+                  retire(visit);
+                  visit.onOpenChange(false);
+                }, 900);
+              } catch (error) {
+                if (!ownsOperation()) return;
+                setPresentation((current) =>
+                  current?.visit === visit ? { ...current, error: apiErrorText(error, "Publish failed") } : current,
+                );
+              } finally {
+                if (!ownsOperation()) return;
+                if (!succeeded) visit.operation = null;
+                setPresentation((current) =>
+                  current?.visit === visit ? { ...current, busy: false } : current,
+                );
+              }
+            })();
           }}
         >
-          {open && <GistAutoUpdateControl doc={doc} isOwner={isOwner} />}
-          <label className="text-sm font-medium text-ink-2">{doc.storage === "gist" ? "Description" : "Commit message"}</label>
-          <input className="input" value={message} onChange={(e) => setMessage(e.target.value)} autoFocus data-testid="commit-message" />
+          {visit && <GistAutoUpdateControl doc={visit.doc} isOwner={visit.isOwner} />}
+          <label className="text-sm font-medium text-ink-2">{shownDoc.storage === "gist" ? "Description" : "Commit message"}</label>
+          <input
+            className="input"
+            value={shown?.message ?? ""}
+            onChange={(e) => {
+              if (!visit || currentVisit.current !== visit) return;
+              setPresentation((current) =>
+                current?.visit === visit ? { ...current, message: e.target.value } : current,
+              );
+            }}
+            autoFocus
+            data-testid="commit-message"
+          />
           <p className="text-xs text-ink-3">Pending suggestions are not included until they are accepted.</p>
-          {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
+          {shown?.error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{shown.error}</div>}
           <div className="flex justify-end gap-2">
-            <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
+            <button type="button" className="btn btn-ghost" onClick={() => changeOpen(false)}>
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary gap-2" disabled={busy || done} data-testid="commit-submit">
-              {done ? <Check size={16} /> : busy ? <Loader2 size={16} className="animate-spin" /> : null}
-              {done ? "Published" : doc.storage === "gist" ? "Update gist" : "Commit"}
+            <button type="submit" className="btn btn-primary gap-2" disabled={shown?.busy || shown?.done} data-testid="commit-submit">
+              {shown?.done ? <Check size={16} /> : shown?.busy ? <Loader2 size={16} className="animate-spin" /> : null}
+              {shown?.done ? "Published" : shownDoc.storage === "gist" ? "Update gist" : "Commit"}
             </button>
           </div>
         </form>
