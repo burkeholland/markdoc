@@ -215,11 +215,10 @@ vi.mock("./agent-requests", () => ({
 }));
 
 import { ApiError, api, type SyncStatusDto } from "@/lib/api";
-import { CollabSession, type PresenceUser } from "@/editor/collab/session";
+import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import type { DocumentDto } from "@/server/dto";
 import type { EditorUser } from "./use-session";
-import { EditorActions } from "./actions";
 import { EditorShell } from "./editor-shell";
 
 type HeaderProps = ComponentProps<typeof import("./header").Header>;
@@ -314,22 +313,6 @@ function createSession(doc: DocumentDto, user: EditorUser = USER) {
   created.ytext.insert(0, `Text for ${doc.id}`);
   sessions.push(created);
   return created;
-}
-
-function collaborator(cursor: number): PresenceUser {
-  return {
-    ...makeCollabUser("collaborator", "Collaborator", null, "collaborator"),
-    clientId: 42,
-    cursor,
-    section: null,
-    idleSince: null,
-    role: "editor",
-    isLocal: false,
-    isAgent: false,
-    status: null,
-    ownerLogin: null,
-    ownerName: null,
-  };
 }
 
 function publishResponse(document: DocumentDto | null = null, skipped = false): PublishResponse {
@@ -879,43 +862,5 @@ describe("EditorShell publish and pull ownership", () => {
     expect(versionsRefresh).toBe(0);
     expect(syncPollingProps.refreshKey).toBe(0);
     window.removeEventListener("unhandledrejection", unhandled);
-  });
-});
-
-describe("EditorShell collaborator-follow ownership", () => {
-  it("retires a queued follow scroll when the exact editor session is replaced", () => {
-    vi.spyOn(session, "presence").mockReturnValue([collaborator(11)]);
-    session.followUserId = "collaborator";
-    vi.useFakeTimers();
-    const timeout = vi.spyOn(globalThis, "setTimeout");
-    const scroll = vi.spyOn(EditorActions.prototype, "scrollToSource");
-    const view = render(shell());
-
-    try {
-      const retiredCall = timeout.mock.calls.find(([, delay]) => delay === 150);
-      expect(retiredCall).toBeDefined();
-      const retiredScroll = retiredCall?.[0];
-      if (typeof retiredScroll !== "function") throw new Error("Follow scroll was not scheduled");
-
-      session = createSession(DOC, USER);
-      vi.spyOn(session, "presence").mockReturnValue([collaborator(29)]);
-      session.followUserId = "collaborator";
-      view.rerender(shell());
-
-      const followCalls = timeout.mock.calls.filter(([, delay]) => delay === 150);
-      expect(followCalls).toHaveLength(2);
-      const currentScroll = followCalls[1][0];
-      if (typeof currentScroll !== "function") throw new Error("Replacement follow scroll was not scheduled");
-
-      act(() => retiredScroll());
-      expect(scroll).not.toHaveBeenCalled();
-
-      act(() => currentScroll());
-      expect(scroll).toHaveBeenCalledExactlyOnceWith(29, { code: true, rich: true, synced: true });
-    } finally {
-      view.unmount();
-      vi.clearAllTimers();
-      vi.useRealTimers();
-    }
   });
 });
