@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useEffect, useLayoutEffect } from "react";
+import { StrictMode, useEffect, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import * as Y from "yjs";
 
@@ -2030,6 +2030,89 @@ describe("CommentsPanel", () => {
         expect(focusCallsFor(focus, staleBox)).toHaveLength(0);
         expect(focusCallsFor(focus, currentBox)).toHaveLength(1);
         expect(focusCallsFor(selection, staleBox)).toHaveLength(0);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it("keeps replayed visits independent when React preserves the same textarea element", () => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = reviewSession("composer-focus-replay");
+      session = fixture.session;
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 12, to: 27 });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        act(() =>
+          root.render(
+            <StrictMode>
+              <ComposerBoundary session={session!} visit="strict" />
+            </StrictMode>,
+          ),
+        );
+        const box = host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]')!;
+        const staleFrame = frames.captured[0];
+        const currentFrame = frames.captured.at(-1)!;
+        expect(currentFrame).not.toBe(staleFrame);
+        expect(currentFrame.id).toBe(staleFrame.id);
+        expect(staleFrame.cancelled).toBe(true);
+        expect(frames.pending.has(currentFrame)).toBe(true);
+        focus.mockClear();
+        act(() => {
+          frames.invoke(staleFrame);
+          frames.invoke(currentFrame);
+        });
+        expect(focusCallsFor(focus, box)).toHaveLength(1);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("applies each current suggestion and formatting range exactly once", () => {
+      const frames = controlledComposerFrames();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        focus.mockClear();
+        selection.mockClear();
+        fireEvent.click(screen.getByTestId("comment-suggest-change"));
+        const suggestionFrame = frames.captured.at(-1)!;
+        act(() => frames.invoke(suggestionFrame));
+        expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
+
+        const cases = [
+          { key: "b", value: "**draft**", range: [2, 7] },
+          { key: "i", value: "*draft*", range: [1, 6] },
+          { key: "e", value: "`draft`", range: [1, 6] },
+          { key: "k", value: "[draft]()", range: [8, 8] },
+        ] as const;
+        for (const current of cases) {
+          fireEvent.change(mounted.box, { target: { value: "draft" } });
+          mounted.box.setSelectionRange(0, 5);
+          fireEvent.select(mounted.box);
+          focus.mockClear();
+          selection.mockClear();
+          fireEvent.keyDown(mounted.box, { key: current.key, ctrlKey: true });
+          const operation = frames.captured.at(-1)!;
+          expect([...frames.pending]).toEqual([operation]);
+          act(() => frames.invoke(operation));
+          expect(mounted.box).toHaveValue(current.value);
+          expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
+          expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
+          expect(selection).toHaveBeenLastCalledWith(...current.range);
+        }
       } finally {
         act(() => mounted.root.unmount());
         mounted.host.remove();
