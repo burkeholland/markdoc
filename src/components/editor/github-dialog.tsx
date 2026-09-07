@@ -197,31 +197,33 @@ export function GitHubPicker({
   const [path, setPath] = useState("");
 
   const loadGists = useCallback(() => {
+    if (tab !== "gist") return;
     startGistLoad(async () => (await api.github.gists()).gists, "Could not load gists.");
-  }, [startGistLoad]);
+  }, [startGistLoad, tab]);
 
   const loadRepos = useCallback(() => {
+    if (tab !== "repo" || repo) return;
     startRepoLoad(async () => (await api.github.repos()).repos, "Could not load repositories.");
-  }, [startRepoLoad]);
+  }, [repo, startRepoLoad, tab]);
 
   const loadBranches = useCallback(() => {
-    if (!repo) return;
+    if (tab !== "repo" || !repo) return;
     const currentRepo = repo;
     startBranchLoad(
       async () => (await api.github.branches(currentRepo.owner, currentRepo.name)).branches,
       `Could not load branches for ${currentRepo.fullName}.`,
     );
-  }, [repo, startBranchLoad]);
+  }, [repo, startBranchLoad, tab]);
 
   const loadFiles = useCallback(() => {
-    if (!repo || !branch) return;
+    if (tab !== "repo" || !repo || !branch) return;
     const currentRepo = repo;
     const currentBranch = branch;
     startFileLoad(
       async () => (await api.github.files(currentRepo.owner, currentRepo.name, currentBranch)).files,
       `Could not load files from ${currentRepo.fullName} on ${currentBranch}.`,
     );
-  }, [branch, repo, startFileLoad]);
+  }, [branch, repo, startFileLoad, tab]);
 
   useEffect(() => {
     if (!githubAvailable) return;
@@ -234,12 +236,12 @@ export function GitHubPicker({
   }, [githubAvailable, gistList.error, gistList.items, gistList.pending, loadGists, loadRepos, repo, repoList.error, repoList.items, repoList.pending, tab]);
 
   useEffect(() => {
-    if (repo && branchList.items === null && !branchList.error && !branchList.pending) loadBranches();
-  }, [branchList.error, branchList.items, branchList.pending, loadBranches, repo]);
+    if (tab === "repo" && repo && branchList.items === null && !branchList.error && !branchList.pending) loadBranches();
+  }, [branchList.error, branchList.items, branchList.pending, loadBranches, repo, tab]);
 
   useEffect(() => {
-    if (repo && branch && fileList.items === null && !fileList.error && !fileList.pending) loadFiles();
-  }, [branch, fileList.error, fileList.items, fileList.pending, loadFiles, repo]);
+    if (tab === "repo" && repo && branch && fileList.items === null && !fileList.error && !fileList.pending) loadFiles();
+  }, [branch, fileList.error, fileList.items, fileList.pending, loadFiles, repo, tab]);
 
   const filteredGists = useMemo(() => {
     const q = filter.toLowerCase();

@@ -280,6 +280,50 @@ describe("GitHubPicker list recovery", () => {
     expect(repos).toHaveBeenCalledTimes(2);
   });
 
+  it("does not restart hidden child loads after leaving a repository and starts one fresh load per level on return", async () => {
+    const oldBranches = deferred<{ branches: string[] }>();
+    const oldFiles = deferred<{ files: RepoFile[] }>();
+    const freshBranches = deferred<{ branches: string[] }>();
+    const freshFiles = deferred<{ files: RepoFile[] }>();
+    branches.mockReset().mockReturnValueOnce(oldBranches.promise).mockReturnValueOnce(freshBranches.promise);
+    files.mockReset().mockReturnValueOnce(oldFiles.promise).mockReturnValueOnce(freshFiles.promise);
+
+    renderPicker();
+    await selectRepository();
+    await waitFor(() => {
+      expect(branches).toHaveBeenCalledTimes(1);
+      expect(files).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByTestId("picker-tab-gist"));
+    await act(async () => {
+      oldBranches.resolve({ branches: ["legacy"] });
+      oldFiles.reject(new Error("stale hidden file failure"));
+      await Promise.allSettled([oldBranches.promise, oldFiles.promise]);
+    });
+
+    expect(branches).toHaveBeenCalledTimes(1);
+    expect(files).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("legacy")).toBeNull();
+    expect(screen.queryByText("stale hidden file failure")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    await waitFor(() => {
+      expect(branches).toHaveBeenCalledTimes(2);
+      expect(files).toHaveBeenCalledTimes(2);
+    });
+    freshBranches.resolve({ branches: ["main", "release"] });
+    freshFiles.resolve({ files: [repoFile("fresh-current.md")] });
+
+    expect(await screen.findByText("fresh-current.md")).toBeInTheDocument();
+    expect(screen.getByTestId("branch-select")).toHaveValue("main");
+    expect(screen.getByRole("option", { name: "release" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "legacy" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(branches).toHaveBeenCalledTimes(2);
+    expect(files).toHaveBeenCalledTimes(2);
+  });
+
   it("isolates late branch success and file error after choosing another repository", async () => {
     const firstRepo = repository("first");
     const nextRepo = repository("next", "release");
