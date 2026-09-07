@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { SetStateAction } from "react";
+import { useLayoutEffect, type ComponentProps, type SetStateAction } from "react";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
@@ -16,6 +16,10 @@ import { EditorActions, EMPTY_FORMAT } from "./actions";
 import { SelectionBubble } from "./selection-bubble";
 
 const screen = within(document.documentElement);
+type SelectionBubbleProps = ComponentProps<typeof SelectionBubble>;
+type ClickHandler = () => void;
+const TOOLBAR_LABELS = ["Bold", "Italic", "Strikethrough", "Inline code", "Link", "Comment"] as const;
+
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
   return {
@@ -248,6 +252,79 @@ function fixture() {
   };
 }
 
+function BubbleBoundary({
+  bubble,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  bubble: SelectionBubbleProps;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <SelectionBubble {...bubble} /> : null;
+}
+
+function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
+  return handler as T;
+}
+
+function captureToolbar() {
+  return TOOLBAR_LABELS.map((label) => {
+    const element = screen.getByRole("button", { name: label });
+    expect(element).toHaveClass("h-[32px]", "w-[32px]");
+    return { label, element, click: reactHandler<ClickHandler>(element, "onClick") };
+  });
+}
+
+function invokeToolbar(toolbar: ReturnType<typeof captureToolbar>) {
+  for (const action of toolbar) action.click();
+}
+
+function instrumentActions() {
+  const toggleMark = vi.fn();
+  return {
+    actions: { toggleMark } as unknown as EditorActions,
+    toggleMark,
+  };
+}
+
+function instrumentPermissions(session: CollabSession, canEdit = true, canComment = true) {
+  const editReads = vi.fn(() => canEdit);
+  const commentReads = vi.fn(() => canComment);
+  Object.defineProperties(session, {
+    canEdit: { configurable: true, get: editReads },
+    canComment: { configurable: true, get: commentReads },
+  });
+  return { editReads, commentReads };
+}
+
+function toolbarSession() {
+  return {
+    activeSurface: "rich",
+    undoManager: { stopCapturing: vi.fn() },
+  } as unknown as CollabSession;
+}
+
+function expectToolbarCalls(
+  actions: ReturnType<typeof instrumentActions>,
+  onLink: ReturnType<typeof vi.fn>,
+  onComment: ReturnType<typeof vi.fn>,
+) {
+  expect(actions.toggleMark.mock.calls).toEqual([["strong"], ["em"], ["strike"], ["code"]]);
+  expect(onLink).toHaveBeenCalledTimes(1);
+  expect(onComment).toHaveBeenCalledTimes(1);
+}
+
 function productionFixture() {
   const source = "alpha beta gamma";
   const getToken = vi.fn(async (): Promise<string> => { throw new Error("Unexpected connection"); });
@@ -370,6 +447,293 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(observer.disconnect).toHaveBeenCalledTimes(1);
     }
     expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+  });
+
+  it.each(["retired-before-current", "current-before-retired"] as const)(
+    "binds reused-view publications and actions to the exact replacement owner (%s)",
+    (order) => {
+      const env = environment({ popover: true });
+      const shared = fixture();
+      const retiredActions = instrumentActions();
+      const retiredPermissions = instrumentPermissions(shared.session);
+      const retiredLink = vi.fn();
+      const retiredComment = vi.fn();
+      const retiredBubble = {
+        ...shared.props,
+        actions: retiredActions.actions,
+        onLink: retiredLink,
+        onComment: retiredComment,
+      };
+      env.enterFullscreen(shared.scroller);
+      const rendered = render(<BubbleBoundary bubble={retiredBubble} />);
+      env.flush();
+      const retiredToolbar = captureToolbar();
+      const retiredLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+      const retiredObservers = { resize: env.resizes[0], mutation: env.mutations[0] };
+      const retiredListeners = env.listeners.slice();
+      window.dispatchEvent(new Event("resize"));
+      const retiredFrameId = [...env.frames.keys()][0];
+      const retiredFrames = env.capturedFrames.slice();
+      if (retiredFrameId === undefined) throw new Error("The retired owner did not have a pending frame");
+      retiredPermissions.editReads.mockClear();
+      retiredPermissions.commentReads.mockClear();
+
+      const currentSession = toolbarSession();
+      const currentPermissions = instrumentPermissions(currentSession);
+      const currentActions = instrumentActions();
+      const currentLink = vi.fn();
+      const currentComment = vi.fn();
+      const currentBubble = {
+        ...retiredBubble,
+        session: currentSession,
+        actions: currentActions.actions,
+        onLink: currentLink,
+        onComment: currentComment,
+      };
+      let retiredAbsentAtBoundary = false;
+      rendered.rerender(
+        <BubbleBoundary
+          bubble={currentBubble}
+          boundary={1}
+          onBoundary={() => {
+            retiredAbsentAtBoundary =
+              screen.queryByTestId("selection-bubble") === null &&
+              document.querySelectorAll("[data-selection-bubble-layer]").length === 0;
+            invokeToolbar(retiredToolbar);
+          }}
+        />,
+      );
+
+      expect(retiredAbsentAtBoundary).toBe(true);
+      expect(env.frames.has(retiredFrameId)).toBe(false);
+      expect(env.frames.size).toBe(1);
+      expect(retiredToolbar.every(({ element }) => !element.isConnected)).toBe(true);
+      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
+      expect(retiredLink).not.toHaveBeenCalled();
+      expect(retiredComment).not.toHaveBeenCalled();
+      expect(retiredPermissions.editReads).not.toHaveBeenCalled();
+      expect(retiredPermissions.commentReads).not.toHaveBeenCalled();
+      expect(retiredObservers.resize.disconnect).toHaveBeenCalledTimes(1);
+      expect(retiredObservers.mutation.disconnect).toHaveBeenCalledTimes(1);
+      expect(retiredListeners).toHaveLength(15);
+      expect(retiredListeners.every((listener) => listener.removed === 1)).toBe(true);
+      expect(env.opened.has(retiredLayer)).toBe(false);
+
+      env.flush();
+      const currentToolbar = captureToolbar();
+      const currentLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+      expect(currentLayer).not.toBe(retiredLayer);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
+      expect(screen.getAllByRole("button")).toHaveLength(6);
+      expect(env.opened).toEqual(new Set([currentLayer]));
+      expect(env.listeners).toHaveLength(30);
+      expect(env.listeners.slice(15).every((listener) => listener.removed === 0)).toBe(true);
+      expect(env.resizes).toHaveLength(2);
+      expect(env.mutations).toHaveLength(2);
+      const currentTargets = {
+        resize: new Set(env.resizes[1].targets),
+        mutation: new Map(env.mutations[1].targets),
+        layerParent: currentLayer.parentElement,
+        selection: shared.view.state.selection.toJSON(),
+        focusCalls: shared.hasFocus.mock.calls.length,
+        requests: env.request.mock.calls.length,
+      };
+
+      for (const observer of Object.values(retiredObservers)) observer.fire();
+      for (const listener of retiredListeners) {
+        const event = new Event(listener.type);
+        if (typeof listener.callback === "function") listener.callback.call(listener.target, event);
+        else listener.callback.handleEvent(event);
+      }
+      for (const frame of retiredFrames) frame(0);
+      expect(env.frames.size).toBe(0);
+      expect(env.request).toHaveBeenCalledTimes(currentTargets.requests);
+      expect(env.resizes[1].targets).toEqual(currentTargets.resize);
+      expect(env.mutations[1].targets).toEqual(currentTargets.mutation);
+      expect(currentLayer.parentElement).toBe(currentTargets.layerParent);
+      expect(shared.view.state.selection.toJSON()).toEqual(currentTargets.selection);
+      expect(shared.hasFocus).toHaveBeenCalledTimes(currentTargets.focusCalls);
+      expect(env.opened).toEqual(new Set([currentLayer]));
+      expect(screen.getAllByRole("button")).toHaveLength(6);
+
+      retiredPermissions.editReads.mockClear();
+      retiredPermissions.commentReads.mockClear();
+      currentPermissions.editReads.mockClear();
+      currentPermissions.commentReads.mockClear();
+      act(() => {
+        if (order === "retired-before-current") {
+          invokeToolbar(retiredToolbar);
+          invokeToolbar(currentToolbar);
+        } else {
+          invokeToolbar(currentToolbar);
+          invokeToolbar(retiredToolbar);
+        }
+      });
+      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
+      expect(retiredLink).not.toHaveBeenCalled();
+      expect(retiredComment).not.toHaveBeenCalled();
+      expect(retiredPermissions.editReads).not.toHaveBeenCalled();
+      expect(retiredPermissions.commentReads).not.toHaveBeenCalled();
+      expectToolbarCalls(currentActions, currentLink, currentComment);
+      expect(currentPermissions.editReads).toHaveBeenCalledTimes(5);
+      expect(currentPermissions.commentReads).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["retired-before-current", "current-before-retired"] as const)(
+    "retires same-owner action props without replacing native ownership (%s)",
+    (order) => {
+      const env = environment({ popover: true });
+      const shared = fixture();
+      const permissions = instrumentPermissions(shared.session);
+      const retiredActions = instrumentActions();
+      const retiredLink = vi.fn();
+      const retiredComment = vi.fn();
+      const retiredBubble = {
+        ...shared.props,
+        actions: retiredActions.actions,
+        onLink: retiredLink,
+        onComment: retiredComment,
+      };
+      const rendered = render(<BubbleBoundary bubble={retiredBubble} />);
+      env.flush();
+      const retiredToolbar = captureToolbar();
+      const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+      window.dispatchEvent(new Event("resize"));
+      const pendingFrame = [...env.frames.keys()][0];
+      if (pendingFrame === undefined) throw new Error("The shared owner did not have a pending frame");
+      permissions.editReads.mockClear();
+      permissions.commentReads.mockClear();
+
+      const currentActions = instrumentActions();
+      const currentLink = vi.fn();
+      const currentComment = vi.fn();
+      const currentBubble = {
+        ...retiredBubble,
+        actions: currentActions.actions,
+        onLink: currentLink,
+        onComment: currentComment,
+      };
+      let retiredAbsentAtBoundary = false;
+      rendered.rerender(
+        <BubbleBoundary
+          bubble={currentBubble}
+          boundary={1}
+          onBoundary={() => {
+            retiredAbsentAtBoundary = screen.queryByTestId("selection-bubble") === null;
+            invokeToolbar(retiredToolbar);
+          }}
+        />,
+      );
+
+      expect(retiredAbsentAtBoundary).toBe(true);
+      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
+      expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
+      expect(env.frames.has(pendingFrame)).toBe(true);
+      expect(env.cancel).not.toHaveBeenCalled();
+      expect(env.resizes).toHaveLength(1);
+      expect(env.mutations).toHaveLength(1);
+      expect(env.resizes[0].disconnect).not.toHaveBeenCalled();
+      expect(env.mutations[0].disconnect).not.toHaveBeenCalled();
+      expect(env.listeners).toHaveLength(15);
+      expect(env.listeners.every((listener) => listener.removed === 0)).toBe(true);
+      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
+      expect(retiredLink).not.toHaveBeenCalled();
+      expect(retiredComment).not.toHaveBeenCalled();
+      expect(permissions.editReads).not.toHaveBeenCalled();
+      expect(permissions.commentReads).not.toHaveBeenCalled();
+
+      env.flush();
+      const currentToolbar = captureToolbar();
+      expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
+      expect(screen.getAllByRole("button")).toHaveLength(6);
+      permissions.editReads.mockClear();
+      permissions.commentReads.mockClear();
+      act(() => {
+        if (order === "retired-before-current") {
+          invokeToolbar(retiredToolbar);
+          invokeToolbar(currentToolbar);
+        } else {
+          invokeToolbar(currentToolbar);
+          invokeToolbar(retiredToolbar);
+        }
+      });
+      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
+      expect(retiredLink).not.toHaveBeenCalled();
+      expect(retiredComment).not.toHaveBeenCalled();
+      expectToolbarCalls(currentActions, currentLink, currentComment);
+      expect(permissions.editReads).toHaveBeenCalledTimes(5);
+      expect(permissions.commentReads).toHaveBeenCalledTimes(1);
+      expect(env.resizes[0].disconnect).not.toHaveBeenCalled();
+      expect(env.mutations[0].disconnect).not.toHaveBeenCalled();
+      expect(env.listeners.every((listener) => listener.removed === 0)).toBe(true);
+      expect(env.opened).toEqual(new Set([layer]));
+    },
+  );
+
+  it("retires publication and captured actions before the parent removal layout boundary", () => {
+    const env = environment({ popover: true });
+    const f = fixture();
+    const actions = instrumentActions();
+    const permissions = instrumentPermissions(f.session);
+    const onLink = vi.fn();
+    const onComment = vi.fn();
+    const bubble = { ...f.props, actions: actions.actions, onLink, onComment };
+    const rendered = render(<BubbleBoundary bubble={bubble} />);
+    env.flush();
+    const retiredToolbar = captureToolbar();
+    const retiredLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
+    window.dispatchEvent(new Event("resize"));
+    const retiredFrames = env.capturedFrames.slice();
+    const requested = env.request.mock.calls.length;
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+    let absentAtBoundary = false;
+
+    rendered.rerender(
+      <BubbleBoundary
+        bubble={bubble}
+        present={false}
+        boundary={1}
+        onBoundary={() => {
+          absentAtBoundary =
+            screen.queryByTestId("selection-bubble") === null &&
+            document.querySelectorAll("[data-selection-bubble-layer]").length === 0;
+          invokeToolbar(retiredToolbar);
+        }}
+      />,
+    );
+
+    expect(absentAtBoundary).toBe(true);
+    expect(retiredToolbar.every(({ element }) => !element.isConnected)).toBe(true);
+    expect(env.frames.size).toBe(0);
+    expect(env.opened.has(retiredLayer)).toBe(false);
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+    expect(onLink).not.toHaveBeenCalled();
+    expect(onComment).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+    expect(env.listeners).toHaveLength(15);
+    expect(env.listeners.every((listener) => listener.removed === 1)).toBe(true);
+    expect(env.resizes[0].targets.size).toBe(0);
+    expect(env.mutations[0].targets.size).toBe(0);
+    expect(env.resizes[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(env.mutations[0].disconnect).toHaveBeenCalledTimes(1);
+
+    for (const frame of retiredFrames) frame(0);
+    for (const listener of env.listeners) {
+      const event = new Event(listener.type);
+      if (typeof listener.callback === "function") listener.callback.call(listener.target, event);
+      else listener.callback.handleEvent(event);
+    }
+    env.resizes[0].fire();
+    env.mutations[0].fire();
+    expect(env.request).toHaveBeenCalledTimes(requested);
+    expect(env.frames.size).toBe(0);
+    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
+    expect(actions.toggleMark).not.toHaveBeenCalled();
+    expect(onLink).not.toHaveBeenCalled();
+    expect(onComment).not.toHaveBeenCalled();
   });
 
   it("positions and follows existing signals without ResizeObserver", () => {
