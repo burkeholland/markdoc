@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, GitCommit, History, Loader2, MoveVertical, Pencil, RotateCcw, Tag, Upload, X, Download } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -139,7 +139,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const canEdit = session.role === "owner" || session.role === "editor";
   const mutationBusy = activeMutation !== null;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -45,6 +46,11 @@ function deferred<T>() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+function SettleInLayout({ settle }: { settle: () => void }) {
+  useLayoutEffect(() => settle(), [settle]);
+  return null;
 }
 
 function session(docId: string): CollabSession {
@@ -515,6 +521,109 @@ describe("VersionsPanel · mutation ownership", () => {
     expect(push).toHaveBeenCalledWith("/d/replacement-copy");
     expectMutationControlsToBeDisabled(false);
     expect(spinnerFor("Replacement new")).toBeNull();
+  });
+
+  it.each([
+    ["restore", "resolve"],
+    ["restore", "reject"],
+    ["copy", "resolve"],
+    ["copy", "reject"],
+  ] as const)("retires an old %s before its layout-settled %s reaches UI after replacement", async (kind, settlement) => {
+    const oldDocId = `mutation-layout-old-${kind}-${settlement}`;
+    const newDocId = `mutation-layout-new-${kind}-${settlement}`;
+    const oldVersion = { ...named, id: `layout-old-${kind}-${settlement}`, title: `Layout old ${kind} ${settlement}` };
+    const newVersion = { ...named, id: `layout-new-${kind}-${settlement}`, title: `Layout new ${kind} ${settlement}` };
+    const mutation = deferred<unknown>();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockImplementation((docId: string) => Promise.resolve({ versions: [docId === oldDocId ? oldVersion : newVersion] }));
+    if (kind === "restore") restoreVersion.mockReturnValueOnce(mutation.promise);
+    else copyVersion.mockReturnValueOnce(mutation.promise);
+    const props = { onClose: vi.fn(), onPreview, refreshKey: 0 };
+
+    const rendered = render(<VersionsPanel {...props} session={session(oldDocId)} />);
+    fireEvent.click(await screen.findByText(`Layout old ${kind} ${settlement}`));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    onPreview.mockClear();
+    fireEvent.click(screen.getByTestId(kind === "restore" ? "version-restore" : "version-copy"));
+
+    const settle = () => {
+      if (settlement === "reject") mutation.reject(new Error("obsolete layout failure"));
+      else if (kind === "restore") mutation.resolve({ ok: true });
+      else mutation.resolve({ id: "obsolete-layout-copy", title: "Obsolete layout copy" });
+    };
+    rendered.rerender(
+      <>
+        <VersionsPanel {...props} session={session(newDocId)} />
+        <SettleInLayout settle={settle} />
+      </>,
+    );
+
+    expect(await screen.findByText(`Layout new ${kind} ${settlement}`)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(versions).toHaveBeenCalledTimes(2);
+    expect(versions).toHaveBeenNthCalledWith(1, oldDocId);
+    expect(versions).toHaveBeenNthCalledWith(2, newDocId);
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(screen.queryByText("obsolete layout failure")).toBeNull();
+    expect(screen.queryByText(`Layout old ${kind} ${settlement}`)).toBeNull();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    if (kind === "restore") expect(restoreVersion).toHaveBeenCalledOnce();
+    else expect(copyVersion).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an old layout-settled finalizer unlock the newer Copy owner", async () => {
+    const docId = "mutation-layout-newer-owner";
+    const current = { ...named, id: "layout-newer-owner-version", title: "Layout newer owner" };
+    const oldRestore = deferred<{ ok: boolean }>();
+    const currentCopy = deferred<{ id: string; title: string }>();
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    versions.mockResolvedValueOnce({ versions: [current] });
+    restoreVersion.mockReturnValueOnce(oldRestore.promise);
+    copyVersion.mockReturnValueOnce(currentCopy.promise);
+    const props = { session: session(docId), onClose, onPreview, refreshKey: 0 };
+
+    const rendered = render(<VersionsPanel {...props} />);
+    fireEvent.click(await screen.findByText("Layout newer owner"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTestId("version-restore"));
+    fireEvent.click(screen.getByRole("button", { name: "Close version history" }));
+    fireEvent.click(screen.getByTestId("version-copy"));
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Layout newer owner")).not.toBeNull();
+
+    rendered.rerender(
+      <>
+        <VersionsPanel {...props} />
+        <SettleInLayout settle={() => oldRestore.resolve({ ok: true })} />
+      </>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(restoreVersion).toHaveBeenCalledOnce();
+    expect(copyVersion).toHaveBeenCalledOnce();
+    expect(versions).toHaveBeenCalledOnce();
+    expect(onPreview).toHaveBeenCalledTimes(2);
+    expect(onPreview).toHaveBeenLastCalledWith(null);
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expectMutationControlsToBeDisabled(true);
+    expect(spinnerFor("Layout newer owner")).not.toBeNull();
+
+    currentCopy.resolve({ id: "layout-current-copy", title: "Layout current copy" });
+    await waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(pendingNotice).toHaveBeenCalledOnce();
+    expect(push).toHaveBeenCalledWith("/d/layout-current-copy");
+    expectMutationControlsToBeDisabled(false);
+    expect(spinnerFor("Layout newer owner")).toBeNull();
   });
 
   it.each(["resolve", "reject"] as const)("ignores a late Copy %s after unmount", async (settlement) => {
