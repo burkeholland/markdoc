@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, KeyRound, Loader2, Plus } from "lucide-react";
 import { cn, relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
@@ -71,6 +71,26 @@ interface TokenOperation extends MountedOperation {
   kind: TokenMutationKind;
 }
 
+type DocumentListIntent = "initial" | "retry";
+
+interface DocumentListInputs {
+  readonly starred?: false;
+  readonly trash?: false;
+}
+
+interface DocumentListRequest extends MountedOperation {
+  id: number;
+  inputs: Readonly<DocumentListInputs>;
+  promise: ReturnType<typeof api.documents.list>;
+}
+
+interface DocumentListOperation extends MountedOperation {
+  visit: number;
+  requestId: number;
+  intent: DocumentListIntent;
+  request: DocumentListRequest;
+}
+
 /** Closing a host dialog unmounts all transient state, including late creation responses. */
 export function TokensPanel({ open = true, ...props }: TokensPanelProps) {
   return open ? <TokenManager key={props.documentId ?? "settings"} {...props} /> : null;
@@ -88,6 +108,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const [documentIds, setDocumentIds] = useState<string[]>(documentId ? [documentId] : []);
   const [documents, setDocuments] = useState<DocumentSummaryDto[] | null>(null);
   const [documentError, setDocumentError] = useState<string | null>(null);
+  const [documentPending, setDocumentPending] = useState<DocumentListOperation | null>(null);
   const [createPending, setCreatePending] = useState<CreateOperation | null>(null);
   const [pendingActions, setPendingActions] = useState<Record<string, TokenOperation>>({});
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +118,13 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const liveOrigin = useOrigin(origin);
   const id = useId();
   const tokensButton = useRef<HTMLButtonElement>(null);
+  const documentMount = useRef(Symbol("token-manager-documents")).current;
+  const documentMountActive = useRef(true);
+  const documentVisitSeq = useRef(0);
+  const documentRequestSeq = useRef(0);
+  const documentVisit = useRef<number | null>(null);
+  const documentOwner = useRef<DocumentListOperation | null>(null);
+  const documentRequest = useRef<DocumentListRequest | null>(null);
   const mounted = useRef<symbol | null>(null);
   const createOwner = useRef<CreateOperation | null>(null);
   const tokenOwners = useRef(new Map<string, TokenOperation>());
@@ -109,8 +137,96 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const secretWorkPending = busy || Object.values(pendingActions).some((operation) => operation.kind === "replace");
   const blockingTokenActionPending = Object.values(pendingActions).some((operation) => operation.kind !== "collaborators");
   const restrictionError = restrict && documentIds.length === 0 ? "Select at least one document when restricting a token." : null;
+  const documentAuthorityUnavailable = restrict && !documentId && (documentPending !== null || documentError !== null);
+  const showRestrictionError = Boolean(restrictionError) && !documentAuthorityUnavailable;
   const managementLink = documentId ? `/settings?next=${encodeURIComponent(`/d/${documentId}`)}#tokens` : "/settings#tokens";
   const matching = conflictName ? tokens?.find((t) => tokenState(t) === "Active" && agentMentionSlug(t.name).toLowerCase() === agentMentionSlug(conflictName).toLowerCase()) : null;
+  const chooserVisible = destination === "tokens" && showCreate && restrict && !documentId;
+
+  const isDocumentCurrent = useCallback((operation: DocumentListOperation) =>
+    documentMountActive.current
+    && operation.mount === documentMount
+    && documentVisit.current === operation.visit
+    && operation.requestId === operation.request.id
+    && documentOwner.current === operation, [documentMount]);
+  const retireDocumentVisit = useCallback((updatePending = true) => {
+    const owner = documentOwner.current;
+    documentVisit.current = null;
+    documentOwner.current = null;
+    if (updatePending && owner) {
+      setDocumentPending((current) => current === owner ? null : current);
+    }
+  }, []);
+  const beginDocumentRequest = useCallback((intent: DocumentListIntent, visit: number) => {
+    if (!documentMountActive.current || documentVisit.current !== visit || documentOwner.current) return;
+    let request = documentRequest.current;
+    if (!request) {
+      const inputs = Object.freeze<DocumentListInputs>({});
+      request = {
+        mount: documentMount,
+        id: ++documentRequestSeq.current,
+        inputs,
+        promise: api.documents.list(inputs),
+      };
+      documentRequest.current = request;
+      const clearRequest = () => {
+        if (documentRequest.current === request) documentRequest.current = null;
+      };
+      void request.promise.then(clearRequest, clearRequest);
+    }
+    const operation: DocumentListOperation = {
+      mount: documentMount,
+      visit,
+      requestId: request.id,
+      intent,
+      request,
+    };
+    documentOwner.current = operation;
+    setDocumentError(null);
+    setDocumentPending(operation);
+    void (async () => {
+      try {
+        const res = await operation.request.promise;
+        if (!isDocumentCurrent(operation)) return;
+        const accessibleIds = new Set(res.documents.map((entry) => entry.id));
+        setDocuments(res.documents);
+        setDocumentIds((current) => current.filter((documentId) => accessibleIds.has(documentId)));
+      } catch (e) {
+        if (!isDocumentCurrent(operation)) return;
+        setDocumentError(apiErrorText(e, "Could not load documents"));
+      } finally {
+        if (!isDocumentCurrent(operation)) return;
+        documentOwner.current = null;
+        setDocumentPending((current) => current === operation ? null : current);
+      }
+    })();
+  }, [documentMount, isDocumentCurrent]);
+  const beginDocumentVisit = useCallback(() => {
+    if (!documentMountActive.current || documentVisit.current !== null) return;
+    const visit = ++documentVisitSeq.current;
+    documentVisit.current = visit;
+    beginDocumentRequest("initial", visit);
+  }, [beginDocumentRequest]);
+  const retryDocuments = useCallback(() => {
+    const visit = documentVisit.current;
+    if (visit === null || documentOwner.current) return;
+    beginDocumentRequest("retry", visit);
+  }, [beginDocumentRequest]);
+
+  useLayoutEffect(() => {
+    documentMountActive.current = true;
+    return () => {
+      documentMountActive.current = false;
+      retireDocumentVisit(false);
+    };
+  }, [retireDocumentVisit]);
+  useLayoutEffect(() => {
+    if (chooserVisible) beginDocumentVisit();
+    else retireDocumentVisit();
+    return () => {
+      if (chooserVisible) retireDocumentVisit();
+    };
+  }, [beginDocumentVisit, chooserVisible, retireDocumentVisit]);
 
   useEffect(() => {
     const mount = Symbol("token-manager");
@@ -155,13 +271,6 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     }
   }, []);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => {
-    if (!restrict || documentId || documents !== null || documentError) return;
-    let cancelled = false;
-    api.documents.list().then((res) => { if (!cancelled) setDocuments(res.documents); })
-      .catch((e) => { if (!cancelled) setDocumentError(apiErrorText(e, "Could not load documents")); });
-    return () => { cancelled = true; };
-  }, [restrict, documentId, documents, documentError]);
   useEffect(() => {
     if (embedded) return;
     const readHash = () => {
@@ -213,6 +322,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   };
 
   const create = async () => {
+    if (documentAuthorityUnavailable) return;
     if (restrictionError) { setError(restrictionError); return; }
     const mount = mounted.current;
     if (!mount || createOwner.current || createdRef.current || [...tokenOwners.current.values()].some((operation) => operation.kind !== "collaborators")) return;
@@ -333,7 +443,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
          onClick={() => { if (!hasSecretWork()) setDestination("connect"); }}>Connect an MCP client</button>
       </nav>
       {onClose && <button type="button" className="btn btn-ghost btn-sm" disabled={secretWorkPending}
-       onClick={() => { if (!hasSecretWork()) onClose(); }}>Close token management</button>}
+       onClick={() => { if (!hasSecretWork()) { retireDocumentVisit(); onClose(); } }}>Close token management</button>}
       </div>
       <p className="text-xs leading-5 text-ink-3">Existing secrets cannot be shown again. Rename changes only the name; replace creates a new secret.</p>
       {error && <p role="alert" aria-atomic="true" className="text-sm text-danger">{error}</p>}
@@ -383,27 +493,34 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
             </label>)}
           </fieldset>
           <label className="flex items-center gap-2 text-sm text-ink-2">
-           <input type="checkbox" checked={restrict} disabled={busy} onChange={(e) => setRestrict(e.target.checked)} aria-invalid={Boolean(restrictionError)}
+           <input type="checkbox" checked={restrict} disabled={busy} onChange={(e) => {
+             if (e.target.checked) beginDocumentVisit();
+             else retireDocumentVisit();
+             setRestrict(e.target.checked);
+           }} aria-invalid={Boolean(showRestrictionError)}
               aria-describedby={`${id}-access`} data-testid="token-restrict" />
             {documentId ? "Only this document" : "Only these documents"}
           </label>
           <p id={`${id}-access`} className="text-xs text-ink-3" data-testid="token-document-access">{restrict ? "Every other document answers 404 to this token." : "This token will access all documents you can access."}</p>
           {restrict && !documentId && <div className="max-h-48 overflow-y-auto" data-testid="token-documents">
-           {documentError ? <><p role="alert" className="text-sm text-danger">{documentError}</p><button type="button" className="btn btn-sm btn-outline" disabled={busy} onClick={() => setDocumentError(null)}>Retry documents</button></>
-              : documents === null ? <p className="text-xs text-ink-3">Loading your documents...</p>
-                : documents.length === 0 ? <p className="text-xs text-ink-3">No documents yet.</p>
+           {documentPending && <p role="status" aria-live="polite" aria-atomic="true" className="text-xs text-ink-3" data-testid="token-documents-pending">
+             {documentPending.intent === "retry" ? "Refreshing your documents..." : "Loading your documents..."}
+           </p>}
+           {documentError && <><p role="alert" aria-atomic="true" className="text-sm text-danger">{documentError}</p>
+             <button type="button" className="btn btn-sm btn-outline" disabled={busy} onClick={retryDocuments}>Retry documents</button></>}
+           {documents !== null && (documents.length === 0 ? <p className="text-xs text-ink-3">No documents yet.</p>
                   : documents.map((d) => <label key={d.id} className="flex items-start gap-2 text-sm text-ink-2">
                    <input type="checkbox" checked={documentIds.includes(d.id)} disabled={busy} onChange={() => setDocumentIds((ids) => ids.includes(d.id) ? ids.filter((value) => value !== d.id) : [...ids, d.id])} data-testid={`token-document-${d.id}`} />
                     <span className="min-w-0 break-words">{d.title}</span>
-                  </label>)}
+                  </label>))}
           </div>}
-          {restrictionError && <p className="text-xs text-danger" role="alert" data-testid="token-document-error">{restrictionError}</p>}
+          {showRestrictionError && <p className="text-xs text-danger" role="alert" data-testid="token-document-error">{restrictionError}</p>}
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">Expires
            <select className="select w-fit" value={expires} disabled={busy} onChange={(e) => setExpires(e.target.value)}>
               <option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option><option value="never">Never</option>
             </select>
           </label>
-          <button type="submit" className="btn btn-primary w-fit gap-1.5" disabled={busy || blockingTokenActionPending || Boolean(created) || tokens === null || !name.trim() || Boolean(restrictionError)} data-testid="token-create">
+          <button type="submit" className="btn btn-primary w-fit gap-1.5" disabled={busy || blockingTokenActionPending || Boolean(created) || tokens === null || !name.trim() || Boolean(restrictionError) || documentAuthorityUnavailable} data-testid="token-create">
             {busy && <Loader2 size={16} className="animate-spin" />} Create token
           </button>
         </form>}
