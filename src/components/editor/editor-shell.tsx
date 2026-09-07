@@ -1255,9 +1255,13 @@ export function EditorShell({
   // Re-centre on the followed cursor (debounced) whenever it moves or the panes change.
   useEffect(() => {
     if (!followUserId || followedCursor === null) return;
-    const t = setTimeout(() => actions.scrollToSource(followedCursor, { code: showCode, rich: showRich, synced: syncScroll && showCode && showRich }), 150);
+    const owner = editorIdentity;
+    const t = setTimeout(() => {
+      if (currentEditorRef.current !== owner) return;
+      actions.scrollToSource(followedCursor, { code: showCode, rich: showRich, synced: syncScroll && showCode && showRich });
+    }, 150);
     return () => clearTimeout(t);
-  }, [actions, followUserId, followedCursor, showCode, showRich, syncScroll]);
+  }, [actions, editorIdentity, followUserId, followedCursor, showCode, showRich, syncScroll]);
 
   // Following stops on the user's own scroll (wheel/touch, not programmatic), typing in either pane, or Esc.
   useEffect(() => {
