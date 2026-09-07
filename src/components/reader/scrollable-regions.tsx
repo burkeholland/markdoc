@@ -1,19 +1,32 @@
 "use client";
 
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 
-const ROOT_SELECTOR = "[data-reader-overflow-root]";
 const REGION_SELECTOR = "pre, table";
 
-/** Adds a keyboard entry point only while a reader code block or table overflows horizontally. */
-export function ReaderScrollableRegions({ contentKey }: { contentKey: string }) {
+type ContentAuthority = {
+  html: string;
+};
+
+/** Renders the reader body and adds a keyboard entry point only to its overflowing regions. */
+export function ReaderScrollableRegions({ html, hideFirstH1 }: { html: string; hideFirstH1: boolean }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const authority = useMemo<ContentAuthority>(() => ({ html }), [html]);
+  const authorityRef = useRef<ContentAuthority | null>(null);
+
   useLayoutEffect(() => {
-    const root = document.querySelector<HTMLElement>(ROOT_SELECTOR);
+    const root = rootRef.current;
     if (!root) return;
 
+    authorityRef.current = authority;
     const regions = Array.from(root.querySelectorAll<HTMLElement>(REGION_SELECTOR));
+    const originalTabIndexes = new Map(regions.map((region) => [region, region.getAttribute("tabindex")]));
+    let retired = false;
+    const isCurrent = () => !retired && authorityRef.current === authority && rootRef.current === root;
     const sync = () => {
+      if (!isCurrent()) return;
       for (const region of regions) {
+        if (!isCurrent()) return;
         if (region.scrollWidth > region.clientWidth + 1) region.tabIndex = 0;
         else region.removeAttribute("tabindex");
       }
@@ -24,16 +37,26 @@ export function ReaderScrollableRegions({ contentKey }: { contentKey: string }) 
     observer.observe(root);
     regions.forEach((region) => observer.observe(region));
 
-    let cancelled = false;
-    void document.fonts.ready.then(() => {
-      if (!cancelled) sync();
-    });
+    void document.fonts.ready.then(sync);
 
     return () => {
-      cancelled = true;
+      retired = true;
+      if (authorityRef.current === authority) authorityRef.current = null;
       observer.disconnect();
+      for (const [region, tabIndex] of originalTabIndexes) {
+        if (tabIndex === null) region.removeAttribute("tabindex");
+        else region.setAttribute("tabindex", tabIndex);
+      }
     };
-  }, [contentKey]);
+  }, [authority]);
 
-  return null;
+  return (
+    <div
+      ref={rootRef}
+      className="reader-body"
+      data-testid="reader-body"
+      data-hide-first-h1={hideFirstH1 || undefined}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
