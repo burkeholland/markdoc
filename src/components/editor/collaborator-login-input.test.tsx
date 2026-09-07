@@ -2,30 +2,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRoot } from "react-dom/client";
-import {
-  useCallback,
-  useLayoutEffect,
-  useState,
-  type ChangeEvent,
-  type FocusEvent,
-  type KeyboardEvent,
-  type MouseEvent,
-} from "react";
+import { useCallback, useLayoutEffect, useState, type ChangeEvent, type FocusEvent, type KeyboardEvent, type MouseEvent, type RefCallback } from "react";
 
-type SearchAnswer = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: "no-github-token" };
+type SearchAnswer = {
+  users: { login: string; name: string | null; avatarUrl: string }[];
+  limited: boolean;
+  reason?: "no-github-token";
+};
 const searchUsers = vi.fn<(q: string, init?: RequestInit) => Promise<SearchAnswer>>();
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {
     ...actual,
-    api: { ...actual.api, github: { ...actual.api.github, searchUsers: (...args: [string, RequestInit?]) => searchUsers(...args) } },
+    api: {
+      ...actual.api,
+      github: {
+        ...actual.api.github,
+        searchUsers: (...args: [string, RequestInit?]) => searchUsers(...args),
+      },
+    },
   };
 });
 
 import { ApiError } from "@/lib/api";
 import { CollaboratorLoginInput, SUGGEST_DEBOUNCE_MS, suggestQuery } from "./collaborator-login-input";
 
-const user = (login: string) => ({ login, name: null, avatarUrl: `https://avatars.githubusercontent.com/${login}?s=40` });
+const user = (login: string) => ({
+  login,
+  name: null,
+  avatarUrl: `https://avatars.githubusercontent.com/${login}?s=40`,
+});
 const answer = (...logins: string[]) => Promise.resolve({ users: logins.map(user), limited: false });
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -56,13 +62,7 @@ function Harness({ exclude = [], onPick, onSubmit }: { exclude?: string[]; onPic
   );
 }
 
-function ExactValueHarness({
-  onChange,
-  onPick,
-}: {
-  onChange: (login: string) => void;
-  onPick: (login: string) => void;
-}) {
+function ExactValueHarness({ onChange, onPick }: { onChange: (login: string) => void; onPick: (login: string) => void }) {
   const [login, setLogin] = useState("octocat");
   const change = useCallback(
     (next: string) => {
@@ -78,17 +78,7 @@ function ExactValueHarness({
  * Runs `onBoundary` from the parent's layout effect after a child query replacement or removal.
  * Promise settlements queued here happen before the retired child's passive cleanup.
  */
-function BoundaryHarness({
-  value,
-  present = true,
-  boundary = 0,
-  onBoundary,
-}: {
-  value: string;
-  present?: boolean;
-  boundary?: number;
-  onBoundary?: () => void;
-}) {
+function BoundaryHarness({ value, present = true, boundary = 0, onBoundary }: { value: string; present?: boolean; boundary?: number; onBoundary?: () => void }) {
   useLayoutEffect(() => {
     if (boundary > 0) onBoundary?.();
   }, [boundary, onBoundary]);
@@ -126,7 +116,10 @@ type PendingSearch = {
   reject: (reason?: unknown) => void;
 };
 
-const boundarySettlements: { label: string; settle: (pending: PendingSearch) => void }[] = [
+const boundarySettlements: {
+  label: string;
+  settle: (pending: PendingSearch) => void;
+}[] = [
   {
     label: "normal success",
     settle: (pending) => pending.resolve({ users: [user("ocean")], limited: false }),
@@ -167,6 +160,28 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
   return handler as T;
 }
+
+function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
+  return fiber.ref as RefCallback<T>;
+}
+
+const mouseSource = (currentTarget: HTMLElement, preventDefault = vi.fn()) =>
+  ({
+    currentTarget,
+    target: currentTarget,
+    preventDefault,
+  }) as unknown as MouseEvent<HTMLLIElement>;
+
+const buttonMouseSource = (currentTarget: HTMLElement, preventDefault = vi.fn()) =>
+  ({
+    currentTarget,
+    target: currentTarget,
+    preventDefault,
+  }) as unknown as MouseEvent<HTMLButtonElement>;
 
 type DebounceTimerRecord = {
   callback: () => void;
@@ -311,7 +326,10 @@ describe("CollaboratorLoginInput", () => {
     });
     expect(options()).toEqual(["octocat"]);
     await act(async () => {
-      pending.get("oc")!({ users: [user("ocean"), user("ocelot")], limited: false });
+      pending.get("oc")!({
+        users: [user("ocean"), user("ocelot")],
+        limited: false,
+      });
     });
     expect(options()).toEqual(["octocat"]);
   });
@@ -319,7 +337,10 @@ describe("CollaboratorLoginInput", () => {
   it.each(boundarySettlements)("retires a pending $label at the query layout boundary", async ({ settle: settlePending }) => {
     const pending = deferred<SearchAnswer>();
     const replacement = deferred<SearchAnswer>();
-    searchUsers.mockReturnValueOnce(pending.promise).mockReturnValueOnce(replacement.promise).mockImplementation(() => answer("ocean"));
+    searchUsers
+      .mockReturnValueOnce(pending.promise)
+      .mockReturnValueOnce(replacement.promise)
+      .mockImplementation(() => answer("ocean"));
     const view = render(<BoundaryHarness value="oc" />);
     input().focus();
     await settle();
@@ -456,9 +477,9 @@ describe("CollaboratorLoginInput", () => {
     await settle();
     expect(options()).toEqual(["octocat"]);
     const exactOption = screen.getByTestId("share-login-option");
-    const capturedPick = reactHandler<() => void>(exactOption, "onClick");
+    const capturedPick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(exactOption, "onClick");
 
-    act(() => capturedPick());
+    act(() => capturedPick(mouseSource(exactOption)));
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange).toHaveBeenCalledWith("octocat");
     expect(onPick).toHaveBeenCalledOnce();
@@ -467,8 +488,8 @@ describe("CollaboratorLoginInput", () => {
     expect(input()).toBe(exactInput);
 
     act(() => {
-      capturedPick();
-      capturedPick();
+      capturedPick(mouseSource(exactOption));
+      capturedPick(mouseSource(exactOption));
     });
     expect(onChange).toHaveBeenCalledOnce();
     expect(onPick).toHaveBeenCalledOnce();
@@ -517,8 +538,16 @@ describe("CollaboratorLoginInput", () => {
     fireEvent.click(retry);
     expect(searchUsers).toHaveBeenCalledTimes(2);
     expect(searchUsers.mock.calls[1][0]).toBe("octo");
-    expect(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" })).toBeDisabled();
-    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" }));
+    expect(
+      within(screen.getByRole("alert")).getByRole("button", {
+        name: "Retrying…",
+      }),
+    ).toBeDisabled();
+    fireEvent.click(
+      within(screen.getByRole("alert")).getByRole("button", {
+        name: "Retrying…",
+      }),
+    );
     expect(searchUsers).toHaveBeenCalledTimes(2);
 
     await act(async () => {
@@ -543,7 +572,10 @@ describe("CollaboratorLoginInput", () => {
     expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
 
     await act(async () => {
-      retried.resolve({ users: [user("octocat"), user("octodog")], limited: false });
+      retried.resolve({
+        users: [user("octocat"), user("octodog")],
+        limited: false,
+      });
     });
     expect(screen.queryByRole("alert")).toBeNull();
     expect(options()).toEqual(["octocat", "octodog"]);
@@ -551,7 +583,13 @@ describe("CollaboratorLoginInput", () => {
   });
 
   it("after the route answers reason=no-github-token it asks no more while mounted: one request for a whole share, no hint, the box still types (task #1481)", async () => {
-    searchUsers.mockImplementation(() => Promise.resolve({ users: [], limited: false, reason: "no-github-token" as const }));
+    searchUsers.mockImplementation(() =>
+      Promise.resolve({
+        users: [],
+        limited: false,
+        reason: "no-github-token" as const,
+      }),
+    );
     render(<Harness />);
     type("oc");
     await settle();
@@ -586,7 +624,11 @@ describe("CollaboratorLoginInput", () => {
     expect(searchUsers).toHaveBeenCalledTimes(2);
     // The stale answer arrives first and carries the reason.
     await act(async () => {
-      pending.get("oc")!({ users: [], limited: false, reason: "no-github-token" });
+      pending.get("oc")!({
+        users: [],
+        limited: false,
+        reason: "no-github-token",
+      });
     });
     expect(searchUsers.mock.calls[1][1]?.signal?.aborted).toBe(false);
     await act(async () => {
@@ -626,10 +668,7 @@ describe("CollaboratorLoginInput", () => {
 
   it("keeps a newer query error when an aborted Retry for the old query later succeeds", async () => {
     const oldRetry = deferred<SearchAnswer>();
-    searchUsers
-      .mockRejectedValueOnce(new ApiError(503, "Old query failed"))
-      .mockReturnValueOnce(oldRetry.promise)
-      .mockRejectedValueOnce(new ApiError(503, "Current query failed"));
+    searchUsers.mockRejectedValueOnce(new ApiError(503, "Old query failed")).mockReturnValueOnce(oldRetry.promise).mockRejectedValueOnce(new ApiError(503, "Current query failed"));
     render(<Harness />);
 
     type("oc");
@@ -820,14 +859,7 @@ describe("CollaboratorLoginInput", () => {
 
     try {
       await act(async () => {
-        root.render(
-          <AuthorityBoundary
-            instance="same"
-            value="octo"
-            onChange={onChange}
-            exclude={["@OCTOCAT", "octodog", "octodog"]}
-          />,
-        );
+        root.render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} exclude={["@OCTOCAT", "octodog", "octodog"]} />);
       });
       expect(timers.records).toHaveLength(1);
       const exactTimer = timers.records[0];
@@ -920,103 +952,92 @@ describe("CollaboratorLoginInput", () => {
     }
   });
 
-  it.each(["stale-first", "current-first"] as const)(
-    "isolates equal-query requests and equal users across callback replacement ($order)",
-    async (order) => {
-      const retired = deferred<SearchAnswer>();
-      const current = deferred<SearchAnswer>();
-      searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const onChangeA = vi.fn();
-      const onChangeB = vi.fn();
-      const onPickA = vi.fn();
-      const onPickB = vi.fn();
-      let abortedAtBoundary = false;
-      let aborts = 0;
-      let reusedInput = false;
+  it.each(["stale-first", "current-first"] as const)("isolates equal-query requests and equal users across callback replacement ($order)", async (order) => {
+    const retired = deferred<SearchAnswer>();
+    const current = deferred<SearchAnswer>();
+    searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onChangeA = vi.fn();
+    const onChangeB = vi.fn();
+    const onPickA = vi.fn();
+    const onPickB = vi.fn();
+    let abortedAtBoundary = false;
+    let aborts = 0;
+    let reusedInput = false;
 
-      try {
-        await act(async () => {
-          root.render(
-            <AuthorityBoundary
-              instance="same"
-              value="octo"
-              onChange={onChangeA}
-              onPick={onPickA}
-              exclude={[]}
-            />,
-          );
-        });
-        const exactInput = input();
-        exactInput.focus();
-        await settle();
-        const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
-        retiredSignal?.addEventListener("abort", () => {
-          aborts++;
-        });
+    try {
+      await act(async () => {
+        root.render(<AuthorityBoundary instance="same" value="octo" onChange={onChangeA} onPick={onPickA} exclude={[]} />);
+      });
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+      retiredSignal?.addEventListener("abort", () => {
+        aborts++;
+      });
 
-        await act(async () => {
-          root.render(
-            <AuthorityBoundary
-              instance="same"
-              value="octo"
-              onChange={onChangeB}
-              onPick={onPickB}
-              exclude={[]}
-              boundary={1}
-              onBoundary={() => {
-                abortedAtBoundary = retiredSignal?.aborted === true;
-                reusedInput = input() === exactInput;
-              }}
-            />,
-          );
-        });
-        expect(abortedAtBoundary).toBe(true);
-        expect(aborts).toBe(1);
-        expect(reusedInput).toBe(true);
-        await settle();
-        expect(searchUsers).toHaveBeenCalledTimes(2);
-        const currentSignal = searchUsers.mock.calls[1][1]?.signal;
+      await act(async () => {
+        root.render(
+          <AuthorityBoundary
+            instance="same"
+            value="octo"
+            onChange={onChangeB}
+            onPick={onPickB}
+            exclude={[]}
+            boundary={1}
+            onBoundary={() => {
+              abortedAtBoundary = retiredSignal?.aborted === true;
+              reusedInput = input() === exactInput;
+            }}
+          />,
+        );
+      });
+      expect(abortedAtBoundary).toBe(true);
+      expect(aborts).toBe(1);
+      expect(reusedInput).toBe(true);
+      await settle();
+      expect(searchUsers).toHaveBeenCalledTimes(2);
+      const currentSignal = searchUsers.mock.calls[1][1]?.signal;
+      expect(currentSignal?.aborted).toBe(false);
+
+      const settleRetired = async () => {
+        retired.resolve({ users: [{ ...user("octocat") }], limited: false });
+        await retired.promise;
+        await Promise.resolve();
+      };
+      const settleCurrent = async () => {
+        current.resolve({ users: [{ ...user("octocat") }], limited: false });
+        await current.promise;
+        await Promise.resolve();
+      };
+
+      if (order === "stale-first") {
+        await act(settleRetired);
+        expect(options()).toEqual([]);
+        expect(screen.getByRole("status")).toHaveTextContent("@octo");
         expect(currentSignal?.aborted).toBe(false);
-
-        const settleRetired = async () => {
-          retired.resolve({ users: [{ ...user("octocat") }], limited: false });
-          await retired.promise;
-          await Promise.resolve();
-        };
-        const settleCurrent = async () => {
-          current.resolve({ users: [{ ...user("octocat") }], limited: false });
-          await current.promise;
-          await Promise.resolve();
-        };
-
-        if (order === "stale-first") {
-          await act(settleRetired);
-          expect(options()).toEqual([]);
-          expect(screen.getByRole("status")).toHaveTextContent("@octo");
-          expect(currentSignal?.aborted).toBe(false);
-          await act(settleCurrent);
-        } else {
-          await act(settleCurrent);
-          expect(options()).toEqual(["octocat"]);
-          await act(settleRetired);
-        }
-
+        await act(settleCurrent);
+      } else {
+        await act(settleCurrent);
         expect(options()).toEqual(["octocat"]);
-        expect(currentSignal?.aborted).toBe(false);
-        expect(aborts).toBe(1);
-        expect(onChangeA).not.toHaveBeenCalled();
-        expect(onPickA).not.toHaveBeenCalled();
-        expect(onChangeB).not.toHaveBeenCalled();
-        expect(onPickB).not.toHaveBeenCalled();
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
+        await act(settleRetired);
       }
-    },
-  );
+
+      expect(options()).toEqual(["octocat"]);
+      expect(currentSignal?.aborted).toBe(false);
+      expect(aborts).toBe(1);
+      expect(onChangeA).not.toHaveBeenCalled();
+      expect(onPickA).not.toHaveBeenCalled();
+      expect(onChangeB).not.toHaveBeenCalled();
+      expect(onPickB).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 
   it.each([
     { label: "equal-query value replacement", value: " @octo ", exclude: [] },
@@ -1060,7 +1081,10 @@ describe("CollaboratorLoginInput", () => {
 
       await act(async () => {
         retired.resolve({ users: [user("retired-user")], limited: false });
-        current.resolve({ users: [user("octocat"), user("octodog")], limited: false });
+        current.resolve({
+          users: [user("octocat"), user("octodog")],
+          limited: false,
+        });
         await Promise.all([retired.promise, current.promise]);
       });
       expect(options()).toEqual(nextExclude.length ? ["octodog"] : ["octocat", "octodog"]);
@@ -1071,38 +1095,211 @@ describe("CollaboratorLoginInput", () => {
     }
   });
 
+  it("rejects sibling, foreign, detached, and mismatched input or control event sources before any work", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />);
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    const control = exactInput.parentElement as HTMLDivElement;
+    const change = reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(exactInput, "onChange");
+    const focus = reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onFocus");
+    const keydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown");
+    const blur = reactHandler<(event: FocusEvent<HTMLDivElement>) => void>(control, "onBlur");
+    const sibling = document.createElement("input");
+    const foreign = document.createElement("input");
+    const detached = document.createElement("input");
+    const foreignControl = document.createElement("div");
+    sibling.value = "sibling";
+    foreign.value = "foreign";
+    detached.value = "detached";
+    control.append(sibling);
+    document.body.append(foreign, foreignControl);
+    const keyPrevents = [vi.fn(), vi.fn(), vi.fn()];
+
+    act(() => {
+      for (const source of [sibling, foreign, detached]) {
+        change({
+          currentTarget: source,
+          target: source,
+        } as ChangeEvent<HTMLInputElement>);
+        focus({
+          currentTarget: source,
+          target: source,
+        } as FocusEvent<HTMLInputElement>);
+      }
+      change({
+        currentTarget: exactInput,
+        target: sibling,
+      } as unknown as ChangeEvent<HTMLInputElement>);
+      for (const [index, key] of ["ArrowDown", "Enter", "Escape"].entries()) {
+        keydown({
+          key,
+          currentTarget: sibling,
+          target: sibling,
+          preventDefault: keyPrevents[index],
+        } as unknown as KeyboardEvent<HTMLInputElement>);
+      }
+      blur({
+        currentTarget: foreignControl,
+        target: foreignControl,
+        relatedTarget: null,
+      } as unknown as FocusEvent<HTMLDivElement>);
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onPick).not.toHaveBeenCalled();
+    expect(keyPrevents.every((prevent) => prevent.mock.calls.length === 0)).toBe(true);
+    expect(listOptions().every((option) => option.getAttribute("aria-selected") === "false")).toBe(true);
+    expect(options()).toEqual(["octocat", "octodog"]);
+    expect(exactInput).toHaveFocus();
+
+    sibling.remove();
+    foreign.remove();
+    foreignControl.remove();
+    const exactPrevent = vi.fn();
+    act(() => {
+      keydown({
+        key: "ArrowDown",
+        currentTarget: exactInput,
+        target: exactInput,
+        preventDefault: exactPrevent,
+      } as unknown as KeyboardEvent<HTMLInputElement>);
+    });
+    expect(exactPrevent).toHaveBeenCalledOnce();
+    expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+    const currentKeydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown");
+    act(() => {
+      currentKeydown({
+        key: "Enter",
+        currentTarget: exactInput,
+        target: exactInput,
+        preventDefault: exactPrevent,
+      } as unknown as KeyboardEvent<HTMLInputElement>);
+    });
+    expect(exactPrevent).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledWith("octocat");
+    expect(onPick).toHaveBeenCalledOnce();
+    expect(onPick).toHaveBeenCalledWith("octocat");
+  });
+
+  it("binds every pointer handler to its exact ordered row and synchronously claims one competing pick", async () => {
+    const octocat = {
+      login: "octocat",
+      name: "The Octocat",
+      avatarUrl: "https://avatars.githubusercontent.com/octocat?s=40",
+    };
+    const octodog = {
+      login: "octodog",
+      name: "Octo Dog",
+      avatarUrl: "https://avatars.githubusercontent.com/octodog?s=40",
+    };
+    searchUsers.mockResolvedValue({
+      users: [octocat, octodog],
+      limited: false,
+    });
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />);
+    input().focus();
+    await settle();
+    const list = screen.getByTestId("share-login-suggestions");
+    const [first, second] = screen.getAllByTestId("share-login-option");
+    const down = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onMouseDown");
+    const enter = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onMouseEnter");
+    const click = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onClick");
+    const staleListRef = reactRef(list);
+    const staleRowRef = reactRef(first);
+    const replacement = first.cloneNode(true) as HTMLLIElement;
+    const foreign = document.createElement("li");
+    const detached = document.createElement("li");
+    list.append(replacement);
+    document.body.append(foreign);
+    const wrongPrevents = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+
+    act(() => {
+      for (const [index, source] of [second, replacement, foreign, detached].entries()) {
+        down(mouseSource(source, wrongPrevents[index]));
+        enter(mouseSource(source));
+        click(mouseSource(source));
+      }
+    });
+
+    expect(wrongPrevents.every((prevent) => prevent.mock.calls.length === 0)).toBe(true);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onPick).not.toHaveBeenCalled();
+    expect(listOptions().every((option) => option.getAttribute("aria-selected") === "false")).toBe(true);
+
+    replacement.remove();
+    foreign.remove();
+    const exactPrevent = vi.fn();
+    act(() => {
+      down(mouseSource(first, exactPrevent));
+      enter(mouseSource(first));
+    });
+    expect(exactPrevent).toHaveBeenCalledOnce();
+    expect(screen.getAllByTestId("share-login-option")[0]).toHaveAttribute("aria-selected", "true");
+
+    const [currentFirst, currentSecond] = screen.getAllByTestId("share-login-option");
+    expect(currentFirst).toBe(first);
+    expect(currentFirst.parentElement).toBe(list);
+    const currentClick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(currentFirst, "onClick");
+    const competingClick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(currentSecond, "onClick");
+    act(() => {
+      staleListRef(null);
+      staleRowRef(null);
+      click(mouseSource(first));
+    });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onPick).not.toHaveBeenCalled();
+    act(() => {
+      currentClick(mouseSource(currentFirst));
+      competingClick(mouseSource(currentSecond));
+      currentClick(mouseSource(currentFirst));
+      click(mouseSource(first));
+    });
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledWith("octocat");
+    expect(onPick).toHaveBeenCalledOnce();
+    expect(onPick).toHaveBeenCalledWith("octocat");
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
   it("gates every captured A input and option handler while reused-DOM B remains usable", async () => {
     searchUsers.mockImplementation(() => answer("octocat", "octodog"));
     const onChangeA = vi.fn();
     const onPickA = vi.fn();
     const onChangeB = vi.fn();
     const onPickB = vi.fn();
-    const rendered = render(
-      <AuthorityBoundary
-        instance="same"
-        value="octo"
-        onChange={onChangeA}
-        onPick={onPickA}
-        exclude={[]}
-      />,
-    );
+    const rendered = render(<AuthorityBoundary instance="same" value="octo" onChange={onChangeA} onPick={onPickA} exclude={[]} />);
     const exactInput = input();
     exactInput.focus();
     await settle();
     const control = exactInput.parentElement as HTMLDivElement;
+    const retiredList = screen.getByTestId("share-login-suggestions");
     const retiredOption = screen.getAllByTestId("share-login-option")[0];
+    const staleRefs = {
+      control: reactRef(control),
+      input: reactRef(exactInput),
+      list: reactRef(retiredList),
+      row: reactRef(retiredOption),
+    };
     const stale = {
       change: reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(exactInput, "onChange"),
       focus: reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onFocus"),
       keydown: reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown"),
       blur: reactHandler<(event: FocusEvent<HTMLDivElement>) => void>(control, "onBlur"),
-      enter: reactHandler<() => void>(retiredOption, "onMouseEnter"),
+      enter: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onMouseEnter"),
       down: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onMouseDown"),
-      click: reactHandler<() => void>(retiredOption, "onClick"),
+      click: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onClick"),
     };
     const keyPrevent = vi.fn();
     const pointerPrevent = vi.fn();
     let reusedInputAtBoundary = false;
+    let reusedControlAtBoundary = false;
     let emptyAtBoundary = false;
 
     rendered.rerender(
@@ -1115,9 +1312,16 @@ describe("CollaboratorLoginInput", () => {
         boundary={1}
         onBoundary={() => {
           reusedInputAtBoundary = input() === exactInput;
+          reusedControlAtBoundary = input().parentElement === control;
           emptyAtBoundary = screen.queryByTestId("share-login-option") === null;
-          stale.change({ currentTarget: exactInput, target: exactInput } as ChangeEvent<HTMLInputElement>);
-          stale.focus({ currentTarget: exactInput, target: exactInput } as FocusEvent<HTMLInputElement>);
+          stale.change({
+            currentTarget: exactInput,
+            target: exactInput,
+          } as ChangeEvent<HTMLInputElement>);
+          stale.focus({
+            currentTarget: exactInput,
+            target: exactInput,
+          } as FocusEvent<HTMLInputElement>);
           stale.keydown({
             key: "ArrowDown",
             currentTarget: exactInput,
@@ -1129,18 +1333,19 @@ describe("CollaboratorLoginInput", () => {
             target: control,
             relatedTarget: null,
           } as unknown as FocusEvent<HTMLDivElement>);
-          stale.enter();
+          stale.enter(mouseSource(retiredOption));
           stale.down({
             currentTarget: retiredOption,
             target: retiredOption,
             preventDefault: pointerPrevent,
           } as unknown as MouseEvent<HTMLLIElement>);
-          stale.click();
+          stale.click(mouseSource(retiredOption));
         }}
       />,
     );
 
     expect(reusedInputAtBoundary).toBe(true);
+    expect(reusedControlAtBoundary).toBe(true);
     expect(emptyAtBoundary).toBe(true);
     expect(keyPrevent).not.toHaveBeenCalled();
     expect(pointerPrevent).not.toHaveBeenCalled();
@@ -1150,6 +1355,15 @@ describe("CollaboratorLoginInput", () => {
     expect(onPickB).not.toHaveBeenCalled();
     expect(options()).toEqual(["octodog"]);
     expect(input()).toHaveFocus();
+    act(() => {
+      staleRefs.control(null);
+      staleRefs.input(null);
+      staleRefs.list(null);
+      staleRefs.row(null);
+    });
+    expect(options()).toEqual(["octodog"]);
+    expect(input()).toBe(exactInput);
+    expect(input().parentElement).toBe(control);
 
     const currentOption = screen.getByTestId("share-login-option");
     fireEvent.mouseEnter(currentOption);
@@ -1161,13 +1375,13 @@ describe("CollaboratorLoginInput", () => {
     expect(onPickB).toHaveBeenCalledOnce();
     expect(onPickB).toHaveBeenCalledWith("octodog");
     act(() => {
-      stale.enter();
+      stale.enter(mouseSource(retiredOption));
       stale.down({
         currentTarget: retiredOption,
         target: retiredOption,
         preventDefault: pointerPrevent,
       } as unknown as MouseEvent<HTMLLIElement>);
-      stale.click();
+      stale.click(mouseSource(retiredOption));
     });
     expect(onChangeB).toHaveBeenCalledOnce();
     expect(onPickB).toHaveBeenCalledOnce();
@@ -1179,16 +1393,15 @@ describe("CollaboratorLoginInput", () => {
 
   it("binds Retry to its exact error and callback set and starts one current request", async () => {
     const currentRetry = deferred<SearchAnswer>();
-    searchUsers
-      .mockRejectedValueOnce(new ApiError(503, "A failed"))
-      .mockRejectedValueOnce(new ApiError(503, "B failed"))
-      .mockReturnValueOnce(currentRetry.promise);
+    searchUsers.mockRejectedValueOnce(new ApiError(503, "A failed")).mockRejectedValueOnce(new ApiError(503, "B failed")).mockReturnValueOnce(currentRetry.promise);
     const onChangeA = vi.fn();
     const onChangeB = vi.fn();
     const rendered = render(<AuthorityBoundary instance="same" value="octo" onChange={onChangeA} exclude={[]} />);
     input().focus();
     await settle();
-    const staleRetry = reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick");
+    const retiredRetry = screen.getByRole("button", { name: "Retry" });
+    const staleRetry = reactHandler<(event: MouseEvent<HTMLButtonElement>) => void>(retiredRetry, "onClick");
+    const staleRetryRef = reactRef(retiredRetry);
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     let requestsAtBoundary = -1;
 
@@ -1200,8 +1413,8 @@ describe("CollaboratorLoginInput", () => {
         exclude={[]}
         boundary={1}
         onBoundary={() => {
-          staleRetry();
-          staleRetry();
+          staleRetry(buttonMouseSource(retiredRetry));
+          staleRetry(buttonMouseSource(retiredRetry));
           requestsAtBoundary = searchUsers.mock.calls.length;
         }}
       />,
@@ -1212,10 +1425,26 @@ describe("CollaboratorLoginInput", () => {
     await settle();
     expect(searchUsers).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("alert")).toHaveTextContent("B failed");
-    const retryB = reactHandler<() => void>(screen.getByRole("button", { name: "Retry" }), "onClick");
+    const currentRetryButton = screen.getByRole("button", { name: "Retry" });
+    const retryB = reactHandler<(event: MouseEvent<HTMLButtonElement>) => void>(currentRetryButton, "onClick");
+    const sibling = document.createElement("button");
+    const foreign = document.createElement("button");
+    const detached = document.createElement("button");
+    screen.getByRole("alert").append(sibling);
+    document.body.append(foreign);
     act(() => {
-      retryB();
-      retryB();
+      staleRetryRef(null);
+      retryB(buttonMouseSource(sibling));
+      retryB(buttonMouseSource(foreign));
+      retryB(buttonMouseSource(detached));
+    });
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+    expect(focus).not.toHaveBeenCalled();
+    sibling.remove();
+    foreign.remove();
+    act(() => {
+      retryB(buttonMouseSource(currentRetryButton));
+      retryB(buttonMouseSource(currentRetryButton));
     });
     expect(searchUsers).toHaveBeenCalledTimes(3);
     expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octo", "octo", "octo"]);
@@ -1231,79 +1460,79 @@ describe("CollaboratorLoginInput", () => {
     expect(onChangeB).not.toHaveBeenCalled();
   });
 
-  it.each(["DOM replacement", "removal"] as const)(
-    "retires A's exact request before the parent layout boundary on $transition",
-    async (transition) => {
-      const retired = deferred<SearchAnswer>();
-      const current = deferred<SearchAnswer>();
-      searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const onChangeA = vi.fn();
-      const onChangeB = vi.fn();
-      let aborts = 0;
-      let abortedAtBoundary = false;
-      let stalePreventedAtBoundary = false;
-      let inputAbsentAtBoundary = false;
+  it.each(["DOM replacement", "removal"] as const)("retires A's exact request before the parent layout boundary on $transition", async (transition) => {
+    const retired = deferred<SearchAnswer>();
+    const current = deferred<SearchAnswer>();
+    searchUsers.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onChangeA = vi.fn();
+    const onChangeB = vi.fn();
+    let aborts = 0;
+    let abortedAtBoundary = false;
+    let stalePreventedAtBoundary = false;
+    let inputAbsentAtBoundary = false;
 
-      try {
-        await act(async () => {
-          root.render(<AuthorityBoundary instance="A" value="octo" onChange={onChangeA} exclude={[]} />);
-        });
-        const retiredInput = input();
-        retiredInput.focus();
-        await settle();
-        const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
-        retiredSignal?.addEventListener("abort", () => {
-          aborts++;
-        });
-        const staleChange = reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(retiredInput, "onChange");
-        const staleKeydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(retiredInput, "onKeyDown");
+    try {
+      await act(async () => {
+        root.render(<AuthorityBoundary instance="A" value="octo" onChange={onChangeA} exclude={[]} />);
+      });
+      const retiredInput = input();
+      retiredInput.focus();
+      await settle();
+      const retiredSignal = searchUsers.mock.calls[0][1]?.signal;
+      retiredSignal?.addEventListener("abort", () => {
+        aborts++;
+      });
+      const staleChange = reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(retiredInput, "onChange");
+      const staleKeydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(retiredInput, "onKeyDown");
 
-        await act(async () => {
-          root.render(
-            <AuthorityBoundary
-              instance="B"
-              value="octo"
-              onChange={onChangeB}
-              exclude={[]}
-              present={transition === "DOM replacement"}
-              boundary={1}
-              onBoundary={() => {
-                abortedAtBoundary = retiredSignal?.aborted === true;
-                const preventDefault = vi.fn();
-                staleChange({ currentTarget: retiredInput, target: retiredInput } as ChangeEvent<HTMLInputElement>);
-                staleKeydown({
-                  key: "ArrowDown",
-                  currentTarget: retiredInput,
-                  target: retiredInput,
-                  preventDefault,
-                } as unknown as KeyboardEvent<HTMLInputElement>);
-                stalePreventedAtBoundary = preventDefault.mock.calls.length > 0;
-                inputAbsentAtBoundary = screen.queryByTestId("share-login") === null;
-              }}
-            />,
-          );
-        });
+      await act(async () => {
+        root.render(
+          <AuthorityBoundary
+            instance="B"
+            value="octo"
+            onChange={onChangeB}
+            exclude={[]}
+            present={transition === "DOM replacement"}
+            boundary={1}
+            onBoundary={() => {
+              abortedAtBoundary = retiredSignal?.aborted === true;
+              const preventDefault = vi.fn();
+              staleChange({
+                currentTarget: retiredInput,
+                target: retiredInput,
+              } as ChangeEvent<HTMLInputElement>);
+              staleKeydown({
+                key: "ArrowDown",
+                currentTarget: retiredInput,
+                target: retiredInput,
+                preventDefault,
+              } as unknown as KeyboardEvent<HTMLInputElement>);
+              stalePreventedAtBoundary = preventDefault.mock.calls.length > 0;
+              inputAbsentAtBoundary = screen.queryByTestId("share-login") === null;
+            }}
+          />,
+        );
+      });
 
-        expect(abortedAtBoundary).toBe(true);
-        expect(aborts).toBe(1);
-        expect(stalePreventedAtBoundary).toBe(false);
-        expect(onChangeA).not.toHaveBeenCalled();
-        expect(onChangeB).not.toHaveBeenCalled();
-        expect(inputAbsentAtBoundary).toBe(transition === "removal");
-        if (transition === "DOM replacement") expect(input()).not.toBe(retiredInput);
+      expect(abortedAtBoundary).toBe(true);
+      expect(aborts).toBe(1);
+      expect(stalePreventedAtBoundary).toBe(false);
+      expect(onChangeA).not.toHaveBeenCalled();
+      expect(onChangeB).not.toHaveBeenCalled();
+      expect(inputAbsentAtBoundary).toBe(transition === "removal");
+      if (transition === "DOM replacement") expect(input()).not.toBe(retiredInput);
 
-        await act(async () => {
-          retired.resolve({ users: [user("retired-user")], limited: false });
-          await retired.promise;
-        });
-        expect(screen.queryByText("@retired-user")).toBeNull();
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
+      await act(async () => {
+        retired.resolve({ users: [user("retired-user")], limited: false });
+        await retired.promise;
+      });
+      expect(screen.queryByText("@retired-user")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
