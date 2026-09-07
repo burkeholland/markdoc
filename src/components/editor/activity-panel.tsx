@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Activity as ActivityIcon, Bot, Loader2, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api, apiErrorText, type ActivityItemDto } from "@/lib/api";
@@ -16,12 +16,15 @@ const REFRESH_MS = 30_000;
 const PAGE = 50;
 
 type ActivityVisit = {
+  session: CollabSession;
   documentId: string;
+  onClose: () => void;
 };
 
 type CadenceOperation = {
   visit: ActivityVisit;
   timer: ReturnType<typeof setInterval>;
+  cleared: boolean;
 };
 
 type RefreshOperation = {
@@ -153,7 +156,15 @@ export function ActivityPanel(props: ActivityPanelProps) {
 }
 
 function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
-  const visit = useMemo<ActivityVisit>(() => ({ documentId: session.docId }), [session.docId]);
+  const documentId = session.docId;
+  const visit = useMemo<ActivityVisit>(
+    () => ({
+      session,
+      documentId,
+      onClose,
+    }),
+    [session, documentId, onClose],
+  );
   const [items, setItems] = useState<ActivityItemDto[] | null>(null);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -161,70 +172,83 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [retrying, setRetrying] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  const expanded = useRef(false);
-  const activeVisit = useRef<ActivityVisit | null>(visit);
-  const cadenceOperation = useRef<CadenceOperation | null>(null);
-  const nextBeforeRef = useRef<string | null>(null);
+  const activeVisit = useRef<ActivityVisit | null>(null);
+  const retiredVisits = useRef(new WeakSet<ActivityVisit>());
+  const cadenceOperations = useRef(new Map<ActivityVisit, CadenceOperation>());
+  const refreshOperations = useRef(new Map<ActivityVisit, RefreshOperation>());
+  const loadMoreOperations = useRef(new Map<ActivityVisit, LoadMoreOperation>());
+  const cursors = useRef(new Map<ActivityVisit, string | null>());
+  const expandedVisits = useRef(new WeakSet<ActivityVisit>());
   const refreshSequence = useRef(0);
-  const refreshOperation = useRef<RefreshOperation | null>(null);
   const loadMoreSequence = useRef(0);
-  const loadMoreOperation = useRef<LoadMoreOperation | null>(null);
 
-  const retireVisit = useCallback((owner: ActivityVisit) => {
-    if (activeVisit.current !== owner) return;
-    activeVisit.current = null;
-    const cadence = cadenceOperation.current;
-    if (cadence?.visit === owner) {
-      cadenceOperation.current = null;
-      clearInterval(cadence.timer);
-    }
-    if (refreshOperation.current?.visit === owner) refreshOperation.current = null;
-    if (loadMoreOperation.current?.visit === owner) loadMoreOperation.current = null;
+  const clearCadence = useCallback((operation: CadenceOperation) => {
+    if (operation.cleared) return;
+    operation.cleared = true;
+    clearInterval(operation.timer);
   }, []);
 
-  const ownsVisit = useCallback((owner: ActivityVisit) => activeVisit.current === owner, []);
+  const retireVisit = useCallback(
+    (owner: ActivityVisit) => {
+      if (retiredVisits.current.has(owner)) return;
+      retiredVisits.current.add(owner);
+      if (activeVisit.current === owner) activeVisit.current = null;
+      const cadence = cadenceOperations.current.get(owner);
+      if (cadence) {
+        cadenceOperations.current.delete(owner);
+        clearCadence(cadence);
+      }
+      refreshOperations.current.delete(owner);
+      loadMoreOperations.current.delete(owner);
+      cursors.current.delete(owner);
+      expandedVisits.current.delete(owner);
+    },
+    [clearCadence],
+  );
+
+  const ownsVisit = useCallback(
+    (owner: ActivityVisit) => !retiredVisits.current.has(owner) && activeVisit.current === owner,
+    [],
+  );
   const ownsRefresh = useCallback(
-    (operation: RefreshOperation) => ownsVisit(operation.visit) && refreshOperation.current === operation,
+    (operation: RefreshOperation) =>
+      ownsVisit(operation.visit) && refreshOperations.current.get(operation.visit) === operation,
     [ownsVisit],
   );
   const ownsLoadMoreRequest = useCallback(
-    (operation: LoadMoreOperation) => ownsVisit(operation.visit) && loadMoreOperation.current === operation,
+    (operation: LoadMoreOperation) =>
+      ownsVisit(operation.visit) && loadMoreOperations.current.get(operation.visit) === operation,
     [ownsVisit],
   );
   const ownsLoadMoreSettlement = useCallback(
     (operation: LoadMoreOperation) =>
-      ownsLoadMoreRequest(operation) && nextBeforeRef.current === operation.cursor,
+      ownsLoadMoreRequest(operation) && cursors.current.get(operation.visit) === operation.cursor,
     [ownsLoadMoreRequest],
   );
 
-  useLayoutEffect(() => {
-    activeVisit.current = visit;
-    return () => retireVisit(visit);
-  }, [retireVisit, visit]);
-
   // Reload the first page; older pages the user has already expanded are kept below it.
-  const refresh = useCallback((isRetry = false) => {
-    if (!ownsVisit(visit) || refreshOperation.current !== null) return;
-    const operation = { visit, id: ++refreshSequence.current };
-    refreshOperation.current = operation;
+  const refresh = useCallback((owner: ActivityVisit, isRetry = false) => {
+    if (!ownsVisit(owner) || refreshOperations.current.has(owner)) return;
+    const operation = { visit: owner, id: ++refreshSequence.current };
+    refreshOperations.current.set(owner, operation);
     if (isRetry) setRetrying(true);
 
     void (async () => {
       try {
-        const page = await api.documents.activity(visit.documentId, { limit: PAGE });
+        const page = await api.documents.activity(owner.documentId, { limit: PAGE });
         if (!ownsRefresh(operation)) return;
         setItems((prev) => {
-          if (!prev || !expanded.current) return page.items;
+          if (!prev || !expandedVisits.current.has(owner)) return page.items;
           const seen = new Set(page.items.map((i) => i.id));
           return [...page.items, ...prev.filter((i) => !seen.has(i.id))];
         });
-        if (!expanded.current) {
-          const pageOperation = loadMoreOperation.current;
-          if (pageOperation?.visit === visit && pageOperation.cursor !== page.nextBefore) {
-            loadMoreOperation.current = null;
+        if (!expandedVisits.current.has(owner)) {
+          const pageOperation = loadMoreOperations.current.get(owner);
+          if (pageOperation && pageOperation.cursor !== page.nextBefore) {
+            loadMoreOperations.current.delete(owner);
             setLoadingMore(false);
           }
-          nextBeforeRef.current = page.nextBefore;
+          cursors.current.set(owner, page.nextBefore);
           setNextBefore(page.nextBefore);
         }
         setListError(null);
@@ -234,35 +258,21 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
         setListError(apiErrorText(e, "Failed to load activity"));
       } finally {
         if (!ownsRefresh(operation)) return;
-        refreshOperation.current = null;
+        refreshOperations.current.delete(owner);
         if (isRetry) setRetrying(false);
       }
     })();
-  }, [ownsRefresh, ownsVisit, visit]);
+  }, [ownsRefresh, ownsVisit]);
 
   const retry = useCallback(() => {
-    refresh(true);
-  }, [refresh]);
+    refresh(visit, true);
+  }, [refresh, visit]);
 
-  useEffect(() => {
-    if (!ownsVisit(visit)) return;
-    refresh();
-    const timer = setInterval(() => {
-      refresh();
-    }, REFRESH_MS);
-    const cadence = { visit, timer };
-    cadenceOperation.current = cadence;
-    return () => {
-      clearInterval(timer);
-      if (cadenceOperation.current === cadence) cadenceOperation.current = null;
-    };
-  }, [ownsVisit, refresh, visit]);
-
-  const loadMore = () => {
-    const cursor = nextBeforeRef.current;
-    if (!ownsVisit(visit) || !cursor || loadMoreOperation.current !== null) return;
+  const loadMore = useCallback(() => {
+    const cursor = cursors.current.get(visit);
+    if (!ownsVisit(visit) || !cursor || loadMoreOperations.current.has(visit)) return;
     const operation = { visit, id: ++loadMoreSequence.current, cursor };
-    loadMoreOperation.current = operation;
+    loadMoreOperations.current.set(visit, operation);
     setLoadingMore(true);
 
     void (async () => {
@@ -273,25 +283,49 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
           const seen = new Set((prev ?? []).map((i) => i.id));
           return [...(prev ?? []), ...page.items.filter((i) => !seen.has(i.id))];
         });
-        nextBeforeRef.current = page.nextBefore;
+        cursors.current.set(visit, page.nextBefore);
         setNextBefore(page.nextBefore);
-        expanded.current = true;
+        expandedVisits.current.add(visit);
         setError(null);
       } catch (e) {
         if (!ownsLoadMoreSettlement(operation)) return;
         setError(apiErrorText(e, "Failed to load more"));
       } finally {
         if (!ownsLoadMoreRequest(operation)) return;
-        loadMoreOperation.current = null;
+        loadMoreOperations.current.delete(visit);
         setLoadingMore(false);
       }
     })();
-  };
+  }, [ownsLoadMoreRequest, ownsLoadMoreSettlement, ownsVisit, visit]);
 
-  const close = () => {
+  const close = useCallback(() => {
+    if (!ownsVisit(visit)) return;
     retireVisit(visit);
-    onClose();
-  };
+    visit.onClose();
+  }, [ownsVisit, retireVisit, visit]);
+
+  useLayoutEffect(() => {
+    retiredVisits.current.delete(visit);
+    activeVisit.current = visit;
+    cursors.current.set(visit, null);
+    expandedVisits.current.delete(visit);
+
+    setItems(null);
+    setNextBefore(null);
+    setError(null);
+    setListError(null);
+    setRetrying(false);
+    setLoadingMore(false);
+    setNow(Date.now());
+
+    const timer = setInterval(() => {
+      refresh(visit);
+    }, REFRESH_MS);
+    cadenceOperations.current.set(visit, { visit, timer, cleared: false });
+    refresh(visit);
+
+    return () => retireVisit(visit);
+  }, [refresh, retireVisit, visit]);
 
   const groups = useMemo(() => groupByDay(items ?? []), [items]);
 
@@ -359,7 +393,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
               </div>
             ))}
             {nextBefore && (
-              <button type="button" className={cn("btn btn-sm btn-ghost w-full justify-center gap-1.5")} onClick={() => void loadMore()} disabled={loadingMore} data-testid="activity-load-more">
+              <button type="button" className={cn("btn btn-sm btn-ghost w-full justify-center gap-1.5")} onClick={loadMore} disabled={loadingMore} data-testid="activity-load-more">
                 {loadingMore && <Loader2 size={13} className="animate-spin" />}
                 Load more
               </button>

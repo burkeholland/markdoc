@@ -53,6 +53,33 @@ function ActivityBoundary({
   return present ? <ActivityPanel session={session(documentId)} onClose={() => {}} /> : null;
 }
 
+function ActivityVisitBoundary({
+  session,
+  onClose,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  session: CollabSession;
+  onClose: () => void;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <ActivityPanel session={session} onClose={onClose} /> : null;
+}
+
+function captureClick(element: HTMLElement): () => void {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the element");
+  const props = (element as unknown as Record<string, { onClick?: () => void }>)[propsKey];
+  if (!props.onClick) throw new Error("Element does not have an onClick handler");
+  return props.onClick;
+}
+
 function row(id: string, actorName: string): ActivityItemDto {
   return {
     id,
@@ -77,6 +104,7 @@ afterEach(async () => {
   process.off("unhandledRejection", recordUnhandledRejection);
   vi.clearAllTimers();
   vi.useRealTimers();
+  vi.restoreAllMocks();
   expect(unhandledRejections).toEqual([]);
 });
 
@@ -134,6 +162,206 @@ describe("ActivityPanel list recovery", () => {
     later.resolve({ items: [row("later", "Later editor")], nextBefore: null });
     await act(async () => {});
     expect(screen.getByText("Later editor")).toBeInTheDocument();
+  });
+
+  it.each(["stale-first", "current-first"] as const)(
+    "gives a same-document replacement sole authority when %s work settles first",
+    async (settlementOrder) => {
+      const intervalCallbacks: Array<() => void> = [];
+      const reusedHandle = 41 as unknown as ReturnType<typeof setInterval>;
+      const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+        intervalCallbacks.push(handler as () => void);
+        return reusedHandle;
+      });
+      const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+      const sharedPage = { items: [row("shared", "Shared editor")], nextBefore: "shared-cursor" };
+      const failedRefresh = deferred<ActivityPageDto>();
+      const retiredRetry = deferred<ActivityPageDto>();
+      const retiredPage = deferred<ActivityPageDto>();
+      const currentRefresh = deferred<ActivityPageDto>();
+      const currentPage = deferred<ActivityPageDto>();
+      const responses = [
+        Promise.resolve(sharedPage),
+        failedRefresh.promise,
+        retiredRetry.promise,
+        retiredPage.promise,
+        currentRefresh.promise,
+        currentPage.promise,
+      ];
+      activity.mockImplementation(() => {
+        const response = responses.shift();
+        if (!response) throw new Error("Unexpected activity request");
+        return response;
+      });
+      const firstSession = session("same-document");
+      const currentSession = session("same-document");
+      const firstClose = vi.fn();
+      const currentClose = vi.fn();
+
+      const rendered = render(<ActivityVisitBoundary session={firstSession} onClose={firstClose} />);
+      await act(async () => {});
+      const oldClose = captureClick(screen.getByRole("button", { name: "Close activity" }));
+      const oldLoadMore = captureClick(screen.getByRole("button", { name: "Load more" }));
+
+      await act(async () => {
+        intervalCallbacks[0]();
+        failedRefresh.reject("refresh unavailable");
+      });
+      const oldRetry = captureClick(screen.getByRole("button", { name: "Retry" }));
+      act(() => {
+        oldRetry();
+        oldLoadMore();
+      });
+      expect(activity).toHaveBeenCalledTimes(4);
+
+      let clearsAtBoundary = -1;
+      let intervalsAtBoundary = -1;
+      rendered.rerender(
+        <ActivityVisitBoundary
+          session={currentSession}
+          onClose={currentClose}
+          boundary={1}
+          onBoundary={() => {
+            clearsAtBoundary = clearIntervalSpy.mock.calls.length;
+            intervalsAtBoundary = setIntervalSpy.mock.calls.length;
+          }}
+        />,
+      );
+
+      expect(clearsAtBoundary).toBe(1);
+      expect(intervalsAtBoundary).toBe(2);
+      expect(activity).toHaveBeenCalledTimes(5);
+      expect(screen.queryByText("Shared editor")).toBeNull();
+      expect(screen.getByTestId("activity-panel").querySelector(".animate-spin")).not.toBeNull();
+
+      intervalCallbacks[0]();
+      oldRetry();
+      oldLoadMore();
+      oldClose();
+      expect(activity).toHaveBeenCalledTimes(5);
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(firstClose).not.toHaveBeenCalled();
+
+      await act(async () => {
+        intervalCallbacks[1]();
+        intervalCallbacks[1]();
+      });
+      expect(activity).toHaveBeenCalledTimes(5);
+
+      const settleRetired = async () => {
+        retiredRetry.resolve(sharedPage);
+        retiredPage.resolve(sharedPage);
+        await Promise.all([retiredRetry.promise, retiredPage.promise]);
+      };
+
+      if (settlementOrder === "stale-first") {
+        const beforeRetiredSettlements = screen.getByTestId("activity-panel").innerHTML;
+        await act(settleRetired);
+        expect(screen.getByTestId("activity-panel").innerHTML).toBe(beforeRetiredSettlements);
+        currentRefresh.resolve(sharedPage);
+        await act(async () => {});
+      } else {
+        currentRefresh.resolve(sharedPage);
+        await act(async () => {});
+        const beforeRetiredSettlements = screen.getByTestId("activity-panel").innerHTML;
+        await act(settleRetired);
+        expect(screen.getByTestId("activity-panel").innerHTML).toBe(beforeRetiredSettlements);
+      }
+
+      expect(screen.getByText("Shared editor")).toBeInTheDocument();
+      const currentLoadMore = captureClick(screen.getByRole("button", { name: "Load more" }));
+      act(() => {
+        currentLoadMore();
+        currentLoadMore();
+      });
+      expect(activity).toHaveBeenCalledTimes(6);
+      expect(activity).toHaveBeenLastCalledWith("same-document", { before: "shared-cursor", limit: 50 });
+      expect(screen.getByTestId("activity-load-more")).toBeDisabled();
+
+      oldRetry();
+      oldLoadMore();
+      oldClose();
+      intervalCallbacks[0]();
+      expect(activity).toHaveBeenCalledTimes(6);
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("activity-load-more")).toBeDisabled();
+
+      currentPage.resolve({
+        items: [row("older", "Earlier editor"), row("shared", "Duplicate shared editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.getAllByTestId("activity-row")).toHaveLength(2);
+      expect(screen.getByText("Earlier editor")).toBeInTheDocument();
+      expect(screen.queryByText("Duplicate shared editor")).toBeNull();
+
+      const closeCurrent = captureClick(screen.getByRole("button", { name: "Close activity" }));
+      closeCurrent();
+      closeCurrent();
+      intervalCallbacks[1]();
+      expect(currentClose).toHaveBeenCalledOnce();
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
+      expect(clearIntervalSpy).toHaveBeenNthCalledWith(1, reusedHandle);
+      expect(clearIntervalSpy).toHaveBeenNthCalledWith(2, reusedHandle);
+      expect(activity).toHaveBeenCalledTimes(6);
+
+      rendered.unmount();
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("retires a callback-only visit before its replacement reaches the parent layout boundary", async () => {
+    const intervalCallbacks: Array<() => void> = [];
+    const reusedHandle = 73 as unknown as ReturnType<typeof setInterval>;
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+      intervalCallbacks.push(handler as () => void);
+      return reusedHandle;
+    });
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+    const retiredRequest = deferred<ActivityPageDto>();
+    const currentRequest = deferred<ActivityPageDto>();
+    activity.mockReturnValueOnce(retiredRequest.promise).mockReturnValueOnce(currentRequest.promise);
+    const stableSession = session("callback-replacement");
+    const retiredClose = vi.fn();
+    const currentClose = vi.fn();
+
+    const rendered = render(<ActivityVisitBoundary session={stableSession} onClose={retiredClose} />);
+    const oldClose = captureClick(screen.getByRole("button", { name: "Close activity" }));
+    let clearsAtBoundary = -1;
+    rendered.rerender(
+      <ActivityVisitBoundary
+        session={stableSession}
+        onClose={currentClose}
+        boundary={1}
+        onBoundary={() => {
+          clearsAtBoundary = clearIntervalSpy.mock.calls.length;
+        }}
+      />,
+    );
+
+    expect(clearsAtBoundary).toBe(1);
+    expect(intervalCallbacks).toHaveLength(2);
+    expect(activity).toHaveBeenCalledTimes(2);
+    oldClose();
+    intervalCallbacks[0]();
+    expect(retiredClose).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenCalledTimes(2);
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+
+    currentRequest.resolve({ items: [row("current", "Current editor")], nextBefore: null });
+    await act(async () => {});
+    const currentPublication = screen.getByTestId("activity-panel").innerHTML;
+    retiredRequest.resolve({ items: [row("retired", "Retired editor")], nextBefore: null });
+    await act(async () => {});
+    expect(screen.getByTestId("activity-panel").innerHTML).toBe(currentPublication);
+
+    const closeCurrent = captureClick(screen.getByRole("button", { name: "Close activity" }));
+    closeCurrent();
+    closeCurrent();
+    expect(currentClose).toHaveBeenCalledOnce();
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
+    rendered.unmount();
+    expect(clearIntervalSpy).toHaveBeenCalledTimes(2);
   });
 
   it("keeps expanded rows through a refresh failure and a successful retry", async () => {
