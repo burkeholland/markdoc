@@ -774,62 +774,538 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
   );
 }
 
-type ModeSwitcherVisit = {
-  session: CollabSession;
-  editable: boolean;
-};
+interface ModeSwitcherVisit {
+  readonly mount: symbol;
+  readonly session: CollabSession;
+}
 
-type ModeSwitcherState = {
-  visit: ModeSwitcherVisit;
-  open: boolean;
-};
+interface ModeSwitcherState {
+  readonly visit: ModeSwitcherVisit;
+  readonly open: boolean;
+}
 
-function isEditMode(value: string): value is EditMode {
-  return value === "editing" || value === "suggesting" || value === "viewing";
+interface ModeSwitcherRowAuthority {
+  readonly index: number;
+  readonly value: EditMode;
+  readonly label: string;
+  readonly description: string;
+  readonly eligible: boolean;
+}
+
+interface ModeSwitcherDom {
+  readonly trigger: HTMLButtonElement | null;
+  readonly content: HTMLDivElement | null;
+  readonly group: HTMLDivElement | null;
+  readonly rows: readonly (HTMLDivElement | null)[];
+  readonly reader: HTMLDivElement | null;
+}
+
+interface ModeSwitcherAuthority {
+  readonly visit: ModeSwitcherVisit;
+  readonly session: CollabSession;
+  readonly docId: string;
+  readonly role: CollabSession["role"];
+  readonly editable: boolean;
+  readonly mode: EditMode;
+  readonly open: boolean;
+  readonly setMode: CollabSession["setMode"];
+  readonly dom: ModeSwitcherDom;
+  readonly reader: Readonly<{
+    url: string;
+    target: "_blank";
+    features: "noopener";
+  }>;
+  readonly rows: readonly ModeSwitcherRowAuthority[];
+}
+
+interface ModeSwitcherRowPublication extends ModeSwitcherRowAuthority {
+  readonly capture: (element: HTMLDivElement | null) => void;
+  readonly onSelect: (event: Event) => void;
+}
+
+interface ModeSwitcherDisclosureIntent {
+  readonly publication: ModeSwitcherPresentation;
+  readonly open: boolean;
+  readonly claim: () => boolean;
+}
+
+interface ModeSwitcherSelectionIntent {
+  readonly publication: ModeSwitcherPresentation;
+  readonly row: ModeSwitcherRowPublication;
+  readonly claim: () => boolean;
+}
+
+interface ModeSwitcherFocusIntent {
+  readonly publication: ModeSwitcherPresentation;
+  readonly target: HTMLButtonElement;
+}
+
+interface ModeSwitcherCells {
+  active: ModeSwitcherPresentation | null;
+  disclosureIntent: ModeSwitcherDisclosureIntent | null;
+  selectionIntent: ModeSwitcherSelectionIntent | null;
+  focusIntent: ModeSwitcherFocusIntent | null;
+  readonly issuedEvents: WeakSet<object>;
+}
+
+interface ModeSwitcherPresentation {
+  readonly authority: ModeSwitcherAuthority;
+  readonly rows: readonly ModeSwitcherRowPublication[];
+  readonly captureTrigger: (element: HTMLButtonElement | null) => void;
+  readonly captureContent: (element: HTMLDivElement | null) => void;
+  readonly captureGroup: (element: HTMLDivElement | null) => void;
+  readonly captureReader: (element: HTMLDivElement | null) => void;
+  readonly establish: () => void;
+  readonly retire: () => boolean;
+  readonly onTriggerPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onModeChange: (value: string) => void;
+  readonly onReaderSelect: (event: Event) => void;
+  readonly onEscapeKeyDown: (event: KeyboardEvent) => void;
+  readonly onOutside: (event: CustomEvent<{ originalEvent: Event }>) => void;
+}
+
+function createModeSwitcherPresentation({
+  authority,
+  cells,
+  commitOpen,
+  captureTrigger,
+  captureContent,
+  captureGroup,
+  captureRows,
+  captureReader,
+}: {
+  authority: ModeSwitcherAuthority;
+  cells: ModeSwitcherCells;
+  commitOpen: (state: ModeSwitcherState) => void;
+  captureTrigger: (element: HTMLButtonElement | null) => void;
+  captureContent: (element: HTMLDivElement | null) => void;
+  captureGroup: (element: HTMLDivElement | null) => void;
+  captureRows: readonly ((element: HTMLDivElement | null) => void)[];
+  captureReader: (element: HTMLDivElement | null) => void;
+}): ModeSwitcherPresentation {
+  const factsAreCurrent = () => {
+    const currentEditable = authority.session.role === "owner" || authority.session.role === "editor";
+    return (
+      authority.visit.session === authority.session
+      && authority.session.docId === authority.docId
+      && authority.session.role === authority.role
+      && currentEditable === authority.editable
+      && authority.session.mode === authority.mode
+      && authority.session.setMode === authority.setMode
+    );
+  };
+  const exactDomIsCurrent = () => {
+    const { trigger, content, group, reader } = authority.dom;
+    if (
+      !trigger
+      || !trigger.isConnected
+      || trigger.ownerDocument !== document
+      || trigger.getAttribute("data-testid") !== "mode-switcher"
+      || trigger.getAttribute("aria-expanded") !== String(authority.open)
+      || trigger.getAttribute("data-state") !== (authority.open ? "open" : "closed")
+    ) return false;
+
+    if (!authority.open) {
+      return content === null
+        && group === null
+        && reader === null
+        && authority.dom.rows.every((element) => element === null);
+    }
+    if (
+      !content
+      || !group
+      || !reader
+      || !content.isConnected
+      || !group.isConnected
+      || !reader.isConnected
+      || content.ownerDocument !== trigger.ownerDocument
+      || content.getAttribute("role") !== "menu"
+      || content.getAttribute("data-state") !== "open"
+      || group.parentElement !== content
+      || reader.parentElement !== content
+      || reader.getAttribute("role") !== "menuitem"
+      || content.children.length !== 3
+      || content.firstElementChild !== group
+      || content.lastElementChild !== reader
+      || group.nextElementSibling?.nextElementSibling !== reader
+      || group.children.length !== authority.rows.length
+    ) return false;
+
+    return rows.every((row) => {
+      const source = authority.rows[row.index];
+      const element = authority.dom.rows[row.index];
+      return (
+        source?.index === row.index
+        && source.value === row.value
+        && source.label === row.label
+        && source.description === row.description
+        && source.eligible === row.eligible
+        && !!element
+        && element.isConnected
+        && element.parentElement === group
+        && group.children.item(row.index) === element
+        && element.getAttribute("role") === "menuitemradio"
+        && element.getAttribute("aria-checked") === String(row.value === authority.mode)
+        && (element.getAttribute("aria-disabled") === "true") === !row.eligible
+      );
+    });
+  };
+  const ownsPresentation = () => cells.active === publication && factsAreCurrent() && exactDomIsCurrent();
+  const eventCapability = (event: object, prove: () => boolean) => {
+    if (cells.issuedEvents.has(event) || !prove()) return null;
+    cells.issuedEvents.add(event);
+    let claimed = false;
+    return () => {
+      if (claimed || !prove()) return false;
+      claimed = true;
+      return true;
+    };
+  };
+  const connectedControl = (element: HTMLElement | null, expected: HTMLElement | null) => {
+    const content = authority.dom.content;
+    return (
+      ownsPresentation()
+      && !!content
+      && !!element
+      && element === expected
+      && element.isConnected
+      && content.isConnected
+      && content.contains(element)
+    );
+  };
+  const preparedClose = (): ModeSwitcherDisclosureIntent | null => {
+    if (!ownsPresentation() || !authority.open) return null;
+    const { trigger, content } = authority.dom;
+    if (!trigger || !content) return null;
+    let used = false;
+    return Object.freeze({
+      publication,
+      open: false,
+      claim: () => {
+        if (
+          used
+          || cells.active !== publication
+          || authority.dom.trigger !== trigger
+          || authority.dom.content !== content
+          || !trigger.isConnected
+          || !content.isConnected
+        ) return false;
+        used = true;
+        return true;
+      },
+    });
+  };
+  const publishDisclosure = (event: object, open: boolean, prove: () => boolean) => {
+    const claim = eventCapability(event, prove);
+    if (!claim) return;
+    cells.disclosureIntent = Object.freeze({ publication, open, claim });
+  };
+  const scheduleFocusReturn = (target: HTMLButtonElement) => {
+    const intent: ModeSwitcherFocusIntent = Object.freeze({ publication, target });
+    cells.focusIntent = intent;
+    queueMicrotask(() => {
+      if (
+        cells.focusIntent !== intent
+        || !target.isConnected
+        || target.ownerDocument !== document
+      ) return;
+      cells.focusIntent = null;
+      target.focus();
+    });
+  };
+  const onTriggerPointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const source = event.currentTarget;
+    if (event.defaultPrevented || event.button !== 0 || event.ctrlKey) return;
+    publishDisclosure(event, !authority.open, () => (
+      source === authority.dom.trigger
+      && source.isConnected
+      && ownsPresentation()
+    ));
+  };
+  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.defaultPrevented || !["Enter", " ", "ArrowDown"].includes(event.key)) return;
+    const source = event.currentTarget;
+    const open = event.key === "ArrowDown" ? true : !authority.open;
+    publishDisclosure(event, open, () => (
+      source === authority.dom.trigger
+      && source.isConnected
+      && ownsPresentation()
+    ));
+  };
+  const onOpenChange = (open: boolean) => {
+    const intent = cells.disclosureIntent;
+    if (
+      intent?.publication !== publication
+      || intent.open !== open
+      || !intent.claim()
+    ) return;
+    cells.disclosureIntent = null;
+    if (authority.open === open) return;
+    publication.retire();
+    commitOpen(Object.freeze({ visit: authority.visit, open }));
+  };
+  const onModeChange = (value: string) => {
+    const intent = cells.selectionIntent;
+    if (
+      intent?.publication !== publication
+      || intent.row.value !== value
+      || !intent.row.eligible
+      || !intent.claim()
+    ) return;
+    const close = preparedClose();
+    if (!close) return;
+    const returnTarget = authority.dom.trigger;
+    if (!returnTarget) return;
+    cells.selectionIntent = null;
+    cells.disclosureIntent = close;
+    scheduleFocusReturn(returnTarget);
+    onOpenChange(false);
+    authority.setMode.call(authority.session, intent.row.value);
+  };
+  const onReaderSelect = (event: Event) => {
+    const source = event.currentTarget;
+    const claim = eventCapability(event, () => connectedControl(
+      source instanceof HTMLDivElement ? source : null,
+      authority.dom.reader,
+    ));
+    if (!claim || !claim()) return;
+    const close = preparedClose();
+    if (!close) return;
+    const returnTarget = authority.dom.trigger;
+    if (!returnTarget) return;
+    cells.selectionIntent = null;
+    cells.disclosureIntent = close;
+    scheduleFocusReturn(returnTarget);
+    onOpenChange(false);
+    window.open(authority.reader.url, authority.reader.target, authority.reader.features);
+  };
+  const onEscapeKeyDown = (event: KeyboardEvent) => {
+    const target = event.target;
+    const content = authority.dom.content;
+    if (
+      event.defaultPrevented
+      || event.key !== "Escape"
+      || !content
+      || !(target instanceof Node)
+      || event.currentTarget instanceof Element
+    ) return;
+    publishDisclosure(event, false, () => (
+      ownsPresentation()
+      && authority.dom.content === content
+      && content.isConnected
+      && target.isConnected
+      && content.contains(target)
+    ));
+  };
+  const onOutside = (event: CustomEvent<{ originalEvent: Event }>) => {
+    const originalTarget = event.detail?.originalEvent?.target;
+    const { content, trigger } = authority.dom;
+    if (
+      event.defaultPrevented
+      || !content
+      || !trigger
+      || !(originalTarget instanceof Node)
+      || event.target !== originalTarget
+      || event.currentTarget !== originalTarget
+      || content.contains(originalTarget)
+      || trigger.contains(originalTarget)
+    ) return;
+    publishDisclosure(event, false, () => (
+      ownsPresentation()
+      && authority.dom.content === content
+      && authority.dom.trigger === trigger
+      && content.isConnected
+      && trigger.isConnected
+      && originalTarget.isConnected
+      && !content.contains(originalTarget)
+      && !trigger.contains(originalTarget)
+    ));
+  };
+  const retire = () => {
+    const wasActive = cells.active === publication;
+    if (wasActive) cells.active = null;
+    if (cells.disclosureIntent?.publication === publication) cells.disclosureIntent = null;
+    if (cells.selectionIntent?.publication === publication) cells.selectionIntent = null;
+    return wasActive;
+  };
+  const establish = () => {
+    const previous = cells.active;
+    if (previous && previous !== publication) previous.retire();
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
+    const focus = cells.focusIntent;
+    if (
+      focus
+      && (
+        focus.publication.authority.visit !== authority.visit
+        || authority.open
+        || focus.target !== authority.dom.trigger
+      )
+    ) cells.focusIntent = null;
+    cells.active = publication;
+  };
+  const rows: readonly ModeSwitcherRowPublication[] = authority.rows.map((row, index) => {
+    const rowPublication: ModeSwitcherRowPublication = Object.freeze({
+      ...row,
+      capture: captureRows[index]!,
+      onSelect: (event: Event) => {
+        if (!row.eligible) return;
+        const source = event.currentTarget;
+        const claim = eventCapability(event, () => (
+          rowPublication === rows[row.index]
+          && connectedControl(
+            source instanceof HTMLDivElement ? source : null,
+            authority.dom.rows[row.index],
+          )
+        ));
+        if (claim) {
+          cells.selectionIntent = Object.freeze({
+            publication,
+            row: rowPublication,
+            claim,
+          });
+        }
+      },
+    });
+    return rowPublication;
+  });
+  const publication: ModeSwitcherPresentation = Object.freeze({
+    authority,
+    rows: Object.freeze(rows),
+    captureTrigger,
+    captureContent,
+    captureGroup,
+    captureReader,
+    establish,
+    retire,
+    onTriggerPointerDown,
+    onTriggerKeyDown,
+    onOpenChange,
+    onModeChange,
+    onReaderSelect,
+    onEscapeKeyDown,
+    onOutside,
+  });
+  return publication;
+}
+
+function useModeSwitcherElement<T extends HTMLElement>(
+  cells: ModeSwitcherCells,
+  republish: () => void,
+) {
+  const [element, setElement] = useState<T | null>(null);
+  const attached = useRef<T | null>(null);
+  const capture = useCallback<React.RefCallback<T>>((next) => {
+    if (attached.current === next) return;
+    attached.current = next;
+    cells.active?.retire();
+    setElement(next);
+    republish();
+  }, [cells, republish]);
+  return [element, capture] as const;
+}
+
+function ModeSwitcherOpenCommit({ presentation }: { presentation: ModeSwitcherPresentation }) {
+  useLayoutEffect(() => {
+    presentation.establish();
+    return () => {
+      presentation.retire();
+    };
+  }, [presentation]);
+  return null;
 }
 
 export function ModeSwitcher({ session }: { session: CollabSession }) {
   const mode = useSessionValue(session, (s) => s.mode);
   const editable = session.role === "owner" || session.role === "editor";
-  const visit = useMemo<ModeSwitcherVisit>(() => ({ session, editable }), [editable, session]);
-  const initialState = useMemo<ModeSwitcherState>(() => ({ visit, open: false }), [visit]);
+  const [mount] = useState(() => Symbol("mode switcher"));
+  const visit = useMemo<ModeSwitcherVisit>(
+    () => Object.freeze({ mount, session }),
+    [mount, session],
+  );
+  const initialState = useMemo<ModeSwitcherState>(
+    () => Object.freeze({ visit, open: false }),
+    [visit],
+  );
   const [storedState, setStoredState] = useState<ModeSwitcherState>(initialState);
+  const [cells] = useState<ModeSwitcherCells>(() => ({
+    active: null,
+    disclosureIntent: null,
+    selectionIntent: null,
+    focusIntent: null,
+    issuedEvents: new WeakSet(),
+  }));
+  const [, setDomRevision] = useState(0);
+  const republishDom = useCallback(() => setDomRevision((current) => current + 1), []);
+  const [triggerElement, captureTriggerElement] = useModeSwitcherElement<HTMLButtonElement>(cells, republishDom);
+  const [contentElement, captureContentElement] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
+  const [groupElement, captureGroupElement] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
+  const [editingElement, captureEditing] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
+  const [suggestingElement, captureSuggesting] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
+  const [viewingElement, captureViewing] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
+  const [readerElement, captureReaderElement] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
   const state = storedState.visit === visit ? storedState : initialState;
-  const activeVisit = useRef<ModeSwitcherVisit | null>(null);
-  const ownsVisit = useCallback((owner: ModeSwitcherVisit) => activeVisit.current === owner, []);
-  const updateState = useCallback(
-    (update: (current: ModeSwitcherState) => ModeSwitcherState) => {
-      if (!ownsVisit(visit)) return;
-      setStoredState((current) => {
-        if (!ownsVisit(visit) || current.visit !== visit) return current;
-        return update(current);
-      });
-    },
-    [ownsVisit, visit],
-  );
-  useLayoutEffect(() => {
-    activeVisit.current = visit;
-    setStoredState((current) => (current.visit === visit ? current : initialState));
-    return () => {
-      if (activeVisit.current === visit) activeVisit.current = null;
-    };
-  }, [initialState, visit]);
+  const rows: readonly ModeSwitcherRowAuthority[] = Object.freeze([
+    Object.freeze({ index: 0, value: "editing", label: "Editing", description: "Edit the document directly", eligible: editable }),
+    Object.freeze({ index: 1, value: "suggesting", label: "Suggesting", description: "Edits become suggestions others can accept", eligible: editable }),
+    Object.freeze({ index: 2, value: "viewing", label: "Viewing", description: "Read or print the final document", eligible: true }),
+  ]);
+  const authority: ModeSwitcherAuthority = Object.freeze({
+    visit,
+    session,
+    docId: session.docId,
+    role: session.role,
+    editable,
+    mode,
+    open: state.open,
+    setMode: session.setMode,
+    dom: Object.freeze({
+      trigger: triggerElement,
+      content: contentElement,
+      group: groupElement,
+      rows: Object.freeze([editingElement, suggestingElement, viewingElement]),
+      reader: readerElement,
+    }),
+    reader: Object.freeze({
+      url: `/p/${session.docId}`,
+      target: "_blank",
+      features: "noopener",
+    }),
+    rows,
+  });
+  const presentation = createModeSwitcherPresentation({
+    authority,
+    cells,
+    commitOpen: setStoredState,
+    captureTrigger: captureTriggerElement,
+    captureContent: captureContentElement,
+    captureGroup: captureGroupElement,
+    captureRows: Object.freeze([captureEditing, captureSuggesting, captureViewing]),
+    captureReader: captureReaderElement,
+  });
 
-  const changeOpen = useCallback(
-    (open: boolean) => updateState((current) => (current.open === open ? current : { ...current, open })),
-    [updateState],
-  );
-  const changeMode = useCallback(
-    (value: string) => {
-      if (!ownsVisit(visit) || !isEditMode(value) || (!visit.editable && value !== "viewing")) return;
-      visit.session.setMode(value);
-    },
-    [ownsVisit, visit],
-  );
-  const openReader = useCallback(() => {
-    if (!ownsVisit(visit)) return;
-    window.open(`/p/${visit.session.docId}`, "_blank", "noopener");
-  }, [ownsVisit, visit]);
+  useLayoutEffect(() => {
+    presentation.establish();
+    return () => {
+      presentation.retire();
+    };
+  }, [presentation]);
+  const {
+    captureTrigger,
+    captureContent,
+    captureGroup,
+    captureReader,
+    onTriggerPointerDown,
+    onTriggerKeyDown,
+    onOpenChange,
+    onModeChange,
+    onReaderSelect,
+    onEscapeKeyDown,
+    onOutside,
+    rows: publishedRows,
+  } = presentation;
+
   const icons: Record<EditMode, React.ReactNode> = {
     editing: <PenLine size={15} />,
     suggesting: <MessageSquarePlus size={15} />,
@@ -837,14 +1313,17 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
   };
   const labels: Record<EditMode, string> = { editing: "Editing", suggesting: "Suggesting", viewing: "Viewing" };
   return (
-    <Menu open={state.open} onOpenChange={changeOpen}>
+    <Menu open={state.open} onOpenChange={onOpenChange}>
       <MenuTrigger asChild>
         <button
+          ref={captureTrigger}
           type="button"
           className={cn(
             "btn btn-sm gap-1.5 border",
             mode === "suggesting" ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300" : "border-line-2 bg-surface text-ink-2 hover:bg-surface-2",
           )}
+          onPointerDown={onTriggerPointerDown}
+          onKeyDown={onTriggerKeyDown}
           data-testid="mode-switcher"
         >
           {icons[mode]}
@@ -853,22 +1332,38 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
         </button>
       </MenuTrigger>
       {state.open && (
-        <MenuContent align="end" className="w-64">
-          <MenuRadioGroup value={mode} onValueChange={changeMode}>
-            <MenuRadioItem value="editing" disabled={!editable} description="Edit the document directly">
-              Editing
-            </MenuRadioItem>
-            <MenuRadioItem value="suggesting" disabled={!editable} description="Edits become suggestions others can accept">
-              Suggesting
-            </MenuRadioItem>
-            <MenuRadioItem value="viewing" description="Read or print the final document">
-              Viewing
-            </MenuRadioItem>
+        <MenuContent
+          ref={captureContent}
+          align="end"
+          className="w-64"
+          onEscapeKeyDown={onEscapeKeyDown}
+          onPointerDownOutside={onOutside}
+          onFocusOutside={onOutside}
+        >
+          <MenuRadioGroup ref={captureGroup} value={mode} onValueChange={onModeChange}>
+            {publishedRows.map((row) => (
+              <MenuRadioItem
+                key={row.value}
+                ref={row.capture}
+                value={row.value}
+                disabled={!row.eligible}
+                description={row.description}
+                onSelect={row.onSelect}
+              >
+                {row.label}
+              </MenuRadioItem>
+            ))}
           </MenuRadioGroup>
           <MenuSeparator />
-          <MenuItem icon={<BookOpen size={15} />} onSelect={openReader} data-testid="mode-reader">
+          <MenuItem
+            ref={captureReader}
+            icon={<BookOpen size={15} />}
+            onSelect={onReaderSelect}
+            data-testid="mode-reader"
+          >
             Open reader view
           </MenuItem>
+          <ModeSwitcherOpenCommit presentation={presentation} />
         </MenuContent>
       )}
     </Menu>
