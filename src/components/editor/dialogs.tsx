@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
@@ -117,41 +117,71 @@ export const ImageDialog = memo(function ImageDialog({
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const uploadVisit = useRef(0);
+  const uploadSequence = useRef(0);
+  const activeUpload = useRef<number | null>(null);
+  const altEditRevision = useRef(0);
+  const invalidateUpload = useCallback(() => {
+    uploadVisit.current += 1;
+    activeUpload.current = null;
+  }, []);
+  useLayoutEffect(() => {
+    invalidateUpload();
+    return invalidateUpload;
+  }, [open, invalidateUpload]);
   useEffect(() => {
     if (open) {
       setSrc("");
       setAlt("");
       setError(null);
       setUploading(false);
+      altEditRevision.current = 0;
     }
   }, [open]);
   const chooseFile = async (file: File | undefined) => {
-    if (!file || !onUpload) return;
+    if (!file || !onUpload || !open || activeUpload.current !== null) return;
+    const visit = uploadVisit.current;
+    const upload = ++uploadSequence.current;
+    const altRevision = altEditRevision.current;
+    activeUpload.current = upload;
     setError(null);
     setUploading(true);
+    const isCurrent = () => uploadVisit.current === visit && activeUpload.current === upload;
     try {
       const result = await onUpload(file);
+      if (!isCurrent()) return;
       setSrc(result.url);
-      setAlt((current) => current || result.alt || file.name.replace(/\.[a-z0-9]{2,5}$/i, ""));
+      setAlt((current) => {
+        if (altEditRevision.current !== altRevision || current) return current;
+        return result.alt || file.name.replace(/\.[a-z0-9]{2,5}$/i, "");
+      });
     } catch (e) {
+      if (!isCurrent()) return;
       setError(apiErrorText(e, "Upload failed"));
     } finally {
-      setUploading(false);
-      if (fileInput.current) fileInput.current.value = "";
+      if (isCurrent()) {
+        activeUpload.current = null;
+        setUploading(false);
+        if (fileInput.current) fileInput.current.value = "";
+      }
     }
+  };
+  const setOpen = (nextOpen: boolean) => {
+    if (!nextOpen) invalidateUpload();
+    onOpenChange(nextOpen);
   };
   const after = useAfterClose();
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent title="Insert image" description="Paste the address of an image or upload one. Alt text describes the image for people who can't see it." onClosed={after.onClosed}>
         <form
           className="flex flex-col gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!src.trim()) return;
+            if (activeUpload.current !== null || uploading || !src.trim()) return;
             const [s, a] = [src.trim(), alt.trim()];
             after.defer(() => onSubmit(s, a));
-            onOpenChange(false);
+            setOpen(false);
           }}
         >
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
@@ -182,17 +212,26 @@ export const ImageDialog = memo(function ImageDialog({
           )}
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             Alt text
-            <input className="input" placeholder="Describe the image" value={alt} onChange={(e) => setAlt(e.target.value)} data-testid="image-alt" />
+            <input
+              className="input"
+              placeholder="Describe the image"
+              value={alt}
+              onChange={(e) => {
+                altEditRevision.current += 1;
+                setAlt(e.target.value);
+              }}
+              data-testid="image-alt"
+            />
           </label>
           {src.trim() && (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={src.trim()} alt="" className="max-h-40 rounded-lg border border-line object-contain" onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
           )}
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
+            <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary" disabled={!src.trim()} data-testid="image-submit">
+            <button type="submit" className="btn btn-primary" disabled={uploading || !src.trim()} data-testid="image-submit">
               Insert
             </button>
           </div>
