@@ -193,6 +193,10 @@ export function EditorShell({
 }: EditorShellProps) {
   const router = useRouter();
   const session = useCollabSession(initialDoc.id, user, role, embed);
+  const editorIdentity = useMemo<EditorIdentity>(
+    () => ({ documentId: initialDoc.id, session }),
+    [initialDoc.id, session],
+  );
   const [doc, setDoc] = useState(initialDoc);
   const [layout, setLayoutState] = useState<Layout>("split");
   const [outlineOpen, setOutlineOpen] = useState(true);
@@ -256,15 +260,14 @@ export function EditorShell({
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   useLayoutEffect(() => {
-    const editor = { documentId: initialDoc.id, session };
-    currentEditorRef.current = editor;
+    currentEditorRef.current = editorIdentity;
     publishPullOwnerRef.current = null;
     setPublishingOwner(null);
     return () => {
-      if (currentEditorRef.current === editor) currentEditorRef.current = null;
-      if (publishPullOwnerRef.current?.editor === editor) publishPullOwnerRef.current = null;
+      if (currentEditorRef.current === editorIdentity) currentEditorRef.current = null;
+      if (publishPullOwnerRef.current?.editor === editorIdentity) publishPullOwnerRef.current = null;
     };
-  }, [initialDoc.id, session]);
+  }, [editorIdentity]);
   useLayoutEffect(() => {
     setDoc((current) => current.id === initialDoc.id ? current : initialDoc);
   }, [initialDoc]);
@@ -1068,7 +1071,13 @@ export function EditorShell({
   // The title lives in the shared document so everyone sees renames immediately.
   const sharedTitle = useSessionValue(session, (s) => s.title);
   const docView = useMemo(() => (sharedTitle && sharedTitle !== doc.title ? { ...doc, title: sharedTitle } : doc), [doc, sharedTitle]);
-  const operationDialogKey = `${initialDoc.id}:${user.id}:${role}:${embed ? "embed" : "page"}`;
+  const operationDialogKey = `${initialDoc.id}:${user.id}:${role}:${embed ? "embed" : "page"}:${session.ydoc.guid}`;
+  const changeCommitOpen = useCallback((open: boolean) => {
+    if (currentEditorRef.current === editorIdentity) setCommitOpen(open);
+  }, [editorIdentity]);
+  const changeSyncOpen = useCallback((open: boolean) => {
+    if (currentEditorRef.current === editorIdentity) setSyncOpen(open);
+  }, [editorIdentity]);
 
   const authError = useSessionValue(session, (s) => s.authError);
   // Keep the panes covered until either the local copy or the server state is in, so a
@@ -1447,8 +1456,8 @@ export function EditorShell({
             {everOpened.publish && (
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
             )}
-            {everOpened.commit && <CommitDialog key={`commit:${operationDialogKey}`} open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
-            {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
+            {everOpened.commit && <CommitDialog key={`commit:${operationDialogKey}`} open={commitOpen} onOpenChange={changeCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
+            {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={changeSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
           </>
         )}
         {everOpened.link && <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />}

@@ -75,19 +75,104 @@ vi.mock("./header", () => ({
     );
   },
 }));
-vi.mock("./github-dialog", () => ({
-  GitHubDialog: () => null,
-  CommitDialog: (props: ComponentProps<typeof import("./github-dialog").CommitDialog>) => {
-    commitProps = props;
-    return <div data-testid="commit-dialog" data-open={String(props.open)} data-document={props.doc.id} />;
-  },
-}));
-vi.mock("./sync-dialog", () => ({
-  SyncDialog: (props: ComponentProps<typeof import("./sync-dialog").SyncDialog>) => {
-    syncDialogProps = props;
-    return <div data-testid="sync-dialog-mock" data-open={String(props.open)} data-document={props.doc.id} data-status={props.sync?.status ?? "none"} />;
-  },
-}));
+vi.mock("./github-dialog", async () => {
+  const { useState } = await import("react");
+  return {
+    GitHubDialog: () => null,
+    CommitDialog: (props: ComponentProps<typeof import("./github-dialog").CommitDialog>) => {
+      commitProps = props;
+      const [instance] = useState(() => ++commitDialogSequence);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState<string | null>(null);
+      const [done, setDone] = useState(false);
+      const run = async () => {
+        setBusy(true);
+        setError(null);
+        try {
+          await props.onCommit(`Stateful commit ${instance}`);
+          setDone(true);
+          setTimeout(() => props.onOpenChange(false), 900);
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "Publish failed");
+        } finally {
+          setBusy(false);
+        }
+      };
+      return (
+        <div
+          data-testid="commit-dialog"
+          data-open={String(props.open)}
+          data-document={props.doc.id}
+          data-instance={instance}
+          data-busy={String(busy)}
+          data-error={error ?? "none"}
+          data-done={String(done)}
+        >
+          <button
+            type="button"
+            data-testid="stateful-commit"
+            disabled={busy || done}
+            onClick={() => {
+              const request = run();
+              commitDialogRuns.push(request);
+            }}
+          >
+            Commit
+          </button>
+        </div>
+      );
+    },
+  };
+});
+vi.mock("./sync-dialog", async () => {
+  const { useState } = await import("react");
+  return {
+    SyncDialog: (props: ComponentProps<typeof import("./sync-dialog").SyncDialog>) => {
+      syncDialogProps = props;
+      const [instance] = useState(() => ++syncDialogSequence);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState<string | null>(null);
+      const [done, setDone] = useState(false);
+      const run = async () => {
+        setBusy(true);
+        setError(null);
+        try {
+          await props.actions.takeRemote();
+          setDone(true);
+          setTimeout(() => props.onOpenChange(false), 900);
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "Sync failed");
+        } finally {
+          setBusy(false);
+        }
+      };
+      return (
+        <div
+          data-testid="sync-dialog-mock"
+          data-open={String(props.open)}
+          data-document={props.doc.id}
+          data-status={props.sync?.status ?? "none"}
+          data-instance={instance}
+          data-busy={String(busy)}
+          data-error={error ?? "none"}
+          data-done={String(done)}
+        >
+          <button
+            type="button"
+            data-testid="stateful-sync-take"
+            disabled={busy || done}
+            onClick={() => {
+              const request = run();
+              syncDialogRuns.push(request);
+            }}
+          >
+            Take GitHub
+          </button>
+        </div>
+      );
+    },
+  };
+});
 vi.mock("./versions-panel", () => ({
   VersionDiffView: () => null,
   VersionsPanel: (props: ComponentProps<typeof import("./versions-panel").VersionsPanel>) => {
@@ -200,6 +285,10 @@ let commitProps: CommitProps;
 let syncDialogProps: SyncDialogProps;
 let syncPollingProps: SyncPollingProps;
 let versionsRefresh: number | null;
+let commitDialogSequence = 0;
+let syncDialogSequence = 0;
+let commitDialogRuns: Promise<void>[] = [];
+let syncDialogRuns: Promise<void>[] = [];
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -291,6 +380,10 @@ beforeEach(() => {
   commitProps = undefined!;
   syncDialogProps = undefined!;
   syncPollingProps = undefined!;
+  commitDialogSequence = 0;
+  syncDialogSequence = 0;
+  commitDialogRuns = [];
+  syncDialogRuns = [];
   sessions = [];
   session = createSession(DOC);
   vi.mocked(api.documents.publish).mockReset();
@@ -574,6 +667,122 @@ describe("EditorShell publish and pull ownership", () => {
       await currentPull.promise;
     });
     expectPending(false);
+    expect(versionsRefresh).toBe(1);
+    expect(syncPollingProps.refreshKey).toBe(1);
+  });
+
+  it("remounts Commit for a same-user session replacement and ignores the old success, finalizer, and close timer", async () => {
+    const oldPublish = deferred<PublishResponse>();
+    const currentPublish = deferred<PublishResponse>();
+    vi.mocked(api.documents.publish).mockReturnValueOnce(oldPublish.promise).mockReturnValueOnce(currentPublish.promise);
+    const view = await mount();
+    await openCommit();
+    const oldDialog = screen.getByTestId("commit-dialog");
+    const oldInstance = oldDialog.getAttribute("data-instance");
+    fireEvent.click(screen.getByTestId("stateful-commit"));
+    const oldRun = commitDialogRuns.at(-1)!;
+    expect(oldDialog).toHaveAttribute("data-busy", "true");
+    expect(api.documents.publish).toHaveBeenCalledExactlyOnceWith(DOC.id, `Stateful commit ${oldInstance}`, { force: false });
+
+    session = createSession(DOC, USER);
+    view.rerender(shell(DOC, USER));
+    const currentDialog = await screen.findByTestId("commit-dialog");
+    vi.useFakeTimers();
+
+    try {
+      const currentInstance = currentDialog.getAttribute("data-instance");
+      expect(currentInstance).not.toBe(oldInstance);
+      expect(currentDialog).toHaveAttribute("data-open", "true");
+      expect(currentDialog).toHaveAttribute("data-busy", "false");
+      expect(currentDialog).toHaveAttribute("data-error", "none");
+      expect(currentDialog).toHaveAttribute("data-done", "false");
+
+      fireEvent.click(screen.getByTestId("stateful-commit"));
+      const currentRun = commitDialogRuns.at(-1)!;
+      expect(api.documents.publish).toHaveBeenNthCalledWith(2, DOC.id, `Stateful commit ${currentInstance}`, { force: false });
+      expectPending(true);
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-busy", "true");
+
+      await act(async () => {
+        oldPublish.resolve(publishResponse({ ...DOC, title: "Obsolete publish" }));
+        await oldRun;
+      });
+      act(() => vi.advanceTimersByTime(900));
+
+      expect(headerProps.doc.title).toBe(DOC.title);
+      expectPending(true);
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-open", "true");
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-busy", "true");
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-error", "none");
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-done", "false");
+      expect(versionsRefresh).toBe(0);
+      expect(syncPollingProps.refreshKey).toBe(0);
+      expect(screen.queryByTestId("toast")).toBeNull();
+
+      await act(async () => {
+        currentPublish.resolve(publishResponse());
+        await currentRun;
+      });
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-busy", "false");
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-done", "true");
+      act(() => vi.advanceTimersByTime(900));
+      expect(screen.getByTestId("commit-dialog")).toHaveAttribute("data-open", "false");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("remounts Sync for a same-user session replacement and ignores the old rejection and finalizer", async () => {
+    const oldPull = deferred<PullResponse>();
+    const currentPull = deferred<PullResponse>();
+    vi.mocked(api.documents.pull).mockReturnValueOnce(oldPull.promise).mockReturnValueOnce(currentPull.promise);
+    const view = await mount();
+    await openSync();
+
+    const oldDialog = screen.getByTestId("sync-dialog-mock");
+    const oldInstance = oldDialog.getAttribute("data-instance");
+    fireEvent.click(screen.getByTestId("stateful-sync-take"));
+    const oldRun = syncDialogRuns.at(-1)!;
+    expect(oldDialog).toHaveAttribute("data-busy", "true");
+    expect(api.documents.pull).toHaveBeenCalledExactlyOnceWith(DOC.id, { force: true });
+
+    session = createSession(DOC, USER);
+    view.rerender(shell(DOC, USER));
+    const currentDialog = await screen.findByTestId("sync-dialog-mock");
+    expect(currentDialog.getAttribute("data-instance")).not.toBe(oldInstance);
+    expect(currentDialog).toHaveAttribute("data-open", "true");
+    expect(currentDialog).toHaveAttribute("data-busy", "false");
+    expect(currentDialog).toHaveAttribute("data-error", "none");
+    expect(currentDialog).toHaveAttribute("data-done", "false");
+
+    fireEvent.click(screen.getByTestId("stateful-sync-take"));
+    const currentRun = syncDialogRuns.at(-1)!;
+    expect(api.documents.pull).toHaveBeenNthCalledWith(2, DOC.id, { force: true });
+    expectPending(true);
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-busy", "true");
+
+    await act(async () => {
+      oldPull.reject(new ApiError(503, "Obsolete sync failure"));
+      await oldRun;
+    });
+
+    expectPending(true);
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-open", "true");
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-busy", "true");
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-error", "none");
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-done", "false");
+    expect(versionsRefresh).toBe(0);
+    expect(syncPollingProps.refreshKey).toBe(0);
+    expect(screen.queryByTestId("toast")).toBeNull();
+
+    await act(async () => {
+      currentPull.resolve(pullResponse());
+      await currentRun;
+    });
+    expectPending(false);
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-busy", "false");
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-error", "none");
+    expect(screen.getByTestId("sync-dialog-mock")).toHaveAttribute("data-done", "true");
     expect(versionsRefresh).toBe(1);
     expect(syncPollingProps.refreshKey).toBe(1);
   });
