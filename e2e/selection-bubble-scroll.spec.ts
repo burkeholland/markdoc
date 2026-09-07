@@ -1,5 +1,10 @@
 import { test } from "./fixtures";
-import type { BrowserContext, Page, TestInfo } from "@playwright/test";
+import type {
+  BrowserContext,
+  BrowserContextOptions,
+  Page,
+  TestInfo,
+} from "@playwright/test";
 import { createDocument, devLogin, uniqueLogin } from "./helpers";
 import {
   MATRIX_AXES,
@@ -48,6 +53,177 @@ const DOCUMENT_SOURCE = [
 
 const MATRIX_ENABLE_ENV = "E2E_SELECTION_BUBBLE_MATRIX";
 const MATRIX_PORT_ENV = "E2E_SELECTION_BUBBLE_PORT";
+const MATRIX_CONTEXT_KINDS = ["setup", "row", "lifecycle"] as const;
+
+type StoredSession = Awaited<ReturnType<BrowserContext["storageState"]>>;
+type MatrixContextRequest =
+  | { kind: "setup" }
+  | { kind: "row"; storageState: StoredSession; row: MatrixRow }
+  | { kind: "lifecycle"; storageState: StoredSession };
+
+function matrixContextOptions(
+  request: MatrixContextRequest,
+): BrowserContextOptions {
+  const networkIsolation = { serviceWorkers: "block" as const };
+  if (request.kind === "setup") return networkIsolation;
+  if (request.kind === "lifecycle") {
+    return {
+      ...networkIsolation,
+      storageState: request.storageState,
+      viewport: { width: 768, height: 1024 },
+      reducedMotion: "reduce",
+    };
+  }
+  return {
+    ...networkIsolation,
+    storageState: request.storageState,
+    viewport: request.row.viewport,
+    reducedMotion: request.row.motion,
+    hasTouch: request.row.viewport.width <= 390,
+  };
+}
+
+interface MatrixContextCreator<Context> {
+  newContext(options?: BrowserContextOptions): Promise<Context>;
+}
+
+function createMatrixContext<Context>(
+  browser: MatrixContextCreator<Context>,
+  request: MatrixContextRequest,
+): Promise<Context> {
+  return browser.newContext(matrixContextOptions(request));
+}
+
+function assertMatrixContextFactoryPolicy() {
+  const row = MATRIX_ROWS[0];
+  if (!row) throw new Error("matrix-context-row-probe-missing");
+  const storageState: StoredSession = { cookies: [], origins: [] };
+  const requests: MatrixContextRequest[] = [
+    { kind: "setup" },
+    { kind: "row", storageState, row },
+    { kind: "lifecycle", storageState },
+  ];
+  const coveredKinds = new Set(requests.map((request) => request.kind));
+  if (
+    requests.length !== MATRIX_CONTEXT_KINDS.length ||
+    MATRIX_CONTEXT_KINDS.some((kind) => !coveredKinds.has(kind))
+  ) {
+    throw new Error("matrix-context-factory-coverage");
+  }
+  const observedOptions: BrowserContextOptions[] = [];
+  const browser: MatrixContextCreator<null> = {
+    async newContext(options) {
+      observedOptions.push(options ?? {});
+      return null;
+    },
+  };
+  for (const request of requests) void createMatrixContext(browser, request);
+  if (observedOptions.length !== requests.length) {
+    throw new Error("matrix-context-factory-call-count");
+  }
+  for (const [index, request] of requests.entries()) {
+    if (observedOptions[index]?.serviceWorkers !== "block") {
+      throw new Error(`matrix-context-service-workers-${request.kind}`);
+    }
+  }
+}
+
+interface ClosableContext {
+  close(): Promise<void>;
+}
+
+async function withOwnedContext<
+  Context extends ClosableContext,
+  Result,
+>(
+  createContext: () => Promise<Context>,
+  operateContext: (context: Context) => Promise<Result>,
+): Promise<Result> {
+  const context = await createContext();
+  try {
+    return await operateContext(context);
+  } finally {
+    await context.close();
+  }
+}
+
+interface RowInitialization<Context, MatrixPage, Resources> {
+  installRouting(context: Context): Promise<{ blocked: number }>;
+  openPage(context: Context): Promise<MatrixPage>;
+  setupResources(page: MatrixPage): Promise<Resources>;
+}
+
+async function initializeRow<Context, MatrixPage, Resources>(
+  context: Context,
+  initialization: RowInitialization<Context, MatrixPage, Resources>,
+) {
+  const traffic = await initialization.installRouting(context);
+  const page = await initialization.openPage(context);
+  const resources = await initialization.setupResources(page);
+  return { traffic, page, resources };
+}
+
+async function assertContextFailureCleanup() {
+  const stages = ["routing", "page", "resource-setup"] as const;
+  for (const failedStage of stages) {
+    const calls: string[] = [];
+    const closed: ClosableContext[] = [];
+    const failure = new Error(`matrix-static-${failedStage}`);
+    const context: ClosableContext = {
+      async close() {
+        closed.push(context);
+      },
+    };
+    let observed: unknown;
+    try {
+      await withOwnedContext(
+        async () => context,
+        async (ownedContext) => {
+          await initializeRow(ownedContext, {
+            async installRouting(value) {
+              calls.push("routing");
+              if (value !== context) {
+                throw new Error("matrix-routing-context-mismatch");
+              }
+              if (failedStage === "routing") throw failure;
+              return { blocked: 0 };
+            },
+            async openPage(value) {
+              calls.push("page");
+              if (value !== context) {
+                throw new Error("matrix-page-context-mismatch");
+              }
+              if (failedStage === "page") throw failure;
+              return { context: value };
+            },
+            async setupResources(page) {
+              calls.push("resource-setup");
+              if (page.context !== context) {
+                throw new Error("matrix-resource-context-mismatch");
+              }
+              if (failedStage === "resource-setup") throw failure;
+              return {};
+            },
+          });
+        },
+      );
+    } catch (error) {
+      observed = error;
+    }
+    const expectedCalls = stages.slice(0, stages.indexOf(failedStage) + 1);
+    if (
+      observed !== failure ||
+      calls.join("|") !== expectedCalls.join("|") ||
+      closed.length !== 1 ||
+      closed[0] !== context
+    ) {
+      throw new Error(`matrix-context-cleanup-contract-${failedStage}`);
+    }
+  }
+}
+
+assertMatrixContextFactoryPolicy();
+await assertContextFailureCleanup();
 
 // Fullscreen is intentionally not a browser axis: Markdoc has no reachable
 // Fullscreen API control. Source-only fullscreenchange lifecycle evidence stays
@@ -122,49 +298,54 @@ async function runRow(
   font: FontAsset,
   summary: MatrixSummary,
 ) {
-  const context = await browserContext();
-  const traffic = await preventNonLoopbackTraffic(context);
-  const page = await context.newPage();
-  const resources = await setupLateResources(page, font);
-  let documentId: string | null = null;
+  await withOwnedContext(browserContext, async (context) => {
+    let page: Page | null = null;
+    let resources: Awaited<ReturnType<typeof setupLateResources>> | null = null;
+    let documentId: string | null = null;
 
-  try {
-    documentId = await createDocument(
-      page,
-      DOCUMENT_SOURCE,
-      `Toolbar matrix ${row.ordinal}`,
-    );
-    await openMatrixDocument(page, documentId, SELECTED_TEXT);
-    await setMatrixEnvironment(page, row);
-    await sampleRetainedStates(page, row, summary, SELECTED_TEXT);
-    await sampleEdgeReachability(page, row, summary, EDGE_TEXT);
-    await completeLateImage(
-      page,
-      row,
-      summary,
-      resources,
-      SELECTED_TEXT,
-      LATE_IMAGE_ALT,
-    );
-    await completeLateFont(
-      page,
-      row,
-      summary,
-      resources,
-      SELECTED_TEXT,
-    );
-    await exerciseActions(page, row, summary, ACTION_TEXT);
-
-    if (traffic.blocked !== 0) throw new Error("row-non-loopback-request");
-    summary.rows.completed++;
-  } finally {
-    resources.releaseAll();
     try {
-      if (documentId) await deleteDocument(page, documentId);
+      const initialized = await initializeRow(context, {
+        installRouting: preventNonLoopbackTraffic,
+        openPage: (ownedContext) => ownedContext.newPage(),
+        setupResources: (matrixPage) => setupLateResources(matrixPage, font),
+      });
+      page = initialized.page;
+      resources = initialized.resources;
+      documentId = await createDocument(
+        page,
+        DOCUMENT_SOURCE,
+        `Toolbar matrix ${row.ordinal}`,
+      );
+      await openMatrixDocument(page, documentId, SELECTED_TEXT);
+      await setMatrixEnvironment(page, row);
+      await sampleRetainedStates(page, row, summary, SELECTED_TEXT);
+      await sampleEdgeReachability(page, row, summary, EDGE_TEXT);
+      await completeLateImage(
+        page,
+        row,
+        summary,
+        resources,
+        SELECTED_TEXT,
+        LATE_IMAGE_ALT,
+      );
+      await completeLateFont(
+        page,
+        row,
+        summary,
+        resources,
+        SELECTED_TEXT,
+      );
+      await exerciseActions(page, row, summary, ACTION_TEXT);
+
+      if (initialized.traffic.blocked !== 0) {
+        throw new Error("row-non-loopback-request");
+      }
+      summary.rows.completed++;
     } finally {
-      await context.close();
+      resources?.releaseAll();
+      if (page && documentId) await deleteDocument(page, documentId);
     }
-  }
+  });
 }
 
 test(
@@ -173,15 +354,13 @@ test(
     test.setTimeout(3 * 60 * 60 * 1000);
     const summary = createMatrixSummary(MATRIX_AXES, MATRIX_ROWS.length);
     const attempts = new Map<string, number>();
-    let setupContext: BrowserContext | null = null;
 
     try {
       assertDedicatedLoopbackPort(testInfo);
-      setupContext = await browser.newContext();
-      const { storageState, font } =
-        await createAuthenticatedState(setupContext);
-      await setupContext.close();
-      setupContext = null;
+      const { storageState, font } = await withOwnedContext(
+        () => createMatrixContext(browser, { kind: "setup" }),
+        createAuthenticatedState,
+      );
 
       for (const row of MATRIX_ROWS) {
         attempts.set(row.key, (attempts.get(row.key) ?? 0) + 1);
@@ -189,11 +368,10 @@ test(
         try {
           await runRow(
             () =>
-              browser.newContext({
+              createMatrixContext(browser, {
+                kind: "row",
                 storageState,
-                viewport: row.viewport,
-                reducedMotion: row.motion,
-                hasTouch: row.viewport.width <= 390,
+                row,
               }),
             row,
             font,
@@ -204,59 +382,64 @@ test(
         }
       }
 
-      const lifecycleContext = await browser.newContext({
-        storageState,
-        viewport: { width: 768, height: 1024 },
-        reducedMotion: "reduce",
-      });
-      const lifecycleDocuments: string[] = [];
-      const page = await lifecycleContext.newPage();
-      try {
-        const traffic = await preventNonLoopbackTraffic(lifecycleContext);
-        await installOwnershipProbe(page);
-        const first = await createDocument(
-          page,
-          DOCUMENT_SOURCE,
-          "Toolbar lifecycle first",
-        );
-        lifecycleDocuments.push(first);
-        const replacement = await createDocument(
-          page,
-          DOCUMENT_SOURCE,
-          "Toolbar lifecycle replacement",
-        );
-        lifecycleDocuments.push(replacement);
-        await runLifecycleChecks(
-          page,
-          summary,
-          first,
-          replacement,
-          SELECTED_TEXT,
-        );
-        if (traffic.blocked !== 0) {
-          throw new Error("lifecycle-non-loopback-request");
-        }
-      } catch (error) {
-        recordMatrixFailure(summary, "lifecycle", "teardown", error);
-      } finally {
-        for (const documentId of lifecycleDocuments) {
+      await withOwnedContext(
+        () =>
+          createMatrixContext(browser, {
+            kind: "lifecycle",
+            storageState,
+          }),
+        async (lifecycleContext) => {
+          const lifecycleDocuments: string[] = [];
+          let page: Page | null = null;
           try {
-            await deleteDocument(page, documentId);
-          } catch (error) {
-            recordMatrixFailure(
-              summary,
-              "lifecycle",
-              "document-cleanup",
-              error,
+            const traffic =
+              await preventNonLoopbackTraffic(lifecycleContext);
+            page = await lifecycleContext.newPage();
+            await installOwnershipProbe(page);
+            const first = await createDocument(
+              page,
+              DOCUMENT_SOURCE,
+              "Toolbar lifecycle first",
             );
+            lifecycleDocuments.push(first);
+            const replacement = await createDocument(
+              page,
+              DOCUMENT_SOURCE,
+              "Toolbar lifecycle replacement",
+            );
+            lifecycleDocuments.push(replacement);
+            await runLifecycleChecks(
+              page,
+              summary,
+              first,
+              replacement,
+              SELECTED_TEXT,
+            );
+            if (traffic.blocked !== 0) {
+              throw new Error("lifecycle-non-loopback-request");
+            }
+          } catch (error) {
+            recordMatrixFailure(summary, "lifecycle", "teardown", error);
+          } finally {
+            if (page) {
+              for (const documentId of lifecycleDocuments) {
+                try {
+                  await deleteDocument(page, documentId);
+                } catch (error) {
+                  recordMatrixFailure(
+                    summary,
+                    "lifecycle",
+                    "document-cleanup",
+                    error,
+                  );
+                }
+              }
+            }
           }
-        }
-        await lifecycleContext.close();
-      }
+        },
+      );
     } catch (error) {
       recordMatrixFailure(summary, "setup", "bootstrap", error);
-    } finally {
-      await setupContext?.close();
     }
 
     for (const row of MATRIX_ROWS) {
