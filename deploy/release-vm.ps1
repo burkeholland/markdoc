@@ -9,6 +9,9 @@
 param([string]$ExpectedCommit = $env:RELEASE_SHA)
 
 $ErrorActionPreference = 'Stop'
+$ReleaseDeadlineSeconds = 2100
+
+. (Join-Path $PSScriptRoot 'release-vm-evidence.ps1')
 
 function Stop-VmRelease([string]$Message, [int]$ExitCode = 1) {
   $failure = [InvalidOperationException]::new($Message)
@@ -62,7 +65,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
 }
 
 function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
-  $remaining = [math]::Floor(540 - $releaseClock.Elapsed.TotalSeconds)
+  $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
   if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
   Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining))
 }
@@ -156,8 +159,10 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     [void](Invoke-ReleaseStep 'tar' @('-xf', "$context\source.tar", '-C', $context))
     Remove-Item -LiteralPath "$context\source.tar"
     $vmScript = Join-Path $context 'infra\deploy-vm-image.sh'
-    if (-not (Test-Path -LiteralPath (Join-Path $context 'Dockerfile')) -or -not (Test-Path -LiteralPath $vmScript)) {
-      Stop-VmRelease 'Selected source archive lacks the existing Dockerfile or VM deployment script.'
+    $walScript = Join-Path $context 'infra\release-wal-gate.sh'
+    if (-not (Test-Path -LiteralPath (Join-Path $context 'Dockerfile')) -or
+      -not (Test-Path -LiteralPath $vmScript) -or -not (Test-Path -LiteralPath $walScript)) {
+      Stop-VmRelease 'Selected source archive lacks the Dockerfile or release guest scripts.'
     }
     Assert-ReleaseSource $Commit
     $releaseStage = 'ACR build submission'
@@ -203,10 +208,10 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     Write-Host "Release: guest invocation $operation; VM $vmId; started $([DateTime]::UtcNow.ToString('o'))."
     Write-Host 'ARM operation ID is not exposed by invoke. The guest ID is recorded in the submitted script parameters and guest output.'
     Write-Host 'Timeout/failure is unverified, not cancellation or automatic rollback. Do not submit another release.'
-    $vmLimit = [math]::Floor(510 - $releaseClock.Elapsed.TotalSeconds)
+    $vmLimit = [math]::Floor(($ReleaseDeadlineSeconds - 30) - $releaseClock.Elapsed.TotalSeconds)
     if ($vmLimit -lt 1) { Stop-VmRelease 'No time remains for a VM invocation and public health.' 124 }
     $result = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('vm', 'run-command', 'invoke', '--name', $vm, '--command-id', 'RunShellScript',
-      '--scripts', "@$vmScript", '--parameters', $registry, $image, $Commit, $tenant, $operation) + $nativeScope) $vmLimit)
+      '--scripts', "@$walScript", "@$vmScript", '--parameters', $registry, $image, $Commit, $tenant, $operation) + $nativeScope) $vmLimit)
     $messages = @($result.value)
     if ($messages.Count -ne 1 -or $messages[0].code -cne 'ProvisioningState/succeeded' -or $messages[0].message -isnot [string]) {
       Stop-VmRelease 'VM transport did not return the expected completed result.'
@@ -216,11 +221,18 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     if (-not $stdout.Success) { Stop-VmRelease 'VM result is missing distinct guest stdout/stderr evidence.' }
     $terminal = [regex]::Match($stdout.Groups['output'].Value.TrimEnd(),
       "(?m)^(?<health>\{[^\r\n]+\})\nmarkdoc-vm-image-ready\nmarkdoc-vm-image-operation-ready:$operation\z")
-    if (-not $terminal.Success) { Stop-VmRelease 'VM transport succeeded without exact terminal guest-ready and local-health evidence.' }
+    if (-not $terminal.Success) {
+      $walFailure = Get-ReleaseWalFailure $stdout.Groups['output'].Value $operation
+      if ($walFailure) {
+        Stop-VmRelease "Release WAL gate failed during $($walFailure.Stage); owned cleanup=$($walFailure.Cleanup)."
+      }
+      Stop-VmRelease 'VM transport succeeded without exact terminal guest-ready and local-health evidence.'
+    }
+    [void](Assert-ReleaseWalEvidence $stdout.Groups['output'].Value $operation $terminal.Index)
     Assert-ReleaseHealth (ConvertFrom-ReleaseJson $terminal.Groups['health'].Value) $Commit 'Local'
     $releaseStage = 'public health after guest ready (no automatic rollback)'
     Write-Host 'Release: guest ready; waiting for exact public health.'
-    $healthLimit = [math]::Min(20, [math]::Floor(540 - $releaseClock.Elapsed.TotalSeconds))
+    $healthLimit = [math]::Min(20, [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds))
     if ($healthLimit -lt 1) { Stop-VmRelease 'No time remains to verify public health; guest deployment may be active.' 124 }
     $health = ConvertFrom-ReleaseJson (Get-ReleasePublicHealth $origin $healthLimit)
     Assert-ReleaseHealth $health $Commit 'Public'

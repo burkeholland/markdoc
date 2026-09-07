@@ -151,11 +151,15 @@ run for this documentation update.
    commit. `AZURE_RESOURCE_GROUP` must name `markdoc-rg`, and
    `AZURE_ACR_NAME` must name the existing registry.
 3. The workflow builds in ACR with full/12-character SHA tags and
-   `APP_VERSION`, resolves the immutable digest, then invokes
-   [`infra/deploy-vm-image.sh`](../infra/deploy-vm-image.sh) through VM Run
-   Command on `markdoc-pg`. The script pulls that digest, updates only
-   `APP_VERSION` in the existing environment file, replaces the application
-   unit and restarts `markdoc-app`. It does not reprovision PostgreSQL.
+   `APP_VERSION`, resolves the immutable digest, then sends
+   [`infra/release-wal-gate.sh`](../infra/release-wal-gate.sh) before
+   [`infra/deploy-vm-image.sh`](../infra/deploy-vm-image.sh) in one VM Run
+   Command on `markdoc-pg`. The deployment script invokes the gate and refuses
+   to continue without its operation-bound receipt. Only after the gate proves
+   exact release-endpoint replay and removes its scratch cluster does the script
+   pull the digest, update only `APP_VERSION` in the existing environment file,
+   replace the application unit and restart `markdoc-app`. It does not
+   reprovision or restart primary PostgreSQL.
 4. The script waits for local `/api/health` to report `ok`, `db` and `collab`
    true and `version` equal to the requested full SHA. The workflow then
    resolves `markdoc-web-ip`'s DNS name and requires the same fields at the
@@ -202,25 +206,51 @@ the active account. The guest still uses its managed identity and existing
 root-owned `0600` `/etc/markdoc/markdoc.env` for `markdoc-app`.
 
 The command waits for ACR success, requires a single well-formed digest for the
-full-SHA tag matching that build's output, then invokes the existing VM script.
-Its optional fifth argument is a guest invocation UUID; four-argument workflow
-calls still work. Local health and the ready marker now print only after successful
-guest cleanup. Terminal success requires that marker, the invocation-specific
-completion marker, and both local and non-redirected public `/api/health` with
-boolean `ok`, `db`, `collab` all true and `version` exactly the selected SHA.
-ARM transport success alone never suffices. A public failure after guest readiness
-is a failed/unverified release, **not** an automatic rollback. Existing local
-rollback restores configuration/image only; it does not undo schema changes.
+full-SHA tag matching that build's output, then makes one VM invocation containing
+the WAL gate and existing deployment script. Before image pull, environment
+change, unit rewrite or service start, the gate captures the primary's current
+flush LSN, performs an explicit `pg_switch_wal()`, and waits for PostgreSQL's
+exact `.done` archive-status object for the containing segment. pgBackRest's
+documented asynchronous archive push returns success only after safely storing
+that segment in the archive. The gate additionally reads repository metadata to
+identify repository 1's current archive ID, then requires `repo-ls` to expose
+the exact checksum-suffixed WAL object in that archive. It binds that basename
+to the release receipt without printing the repository path. It restores from
+the same repository to a fresh invocation-owned directory with that LSN as the
+recovery target, starts PostgreSQL with no network listener on a private socket
+and unused port, requires `archive_mode=off`, SQL readiness and a replay LSN at
+or beyond the captured endpoint, then stops and removes that scratch cluster.
+It does not fetch or copy WAL outside recovery, alter archive state, checkpoint
+or restart the primary, change recovery configuration, use the weekly
+restore-check directory, or connect to an application database.
 
-The local budget is nine minutes within the Board's ten-minute limit. Build
-polling stops by roughly 6.5 minutes, leaving time for the guest and public check;
-the ACR build itself has a five-minute service timeout. Cloud queue/upload/pull
-and startup durations are not guaranteed to fit. On failure or timeout, do not
-press Release again before reconciling the prior attempt: no write is resubmitted,
-but killing the CLI does **not** cancel remote work. Output records the ACR run ID
-and a unique additional submission tag, then the VM resource, guest invocation
-UUID and start time. The high-level VM CLI does not expose its ARM operation ID;
-the guest UUID is instead retained in Run Command parameters/output for targeted
+The scripts now require the fifth argument, a guest invocation UUID. Terminal
+success requires one exact ordered capture/switch/remote-archive/restore/SQL/
+replay/cleanup evidence block bound to that UUID and containing the exact WAL
+segment and remote object basename. It must be followed by the local-health
+ready marker, the invocation-specific completion marker, and non-redirected
+public `/api/health` with boolean `ok`, `db`, `collab` all true and `version`
+exactly the selected SHA. Missing, duplicate, malformed, reordered,
+wrong-operation, wrong-object or replay-behind evidence fails closed. ARM
+transport success alone never suffices.
+A public failure after guest readiness is a failed/unverified release, **not** an
+automatic rollback. Existing local rollback restores configuration/image only;
+it does not undo schema changes.
+
+The local deadline is 35 minutes. Build polling still stops by roughly 6.5
+minutes and the ACR build itself has a five-minute service timeout. The guest
+gate is phase-bounded: lock acquisition is nonblocking, archive wait is five
+minutes, restore ten minutes, scratch start four minutes, each control query 30
+seconds, and cleanup gets a separate 45-second stop. The total leaves about five
+minutes beyond the gate and build ceilings for the existing image pull,
+application start/health loop and reserved public check. Cleanup targets only
+the invocation's directory/process. Cloud queue/upload/pull and startup
+durations are not guaranteed to fit. On failure or timeout, do not press Release
+again before reconciling the prior attempt: no write is resubmitted, but killing
+the CLI does **not** cancel remote work. Output records the ACR run ID and a
+unique additional submission tag, then the VM resource, guest invocation UUID
+and start time. The high-level VM CLI does not expose its ARM operation ID; the
+guest UUID is instead retained in Run Command parameters/output for targeted
 owner reconciliation. A lost submission response can leave Azure acceptance
 unknown (including no returned ACR run ID); these identifiers do not claim that
 the provider accepted or canceled anything. Raw build/VM/HTTP output is withheld.
