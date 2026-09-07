@@ -14,6 +14,11 @@ interface CopyOperation {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+interface CopyFeedback {
+  operation: CopyOperation;
+  status: Exclude<CopyStatus, "idle">;
+}
+
 /**
  * State for a Copy button. `copy()` must be called straight from the click handler (it calls
  * `copyText` synchronously so the fallback keeps the gesture). On success the status is `copied`
@@ -21,13 +26,12 @@ interface CopyOperation {
  * element's text is selected so the user finishes with Ctrl+C. `label` is what the button should read.
  */
 export function useCopy(text: string, target?: RefObject<HTMLElement | null>, idleLabel = "Copy") {
-  const [status, setStatus] = useState<CopyStatus>("idle");
+  const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
   const mounted = useRef(false);
   const operation = useRef<CopyOperation | null>(null);
 
   useLayoutEffect(() => {
     mounted.current = true;
-    setStatus("idle");
     return () => {
       mounted.current = false;
       const current = operation.current;
@@ -49,7 +53,7 @@ export function useCopy(text: string, target?: RefObject<HTMLElement | null>, id
     };
     operation.current = owned;
     const attempt = copyText(owned.text);
-    setStatus("idle");
+    setFeedback(null);
 
     const settle = (ok: boolean) => {
       if (!mounted.current || operation.current !== owned) return;
@@ -58,17 +62,20 @@ export function useCopy(text: string, target?: RefObject<HTMLElement | null>, id
         selectContents(owned.target);
         if (!mounted.current || operation.current !== owned) return;
       }
-      setStatus(ok ? "copied" : "fallback");
+      setFeedback({ operation: owned, status: ok ? "copied" : "fallback" });
       owned.timer = setTimeout(() => {
         if (!mounted.current || operation.current !== owned) return;
         operation.current = null;
         owned.timer = null;
-        setStatus("idle");
+        setFeedback(null);
       }, ok ? 1500 : 2000);
     };
 
     void attempt.then(settle, () => settle(false));
   };
+  // Retire presentation during render so a replacement cannot revive it if the text later cycles back.
+  if (feedback && feedback.operation.text !== text) setFeedback(null);
+  const status: CopyStatus = feedback?.operation.text === text ? feedback.status : "idle";
   const label = status === "copied" ? "Copied" : status === "fallback" ? COPY_FALLBACK_HINT : idleLabel;
   return { status, copy, label, copied: status === "copied" };
 }

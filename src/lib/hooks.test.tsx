@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 
 const clipboard = vi.hoisted(() => ({
   copyText: vi.fn<(text: string) => Promise<boolean>>(),
@@ -17,6 +18,34 @@ import { useCopy, type CopyStatus } from "./hooks";
 
 const FIRST_TEXT = "first rendered value";
 const NEXT_TEXT = "next rendered value";
+type CopyResult = ReturnType<typeof useCopy>;
+
+function CopyControl({ text, observe }: { text: string; observe: (copy: CopyResult) => void }) {
+  const copy = useCopy(text);
+  observe(copy);
+  return (
+    <button data-testid="copy-control" onClick={copy.copy} aria-label={copy.label}>
+      {copy.label}
+    </button>
+  );
+}
+
+function CopyBoundary({
+  text,
+  boundary = 0,
+  observe,
+  onLayout,
+}: {
+  text: string;
+  boundary?: number;
+  observe: (copy: CopyResult) => void;
+  onLayout?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onLayout?.();
+  }, [boundary, onLayout]);
+  return <CopyControl text={text} observe={observe} />;
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -69,6 +98,97 @@ describe("useCopy", () => {
     expect(result.current.status).toBe("copied");
   });
 
+  it("renders replacement text as idle before its parent layout boundary", async () => {
+    clipboard.copyText.mockResolvedValue(true);
+    let latest!: CopyResult;
+    const observe = (copy: CopyResult) => {
+      latest = copy;
+    };
+    const { rerender } = render(<CopyBoundary text={FIRST_TEXT} observe={observe} />);
+
+    await flush(() => latest.copy());
+    expect(latest.status).toBe("copied");
+    expect(screen.getByTestId("copy-control")).toHaveAccessibleName("Copied");
+    let statusAtBoundary: CopyStatus | undefined;
+    let labelAtBoundary: string | null | undefined;
+
+    rerender(
+      <CopyBoundary
+        text={NEXT_TEXT}
+        boundary={1}
+        observe={observe}
+        onLayout={() => {
+          statusAtBoundary = latest.status;
+          labelAtBoundary = screen.getByTestId("copy-control").getAttribute("aria-label");
+        }}
+      />,
+    );
+
+    expect(statusAtBoundary).toBe("idle");
+    expect(labelAtBoundary).toBe("Copy");
+    expect(latest.status).toBe("idle");
+  });
+
+  it("does not revive retired feedback when text cycles back to the same value", async () => {
+    clipboard.copyText.mockResolvedValue(true);
+    const { result, rerender } = renderHook(({ text }: { text: string }) => useCopy(text), {
+      initialProps: { text: FIRST_TEXT },
+    });
+
+    await flush(() => result.current.copy());
+    expect(result.current.status).toBe("copied");
+
+    rerender({ text: NEXT_TEXT });
+    expect(result.current.status).toBe("idle");
+    expect(vi.getTimerCount()).toBe(0);
+    rerender({ text: FIRST_TEXT });
+    expect(result.current.status).toBe("idle");
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "retires a pending operation before its %s settles at the replacement parent layout boundary",
+    async (outcome) => {
+      const pending = deferred<boolean>();
+      clipboard.copyText.mockReturnValue(pending.promise);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      let latest!: CopyResult;
+      const observe = (copy: CopyResult) => {
+        latest = copy;
+      };
+
+      try {
+        const { rerender } = render(<CopyBoundary text={FIRST_TEXT} observe={observe} />);
+        act(() => latest.copy());
+        expect(clipboard.copyText).toHaveBeenCalledExactlyOnceWith(FIRST_TEXT);
+        let statusAtBoundary: CopyStatus | undefined;
+
+        rerender(
+          <CopyBoundary
+            text={NEXT_TEXT}
+            boundary={1}
+            observe={observe}
+            onLayout={() => {
+              statusAtBoundary = latest.status;
+              if (outcome === "resolve") pending.resolve(true);
+              else pending.reject(new Error("retired clipboard failure"));
+            }}
+          />,
+        );
+        await flush(() => undefined);
+
+        expect(statusAtBoundary).toBe("idle");
+        expect(latest.status).toBe("idle");
+        expect(clipboard.selectContents).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+    },
+  );
+
   it("keeps success and fallback feedback for exactly 1.5 and 2 seconds", async () => {
     const firstTarget = document.createElement("pre");
     const replacementTarget = document.createElement("pre");
@@ -100,34 +220,67 @@ describe("useCopy", () => {
     expect(result.current.status).toBe("idle");
   });
 
-  it("retires old feedback on a text change without letting its timer clear newer feedback", async () => {
-    clipboard.copyText.mockResolvedValue(true);
-    const { result, rerender } = renderHook(({ text }: { text: string }) => useCopy(text), {
-      initialProps: { text: FIRST_TEXT },
-    });
+  it.each([
+    {
+      oldResult: true,
+      oldStatus: "copied" as const,
+      elapsedBeforeReplacement: 500,
+      oldTimeRemaining: 1000,
+      currentResult: false,
+      currentStatus: "fallback" as const,
+      currentDuration: 2000,
+    },
+    {
+      oldResult: false,
+      oldStatus: "fallback" as const,
+      elapsedBeforeReplacement: 600,
+      oldTimeRemaining: 1400,
+      currentResult: true,
+      currentStatus: "copied" as const,
+      currentDuration: 1500,
+    },
+  ])(
+    "does not let an old $oldStatus timer clear newer $currentStatus feedback",
+    async ({
+      oldResult,
+      oldStatus,
+      elapsedBeforeReplacement,
+      oldTimeRemaining,
+      currentResult,
+      currentStatus,
+      currentDuration,
+    }) => {
+      clipboard.copyText.mockResolvedValueOnce(oldResult).mockResolvedValueOnce(currentResult);
+      const { result, rerender } = renderHook(({ text }: { text: string }) => useCopy(text), {
+        initialProps: { text: FIRST_TEXT },
+      });
 
-    await flush(() => result.current.copy());
-    expect(result.current.status).toBe("copied");
-    await advance(500);
+      await flush(() => result.current.copy());
+      expect(result.current.status).toBe(oldStatus);
+      await advance(elapsedBeforeReplacement);
 
-    rerender({ text: NEXT_TEXT });
-    expect(result.current.status).toBe("idle");
-    await flush(() => result.current.copy());
-    expect(clipboard.copyText).toHaveBeenNthCalledWith(2, NEXT_TEXT);
-    expect(result.current.status).toBe("copied");
+      rerender({ text: NEXT_TEXT });
+      expect(result.current.status).toBe("idle");
+      expect(vi.getTimerCount()).toBe(0);
+      await flush(() => result.current.copy());
+      expect(clipboard.copyText).toHaveBeenNthCalledWith(2, NEXT_TEXT);
+      expect(result.current.status).toBe(currentStatus);
 
-    await advance(1000);
-    expect(result.current.status).toBe("copied");
-    await advance(499);
-    expect(result.current.status).toBe("copied");
-    await advance(1);
-    expect(result.current.status).toBe("idle");
-  });
+      await advance(oldTimeRemaining);
+      expect(result.current.status).toBe(currentStatus);
+      await advance(currentDuration - oldTimeRemaining - 1);
+      expect(result.current.status).toBe(currentStatus);
+      await advance(1);
+      expect(result.current.status).toBe("idle");
+    },
+  );
 
   it.each([
-    { staleResult: true, currentResult: false, currentStatus: "fallback" as const },
-    { staleResult: false, currentResult: true, currentStatus: "copied" as const },
-  ])("ignores stale settlement after a new rendered value owns Copy", async ({ staleResult, currentResult, currentStatus }) => {
+    { order: "stale first", staleResult: true, currentResult: false, currentStatus: "fallback" as const },
+    { order: "current first", staleResult: true, currentResult: false, currentStatus: "fallback" as const },
+    { order: "stale first", staleResult: false, currentResult: true, currentStatus: "copied" as const },
+    { order: "current first", staleResult: false, currentResult: true, currentStatus: "copied" as const },
+  ])("ignores stale settlement when it resolves $order", async ({ order, staleResult, currentResult, currentStatus }) => {
     const stale = deferred<boolean>();
     const current = deferred<boolean>();
     clipboard.copyText.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
@@ -144,6 +297,13 @@ describe("useCopy", () => {
     act(() => result.current.copy());
     expect(clipboard.copyText).toHaveBeenNthCalledWith(2, NEXT_TEXT);
 
+    if (order === "stale first") {
+      await flush(() => stale.resolve(staleResult));
+      expect(result.current.status).toBe("idle");
+      expect(clipboard.selectContents).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    }
+
     await flush(() => current.resolve(currentResult));
     expect(result.current.status).toBe(currentStatus);
     const selections = currentResult ? 0 : 1;
@@ -151,7 +311,7 @@ describe("useCopy", () => {
     if (selections) expect(clipboard.selectContents.mock.calls[0][0]).toBe(currentTarget);
     expect(vi.getTimerCount()).toBe(1);
 
-    await flush(() => stale.resolve(staleResult));
+    if (order === "current first") await flush(() => stale.resolve(staleResult));
     expect(result.current.status).toBe(currentStatus);
     expect(clipboard.selectContents).toHaveBeenCalledTimes(selections);
     expect(clipboard.selectContents.mock.calls.some(([selected]) => selected === obsoleteTarget)).toBe(false);
