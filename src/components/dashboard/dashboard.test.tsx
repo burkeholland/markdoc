@@ -210,6 +210,34 @@ function captureClick(element: HTMLElement) {
   return props.onClick;
 }
 
+type KeydownCallback = (event: KeyboardEvent) => void;
+
+function eventCapture(options?: boolean | AddEventListenerOptions | EventListenerOptions): boolean {
+  return typeof options === "boolean" ? options : options?.capture === true;
+}
+
+function trackWindowKeydownListeners() {
+  const add = vi.spyOn(window, "addEventListener");
+  const remove = vi.spyOn(window, "removeEventListener");
+  const added = (capture: boolean) =>
+    add.mock.calls
+      .filter(([type, listener, options]) => type === "keydown" && typeof listener === "function" && eventCapture(options) === capture)
+      .map(([, listener]) => listener as KeydownCallback);
+  const removalCount = (callback: KeydownCallback, capture: boolean) =>
+    remove.mock.calls.filter(
+      ([type, listener, options]) => type === "keydown" && listener === callback && eventCapture(options) === capture,
+    ).length;
+  const active = (capture: boolean) => added(capture).filter((callback) => removalCount(callback, capture) === 0);
+  return { active, added, removalCount };
+}
+
+function shortcutEvent(init: KeyboardEventInit) {
+  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+  const preventDefault = vi.spyOn(event, "preventDefault");
+  const stopPropagation = vi.spyOn(event, "stopPropagation");
+  return { event, preventDefault, stopPropagation };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
@@ -275,7 +303,7 @@ describe("dashboard search shortcut", () => {
         <button type="button">Outside search</button>
       </div>,
     );
-    const search = screen.getByRole("textbox", { name: "Search documents" });
+    const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
     const contexts = [
       screen.getByRole("textbox", { name: "Other input" }),
       screen.getByRole("textbox", { name: "Other textarea" }),
@@ -296,6 +324,257 @@ describe("dashboard search shortcut", () => {
       outside.focus();
       expect(fireEvent.keyDown(outside, { key: "/", ...modifier })).toBe(true);
       expect(search).not.toHaveFocus();
+    }
+  });
+});
+
+describe("dashboard shortcut ownership", () => {
+  it.each([
+    ["Mod-K", { key: "k", ctrlKey: true }],
+    ["Mod-Shift-P", { key: "p", ctrlKey: true, shiftKey: true }],
+  ] as const)("keeps one exact current listener per class and opens once for %s", async (_name, init) => {
+    const listeners = trackWindowKeydownListeners();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(<Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />);
+      });
+      expect(listeners.active(false)).toHaveLength(1);
+      expect(listeners.active(true)).toHaveLength(1);
+
+      const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
+      if (init.key === "k") {
+        const ignored = shortcutEvent(init);
+        act(() => {
+          search.dispatchEvent(ignored.event);
+        });
+        expect(ignored.preventDefault).not.toHaveBeenCalled();
+        expect(ignored.stopPropagation).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("command-palette")).toBeNull();
+      }
+
+      const accepted = shortcutEvent(init);
+      act(() => {
+        screen.getByTestId("new-document").dispatchEvent(accepted.event);
+      });
+      expect(accepted.preventDefault).toHaveBeenCalledOnce();
+      expect(accepted.stopPropagation).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+      expect(listeners.active(false)).toHaveLength(1);
+      expect(listeners.active(true)).toHaveLength(1);
+
+      const repeat = shortcutEvent(init);
+      act(() => {
+        screen.getByTestId("new-document").dispatchEvent(repeat.event);
+      });
+      expect(repeat.preventDefault).not.toHaveBeenCalled();
+      expect(repeat.stopPropagation).not.toHaveBeenCalled();
+
+      const focus = vi.spyOn(search, "focus");
+      const select = vi.spyOn(search, "select");
+      const slash = shortcutEvent({ key: "/" });
+      act(() => {
+        screen.getByTestId("new-document").dispatchEvent(slash.event);
+      });
+      expect(slash.preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      expect(listeners.active(false)).toHaveLength(0);
+      expect(listeners.active(true)).toHaveLength(0);
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["different user", { ...USER, id: "replacement-shortcut-owner", login: "replacement-shortcut-owner" }],
+    ["equal user values", { ...USER }],
+  ])("retires captured callbacks before a %s replacement boundary and leaves the new visit usable", async (_name, replacementUser) => {
+    const listeners = trackWindowKeydownListeners();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+    const onPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      await act(async () => {
+        root.render(<DashboardBoundary onPassiveCleanup={onPassiveCleanup} />);
+      });
+      const staleSearch = listeners.active(false)[0];
+      const stalePalette = listeners.active(true)[0];
+      const staleInput = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
+      const staleFocus = vi.spyOn(staleInput, "focus");
+      const staleSelect = vi.spyOn(staleInput, "select");
+      const staleSlashAtBoundary = shortcutEvent({ key: "/" });
+      const stalePaletteAtBoundary = shortcutEvent({ key: "p", ctrlKey: true, shiftKey: true });
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+
+      root.render(
+        <DashboardBoundary
+          user={replacementUser}
+          boundary={1}
+          onPassiveCleanup={onPassiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            expect(listeners.removalCount(staleSearch, false)).toBe(1);
+            expect(listeners.removalCount(stalePalette, true)).toBe(1);
+            expect(listeners.active(false)).toHaveLength(1);
+            expect(listeners.active(true)).toHaveLength(1);
+            staleSearch(staleSlashAtBoundary.event);
+            stalePalette(stalePaletteAtBoundary.event);
+            expect(staleSlashAtBoundary.preventDefault).not.toHaveBeenCalled();
+            expect(stalePaletteAtBoundary.preventDefault).not.toHaveBeenCalled();
+            expect(stalePaletteAtBoundary.stopPropagation).not.toHaveBeenCalled();
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+
+      const currentSearch = listeners.active(false)[0];
+      const currentPalette = listeners.active(true)[0];
+      expect(currentSearch).not.toBe(staleSearch);
+      expect(currentPalette).not.toBe(stalePalette);
+      expect(staleFocus).not.toHaveBeenCalled();
+      expect(staleSelect).not.toHaveBeenCalled();
+      const currentInput = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
+      const currentFocus = vi.spyOn(currentInput, "focus");
+      const currentSelect = vi.spyOn(currentInput, "select");
+      const currentSlash = shortcutEvent({ key: "/" });
+      act(() => currentSearch(currentSlash.event));
+      expect(currentSlash.preventDefault).toHaveBeenCalledOnce();
+      expect(currentSlash.stopPropagation).not.toHaveBeenCalled();
+      expect(currentFocus).toHaveBeenCalledOnce();
+      expect(currentSelect).toHaveBeenCalledOnce();
+
+      const currentPaletteEvent = shortcutEvent({ key: "k", ctrlKey: true });
+      act(() => currentPalette(currentPaletteEvent.event));
+      expect(currentPaletteEvent.preventDefault).toHaveBeenCalledOnce();
+      expect(currentPaletteEvent.stopPropagation).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+
+      const staleSlashAfterCurrent = shortcutEvent({ key: "/" });
+      const stalePaletteAfterCurrent = shortcutEvent({ key: "p", ctrlKey: true, shiftKey: true });
+      act(() => {
+        stalePalette(stalePaletteAfterCurrent.event);
+        staleSearch(staleSlashAfterCurrent.event);
+      });
+      expect(staleSlashAfterCurrent.preventDefault).not.toHaveBeenCalled();
+      expect(stalePaletteAfterCurrent.preventDefault).not.toHaveBeenCalled();
+      expect(stalePaletteAfterCurrent.stopPropagation).not.toHaveBeenCalled();
+      expect(staleFocus).toHaveBeenCalledOnce();
+      expect(staleSelect).toHaveBeenCalledOnce();
+      expect(currentFocus).toHaveBeenCalledOnce();
+      expect(currentSelect).toHaveBeenCalledOnce();
+      expect(listeners.active(false)).toEqual([currentSearch]);
+      expect(listeners.active(true)).toEqual([currentPalette]);
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(starDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("retires both captured listeners before removal and keeps their callback orders inert", async () => {
+    const listeners = trackWindowKeydownListeners();
+    const host = document.createElement("div");
+    const focusOwner = document.createElement("button");
+    focusOwner.textContent = "Persistent shortcut focus";
+    document.body.append(focusOwner, host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+
+    try {
+      await act(async () => {
+        root.render(
+          <DashboardBoundary
+            onPassiveCleanup={() => {
+              passiveCleanups++;
+            }}
+          />,
+        );
+      });
+      const staleSearch = listeners.active(false)[0];
+      const stalePalette = listeners.active(true)[0];
+      const staleInput = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
+      const staleFocus = vi.spyOn(staleInput, "focus");
+      const staleSelect = vi.spyOn(staleInput, "select");
+      const boundarySlash = shortcutEvent({ key: "/" });
+      const boundaryPalette = shortcutEvent({ key: "k", ctrlKey: true });
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+
+      root.render(
+        <DashboardBoundary
+          present={false}
+          boundary={1}
+          onPassiveCleanup={() => {
+            passiveCleanups++;
+          }}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            expect(listeners.active(false)).toHaveLength(0);
+            expect(listeners.active(true)).toHaveLength(0);
+            focusOwner.focus();
+            staleSearch(boundarySlash.event);
+            stalePalette(boundaryPalette.event);
+            expect(boundarySlash.preventDefault).not.toHaveBeenCalled();
+            expect(boundaryPalette.preventDefault).not.toHaveBeenCalled();
+            expect(boundaryPalette.stopPropagation).not.toHaveBeenCalled();
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+      const removedMarkup = host.innerHTML;
+      const removedSlash = shortcutEvent({ key: "/" });
+      const removedPalette = shortcutEvent({ key: "p", ctrlKey: true, shiftKey: true });
+      act(() => {
+        stalePalette(removedPalette.event);
+        staleSearch(removedSlash.event);
+      });
+
+      expect(host.innerHTML).toBe(removedMarkup);
+      expect(focusOwner).toHaveFocus();
+      expect(staleFocus).not.toHaveBeenCalled();
+      expect(staleSelect).not.toHaveBeenCalled();
+      expect(removedSlash.preventDefault).not.toHaveBeenCalled();
+      expect(removedPalette.preventDefault).not.toHaveBeenCalled();
+      expect(removedPalette.stopPropagation).not.toHaveBeenCalled();
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(starDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      focusOwner.remove();
     }
   });
 });
