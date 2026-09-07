@@ -1136,10 +1136,23 @@ export interface ComposerRequest {
   agents: MentionCandidate[];
 }
 
-function Composer({
+interface ComposerVisit {
+  readonly marker: "composer-visit";
+}
+
+interface ComposerSubmissionOwner {
+  readonly visit: ComposerVisit;
+  readonly operation: number;
+  readonly body: string;
+  readonly request: ComposerRequest | null;
+  readonly agentIdentities: readonly string[];
+}
+
+function Composer<Result>({
   placeholder,
   autoFocus,
   onSubmit,
+  onSuccess,
   onCancel,
   submitLabel = "Comment",
   initial = "",
@@ -1150,7 +1163,9 @@ function Composer({
   placeholder: string;
   autoFocus?: boolean;
   /** `request` is set when the body mentions an agent the picker knows and this composer offers the mode row. */
-  onSubmit: (body: string, request: ComposerRequest | null) => void | Promise<unknown>;
+  onSubmit: (body: string, request: ComposerRequest | null) => Result | Promise<Result>;
+  /** Runs only while this exact composer and submission still own the successful result. */
+  onSuccess?: (result: Result, body: string, request: ComposerRequest | null) => void;
   onCancel?: () => void;
   submitLabel?: string;
   initial?: string;
@@ -1168,8 +1183,24 @@ function Composer({
   const [highlight, setHighlight] = useState(0);
   const [mode, setMode] = useState<AgentRequestMode>(request?.defaultMode ?? "suggest");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const activeVisit = useRef<ComposerVisit | null>(null);
+  const activeSubmission = useRef<ComposerSubmissionOwner | null>(null);
+  const operationSequence = useRef(0);
+  useLayoutEffect(() => {
+    const visit: ComposerVisit = { marker: "composer-visit" };
+    activeVisit.current = visit;
+    activeSubmission.current = null;
+    return () => {
+      if (activeVisit.current === visit) {
+        activeVisit.current = null;
+        activeSubmission.current = null;
+      }
+    };
+  }, []);
+  const ownsSubmission = (owner: ComposerSubmissionOwner) => activeVisit.current === owner.visit && activeSubmission.current === owner;
   /** Re-evaluate whether the caret is in an `@` token. */
   const syncTrigger = useCallback((el: HTMLTextAreaElement) => {
+    if (activeSubmission.current) return;
     setHighlight(0);
     if (el.selectionStart !== el.selectionEnd) {
       setTrigger(null);
@@ -1237,6 +1268,7 @@ function Composer({
 
   /** Insert a suggestion block for the quoted text and select its contents so typing replaces them. */
   const insertSuggestion = () => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (quote === undefined || parseSuggestionBlock(value)) return;
     const next = suggestionBlockFor(quote, value);
@@ -1251,6 +1283,7 @@ function Composer({
 
   /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
   const applyFormat = (kind: "bold" | "italic" | "code" | "link") => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (!el) return;
     const { selectionStart, selectionEnd } = el;
@@ -1293,6 +1326,7 @@ function Composer({
 
   /** A quick instruction goes right after the mention; once the body has text past it, at the caret instead. Focus stays in the box. */
   const insertInstruction = (text: string) => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (!el) return;
     const mentionEnd = lastAgentMentionEnd(value);
@@ -1321,6 +1355,11 @@ function Composer({
 
   /** Arrow keys move through the modes; a disabled mode takes focus (so its tooltip can say why) without being chosen. */
   const onModeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (activeSubmission.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const key = event.key === "ArrowUp" ? "ArrowLeft" : event.key === "ArrowDown" ? "ArrowRight" : event.key;
     const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
@@ -1334,6 +1373,7 @@ function Composer({
   };
 
   const pick = (c: MentionCandidate) => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (!el || !trigger) return;
     const caret = el.selectionStart;
@@ -1350,32 +1390,67 @@ function Composer({
 
   const submit = async () => {
     const body = value.trim();
-    if (!body || locked) return;
+    const visit = activeVisit.current;
+    if (!visit || activeSubmission.current || !body || locked) return;
+    const submittedRequest = showRow ? { mode: effectiveMode, agents: [...agents] } : null;
+    const owner: ComposerSubmissionOwner = {
+      visit,
+      operation: ++operationSequence.current,
+      body,
+      request: submittedRequest,
+      agentIdentities: submittedRequest?.agents.map((agent) => agent.login) ?? [],
+    };
+    activeSubmission.current = owner;
     setBusy(true);
     try {
-      await onSubmit(body, showRow ? { mode: effectiveMode, agents } : null);
-      setValue("");
-      setTrigger(null);
+      const result = await onSubmit(owner.body, owner.request);
+      if (ownsSubmission(owner)) {
+        setValue("");
+        setTrigger(null);
+        onSuccess?.(result, owner.body, owner.request);
+      }
+    } catch (reason) {
+      if (ownsSubmission(owner)) throw reason;
     } finally {
-      setBusy(false);
+      if (ownsSubmission(owner)) {
+        activeSubmission.current = null;
+        setBusy(false);
+      }
     }
   };
   return (
     <div className="@container flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
-      <Popover open={open} onOpenChange={(o) => !o && setTrigger(null)}>
+      <Popover open={open} onOpenChange={(o) => !o && !activeSubmission.current && setTrigger(null)}>
         <PopoverAnchor asChild>
           <textarea
             ref={ref}
             className="textarea min-h-[64px] resize-none text-[13px]"
             placeholder={placeholder}
             value={value}
+            disabled={busy}
+            aria-busy={busy || undefined}
             onChange={(e) => {
+              if (activeSubmission.current) return;
               setValue(e.target.value);
               syncTrigger(e.target);
             }}
-            onSelect={(e) => syncTrigger(e.currentTarget)}
-            onBlur={() => setTimeout(() => setTrigger(null), 120)}
+            onSelect={(e) => {
+              if (!activeSubmission.current) syncTrigger(e.currentTarget);
+            }}
+            onBlur={() => {
+              const visit = activeVisit.current;
+              const operation = operationSequence.current;
+              if (!visit || activeSubmission.current) return;
+              setTimeout(() => {
+                if (activeVisit.current === visit && operationSequence.current === operation && !activeSubmission.current) setTrigger(null);
+              }, 120);
+            }}
             onKeyDown={(e) => {
+              if (activeSubmission.current) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
               const mod = e.metaKey || e.ctrlKey;
               if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "s" && quote !== undefined) {
                 e.preventDefault();
@@ -1460,7 +1535,7 @@ function Composer({
                     key={c.login}
                     role="option"
                     aria-selected={i === highlight}
-                    aria-disabled={lockedRow || undefined}
+                    aria-disabled={busy || lockedRow || undefined}
                     className={cn("menu-item py-1.5", i === highlight && "bg-surface-3", lockedRow && "text-ink-3")}
                     title={reason}
                     onMouseDown={(e) => e.preventDefault()}
@@ -1530,13 +1605,14 @@ function Composer({
                   type="button"
                   role="radio"
                   aria-checked={checked}
-                  aria-disabled={disabled || undefined}
+                  aria-disabled={busy || disabled || undefined}
+                  disabled={busy}
                   tabIndex={checked ? 0 : -1}
                   className="composer-mode"
                   // Choosing a mode with the pointer must not pull focus out of the textarea (Enter still posts).
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    if (!disabled) setMode(m.id);
+                    if (!disabled && !activeSubmission.current) setMode(m.id);
                   }}
                   data-testid={`composer-mode-${m.id}`}
                 >
@@ -1554,7 +1630,7 @@ function Composer({
           </div>
           <div className="composer-chips" role="group" aria-label="Quick instructions">
             {QUICK_INSTRUCTIONS.map((q) => (
-              <button key={q} type="button" className="composer-chip" onMouseDown={(e) => e.preventDefault()} onClick={() => insertInstruction(q)} data-testid="composer-chip">
+              <button key={q} type="button" className="composer-chip" onMouseDown={(e) => e.preventDefault()} onClick={() => insertInstruction(q)} disabled={busy} data-testid="composer-chip">
                 {q}
               </button>
             ))}
@@ -1578,7 +1654,7 @@ function Composer({
             type="button"
             className="btn btn-ghost btn-sm mr-auto min-w-8 gap-1.5 whitespace-nowrap px-2 @min-[21rem]:px-3"
             onClick={insertSuggestion}
-            disabled={parseSuggestionBlock(value) !== null}
+            disabled={busy || parseSuggestionBlock(value) !== null}
             title="Suggest a change (Ctrl+Shift+S)"
             aria-label="Suggest a change"
             data-testid="comment-suggest-change"
@@ -1587,7 +1663,14 @@ function Composer({
           </button>
         )}
         {onCancel && (
-          <button type="button" className="btn btn-ghost btn-sm whitespace-nowrap" onClick={onCancel}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm whitespace-nowrap"
+            onClick={() => {
+              if (!activeSubmission.current) onCancel();
+            }}
+            disabled={busy}
+          >
             Cancel
           </button>
         )}
@@ -1598,7 +1681,7 @@ function Composer({
             type="button"
             className="btn btn-primary btn-sm whitespace-nowrap"
             disabled={!value.trim() || busy || locked}
-            onClick={() => void submit()}
+            onClick={submit}
             // Read after the button's name by screen readers, so keyboard users get the shortcuts without hovering.
             // (Not aria-label, which would replace "Save"; not title, which would add a second, native tooltip.)
             aria-description={shortcuts}
@@ -1913,10 +1996,8 @@ const ThreadCard = memo(function ThreadCard({
             autoFocus
             editing
             submitLabel="Save"
-            onSubmit={async (body) => {
-              await ops.edit(thread.id, body);
-              setEditing(null);
-            }}
+            onSubmit={(body) => ops.edit(thread.id, body)}
+            onSuccess={() => setEditing(null)}
             onCancel={() => setEditing(null)}
           />
         </div>
@@ -2009,10 +2090,8 @@ const ThreadCard = memo(function ThreadCard({
                       autoFocus
                       editing
                       submitLabel="Save"
-                      onSubmit={async (body) => {
-                        await ops.edit(thread.id, body, r.id);
-                        setEditing(null);
-                      }}
+                      onSubmit={(body) => ops.edit(thread.id, body, r.id)}
+                      onSuccess={() => setEditing(null)}
                       onCancel={() => setEditing(null)}
                     />
                   </div>
@@ -2032,8 +2111,8 @@ const ThreadCard = memo(function ThreadCard({
               submitLabel="Reply"
               quote={thread.range && !isDocument ? thread.quote : undefined}
               request={onRequest ? { canEdit: canRequestEdits, defaultMode: request?.mode ?? "suggest" } : undefined}
-              onSubmit={async (body, req) => {
-                await ops.reply(thread.id, body);
+              onSubmit={(body) => ops.reply(thread.id, body)}
+              onSuccess={(_result, body, req) => {
                 setReplying(false);
                 if (req && onRequest) onRequest(thread.id, body, req.mode);
               }}
@@ -2914,9 +2993,11 @@ export function CommentsPanel({
               initial={seed?.initial ?? ""}
               quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
               request={{ canEdit, defaultMode: "suggest" }}
-              onSubmit={async (body, req) => {
+              onSubmit={(body) => {
                 const quote = session.ytext.toString().slice(pending.from, pending.to);
-                const id = await ops.add(pending.from, pending.to, body);
+                return ops.add(pending.from, pending.to, body).then((id) => ({ id, quote }));
+              }}
+              onSuccess={({ id, quote }, body, req) => {
                 session.setPendingComment(null);
                 if (typeof id === "string") session.setActiveComment(id);
                 onPendingDone?.();
