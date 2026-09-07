@@ -210,12 +210,14 @@ function Boundary({
   current,
   present = true,
   boundary = 0,
+  mountKey,
   onBoundary,
   onPassiveCleanup,
 }: {
   current: Fixture;
   present?: boolean;
   boundary?: number;
+  mountKey?: number;
   onBoundary?: () => void;
   onPassiveCleanup?: () => void;
 }) {
@@ -227,6 +229,7 @@ function Boundary({
     <>
       {present ? (
         <TableMenu
+          key={mountKey}
           view={current.view}
           session={current.session}
           actions={current.actions}
@@ -236,6 +239,90 @@ function Boundary({
       ) : null}
     </>
   );
+}
+
+interface DirectMouseEvent {
+  preventDefault: () => void;
+}
+
+interface CapturedControl {
+  click: () => void;
+  mouseDown: (event: DirectMouseEvent) => void;
+}
+
+function reactHandler<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return handler as T;
+}
+
+function captureControl(testId: string): CapturedControl {
+  const element = screen.getByTestId(testId);
+  return {
+    click: reactHandler(element, "onClick"),
+    mouseDown: reactHandler(element, "onMouseDown"),
+  };
+}
+
+function captureRepresentativeControls() {
+  return {
+    table: captureControl("table-row-before"),
+    alignment: captureControl("table-align-center"),
+    deletion: captureControl("table-delete"),
+  };
+}
+
+function observedControlWork(
+  browser: ReturnType<typeof controlledBrowser>,
+  fixtures: Fixture[],
+  host: HTMLElement,
+  focus: ReturnType<typeof vi.spyOn>,
+) {
+  return {
+    requests: browser.request.mock.calls.length,
+    cancellations: browser.cancel.mock.calls.length,
+    pendingFrames: [...browser.frames.keys()],
+    listeners: browser.listeners.map((listener) => listener.removed),
+    fixtures: fixtures.map((current) => ({
+      state: current.stateRead.mock.calls.length,
+      dom: current.domRead.mock.calls.length,
+      destroyed: current.destroyedRead.mock.calls.length,
+      nodeDOM: current.nodeDOM.mock.calls.length,
+      tableRect: current.tableRect.mock.calls.length,
+      hostRect: current.hostRect.mock.calls.length,
+      tableActions: current.tableAction.mock.calls.length,
+      alignActions: current.alignAction.mock.calls.length,
+    })),
+    focus: focus.mock.calls.length,
+    activeElement: document.activeElement,
+    markup: host.innerHTML,
+  };
+}
+
+function expectRetiredControlsDoNoWork({
+  controls,
+  browser,
+  fixtures,
+  host,
+  focus,
+}: {
+  controls: ReturnType<typeof captureRepresentativeControls>;
+  browser: ReturnType<typeof controlledBrowser>;
+  fixtures: Fixture[];
+  host: HTMLElement;
+  focus: ReturnType<typeof vi.spyOn>;
+}) {
+  const before = observedControlWork(browser, fixtures, host, focus);
+  const preventions = Object.values(controls).map(() => vi.fn());
+  Object.values(controls).forEach((control, index) => {
+    control.mouseDown({ preventDefault: preventions[index] });
+    control.click();
+  });
+  expect(preventions.every((preventDefault) => preventDefault.mock.calls.length === 0)).toBe(true);
+  expect(observedControlWork(browser, fixtures, host, focus)).toEqual(before);
 }
 
 afterEach(() => {
@@ -431,7 +518,7 @@ describe("TableMenu geometry ownership", () => {
     }
   });
 
-  it("keeps every table button focus-safe and wired to exactly one intended action", () => {
+  it("keeps every table button focus-safe and gives each control one exact action per publication", () => {
     const browser = controlledBrowser();
     const current = fixture({
       host: new DOMRect(50, 120, 800, 600),
@@ -459,6 +546,13 @@ describe("TableMenu geometry ownership", () => {
         ["table-align-center", null],
         ["table-align-right", "right"],
       ];
+      const frozenRow = captureControl("table-row-before");
+      const replacementAction = vi.fn<(command: TableCommand) => void>();
+      current.actions.table = replacementAction;
+      frozenRow.click();
+      current.actions.table = current.tableAction;
+      expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
+      expect(replacementAction).not.toHaveBeenCalled();
 
       for (const [testId] of [...commands, ...alignments]) {
         const button = screen.getByTestId(testId);
@@ -473,6 +567,393 @@ describe("TableMenu geometry ownership", () => {
       expect(current.alignAction.mock.calls).toEqual(alignments.map(([, alignment]) => [alignment]));
       expect(current.alignAction).toHaveBeenCalledTimes(3);
       expect(screen.getAllByRole("button")).toHaveLength(10);
+
+      for (const [testId] of [...commands, ...alignments]) {
+        const button = screen.getByTestId(testId);
+        fireEvent.click(button);
+        reactHandler<() => void>(button, "onClick")();
+      }
+      expect(current.tableAction).toHaveBeenCalledTimes(7);
+      expect(current.alignAction).toHaveBeenCalledTimes(3);
+
+      const menu = screen.getByTestId("table-menu");
+      const rowBefore = screen.getByTestId("table-row-before");
+      act(() => root.render(<Boundary current={current} boundary={1} />));
+      expect(screen.getByTestId("table-menu")).toBe(menu);
+      expect(screen.getByTestId("table-row-before")).toBe(rowBefore);
+      reactHandler<() => void>(rowBefore, "onClick")();
+      expect(current.tableAction).toHaveBeenCalledTimes(8);
+      expect(current.tableAction).toHaveBeenLastCalledWith("rowBefore");
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "retires reused-DOM actions before the parent layout boundary and keeps the replacement usable (%s)",
+    (order) => {
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+        align: "center",
+      });
+      const replacement = {
+        ...current,
+        actions: {
+          table: current.actions.table,
+          setColumnAlign: current.actions.setColumnAlign,
+        } as EditorActions,
+      };
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      let passiveCleanups = 0;
+      const onPassiveCleanup = () => {
+        passiveCleanups++;
+      };
+
+      try {
+        act(() => root.render(<Boundary current={current} onPassiveCleanup={onPassiveCleanup} />));
+        browser.flush();
+        const reusedMenu = screen.getByTestId("table-menu");
+        const reusedRow = screen.getByTestId("table-row-before");
+        const retired = captureRepresentativeControls();
+        let boundaries = 0;
+
+        act(() => {
+          root.render(
+            <Boundary
+              current={replacement}
+              boundary={1}
+              onPassiveCleanup={onPassiveCleanup}
+              onBoundary={() => {
+                boundaries++;
+                expect(passiveCleanups).toBe(0);
+                expect(screen.getByTestId("table-menu")).toBe(reusedMenu);
+                expect(screen.getByTestId("table-row-before")).toBe(reusedRow);
+                expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
+              }}
+            />,
+          );
+        });
+        expect(boundaries).toBe(1);
+        expect(passiveCleanups).toBe(1);
+        expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
+
+        const replacementControls = captureRepresentativeControls();
+        const retiredPrevention = vi.fn();
+        const currentPrevention = vi.fn();
+        const staleAttempt = () => {
+          retired.table.mouseDown({ preventDefault: retiredPrevention });
+          retired.table.click();
+        };
+        const currentAttempt = () => {
+          replacementControls.table.mouseDown({ preventDefault: currentPrevention });
+          replacementControls.table.click();
+        };
+        for (const attempt of order === "stale-before-current"
+          ? [staleAttempt, currentAttempt]
+          : [currentAttempt, staleAttempt]) {
+          attempt();
+        }
+        expect(retiredPrevention).not.toHaveBeenCalled();
+        expect(currentPrevention).toHaveBeenCalledOnce();
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
+
+        replacementControls.table.click();
+        fireEvent.click(reusedRow);
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
+
+        replacementControls.deletion.click();
+        captureControl("table-align-left").click();
+        replacementControls.alignment.click();
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"]]);
+        expect(current.alignAction.mock.calls).toEqual([["left"], [null]]);
+
+        let replacementBoundaries = 0;
+        act(() => {
+          root.render(
+            <Boundary
+              current={replacement}
+              boundary={2}
+              onPassiveCleanup={onPassiveCleanup}
+              onBoundary={() => {
+                replacementBoundaries++;
+                expect(passiveCleanups).toBe(1);
+                expectRetiredControlsDoNoWork({
+                  controls: replacementControls,
+                  browser,
+                  fixtures: [current],
+                  host,
+                  focus,
+                });
+              }}
+            />,
+          );
+        });
+        expect(replacementBoundaries).toBe(1);
+        expect(passiveCleanups).toBe(2);
+        expect(screen.getByTestId("table-menu")).toBe(reusedMenu);
+        expect(screen.getByTestId("table-row-before")).toBe(reusedRow);
+        captureControl("table-row-before").click();
+        captureControl("table-row-before").click();
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"], ["rowBefore"]]);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it("retires format, eligibility, geometry, view, session, container, and removal publications without stale work", () => {
+    const browser = controlledBrowser();
+    const first = fixture({
+      host: new DOMRect(10, 100, 800, 600),
+      tableBox: new DOMRect(110, 300, 500, 300),
+      align: "center",
+    });
+    const second = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+      align: "center",
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let passiveCleanups = 0;
+    const onPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      act(() => root.render(<Boundary current={first} onPassiveCleanup={onPassiveCleanup} />));
+      browser.flush();
+      const reusedMenu = screen.getByTestId("table-menu");
+      const reusedRow = screen.getByTestId("table-row-before");
+      const initial = captureRepresentativeControls();
+      const equalFormat = { ...first, format: { ...first.format } };
+      let formatBoundaries = 0;
+
+      act(() => {
+        root.render(
+          <Boundary
+            current={equalFormat}
+            boundary={1}
+            onPassiveCleanup={onPassiveCleanup}
+            onBoundary={() => {
+              formatBoundaries++;
+              expect(passiveCleanups).toBe(0);
+              expect(screen.getByTestId("table-menu")).toBe(reusedMenu);
+              expect(screen.getByTestId("table-row-before")).toBe(reusedRow);
+              expectRetiredControlsDoNoWork({ controls: initial, browser, fixtures: [first], host, focus });
+            }}
+          />,
+        );
+      });
+      expect(formatBoundaries).toBe(1);
+      expect(passiveCleanups).toBe(1);
+      expectRetiredControlsDoNoWork({ controls: initial, browser, fixtures: [first], host, focus });
+
+      const formatted = captureRepresentativeControls();
+      equalFormat.format.tableAlign = "right";
+      expectRetiredControlsDoNoWork({ controls: formatted, browser, fixtures: [first], host, focus });
+      equalFormat.format.tableAlign = "center";
+
+      (first.session as unknown as { canEdit: boolean }).canEdit = false;
+      let editabilityBoundaries = 0;
+      act(() => {
+        root.render(
+          <Boundary
+            current={equalFormat}
+            boundary={2}
+            onPassiveCleanup={onPassiveCleanup}
+            onBoundary={() => {
+              editabilityBoundaries++;
+              expect(passiveCleanups).toBe(1);
+              expectRetiredControlsDoNoWork({ controls: formatted, browser, fixtures: [first], host, focus });
+            }}
+          />,
+        );
+      });
+      expect(editabilityBoundaries).toBe(1);
+      expect(passiveCleanups).toBe(2);
+      const ineligibleEdit = captureRepresentativeControls();
+      expectRetiredControlsDoNoWork({ controls: ineligibleEdit, browser, fixtures: [first], host, focus });
+      browser.flush();
+      expect(screen.queryByTestId("table-menu")).toBeNull();
+      expectRetiredControlsDoNoWork({ controls: formatted, browser, fixtures: [first], host, focus });
+      expectRetiredControlsDoNoWork({ controls: ineligibleEdit, browser, fixtures: [first], host, focus });
+
+      (first.session as unknown as { canEdit: boolean }).canEdit = true;
+      act(() => root.render(<Boundary current={equalFormat} boundary={3} onPassiveCleanup={onPassiveCleanup} />));
+      browser.flush();
+      const editable = captureRepresentativeControls();
+      (first.session as unknown as { activeSurface: "code" | "rich" }).activeSurface = "code";
+      let surfaceBoundaries = 0;
+      act(() => {
+        root.render(
+          <Boundary
+            current={equalFormat}
+            boundary={4}
+            onPassiveCleanup={onPassiveCleanup}
+            onBoundary={() => {
+              surfaceBoundaries++;
+              expect(passiveCleanups).toBe(3);
+              expectRetiredControlsDoNoWork({ controls: editable, browser, fixtures: [first], host, focus });
+            }}
+          />,
+        );
+      });
+      expect(surfaceBoundaries).toBe(1);
+      expect(passiveCleanups).toBe(4);
+      const ineligibleSurface = captureRepresentativeControls();
+      expectRetiredControlsDoNoWork({ controls: ineligibleSurface, browser, fixtures: [first], host, focus });
+      browser.flush();
+      expect(screen.queryByTestId("table-menu")).toBeNull();
+
+      (first.session as unknown as { activeSurface: "code" | "rich" }).activeSurface = "rich";
+      act(() => root.render(<Boundary current={equalFormat} boundary={5} onPassiveCleanup={onPassiveCleanup} />));
+      browser.flush();
+      const beforeDestruction = captureRepresentativeControls();
+      first.destroyedRead.mockReturnValue(true);
+      const destroyedPrevention = vi.fn();
+      beforeDestruction.table.mouseDown({ preventDefault: destroyedPrevention });
+      beforeDestruction.table.click();
+      expect(destroyedPrevention).not.toHaveBeenCalled();
+      expect(first.tableAction).not.toHaveBeenCalled();
+      expect(first.alignAction).not.toHaveBeenCalled();
+      first.destroyedRead.mockReturnValue(false);
+      const prevention = vi.fn();
+      beforeDestruction.table.mouseDown({ preventDefault: prevention });
+      beforeDestruction.table.click();
+      expect(prevention).toHaveBeenCalledOnce();
+      expect(first.tableAction.mock.calls).toEqual([["rowBefore"]]);
+
+      first.container.dispatchEvent(new Event("scroll"));
+      const beforeGeometry = captureRepresentativeControls();
+      const menuBeforeGeometry = screen.getByTestId("table-menu");
+      const rowBeforeGeometry = screen.getByTestId("table-row-before");
+      browser.flush();
+      expect(screen.getByTestId("table-menu")).toBe(menuBeforeGeometry);
+      expect(screen.getByTestId("table-row-before")).toBe(rowBeforeGeometry);
+      expectRetiredControlsDoNoWork({ controls: beforeGeometry, browser, fixtures: [first], host, focus });
+      const currentGeometry = captureRepresentativeControls();
+
+      let replacementBoundaries = 0;
+      act(() => {
+        root.render(
+          <Boundary
+            current={second}
+            boundary={6}
+            onPassiveCleanup={onPassiveCleanup}
+            onBoundary={() => {
+              replacementBoundaries++;
+              expect(passiveCleanups).toBe(5);
+              expect(screen.queryByTestId("table-menu")).toBeNull();
+              expectRetiredControlsDoNoWork({
+                controls: currentGeometry,
+                browser,
+                fixtures: [first, second],
+                host,
+                focus,
+              });
+            }}
+          />,
+        );
+      });
+      expect(replacementBoundaries).toBe(1);
+      expect(passiveCleanups).toBe(6);
+      expectRetiredControlsDoNoWork({ controls: currentGeometry, browser, fixtures: [first, second], host, focus });
+      browser.flush();
+      const replacement = captureRepresentativeControls();
+      replacement.alignment.click();
+      replacement.deletion.click();
+      expect(second.alignAction.mock.calls).toEqual([[null]]);
+      expect(second.tableAction.mock.calls).toEqual([["deleteTable"]]);
+
+      let removalBoundaries = 0;
+      act(() => {
+        root.render(
+          <Boundary
+            current={second}
+            present={false}
+            boundary={7}
+            onPassiveCleanup={onPassiveCleanup}
+            onBoundary={() => {
+              removalBoundaries++;
+              expect(passiveCleanups).toBe(6);
+              expectRetiredControlsDoNoWork({
+                controls: replacement,
+                browser,
+                fixtures: [first, second],
+                host,
+                focus,
+              });
+            }}
+          />,
+        );
+      });
+      expect(removalBoundaries).toBe(1);
+      expect(passiveCleanups).toBe(7);
+      expect(screen.queryByTestId("table-menu")).toBeNull();
+      expectRetiredControlsDoNoWork({ controls: replacement, browser, fixtures: [first, second], host, focus });
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("isolates an equal-value remount from the retired mount's callbacks and claims", () => {
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+      align: "center",
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let passiveCleanups = 0;
+    const onPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      act(() => root.render(<Boundary current={current} mountKey={0} onPassiveCleanup={onPassiveCleanup} />));
+      browser.flush();
+      const retired = captureRepresentativeControls();
+      retired.table.click();
+      expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
+      let boundaries = 0;
+      act(() => {
+        root.render(
+          <Boundary
+            current={current}
+            mountKey={1}
+            boundary={1}
+            onPassiveCleanup={onPassiveCleanup}
+            onBoundary={() => {
+              boundaries++;
+              expect(passiveCleanups).toBe(0);
+              expect(screen.queryByTestId("table-menu")).toBeNull();
+              expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
+            }}
+          />,
+        );
+      });
+      expect(boundaries).toBe(1);
+      expect(passiveCleanups).toBe(1);
+      expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
+
+      browser.flush();
+      const remounted = captureRepresentativeControls();
+      remounted.table.click();
+      remounted.alignment.click();
+      expectRetiredControlsDoNoWork({ controls: retired, browser, fixtures: [current], host, focus });
+      expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["rowBefore"]]);
+      expect(current.alignAction.mock.calls).toEqual([[null]]);
     } finally {
       act(() => root.unmount());
     }
