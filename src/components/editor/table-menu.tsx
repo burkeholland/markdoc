@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { EditorView } from "prosemirror-view";
 import {
   ArrowUpToLine,
@@ -25,6 +25,29 @@ import { useSessionValue } from "./use-session";
 
 const MENU_WIDTH = 372;
 const MENU_HEIGHT = 40;
+
+interface ScheduledFrame {
+  id: number;
+}
+
+interface TableMenuAuthority {
+  view: EditorView;
+  editor: HTMLElement | null;
+  container: HTMLElement;
+  session: CollabSession;
+  format: FormatState;
+  canEdit: boolean;
+  activeSurface: CollabSession["activeSurface"];
+  schedule: () => void;
+  dispose: () => void;
+}
+
+interface TableMenuGeometry {
+  authority: TableMenuAuthority;
+  left: number;
+  top: number;
+  width: number;
+}
 
 function MenuButton({
   label,
@@ -76,69 +99,139 @@ export function TableMenu({
   format: FormatState;
   containerRef: React.RefObject<HTMLElement | null>;
 }) {
-  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null);
-  const raf = useRef<number | null>(null);
+  const [geometry, setGeometry] = useState<TableMenuGeometry | null>(null);
+  const authorityRef = useRef<TableMenuAuthority | null>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
 
-  const compute = useCallback(() => {
-    const container = containerRef.current;
-    if (!view || !container || format.tablePos < 0 || !canEdit || activeSurface !== "rich" || isTableMenuHidden(view.state)) {
-      setPos(null);
-      return;
-    }
-    const dom = view.nodeDOM(format.tablePos);
-    // The table node view wraps the <table>; anchor to whichever element is actually rendered.
-    const table = dom instanceof HTMLElement ? (dom.tagName === "TABLE" ? dom : dom.querySelector("table") ?? dom) : null;
-    if (!table) {
-      setPos(null);
-      return;
-    }
-    const rect = table.getBoundingClientRect();
-    const host = container.getBoundingClientRect();
-    // Sit above the table; if that edge is scrolled away, stick to the top of the pane. Then keep
-    // the whole menu inside the window (narrow phones shrink it and let it scroll sideways).
-    const box = clampToViewport(
-      { left: rect.left, top: Math.max(host.top + 4, rect.top - MENU_HEIGHT - 8), width: MENU_WIDTH, height: MENU_HEIGHT },
-      { width: window.innerWidth, height: window.innerHeight },
-    );
-    const left = Math.max(8, Math.min(container.clientWidth - box.width - 8, box.left - host.left));
-    const top = Math.max(container.scrollTop + 4, box.top - host.top + container.scrollTop);
-    setPos({ left, top, width: box.width });
-  }, [view, canEdit, activeSurface, containerRef, format.tablePos]);
-
-  const schedule = useCallback(() => {
-    if (raf.current) cancelAnimationFrame(raf.current);
-    raf.current = requestAnimationFrame(compute);
-  }, [compute]);
-
+  // Resolve ref.current on every commit: the pane can be replaced without replacing its ref.
   useLayoutEffect(() => {
-    schedule();
-  }, [schedule, format]);
+    const container = containerRef.current;
+    const previous = authorityRef.current;
+    if (previous?.view === view && previous.container === container && previous.session === session) {
+      const changed = previous.format !== format || previous.canEdit !== canEdit || previous.activeSurface !== activeSurface;
+      previous.format = format;
+      previous.canEdit = canEdit;
+      previous.activeSurface = activeSurface;
+      if (changed) previous.schedule();
+      return;
+    }
+    previous?.dispose();
+    authorityRef.current = null;
+    if (!view || !container) {
+      return;
+    }
+    const ownedView = view;
+    const ownedContainer = container;
 
-  useEffect(() => {
-    if (!view) return;
-    const scroller = containerRef.current;
-    scroller?.addEventListener("scroll", schedule, { passive: true });
+    let disposed = false;
+    let frame: ScheduledFrame | null = null;
+    const authority: TableMenuAuthority = {
+      view: ownedView,
+      editor: null,
+      container: ownedContainer,
+      session,
+      format,
+      canEdit,
+      activeSurface,
+      schedule,
+      dispose,
+    };
+
+    function owns(scheduled: ScheduledFrame) {
+      return !disposed && authorityRef.current === authority && frame === scheduled;
+    }
+
+    function publish(scheduled: ScheduledFrame, position: Omit<TableMenuGeometry, "authority"> | null) {
+      if (!owns(scheduled)) return;
+      setGeometry(position ? { authority, ...position } : null);
+    }
+
+    function compute(scheduled: ScheduledFrame) {
+      if (!owns(scheduled)) return;
+      const currentFormat = authority.format;
+      if (
+        ownedView.isDestroyed ||
+        currentFormat.tablePos < 0 ||
+        !authority.canEdit ||
+        authority.activeSurface !== "rich" ||
+        isTableMenuHidden(ownedView.state)
+      ) {
+        publish(scheduled, null);
+        return;
+      }
+      if (!owns(scheduled)) return;
+      const dom = ownedView.nodeDOM(currentFormat.tablePos);
+      // The table node view wraps the <table>; anchor to whichever element is actually rendered.
+      const table = dom instanceof HTMLElement ? (dom.tagName === "TABLE" ? dom : dom.querySelector("table") ?? dom) : null;
+      if (!table) {
+        publish(scheduled, null);
+        return;
+      }
+      const rect = table.getBoundingClientRect();
+      const host = ownedContainer.getBoundingClientRect();
+      // Sit above the table; if that edge is scrolled away, stick to the top of the pane. Then keep
+      // the whole menu inside the window (narrow phones shrink it and let it scroll sideways).
+      const box = clampToViewport(
+        { left: rect.left, top: Math.max(host.top + 4, rect.top - MENU_HEIGHT - 8), width: MENU_WIDTH, height: MENU_HEIGHT },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+      const left = Math.max(8, Math.min(ownedContainer.clientWidth - box.width - 8, box.left - host.left));
+      const top = Math.max(ownedContainer.scrollTop + 4, box.top - host.top + ownedContainer.scrollTop);
+      publish(scheduled, { left, top, width: box.width });
+    }
+
+    function schedule() {
+      if (disposed || authorityRef.current !== authority || frame !== null) return;
+      const scheduled: ScheduledFrame = { id: -1 };
+      frame = scheduled;
+      scheduled.id = requestAnimationFrame(() => {
+        if (!owns(scheduled)) return;
+        compute(scheduled);
+        if (frame === scheduled) frame = null;
+      });
+    }
+
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      ownedContainer.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+      authority.editor?.removeEventListener(TABLE_MENU_EVENT, schedule);
+      const scheduled = frame;
+      frame = null;
+      if (scheduled) cancelAnimationFrame(scheduled.id);
+      setGeometry((current) => current?.authority === authority ? null : current);
+    }
+
+    authorityRef.current = authority;
+    if (authorityRef.current !== authority) return;
+    const editor = ownedView.dom;
+    authority.editor = editor;
+    ownedContainer.addEventListener("scroll", schedule, { passive: true });
     window.addEventListener("resize", schedule);
     // Esc hides the menu (and the next caret move shows it again) through plugin state; the editor
     // announces each flip here because a meta-only transaction changes nothing the shell re-renders on.
-    view.dom.addEventListener(TABLE_MENU_EVENT, schedule);
-    return () => {
-      scroller?.removeEventListener("scroll", schedule);
-      window.removeEventListener("resize", schedule);
-      view.dom.removeEventListener(TABLE_MENU_EVENT, schedule);
-    };
-  }, [view, schedule, containerRef]);
+    editor.addEventListener(TABLE_MENU_EVENT, schedule);
+    schedule();
+  });
 
-  if (!pos) return null;
+  useLayoutEffect(() => () => {
+    authorityRef.current?.dispose();
+    authorityRef.current = null;
+  }, []);
+
+  if (!geometry || geometry.authority.view !== view || geometry.authority.session !== session) {
+    return null;
+  }
+  const { left, top, width } = geometry;
 
   const align = (value: TableAlign) => () => actions.setColumnAlign(format.tableAlign === value ? null : value);
 
   return (
     <div
       className="touch-target scrollbar-thin absolute z-30 flex items-center gap-0.5 overflow-x-auto rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
-      style={{ left: pos.left, top: pos.top, width: pos.width }}
+      style={{ left, top, width }}
       data-testid="table-menu"
       role="toolbar"
       aria-label="Table"
