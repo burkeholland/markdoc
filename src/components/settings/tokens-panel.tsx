@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, Copy, KeyRound, Loader2, Plus } from "lucide-react";
 import { cn, relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
@@ -65,6 +65,23 @@ interface ManagerSession {
   documentId?: string;
 }
 
+interface ManagerControlVisit {
+  session: ManagerSession;
+  embedded: boolean | undefined;
+  next: string | null | undefined;
+  onClose: (() => void) | undefined;
+  hashListener: (() => void) | null;
+}
+
+interface TokensButtonControl {
+  visit: ManagerControlVisit;
+  element: HTMLButtonElement | null;
+}
+
+interface SecretPublication {
+  value: CreatedApiTokenDto;
+}
+
 interface ManagerOperation {
   session: ManagerSession;
 }
@@ -126,10 +143,10 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const [error, setError] = useState<string | null>(null);
   const [conflictName, setConflictName] = useState<string | null>(null);
   const [switchErrors, setSwitchErrors] = useState<Record<string, string>>({});
-  const [created, setCreated] = useState<CreatedApiTokenDto | null>(null);
+  const [createdPublication, setCreatedPublication] = useState<SecretPublication | null>(null);
+  const created = createdPublication?.value ?? null;
   const liveOrigin = useOrigin(origin);
   const id = useId();
-  const tokensButton = useRef<HTMLButtonElement>(null);
   const documentMount = useRef(Symbol("token-manager-documents")).current;
   const documentMountActive = useRef(true);
   const documentVisitSeq = useRef(0);
@@ -144,10 +161,23 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     documentId,
   }).current;
   const activeManagerSession = useRef<ManagerSession | null>(null);
+  const controlVisit = useMemo<ManagerControlVisit>(() => ({
+    session: managerSession,
+    embedded,
+    next,
+    onClose,
+    hashListener: null,
+  }), [embedded, managerSession, next, onClose]);
+  const activeControlVisit = useRef<ManagerControlVisit | null>(null);
+  const tokensButtonOwner = useRef<TokensButtonControl | null>(null);
+  const tokensButtonControl = useMemo<TokensButtonControl>(() => ({
+    visit: controlVisit,
+    element: null,
+  }), [controlVisit]);
   const createOwner = useRef<CreateOperation | null>(null);
   const tokenOwners = useRef(new Map<string, TokenOperation>());
   const latestTokenOperations = useRef(new Map<string, TokenOperation>());
-  const createdRef = useRef<CreatedApiTokenDto | null>(null);
+  const createdRef = useRef<SecretPublication | null>(null);
   const loadSeq = useRef(0);
   const pendingFlips = useRef(new Map<string, { value: boolean; owner: TokenOperation }>());
   const updatedRows = useRef(new Map<string, ApiTokenDto>());
@@ -167,13 +197,36 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     && session.origin === origin
     && session.userLogin === userLogin
     && session.documentId === documentId, [documentId, origin, userLogin]);
+  const isControlVisitCurrent = useCallback((visit: ManagerControlVisit) =>
+    activeControlVisit.current === visit && isManagerSessionCurrent(visit.session), [isManagerSessionCurrent]);
+  const retireControlVisit = useCallback((visit: ManagerControlVisit) => {
+    if (activeControlVisit.current === visit) activeControlVisit.current = null;
+    const listener = visit.hashListener;
+    if (!listener) return;
+    visit.hashListener = null;
+    window.removeEventListener("hashchange", listener);
+  }, []);
+  const hasSecretWork = useCallback((visit: ManagerControlVisit) =>
+    isControlVisitCurrent(visit)
+    && (createOwner.current !== null || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace")),
+  [isControlVisitCurrent]);
+  const bindTokensButton = useCallback((element: HTMLButtonElement | null) => {
+    if (element) {
+      tokensButtonControl.element = element;
+      tokensButtonOwner.current = tokensButtonControl;
+      return;
+    }
+    tokensButtonControl.element = null;
+    if (tokensButtonOwner.current === tokensButtonControl) tokensButtonOwner.current = null;
+  }, [tokensButtonControl]);
   const isDocumentCurrent = useCallback((operation: DocumentListOperation) =>
     documentMountActive.current
     && operation.mount === documentMount
     && documentVisit.current === operation.visit
     && operation.requestId === operation.request.id
     && documentOwner.current === operation, [documentMount]);
-  const retireDocumentVisit = useCallback((updatePending = true) => {
+  const retireDocumentVisit = useCallback((updatePending = true, expectedVisit?: number) => {
+    if (expectedVisit !== undefined && documentVisit.current !== expectedVisit) return;
     const owner = documentOwner.current;
     documentVisit.current = null;
     documentOwner.current = null;
@@ -236,6 +289,25 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     if (visit === null || documentOwner.current) return;
     beginDocumentRequest("retry", visit);
   }, [beginDocumentRequest]);
+  const selectDestination = useCallback((visit: ManagerControlVisit, value: "tokens" | "connect") => {
+    if (!isControlVisitCurrent(visit) || hasSecretWork(visit)) return;
+    setDestination((current) =>
+      isControlVisitCurrent(visit) && !hasSecretWork(visit) && current !== value ? value : current);
+  }, [hasSecretWork, isControlVisitCurrent]);
+  const toggleCreate = useCallback((visit: ManagerControlVisit) => {
+    if (!isControlVisitCurrent(visit)) return;
+    setShowCreate((current) => isControlVisitCurrent(visit) ? !current : current);
+  }, [isControlVisitCurrent]);
+  const guardNavigation = useCallback((visit: ManagerControlVisit, event: { preventDefault: () => void }) => {
+    if (isControlVisitCurrent(visit) && hasSecretWork(visit)) event.preventDefault();
+  }, [hasSecretWork, isControlVisitCurrent]);
+  const closeControlVisit = useCallback((visit: ManagerControlVisit) => {
+    if (!isControlVisitCurrent(visit) || hasSecretWork(visit)) return;
+    const ownedDocumentVisit = documentVisit.current;
+    retireControlVisit(visit);
+    if (ownedDocumentVisit !== null) retireDocumentVisit(true, ownedDocumentVisit);
+    visit.onClose?.();
+  }, [hasSecretWork, isControlVisitCurrent, retireControlVisit, retireDocumentVisit]);
 
   useLayoutEffect(() => {
     const owners = tokenOwners.current;
@@ -298,17 +370,20 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     }
   }, [isManagerSessionCurrent]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => {
-    if (embedded) return;
+  useLayoutEffect(() => {
+    activeControlVisit.current = controlVisit;
+    if (controlVisit.embedded) return () => retireControlVisit(controlVisit);
     const readHash = () => {
-      if (!isManagerSessionCurrent(managerSession)) return;
-      if (createOwner.current || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace")) return;
-      setDestination(window.location.hash === "#connect" ? "connect" : "tokens");
+      if (!isControlVisitCurrent(controlVisit) || hasSecretWork(controlVisit)) return;
+      const value = window.location.hash === "#connect" ? "connect" : "tokens";
+      setDestination((current) =>
+        isControlVisitCurrent(controlVisit) && !hasSecretWork(controlVisit) && current !== value ? value : current);
     };
+    controlVisit.hashListener = readHash;
     readHash();
     window.addEventListener("hashchange", readHash);
-    return () => window.removeEventListener("hashchange", readHash);
-  }, [embedded, isManagerSessionCurrent, managerSession]);
+    return () => retireControlVisit(controlVisit);
+  }, [controlVisit, hasSecretWork, isControlVisitCurrent, retireControlVisit]);
 
   const isCreateCurrent = (operation: CreateOperation) =>
     isManagerSessionCurrent(operation.session) && createOwner.current === operation;
@@ -316,13 +391,10 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     isManagerSessionCurrent(operation.session) && tokenOwners.current.get(operation.id) === operation;
   const isLatestTokenOperation = (operation: TokenOperation) =>
     isManagerSessionCurrent(operation.session) && latestTokenOperations.current.get(operation.id) === operation;
-  const hasSecretWork = () =>
-    isManagerSessionCurrent(managerSession)
-    && (createOwner.current !== null || [...tokenOwners.current.values()].some((operation) => operation.kind === "replace"));
   const tokenOperationBlocked = (tokenId: string, kind: TokenMutationKind) =>
     !isManagerSessionCurrent(managerSession)
     || tokenOwners.current.has(tokenId)
-    || (kind === "replace" && (createdRef.current !== null || hasSecretWork()));
+    || (kind === "replace" && (createdRef.current !== null || hasSecretWork(controlVisit)));
   const beginTokenOperation = (tokenId: string, kind: TokenMutationKind) => {
     const session = activeManagerSession.current;
     if (!session || !isManagerSessionCurrent(session) || tokenOperationBlocked(tokenId, kind)) return null;
@@ -343,12 +415,32 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     });
   };
   const showCreated = (value: CreatedApiTokenDto) => {
-    createdRef.current = value;
-    setCreated(value);
+    const publication = { value };
+    createdRef.current = publication;
+    setCreatedPublication(publication);
   };
-  const dismissCreated = () => {
+  const clearCreated = (publication: SecretPublication) => {
+    if (createdRef.current !== publication) return false;
     createdRef.current = null;
-    setCreated(null);
+    setCreatedPublication((current) => current === publication ? null : current);
+    return true;
+  };
+  const dismissCreated = (
+    visit: ManagerControlVisit,
+    publication: SecretPublication,
+    buttonControl: TokensButtonControl,
+  ) => {
+    const button = buttonControl.element;
+    if (!isControlVisitCurrent(visit)
+      || createdRef.current !== publication
+      || buttonControl.visit !== visit
+      || tokensButtonOwner.current !== buttonControl
+      || !button?.isConnected
+      || !clearCreated(publication)) return;
+    if (isControlVisitCurrent(visit)
+      && tokensButtonOwner.current === buttonControl
+      && buttonControl.element === button
+      && button.isConnected) button.focus();
   };
 
   const create = async () => {
@@ -398,7 +490,8 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
         if (!isTokenCurrent(operation)) return false;
         updatedRows.current.set(token.id, res.token);
         setTokens((rows) => isLatestTokenOperation(operation) ? rows?.map((row) => row.id === token.id ? res.token : row) ?? null : rows);
-        if (createdRef.current?.id === token.id) showCreated({ ...createdRef.current, name: res.token.name });
+        const publication = createdRef.current;
+        if (publication?.value.id === token.id) showCreated({ ...publication.value, name: res.token.name });
       } else {
         if (action === "replace") {
           const res = await api.tokens.replace(token.id);
@@ -407,9 +500,10 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
         } else {
           await api.tokens.revoke(token.id);
           if (!isTokenCurrent(operation)) return false;
-          if (createdRef.current?.id === token.id) dismissCreated();
+          const publication = createdRef.current;
+          if (publication?.value.id === token.id) clearCreated(publication);
         }
-        tokensButton.current?.focus();
+        tokensButtonOwner.current?.element?.focus();
         await load(() => isTokenCurrent(operation));
       }
       return true;
@@ -465,21 +559,21 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
         <p className="mt-1 text-sm text-ink-3">Manage tokens for {userLogin}. Agents can never do more than you can.</p>
         {next && <a className={cn("btn btn-outline btn-sm mt-3 gap-1.5", secretWorkPending && "pointer-events-none opacity-50")}
           href={next} aria-disabled={secretWorkPending || undefined} tabIndex={secretWorkPending ? -1 : undefined}
-          onClick={(event) => { if (hasSecretWork()) event.preventDefault(); }} data-testid="settings-back-to-document">
+          onClick={(event) => guardNavigation(controlVisit, event)} data-testid="settings-back-to-document">
           <ArrowLeft size={14} /> Back to the document
         </a>}
       </div>}
       <div className={cn("flex flex-wrap items-start gap-2", embedded && "sticky top-0 z-10 bg-surface py-2")}>
       <nav className="flex min-w-0 flex-wrap gap-2" aria-label="Token access">
-        <button ref={tokensButton} type="button" className={cn("btn btn-sm", destination === "tokens" ? "btn-primary" : "btn-outline")}
+        <button ref={bindTokensButton} type="button" className={cn("btn btn-sm", destination === "tokens" ? "btn-primary" : "btn-outline")}
          aria-pressed={destination === "tokens"} disabled={secretWorkPending}
-         onClick={() => { if (!hasSecretWork()) setDestination("tokens"); }}>Tokens</button>
+         onClick={() => selectDestination(controlVisit, "tokens")}>Tokens</button>
         <button type="button" className={cn("btn btn-sm whitespace-normal text-left", destination === "connect" ? "btn-primary" : "btn-outline")}
          aria-pressed={destination === "connect"} disabled={secretWorkPending}
-         onClick={() => { if (!hasSecretWork()) setDestination("connect"); }}>Connect an MCP client</button>
+         onClick={() => selectDestination(controlVisit, "connect")}>Connect an MCP client</button>
       </nav>
       {onClose && <button type="button" className="btn btn-ghost btn-sm" disabled={secretWorkPending}
-       onClick={() => { if (!hasSecretWork()) { retireDocumentVisit(); onClose(); } }}>Close token management</button>}
+       onClick={() => closeControlVisit(controlVisit)}>Close token management</button>}
       </div>
       <p className="text-xs leading-5 text-ink-3">Existing secrets cannot be shown again. Rename changes only the name; replace creates a new secret.</p>
       {error && <p role="alert" aria-atomic="true" className="text-sm text-danger">{error}</p>}
@@ -488,7 +582,8 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
           : "That name is reserved by an existing token, but it could not be matched to this list. Retry the list or open all your tokens in a signed-in browser session; do not create another until the scope and account are clear."}
         {!matching && <button type="button" className="btn btn-outline btn-sm mt-2" disabled={busy} onClick={() => void load()}>Refresh token list</button>}
       </p>}
-      {created && <SecretNotice created={created} onDismiss={() => { dismissCreated(); tokensButton.current?.focus(); }} />}
+      {createdPublication && <SecretNotice created={createdPublication.value}
+        onDismiss={() => dismissCreated(controlVisit, createdPublication, tokensButtonControl)} />}
       <section className="min-w-0 rounded-xl border border-line bg-surface" aria-label="Your tokens">
         <h2 className="border-b border-line px-3 py-2 text-sm font-semibold text-ink">Your tokens</h2>
         {loadError ? <div className="p-3 text-sm">
@@ -507,13 +602,13 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       </section>
       {embedded && <a className={cn("w-fit text-sm font-medium text-accent hover:underline", secretWorkPending && "pointer-events-none opacity-50")}
         href={managementLink} aria-disabled={secretWorkPending || undefined} tabIndex={secretWorkPending ? -1 : undefined}
-        onClick={(event) => { if (hasSecretWork()) event.preventDefault(); }}>Open all your tokens in Settings</a>}
+        onClick={(event) => guardNavigation(controlVisit, event)}>Open all your tokens in Settings</a>}
       {destination === "connect" ? <div id={embedded ? undefined : "connect"} className="min-w-0">
         <p className="mb-3 text-sm text-ink-2">Choose a client and copy its setup. Put your saved token in the Authorization header where it says MARKDOC_TOKEN. No connection is needed to read these instructions.</p>
         <AgentConnectCard origin={liveOrigin} scope={created?.scope} hideTokenStep />
       </div> : <>
         <button type="button" className="btn btn-outline w-fit gap-1.5" disabled={busy || tokens === null || Boolean(created) || blockingTokenActionPending}
-          aria-expanded={showCreate} aria-controls={`${id}-create`} onClick={() => setShowCreate((value) => !value)} data-testid="token-add">
+          aria-expanded={showCreate} aria-controls={`${id}-create`} onClick={() => toggleCreate(controlVisit)} data-testid="token-add">
           <Plus size={16} /> {showCreate ? "Cancel creation" : "Create token"}
         </button>
         {showCreate && <form id={`${id}-create`} className="flex min-w-0 flex-col gap-3 rounded-xl border border-line bg-surface p-3"
