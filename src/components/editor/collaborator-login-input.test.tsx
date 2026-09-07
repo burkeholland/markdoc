@@ -1099,6 +1099,18 @@ describe("CollaboratorLoginInput", () => {
     expect(onChangeB).toHaveBeenCalledWith("octodog");
     expect(onPickB).toHaveBeenCalledOnce();
     expect(onPickB).toHaveBeenCalledWith("octodog");
+    act(() => {
+      stale.enter();
+      stale.down({
+        currentTarget: retiredOption,
+        target: retiredOption,
+        preventDefault: pointerPrevent,
+      } as unknown as MouseEvent<HTMLLIElement>);
+      stale.click();
+    });
+    expect(onChangeB).toHaveBeenCalledOnce();
+    expect(onPickB).toHaveBeenCalledOnce();
+    expect(pointerPrevent).not.toHaveBeenCalled();
     expect(onChangeA).not.toHaveBeenCalled();
     expect(onPickA).not.toHaveBeenCalled();
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
