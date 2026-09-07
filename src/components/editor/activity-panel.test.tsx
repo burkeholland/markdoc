@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { ActivityItemDto, ActivityPageDto } from "@/lib/api";
 
@@ -33,6 +34,23 @@ function deferred<T>() {
 
 function session(docId: string): CollabSession {
   return { docId } as unknown as CollabSession;
+}
+
+function ActivityBoundary({
+  documentId,
+  present = true,
+  boundary = 0,
+  onBoundary,
+}: {
+  documentId: string;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <ActivityPanel session={session(documentId)} onClose={() => {}} /> : null;
 }
 
 function row(id: string, actorName: string): ActivityItemDto {
@@ -202,11 +220,13 @@ describe("ActivityPanel list recovery", () => {
     vi.useFakeTimers();
     const oldPage = deferred<ActivityPageDto>();
     const currentPage = deferred<ActivityPageDto>();
+    const laterPage = deferred<ActivityPageDto>();
     activity
       .mockResolvedValueOnce({ items: [row("initial", "Initial editor")], nextBefore: "old-cursor" })
       .mockReturnValueOnce(oldPage.promise)
       .mockResolvedValueOnce({ items: [row("fresh", "Fresh editor")], nextBefore: "current-cursor" })
-      .mockReturnValueOnce(currentPage.promise);
+      .mockReturnValueOnce(currentPage.promise)
+      .mockReturnValueOnce(laterPage.promise);
 
     render(<ActivityPanel session={session("activity-stale-page-success")} onClose={vi.fn()} />);
     await act(async () => {});
@@ -225,13 +245,23 @@ describe("ActivityPanel list recovery", () => {
     expect(screen.queryByText("Stale editor")).toBeNull();
     expect(screen.getByText("Fresh editor")).toBeInTheDocument();
     expect(screen.getByTestId("activity-load-more")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("activity-load-more"));
+    expect(activity).toHaveBeenCalledTimes(4);
 
-    currentPage.resolve({ items: [row("current", "Current older editor"), row("fresh", "Duplicate fresh editor")], nextBefore: null });
+    currentPage.resolve({ items: [row("current", "Current older editor"), row("fresh", "Duplicate fresh editor")], nextBefore: "later-cursor" });
     await act(async () => {});
     expect(screen.getByText("Current older editor")).toBeInTheDocument();
     expect(screen.queryByText("Duplicate fresh editor")).toBeNull();
-    expect(screen.queryByTestId("activity-load-more")).toBeNull();
+    expect(screen.getByTestId("activity-load-more")).toBeEnabled();
     expect(screen.getAllByTestId("activity-row")).toHaveLength(2);
+
+    fireEvent.click(screen.getByTestId("activity-load-more"));
+    expect(activity).toHaveBeenCalledTimes(5);
+    expect(activity).toHaveBeenNthCalledWith(5, "activity-stale-page-success", { before: "later-cursor", limit: 50 });
+    laterPage.resolve({ items: [row("last", "Last editor")], nextBefore: null });
+    await act(async () => {});
+    expect(screen.getByText("Last editor")).toBeInTheDocument();
+    expect(screen.queryByTestId("activity-load-more")).toBeNull();
   });
 
   it("ignores an old-cursor failure and finalizer while the current page is pending", async () => {
@@ -282,18 +312,129 @@ describe("ActivityPanel list recovery", () => {
     expect(screen.queryByText("Old document editor")).toBeNull();
   });
 
+  it.each(["success", "failure"] as const)(
+    "retires an old document before its deferred %s settles at the replacement layout boundary",
+    async (outcome) => {
+      vi.useFakeTimers();
+      const oldRequest = deferred<ActivityPageDto>();
+      const currentRequest = deferred<ActivityPageDto>();
+      const laterRequest = deferred<ActivityPageDto>();
+      activity
+        .mockReturnValueOnce(oldRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise)
+        .mockReturnValueOnce(laterRequest.promise);
+
+      const rendered = render(<ActivityBoundary documentId="activity-boundary-old" />);
+      expect(activity).toHaveBeenCalledTimes(1);
+
+      rendered.rerender(
+        <ActivityBoundary
+          documentId="activity-boundary-current"
+          boundary={1}
+          onBoundary={() => {
+            if (outcome === "success") {
+              oldRequest.resolve({ items: [row("retired", "Retired document editor")], nextBefore: "retired-cursor" });
+            } else {
+              oldRequest.reject("retired document failure");
+            }
+          }}
+        />,
+      );
+      await act(async () => {
+        await Promise.allSettled([oldRequest.promise]);
+      });
+
+      expect(activity).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText("Retired document editor")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByTestId("activity-panel").querySelector(".animate-spin")).not.toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+      expect(activity).toHaveBeenCalledTimes(2);
+
+      currentRequest.resolve({ items: [row("current", "Current document editor")], nextBefore: null });
+      await act(async () => {});
+      expect(screen.getByText("Current document editor")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(activity).toHaveBeenCalledTimes(3);
+      expect(activity).toHaveBeenNthCalledWith(3, "activity-boundary-current", { limit: 50 });
+      laterRequest.resolve({ items: [row("later", "Later current editor")], nextBefore: null });
+      await act(async () => {});
+      expect(screen.getByText("Later current editor")).toBeInTheDocument();
+      expect(vi.getTimerCount()).toBe(1);
+    },
+  );
+
   it("invalidates pending work synchronously when Close is activated", async () => {
+    vi.useFakeTimers();
     const pending = deferred<ActivityPageDto>();
     const onClose = vi.fn();
     activity.mockReturnValueOnce(pending.promise);
 
     render(<ActivityPanel session={session("activity-close")} onClose={onClose} />);
+    expect(vi.getTimerCount()).toBe(1);
     fireEvent.click(screen.getByRole("button", { name: "Close activity" }));
     expect(onClose).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+    expect(activity).toHaveBeenCalledOnce();
 
     pending.resolve({ items: [row("late", "Late editor")], nextBefore: null });
     await act(async () => {});
     expect(screen.queryByText("Late editor")).toBeNull();
+  });
+
+  it("retires page, refresh, and cadence work before settlements at the removal layout boundary", async () => {
+    vi.useFakeTimers();
+    const page = deferred<ActivityPageDto>();
+    const refresh = deferred<ActivityPageDto>();
+    activity
+      .mockResolvedValueOnce({ items: [row("initial", "Initial editor")], nextBefore: "older-cursor" })
+      .mockReturnValueOnce(page.promise)
+      .mockReturnValueOnce(refresh.promise);
+
+    const rendered = render(<ActivityBoundary documentId="activity-boundary-removal" />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(1);
+    let timersAtBoundary = -1;
+
+    rendered.rerender(
+      <ActivityBoundary
+        documentId="activity-boundary-removal"
+        present={false}
+        boundary={1}
+        onBoundary={() => {
+          timersAtBoundary = vi.getTimerCount();
+          page.resolve({ items: [row("retired-page", "Retired page editor")], nextBefore: "retired-next" });
+          refresh.reject("retired refresh failure");
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.allSettled([page.promise, refresh.promise]);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_000);
+    });
+
+    expect(timersAtBoundary).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(screen.queryByTestId("activity-panel")).toBeNull();
+    expect(screen.queryByText("Retired page editor")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(unhandledRejections).toEqual([]);
   });
 
   it("handles late page resolution and refresh rejection after unmount without committing", async () => {
