@@ -1,14 +1,39 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useHydrated } from "@/lib/hooks";
-import { nextTheme, setThemePreference, themeLabel, themeStore, type ThemePreference } from "@/lib/theme";
+import { isThemePreference, nextTheme, setThemePreference, themeLabel, themeStore, type ThemePreference } from "@/lib/theme";
+
+interface ThemeAuthority {
+  preference: ThemePreference;
+}
 
 export function useTheme(): [ThemePreference, (next: ThemePreference) => void] {
   const preference = useSyncExternalStore(themeStore.subscribe, themeStore.getSnapshot, themeStore.getServerSnapshot);
-  return [preference, setThemePreference];
+  const authority = useMemo<ThemeAuthority>(() => ({ preference }), [preference]);
+  const authorityRef = useRef<ThemeAuthority | null>(null);
+
+  useLayoutEffect(() => {
+    authorityRef.current = authority;
+    return () => {
+      if (authorityRef.current === authority) authorityRef.current = null;
+    };
+  }, [authority]);
+
+  const setPreference = useCallback((next: ThemePreference) => {
+    if (
+      authorityRef.current !== authority
+      || !isThemePreference(next)
+      || next === authority.preference
+      || themeStore.getSnapshot() !== authority.preference
+    )
+      return;
+    setThemePreference(next);
+  }, [authority]);
+
+  return [preference, setPreference];
 }
 
 const ICONS = { system: Monitor, light: Sun, dark: Moon } as const;
@@ -28,7 +53,10 @@ export function ThemeToggle({ className, size = 16 }: { className?: string; size
     <button
       type="button"
       className={cn("icon-btn", className)}
-      onClick={() => setPreference(nextTheme(preference))}
+      onClick={() => {
+        if (!hydrated) return;
+        setPreference(nextTheme(preference));
+      }}
       disabled={!hydrated}
       aria-busy={!hydrated || undefined}
       title={`${label} (click to switch)`}
