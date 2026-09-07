@@ -11,13 +11,15 @@ interface State {
   items: NotificationDto[];
   unreadCount: number;
   loaded: boolean;
+  loading: boolean;
+  loadError: boolean;
 }
 
 /**
  * One shared, polled copy of the signed-in user's notifications for every bell, strip and
  * comment card on the page. Polls while the tab is visible and at least one component is mounted.
  */
-let state: State = { items: [], unreadCount: 0, loaded: false };
+let state: State = { items: [], unreadCount: 0, loaded: false, loading: true, loadError: false };
 const listeners = new Set<() => void>();
 let subscribers = 0;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -32,12 +34,18 @@ function set(next: Partial<State>) {
 export function refreshNotifications(): Promise<void> {
   if (!enabled) return Promise.resolve();
   if (inflight) return inflight;
+  set({ loading: true });
   inflight = api.notifications
     .list({ limit: PAGE })
-    .then((page) => set({ items: page.items, unreadCount: page.unreadCount, loaded: true }))
+    .then((page) => set({ items: page.items, unreadCount: page.unreadCount, loaded: true, loading: false, loadError: false }))
     .catch((err) => {
       // Anonymous link visitors have no notifications; stop asking.
-      if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) enabled = false;
+      if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
+        enabled = false;
+        set({ loading: false, loadError: false });
+        return;
+      }
+      set({ loading: false, loadError: !state.loaded });
     })
     .finally(() => {
       inflight = null;
@@ -81,7 +89,7 @@ function subscribe(listener: () => void) {
 }
 
 const getSnapshot = () => state;
-const SERVER: State = { items: [], unreadCount: 0, loaded: false };
+const SERVER: State = { items: [], unreadCount: 0, loaded: false, loading: false, loadError: false };
 const getServerSnapshot = () => SERVER;
 
 function markLocal(pred: (n: NotificationDto) => boolean) {

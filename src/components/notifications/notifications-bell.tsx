@@ -6,7 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/pr
 import { RelativeTime } from "@/components/ui/relative-time";
 import type { NotificationDto } from "@/lib/api";
 import type { NotificationKind } from "@/server/db/schema";
-import { markAllNotificationsRead, markNotificationRead, useNotifications, sentence } from "@/lib/notifications-store";
+import { markAllNotificationsRead, markNotificationRead, refreshNotifications, useNotifications, sentence } from "@/lib/notifications-store";
 import { cn } from "@/lib/utils";
 
 const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; className?: string }>> = {
@@ -43,7 +43,7 @@ export interface NotificationsBellProps {
 
 /** Bell with an unread badge; the popover lists the latest notifications. */
 export function NotificationsBell({ currentDocId, onOpen, ready = true }: NotificationsBellProps) {
-  const { items, unreadCount } = useNotifications(ready);
+  const { items, unreadCount, loaded, loading, loadError } = useNotifications(ready);
   const [open, setOpen] = useState(false);
 
   const openItem = (n: NotificationDto) => {
@@ -81,7 +81,23 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
           {unreadCount > 0 && <span className="text-xs text-ink-4">{unreadCount} unread</span>}
         </div>
         <ul className="scrollbar-thin max-h-[420px] overflow-y-auto py-1" aria-label="Notifications">
-          {items.length === 0 && <li className="px-3 py-8 text-center text-sm text-ink-4">You&apos;re all caught up.</li>}
+          {!loaded && !loadError && loading && <li className="px-3 py-8 text-center text-sm text-ink-4">Loading notifications…</li>}
+          {!loaded && loadError && (
+            <li className="px-3 py-4">
+              <div className="flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
+                <span>Couldn&apos;t load notifications.</span>
+                <button
+                  type="button"
+                  className="btn btn-outline h-7 shrink-0 px-2 text-xs"
+                  disabled={loading}
+                  onClick={() => void refreshNotifications()}
+                >
+                  {loading ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+            </li>
+          )}
+          {loaded && items.length === 0 && <li className="px-3 py-8 text-center text-sm text-ink-4">You&apos;re all caught up.</li>}
           {items.map((n) => (
             <li key={n.id}>
               <button
