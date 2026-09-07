@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { CollabSession } from "@/editor/collab/session";
@@ -11,7 +11,6 @@ import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlig
 import { collectHighlights } from "@/editor/prosemirror/highlights";
 import type { NoticeAction } from "@/editor/markdown/tsv";
 import type { HighlightClickHandler } from "@/editor/highlight-activation";
-import { useSessionValue } from "./use-session";
 
 function sameHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
   if (a.length !== b.length) return false;
@@ -41,81 +40,153 @@ export interface CodePaneProps {
   lineWrapping: boolean;
 }
 
+interface CodePaneHandlers {
+  onSelection: CodePaneProps["onSelection"];
+  onHighlightClick: CodePaneProps["onHighlightClick"];
+  uploadImage: CodePaneProps["uploadImage"];
+  onImageError: CodePaneProps["onImageError"];
+  onNotice: CodePaneProps["onNotice"];
+  onMarkdownFileDrop: CodePaneProps["onMarkdownFileDrop"];
+}
+
+interface CodePaneVisit {
+  active: boolean;
+  session: CollabSession;
+  host: HTMLDivElement;
+  view: EditorView;
+  setup: CodeEditorSetup;
+  canEdit: boolean | null;
+  suggesting: boolean | null;
+  lineWrapping: boolean | null;
+  lastHighlights: SourceHighlight[] | null;
+}
+
 export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop, lineWrapping }: CodePaneProps) {
-  // Source offset of the rich pane's cursor while the rich pane is active (for the focus line).
-  const focusSource = useSessionValue(session, (s) => (s.activeSurface === "rich" ? s.localCursor.rich : null));
   const host = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<EditorView | null>(null);
-  const setupRef = useRef<CodeEditorSetup | null>(null);
-  const handlers = useRef({ onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
-  useEffect(() => {
+  const authority = useRef<CodePaneVisit | null>(null);
+  const handlers = useRef<CodePaneHandlers>({ onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
+
+  useLayoutEffect(() => {
     handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
   }, [onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop]);
-  const focusRef = useRef<number | null>(null);
-  const lastHighlights = useRef<SourceHighlight[] | null>(null);
 
-  useEffect(() => {
-    if (!host.current) return;
+  useLayoutEffect(() => {
+    const mountedHost = host.current;
+    if (!mountedHost) return;
+
+    let visit: CodePaneVisit | null = null;
+    let ownedView: EditorView | null = null;
+    const hasAuthority = () =>
+      visit !== null &&
+      visit.active &&
+      authority.current === visit &&
+      visit.session === session &&
+      visit.host === mountedHost &&
+      visit.view === ownedView;
     const setup = createCodeEditorSetup(session, {
-      onFocus: () => session.setActiveSurface("code"),
-      onSelection: (head, anchor) => handlers.current.onSelection(head, anchor),
-      onHighlightClick: (kind, id, sourcePosition) => handlers.current.onHighlightClick(kind, id, sourcePosition),
-      uploadImage: handlers.current.uploadImage ? (file) => handlers.current.uploadImage!(file) : undefined,
-      onImageError: (message) => handlers.current.onImageError?.(message),
-      onNotice: (message, action) => handlers.current.onNotice?.(message, action),
-      onMarkdownFileDrop: (file, at) => handlers.current.onMarkdownFileDrop?.(file, at),
+      onFocus: () => {
+        if (hasAuthority()) session.setActiveSurface("code");
+      },
+      onSelection: (head, anchor) => {
+        if (hasAuthority()) handlers.current.onSelection(head, anchor);
+      },
+      onHighlightClick: (kind, id, sourcePosition) => {
+        if (hasAuthority()) handlers.current.onHighlightClick(kind, id, sourcePosition);
+      },
+      uploadImage: handlers.current.uploadImage
+        ? (file) => {
+            if (!hasAuthority()) return Promise.reject(new Error("Code editor visit is no longer active"));
+            return handlers.current.uploadImage!(file);
+          }
+        : undefined,
+      onImageError: (message) => {
+        if (hasAuthority()) handlers.current.onImageError?.(message);
+      },
+      onNotice: (message, action) => {
+        if (hasAuthority()) handlers.current.onNotice?.(message, action);
+      },
+      onMarkdownFileDrop: (file, at) => {
+        if (hasAuthority()) handlers.current.onMarkdownFileDrop?.(file, at);
+      },
     });
     const view = new EditorView({
       state: EditorState.create({ doc: session.ytext.toString(), extensions: setup.extensions }),
-      parent: host.current,
+      parent: mountedHost,
     });
-    viewRef.current = view;
+    ownedView = view;
     const unbindComposition = session.bindContentComposition(view.contentDOM);
-    setupRef.current = setup;
-    lastHighlights.current = null;
+    visit = {
+      active: true,
+      session,
+      host: mountedHost,
+      view,
+      setup,
+      canEdit: null,
+      suggesting: null,
+      lineWrapping: null,
+      lastHighlights: null,
+    };
+    authority.current = visit;
+
+    const applyMode = () => {
+      if (!hasAuthority()) return;
+      const canEdit = session.canEdit;
+      const suggesting = session.mode === "suggesting";
+      if (visit.canEdit === canEdit && visit.suggesting === suggesting) return;
+      visit.canEdit = canEdit;
+      visit.suggesting = suggesting;
+      setup.setMode(view, canEdit, suggesting);
+    };
+    const applyHighlights = () => {
+      if (!hasAuthority()) return;
+      const focusSource = session.activeSurface === "rich" ? session.localCursor.rich : null;
+      const focus = focusSource !== null ? { from: focusSource, to: focusSource } : null;
+      const highlights = collectHighlights(session, focus).map((highlight) =>
+        highlight.kind === "focus"
+          ? {
+              ...highlight,
+              from: view.state.doc.lineAt(Math.min(highlight.from, view.state.doc.length)).from,
+              to: view.state.doc.lineAt(Math.min(highlight.from, view.state.doc.length)).from,
+            }
+          : highlight,
+      );
+      if (visit.lastHighlights && sameHighlights(visit.lastHighlights, highlights)) return;
+      visit.lastHighlights = highlights;
+      view.dispatch({ effects: setHighlights.of(highlights) });
+    };
+    const updateFromSession = () => {
+      if (!hasAuthority()) return;
+      applyMode();
+      applyHighlights();
+    };
+    const unsubscribe = session.subscribe(updateFromSession);
+
     onReady(view, codeApi);
+    applyMode();
+    visit.lineWrapping = lineWrapping;
+    setup.setLineWrapping(view, lineWrapping);
+    applyHighlights();
+
     return () => {
-      onReady(null, null);
+      if (!visit || !visit.active) return;
+      visit.active = false;
+      unsubscribe();
       unbindComposition();
       view.destroy();
-      viewRef.current = null;
+      if (authority.current === visit) {
+        authority.current = null;
+        onReady(null, null);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  // Mode / permissions.
-  const canEdit = useSessionValue(session, (s) => s.canEdit);
-  const suggesting = useSessionValue(session, (s) => s.mode === "suggesting");
-  useEffect(() => {
-    if (viewRef.current && setupRef.current) setupRef.current.setMode(viewRef.current, canEdit, suggesting);
-  }, [canEdit, suggesting]);
-
-  useEffect(() => {
-    if (viewRef.current && setupRef.current) setupRef.current.setLineWrapping(viewRef.current, lineWrapping);
-  }, [lineWrapping]);
-
-  // Comment / suggestion / focus highlights follow the session directly (no React render per keystroke).
-  // The session notifies on every change while a document opens (status, awareness, each comment thread,
-  // the text itself); only an actual change in the highlight list is dispatched. A CodeMirror dispatch
-  // reads the DOM selection, which forces a layout of whatever the rich pane and React left dirty — on
-  // the 12k-word document those no-op dispatches added up to ~200 ms of forced layout per open (#118).
-  const applyHighlights = useCallback(() => {
-    const view = viewRef.current;
-    if (!view) return;
-    const focusSource = focusRef.current;
-    const focus = focusSource !== null && session.activeSurface === "rich" ? { from: focusSource, to: focusSource } : null;
-    const highlights = collectHighlights(session, focus).map((h) =>
-      h.kind === "focus" ? { ...h, from: view.state.doc.lineAt(Math.min(h.from, view.state.doc.length)).from, to: view.state.doc.lineAt(Math.min(h.from, view.state.doc.length)).from } : h,
-    );
-    if (lastHighlights.current && sameHighlights(lastHighlights.current, highlights)) return;
-    lastHighlights.current = highlights;
-    view.dispatch({ effects: setHighlights.of(highlights) });
-  }, [session]);
-  useEffect(() => {
-    focusRef.current = focusSource;
-    applyHighlights();
-  }, [focusSource, applyHighlights]);
-  useEffect(() => session.subscribe(applyHighlights), [session, applyHighlights]);
+  useLayoutEffect(() => {
+    const visit = authority.current;
+    if (!visit?.active || visit.session !== session || visit.lineWrapping === lineWrapping) return;
+    visit.lineWrapping = lineWrapping;
+    visit.setup.setLineWrapping(visit.view, lineWrapping);
+  }, [lineWrapping, session]);
 
   return <div ref={host} className="h-full min-h-0 w-full" data-testid="code-pane" />;
 }
