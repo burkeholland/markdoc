@@ -3,6 +3,10 @@ import { devices, type Browser, type BrowserContext, type Locator, type Page } f
 import AxeBuilder from "@axe-core/playwright";
 import { createDocument, cssPx, devLogin, focusRichEnd, selectTextInRich, uniqueLogin, waitForEditor, waitForHydration } from "./helpers";
 
+// Keep synthetic dashboard contents out of failure artifacts without changing diagnostics for unrelated mobile rows.
+const privateGeometryTest = test.extend({});
+privateGeometryTest.use({ trace: "off", screenshot: "off", video: "off" });
+
 const DOC = "# Mobile doc\n\nSome **bold** text here to select.\n\n## Second\n\nMore words.\n\n## Third\n\nEnd.\n";
 
 /** Enough content to fill a phone screen on first paint: a heading, a list, a table and a code block (the CLS tests). */
@@ -147,12 +151,17 @@ const LONG_WORD = "Xk7".repeat(67).slice(0, 200);
 type RectGeometry = { x: number; y: number; width: number; height: number };
 type TextGeometry = { renderedWidth: number; clientWidth: number; intrinsicWidth: number; height: number };
 
+function isLoopbackUrl(url: string | URL) {
+  const host = new URL(url).hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
 async function blockNonLoopbackTraffic(context: BrowserContext) {
   await context.route(/^https?:\/\//, async (route) => {
-    const host = new URL(route.request().url()).hostname;
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1") await route.continue();
+    if (isLoopbackUrl(route.request().url())) await route.continue();
     else await route.abort();
   });
+  await context.routeWebSocket((url) => !isLoopbackUrl(url), (webSocket) => webSocket.close());
 }
 
 const textGeometry = (locator: Locator): Promise<TextGeometry> =>
@@ -660,23 +669,20 @@ test.describe("phone", () => {
     await context.close();
   });
 
-  test.describe("task 2814 dashboard geometry", () => {
-    // The synthetic document contents must not be retained in a failed-run artifact.
-    test.use({ trace: "off", screenshot: "off", video: "off" });
-
+  privateGeometryTest.describe("task 2814 dashboard geometry", () => {
     // One long unbroken word as a card's title or first paragraph (a pasted URL, an identifier) made the
     // single-column grid as wide as the word. The two phone widths read every affected dashboard surface;
     // the desktop read is a same-browser style control, not an old-release binary comparison.
-    test("[2814] dashboard long-word and normal-card geometry", async ({ browser }) => {
+    privateGeometryTest("[2814] dashboard long-word and normal-card geometry", async ({ browser }) => {
       const evidence: unknown[] = [];
       for (const viewport of [
         { width: 393, height: 851 },
         { width: 520, height: 720 },
       ]) {
-        const context = await browser.newContext({ ...devices["Pixel 5"], viewport, screen: viewport });
-        await blockNonLoopbackTraffic(context);
-        const page = await context.newPage();
+        const context = await browser.newContext({ ...devices["Pixel 5"], viewport, screen: viewport, serviceWorkers: "block" });
         try {
+          await blockNonLoopbackTraffic(context);
+          const page = await context.newPage();
           await devLogin(page, uniqueLogin(`phone-long-word-${viewport.width}`));
           const longId = await createDocument(page, `# ${LONG_TITLE}\n\n${LONG_WORD}\n`, LONG_TITLE);
           await createDocument(page, "# Normal\n\nA short paragraph.\n", "Normal");
@@ -730,10 +736,10 @@ test.describe("phone", () => {
       }
 
       const desktopViewport = { width: 1280, height: 720 };
-      const desktop = await browser.newContext({ viewport: desktopViewport });
-      await blockNonLoopbackTraffic(desktop);
-      const page = await desktop.newPage();
+      const desktop = await browser.newContext({ viewport: desktopViewport, serviceWorkers: "block" });
       try {
+        await blockNonLoopbackTraffic(desktop);
+        const page = await desktop.newPage();
         await devLogin(page, uniqueLogin("normal-card-control"));
         await createDocument(page, `# ${LONG_TITLE}\n\n${LONG_WORD}\n`, LONG_TITLE);
         const normalId = await createDocument(page, "# Normal\n\nA short paragraph.\n", "Normal");

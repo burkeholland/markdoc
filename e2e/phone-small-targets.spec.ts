@@ -19,12 +19,17 @@ function deferred() {
   return { promise, resolve };
 }
 
+function isLoopbackUrl(url: string | URL) {
+  const host = new URL(url).hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
 async function blockNonLoopbackTraffic(context: BrowserContext) {
   await context.route(/^https?:\/\//, async (route) => {
-    const host = new URL(route.request().url()).hostname;
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1") await route.continue();
+    if (isLoopbackUrl(route.request().url())) await route.continue();
     else await route.abort();
   });
+  await context.routeWebSocket((url) => !isLoopbackUrl(url), (webSocket) => webSocket.close());
 }
 
 async function expectTarget(locator: Locator, label: string, minimum: { width?: number; height: number }) {
@@ -146,12 +151,12 @@ async function openTokenDetails(page: Page) {
 
 for (const viewport of VIEWPORTS) {
   test(`[2814] settings and editor targets stay usable at ${viewport.width}x${viewport.height}`, async ({ browser }) => {
-    const context = await browser.newContext({ viewport });
-    await blockNonLoopbackTraffic(context);
-    const page = await context.newPage();
+    const context = await browser.newContext({ viewport, serviceWorkers: "block" });
     let token: Awaited<ReturnType<typeof mintToken>> | undefined;
 
     try {
+      await blockNonLoopbackTraffic(context);
+      const page = await context.newPage();
       await devLogin(page, uniqueLogin(`small-targets-${viewport.width}`));
       token = await mintToken(page, `Phone target ${viewport.width}`);
       await page.goto("/settings");
@@ -303,8 +308,11 @@ for (const viewport of VIEWPORTS) {
         })}`,
       );
     } finally {
-      await token?.revoke();
-      await context.close();
+      try {
+        await token?.revoke();
+      } finally {
+        await context.close();
+      }
     }
   });
 }
