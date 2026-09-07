@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useState } from "react";
+import { startTransition, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -24,6 +24,10 @@ const openCreate = async () => {
   await waitFor(() => expect(screen.getByTestId("token-add")).toBeEnabled());
   fireEvent.click(screen.getByTestId("token-add"));
 };
+function TransitionClosePanel() {
+  const [open, setOpen] = useState(true);
+  return <TokensPanel origin="https://markdoc.test" userLogin="alice" open={open} onClose={() => startTransition(() => setOpen(false))} />;
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -589,19 +593,209 @@ describe("one-time lifecycle and setup", () => {
     expect(screen.getByRole("button", { name: `Rename ${token.name}` })).toBeVisible();
   });
 
-  it("shows document-list failures as failures, with a retry instead of an empty picker", async () => {
-    fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
-      .mockResolvedValueOnce(response({ error: "Documents unavailable" }, 503))
-      .mockResolvedValueOnce(response({ documents: [{ id: "doc-one", title: "Example document" }] }));
-    renderPanel();
+  it("shares a pending list across rapid chooser visits and retries once while preserving only accessible selections", async () => {
+    const initial = deferred<Response>();
+    const refresh = deferred<Response>();
+    const retry = deferred<Response>();
+    const documentRequests = [initial, refresh, retry];
+    let documentRequestIndex = 0;
+    let createBody: unknown;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/documents") return documentRequests[documentRequestIndex++].promise;
+      if (url === "/api/tokens" && init?.method === "POST") {
+        createBody = JSON.parse(String(init.body));
+        return response({ token: { ...minted(), documentIds: ["doc-two"] } }, 201);
+      }
+      if (url === "/api/tokens?includeRevoked=true") return response({ tokens: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const documentListCount = () => fetchMock.mock.calls.filter(([input]) => String(input) === "/api/documents").length;
+    const view = renderPanel();
+    await openCreate();
+
+    const restrict = screen.getByTestId("token-restrict");
+    fireEvent.click(restrict);
+    expect(documentListCount()).toBe(1);
+    expect(screen.getAllByRole("status")).toEqual([screen.getByTestId("token-documents-pending")]);
+    act(() => {
+      restrict.click();
+      restrict.click();
+    });
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open />);
+    expect(documentListCount()).toBe(1);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+
+    await act(async () => initial.resolve(response({ documents: [
+      { id: "doc-one", title: "First document" },
+      { id: "doc-two", title: "Second document" },
+    ] })));
+    fireEvent.click(screen.getByTestId("token-document-doc-one"));
+    fireEvent.click(screen.getByTestId("token-document-doc-two"));
+
+    act(() => {
+      restrict.click();
+      restrict.click();
+    });
+    expect(documentListCount()).toBe(2);
+    expect(screen.getByTestId("token-document-doc-one")).toBeChecked();
+    expect(screen.getByTestId("token-document-doc-two")).toBeChecked();
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.getByTestId("token-create")).toBeDisabled();
+
+    await act(async () => refresh.resolve(response({ error: "Documents unavailable" }, 503)));
+    expect(screen.getAllByRole("alert")).toEqual([screen.getByText("Documents unavailable")]);
+    expect(screen.queryByText("No documents yet.")).toBeNull();
+    expect(screen.getByTestId("token-document-doc-one")).toBeChecked();
+    expect(screen.getByTestId("token-document-doc-two")).toBeChecked();
+    const retryButton = screen.getByRole("button", { name: "Retry documents" });
+    act(() => {
+      retryButton.click();
+      retryButton.click();
+    });
+    expect(documentListCount()).toBe(3);
+    expect(screen.queryByText("Documents unavailable")).toBeNull();
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.getByTestId("token-document-doc-one")).toBeChecked();
+    expect(screen.getByTestId("token-document-doc-two")).toBeChecked();
+
+    await act(async () => retry.resolve(response({ documents: [
+      { id: "doc-two", title: "Second document" },
+      { id: "doc-three", title: "Third document" },
+    ] })));
+    expect(screen.queryByTestId("token-document-doc-one")).toBeNull();
+    expect(screen.getByTestId("token-document-doc-two")).toBeChecked();
+    expect(screen.getByTestId("token-document-doc-three")).not.toBeChecked();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByTestId("token-create")).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId("token-create"));
+    await screen.findByTestId("token-created");
+    expect(createBody).toEqual({
+      name: "GitHub Copilot CLI",
+      expiresInDays: 90,
+      scope: "comment",
+      documentIds: ["doc-two"],
+    });
+    expect(documentListCount()).toBe(3);
+  });
+
+  it.each(["resolve", "reject"] as const)("retires a fixed-document replacement before an old document %s and protects the new owner", async (oldSettlement) => {
+    const oldRequest = deferred<Response>();
+    const currentRequest = deferred<Response>();
+    const documentRequests = [oldRequest, currentRequest];
+    let documentRequestIndex = 0;
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/documents") return documentRequests[documentRequestIndex++].promise;
+      if (url === "/api/tokens?includeRevoked=true") return response({ tokens: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const documentListCount = () => fetchMock.mock.calls.filter(([input]) => String(input) === "/api/documents").length;
+    const view = renderPanel();
     await openCreate();
     fireEvent.click(screen.getByTestId("token-restrict"));
-    await screen.findByText("Documents unavailable");
-    expect(screen.queryByText("No documents yet.")).toBeNull();
-    expect(screen.getByTestId("token-create")).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Retry documents" }));
-    fireEvent.click(await screen.findByTestId("token-document-doc-one"));
-    expect(screen.getByTestId("token-create")).toBeEnabled();
+    expect(documentListCount()).toBe(1);
+
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" documentId="fixed-document" open />);
+    await openCreate();
+    expect(screen.getByTestId("token-restrict")).toBeChecked();
+    expect(screen.getByText("Only this document")).toBeVisible();
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open />);
+    await openCreate();
+    fireEvent.click(screen.getByTestId("token-restrict"));
+    expect(documentListCount()).toBe(2);
+
+    await act(async () => {
+      if (oldSettlement === "resolve") {
+        oldRequest.resolve(response({ documents: [{ id: "stale-document", title: "Stale document" }] }));
+      } else {
+        oldRequest.reject(new Error("Stale document failure"));
+      }
+      await Promise.allSettled([oldRequest.promise]);
+    });
+    expect(screen.getByText("Loading your documents...")).toBeVisible();
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.queryByText("Stale document")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(documentListCount()).toBe(2);
+
+    if (oldSettlement === "resolve") {
+      await act(async () => currentRequest.resolve(response({ error: "Current documents unavailable" }, 503)));
+      expect(screen.getAllByRole("alert")).toEqual([screen.getByText("Current documents unavailable")]);
+      expect(screen.queryByRole("status")).toBeNull();
+    } else {
+      await act(async () => currentRequest.resolve(response({ documents: [{ id: "current-document", title: "Current document" }] })));
+      expect(screen.getByTestId("token-document-current-document")).toBeVisible();
+      expect(screen.getAllByRole("alert")).toEqual([screen.getByTestId("token-document-error")]);
+      expect(screen.getByRole("alert")).toHaveTextContent("Select at least one document");
+      expect(screen.queryByRole("status")).toBeNull();
+    }
+    expect(documentListCount()).toBe(2);
+  });
+
+  it.each([
+    ["close transition", "resolve"],
+    ["direct unmount", "reject"],
+  ] as const)("retires document work at the %s boundary before a late %s", async (boundary, settlement) => {
+    const pending = deferred<Response>();
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/documents") return pending.promise;
+      if (url === "/api/tokens?includeRevoked=true") return response({ tokens: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const view = render(<TransitionClosePanel />);
+    let observer: MutationObserver | null = null;
+    const actEnvironment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+
+    try {
+      await openCreate();
+      fireEvent.click(screen.getByTestId("token-restrict"));
+      expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/documents")).toHaveLength(1);
+      const settle = () => {
+        if (settlement === "resolve") pending.resolve(response({ documents: [{ id: "late", title: "Late document" }] }));
+        else pending.reject(new Error("Late document failure"));
+      };
+      let postRemovalMutations = 0;
+      if (boundary === "close transition") {
+        const removed = deferred<void>();
+        let settledAtRemoval = false;
+        observer = new MutationObserver((records) => {
+          if (document.querySelector('[data-testid="token-manager"]')) return;
+          if (!settledAtRemoval) {
+            settledAtRemoval = true;
+            settle();
+            removed.resolve();
+            return;
+          }
+          postRemovalMutations += records.length;
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+        screen.getByRole("button", { name: "Close token management" }).click();
+        await removed.promise;
+      } else {
+        view.unmount();
+        settle();
+      }
+      await Promise.allSettled([pending.promise]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByTestId("token-manager")).toBeNull();
+      expect(screen.queryByText("Late document")).toBeNull();
+      expect(screen.queryByText("Late document failure")).toBeNull();
+      expect(postRemovalMutations).toBe(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      observer?.disconnect();
+      process.off("unhandledRejection", onUnhandled);
+      view.unmount();
+    }
   });
 
   it("does not offer replacement for expired or revoked tokens", async () => {
