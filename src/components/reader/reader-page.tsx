@@ -97,7 +97,14 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
           {/* Safe to inject: `html` is the output of renderMarkdownBody, which runs rehype-sanitize
               (GitHub's default schema) before slugging/highlighting, so scripts, handlers and
               javascript: URLs never reach this point. */}
-          <ReaderScrollableRegions html={html} hideFirstH1={hideFirstH1} />
+          <div
+            className="reader-body"
+            data-testid="reader-body"
+            data-reader-overflow-root
+            data-hide-first-h1={hideFirstH1 || undefined}
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+          <ReaderScrollableRegions contentKey={initialHash} />
           <footer className="reader-footer mt-16 border-t border-line pt-5 text-xs text-ink-4">
             Made with{" "}
             <Link href={signedIn ? "/" : "/login"} className="font-medium text-ink-3 hover:text-accent">
