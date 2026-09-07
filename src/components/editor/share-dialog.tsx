@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useId, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
 import { BookOpen, Bot, Check, ChevronDown, Copy, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
@@ -18,6 +18,12 @@ const LINK_OPTIONS: { value: DocumentDto["linkAccess"]; label: string; descripti
   { value: "edit", label: "Anyone with the link can edit", description: "Signed-in visitors can edit; others can read." },
 ];
 
+type CollaboratorOwner = { login: string | null; name: string | null; image: string | null };
+type CollaboratorListState =
+  | { documentId: string; status: "loading" }
+  | { documentId: string; status: "error"; message: string; retrying: boolean }
+  | { documentId: string; status: "loaded"; owner: CollaboratorOwner | null; collaborators: CollaboratorDto[] };
+
 export const ShareDialog = memo(function ShareDialog({
   open,
   onOpenChange,
@@ -31,13 +37,16 @@ export const ShareDialog = memo(function ShareDialog({
   isOwner: boolean;
   onDocChange: (doc: DocumentDto) => void;
 }) {
-  const [collabs, setCollabs] = useState<CollaboratorDto[] | null>(null);
-  const [owner, setOwner] = useState<{ login: string | null; name: string | null; image: string | null } | null>(null);
+  const [collaboratorList, setCollaboratorList] = useState<CollaboratorListState | null>(null);
+  const listRequest = useRef(0);
+  const listPending = useRef<{ request: number; documentId: string } | null>(null);
   const [login, setLogin] = useState("");
   const [role, setRole] = useState<Exclude<Role, "owner">>("editor");
   const roleSelect = useRef<HTMLSelectElement>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const addRequest = useRef(0);
+  const addPending = useRef<{ request: number; documentId: string } | null>(null);
+  const [addError, setAddError] = useState<{ documentId: string; message: string } | null>(null);
   const [origin, setOrigin] = useState("");
   useEffect(() => setOrigin(window.location.origin), []);
   const readerLink = `${origin}/p/${doc.id}`;
@@ -62,41 +71,96 @@ export const ShareDialog = memo(function ShareDialog({
     }
   }, [showLinkFallback]);
 
+  const loadCollaborators = useCallback(async (documentId: string, mode: "load" | "retry" = "load", supersede = false) => {
+    if (!supersede && listPending.current?.documentId === documentId) return;
+
+    const ownership = { request: ++listRequest.current, documentId };
+    listPending.current = ownership;
+    setCollaboratorList((current) =>
+      mode === "retry" && current?.documentId === documentId && current.status === "error"
+        ? { ...current, retrying: true }
+        : { documentId, status: "loading" },
+    );
+    try {
+      const res = await api.documents.collaborators(documentId);
+      if (listPending.current !== ownership || listRequest.current !== ownership.request) return;
+      setCollaboratorList({ documentId, status: "loaded", owner: res.owner, collaborators: res.collaborators });
+    } catch (e) {
+      if (listPending.current !== ownership || listRequest.current !== ownership.request) return;
+      setCollaboratorList({ documentId, status: "error", message: apiErrorText(e, "Could not load collaborators"), retrying: false });
+    } finally {
+      if (listPending.current === ownership) listPending.current = null;
+    }
+  }, []);
+
   useEffect(() => {
-    if (!open) return;
-    api.documents
-      .collaborators(doc.id)
-      .then((res) => {
-        setCollabs(res.collaborators);
-        setOwner(res.owner);
-      })
-      .catch((e) => setError(apiErrorText(e, "Could not add collaborator")));
-  }, [open, doc.id]);
+    listRequest.current += 1;
+    listPending.current = null;
+    addRequest.current += 1;
+    addPending.current = null;
+    setBusy(false);
+    setAddError(null);
+    if (!open) {
+      setCollaboratorList(null);
+      return;
+    }
+    setCollaboratorList({ documentId: doc.id, status: "loading" });
+    void loadCollaborators(doc.id);
+    return () => {
+      listRequest.current += 1;
+      listPending.current = null;
+      addRequest.current += 1;
+      addPending.current = null;
+    };
+  }, [open, doc.id, loadCollaborators]);
+
+  const currentList = collaboratorList?.documentId === doc.id ? collaboratorList : null;
+  const collabs = currentList?.status === "loaded" ? currentList.collaborators : null;
+  const owner = currentList?.status === "loaded" ? currentList.owner : null;
+  const currentAddError = addError?.documentId === doc.id ? addError.message : null;
 
   const add = async () => {
-    if (!login.trim()) return;
+    if (!login.trim() || addPending.current) return;
+    const documentId = doc.id;
+    const ownership = { request: ++addRequest.current, documentId };
+    addPending.current = ownership;
     setBusy(true);
-    setError(null);
+    setAddError(null);
     try {
-      await api.documents.addCollaborator(doc.id, login.trim(), role);
-      const res = await api.documents.collaborators(doc.id);
-      setCollabs(res.collaborators);
+      await api.documents.addCollaborator(documentId, login.trim(), role);
+      if (addPending.current !== ownership || addRequest.current !== ownership.request) return;
       setLogin("");
+      await loadCollaborators(documentId, "load", true);
     } catch (e) {
-      setError(apiErrorText(e, "Could not add collaborator"));
+      if (addPending.current === ownership && addRequest.current === ownership.request) {
+        setAddError({ documentId, message: apiErrorText(e, "Could not add collaborator") });
+      }
     } finally {
-      setBusy(false);
+      if (addPending.current === ownership && addRequest.current === ownership.request) {
+        addPending.current = null;
+        setBusy(false);
+      }
     }
   };
 
   const changeRole = async (c: CollaboratorDto, next: Exclude<Role, "owner">) => {
-    await api.documents.addCollaborator(doc.id, c.login, next);
-    setCollabs((list) => list?.map((x) => (x.login === c.login ? { ...x, role: next } : x)) ?? null);
+    const documentId = doc.id;
+    await api.documents.addCollaborator(documentId, c.login, next);
+    setCollaboratorList((current) =>
+      current?.documentId === documentId && current.status === "loaded"
+        ? { ...current, collaborators: current.collaborators.map((x) => (x.login === c.login ? { ...x, role: next } : x)) }
+        : current,
+    );
   };
 
   const remove = async (c: CollaboratorDto) => {
-    await api.documents.removeCollaborator(doc.id, c.login);
-    setCollabs((list) => list?.filter((x) => x.login !== c.login) ?? null);
+    const documentId = doc.id;
+    await api.documents.removeCollaborator(documentId, c.login);
+    setCollaboratorList((current) =>
+      current?.documentId === documentId && current.status === "loaded"
+        ? { ...current, collaborators: current.collaborators.filter((x) => x.login !== c.login) }
+        : current,
+    );
   };
 
   const setLink = async (value: DocumentDto["linkAccess"]) => {
@@ -133,11 +197,35 @@ export const ShareDialog = memo(function ShareDialog({
             </button>
           </form>
         )}
-        {error && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">{error}</div>}
+        {currentAddError && (
+          <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="share-add-error">
+            {currentAddError}
+          </div>
+        )}
 
         <div className="mt-5">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-3">People with access</div>
           <ul className="flex flex-col divide-y divide-line rounded-xl border border-line">
+            {(!currentList || currentList.status === "loading") && (
+              <li className="flex items-center justify-center gap-2 px-3 py-4 text-sm text-ink-3" role="status" aria-live="polite" aria-atomic="true" data-testid="collaborator-list-loading">
+                <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+                Loading collaborators…
+              </li>
+            )}
+            {currentList?.status === "error" && (
+              <li className="bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="collaborator-list-error">
+                <div>{currentList.message}</div>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm mt-2 gap-1.5"
+                  onClick={() => void loadCollaborators(doc.id, "retry")}
+                  disabled={currentList.retrying}
+                >
+                  {currentList.retrying && <Loader2 size={13} className="animate-spin" aria-hidden="true" />}
+                  {currentList.retrying ? "Retrying…" : "Retry"}
+                </button>
+              </li>
+            )}
             {owner && (
               <li className="flex items-center gap-3 px-3 py-2.5">
                 <Avatar name={owner.name ?? owner.login ?? "Owner"} src={owner.image} size={32} />
