@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Bot, MessageSquare, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api } from "@/lib/api";
@@ -32,6 +32,34 @@ const ICONS: Record<HintId, typeof Bot> = { "collab-agent": Bot, "mention-copilo
 
 const noopSubscribe = () => () => {};
 
+/** Quiet retry cadence for the optional collaborator/agent discovery behind hint (a). */
+export const COLLAB_HINT_RETRY_MS = 30_000;
+
+interface CollaboratorEvidence {
+  collaborators: number;
+  agentKnown: boolean;
+}
+
+interface DiscoveryKey {
+  session: CollabSession;
+  documentId: string;
+}
+
+interface DiscoverySnapshot {
+  key: DiscoveryKey;
+  collaborators: CollaboratorEvidence | null;
+  tokenUsed: boolean | null;
+}
+
+interface DiscoveryCoordinator {
+  key: DiscoveryKey | null;
+  collaborators: CollaboratorEvidence | null;
+  tokenUsed: boolean | null;
+  collaboratorsInFlight: boolean;
+  tokenInFlight: boolean;
+  run: (() => void) | null;
+}
+
 /**
  * One-line, once-only hints under the toolbar for the agent/collaboration features. Reads session
  * state itself (the shell does not re-render for it) and remembers dismissals in `localStorage`
@@ -50,28 +78,6 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
   const wide = useMediaQuery(`(min-width: ${HINTS_MIN_WIDTH}px)`);
   const active = hydrated && loaded && wide && !allHintsDismissed(record.dismissed);
 
-  // Share list and token usage: fetched once per document, only while the hint that needs them is still
-  // open, and not before the document is synced (they are not needed to edit; #118).
-  const settled = useOpenSettled(session);
-  const [shared, setShared] = useState<{ collaborators: number; agentUsed: boolean } | null>(null);
-  const needsShareInfo = active && settled && !record.dismissed.includes("collab-agent") && !record.agentSeen;
-  useEffect(() => {
-    if (!needsShareInfo || shared) return;
-    let cancelled = false;
-    Promise.all([
-      api.documents
-        .collaborators(session.docId)
-        .then((r) => ({ collaborators: r.collaborators.length, agentPresent: r.agents.some((a) => a.present) }))
-        .catch(() => ({ collaborators: 0, agentPresent: false })),
-      api.tokens.list().then((r) => r.tokens.some((t) => !!t.lastUsedAt)).catch(() => false),
-    ]).then(([share, tokenUsed]) => {
-      if (!cancelled) setShared({ collaborators: share.collaborators, agentUsed: tokenUsed || share.agentPresent });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [needsShareInfo, shared, session.docId]);
-
   // Everything else comes from the live session; the selector returns small primitives so the bar
   // re-renders only when a gate actually flips, not per keystroke.
   const live = useSessionValue(
@@ -88,26 +94,192 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     shallowEqual,
   );
 
+  // Share-list and token evidence are independent: a failed source stays unknown and is retried
+  // without discarding a successful source. The coordinator outlives effect restarts so an older
+  // request must settle before the same source can be requested for a replacement document.
+  const settled = useOpenSettled(session);
+  const documentId = session.docId;
+  const discoveryKey = useMemo<DiscoveryKey>(() => ({ session, documentId }), [session, documentId]);
+  const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
+  const discoveryCoordinator = useRef<DiscoveryCoordinator>({
+    key: null,
+    collaborators: null,
+    tokenUsed: null,
+    collaboratorsInFlight: false,
+    tokenInFlight: false,
+    run: null,
+  });
+  const needsShareInfo = active && settled && !record.dismissed.includes("collab-agent") && !record.agentSeen && !live.agentHere;
+  useEffect(() => {
+    const coordinator = discoveryCoordinator.current;
+    if (coordinator.key !== discoveryKey) {
+      coordinator.key = discoveryKey;
+      coordinator.collaborators = null;
+      coordinator.tokenUsed = null;
+      setDiscovery({ key: discoveryKey, collaborators: null, tokenUsed: null });
+    }
+    if (!needsShareInfo) return;
+
+    let running = true;
+    let visible = document.visibilityState === "visible";
+    let generation = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const publish = () => {
+      setDiscovery({
+        key: discoveryKey,
+        collaborators: coordinator.collaborators,
+        tokenUsed: coordinator.tokenUsed,
+      });
+    };
+    const clearRetry = () => {
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+    const ownsCurrentRun = (requestGeneration: number) =>
+      running &&
+      visible &&
+      requestGeneration === generation &&
+      coordinator.key === discoveryKey &&
+      coordinator.run === run;
+    const agentKnown = () => coordinator.collaborators?.agentKnown === true || coordinator.tokenUsed === true;
+    const scheduleRetry = () => {
+      if (
+        !running ||
+        !visible ||
+        coordinator.key !== discoveryKey ||
+        agentKnown() ||
+        (coordinator.collaborators !== null && coordinator.tokenUsed !== null)
+      ) {
+        clearRetry();
+        return;
+      }
+      const retryableSource =
+        (coordinator.collaborators === null && !coordinator.collaboratorsInFlight) ||
+        (coordinator.tokenUsed === null && !coordinator.tokenInFlight);
+      if (!retryableSource || retryTimer !== null) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        run();
+      }, COLLAB_HINT_RETRY_MS);
+    };
+    const afterSettlement = () => {
+      scheduleRetry();
+    };
+    const finishStaleRequest = () => {
+      coordinator.run?.();
+    };
+    const requestCollaborators = () => {
+      const requestGeneration = generation;
+      coordinator.collaboratorsInFlight = true;
+      void api.documents.collaborators(documentId).then(
+        (result) => {
+          coordinator.collaboratorsInFlight = false;
+          if (!ownsCurrentRun(requestGeneration)) {
+            finishStaleRequest();
+            return;
+          }
+          coordinator.collaborators = {
+            collaborators: result.collaborators.length,
+            agentKnown: result.agents.length > 0,
+          };
+          publish();
+          afterSettlement();
+        },
+        () => {
+          coordinator.collaboratorsInFlight = false;
+          if (!ownsCurrentRun(requestGeneration)) {
+            finishStaleRequest();
+            return;
+          }
+          afterSettlement();
+        },
+      );
+    };
+    const requestTokens = () => {
+      const requestGeneration = generation;
+      coordinator.tokenInFlight = true;
+      void api.tokens.list().then(
+        (result) => {
+          coordinator.tokenInFlight = false;
+          if (!ownsCurrentRun(requestGeneration)) {
+            finishStaleRequest();
+            return;
+          }
+          coordinator.tokenUsed = result.tokens.some((token) => !!token.lastUsedAt);
+          publish();
+          afterSettlement();
+        },
+        () => {
+          coordinator.tokenInFlight = false;
+          if (!ownsCurrentRun(requestGeneration)) {
+            finishStaleRequest();
+            return;
+          }
+          afterSettlement();
+        },
+      );
+    };
+    function run() {
+      if (!running || !visible || coordinator.key !== discoveryKey || agentKnown()) return;
+      clearRetry();
+      if (coordinator.collaborators === null && !coordinator.collaboratorsInFlight) requestCollaborators();
+      if (coordinator.tokenUsed === null && !coordinator.tokenInFlight) requestTokens();
+    }
+    coordinator.run = run;
+
+    const onVisibilityChange = () => {
+      const nextVisible = document.visibilityState === "visible";
+      if (nextVisible === visible) return;
+      visible = nextVisible;
+      if (!visible) {
+        generation++;
+        clearRetry();
+        return;
+      }
+      run();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    run();
+    return () => {
+      running = false;
+      generation++;
+      clearRetry();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (coordinator.run === run) coordinator.run = null;
+    };
+  }, [discoveryKey, documentId, needsShareInfo]);
+
+  const currentDiscovery = discovery?.key === discoveryKey ? discovery : null;
+  const discoveredAgent = currentDiscovery?.collaborators?.agentKnown === true || currentDiscovery?.tokenUsed === true;
+
   // Remember that an agent has been seen so hint (a) stays quiet in future documents.
   useEffect(() => {
-    if (!loaded || record.agentSeen || !(live.agentHere || shared?.agentUsed)) return;
+    if (!loaded || record.agentSeen || !(live.agentHere || discoveredAgent)) return;
     const next = { ...record, agentSeen: true };
     setRecord(next);
     writeHintsRecord(window.localStorage, next);
-  }, [loaded, live.agentHere, shared?.agentUsed, record]);
+  }, [loaded, live.agentHere, discoveredAgent, record]);
 
-  const agentEverConnected = record.agentSeen || live.agentHere || (shared?.agentUsed ?? false);
+  const agentEverConnected = record.agentSeen || live.agentHere || discoveredAgent;
+  const agentAbsenceKnown =
+    currentDiscovery?.collaborators != null &&
+    currentDiscovery.tokenUsed !== null &&
+    !discoveredAgent;
+  const collaborators = agentAbsenceKnown
+    ? Math.max(live.people, currentDiscovery.collaborators?.collaborators ?? 0)
+    : 0;
   const due = active
-    ? dueHint({ collaborators: Math.max(live.people, shared?.collaborators ?? 0), agentEverConnected, commentThreads: live.threads }, record.dismissed)
+    ? dueHint({ collaborators, agentEverConnected, commentThreads: live.threads }, record.dismissed)
     : null;
 
   // A hint that appeared is pinned until the user acts on it, even if its gate turns false again
   // or another hint becomes due.
-  const [pinned, setPinned] = useState<HintId | null>(null);
+  const [pinned, setPinned] = useState<{ key: DiscoveryKey; id: HintId } | null>(null);
   useEffect(() => {
-    if (!pinned && due) setPinned(due);
-  }, [due, pinned]);
-  const shown = pinned && !record.dismissed.includes(pinned) && active ? pinned : null;
+    if ((!pinned || pinned.key !== discoveryKey) && due) setPinned({ key: discoveryKey, id: due });
+  }, [discoveryKey, due, pinned]);
+  const shown = pinned?.key === discoveryKey && !record.dismissed.includes(pinned.id) && active ? pinned.id : null;
 
   const barRef = useRef<HTMLDivElement>(null);
   const dismiss = useCallback(
