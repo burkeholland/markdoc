@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { startTransition, useState } from "react";
+import { startTransition, useEffect, useLayoutEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
 
@@ -102,6 +102,37 @@ function TransitionUnmount({ children }: { children: React.ReactNode }) {
   );
 }
 
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
+}
+
+function DashboardBoundary({
+  user = USER,
+  documents = DOCUMENTS,
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup = () => {},
+}: {
+  user?: typeof USER;
+  documents?: DocumentSummaryDto[];
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? (
+    <>
+      <Dashboard user={user} documents={documents} githubAvailable githubConfigured />
+      <PassiveCleanupProbe key={user.id} onCleanup={onPassiveCleanup} />
+    </>
+  ) : null;
+}
+
 function openTrash() {
   fireEvent.click(screen.getByTestId("filter-trash"));
 }
@@ -128,6 +159,37 @@ function deferred<T>() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+function controlledSearch<T>() {
+  type Chain = {
+    then: (handler: (value: T) => unknown) => Chain;
+    catch: (handler: (reason: unknown) => unknown) => Chain;
+    finally: (handler: () => unknown) => Chain;
+  };
+  let success: ((value: T) => unknown) | undefined;
+  let failure: ((reason: unknown) => unknown) | undefined;
+  let finalizer: (() => unknown) | undefined;
+  const chain: Chain = {
+    then(handler) {
+      success = handler;
+      return chain;
+    },
+    catch(handler) {
+      failure = handler;
+      return chain;
+    },
+    finally(handler) {
+      finalizer = handler;
+      return chain;
+    },
+  };
+  return {
+    promise: chain as unknown as Promise<T>,
+    resolve: (value: T) => success?.(value),
+    reject: (reason: unknown) => failure?.(reason),
+    finalize: () => finalizer?.(),
+  };
 }
 
 function documentStar(title: string) {
@@ -254,7 +316,11 @@ describe("dashboard content-search recovery", () => {
     await settleSearch();
     const alert = screen.getByRole("alert");
 
-    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    const retryButton = within(alert).getByRole("button", { name: "Retry" });
+    act(() => {
+      retryButton.click();
+      retryButton.click();
+    });
 
     expect(searchDocuments).toHaveBeenCalledTimes(2);
     expect(searchDocuments.mock.calls[1][0]).toBe("alpha");
@@ -303,6 +369,144 @@ describe("dashboard content-search recovery", () => {
     expect(screen.getByRole("link", { name: /Gamma result/ })).toBeInTheDocument();
     expect(screen.queryByText(/Stale alpha result/)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "retires an old user search before its %s settles at the replacement layout boundary",
+    async (settlement) => {
+      const oldSearch = deferred<SearchResponse>();
+      const currentSearch = deferred<SearchResponse>();
+      const passiveCleanup = vi.fn();
+      const replacementUser = { ...USER, id: "replacement-owner", name: "Replacement owner", login: "replacement-owner" };
+      searchDocuments.mockReturnValueOnce(oldSearch.promise).mockReturnValueOnce(currentSearch.promise);
+      const view = render(<DashboardBoundary onPassiveCleanup={passiveCleanup} />);
+      fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      await settleSearch();
+      const oldSignal = searchDocuments.mock.calls[0][1]?.signal;
+
+      view.rerender(
+        <DashboardBoundary
+          user={replacementUser}
+          documents={[]}
+          boundary={1}
+          onPassiveCleanup={passiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanup).not.toHaveBeenCalled();
+            expect(oldSignal?.aborted).toBe(true);
+            if (settlement === "success") {
+              oldSearch.resolve({ query: "alpha", documents: [result("old-result", "Old user result", "Old user content")] });
+            } else {
+              oldSearch.reject(new ApiError(503, "Old user search failed"));
+            }
+          }}
+        />,
+      );
+      await act(async () => {
+        await Promise.allSettled([oldSearch.promise]);
+        await Promise.resolve();
+      });
+
+      expect(searchDocuments).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("Old user result")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("search-loading")).toBeNull();
+      expect(screen.getByText('Searching for "alpha"…')).toBeInTheDocument();
+      expect(console.error).not.toHaveBeenCalled();
+
+      await settleSearch();
+      expect(searchDocuments).toHaveBeenCalledTimes(2);
+      expect(searchDocuments.mock.calls[1][0]).toBe("alpha");
+      expect(searchDocuments.mock.calls[1][1]?.signal?.aborted).toBe(false);
+      expect(screen.getByTestId("search-loading")).toBeInTheDocument();
+
+      await act(async () => {
+        currentSearch.resolve({ query: "alpha", documents: [result("current-result", "Current user result", "Current user content")] });
+        await currentSearch.promise;
+      });
+      expect(screen.getByRole("link", { name: /Current user result/ })).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("search-loading")).toBeNull();
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "retires a search before its %s settles at the removal layout boundary",
+    async (settlement) => {
+      const oldSearch = deferred<SearchResponse>();
+      const passiveCleanup = vi.fn();
+      searchDocuments.mockReturnValueOnce(oldSearch.promise);
+      const view = render(<DashboardBoundary onPassiveCleanup={passiveCleanup} />);
+      fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      await settleSearch();
+      const oldSignal = searchDocuments.mock.calls[0][1]?.signal;
+
+      view.rerender(
+        <DashboardBoundary
+          present={false}
+          boundary={1}
+          onPassiveCleanup={passiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanup).not.toHaveBeenCalled();
+            expect(oldSignal?.aborted).toBe(true);
+            if (settlement === "success") {
+              oldSearch.resolve({ query: "alpha", documents: [result("removed-result", "Removed result", "Removed content")] });
+            } else {
+              oldSearch.reject(new ApiError(503, "Removed search failed"));
+            }
+          }}
+        />,
+      );
+      await act(async () => {
+        await Promise.allSettled([oldSearch.promise]);
+        await Promise.resolve();
+      });
+
+      expect(searchDocuments).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("textbox", { name: "Search documents" })).toBeNull();
+      expect(screen.queryByText("Removed result")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("search-loading")).toBeNull();
+      expect(console.error).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the replacement request pending when the old request finalizes", async () => {
+    const oldSearch = controlledSearch<SearchResponse>();
+    const currentSearch = deferred<SearchResponse>();
+    const replacementUser = { ...USER, id: "replacement-finalizer", name: "Replacement owner", login: "replacement-finalizer" };
+    searchDocuments.mockReturnValueOnce(oldSearch.promise).mockReturnValueOnce(currentSearch.promise);
+    const view = render(<DashboardBoundary />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+    await settleSearch();
+
+    view.rerender(
+      <DashboardBoundary
+        user={replacementUser}
+        documents={[]}
+        boundary={1}
+        onBoundary={() => oldSearch.resolve({ query: "alpha", documents: [result("stale-finalizer", "Stale finalizer", "Old content")] })}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await settleSearch();
+
+    expect(searchDocuments).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("search-loading")).toBeInTheDocument();
+    act(() => {
+      oldSearch.finalize();
+    });
+    expect(screen.getByTestId("search-loading")).toBeInTheDocument();
+    expect(screen.queryByText("Stale finalizer")).toBeNull();
+
+    await act(async () => {
+      currentSearch.resolve({ query: "alpha", documents: [result("finalizer-current", "Current finalizer result", "Current content")] });
+      await currentSearch.promise;
+    });
+    expect(screen.queryByTestId("search-loading")).toBeNull();
+    expect(screen.getByRole("link", { name: /Current finalizer result/ })).toBeInTheDocument();
+    expect(console.error).not.toHaveBeenCalled();
   });
 });
 
