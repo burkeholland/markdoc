@@ -33,8 +33,10 @@ interface ReadOperation {
   key: string;
   operation: NotificationReadError["operation"];
   scope: OperationScope;
+  optimisticIds: Set<string>;
   cacheRevision: number;
   superseded: boolean;
+  fullyConfirmed: boolean;
   retryErrorId: number | null;
   optimisticAt: string;
   promise: Promise<void>;
@@ -44,7 +46,10 @@ interface ReadOperation {
   localChanged: number;
 }
 
-type ReadOperationInit = Omit<ReadOperation, "id" | "cacheRevision" | "superseded" | "retryErrorId" | "optimisticAt" | "promise">;
+type ReadOperationInit = Omit<
+  ReadOperation,
+  "id" | "cacheRevision" | "superseded" | "fullyConfirmed" | "retryErrorId" | "optimisticAt" | "promise"
+>;
 
 interface RefreshOperation {
   id: number;
@@ -84,20 +89,15 @@ function operations(): ReadOperation[] {
 }
 
 function affects(op: ReadOperation, notification: NotificationDto): boolean {
-  if (op.scope.kind === "all") return true;
-  if (op.scope.kind === "ids") return op.scope.ids.has(notification.id);
-  return notification.documentId === op.scope.documentId && op.scope.refIds.has(notification.refId);
+  return op.optimisticIds.has(notification.id);
 }
 
 function isPending(error: NotificationReadError | null): boolean {
-  if (!error) return false;
-  if (error.operation === "all") return readAll?.retryErrorId === error.id;
-  if (error.operation === "single") return singleReads.get(error.notificationId)?.retryErrorId === error.id;
-  return refReads.get(refKey(error.documentId, error.refIds))?.retryErrorId === error.id;
+  return error !== null && operations().some((operation) => operation.retryErrorId === error.id);
 }
 
 function publish(next: Partial<State> = {}) {
-  const active = operations();
+  const active = operations().filter((operation) => !operation.superseded);
   let changed = 0;
   const items = cache.items.map((notification) => {
     if (notification.readAt) return notification;
@@ -106,7 +106,7 @@ function publish(next: Partial<State> = {}) {
     changed++;
     return { ...notification, readAt: owner.optimisticAt };
   });
-  const unreadCount = readAll ? 0 : Math.max(0, cache.unreadCount - changed);
+  const unreadCount = readAll && !readAll.superseded ? 0 : Math.max(0, cache.unreadCount - changed);
   const readError = Object.prototype.hasOwnProperty.call(next, "readError") ? (next.readError ?? null) : state.readError;
   state = {
     ...state,
@@ -150,8 +150,12 @@ export function refreshNotifications(): Promise<void> {
       if (inflight !== owner || owner.cacheRevision !== cacheRevision) return;
       cache = { items: page.items, unreadCount: page.unreadCount };
       cacheRevision++;
-      for (const operation of operations()) operation.superseded = true;
-      publish({ loaded: true, loadError: false, readError: null });
+      for (const operation of operations()) {
+        if (operation.id < owner.id) operation.superseded = true;
+        else if (!operation.superseded) operation.cacheRevision = cacheRevision;
+      }
+      const readError = state.readError && state.readError.operationId > owner.id ? state.readError : null;
+      publish({ loaded: true, loadError: false, readError });
     })
     .catch((err: unknown) => {
       if (inflight !== owner || owner.cacheRevision !== cacheRevision) return;
@@ -220,27 +224,66 @@ const SERVER: State = {
 };
 const getServerSnapshot = () => SERVER;
 
-function scopesOverlap(left: OperationScope, right: OperationScope): boolean {
-  if (left.kind === "all" || right.kind === "all") return true;
-  if (left.kind === "refs" && right.kind === "refs") {
-    if (left.documentId !== right.documentId) return false;
-    for (const refId of left.refIds) {
-      if (right.refIds.has(refId)) return true;
-    }
-    return false;
-  }
-  if (left.kind === "ids" && right.kind === "ids") {
-    for (const id of left.ids) {
-      if (right.ids.has(id)) return true;
-    }
-    return false;
-  }
-  const ids = left.kind === "ids" ? left.ids : right.kind === "ids" ? right.ids : new Set<string>();
-  const refs = left.kind === "refs" ? left : right.kind === "refs" ? right : null;
-  return refs !== null && cache.items.some((notification) => ids.has(notification.id) && notification.documentId === refs.documentId && refs.refIds.has(notification.refId));
+function scopeIncludes(scope: OperationScope, notification: NotificationDto): boolean {
+  if (scope.kind === "all") return true;
+  if (scope.kind === "ids") return scope.ids.has(notification.id);
+  return notification.documentId === scope.documentId && scope.refIds.has(notification.refId);
 }
 
-function commitRead(owner: ReadOperation, pred: (notification: NotificationDto) => boolean, scope: OperationScope, all = false) {
+function reconcileOperation(operation: ReadOperation, confirmed: OperationScope) {
+  for (const notification of cache.items) {
+    if (scopeIncludes(confirmed, notification)) operation.optimisticIds.delete(notification.id);
+  }
+
+  if (confirmed.kind === "all") {
+    operation.fullyConfirmed = true;
+    if (operation.scope.kind === "ids") operation.scope.ids.clear();
+    if (operation.scope.kind === "refs") operation.scope.refIds.clear();
+    return;
+  }
+  if (operation.scope.kind === "ids") {
+    if (confirmed.kind === "ids") {
+      for (const id of confirmed.ids) operation.scope.ids.delete(id);
+    } else {
+      for (const notification of cache.items) {
+        if (scopeIncludes(confirmed, notification)) operation.scope.ids.delete(notification.id);
+      }
+    }
+    return;
+  }
+  if (operation.scope.kind === "refs" && confirmed.kind === "refs" && operation.scope.documentId === confirmed.documentId) {
+    for (const refId of confirmed.refIds) operation.scope.refIds.delete(refId);
+  }
+}
+
+function reconcileError(error: NotificationReadError | null, confirmed: OperationScope): NotificationReadError | null {
+  if (!error) return null;
+  if (error.operation === "all") {
+    return confirmed.kind === "all" || cache.unreadCount === 0 ? null : error;
+  }
+  if (error.operation === "single") {
+    if (confirmed.kind === "all" || (confirmed.kind === "ids" && confirmed.ids.has(error.notificationId))) return null;
+    if (confirmed.kind === "refs") {
+      const notification = cache.items.find((item) => item.id === error.notificationId);
+      if (notification && scopeIncludes(confirmed, notification)) return null;
+    }
+    return error;
+  }
+  if (confirmed.kind === "all") return null;
+  if (confirmed.kind !== "refs" || confirmed.documentId !== error.documentId) return error;
+  const refIds = error.refIds.filter((refId) => !confirmed.refIds.has(refId));
+  if (refIds.length === 0) return null;
+  return refIds.length === error.refIds.length ? error : { ...error, refIds };
+}
+
+function hasRemainingEffect(operation: ReadOperation): boolean {
+  if (operation.fullyConfirmed) return false;
+  if (operation.scope.kind === "all") return cache.unreadCount > 0;
+  if (operation.scope.kind === "ids") return operation.scope.ids.size > 0;
+  return operation.scope.refIds.size > 0 && (operation.optimisticIds.size > 0 || cache.unreadCount > 0);
+}
+
+function commitRead(pred: (notification: NotificationDto) => boolean, scope: OperationScope, all = false): NotificationReadError | null {
   const now = new Date().toISOString();
   let changed = 0;
   const items = cache.items.map((notification) => {
@@ -255,14 +298,11 @@ function commitRead(owner: ReadOperation, pred: (notification: NotificationDto) 
   cacheRevision++;
 
   for (const operation of operations()) {
-    if (operation === owner) {
-      operation.cacheRevision = cacheRevision;
-    } else if (scopesOverlap(operation.scope, scope)) {
-      operation.superseded = true;
-    } else if (!operation.superseded) {
-      operation.cacheRevision = cacheRevision;
-    }
+    if (operation.superseded) continue;
+    reconcileOperation(operation, scope);
+    operation.cacheRevision = cacheRevision;
   }
+  return reconcileError(state.readError, scope);
 }
 
 function isOwner(operation: ReadOperation): boolean {
@@ -300,13 +340,14 @@ function failureFor(operation: ReadOperation): NotificationReadError {
     };
   }
   if (operation.operation === "refs") {
+    const refIds = operation.scope.kind === "refs" ? [...operation.scope.refIds].sort() : operation.refIds!;
     return {
       id,
       operationId: operation.id,
       operation: "refs",
       message: "Couldn't mark these notifications as read.",
       documentId: operation.documentId!,
-      refIds: operation.refIds!,
+      refIds,
     };
   }
   return { id, operationId: operation.id, operation: "all", message: "Couldn't mark all notifications as read." };
@@ -316,7 +357,7 @@ function beginRead<T>(
   operation: ReadOperationInit,
   register: (owner: ReadOperation) => void,
   request: () => Promise<T>,
-  onSuccess: (result: T, owner: ReadOperation) => void,
+  onSuccess: (result: T, owner: ReadOperation) => NotificationReadError | null,
 ): Promise<void> {
   const retryError = state.readError;
   let resolveOwner!: () => void;
@@ -330,6 +371,7 @@ function beginRead<T>(
     id: ++nextOperationId,
     cacheRevision,
     superseded: false,
+    fullyConfirmed: false,
     retryErrorId: retryError && failureMatches(retryError, operation) ? retryError.id : null,
     optimisticAt: new Date().toISOString(),
     promise: shared,
@@ -348,12 +390,12 @@ function beginRead<T>(
     .then(
       (result) => {
         if (!isOwner(owner) || owner.superseded || owner.cacheRevision !== cacheRevision) return;
-        onSuccess(result, owner);
-        const readError = state.readError?.id === owner.retryErrorId ? null : state.readError;
+        const readError = onSuccess(result, owner);
         publish({ readError });
       },
       () => {
         if (!isOwner(owner) || owner.superseded || owner.cacheRevision !== cacheRevision) return;
+        if (!hasRemainingEffect(owner)) return;
         const current = state.readError;
         if (current && current.operationId > owner.id) return;
         publish({ readError: failureFor(owner) });
@@ -379,24 +421,26 @@ function refKey(documentId: string, refIds: string[]): string {
 export function markNotificationRead(id: string): Promise<void> {
   const current = singleReads.get(id);
   if (current) return current.promise;
-  const scope: OperationScope = { kind: "ids", ids: idsFor((notification) => notification.id === id) };
+  const ids = idsFor((notification) => notification.id === id);
+  const scope: OperationScope = { kind: "ids", ids: new Set(ids) };
   return beginRead(
-    { key: id, operation: "single", scope, notificationId: id, localChanged: scope.ids.size },
+    { key: id, operation: "single", scope, optimisticIds: ids, notificationId: id, localChanged: ids.size },
     (owner) => singleReads.set(id, owner),
     () => api.notifications.read(id),
-    (_result, owner) => commitRead(owner, (notification) => notification.id === id, { kind: "ids", ids: new Set([id]) }),
+    () => commitRead((notification) => notification.id === id, { kind: "ids", ids: new Set([id]) }),
   );
 }
 
 export function markAllNotificationsRead(): Promise<void> {
   if (readAll) return readAll.promise;
+  const optimisticIds = idsFor(() => true);
   return beginRead(
-    { key: "all", operation: "all", scope: { kind: "all" }, localChanged: state.unreadCount },
+    { key: "all", operation: "all", scope: { kind: "all" }, optimisticIds, localChanged: state.unreadCount },
     (owner) => {
       readAll = owner;
     },
     () => api.notifications.readAll(),
-    (_result, owner) => commitRead(owner, () => true, { kind: "all" }, true),
+    () => commitRead(() => true, { kind: "all" }, true),
   );
 }
 
@@ -407,19 +451,20 @@ export function markRefsRead(documentId: string, refIds: string[]): Promise<void
   const key = refKey(documentId, normalizedRefs);
   const current = refReads.get(key);
   if (current) return current.promise;
-  const refs = new Set(normalizedRefs);
-  const pred = (notification: NotificationDto) => notification.documentId === documentId && refs.has(notification.refId);
+  const requestedRefs = new Set(normalizedRefs);
+  const pred = (notification: NotificationDto) => notification.documentId === documentId && requestedRefs.has(notification.refId);
   // Unread rows beyond the loaded page may exist; ask the server regardless of the local view.
-  const local = state.items.filter((notification) => !notification.readAt && pred(notification)).length;
-  if (local === 0 && state.loaded && state.unreadCount === 0) return Promise.resolve();
-  const scope: OperationScope = { kind: "refs", documentId, refIds: refs };
+  const optimisticIds = idsFor(pred);
+  if (optimisticIds.size === 0 && state.loaded && state.unreadCount === 0) return Promise.resolve();
+  const scope: OperationScope = { kind: "refs", documentId, refIds: new Set(requestedRefs) };
   return beginRead(
-    { key, operation: "refs", scope, documentId, refIds: normalizedRefs, localChanged: local },
+    { key, operation: "refs", scope, optimisticIds, documentId, refIds: normalizedRefs, localChanged: optimisticIds.size },
     (owner) => refReads.set(key, owner),
     () => api.notifications.readRefs(documentId, normalizedRefs),
     (result, owner) => {
-      commitRead(owner, pred, scope);
+      const readError = commitRead(pred, { kind: "refs", documentId, refIds: new Set(normalizedRefs) });
       if (result.count > owner.localChanged) void refreshNotifications();
+      return readError;
     },
   );
 }

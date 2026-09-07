@@ -56,6 +56,11 @@ const ITEM_TWO: NotificationDto = {
   documentTitle: "Release notes",
   refId: "thread-two",
 };
+const REF_ITEMS: NotificationDto[] = [
+  { ...ITEM, id: "notification-a", refId: "thread-a" },
+  { ...ITEM, id: "notification-b", refId: "thread-b" },
+  { ...ITEM, id: "notification-c", refId: "thread-c" },
+];
 
 beforeEach(() => {
   vi.resetModules();
@@ -234,10 +239,40 @@ describe("notification read ownership", () => {
     expect(result.current.readError).toMatchObject({ operation: "all" });
   });
 
-  it("does not let an older read-all failure resurrect a later confirmed single read", async () => {
+  it("commits read-all and a newer single read when both succeed out of order", async () => {
     const all = deferred<{ ok: true; count: number }>();
     const single = deferred<{ ok: true; changed: boolean }>();
     notificationApi.readAll.mockReturnValueOnce(all.promise);
+    notificationApi.read.mockReturnValueOnce(single.promise);
+    const { store, result } = await mountLoaded({ items: [ITEM, ITEM_TWO], unreadCount: 2 });
+
+    let allOperation!: Promise<void>;
+    let singleOperation!: Promise<void>;
+    act(() => {
+      allOperation = store.markAllNotificationsRead();
+      singleOperation = store.markNotificationRead(ITEM.id);
+    });
+
+    await act(async () => {
+      single.resolve({ ok: true, changed: true });
+      await singleOperation;
+      all.resolve({ ok: true, count: 2 });
+      await allOperation;
+    });
+
+    expect(notificationApi.readAll).toHaveBeenCalledOnce();
+    expect(notificationApi.read).toHaveBeenCalledOnce();
+    expect(result.current.items.every((notification) => notification.readAt !== null)).toBe(true);
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readError).toBeNull();
+    expect(result.current.readAllPending).toBe(false);
+  });
+
+  it("rolls back only the unconfirmed part of read-all and retries it", async () => {
+    const all = deferred<{ ok: true; count: number }>();
+    const single = deferred<{ ok: true; changed: boolean }>();
+    const retry = deferred<{ ok: true; count: number }>();
+    notificationApi.readAll.mockReturnValueOnce(all.promise).mockReturnValueOnce(retry.promise);
     notificationApi.read.mockReturnValueOnce(single.promise);
     const { store, result } = await mountLoaded({ items: [ITEM, ITEM_TWO], unreadCount: 2 });
 
@@ -258,6 +293,26 @@ describe("notification read ownership", () => {
     expect(result.current.items.find((notification) => notification.id === ITEM.id)?.readAt).not.toBeNull();
     expect(result.current.items.find((notification) => notification.id === ITEM_TWO.id)?.readAt).toBeNull();
     expect(result.current.unreadCount).toBe(1);
+    expect(result.current.readError).toMatchObject({ operation: "all" });
+    expect(result.current.readAllPending).toBe(false);
+
+    let retryOperation!: Promise<void>;
+    act(() => {
+      retryOperation = store.retryNotificationRead(result.current.readError!);
+    });
+
+    expect(notificationApi.readAll).toHaveBeenCalledTimes(2);
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readAllPending).toBe(true);
+    expect(result.current.readErrorPending).toBe(true);
+
+    await act(async () => {
+      retry.resolve({ ok: true, count: 1 });
+      await retryOperation;
+    });
+
+    expect(result.current.items.every((notification) => notification.readAt !== null)).toBe(true);
+    expect(result.current.unreadCount).toBe(0);
     expect(result.current.readError).toBeNull();
     expect(result.current.readAllPending).toBe(false);
   });
@@ -304,6 +359,108 @@ describe("notification read ownership", () => {
     });
   });
 
+  it("commits partially overlapping ref sets when both succeed out of order", async () => {
+    const firstRefs = deferred<{ ok: true; count: number }>();
+    const secondRefs = deferred<{ ok: true; count: number }>();
+    notificationApi.readRefs.mockReturnValueOnce(firstRefs.promise).mockReturnValueOnce(secondRefs.promise);
+    const { store, result } = await mountLoaded({ items: REF_ITEMS, unreadCount: 3 });
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = store.markRefsRead(ITEM.documentId, ["thread-a", "thread-b"]);
+      second = store.markRefsRead(ITEM.documentId, ["thread-b", "thread-c"]);
+    });
+
+    expect(notificationApi.readRefs).toHaveBeenCalledTimes(2);
+    expect(result.current.unreadCount).toBe(0);
+
+    await act(async () => {
+      secondRefs.resolve({ ok: true, count: 2 });
+      await second;
+      firstRefs.resolve({ ok: true, count: 2 });
+      await first;
+    });
+
+    expect(result.current.items.every((notification) => notification.readAt !== null)).toBe(true);
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readError).toBeNull();
+    expect(result.current.readErrorPending).toBe(false);
+  });
+
+  it("retries only the unconfirmed part of a partially overlapping ref failure", async () => {
+    const firstRefs = deferred<{ ok: true; count: number }>();
+    const secondRefs = deferred<{ ok: true; count: number }>();
+    const retry = deferred<{ ok: true; count: number }>();
+    notificationApi.readRefs.mockReturnValueOnce(firstRefs.promise).mockReturnValueOnce(secondRefs.promise).mockReturnValueOnce(retry.promise);
+    const { store, result } = await mountLoaded({ items: REF_ITEMS, unreadCount: 3 });
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = store.markRefsRead(ITEM.documentId, ["thread-a", "thread-b"]);
+      second = store.markRefsRead(ITEM.documentId, ["thread-b", "thread-c"]);
+    });
+
+    await act(async () => {
+      secondRefs.resolve({ ok: true, count: 2 });
+      await second;
+      firstRefs.reject(new Error("partial thread read failed"));
+      await first;
+    });
+
+    expect(result.current.items.map((notification) => [notification.refId, notification.readAt !== null])).toEqual([
+      ["thread-a", false],
+      ["thread-b", true],
+      ["thread-c", true],
+    ]);
+    expect(result.current.unreadCount).toBe(1);
+    expect(result.current.readError).toMatchObject({
+      operation: "refs",
+      documentId: ITEM.documentId,
+      refIds: ["thread-a"],
+    });
+
+    let retryOperation!: Promise<void>;
+    act(() => {
+      retryOperation = store.retryNotificationRead(result.current.readError!);
+    });
+
+    expect(notificationApi.readRefs).toHaveBeenCalledTimes(3);
+    expect(notificationApi.readRefs).toHaveBeenLastCalledWith(ITEM.documentId, ["thread-a"]);
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readErrorPending).toBe(true);
+
+    await act(async () => {
+      retry.resolve({ ok: true, count: 1 });
+      await retryOperation;
+    });
+
+    expect(result.current.items.every((notification) => notification.readAt !== null)).toBe(true);
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readError).toBeNull();
+    expect(result.current.readErrorPending).toBe(false);
+  });
+
+  it("clears an older single-read failure after read-all confirms it", async () => {
+    notificationApi.read.mockRejectedValueOnce(new Error("single read failed"));
+    notificationApi.readAll.mockResolvedValueOnce({ ok: true, count: 1 });
+    const { store, result } = await mountLoaded({ items: [ITEM], unreadCount: 1 });
+
+    await act(async () => {
+      await store.markNotificationRead(ITEM.id);
+    });
+    expect(result.current.readError).toMatchObject({ operation: "single", notificationId: ITEM.id });
+
+    await act(async () => {
+      await store.markAllNotificationsRead();
+    });
+
+    expect(result.current.items[0]?.readAt).not.toBeNull();
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readError).toBeNull();
+  });
+
   it("keeps the loaded-empty ref optimization", async () => {
     const { store } = await mountLoaded(EMPTY_PAGE);
 
@@ -338,6 +495,38 @@ describe("notification read ownership", () => {
     expect(result.current.items[0]?.readAt).toBe("2026-09-07T12:10:00.000Z");
     expect(result.current.unreadCount).toBe(0);
     expect(result.current.readError).toBeNull();
+  });
+
+  it("does not let an older poll supersede a read started after it", async () => {
+    const poll = deferred<NotificationsPageDto>();
+    const read = deferred<{ ok: true; changed: boolean }>();
+    const { store, result } = await mountLoaded({ items: [ITEM], unreadCount: 1 });
+    notificationApi.list.mockReturnValueOnce(poll.promise);
+    notificationApi.read.mockReturnValueOnce(read.promise);
+
+    let refresh!: Promise<void>;
+    let readOperation!: Promise<void>;
+    act(() => {
+      refresh = store.refreshNotifications();
+      readOperation = store.markNotificationRead(ITEM.id);
+    });
+
+    await act(async () => {
+      poll.resolve({ items: [ITEM], unreadCount: 1 });
+      await refresh;
+    });
+
+    expect(result.current.items[0]?.readAt).not.toBeNull();
+    expect(result.current.unreadCount).toBe(0);
+
+    await act(async () => {
+      read.reject(new Error("newer read failed"));
+      await readOperation;
+    });
+
+    expect(result.current.items[0]?.readAt).toBeNull();
+    expect(result.current.unreadCount).toBe(1);
+    expect(result.current.readError).toMatchObject({ operation: "single", notificationId: ITEM.id });
   });
 
   it("does not let an out-of-order older failure replace a newer failure", async () => {
