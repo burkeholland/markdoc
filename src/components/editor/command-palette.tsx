@@ -36,6 +36,28 @@ interface ChildLoadError {
   message: string;
 }
 
+interface PaletteAuthority {
+  token: symbol;
+}
+
+interface PaletteVisit {
+  authority: PaletteAuthority;
+  token: symbol;
+}
+
+interface ChildRequest {
+  authority: PaletteAuthority;
+  visit: PaletteVisit;
+  id: number;
+  command: Command;
+}
+
+interface CommandExecution {
+  authority: PaletteAuthority;
+  command: Command;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 export interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -61,11 +83,13 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   const [childError, setChildError] = useState<ChildLoadError | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const openRef = useRef(open);
+  const authorityRef = useRef<PaletteAuthority | null>(null);
+  const visitRef = useRef<PaletteVisit | null>(null);
   const childRequestIdRef = useRef(0);
-  const childRequestRef = useRef<{ id: number; command: Command } | null>(null);
+  const childRequestRef = useRef<ChildRequest | null>(null);
   // Command picked but not yet run: it fires from onCloseAutoFocus, once the dialog has handed focus back.
-  const pendingRef = useRef<Command | null>(null);
+  const pendingRef = useRef<CommandExecution | null>(null);
+  const commandTimersRef = useRef(new Set<CommandExecution>());
   // Element focused before the palette opened (editor pane, header button). Radix's modal content
   // hands focus to its Trigger on close; the palette has none, so without this focus falls to <body>.
   const returnRef = useRef<HTMLElement | null>(null);
@@ -77,18 +101,45 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
 
   const clearChildLoad = useCallback(() => {
     invalidateChildLoad();
+    if (!authorityRef.current) return;
     setChildLoad(null);
     setChildError(null);
   }, [invalidateChildLoad]);
 
   useLayoutEffect(() => {
-    openRef.current = open;
+    const authority: PaletteAuthority = { token: Symbol("command-palette") };
+    const commandTimers = commandTimersRef.current;
+    authorityRef.current = authority;
+
+    return () => {
+      if (authorityRef.current === authority) authorityRef.current = null;
+      if (visitRef.current?.authority === authority) visitRef.current = null;
+      if (childRequestRef.current?.authority === authority) invalidateChildLoad();
+      if (pendingRef.current?.authority === authority) pendingRef.current = null;
+      for (const execution of commandTimers) {
+        if (execution.authority !== authority) continue;
+        if (execution.timer !== null) clearTimeout(execution.timer);
+        commandTimers.delete(execution);
+      }
+      returnRef.current = null;
+    };
+  }, [invalidateChildLoad]);
+
+  useLayoutEffect(() => {
+    const authority = authorityRef.current;
+    const visit: PaletteVisit | null = open && authority ? { authority, token: Symbol("command-palette-visit") } : null;
+    visitRef.current = visit;
     if (!open) clearChildLoad();
-  }, [open, clearChildLoad]);
+
+    return () => {
+      if (visitRef.current === visit) visitRef.current = null;
+      if (visit && childRequestRef.current?.visit === visit) invalidateChildLoad();
+    };
+  }, [open, clearChildLoad, invalidateChildLoad]);
 
   useEffect(() => {
+    if (!visitRef.current) return;
     clearChildLoad();
-    if (!open) return;
     setQuery("");
     setHighlight(0);
     setRecent(loadRecent());
@@ -128,24 +179,34 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
 
   const close = useCallback(() => changeOpen(false), [changeOpen]);
 
-  const loadChildren = useCallback((cmd: Command, retry = false) => {
-    const provider = cmd.children;
-    if (!provider || childRequestRef.current?.command.id === cmd.id) return;
+  const ownsChildRequest = useCallback(
+    (request: ChildRequest) =>
+      authorityRef.current === request.authority &&
+      visitRef.current === request.visit &&
+      childRequestRef.current === request,
+    [],
+  );
 
-    const request = ++childRequestIdRef.current;
-    childRequestRef.current = { id: request, command: cmd };
+  const loadChildren = useCallback((cmd: Command, retry = false) => {
+    const authority = authorityRef.current;
+    const visit = visitRef.current;
+    const provider = cmd.children;
+    if (!authority || !visit || visit.authority !== authority || !provider || childRequestRef.current?.command === cmd) return;
+
+    const request: ChildRequest = {
+      authority,
+      visit,
+      id: ++childRequestIdRef.current,
+      command: cmd,
+    };
+    childRequestRef.current = request;
     setChildLoad({ command: cmd, retry });
     if (!retry) setChildError(null);
 
-    const isCurrent = () => {
-      const current = childRequestRef.current;
-      return openRef.current && current?.id === request && current.command.id === cmd.id;
-    };
-
     void Promise.resolve()
-      .then(() => provider())
+      .then(() => (ownsChildRequest(request) ? provider() : null))
       .then((items) => {
-        if (!isCurrent()) return;
+        if (!items || !ownsChildRequest(request) || request.command !== cmd) return;
         childRequestRef.current = null;
         setChildLoad(null);
         setChildError(null);
@@ -154,17 +215,20 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         inputRef.current?.focus();
       })
       .catch((error: unknown) => {
-        if (!isCurrent()) return;
+        if (!ownsChildRequest(request) || request.command !== cmd) return;
         childRequestRef.current = null;
         setChildLoad(null);
         const title = cmd.title.replace(/…$/, "").trim();
         setChildError({ command: cmd, message: apiErrorText(error, `Could not load ${title || "commands"}`) });
         inputRef.current?.focus();
       });
-  }, []);
+  }, [ownsChildRequest]);
 
   const pick = useCallback(
     (cmd: Command) => {
+      const authority = authorityRef.current;
+      const visit = visitRef.current;
+      if (!authority || !visit || visit.authority !== authority) return;
       if (childError?.command.id === cmd.id) return;
       if (cmd.children) {
         loadChildren(cmd);
@@ -176,7 +240,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       setRecent(next);
       // Run after the dialog unmounts and restores focus, so a command that opens another dialog
       // (Share, Image, …) captures the editor — not the palette — as the element to return focus to.
-      pendingRef.current = cmd;
+      pendingRef.current = { authority, command: cmd, timer: null };
       close();
     },
     [childError, loadChildren, clearChildLoad, recent, close],
@@ -223,18 +287,32 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           data-testid="command-palette"
           onOpenAutoFocus={(e) => {
             e.preventDefault();
+            const authority = authorityRef.current;
+            const visit = visitRef.current;
+            if (!authority || !visit || visit.authority !== authority) return;
             returnRef.current = focusedElement();
             inputRef.current?.focus();
           }}
           onCloseAutoFocus={(e) => {
             e.preventDefault();
-            const cmd = pendingRef.current;
+            const authority = authorityRef.current;
+            const execution = pendingRef.current;
             pendingRef.current = null;
+            if (!authority) {
+              returnRef.current = null;
+              return;
+            }
             // Restore focus first so a command that opens another dialog (Share, Image, …) captures
             // the editor — not the palette — as the element that dialog returns focus to.
             restoreFocus(returnRef.current);
             returnRef.current = null;
-            if (cmd) setTimeout(() => void cmd.run(), 0);
+            if (!execution || execution.authority !== authority) return;
+            commandTimersRef.current.add(execution);
+            execution.timer = setTimeout(() => {
+              if (authorityRef.current !== execution.authority || !commandTimersRef.current.delete(execution)) return;
+              execution.timer = null;
+              void execution.command.run();
+            }, 0);
           }}
         >
           <RadixDialog.Title className="sr-only">Command palette</RadixDialog.Title>
