@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import type { CollabSession } from "@/editor/collab/session";
@@ -115,34 +115,62 @@ export interface StatsPopoverProps {
   hydrated: boolean;
 }
 
+type StatsDisclosureVisit = { session: CollabSession };
+type StatsDisclosureState = { visit: StatsDisclosureVisit; open: boolean };
+
 /**
  * Word count button in the status bar with the statistics popover (Mod-Shift-C): whole-document
  * and selection counts, and the per-document writing goal shared through the Y meta map.
  */
 export function StatsPopover({ session, source, selection, hydrated }: StatsPopoverProps) {
-  const [open, setOpen] = useState(false);
+  const visit = useMemo<StatsDisclosureVisit>(() => ({ session }), [session]);
+  const activeVisitRef = useRef<StatsDisclosureVisit | null>(null);
+  const [disclosure, setDisclosure] = useState<StatsDisclosureState>(() => ({ visit, open: false }));
+  const ownsDisclosure = disclosure.visit === visit;
+  const open = ownsDisclosure && disclosure.open;
   const stats = computeStats(source);
   const selStats = selection ? computeSelectionStats(source, selection.from, selection.to) : null;
   const goal = useSessionValue(session, getGoal, jsonEqual);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const progress = goal ? goalProgress(stats, goal) : null;
 
-  useEffect(() => {
+  const setVisitOpen = useCallback(
+    (next: boolean | ((current: boolean) => boolean)) => {
+      if (activeVisitRef.current !== visit) return;
+      setDisclosure((current) => {
+        if (activeVisitRef.current !== visit) return current;
+        const currentOpen = current.visit === visit ? current.open : false;
+        const nextOpen = typeof next === "function" ? next(currentOpen) : next;
+        return current.visit === visit && current.open === nextOpen ? current : { visit, open: nextOpen };
+      });
+    },
+    [visit],
+  );
+
+  const onOpenChange = useCallback((nextOpen: boolean) => setVisitOpen(nextOpen), [setVisitOpen]);
+
+  useLayoutEffect(() => {
+    activeVisitRef.current = visit;
+    setDisclosure((current) => (current.visit === visit && !current.open ? current : { visit, open: false }));
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyC") {
+        if (activeVisitRef.current !== visit) return;
         e.preventDefault();
-        setOpen((o) => !o);
+        setVisitOpen((current) => !current);
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    return () => {
+      if (activeVisitRef.current === visit) activeVisitRef.current = null;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [setVisitOpen, visit]);
 
   const label = hydrated ? `${formatNumber(stats.words)} words` : "— words";
   const selectionLabel = hydrated && selStats ? `${formatNumber(selStats.words)} of ${formatNumber(stats.words)} selected` : null;
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -159,37 +187,39 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[24rem] p-0" data-testid="stats-popover">
-        <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">
-          <span>Document statistics</span>
-          <span className="font-normal normal-case tracking-normal text-ink-4">{shortcut("Mod-Shift-C")}</span>
-        </div>
-        <table className="w-full text-[13px]" data-testid="stats-table">
-          {selStats && (
-            <thead>
-              <tr className="text-xs text-ink-4">
-                <th className="px-3 pt-2 text-left font-normal" />
-                <th className="px-3 pt-2 text-right font-normal">Selection</th>
-                <th className="px-3 pt-2 text-right font-normal">Document</th>
-              </tr>
-            </thead>
-          )}
-          <tbody>
-            {ROWS.map((row) => {
-              const fmt = row.format ?? formatNumber;
-              return (
-                <tr key={row.key} data-stat={row.key}>
-                  <td className="px-3 py-1 text-ink-2">{row.label}</td>
-                  {selStats && <td className="px-3 py-1 text-right tabular-nums text-ink">{fmt(selStats[row.key])}</td>}
-                  <td className="px-3 py-1 text-right tabular-nums text-ink">{fmt(stats[row.key])}</td>
+      {ownsDisclosure && (
+        <PopoverContent align="start" className="w-[24rem] p-0" data-testid="stats-popover">
+          <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">
+            <span>Document statistics</span>
+            <span className="font-normal normal-case tracking-normal text-ink-4">{shortcut("Mod-Shift-C")}</span>
+          </div>
+          <table className="w-full text-[13px]" data-testid="stats-table">
+            {selStats && (
+              <thead>
+                <tr className="text-xs text-ink-4">
+                  <th className="px-3 pt-2 text-left font-normal" />
+                  <th className="px-3 pt-2 text-right font-normal">Selection</th>
+                  <th className="px-3 pt-2 text-right font-normal">Document</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <p className="px-3 pb-2 text-[11px] text-ink-4">Prose only: code blocks and front matter are not counted. Reading at 200 wpm, speaking at 130 wpm.</p>
-        <GoalEditor session={session} goal={goal} progress={progress} canEdit={canEdit} />
-      </PopoverContent>
+              </thead>
+            )}
+            <tbody>
+              {ROWS.map((row) => {
+                const fmt = row.format ?? formatNumber;
+                return (
+                  <tr key={row.key} data-stat={row.key}>
+                    <td className="px-3 py-1 text-ink-2">{row.label}</td>
+                    {selStats && <td className="px-3 py-1 text-right tabular-nums text-ink">{fmt(selStats[row.key])}</td>}
+                    <td className="px-3 py-1 text-right tabular-nums text-ink">{fmt(stats[row.key])}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="px-3 pb-2 text-[11px] text-ink-4">Prose only: code blocks and front matter are not counted. Reading at 200 wpm, speaking at 130 wpm.</p>
+          <GoalEditor session={session} goal={goal} progress={progress} canEdit={canEdit} />
+        </PopoverContent>
+      )}
     </Popover>
   );
 }
