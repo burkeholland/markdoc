@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { cn } from "@/lib/utils";
 
 /** Side panel (Comments / Versions / Activity) width on desktop, in CSS pixels. */
@@ -36,10 +36,69 @@ export interface PanelResizeHandleProps {
   onReset: () => void;
 }
 
-interface Drag {
+interface HandleAuthority {
+  active: boolean;
+  drag: DragOwner | null;
+  stopDragging: () => void;
+}
+
+interface DragOwner {
+  active: boolean;
+  authority: HandleAuthority;
   pointerId: number;
   startX: number;
   startWidth: number;
+  target: HTMLDivElement;
+  onResize: (width: number) => void;
+  min: number;
+  max: number;
+  captureHeld: boolean;
+  body: HTMLElement;
+  bodyCursor: string;
+  bodyUserSelect: string;
+  ownsBodyStyles: boolean;
+}
+
+let bodyStyleOwner: DragOwner | null = null;
+
+function claimBodyStyles(owner: DragOwner) {
+  const previousOwner = bodyStyleOwner;
+  if (previousOwner?.ownsBodyStyles) {
+    previousOwner.ownsBodyStyles = false;
+    owner.bodyCursor = previousOwner.bodyCursor;
+    owner.bodyUserSelect = previousOwner.bodyUserSelect;
+  } else {
+    owner.bodyCursor = owner.body.style.cursor;
+    owner.bodyUserSelect = owner.body.style.userSelect;
+  }
+  owner.ownsBodyStyles = true;
+  bodyStyleOwner = owner;
+  owner.body.style.cursor = "col-resize";
+  owner.body.style.userSelect = "none";
+}
+
+function restoreBodyStyles(owner: DragOwner) {
+  if (!owner.ownsBodyStyles || bodyStyleOwner !== owner) return;
+  owner.ownsBodyStyles = false;
+  bodyStyleOwner = null;
+  owner.body.style.cursor = owner.bodyCursor;
+  owner.body.style.userSelect = owner.bodyUserSelect;
+}
+
+function retireDrag(owner: DragOwner) {
+  if (!owner.active) return;
+  owner.active = false;
+  if (owner.authority.drag === owner) owner.authority.drag = null;
+  if (owner.captureHeld) {
+    owner.captureHeld = false;
+    try {
+      owner.target.releasePointerCapture(owner.pointerId);
+    } catch {
+      // Unsupported or already released (the pointer was cancelled or the element lost capture).
+    }
+  }
+  restoreBodyStyles(owner);
+  if (owner.authority.active) owner.authority.stopDragging();
 }
 
 /**
@@ -49,47 +108,66 @@ interface Drag {
  */
 export function PanelResizeHandle({ width, min, max, onResize, onReset }: PanelResizeHandleProps) {
   const [dragging, setDragging] = useState(false);
-  const drag = useRef<Drag | null>(null);
+  const authorityRef = useRef<HandleAuthority | null>(null);
   const clamp = (w: number) => clampPanelWidth(w, min, max);
 
-  // The panes hold iframes and CodeMirror, which would otherwise take the pointer and start a text
-  // selection once it leaves the 8 px grip; pointer capture keeps the events, this keeps the look.
-  useEffect(() => {
-    if (!dragging) return;
-    const { cursor, userSelect } = document.body.style;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    return () => {
-      document.body.style.cursor = cursor;
-      document.body.style.userSelect = userSelect;
+  useLayoutEffect(() => {
+    const authority: HandleAuthority = {
+      active: true,
+      drag: null,
+      stopDragging: () => setDragging(false),
     };
-  }, [dragging]);
+    authorityRef.current = authority;
+    return () => {
+      authority.active = false;
+      if (authority.drag) retireDrag(authority.drag);
+      if (authorityRef.current === authority) authorityRef.current = null;
+    };
+  }, []);
 
   const endDrag = (e: PointerEvent<HTMLDivElement>) => {
-    if (!drag.current || drag.current.pointerId !== e.pointerId) return;
-    drag.current = null;
-    setDragging(false);
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      // Already released (the pointer was cancelled or the element lost capture).
-    }
+    const authority = authorityRef.current;
+    const owner = authority?.drag;
+    if (!authority?.active || !owner?.active || owner.pointerId !== e.pointerId || owner.target !== e.currentTarget) return;
+    retireDrag(owner);
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    const authority = authorityRef.current;
+    if (!authority?.active || authority.drag) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    drag.current = { pointerId: e.pointerId, startX: e.clientX, startWidth: width };
+    const owner: DragOwner = {
+      active: true,
+      authority,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startWidth: width,
+      target: e.currentTarget,
+      onResize,
+      min,
+      max,
+      captureHeld: false,
+      body: document.body,
+      bodyCursor: "",
+      bodyUserSelect: "",
+      ownsBodyStyles: false,
+    };
+    authority.drag = owner;
+    claimBodyStyles(owner);
     setDragging(true);
     try {
-      e.currentTarget.setPointerCapture(e.pointerId);
+      owner.target.setPointerCapture(owner.pointerId);
+      owner.captureHeld = true;
     } catch {
       // Capture is best-effort; moves over the grip itself still resize.
     }
   };
 
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!drag.current || drag.current.pointerId !== e.pointerId) return;
-    onResize(clamp(drag.current.startWidth + (drag.current.startX - e.clientX)));
+    const authority = authorityRef.current;
+    const owner = authority?.drag;
+    if (!authority?.active || !owner?.active || owner.pointerId !== e.pointerId || owner.target !== e.currentTarget) return;
+    owner.onResize(clampPanelWidth(owner.startWidth + (owner.startX - e.clientX), owner.min, owner.max));
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
