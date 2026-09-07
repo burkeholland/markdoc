@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { startTransition, useEffect, useLayoutEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
+import type { PendingNotice } from "@/lib/notice";
 
 type SearchResponse = { query: string; documents: SearchResultDto[] };
 type ListOptions = { starred?: boolean; trash?: boolean };
@@ -15,11 +17,13 @@ const restoreDocument = vi.fn<(id: string) => Promise<{ ok: true }>>();
 const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => Promise<{ ok: true; permanent: boolean }>>();
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
+const takePendingNotice = vi.fn<() => PendingNotice | null>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("@/components/dashboard/notifications-strip", () => ({ NotificationsStrip: () => null }));
 vi.mock("@/components/ui/theme-toggle", () => ({ ThemeToggle: () => null }));
+vi.mock("@/lib/notice", () => ({ takePendingNotice: () => takePendingNotice() }));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
@@ -198,6 +202,14 @@ function documentStar(title: string) {
   return within(link.closest("li")!).getByTestId("star-toggle");
 }
 
+function captureClick(element: HTMLElement) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the notice button");
+  const props = (element as unknown as Record<string, { onClick?: () => void } | undefined>)[propsKey];
+  if (!props?.onClick) throw new Error("The notice button did not have an onClick handler");
+  return props.onClick;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
@@ -215,6 +227,8 @@ beforeEach(() => {
   starDocument.mockResolvedValue({ starred: true });
   unstarDocument.mockReset();
   unstarDocument.mockResolvedValue({ starred: false });
+  takePendingNotice.mockReset();
+  takePendingNotice.mockReturnValue(null);
   router.push.mockReset();
   router.replace.mockReset();
   router.refresh.mockReset();
@@ -226,8 +240,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("dashboard search shortcut", () => {
@@ -507,6 +521,282 @@ describe("dashboard content-search recovery", () => {
     expect(screen.queryByTestId("search-loading")).toBeNull();
     expect(screen.getByRole("link", { name: /Current finalizer result/ })).toBeInTheDocument();
     expect(console.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("dashboard notice ownership", () => {
+  it("retires the exact old-user timer before the parent layout boundary and leaves a same-value replacement notice independent", async () => {
+    const pending: PendingNotice = { message: "Account notice", kind: "success" };
+    takePendingNotice.mockReturnValueOnce(pending).mockReturnValueOnce({ ...pending });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+    const onPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      await act(async () => {
+        root.render(<DashboardBoundary onPassiveCleanup={onPassiveCleanup} />);
+      });
+      expect(takePendingNotice).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("toast")).toHaveTextContent(pending.message);
+      const oldDismiss = captureClick(screen.getByRole("button", { name: "Dismiss" }));
+      const oldTimerIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 5000);
+      expect(oldTimerIndex).toBeGreaterThanOrEqual(0);
+      const oldTimerCallback = setTimeoutSpy.mock.calls[oldTimerIndex][0];
+      const oldTimer = setTimeoutSpy.mock.results[oldTimerIndex]?.value;
+      expect(typeof oldTimerCallback).toBe("function");
+      const timersBeforeRetirement = vi.getTimerCount();
+      expect(timersBeforeRetirement).toBeGreaterThanOrEqual(1);
+
+      const replacementUser = { ...USER, id: "replacement-notice-owner", login: "replacement-notice-owner" };
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+      root.render(
+        <DashboardBoundary
+          user={replacementUser}
+          boundary={1}
+          onPassiveCleanup={onPassiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            expect(vi.getTimerCount()).toBe(timersBeforeRetirement - 1);
+            expect(clearTimeoutSpy).toHaveBeenCalledWith(oldTimer);
+            expect(screen.queryByTestId("toast")).toBeNull();
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+
+      expect(takePendingNotice).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("toast")).toHaveTextContent(pending.message);
+      expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", pending.kind);
+      const currentDismiss = captureClick(screen.getByRole("button", { name: "Dismiss" }));
+      const currentTimerIndexes = setTimeoutSpy.mock.calls
+        .map(([, delay], index) => (delay === 5000 ? index : -1))
+        .filter((index) => index >= 0);
+      expect(currentTimerIndexes).toHaveLength(2);
+      const currentTimer = setTimeoutSpy.mock.results[currentTimerIndexes[1]]?.value;
+      expect(clearTimeoutSpy).not.toHaveBeenCalledWith(currentTimer);
+      expect(vi.getTimerCount()).toBe(timersBeforeRetirement);
+
+      const search = screen.getByRole("textbox", { name: "Search documents" });
+      search.focus();
+      const documentListBefore = screen.getByTestId("document-list").textContent;
+      const timersBeforeStaleCallbacks = vi.getTimerCount();
+      act(() => {
+        if (typeof oldTimerCallback === "function") oldTimerCallback();
+        oldDismiss();
+      });
+      expect(screen.getByTestId("toast")).toHaveTextContent(pending.message);
+      expect(screen.getByTestId("document-list")).toHaveTextContent(documentListBefore ?? "");
+      expect(search).toHaveFocus();
+      expect(vi.getTimerCount()).toBe(timersBeforeStaleCallbacks);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(<DashboardBoundary user={replacementUser} boundary={2} onPassiveCleanup={onPassiveCleanup} />);
+      });
+      expect(takePendingNotice).toHaveBeenCalledTimes(2);
+      act(() => currentDismiss());
+      expect(screen.queryByTestId("toast")).toBeNull();
+      expect(clearTimeoutSpy.mock.calls.filter(([timer]) => timer === currentTimer)).toHaveLength(1);
+      act(() => currentDismiss());
+      expect(screen.queryByTestId("toast")).toBeNull();
+      expect(clearTimeoutSpy.mock.calls.filter(([timer]) => timer === currentTimer)).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("retires a removed visit before the parent layout boundary and keeps captured callbacks inert", async () => {
+    takePendingNotice.mockReturnValueOnce({ message: "Removed notice", kind: "info" });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const host = document.createElement("div");
+    const focusOwner = document.createElement("button");
+    focusOwner.textContent = "Persistent focus owner";
+    document.body.append(focusOwner, host);
+    const root = createRoot(host);
+    let passiveCleanups = 0;
+    const onPassiveCleanup = () => {
+      passiveCleanups++;
+    };
+
+    try {
+      await act(async () => {
+        root.render(<DashboardBoundary onPassiveCleanup={onPassiveCleanup} />);
+      });
+      const staleDismiss = captureClick(screen.getByRole("button", { name: "Dismiss" }));
+      const timerIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 5000);
+      expect(timerIndex).toBeGreaterThanOrEqual(0);
+      const staleTimerCallback = setTimeoutSpy.mock.calls[timerIndex][0];
+      const staleTimer = setTimeoutSpy.mock.results[timerIndex]?.value;
+      const timersBeforeRetirement = vi.getTimerCount();
+
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+      root.render(
+        <DashboardBoundary
+          present={false}
+          boundary={1}
+          onPassiveCleanup={onPassiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            expect(vi.getTimerCount()).toBe(timersBeforeRetirement - 1);
+            expect(clearTimeoutSpy).toHaveBeenCalledWith(staleTimer);
+            focusOwner.focus();
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+      const removedMarkup = host.innerHTML;
+
+      act(() => {
+        staleDismiss();
+        if (typeof staleTimerCallback === "function") staleTimerCallback();
+      });
+      expect(host.innerHTML).toBe(removedMarkup);
+      expect(screen.queryByTestId("toast")).toBeNull();
+      expect(focusOwner).toHaveFocus();
+      expect(takePendingNotice).toHaveBeenCalledTimes(1);
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(starDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      focusOwner.remove();
+    }
+  });
+
+  it("keeps the pending notice through 4,999 ms and clears that exact publication once at 5,000 ms", async () => {
+    takePendingNotice.mockReturnValueOnce({ message: "Timed notice", kind: "info" });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    renderDashboard();
+
+    expect(takePendingNotice).toHaveBeenCalledOnce();
+    expect(setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 5000)).toHaveLength(1);
+    expect(screen.getByTestId("toast")).toHaveTextContent("Timed notice");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4999);
+    });
+    expect(screen.getByTestId("toast")).toHaveTextContent("Timed notice");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.queryByTestId("toast")).toBeNull();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
+    expect(searchDocuments).not.toHaveBeenCalled();
+  });
+
+  it("does not let a pending timer or Dismiss clear a newer Restore success", async () => {
+    takePendingNotice.mockReturnValueOnce({ message: "Moved to trash.", kind: "success" });
+    listDocuments.mockResolvedValueOnce({ documents: [trashedDoc("restore-notice", "Restore notice")] });
+    renderDashboard();
+    const staleDismiss = captureClick(screen.getByRole("button", { name: "Dismiss" }));
+
+    openTrash();
+    await act(async () => {});
+    fireEvent.click(trashButton("Restore notice", "restore-button"));
+    await act(async () => {});
+
+    expect(screen.getByTestId("toast")).toHaveTextContent("“Restore notice” was restored.");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    act(() => staleDismiss());
+    expect(screen.getByTestId("toast")).toHaveTextContent("“Restore notice” was restored.");
+    expect(router.refresh).toHaveBeenCalledOnce();
+    expect(router.push).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("toast")).toBeNull();
+  });
+
+  it("uses identity when a Create error replaces an equal pending notice and keeps the action error persistent", async () => {
+    const sameNotice: PendingNotice = { message: "Same publication", kind: "error" };
+    const failed = deferred<CreateResponse>();
+    takePendingNotice.mockReturnValueOnce(sameNotice);
+    createDocument.mockReturnValueOnce(failed.promise);
+    renderDashboard(undefined, []);
+    const staleDismiss = captureClick(screen.getByRole("button", { name: "Dismiss" }));
+
+    fireEvent.click(screen.getByTestId("new-document"));
+    await act(async () => {
+      failed.reject(new ApiError(503, sameNotice.message));
+      await Promise.allSettled([failed.promise]);
+    });
+    const currentDismiss = captureClick(screen.getByTestId("toast").querySelector('button[aria-label="Dismiss"]')!);
+    expect(screen.getByTestId("toast")).toHaveTextContent(sameNotice.message);
+
+    act(() => staleDismiss());
+    expect(screen.getByTestId("toast")).toHaveTextContent(sameNotice.message);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(screen.getByTestId("toast")).toHaveTextContent(sameNotice.message);
+    expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", sameNotice.kind);
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
+
+    act(() => currentDismiss());
+    expect(screen.queryByTestId("toast")).toBeNull();
+  });
+
+  it("keeps stale pending callbacks inert when the current Import error is dismissed first", async () => {
+    takePendingNotice.mockReturnValueOnce({ message: "Previous page notice", kind: "info" });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    renderDashboard();
+    const staleDismiss = captureClick(screen.getByRole("button", { name: "Dismiss" }));
+    const timerIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 5000);
+    const staleTimerCallback = setTimeoutSpy.mock.calls[timerIndex][0];
+
+    const input = screen.getByTestId("import-file-input");
+    fireEvent.change(input, {
+      target: { files: [new File(["image"], "only-image.png", { type: "image/png" })] },
+    });
+    expect(screen.getByTestId("toast")).toHaveTextContent("Drop a Markdown, text or HTML file together with the images.");
+    expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", "error");
+
+    const currentDismiss = captureClick(screen.getByTestId("toast").querySelector('button[aria-label="Dismiss"]')!);
+    act(() => currentDismiss());
+    expect(screen.queryByTestId("toast")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () => {});
+    expect(screen.queryByTestId("import-dialog")).toBeNull();
+    act(() => {
+      staleDismiss();
+      if (typeof staleTimerCallback === "function") staleTimerCallback();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(screen.queryByTestId("toast")).toBeNull();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
+    expect(createDocument).not.toHaveBeenCalled();
   });
 });
 
