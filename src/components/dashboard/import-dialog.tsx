@@ -58,6 +58,26 @@ interface RetryOwnership {
   images: File[];
 }
 
+interface InitialBatchOwnership {
+  kind: "initial";
+  generation: number;
+  selectedFiles: File[];
+  documents: File[];
+  images: File[];
+  ignoredNames: string[];
+}
+
+interface RetryBatchOwnership {
+  kind: "retry";
+  generation: number;
+  retryOwnership: RetryOwnership;
+  rowIndexes: number[];
+  documents: File[];
+  images: File[];
+}
+
+type UploadOwnership = InitialBatchOwnership | RetryBatchOwnership;
+
 function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocument[]; failed: FailedImport[] } {
   return {
     documents: items.flatMap((item) =>
@@ -162,8 +182,8 @@ export function useFileImport(options: UseFileImportOptions = {}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const itemsRef = useRef<ImportItem[]>([]);
   const generationRef = useRef(0);
-  const activeUploadsRef = useRef(0);
-  const retryPendingRef = useRef<RetryOwnership | null>(null);
+  const mountedRef = useRef(true);
+  const activeUploadRef = useRef<UploadOwnership | null>(null);
   const retryOwnershipRef = useRef<RetryOwnership | null>(null);
   const optionsRef = useRef(options);
   useEffect(() => {
@@ -177,32 +197,39 @@ export function useFileImport(options: UseFileImportOptions = {}) {
 
   const setDialogOpen = useCallback((next: boolean) => {
     if (!next) {
-      if (activeUploadsRef.current > 0) return;
+      if (activeUploadRef.current) return;
       retryOwnershipRef.current = null;
     }
     setOpen(next);
   }, []);
 
   const retryFailed = useCallback(async () => {
-    const ownership = retryOwnershipRef.current;
-    if (!ownership || retryPendingRef.current === ownership) return;
+    const retryOwnership = retryOwnershipRef.current;
+    if (!mountedRef.current || activeUploadRef.current || !retryOwnership) return;
 
-    const entries = Array.from(ownership.files.entries()).sort(([a], [b]) => a - b);
+    const entries = Array.from(retryOwnership.files.entries()).sort(([a], [b]) => a - b);
     if (entries.length === 0) return;
 
-    retryPendingRef.current = ownership;
-    activeUploadsRef.current++;
     const rowIndexes = entries.map(([index]) => index);
     const documents = entries.map(([, file]) => file);
+    const ownership: RetryBatchOwnership = {
+      kind: "retry",
+      generation: retryOwnership.generation,
+      retryOwnership,
+      rowIndexes,
+      documents,
+      images: retryOwnership.images,
+    };
+    activeUploadRef.current = ownership;
     replaceItems(
       itemsRef.current.map((item, index) =>
-        ownership.files.has(index) ? { ...item, status: "uploading", warnings: [], error: undefined } : item,
+        retryOwnership.files.has(index) ? { ...item, status: "uploading", warnings: [], error: undefined } : item,
       ),
     );
 
     try {
       const { documents: created, failed } = await uploadImportBatch(documents, ownership.images);
-      if (retryOwnershipRef.current !== ownership || generationRef.current !== ownership.generation) return;
+      if (!mountedRef.current || activeUploadRef.current !== ownership || generationRef.current !== ownership.generation) return;
 
       const failedAt = new Map(failed.map((failure) => [failure.index, failure.error]));
       const retained = new Map<number, File>();
@@ -239,28 +266,35 @@ export function useFileImport(options: UseFileImportOptions = {}) {
         ? { generation: ownership.generation, files: retained, images: ownership.images }
         : null;
       const result = summarizeImportItems(nextItems);
-      optionsRef.current.onDone?.(result.documents, result.failed);
+      if (mountedRef.current && activeUploadRef.current === ownership) {
+        optionsRef.current.onDone?.(result.documents, result.failed);
+      }
     } catch (err) {
-      if (retryOwnershipRef.current !== ownership || generationRef.current !== ownership.generation) return;
+      if (!mountedRef.current || activeUploadRef.current !== ownership || generationRef.current !== ownership.generation) return;
       const message = apiErrorText(err, "Import failed");
       const nextItems = itemsRef.current.map((item, index) =>
-        ownership.files.has(index) ? { ...item, status: "error" as const, warnings: [], error: message } : item,
+        retryOwnership.files.has(index) ? { ...item, status: "error" as const, warnings: [], error: message } : item,
       );
       replaceItems(nextItems);
-      optionsRef.current.onError?.(message);
+      if (mountedRef.current && activeUploadRef.current === ownership) optionsRef.current.onError?.(message);
       const result = summarizeImportItems(nextItems);
-      optionsRef.current.onDone?.(result.documents, result.failed);
+      if (mountedRef.current && activeUploadRef.current === ownership) {
+        optionsRef.current.onDone?.(result.documents, result.failed);
+      }
     } finally {
-      if (retryPendingRef.current === ownership) retryPendingRef.current = null;
-      activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+      if (mountedRef.current && activeUploadRef.current === ownership) activeUploadRef.current = null;
     }
   }, [replaceItems]);
 
   const start = useCallback(async (files: Iterable<File>) => {
+    if (!mountedRef.current || activeUploadRef.current) return;
+
+    const selectedFiles = Array.from(files);
+    const { documents, images, ignored: skipped } = splitImportFiles(selectedFiles);
     const generation = ++generationRef.current;
     retryOwnershipRef.current = null;
-    const { documents, images, ignored: skipped } = splitImportFiles(files);
-    setIgnored(skipped.map((f) => f.name));
+    const ignoredNames = skipped.map((f) => f.name);
+    setIgnored(ignoredNames);
     if (documents.length === 0) {
       const msg = images.length ? "Drop a Markdown, text or HTML file together with the images." : NOTHING_IMPORTABLE_MESSAGE;
       optionsRef.current.onError?.(msg);
@@ -268,17 +302,21 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       setOpen(skipped.length > 0 || images.length > 0);
       return;
     }
+
+    const ownership: InitialBatchOwnership = {
+      kind: "initial",
+      generation,
+      selectedFiles,
+      documents,
+      images,
+      ignoredNames,
+    };
+    activeUploadRef.current = ownership;
     replaceItems(documents.map((f) => ({ name: f.name, status: "uploading", warnings: [] })));
     setOpen(true);
-    activeUploadsRef.current++;
-    retryOwnershipRef.current = {
-      generation,
-      files: new Map(documents.map((file, index) => [index, file])),
-      images,
-    };
     try {
       const { documents: created, failed } = await uploadImportBatch(documents, images);
-      if (generationRef.current !== generation) return;
+      if (!mountedRef.current || activeUploadRef.current !== ownership || generationRef.current !== generation) return;
       // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
       const failedAt = new Map(failed.map((f) => [f.index, f.error]));
       const retained = new Map<number, File>();
@@ -297,28 +335,29 @@ export function useFileImport(options: UseFileImportOptions = {}) {
         }),
       );
       retryOwnershipRef.current = retained.size ? { generation, files: retained, images } : null;
-      optionsRef.current.onDone?.(created, failed);
+      if (mountedRef.current && activeUploadRef.current === ownership) optionsRef.current.onDone?.(created, failed);
     } catch (err) {
-      if (generationRef.current !== generation) return;
+      if (!mountedRef.current || activeUploadRef.current !== ownership || generationRef.current !== generation) return;
       const message = apiErrorText(err, "Import failed");
       replaceItems(documents.map((f) => ({ name: f.name, status: "error", warnings: [], error: message, retry: retryFailed })));
-      optionsRef.current.onError?.(message);
-      optionsRef.current.onDone?.([], []);
+      if (mountedRef.current && activeUploadRef.current === ownership) optionsRef.current.onError?.(message);
+      if (mountedRef.current && activeUploadRef.current === ownership) optionsRef.current.onDone?.([], []);
     } finally {
-      activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+      if (mountedRef.current && activeUploadRef.current === ownership) activeUploadRef.current = null;
     }
   }, [replaceItems, retryFailed]);
 
   const pick = useCallback(() => inputRef.current?.click(), []);
 
-  useEffect(
-    () => () => {
-      generationRef.current++;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeUploadRef.current = null;
       retryOwnershipRef.current = null;
       itemsRef.current = [];
-    },
-    [],
-  );
+    };
+  }, []);
 
   // Whole-window drag tracking: show the overlay while files are dragged anywhere over the page.
   useEffect(() => {
