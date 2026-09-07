@@ -348,45 +348,65 @@ function ReactionRow({
  * until it has, or when it failed — so the picker can offer "Connect an agent" to a user who has none (#1025).
  */
 function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): { candidates: MentionCandidate[]; tokenCount: number | null } {
-  const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
-  const [knownAgents, setKnownAgents] = useState<MentionCandidate[]>([]);
-  const [ownTokens, setOwnTokens] = useState<MentionCandidate[] | null>(null);
   const ownerLogin = session.user.login ?? null;
-  const me = ownerLogin?.toLowerCase();
+  const me = ownerLogin?.toLowerCase() ?? null;
+  const [collaborationResult, setCollaborationResult] = useState<{
+    session: CollabSession;
+    documentId: string;
+    viewerLogin: string | null;
+    collaborators: MentionCandidate[];
+    knownAgents: MentionCandidate[];
+  } | null>(null);
+  const [tokenResult, setTokenResult] = useState<{
+    session: CollabSession;
+    viewerLogin: string;
+    viewerName: string;
+    candidates: MentionCandidate[];
+  } | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const documentId = session.docId;
+    const viewerLogin = me;
     api.documents
-      .collaborators(session.docId)
+      .collaborators(documentId)
       .then((res) => {
         if (cancelled) return;
         const list: MentionCandidate[] = [];
         if (res.owner?.login) list.push({ login: res.owner.login, name: res.owner.name ?? res.owner.login, image: res.owner.image });
         for (const c of res.collaborators) list.push({ login: c.login, name: c.name ?? c.login, image: c.image });
-        setCollaborators(list);
-        setKnownAgents(
-          (res.agents ?? []).map((a) => ({
+        setCollaborationResult({
+          session,
+          documentId,
+          viewerLogin,
+          collaborators: list,
+          knownAgents: (res.agents ?? []).map((a) => ({
             login: a.login,
             name: a.name,
             image: null,
-            agent: { ownerLogin: a.ownerLogin, ownerName: a.ownerName ?? null, canAsk: a.ownerLogin.toLowerCase() === me || a.collaboratorsMayAsk === true },
+            agent: { ownerLogin: a.ownerLogin, ownerName: a.ownerName ?? null, canAsk: a.ownerLogin.toLowerCase() === viewerLogin || a.collaboratorsMayAsk === true },
           })),
-        );
+        });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [session.docId, me]);
+  }, [session, session.docId, me]);
   useEffect(() => {
     if (!withOwnTokens || !ownerLogin) return;
     let cancelled = false;
+    const viewerLogin = ownerLogin.toLowerCase();
+    const viewerName = session.user.name;
     api.tokens
       .list()
       .then((res) => {
         if (cancelled) return;
-        setOwnTokens(
-          res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin, ownerName: session.user.name, canAsk: true }, own: true })),
-        );
+        setTokenResult({
+          session,
+          viewerLogin,
+          viewerName,
+          candidates: res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin, ownerName: viewerName, canAsk: true }, own: true })),
+        });
       })
       .catch((err: unknown) => {
         // Agents' sessions cannot list tokens (403); the picker simply offers what the document knows.
@@ -395,7 +415,7 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
     return () => {
       cancelled = true;
     };
-  }, [withOwnTokens, ownerLogin, session.user.name]);
+  }, [withOwnTokens, session, ownerLogin, session.user.name]);
   const present = useSessionValue(
     session,
     (s) =>
@@ -410,7 +430,13 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
         ),
     jsonEqual,
   );
+  const currentCollaboration =
+    collaborationResult?.session === session && collaborationResult.documentId === session.docId && collaborationResult.viewerLogin === me ? collaborationResult : null;
+  const ownTokens =
+    me !== null && tokenResult?.session === session && tokenResult.viewerLogin === me && tokenResult.viewerName === session.user.name ? tokenResult.candidates : null;
   return useMemo(() => {
+    const collaborators = currentCollaboration?.collaborators ?? [];
+    const knownAgents = currentCollaboration?.knownAgents ?? [];
     const seen = new Set<string>();
     const out: MentionCandidate[] = [];
     const known = new Map(knownAgents.map((a) => [a.login.toLowerCase(), a] as const));
@@ -424,7 +450,7 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
       out.push(listed && c.agent ? { ...c, agent: { ...c.agent, ownerName: c.agent.ownerName ?? listed.ownerName, canAsk: c.agent.canAsk || listed.canAsk } } : c);
     }
     return { candidates: out, tokenCount: ownTokens ? ownTokens.length : null };
-  }, [present, collaborators, knownAgents, ownTokens, me]);
+  }, [present, currentCollaboration, ownTokens, me]);
 }
 
 const MAX_SUGGESTIONS = 6;
@@ -1865,8 +1891,23 @@ export function CommentsPanel({
     jsonEqual,
   );
   const ops = useCommentOps(session);
-  // The user's own tokens join the picker once a picker has opened; most panels never mention anyone.
-  const [withOwnTokens, setWithOwnTokens] = useState(false);
+  // A replacement session gets its own lazy-load gate: an old picker opening must not eagerly fetch the new viewer.
+  const tokenViewerLogin = session.user.login?.toLowerCase() ?? null;
+  const tokenViewerName = session.user.name;
+  const [tokenRequestIdentity, setTokenRequestIdentity] = useState<{ session: CollabSession; viewerLogin: string; viewerName: string } | null>(null);
+  const withOwnTokens =
+    tokenViewerLogin !== null &&
+    tokenRequestIdentity?.session === session &&
+    tokenRequestIdentity.viewerLogin === tokenViewerLogin &&
+    tokenRequestIdentity.viewerName === tokenViewerName;
+  const requestOwnTokens = useCallback(() => {
+    if (tokenViewerLogin === null) return;
+    setTokenRequestIdentity((current) =>
+      current?.session === session && current.viewerLogin === tokenViewerLogin && current.viewerName === tokenViewerName
+        ? current
+        : { session, viewerLogin: tokenViewerLogin, viewerName: tokenViewerName },
+    );
+  }, [session, tokenViewerLogin, tokenViewerName]);
   const { candidates, tokenCount } = useMentionCandidates(session, withOwnTokens);
   // "Connect an agent" under the picker for a user whose token list came back empty, until dismissed (#1025).
   const [connectDismissed, setConnectDismissed] = useState(readConnectDismissed);
@@ -1882,10 +1923,10 @@ export function CommentsPanel({
     () => ({
       candidates,
       viewerLogin: session.user.login ?? null,
-      onPickerOpen: () => setWithOwnTokens(true),
+      onPickerOpen: requestOwnTokens,
       connect: { due: tokenCount === 0 && !connectDismissed, onCreateToken, onDismiss: dismissConnect },
     }),
-    [candidates, session.user.login, tokenCount, connectDismissed, onCreateToken, dismissConnect],
+    [candidates, session.user.login, requestOwnTokens, tokenCount, connectDismissed, onCreateToken, dismissConnect],
   );
   // The agent entries only, and the same reference while they read the same: the cards' request chips read this
   // and stay out of every other candidate change (#1382).

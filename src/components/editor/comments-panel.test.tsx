@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
@@ -80,6 +80,8 @@ function reviewDto(id: string, threadIds: string[], documentId = "doc"): ReviewD
 }
 
 type ReviewsResponse = Awaited<ReturnType<typeof api.documents.reviews>>;
+type CollaboratorsResponse = Awaited<ReturnType<typeof api.documents.collaborators>>;
+type TokensResponse = Awaited<ReturnType<typeof api.tokens.list>>;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -1349,6 +1351,284 @@ describe("CommentsPanel", () => {
       fireEvent.click(options[2]);
       await screen.findByTestId("composer-agent-row");
       expect(screen.getByRole("radiogroup", { name: "How should Night Shift answer?" })).toBeInTheDocument();
+    });
+  });
+
+  describe("mention candidate identity lifecycle", () => {
+    const ownedSessions = new Set<CollabSession>();
+    const remoteAwareness = new Set<Awareness>();
+
+    const collaboratorResponse = (opts: {
+      owner?: { login: string; name: string; image: null } | null;
+      collaborators?: { login: string; name: string; image: null }[];
+      agents?: CollaboratorsResponse["agents"];
+    } = {}) =>
+      ({
+        owner: opts.owner ?? null,
+        collaborators: opts.collaborators ?? [],
+        agents: opts.agents ?? [],
+      }) as CollaboratorsResponse;
+
+    const tokenResponse = (...names: string[]) =>
+      ({
+        tokens: names.map((name, index) => ({ id: `token-${index}`, name })),
+      }) as TokensResponse;
+
+    const makeSession = (docId: string, name: string, login: string | null) => {
+      const user = makeCollabUser(`${docId}-${login ?? "anonymous"}`, name, null, login);
+      const next = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      next.setPendingComment({ from: 0, to: 0 });
+      ownedSessions.add(next);
+      session = next;
+      return next;
+    };
+
+    const addPresence = (target: CollabSession, user: Record<string, unknown>) => {
+      const doc = new Y.Doc();
+      const awareness = new Awareness(doc);
+      remoteAwareness.add(awareness);
+      awareness.setLocalState({ user: { color: "#2563eb", colorLight: "#2563eb33", avatar: null, role: "editor", ...user }, lastActive: Date.now() });
+      applyAwarenessUpdate(target.awareness, encodeAwarenessUpdate(awareness, [doc.clientID]), "server");
+    };
+
+    const panel = (current: CollabSession) => (
+      <TooltipProvider>
+        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} onCreateToken={() => {}} />
+      </TooltipProvider>
+    );
+
+    const mountPanel = (initial: CollabSession) => {
+      const view = render(panel(initial));
+      return {
+        replace(next: CollabSession) {
+          session = next;
+          view.rerender(panel(next));
+        },
+        unmount: view.unmount,
+      };
+    };
+
+    const openPicker = async () => {
+      const box = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      box.focus();
+      await userEvent.setup().paste("@");
+      return box;
+    };
+
+    const option = (login: string) => screen.queryAllByTestId("mention-option").find((row) => row.getAttribute("data-login") === login);
+
+    beforeEach(() => {
+      vi.mocked(api.tokens.list).mockReset().mockResolvedValue({ tokens: [] } as never);
+      vi.mocked(api.documents.collaborators).mockReset().mockResolvedValue({ owner: null, collaborators: [], agents: [] } as never);
+    });
+
+    afterEach(() => {
+      for (const awareness of remoteAwareness) awareness.destroy();
+      remoteAwareness.clear();
+      for (const owned of ownedSessions) owned.destroy();
+      ownedSessions.clear();
+      session = null;
+      window.localStorage.removeItem(AGENT_CONNECT_DISMISSED_KEY);
+      vi.mocked(api.tokens.list).mockReset().mockResolvedValue({ tokens: [] } as never);
+      vi.mocked(api.documents.collaborators).mockReset().mockResolvedValue({ owner: null, collaborators: [], agents: [] } as never);
+    });
+
+    it("shows only current presence while replacement viewer requests settle, then publishes only current collaborators, agents, permissions, and tokens", async () => {
+      const oldCollaborators = deferred<CollaboratorsResponse>();
+      const currentCollaborators = deferred<CollaboratorsResponse>();
+      const oldTokens = deferred<TokensResponse>();
+      const currentTokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => oldCollaborators.promise).mockImplementationOnce(() => currentCollaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => oldTokens.promise).mockImplementationOnce(() => currentTokens.promise);
+
+      const oldSession = makeSession("old-doc", "Alice", "Alice");
+      const view = mountPanel(oldSession);
+      await openPicker();
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+        expect(api.tokens.list).toHaveBeenCalledTimes(1);
+      });
+
+      const currentSession = makeSession("current-doc", "Carol", "CAROL");
+      addPresence(currentSession, { id: "live", name: "Live Person", login: "live" });
+      addPresence(currentSession, {
+        id: "agent:old-owner:Shared Agent",
+        name: "Shared Agent",
+        login: null,
+        isAgent: true,
+        status: "reading",
+        userLogin: "old-owner",
+        userName: "Old Owner",
+      });
+      view.replace(currentSession);
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(api.tokens.list).toHaveBeenCalledTimes(2);
+        expect(option("live")).toBeVisible();
+      });
+      expect(option("old-owner/Shared-Agent")).toHaveAttribute("data-locked");
+
+      await act(async () => {
+        oldCollaborators.resolve(
+          collaboratorResponse({
+            collaborators: [{ login: "retired", name: "Retired Person", image: null }],
+            agents: [
+              { name: "Retired Agent", login: "alice/Retired-Agent", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: true },
+              { name: "Shared Agent", login: "old-owner/Shared-Agent", ownerLogin: "old-owner", ownerName: "Old Owner", present: false, collaboratorsMayAsk: true },
+            ],
+          }),
+        );
+        oldTokens.resolve(tokenResponse("Old Token"));
+        await Promise.all([oldCollaborators.promise, oldTokens.promise]);
+      });
+      expect(option("retired")).toBeUndefined();
+      expect(option("alice/Retired-Agent")).toBeUndefined();
+      expect(option("alice/Old-Token")).toBeUndefined();
+      expect(option("old-owner/Shared-Agent")).toHaveAttribute("data-locked");
+
+      await act(async () => {
+        currentCollaborators.resolve(
+          collaboratorResponse({
+            owner: { login: "carol", name: "Carol", image: null },
+            collaborators: [{ login: "current", name: "Current Person", image: null }],
+            agents: [{ name: "Current Agent", login: "drew/Current-Agent", ownerLogin: "drew", ownerName: "Drew", present: false, collaboratorsMayAsk: true }],
+          }),
+        );
+        currentTokens.resolve(tokenResponse("Current Token"));
+        await Promise.all([currentCollaborators.promise, currentTokens.promise]);
+      });
+      await waitFor(() => {
+        expect(option("current")).toBeVisible();
+        expect(option("drew/Current-Agent")).not.toHaveAttribute("data-locked");
+        expect(option("CAROL/Current-Token")).toHaveAttribute("data-own");
+      });
+      expect(option("retired")).toBeUndefined();
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+      expect(api.tokens.list).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a same-viewer replacement session empty until its own evidence settles, including the Connect-an-agent decision", async () => {
+      const oldCollaborators = deferred<CollaboratorsResponse>();
+      const currentCollaborators = deferred<CollaboratorsResponse>();
+      const oldTokens = deferred<TokensResponse>();
+      const currentTokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => oldCollaborators.promise).mockImplementationOnce(() => currentCollaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => oldTokens.promise).mockImplementationOnce(() => currentTokens.promise);
+
+      const view = mountPanel(makeSession("first-doc", "Alice", "Alice"));
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+
+      const replacement = makeSession("second-doc", "Alice", "alice");
+      addPresence(replacement, { id: "current-live", name: "Current Live", login: "current-live" });
+      view.replace(replacement);
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(api.tokens.list).toHaveBeenCalledTimes(2);
+        expect(option("current-live")).toBeVisible();
+      });
+
+      await act(async () => {
+        oldCollaborators.resolve(collaboratorResponse({ collaborators: [{ login: "first-doc-person", name: "First Doc Person", image: null }] }));
+        oldTokens.resolve(tokenResponse());
+        await Promise.all([oldCollaborators.promise, oldTokens.promise]);
+      });
+      expect(option("first-doc-person")).toBeUndefined();
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+
+      await act(async () => {
+        currentCollaborators.resolve(collaboratorResponse({ collaborators: [{ login: "second-doc-person", name: "Second Doc Person", image: null }] }));
+        currentTokens.resolve(tokenResponse());
+        await Promise.all([currentCollaborators.promise, currentTokens.promise]);
+      });
+      expect(await screen.findByTestId("mention-connect-row")).toBeVisible();
+      expect(option("second-doc-person")).toBeVisible();
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+      expect(api.tokens.list).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not let an old picker opening eagerly load tokens for a closed replacement session", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(collaboratorResponse({ collaborators: [{ login: "person", name: "Person", image: null }] }));
+      vi.mocked(api.tokens.list).mockResolvedValue(tokenResponse("Agent"));
+
+      const oldSession = makeSession("old-doc", "Alice", "alice");
+      const view = mountPanel(oldSession);
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+      act(() => oldSession.setPendingComment(null));
+      await waitFor(() => expect(screen.queryByTestId("comment-composer")).toBeNull());
+
+      const replacement = makeSession("replacement-doc", "Carol", "carol");
+      replacement.setPendingComment(null);
+      view.replace(replacement);
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalledTimes(2));
+      await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+
+      act(() => replacement.setPendingComment({ from: 0, to: 0 }));
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(2));
+    });
+
+    it("publishes no old viewer result or failure after replacement with a null-login viewer", async () => {
+      const oldCollaborators = deferred<CollaboratorsResponse>();
+      const currentCollaborators = deferred<CollaboratorsResponse>();
+      const oldTokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => oldCollaborators.promise).mockImplementationOnce(() => currentCollaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => oldTokens.promise);
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      const view = mountPanel(makeSession("old-doc", "Alice", "alice"));
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+
+      const anonymous = makeSession("anonymous-doc", "Anonymous", null);
+      addPresence(anonymous, { id: "anonymous-live", name: "Anonymous Live", login: "anonymous-live" });
+      view.replace(anonymous);
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(option("anonymous-live")).toBeVisible();
+      });
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        currentCollaborators.resolve(collaboratorResponse({ collaborators: [{ login: "anonymous-current", name: "Anonymous Current", image: null }] }));
+        oldCollaborators.reject(new Error("old collaborators failed"));
+        oldTokens.reject(new Error("old tokens failed"));
+        await Promise.allSettled([currentCollaborators.promise, oldCollaborators.promise, oldTokens.promise]);
+      });
+      expect(option("anonymous-current")).toBeVisible();
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+      expect(debug).not.toHaveBeenCalled();
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores collaborator success and token failure after unmount", async () => {
+      const collaborators = deferred<CollaboratorsResponse>();
+      const tokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => collaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => tokens.promise);
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      const view = mountPanel(makeSession("unmounted-doc", "Alice", "alice"));
+      await openPicker();
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+        expect(api.tokens.list).toHaveBeenCalledTimes(1);
+      });
+      view.unmount();
+
+      await act(async () => {
+        collaborators.resolve(collaboratorResponse({ collaborators: [{ login: "late", name: "Late Person", image: null }] }));
+        tokens.reject(new Error("late tokens failed"));
+        await Promise.allSettled([collaborators.promise, tokens.promise]);
+      });
+      expect(screen.queryByTestId("mention-option")).toBeNull();
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+      expect(debug).not.toHaveBeenCalled();
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
     });
   });
 
