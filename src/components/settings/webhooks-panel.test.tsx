@@ -12,10 +12,12 @@ function response(body: unknown, status = 200) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const disabledWebhook = {
@@ -287,5 +289,278 @@ describe("Settings → Webhooks: enable a disabled webhook", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("A webhook cannot point at Markdoc itself");
     expect(screen.getByTestId("webhook-enable")).toBeEnabled();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("Settings → Webhooks: action ownership", () => {
+  it("owns duplicate Create synchronously, preserves a failed form, and keeps an accepted secret until it renders", async () => {
+    const firstCreate = deferred<Response>();
+    const secondCreate = deferred<Response>();
+    const refresh = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [] }))
+      .mockReturnValueOnce(firstCreate.promise)
+      .mockReturnValueOnce(secondCreate.promise)
+      .mockReturnValueOnce(refresh.promise);
+    render(<WebhooksPanel />);
+
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: "https://receiver.example/retry-me" } });
+    fireEvent.change(screen.getByTestId("webhook-docs"), { target: { value: "doc-one, doc-two" } });
+    const form = screen.getByTestId("webhook-form");
+
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("webhook-create")).toBeDisabled();
+    expect(screen.getByTestId("webhook-add")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(screen.getByTestId("webhook-url")).toBeDisabled();
+    expect(screen.getByTestId("webhook-docs")).toBeDisabled();
+    expect(screen.getByTestId("webhook-event-request.created")).toBeDisabled();
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const disclosure = screen.getByTestId("webhook-add");
+    cancel.removeAttribute("disabled");
+    disclosure.removeAttribute("disabled");
+    fireEvent.click(cancel);
+    fireEvent.click(disclosure);
+    expect(form).toBeInTheDocument();
+
+    await act(async () => firstCreate.resolve(response({ error: "Receiver rejected this URL" }, 422)));
+
+    expect(await screen.findByTestId("webhook-action-error")).toHaveTextContent("Receiver rejected this URL");
+    expect(screen.getByTestId("webhook-url")).toHaveValue("https://receiver.example/retry-me");
+    expect(screen.getByTestId("webhook-docs")).toHaveValue("doc-one, doc-two");
+    expect(screen.getByTestId("webhook-create")).toBeEnabled();
+
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId("webhook-create")).toBeDisabled();
+
+    await act(async () =>
+      secondCreate.resolve(response({ webhook: { ...activeWebhook, id: "created-hook", secret: "whsec_single_display" } })),
+    );
+
+    const created = await screen.findByTestId("webhook-created");
+    expect(within(created).getAllByTestId("webhook-secret")).toHaveLength(1);
+    expect(screen.queryByTestId("webhook-form")).toBeNull();
+    expect(screen.getByTestId("webhook-add")).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    await act(async () => refresh.resolve(response({ webhooks: [{ ...activeWebhook, id: "created-hook" }] })));
+
+    expect(screen.getByTestId("webhook-add")).toBeEnabled();
+    expect(screen.getAllByTestId("webhook-secret")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/webhooks" && init?.method === "POST")).toHaveLength(2);
+  });
+
+  it("suppresses duplicate and mixed same-row actions while another row remains independently usable", async () => {
+    const firstRow = deferred<Response>();
+    const secondRow = deferred<Response>();
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmMock);
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, otherDisabledWebhook] }))
+      .mockReturnValueOnce(firstRow.promise)
+      .mockReturnValueOnce(secondRow.promise)
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, otherDisabledWebhook] }))
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, { ...otherDisabledWebhook, active: true, failures: 0 }] }));
+    render(<WebhooksPanel />);
+
+    const rows = await screen.findAllByTestId("webhook-row");
+    fireEvent.click(within(rows[0]).getByTestId("webhook-test"));
+
+    for (const control of [
+      within(rows[0]).getByTestId("webhook-test"),
+      within(rows[0]).getByTestId("webhook-enable"),
+      within(rows[0]).getByTestId("webhook-delete"),
+    ]) {
+      control.removeAttribute("disabled");
+      fireEvent.click(control);
+    }
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/webhooks", "/api/webhooks/disabled-hook/test"]);
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(within(rows[1]).getByTestId("webhook-enable")).toBeEnabled();
+
+    fireEvent.click(within(rows[1]).getByTestId("webhook-enable"));
+    const duplicateEnable = within(rows[1]).getByTestId("webhook-enable");
+    duplicateEnable.removeAttribute("disabled");
+    fireEvent.click(duplicateEnable);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks/disabled-hook/test",
+      "/api/webhooks/other-disabled-hook/enable",
+    ]);
+
+    await act(async () => firstRow.resolve(response({ ok: true })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    expect(within(screen.getAllByTestId("webhook-row")[0]).getByTestId("webhook-test")).toBeEnabled();
+    expect(within(screen.getAllByTestId("webhook-row")[1]).getByTestId("webhook-test")).toBeDisabled();
+
+    await act(async () => secondRow.resolve(response({ webhook: { ...otherDisabledWebhook, active: true, failures: 0 } })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    expect(within(screen.getAllByTestId("webhook-row")[1]).getByTestId("webhook-test")).toBeEnabled();
+  });
+
+  it.each([
+    {
+      label: "Test",
+      hook: activeWebhook,
+      control: "webhook-test",
+      actionUrl: "/api/webhooks/active-hook/test",
+      failure: response({ error: "Test delivery refused" }, 502),
+      reason: "Test delivery refused",
+      success: response({ ok: true }),
+      refreshed: [activeWebhook],
+    },
+    {
+      label: "Enable",
+      hook: disabledWebhook,
+      control: "webhook-enable",
+      actionUrl: "/api/webhooks/disabled-hook/enable",
+      failure: response({ error: "Receiver is still unavailable" }, 409),
+      reason: "Receiver is still unavailable",
+      success: response({ webhook: { ...disabledWebhook, active: true, failures: 0 } }),
+      refreshed: [{ ...disabledWebhook, active: true, failures: 0 }],
+    },
+    {
+      label: "Delete",
+      hook: activeWebhook,
+      control: "webhook-delete",
+      actionUrl: "/api/webhooks/active-hook",
+      failure: null,
+      reason: "Could not delete webhook",
+      success: response({ ok: true }),
+      refreshed: [],
+    },
+  ])("shows the $label reason and accepts an exact same-action retry", async ({ hook, control, actionUrl, failure, reason, success, refreshed }) => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    fetchMock.mockResolvedValueOnce(response({ webhooks: [hook] }));
+    if (failure) fetchMock.mockResolvedValueOnce(failure);
+    else fetchMock.mockRejectedValueOnce("offline");
+    fetchMock.mockResolvedValueOnce(success).mockResolvedValueOnce(response({ webhooks: refreshed }));
+    render(<WebhooksPanel />);
+
+    fireEvent.click(await screen.findByTestId(control));
+
+    expect(await screen.findByTestId("webhook-action-error")).toHaveTextContent(reason);
+    expect(screen.getByTestId(control)).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId(control));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+
+    expect(fetchMock.mock.calls.filter(([url]) => url === actionUrl)).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/webhooks")).toHaveLength(2);
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+  });
+
+  it("owns confirmed Delete once, clears its matching one-time secret, and refreshes once", async () => {
+    const deletion = deferred<Response>();
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmMock);
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [] }))
+      .mockResolvedValueOnce(response({ webhook: { ...activeWebhook, secret: "whsec_delete_me" } }))
+      .mockResolvedValueOnce(response({ webhooks: [activeWebhook] }))
+      .mockReturnValueOnce(deletion.promise)
+      .mockResolvedValueOnce(response({ webhooks: [] }));
+    render(<WebhooksPanel />);
+
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: activeWebhook.url } });
+    fireEvent.submit(screen.getByTestId("webhook-form"));
+    await screen.findByTestId("webhook-row");
+    expect(screen.getAllByTestId("webhook-secret")).toHaveLength(1);
+
+    const deleteButton = screen.getByTestId("webhook-delete");
+    fireEvent.click(deleteButton);
+    deleteButton.removeAttribute("disabled");
+    fireEvent.click(deleteButton);
+
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/webhooks/active-hook" && init?.method === "DELETE")).toHaveLength(1);
+
+    await act(async () => deletion.resolve(response({ ok: true })));
+
+    expect(await screen.findByTestId("webhooks-empty")).toHaveTextContent("No webhooks yet.");
+    expect(screen.queryByTestId("webhook-created")).toBeNull();
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/webhooks" && !init?.method)).toHaveLength(3);
+  });
+
+  it("keeps newer feedback and row ownership isolated from an older settlement and finalizer", async () => {
+    const olderAction = deferred<Response>();
+    const newerAction = deferred<Response>();
+    const newerRetry = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [activeWebhook, { ...activeWebhook, id: "other-active-hook", url: "https://receiver.example/other" }] }))
+      .mockReturnValueOnce(olderAction.promise)
+      .mockReturnValueOnce(newerAction.promise)
+      .mockReturnValueOnce(newerRetry.promise)
+      .mockResolvedValueOnce(response({ webhooks: [activeWebhook, { ...activeWebhook, id: "other-active-hook", url: "https://receiver.example/other" }] }));
+    render(<WebhooksPanel />);
+
+    let rows = await screen.findAllByTestId("webhook-row");
+    fireEvent.click(within(rows[0]).getByTestId("webhook-test"));
+    fireEvent.click(within(rows[1]).getByTestId("webhook-test"));
+
+    await act(async () => newerAction.resolve(response({ error: "Newer action failed" }, 503)));
+    expect(await screen.findByTestId("webhook-action-error")).toHaveTextContent("Newer action failed");
+    rows = screen.getAllByTestId("webhook-row");
+    expect(within(rows[0]).getByTestId("webhook-test")).toBeDisabled();
+    expect(within(rows[1]).getByTestId("webhook-test")).toBeEnabled();
+
+    await act(async () => olderAction.resolve(response({ error: "Older action failed" }, 503)));
+    expect(screen.getByTestId("webhook-action-error")).toHaveTextContent("Newer action failed");
+    rows = screen.getAllByTestId("webhook-row");
+    expect(within(rows[0]).getByTestId("webhook-test")).toBeEnabled();
+    expect(within(rows[1]).getByTestId("webhook-test")).toBeEnabled();
+
+    fireEvent.click(within(rows[1]).getByTestId("webhook-test"));
+    expect(within(rows[0]).getByTestId("webhook-test")).toBeEnabled();
+    expect(within(rows[1]).getByTestId("webhook-test")).toBeDisabled();
+
+    await act(async () => newerRetry.resolve(response({ ok: true })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    expect(within(screen.getAllByTestId("webhook-row")[1]).getByTestId("webhook-test")).toBeEnabled();
+  });
+
+  it("invalidates every owner on unmount and handles late action resolutions and rejections", async () => {
+    const testAction = deferred<Response>();
+    const enableAction = deferred<Response>();
+    const createAction = deferred<Response>();
+    const unhandled = vi.fn();
+    window.addEventListener("unhandledrejection", unhandled);
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [activeWebhook, disabledWebhook] }))
+      .mockReturnValueOnce(testAction.promise)
+      .mockReturnValueOnce(enableAction.promise)
+      .mockReturnValueOnce(createAction.promise);
+    const view = render(<WebhooksPanel />);
+
+    const rows = await screen.findAllByTestId("webhook-row");
+    fireEvent.click(within(rows[0]).getByTestId("webhook-test"));
+    fireEvent.click(within(rows[1]).getByTestId("webhook-enable"));
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: "https://receiver.example/late" } });
+    fireEvent.submit(screen.getByTestId("webhook-form"));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    view.unmount();
+    testAction.reject(new Error("late test rejection"));
+    enableAction.resolve(response({ webhook: { ...disabledWebhook, active: true, failures: 0 } }));
+    createAction.resolve(response({ webhook: { ...activeWebhook, id: "late-created-hook", secret: "whsec_late" } }));
+    await Promise.allSettled([testAction.promise, enableAction.promise, createAction.promise]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(unhandled).not.toHaveBeenCalled();
+    window.removeEventListener("unhandledrejection", unhandled);
   });
 });
