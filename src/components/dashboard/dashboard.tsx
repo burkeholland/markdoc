@@ -3,7 +3,7 @@ import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, M
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -103,28 +103,146 @@ const TEMPLATE_ICONS: Record<TemplateIcon, typeof File> = {
   Sparkles,
 };
 
+interface TemplateGridEntryPublication {
+  index: number;
+  template: Template;
+  id: string;
+  name: string;
+  description: string;
+  icon: TemplateIcon;
+}
+
+interface TemplateGridRenderPublication {
+  onPick: (template: Template) => void;
+  busy: string | null;
+  compact: boolean | undefined;
+  entries: TemplateGridEntryPublication[];
+}
+
+interface TemplateGridDomPublication {
+  entry: TemplateGridEntryPublication;
+  card: HTMLLIElement | null;
+  button: HTMLButtonElement | null;
+}
+
+interface TemplateGridPublication {
+  render: TemplateGridRenderPublication;
+  grid: HTMLUListElement;
+  entries: TemplateGridDomPublication[];
+}
+
+function currentTemplateGridPublication(
+  current: TemplateGridPublication | null,
+  claimed: TemplateGridPublication | null,
+  render: TemplateGridRenderPublication,
+  entry: TemplateGridEntryPublication,
+  source: HTMLButtonElement,
+): TemplateGridPublication | null {
+  if (!current || current.render !== render || claimed === current || render.busy !== null) return null;
+  const sourceEntry = current.entries[entry.index];
+  if (sourceEntry?.entry !== entry || sourceEntry.button !== source || current.entries.length !== PICKER_TEMPLATES.length) return null;
+
+  const grid = current.grid;
+  if (!grid.isConnected || grid.children.length !== current.entries.length) return null;
+  for (const published of current.entries) {
+    const { card, button } = published;
+    const rendered = published.entry;
+    if (
+      PICKER_TEMPLATES[rendered.index] !== rendered.template ||
+      rendered.template.id !== rendered.id ||
+      rendered.template.name !== rendered.name ||
+      rendered.template.description !== rendered.description ||
+      rendered.template.icon !== rendered.icon ||
+      !card?.isConnected ||
+      !button?.isConnected ||
+      grid.children.item(rendered.index) !== card ||
+      card.parentElement !== grid ||
+      card.firstElementChild !== button ||
+      card.children.length !== 1 ||
+      button.parentElement !== card
+    ) {
+      return null;
+    }
+  }
+  return current;
+}
+
 /** Grid of template cards; `busy` is the id currently being created (disables the grid). */
 export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) => void; busy: string | null; compact?: boolean }) {
+  const activePublication = useRef<TemplateGridPublication | null>(null);
+  const claimedPublication = useRef<TemplateGridPublication | null>(null);
+  const gridRef = useRef<HTMLUListElement>(null);
+  const publication: TemplateGridRenderPublication = {
+    onPick,
+    busy,
+    compact,
+    entries: PICKER_TEMPLATES.map((template, index) => ({
+      index,
+      template,
+      id: template.id,
+      name: template.name,
+      description: template.description,
+      icon: template.icon,
+    })),
+  };
+
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const committed: TemplateGridPublication = {
+      render: publication,
+      grid,
+      entries: publication.entries.map((entry, index) => {
+        const card = grid.children.item(index);
+        const button = card?.firstElementChild;
+        return {
+          entry,
+          card: card instanceof HTMLLIElement ? card : null,
+          button: button instanceof HTMLButtonElement ? button : null,
+        };
+      }),
+    };
+    activePublication.current = committed;
+    return () => {
+      if (activePublication.current === committed) activePublication.current = null;
+    };
+  });
+
   return (
-    <ul className={cn("grid gap-3", compact ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" : "sm:grid-cols-2 lg:grid-cols-3")} data-testid="template-grid">
-      {PICKER_TEMPLATES.map((t) => {
-        const Icon = TEMPLATE_ICONS[t.icon];
-        const isBusy = busy === t.id;
+    <ul
+      ref={gridRef}
+      className={cn("grid gap-3", publication.compact ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" : "sm:grid-cols-2 lg:grid-cols-3")}
+      data-testid="template-grid"
+    >
+      {publication.entries.map((entry) => {
+        const Icon = TEMPLATE_ICONS[entry.icon];
+        const isBusy = publication.busy === entry.id;
         return (
-          <li key={t.id} className="min-w-0">
+          <li key={entry.id} className="min-w-0">
             <button
               type="button"
-              onClick={() => onPick(t)}
-              disabled={busy !== null}
+              onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                const committed = currentTemplateGridPublication(
+                  activePublication.current,
+                  claimedPublication.current,
+                  publication,
+                  entry,
+                  event.currentTarget,
+                );
+                if (!committed) return;
+                claimedPublication.current = committed;
+                publication.onPick(entry.template);
+              }}
+              disabled={publication.busy !== null}
               aria-busy={isBusy || undefined}
               className="group flex h-full w-full flex-col gap-2 rounded-xl border border-line bg-surface p-4 text-left transition hover:border-accent hover:shadow-sm focus-visible:border-accent disabled:cursor-default disabled:opacity-60"
-              data-testid={`template-${t.id}`}
+              data-testid={`template-${entry.id}`}
             >
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-3 text-ink-2 transition group-hover:bg-accent group-hover:text-on-accent">
                 {isBusy ? <Loader2 size={18} className="animate-spin" /> : <Icon size={18} />}
               </span>
-              <span className="block text-sm font-semibold text-ink">{t.name}</span>
-              <span className="block text-xs leading-4 text-ink-3">{t.description}</span>
+              <span className="block text-sm font-semibold text-ink">{entry.name}</span>
+              <span className="block text-xs leading-4 text-ink-3">{entry.description}</span>
             </button>
           </li>
         );
