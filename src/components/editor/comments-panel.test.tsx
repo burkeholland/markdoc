@@ -1102,6 +1102,434 @@ describe("CommentsPanel", () => {
     });
   });
 
+  describe("bulk review action ownership", () => {
+    interface BatchFixture {
+      session: CollabSession;
+      user: ReturnType<typeof makeCollabUser>;
+      threadIds: string[];
+    }
+
+    const response = {} as CommentResponse;
+    const words = ["Alpha", "beta", "gamma", "delta"];
+
+    const makeBatchSession = (docId: string, count = 2, source?: CollabSession, suggestions = true): BatchFixture => {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const next = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      if (source) {
+        Y.applyUpdate(next.ydoc, Y.encodeStateAsUpdate(source.ydoc));
+      } else {
+        const text = "Alpha beta gamma delta.";
+        next.ytext.insert(0, text);
+        const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+        for (const [index, word] of words.slice(0, count).entries()) {
+          next.comments.add({
+            from: text.indexOf(word),
+            to: text.indexOf(word) + word.length,
+            body: suggestions ? `Finding ${index + 1}.\n\n\`\`\`suggestion\n${word.toUpperCase()}\n\`\`\`` : `Finding ${index + 1}.`,
+            author: agent,
+          });
+        }
+      }
+      vi.spyOn(next, "commentsViaApi", "get").mockReturnValue(true);
+      session = next;
+      return { session: next, user, threadIds: next.comments.list().map((thread) => thread.id) };
+    };
+
+    const batchPanel = (current: CollabSession, onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>(), onClose = () => {}) => (
+      <TooltipProvider>
+        <CommentsPanel session={current} onClose={onClose} onReveal={() => {}} onToast={onToast} />
+      </TooltipProvider>
+    );
+    const reviewCard = (reviewId: string) => document.querySelector<HTMLElement>(`[data-testid="review-card"][data-review-id="${reviewId}"]`)!;
+    const reviewControl = (reviewId: string, testId: string) => within(reviewCard(reviewId)).getByTestId(testId);
+    const threadCard = (threadId: string) => document.querySelector<HTMLElement>(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`)!;
+    const settleBatch = async (request: ReturnType<typeof deferred<CommentResponse>>, outcome: "resolve" | "reject", reason = "request failed") => {
+      await act(async () => {
+        if (outcome === "resolve") request.resolve(response);
+        else request.reject(new Error(reason));
+        await request.promise.catch(() => {});
+      });
+    };
+
+    beforeEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue(response);
+      vi.mocked(api.documents.reviews).mockReset().mockResolvedValue({ reviews: [] } as ReviewsResponse);
+    });
+
+    afterEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue({ id: "via-api" } as never);
+      vi.mocked(api.documents.reviews).mockReset().mockResolvedValue({ reviews: [] } as ReviewsResponse);
+    });
+
+    it.each(["accept", "reject"] as const)("gives the first immediate review %s activation one frozen ordered batch", async (action) => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const fixture = makeBatchSession(`review-${action}`);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      const primary = await screen.findByTestId(`review-${action}-all`);
+      const mixed = screen.getByTestId(`review-${action === "accept" ? "reject" : "accept"}-all`);
+
+      act(() => {
+        primary.click();
+        primary.click();
+        mixed.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenLastCalledWith(fixture.session.docId, {
+        action: "suggestion",
+        threadId: fixture.threadIds[0],
+        replyId: undefined,
+        decision: action,
+      });
+      expect(primary).toBeDisabled();
+      expect(mixed).toBeDisabled();
+      expect(primary).toHaveTextContent(action === "accept" ? "Accepting…" : "Rejecting…");
+      expect(within(threadCard(fixture.threadIds[0])).getByTestId("comment-resolve")).toBeDisabled();
+      expect(within(threadCard(fixture.threadIds[0])).getByTestId("comment-batch-pending")).toHaveTextContent(
+        action === "accept" ? "Accepting suggestion…" : "Rejecting suggestion…",
+      );
+
+      await settleBatch(requests[0], "resolve");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(api.documents.comment).toHaveBeenLastCalledWith(fixture.session.docId, {
+        action: "suggestion",
+        threadId: fixture.threadIds[1],
+        replyId: undefined,
+        decision: action,
+      });
+      await settleBatch(requests[1], "resolve");
+
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.threadId)).toEqual(fixture.threadIds);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith(`${action === "accept" ? "Accepted" : "Rejected"} 2 suggestions from Copilot.`, "success");
+    });
+
+    it("gives immediate duplicate Resolve all activation one owner and one current summary", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const fixture = makeBatchSession("review-resolve", 2, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      const control = await screen.findByTestId("review-resolve-all");
+
+      act(() => {
+        control.click();
+        control.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith("review-resolve", {
+        action: "resolve",
+        threadId: fixture.threadIds[0],
+        resolved: true,
+      });
+      expect(control).toBeDisabled();
+      expect(control).toHaveTextContent("Resolving…");
+      await settleBatch(requests[0], "resolve");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      await settleBatch(requests[1], "resolve");
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
+    });
+
+    it.each(["accept", "reject"] as const)("owns Suggestions-tab %s all before immediate duplicate or mixed activation", async (action) => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const fixture = makeBatchSession(`suggestions-${action}`);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(screen.getByRole("tab", { name: /Suggestions/ }));
+      const primary = screen.getByTestId(`${action}-all`);
+      const mixed = screen.getByTestId(`${action === "accept" ? "reject" : "accept"}-all`);
+
+      act(() => {
+        primary.click();
+        primary.click();
+        mixed.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(primary).toBeDisabled();
+      expect(mixed).toBeDisabled();
+      expect(primary).toHaveTextContent(action === "accept" ? "Accepting…" : "Rejecting…");
+      await settleBatch(requests[0], "resolve");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      await settleBatch(requests[1], "resolve");
+      expect(vi.mocked(api.documents.comment).mock.calls).toEqual(
+        fixture.threadIds.map((threadId) => [
+          fixture.session.docId,
+          { action: "suggestion", threadId, replyId: undefined, decision: action },
+        ]),
+      );
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith(`${action === "accept" ? "Accepted" : "Rejected"} 2 suggestions.`, "success");
+    });
+
+    it("keeps local Suggestions-tab bulk review in one text-and-annotation undo step", async () => {
+      const created = reviewSession("local-suggestion-batch");
+      session = created.session;
+      const original = "Alpha beta gamma.";
+      session.ytext.insert(0, original);
+      const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+      session.suggestions.proposeEdits(
+        [
+          { from: 0, to: 5, insert: "ALPHA" },
+          { from: 6, to: 10, insert: "BETA" },
+        ],
+        agent,
+      );
+      session.undoManager.clear();
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(session, onToast));
+      fireEvent.click(screen.getByRole("tab", { name: /Suggestions/ }));
+      fireEvent.click(screen.getByTestId("accept-all"));
+
+      await waitFor(() => expect(screen.queryByTestId("suggestion-card")).toBeNull());
+      expect(session.ytext.toString()).toBe("ALPHA BETA gamma.");
+      expect(session.undoManager.undoStack).toHaveLength(1);
+      act(() => session!.undo());
+      expect(session.suggestions.groups(session.ytext.toString())).toHaveLength(2);
+      expect(session.suggestions.cleanText()).toBe(original);
+      expect(onToast).toHaveBeenCalledOnce();
+      expect(onToast).toHaveBeenCalledWith("Accepted 2 suggestions.", "success");
+    });
+
+    it("runs two non-overlapping review owners independently while a row owner excludes its review batch", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(requests[0].promise)
+        .mockReturnValueOnce(requests[1].promise)
+        .mockReturnValueOnce(requests[2].promise);
+      const fixture = makeBatchSession("independent-reviews");
+      const reviews = [
+        reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
+        reviewDto("r2", [fixture.threadIds[1]], fixture.session.docId),
+      ];
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      await waitFor(() => expect(screen.getAllByTestId("review-reject-all")).toHaveLength(2));
+
+      fireEvent.click(reviewControl("r1", "review-reject-all"));
+      expect(reviewControl("r2", "review-reject-all")).toBeEnabled();
+      fireEvent.click(reviewControl("r2", "review-reject-all"));
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.threadId)).toEqual(fixture.threadIds);
+      await settleBatch(requests[1], "resolve");
+      expect(reviewControl("r1", "review-reject-all")).toBeDisabled();
+      await settleBatch(requests[0], "resolve");
+
+      fireEvent.click(within(threadCard(fixture.threadIds[0])).getByTestId("comment-resolve"));
+      expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      expect(reviewControl("r1", "review-reject-all")).toBeDisabled();
+      fireEvent.click(reviewControl("r1", "review-reject-all"));
+      expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      await settleBatch(requests[2], "resolve");
+      expect(reviewControl("r1", "review-reject-all")).toBeEnabled();
+    });
+
+    it("reports exact partial counts, releases the owner, and retries only the failed target", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(requests[0].promise)
+        .mockReturnValueOnce(requests[1].promise)
+        .mockReturnValueOnce(requests[2].promise)
+        .mockReturnValueOnce(requests[3].promise);
+      const fixture = makeBatchSession("partial-retry", 3);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+
+      act(() => fixture.session.comments.rejectSuggestion(fixture.threadIds[0], fixture.user));
+      await settleBatch(requests[0], "resolve");
+      await settleBatch(requests[1], "reject", "second failed");
+      act(() => fixture.session.comments.rejectSuggestion(fixture.threadIds[2], fixture.user));
+      await settleBatch(requests[2], "resolve");
+
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenLastCalledWith("Rejected 2 suggestions from Copilot (2 done, 1 failed, 0 outdated skipped).", "error");
+      const retry = await screen.findByTestId("review-reject-all");
+      expect(retry).toBeEnabled();
+      fireEvent.click(retry);
+      expect(api.documents.comment).toHaveBeenCalledTimes(4);
+      expect(api.documents.comment).toHaveBeenLastCalledWith("partial-retry", {
+        action: "suggestion",
+        threadId: fixture.threadIds[1],
+        replyId: undefined,
+        decision: "reject",
+      });
+      act(() => fixture.session.comments.rejectSuggestion(fixture.threadIds[1], fixture.user));
+      await settleBatch(requests[3], "resolve");
+      expect(onToast).toHaveBeenCalledTimes(2);
+      expect(onToast).toHaveBeenLastCalledWith("Rejected 1 suggestion from Copilot.", "success");
+    });
+
+    it("freezes proposed replacement text and dispatches local accepts in captured order", async () => {
+      const requests = [deferred<boolean>(), deferred<boolean>()];
+      const fixture = makeBatchSession("frozen-proposals");
+      vi.spyOn(fixture.session, "commentsViaApi", "get").mockReturnValue(false);
+      const accept = vi
+        .spyOn(fixture.session, "acceptCommentSuggestion")
+        .mockImplementationOnce(() => requests[0].promise as unknown as boolean)
+        .mockImplementationOnce(() => requests[1].promise as unknown as boolean);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      fireEvent.click(await screen.findByTestId("review-accept-all"));
+
+      expect(accept).toHaveBeenCalledTimes(1);
+      expect(accept).toHaveBeenLastCalledWith(fixture.threadIds[0], "ALPHA", undefined);
+      await act(async () => {
+        requests[0].resolve(true);
+        await requests[0].promise;
+      });
+      expect(accept).toHaveBeenCalledTimes(2);
+      expect(accept).toHaveBeenLastCalledWith(fixture.threadIds[1], "BETA", undefined);
+      await act(async () => {
+        requests[1].resolve(true);
+        await requests[1].promise;
+      });
+    });
+
+    it("counts a newly outdated target without dispatching it and publishes one current summary", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("outdated-count");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      const control = await screen.findByTestId("review-accept-all");
+      fireEvent.click(control);
+      act(() => fixture.session.ytext.insert(7, "!"));
+      await settleBatch(request, "resolve");
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Accepted 1 suggestion from Copilot (1 done, 0 failed, 1 outdated skipped).", "success");
+    });
+
+    it("stops every later dispatch when a captured target is removed mid-loop", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("removed-mid-loop", 3);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      act(() => fixture.session.comments.remove(fixture.threadIds[1]));
+      await settleBatch(request, "resolve");
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Rejected 1 suggestion from Copilot (1 done, 0 failed, 2 outdated skipped).", "success");
+    });
+
+    it("retires a removed review before settlement without dispatching or publishing anything later", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("removed-review");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews)
+        .mockResolvedValueOnce({ reviews: [review] } as ReviewsResponse)
+        .mockResolvedValueOnce({ reviews: [] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      act(() => fixture.session.comments.add({ from: 0, to: 0, body: "Refresh reviews.", author: fixture.user }));
+      await waitFor(() => expect(screen.queryByTestId("review-card")).toBeNull());
+      await settleBatch(request, "resolve");
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(onToast).not.toHaveBeenCalled();
+      expect(within(threadCard(fixture.threadIds[0])).getByTestId("comment-resolve")).toBeEnabled();
+    });
+
+    it("keeps replacement-session ownership independent when old and new settlements arrive out of order", async () => {
+      const oldRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+      const old = makeBatchSession("old-batch-document", 1);
+      const reviewFor = (current: CollabSession) => reviewDto("same-review", [current.comments.list()[0].id], current.docId);
+      vi.mocked(api.documents.reviews).mockImplementation(async (documentId) => {
+        const current = documentId === old.session.docId ? old.session : session!;
+        return { reviews: [reviewFor(current)] } as ReviewsResponse;
+      });
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const rendered = render(batchPanel(old.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+
+      auxiliarySessions.push(old.session);
+      const current = makeBatchSession("new-batch-document", 1, old.session);
+      rendered.rerender(batchPanel(current.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([documentId]) => documentId)).toEqual(["old-batch-document", "new-batch-document"]);
+
+      await settleBatch(currentRequest, "resolve");
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("review-reject-all")).toBeEnabled();
+      await settleBatch(oldRequest, "reject", "old failure");
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("review-reject-all")).toBeEnabled();
+      expect(screen.queryByText(/old failure/i)).toBeNull();
+    });
+
+    it.each(["close", "unmount"] as const)("retires on %s with no later dispatch, toast, or unhandled rejection", async (retirement) => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession(`batch-${retirement}`);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const rendered = render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        if (retirement === "close") fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
+        else rendered.unmount();
+        await settleBatch(request, "reject", "late batch failure");
+        await act(async () => {});
+        expect(api.documents.comment).toHaveBeenCalledTimes(1);
+        expect(onToast).not.toHaveBeenCalled();
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it("keeps unrelated cards at zero render effects while one review publishes ownership and settlement", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("batch-render-isolation");
+      const reviews = [
+        reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
+        reviewDto("r2", [fixture.threadIds[1]], fixture.session.docId),
+      ];
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      await waitFor(() => expect(screen.getAllByTestId("review-reject-all")).toHaveLength(2));
+      await act(async () => {});
+
+      vi.mocked(parseSuggestionBlock).mockClear();
+      fireEvent.click(reviewControl("r1", "review-reject-all"));
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 1."))).not.toHaveLength(0);
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
+      await settleBatch(request, "resolve");
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
+    });
+  });
+
   describe("agent requests from comments (#1024)", () => {
     // As the collaborators route lists it (#1296): whose it is, and — off by default — whether others may ask it.
     const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false };

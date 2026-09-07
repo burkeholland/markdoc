@@ -173,12 +173,14 @@ function SuggestionActions({
   state,
   canAccept,
   canReject,
+  disabled = false,
   onAccept,
   onReject,
 }: {
   state: CommentSuggestionState;
   canAccept: boolean;
   canReject: boolean;
+  disabled?: boolean;
   onAccept: () => void | Promise<void>;
   onReject: () => void | Promise<unknown>;
 }) {
@@ -189,7 +191,7 @@ function SuggestionActions({
         <button
           type="button"
           className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
-          disabled={state === "outdated"}
+          disabled={disabled || state === "outdated"}
           onClick={() => void onAccept()}
           data-testid="suggestion-accept-comment"
         >
@@ -197,7 +199,7 @@ function SuggestionActions({
         </button>
       )}
       {canReject && (
-        <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap" onClick={() => void onReject()} data-testid="suggestion-reject-comment">
+        <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap" disabled={disabled} onClick={() => void onReject()} data-testid="suggestion-reject-comment">
           <X size={13} /> Reject
         </button>
       )}
@@ -617,6 +619,61 @@ type CommentRowAction =
   | { type: "delete" }
   | { type: "react"; emoji: string; reacted: boolean };
 
+type CommentBatchAction = "review-accept" | "review-reject" | "review-resolve" | "suggestions-accept" | "suggestions-reject";
+
+interface CommentTargetIdentity {
+  readonly thread: object;
+  readonly reply: object | null;
+}
+
+interface CommentSuggestionBatchTarget {
+  readonly kind: "comment-suggestion";
+  readonly key: string;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly identity: CommentTargetIdentity;
+  readonly body: string;
+  readonly proposed: string;
+  readonly initiallyOutdated: boolean;
+}
+
+interface CommentResolveBatchTarget {
+  readonly kind: "comment-resolve";
+  readonly key: string;
+  readonly threadId: string;
+  readonly replyId: null;
+  readonly identity: CommentTargetIdentity;
+}
+
+interface LocalSuggestionBatchTarget {
+  readonly kind: "local-suggestion";
+  readonly key: string;
+  readonly suggestionId: string;
+  readonly memberIds: readonly string[];
+  readonly memberIdentities: readonly object[];
+  readonly before: string;
+  readonly after: string;
+}
+
+type CommentBatchTarget = CommentSuggestionBatchTarget | CommentResolveBatchTarget | LocalSuggestionBatchTarget;
+
+interface CommentBatchOwner {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  readonly scope: string;
+  readonly reviewId: string | null;
+  readonly reviewSignature: string | null;
+  readonly authorName: string | null;
+  readonly action: CommentBatchAction;
+  readonly operation: number;
+  readonly targets: readonly CommentBatchTarget[];
+}
+
+function reviewIdentitySignature(review: ReviewDto): string {
+  return JSON.stringify([review.id, review.documentId, review.authorId, review.collabAuthorId, review.agent, review.verdict, review.summary, review.threadIds, review.createdAt]);
+}
+
 interface CommentRowActionOwner {
   readonly session: CollabSession;
   readonly documentId: string;
@@ -631,22 +688,61 @@ interface CommentRowActionCoordinator {
   readonly documentId: string;
   readonly visit: CommentPanelVisit;
   mounted: boolean;
+  operation: number;
   targets: Set<string>;
   readonly owners: Map<string, CommentRowActionOwner>;
   readonly errors: Map<string, string>;
+  readonly batchOwners: Map<string, CommentBatchOwner>;
+  readonly batchTargets: Map<string, CommentBatchOwner>;
+  reviewSignatures: Map<string, string>;
   readonly versions: Map<string, number>;
   readonly listeners: Map<string, Set<() => void>>;
+  readonly batchVersions: Map<string, number>;
+  readonly batchListeners: Map<string, Set<() => void>>;
 }
 
 interface CommentRowActionState {
   pending: CommentRowActionOwner | null;
+  batch: CommentBatchOwner | null;
   error: string | null;
 }
 
 const ROOT_COMMENT_TARGET = "";
+const SUGGESTION_TARGET_PREFIX = "suggestion\0";
+const REVIEW_SCOPE_PREFIX = "review\0";
+const SUGGESTIONS_SCOPE = "suggestions";
 
 function commentTargetKey(threadId: string, replyId: string | null): string {
   return `${threadId}\0${replyId ?? ROOT_COMMENT_TARGET}`;
+}
+
+function localSuggestionTargetKey(suggestionId: string): string {
+  return `${SUGGESTION_TARGET_PREFIX}${suggestionId}`;
+}
+
+function reviewBatchScope(reviewId: string): string {
+  return `${REVIEW_SCOPE_PREFIX}${reviewId}`;
+}
+
+function storedCommentTargetIdentity(session: CollabSession, threadId: string, replyId: string | null): CommentTargetIdentity | null {
+  const thread = session.comments.ymap.get(threadId);
+  if (!thread) return null;
+  if (replyId === null) return Object.freeze({ thread, reply: null });
+  const replies = thread.get("replies");
+  if (!replies || typeof replies !== "object" || !("toArray" in replies) || typeof replies.toArray !== "function") return null;
+  const reply = (replies.toArray() as object[]).find((value) => "id" in value && value.id === replyId);
+  return reply ? Object.freeze({ thread, reply }) : null;
+}
+
+function sameCommentTargetIdentity(session: CollabSession, target: CommentSuggestionBatchTarget | CommentResolveBatchTarget): boolean {
+  const current = storedCommentTargetIdentity(session, target.threadId, target.replyId);
+  return current?.thread === target.identity.thread && current.reply === target.identity.reply;
+}
+
+function commentBatchLabel(owner: CommentBatchOwner): string {
+  if (owner.action === "review-resolve") return "Resolving comment…";
+  if (owner.action === "review-accept" || owner.action === "suggestions-accept") return "Accepting suggestion…";
+  return "Rejecting suggestion…";
 }
 
 function pendingCommentActionLabel(owner: CommentRowActionOwner): string {
@@ -676,6 +772,14 @@ function CommentActionFeedback({ state }: { state: CommentRowActionState }) {
       </div>
     );
   }
+  if (state.batch) {
+    return (
+      <div className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-3" role="status" aria-live="polite" data-testid="comment-batch-pending" data-action={state.batch.action}>
+        <Loader2 size={12} className="animate-spin" aria-hidden />
+        {commentBatchLabel(state.batch)}
+      </div>
+    );
+  }
   if (!state.error) return null;
   return (
     <div className="mt-1.5 rounded-md bg-red-50 px-2 py-1.5 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="comment-action-error">
@@ -688,7 +792,11 @@ function retireCommentRowActions(coordinator: CommentRowActionCoordinator) {
   coordinator.mounted = false;
   coordinator.owners.clear();
   coordinator.errors.clear();
+  coordinator.batchOwners.clear();
+  coordinator.batchTargets.clear();
+  coordinator.reviewSignatures.clear();
   coordinator.listeners.clear();
+  coordinator.batchListeners.clear();
 }
 
 function mountCommentRowActions(coordinator: CommentRowActionCoordinator) {
@@ -726,12 +834,164 @@ function createCommentRowActionCoordinator(session: CollabSession, visit: Commen
     documentId: session.docId,
     visit,
     mounted: true,
+    operation: 0,
     targets: new Set(),
     owners: new Map(),
     errors: new Map(),
+    batchOwners: new Map(),
+    batchTargets: new Map(),
+    reviewSignatures: new Map(),
     versions: new Map(),
     listeners: new Map(),
+    batchVersions: new Map(),
+    batchListeners: new Map(),
   };
+}
+
+function publishCommentBatchScope(coordinator: CommentRowActionCoordinator, scope: string) {
+  coordinator.batchVersions.set(scope, (coordinator.batchVersions.get(scope) ?? 0) + 1);
+  for (const listener of coordinator.batchListeners.get(scope) ?? []) listener();
+}
+
+function commentBatchThreadIds(owner: CommentBatchOwner): string[] {
+  return [...new Set(owner.targets.flatMap((target) => (target.kind === "local-suggestion" ? [] : [target.threadId])))];
+}
+
+function publishCommentBatch(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner) {
+  publishCommentBatchScope(coordinator, owner.scope);
+  for (const threadId of commentBatchThreadIds(owner)) publishCommentRowAction(coordinator, threadId);
+}
+
+function ownsCommentBatch(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner): boolean {
+  return (
+    coordinator.mounted &&
+    coordinator.session === owner.session &&
+    coordinator.documentId === owner.documentId &&
+    coordinator.visit === owner.visit &&
+    coordinator.batchOwners.get(owner.scope) === owner &&
+    owner.targets.every((target) => coordinator.batchTargets.get(target.key) === owner)
+  );
+}
+
+function currentCommentBatchContext(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner): boolean {
+  return ownsCommentBatch(coordinator, owner) && (owner.reviewId === null || coordinator.reviewSignatures.get(owner.reviewId) === owner.reviewSignature);
+}
+
+function releaseCommentBatch(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner) {
+  if (!ownsCommentBatch(coordinator, owner)) return;
+  coordinator.batchOwners.delete(owner.scope);
+  for (const target of owner.targets) if (coordinator.batchTargets.get(target.key) === owner) coordinator.batchTargets.delete(target.key);
+  publishCommentBatch(coordinator, owner);
+}
+
+function commentTargetHasRowConflict(coordinator: CommentRowActionCoordinator, target: CommentBatchTarget): boolean {
+  if (target.kind === "local-suggestion") return false;
+  if (coordinator.owners.has(target.key)) return true;
+  if (target.replyId !== null) return coordinator.owners.get(commentTargetKey(target.threadId, null))?.action.type === "delete";
+  return false;
+}
+
+function commentTargetHasBatchConflict(coordinator: CommentRowActionCoordinator, target: CommentBatchTarget): boolean {
+  if (coordinator.batchTargets.has(target.key)) return true;
+  if (target.kind !== "comment-suggestion") return false;
+  return [...coordinator.batchOwners.values()].some((owner) =>
+    owner.targets.some((claimed) => claimed.kind === "comment-suggestion" && claimed.threadId === target.threadId),
+  );
+}
+
+function isCommentBatchBlocked(coordinator: CommentRowActionCoordinator, targets: readonly CommentBatchTarget[]): boolean {
+  return targets.some((target) => commentTargetHasRowConflict(coordinator, target) || commentTargetHasBatchConflict(coordinator, target));
+}
+
+function claimCommentBatch(
+  coordinator: CommentRowActionCoordinator,
+  input: {
+    scope: string;
+    review: ReviewDto | null;
+    authorName: string | null;
+    action: CommentBatchAction;
+    targets: readonly CommentBatchTarget[];
+  },
+): CommentBatchOwner | null {
+  if (!coordinator.mounted || coordinator.batchOwners.has(input.scope) || input.targets.length === 0 || isCommentBatchBlocked(coordinator, input.targets)) return null;
+  const reviewSignature = input.review ? reviewIdentitySignature(input.review) : null;
+  if (input.review && coordinator.reviewSignatures.get(input.review.id) !== reviewSignature) return null;
+
+  const owner = Object.freeze({
+    session: coordinator.session,
+    documentId: coordinator.documentId,
+    visit: coordinator.visit,
+    scope: input.scope,
+    reviewId: input.review?.id ?? null,
+    reviewSignature,
+    authorName: input.authorName,
+    action: input.action,
+    operation: ++coordinator.operation,
+    targets: Object.freeze([...input.targets]),
+  }) satisfies CommentBatchOwner;
+  coordinator.batchOwners.set(owner.scope, owner);
+  for (const target of owner.targets) {
+    coordinator.batchTargets.set(target.key, owner);
+    coordinator.errors.delete(target.key);
+  }
+  if (!ownsCommentBatch(coordinator, owner)) {
+    coordinator.batchOwners.delete(owner.scope);
+    for (const target of owner.targets) if (coordinator.batchTargets.get(target.key) === owner) coordinator.batchTargets.delete(target.key);
+    return null;
+  }
+  publishCommentBatch(coordinator, owner);
+  return owner;
+}
+
+function syncCommentBatchReviews(coordinator: CommentRowActionCoordinator, reviews: ReviewDto[]) {
+  coordinator.reviewSignatures = new Map(reviews.map((review) => [review.id, reviewIdentitySignature(review)]));
+  for (const owner of [...coordinator.batchOwners.values()]) {
+    if (owner.reviewId !== null && coordinator.reviewSignatures.get(owner.reviewId) !== owner.reviewSignature) releaseCommentBatch(coordinator, owner);
+  }
+}
+
+function useCommentBatchState(
+  coordinator: CommentRowActionCoordinator,
+  scope: string,
+  targets: readonly CommentBatchTarget[],
+): { owner: CommentBatchOwner | null; blocked: boolean } {
+  const threadIdsKey = [...new Set(targets.flatMap((target) => (target.kind === "local-suggestion" ? [] : [target.threadId])))].sort().join("\0");
+  const targetKeys = targets.map((target) => target.key).join("\u001f");
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      let scopeListeners = coordinator.batchListeners.get(scope);
+      if (!scopeListeners) {
+        scopeListeners = new Set();
+        coordinator.batchListeners.set(scope, scopeListeners);
+      }
+      scopeListeners.add(listener);
+      const threadIds = threadIdsKey ? threadIdsKey.split("\0") : [];
+      for (const threadId of threadIds) {
+        let listeners = coordinator.listeners.get(threadId);
+        if (!listeners) {
+          listeners = new Set();
+          coordinator.listeners.set(threadId, listeners);
+        }
+        listeners.add(listener);
+      }
+      return () => {
+        scopeListeners.delete(listener);
+        if (scopeListeners.size === 0) coordinator.batchListeners.delete(scope);
+        for (const threadId of threadIds) {
+          const listeners = coordinator.listeners.get(threadId);
+          listeners?.delete(listener);
+          if (listeners?.size === 0) coordinator.listeners.delete(threadId);
+        }
+      };
+    },
+    [coordinator, scope, threadIdsKey],
+  );
+  const getSnapshot = useCallback(() => {
+    const owner = coordinator.batchOwners.get(scope);
+    return `${owner?.operation ?? 0}:${isCommentBatchBlocked(coordinator, targets) ? 1 : 0}:${targetKeys}`;
+  }, [coordinator, scope, targets, targetKeys]);
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return { owner: coordinator.batchOwners.get(scope) ?? null, blocked: isCommentBatchBlocked(coordinator, targets) };
 }
 
 /**
@@ -770,11 +1030,13 @@ function useCommentRowActions(coordinator: CommentRowActionCoordinator, thread: 
   const run = useCallback(
     (replyId: string | null, nextAction: CommentRowAction) => {
       const key = commentTargetKey(threadId, replyId);
-      if (!coordinator.session.commentsViaApi || !coordinator.mounted || !coordinator.targets.has(key) || coordinator.owners.has(key)) return;
+      if (!coordinator.session.commentsViaApi || !coordinator.mounted || !coordinator.targets.has(key) || coordinator.owners.has(key) || coordinator.batchTargets.has(key)) return;
 
       const rootKey = commentTargetKey(threadId, null);
       const rootOwner = coordinator.owners.get(rootKey);
-      const threadHasOwner = [...coordinator.owners.values()].some((owner) => owner.threadId === threadId);
+      const threadHasOwner =
+        [...coordinator.owners.values()].some((owner) => owner.threadId === threadId) ||
+        [...coordinator.batchOwners.values()].some((owner) => owner.targets.some((target) => target.kind !== "local-suggestion" && target.threadId === threadId));
       if ((replyId !== null && rootOwner?.action.type === "delete") || (replyId === null && nextAction.type === "delete" && threadHasOwner)) return;
 
       const action: Readonly<CommentRowAction> = Object.freeze({ ...nextAction });
@@ -825,14 +1087,18 @@ function useCommentRowActions(coordinator: CommentRowActionCoordinator, thread: 
 
   const state = (replyId: string | null): CommentRowActionState => {
     const key = commentTargetKey(threadId, replyId);
-    return { pending: coordinator.owners.get(key) ?? null, error: coordinator.errors.get(key) ?? null };
+    return { pending: coordinator.owners.get(key) ?? null, batch: coordinator.batchTargets.get(key) ?? null, error: coordinator.errors.get(key) ?? null };
   };
   const rootOwner = coordinator.owners.get(commentTargetKey(threadId, null));
+  const hasBatchReply = [...coordinator.batchOwners.values()].some((owner) =>
+    owner.targets.some((target) => target.kind !== "local-suggestion" && target.threadId === threadId && target.replyId !== null),
+  );
 
   return {
     run,
     state,
-    hasPendingReply: [...coordinator.owners.values()].some((owner) => owner.threadId === threadId && owner.replyId !== null),
+    blocked: (replyId: string | null) => coordinator.batchTargets.has(commentTargetKey(threadId, replyId)),
+    hasPendingReply: [...coordinator.owners.values()].some((owner) => owner.threadId === threadId && owner.replyId !== null) || hasBatchReply,
     rootDeleting: rootOwner?.action.type === "delete",
   };
 }
@@ -1461,7 +1727,7 @@ const ThreadCard = memo(function ThreadCard({
   const canCancelRequest = !!onCancelRequest && !!request && (request.userId === me || canModerate);
   const rowActions = useCommentRowActions(actionCoordinator, thread);
   const rootAction = rowActions.state(null);
-  const rootBusy = rootAction.pending !== null;
+  const rootBusy = rootAction.pending !== null || rootAction.batch !== null;
   const rootDeleteBlocked = rootBusy || rowActions.hasPendingReply;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1482,6 +1748,7 @@ const ThreadCard = memo(function ThreadCard({
   const canAcceptHere = canEdit && !isDocument;
 
   const accept = async (block: SuggestionBlock, reply: CommentReply | null = null) => {
+    if (rowActions.blocked(reply?.id ?? null)) return;
     const ok = await ops.acceptSuggestion(thread.id, block.text, reply?.id);
     if (!ok) {
       onToast?.("The quoted text changed — this suggestion is outdated.", "error");
@@ -1508,14 +1775,17 @@ const ThreadCard = memo(function ThreadCard({
     reveal();
   };
   const resolveThread = () => {
+    if (rowActions.blocked(null)) return;
     if (session.commentsViaApi) rowActions.run(null, { type: "resolve", resolved: !thread.resolved });
     else void ops.resolve(thread.id, !thread.resolved);
   };
   const deleteTarget = (replyId: string | null) => {
+    if (rowActions.blocked(replyId) || (replyId === null && rowActions.hasPendingReply)) return;
     if (session.commentsViaApi) rowActions.run(replyId, { type: "delete" });
     else void ops.remove(thread.id, replyId ?? undefined);
   };
   const reactTo = (replyId: string | null, reactions: Reactions, emoji: string) => {
+    if (rowActions.blocked(replyId)) return;
     if (session.commentsViaApi) rowActions.run(replyId, { type: "react", emoji, reacted: !reactions[emoji]?.includes(me) });
     else void ops.react(thread.id, replyId, emoji);
   };
@@ -1585,8 +1855,11 @@ const ThreadCard = memo(function ThreadCard({
                     state={suggestionState}
                     canAccept={canAcceptHere}
                     canReject={canComment}
+                    disabled={rootBusy}
                     onAccept={() => accept(suggestion)}
-                    onReject={() => ops.rejectSuggestion(thread.id)}
+                    onReject={() => {
+                      if (!rowActions.blocked(null)) return ops.rejectSuggestion(thread.id);
+                    }}
                   />
                 </div>
               )}
@@ -1656,7 +1929,7 @@ const ThreadCard = memo(function ThreadCard({
             const state = block ? r.suggestionState ?? (outdated ? "outdated" : "pending") : null;
             const editingReply = editing === r.id && !r.suggestionState;
             const replyAction = rowActions.state(r.id);
-            const replyBusy = replyAction.pending !== null;
+            const replyBusy = replyAction.pending !== null || replyAction.batch !== null;
             const replyBlocked = replyBusy || rowActions.rootDeleting;
             return (
               <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
@@ -1692,8 +1965,11 @@ const ThreadCard = memo(function ThreadCard({
                               state={state}
                               canAccept={canAcceptHere}
                               canReject={canComment}
+                              disabled={replyBlocked}
                               onAccept={() => accept(block, r)}
-                              onReject={() => ops.rejectSuggestion(thread.id, r.id)}
+                              onReject={() => {
+                                if (!rowActions.blocked(r.id)) return ops.rejectSuggestion(thread.id, r.id);
+                              }}
                             />
                           </div>
                         )}
@@ -1854,10 +2130,185 @@ export function isReviewOpen(review: ReviewDto, threads: CommentThread[], text: 
   return commentSuggestionTargets(mine, text).some((target) => target.state === "pending" || target.state === "outdated");
 }
 
+function snapshotCommentSuggestionTarget(session: CollabSession, target: CommentSuggestionTarget): CommentSuggestionBatchTarget | null {
+  const replyId = target.reply?.id ?? null;
+  const identity = storedCommentTargetIdentity(session, target.thread.id, replyId);
+  const current = session.comments.get(target.thread.id);
+  const currentBody = replyId === null ? current?.body : current?.replies.find((reply) => reply.id === replyId)?.body;
+  if (!identity || currentBody !== (target.reply?.body ?? target.thread.body) || parseSuggestionBlock(currentBody ?? "")?.text !== target.block.text) return null;
+  return Object.freeze({
+    kind: "comment-suggestion",
+    key: commentTargetKey(target.thread.id, replyId),
+    threadId: target.thread.id,
+    replyId,
+    identity,
+    body: currentBody,
+    proposed: target.block.text,
+    initiallyOutdated: target.state === "outdated",
+  });
+}
+
+function snapshotCommentResolveTarget(session: CollabSession, thread: CommentThread): CommentResolveBatchTarget | null {
+  const identity = storedCommentTargetIdentity(session, thread.id, null);
+  const current = session.comments.get(thread.id);
+  if (!identity || !current || current.resolved) return null;
+  return Object.freeze({
+    kind: "comment-resolve",
+    key: commentTargetKey(thread.id, null),
+    threadId: thread.id,
+    replyId: null,
+    identity,
+  });
+}
+
+function snapshotLocalSuggestionTarget(session: CollabSession, suggestion: SuggestionGroup): LocalSuggestionBatchTarget | null {
+  const memberIds = suggestion.members.map((member) => member.id);
+  const memberIdentities = memberIds.map((id) => session.suggestions.ymap.get(id));
+  if (memberIdentities.some((identity) => !identity)) return null;
+  const current = session.suggestions.groups(session.ytext.toString()).find((group) => group.id === suggestion.id);
+  if (!current || current.members.map((member) => member.id).join("\0") !== memberIds.join("\0") || current.before !== suggestion.before || current.after !== suggestion.after) return null;
+  return Object.freeze({
+    kind: "local-suggestion",
+    key: localSuggestionTargetKey(suggestion.id),
+    suggestionId: suggestion.id,
+    memberIds: Object.freeze(memberIds),
+    memberIdentities: Object.freeze(memberIdentities as object[]),
+    before: suggestion.before,
+    after: suggestion.after,
+  });
+}
+
+function localSuggestionTargetStatus(session: CollabSession, target: LocalSuggestionBatchTarget): "ready" | "outdated" | "missing" {
+  if (target.memberIds.some((id, index) => session.suggestions.ymap.get(id) !== target.memberIdentities[index])) return "missing";
+  const current = session.suggestions.groups(session.ytext.toString()).find((group) => group.id === target.suggestionId);
+  if (!current || current.members.map((member) => member.id).join("\0") !== target.memberIds.join("\0") || current.before !== target.before || current.after !== target.after) return "missing";
+  return current.outdated ? "outdated" : "ready";
+}
+
+function commentSuggestionTargetStatus(session: CollabSession, target: CommentSuggestionBatchTarget): "ready" | "outdated" | "missing" {
+  if (!sameCommentTargetIdentity(session, target)) return "missing";
+  const thread = session.comments.get(target.threadId);
+  const item = target.replyId === null ? thread : thread?.replies.find((reply) => reply.id === target.replyId);
+  if (!thread || !item || item.body !== target.body || parseSuggestionBlock(item.body)?.text !== target.proposed) return "missing";
+  if (item.suggestionState) return "outdated";
+  return isSuggestionOutdated(thread, session.ytext.toString()) ? "outdated" : "ready";
+}
+
+function resolveTargetStatus(session: CollabSession, target: CommentResolveBatchTarget): "ready" | "outdated" | "missing" {
+  if (!sameCommentTargetIdentity(session, target)) return "missing";
+  const thread = session.comments.get(target.threadId);
+  if (!thread) return "missing";
+  return thread.resolved ? "outdated" : "ready";
+}
+
+function sameCommentBatchTargetDefinition(session: CollabSession, target: CommentSuggestionBatchTarget | CommentResolveBatchTarget): boolean {
+  if (!sameCommentTargetIdentity(session, target)) return false;
+  if (target.kind === "comment-resolve") return session.comments.get(target.threadId) !== null;
+  const thread = session.comments.get(target.threadId);
+  const item = target.replyId === null ? thread : thread?.replies.find((reply) => reply.id === target.replyId);
+  return !!item && item.body === target.body && parseSuggestionBlock(item.body)?.text === target.proposed;
+}
+
+function commentBatchResult(owner: CommentBatchOwner, done: number, failed: number, skipped: number): { message: string; kind: "success" | "error" } {
+  const accepting = owner.action === "review-accept" || owner.action === "suggestions-accept";
+  const resolving = owner.action === "review-resolve";
+  const noun = resolving ? "comment" : "suggestion";
+  const verb = resolving ? "Resolved" : accepting ? "Accepted" : "Rejected";
+  const author = owner.authorName ? ` from ${owner.authorName}` : "";
+  const base = `${verb} ${done} ${noun}${done === 1 ? "" : "s"}${author}.`;
+  if (failed === 0 && skipped === 0) return { message: base, kind: "success" };
+  return {
+    message: `${base.slice(0, -1)} (${done} done, ${failed} failed, ${skipped} outdated skipped).`,
+    kind: failed > 0 ? "error" : "success",
+  };
+}
+
+async function executeCommentBatch(
+  coordinator: CommentRowActionCoordinator,
+  owner: CommentBatchOwner,
+  ops: ReturnType<typeof useCommentOps>,
+  onToast?: CommentsPanelProps["onToast"],
+) {
+  let done = 0;
+  let failed = 0;
+  let skipped = 0;
+  let index = 0;
+  const accepting = owner.action === "review-accept" || owner.action === "suggestions-accept";
+  const localTargets = owner.targets.filter((target): target is LocalSuggestionBatchTarget => target.kind === "local-suggestion");
+
+  if (localTargets.length > 0) {
+    if (!currentCommentBatchContext(coordinator, owner)) return;
+    const status = localTargets.map((target) => localSuggestionTargetStatus(owner.session, target));
+    if (status.some((value) => value !== "ready")) {
+      skipped += owner.targets.length;
+      index = owner.targets.length;
+    } else {
+      try {
+        const decided = owner.session.reviewSuggestion(accepting ? "acceptAll" : "rejectAll");
+        done += Math.min(decided, localTargets.length);
+        skipped += Math.max(0, localTargets.length - decided);
+      } catch (error) {
+        if (!currentCommentBatchContext(coordinator, owner)) return;
+        if (error instanceof SuggestionConflictError) {
+          skipped += owner.targets.length;
+          index = owner.targets.length;
+        } else {
+          failed += localTargets.length;
+        }
+      }
+      if (!currentCommentBatchContext(coordinator, owner)) return;
+      index = Math.max(index, localTargets.length);
+    }
+  }
+
+  for (; index < owner.targets.length; index++) {
+    const target = owner.targets[index];
+    if (!currentCommentBatchContext(coordinator, owner)) return;
+    if (target.kind === "local-suggestion") continue;
+    const status = target.kind === "comment-resolve" ? resolveTargetStatus(owner.session, target) : commentSuggestionTargetStatus(owner.session, target);
+    if (status === "missing") {
+      skipped += owner.targets.length - index;
+      break;
+    }
+    if (status === "outdated" && (target.kind === "comment-resolve" || accepting)) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      const ok =
+        target.kind === "comment-resolve"
+          ? (await ops.resolve(target.threadId, true), true)
+          : accepting
+            ? await ops.acceptSuggestion(target.threadId, target.proposed, target.replyId ?? undefined)
+            : await ops.rejectSuggestion(target.threadId, target.replyId ?? undefined);
+      if (!currentCommentBatchContext(coordinator, owner)) return;
+      if (!sameCommentBatchTargetDefinition(owner.session, target)) {
+        skipped += owner.targets.length - index;
+        break;
+      }
+      if (ok) done++;
+      else if (target.kind === "comment-suggestion" && accepting && commentSuggestionTargetStatus(owner.session, target) === "outdated") skipped++;
+      else failed++;
+    } catch {
+      if (!currentCommentBatchContext(coordinator, owner)) return;
+      if (!sameCommentBatchTargetDefinition(owner.session, target)) {
+        skipped += owner.targets.length - index;
+        break;
+      }
+      failed++;
+    }
+  }
+
+  if (!currentCommentBatchContext(coordinator, owner)) return;
+  releaseCommentBatch(coordinator, owner);
+  const result = commentBatchResult(owner, done, failed, skipped);
+  onToast?.(result.message, result.kind);
+}
+
 /** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
-function ReviewCard({ review, threads, session, text, ops, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; onToast?: CommentsPanelProps["onToast"] }) {
+const ReviewCard = memo(function ReviewCard({ review, threads, session, text, ops, coordinator, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; coordinator: CommentRowActionCoordinator; onToast?: CommentsPanelProps["onToast"] }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
   const canEdit = session.role === "owner" || session.role === "editor";
   const canComment = session.canComment;
   const mine = reviewThreads(review, threads);
@@ -1865,47 +2316,39 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
   const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
   const applicable = pending.filter((target) => target.state === "pending");
   const unresolved = mine.filter((t) => !t.resolved);
+  const renderedSuggestionTargets = pending.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
+  const renderedResolveTargets = unresolved.map((thread) => snapshotCommentResolveTarget(session, thread)).filter((target): target is CommentResolveBatchTarget => target !== null);
+  const renderedTargets = pending.length > 0 ? renderedSuggestionTargets : renderedResolveTargets;
+  const scope = reviewBatchScope(review.id);
+  const batchState = useCommentBatchState(coordinator, scope, renderedTargets);
+  const busy = batchState.owner !== null;
 
   /** Each suggestion is its own transaction (its own undo step); failures are counted, not fatal. */
-  const decideAll = async (accept: boolean) => {
-    setBusy(true);
-    let done = 0;
-    let failed = 0;
-    try {
-      for (const { thread, reply, block } of accept ? applicable : pending) {
-        try {
-          const ok = accept ? await ops.acceptSuggestion(thread.id, block.text, reply?.id) : await ops.rejectSuggestion(thread.id, reply?.id);
-          if (ok) done++;
-          else failed++;
-        } catch {
-          failed++;
-        }
-      }
-    } finally {
-      setBusy(false);
-    }
-    const skipped = accept ? pending.length - applicable.length : 0;
-    const tail = [failed ? `${failed} failed` : "", skipped ? `${skipped} outdated skipped` : ""].filter(Boolean).join(", ");
-    onToast?.(`${accept ? "Accepted" : "Rejected"} ${done} suggestion${done === 1 ? "" : "s"} from ${review.authorName}${tail ? ` (${tail})` : ""}.`, failed ? "error" : "success");
+  const decideAll = (accept: boolean) => {
+    const targets = pending.map((target) => snapshotCommentSuggestionTarget(session, target));
+    if (targets.some((target) => target === null)) return;
+    const owner = claimCommentBatch(coordinator, {
+      scope,
+      review,
+      authorName: review.authorName,
+      action: accept ? "review-accept" : "review-reject",
+      targets: targets as CommentSuggestionBatchTarget[],
+    });
+    if (owner) void executeCommentBatch(coordinator, owner, ops, onToast);
   };
 
   /** Resolves every open thread of the review so a fully decided review can leave the Open tab (it lists under Resolved). */
-  const resolveAll = async () => {
-    setBusy(true);
-    let done = 0;
-    try {
-      for (const t of unresolved) {
-        try {
-          await ops.resolve(t.id, true);
-          done++;
-        } catch {
-          // Another collaborator may have resolved or deleted it while this batch was running.
-        }
-      }
-    } finally {
-      setBusy(false);
-    }
-    onToast?.(`Resolved ${done} comment${done === 1 ? "" : "s"} from ${review.authorName}.`, "success");
+  const resolveAll = () => {
+    const targets = unresolved.map((thread) => snapshotCommentResolveTarget(session, thread));
+    if (targets.some((target) => target === null)) return;
+    const owner = claimCommentBatch(coordinator, {
+      scope,
+      review,
+      authorName: review.authorName,
+      action: "review-resolve",
+      targets: targets as CommentResolveBatchTarget[],
+    });
+    if (owner) void executeCommentBatch(coordinator, owner, ops, onToast);
   };
 
   const partial = applicable.length !== pending.length;
@@ -1941,25 +2384,29 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
           <button
             type="button"
             className="btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2"
-            disabled={busy || applicable.length === 0}
-            onClick={() => void decideAll(true)}
+            disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length || applicable.length === 0}
+            aria-busy={batchState.owner?.action === "review-accept" || undefined}
+            onClick={() => decideAll(true)}
             title={acceptTitle}
             aria-label={acceptTitle}
             data-testid="review-accept-all"
           >
-            <CheckCheck size={13} aria-hidden /> Accept all
+            {batchState.owner?.action === "review-accept" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <CheckCheck size={13} aria-hidden />}
+            {batchState.owner?.action === "review-accept" ? "Accepting…" : "Accept all"}
             {partial && <span className="hidden text-[11px] opacity-80 @min-[18rem]:inline">({applicable.length} of {pending.length})</span>}
           </button>
           <button
             type="button"
             className="btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2"
-            disabled={busy}
-            onClick={() => void decideAll(false)}
+            disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length}
+            aria-busy={batchState.owner?.action === "review-reject" || undefined}
+            onClick={() => decideAll(false)}
             title="Reject all suggestions"
             aria-label="Reject all suggestions"
             data-testid="review-reject-all"
           >
-            <X size={13} aria-hidden /> Reject all
+            {batchState.owner?.action === "review-reject" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <X size={13} aria-hidden />}
+            {batchState.owner?.action === "review-reject" ? "Rejecting…" : "Reject all"}
           </button>
         </div>
       )}
@@ -1969,12 +2416,14 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
           <button
             type="button"
             className="btn btn-sm btn-outline gap-1.5 whitespace-nowrap"
-            disabled={busy}
-            onClick={() => void resolveAll()}
+            disabled={busy || batchState.blocked || renderedResolveTargets.length !== unresolved.length}
+            aria-busy={batchState.owner?.action === "review-resolve" || undefined}
+            onClick={resolveAll}
             title={`Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`}
             data-testid="review-resolve-all"
           >
-            <Check size={13} aria-hidden /> Resolve all
+            {batchState.owner?.action === "review-resolve" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <Check size={13} aria-hidden />}
+            {batchState.owner?.action === "review-resolve" ? "Resolving…" : "Resolve all"}
           </button>
         </div>
       )}
@@ -2007,7 +2456,7 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
       )}
     </div>
   );
-}
+});
 
 interface ReviewLoadState {
   documentId: string;
@@ -2243,6 +2692,7 @@ export function CommentsPanel({
     [session, postAgentRequest],
   );
   const { reviews, loaded: reviewsLoaded, loading: reviewsLoading, error: reviewsError, retry: retryReviews } = useReviews(session);
+  useLayoutEffect(() => syncCommentBatchReviews(actionCoordinator, reviews), [actionCoordinator, reviews]);
   const unreadRefs = useUnreadRefs(session.docId);
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const open = threads.filter((t) => !t.resolved);
@@ -2267,7 +2717,12 @@ export function CommentsPanel({
     }
     return mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open";
   });
-  const [bulkBusy, setBulkBusy] = useState(false);
+  const renderedLocalSuggestionTargets = suggestions.map((suggestion) => snapshotLocalSuggestionTarget(session, suggestion)).filter((target): target is LocalSuggestionBatchTarget => target !== null);
+  const renderedCommentSuggestionTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
+  const renderedSuggestionBatchTargets = [...renderedLocalSuggestionTargets, ...renderedCommentSuggestionTargets];
+  // The global controls only exist on this tab. Elsewhere, do not subscribe the panel to every row owner:
+  // the affected review and thread cards update without rerendering unrelated cards.
+  const suggestionBatchState = useCommentBatchState(actionCoordinator, SUGGESTIONS_SCOPE, tab === "suggestions" ? renderedSuggestionBatchTargets : []);
   const canAct = session.role === "owner" || session.role === "editor";
   const tablistRef = useRef<HTMLDivElement>(null);
 
@@ -2357,25 +2812,18 @@ export function CommentsPanel({
     items[next]?.focus();
   };
 
-  const decideAllSuggestions = async (accept: boolean) => {
-    setBulkBusy(true);
-    try {
-      session.reviewSuggestion(accept ? "acceptAll" : "rejectAll");
-      for (const { thread, reply, block, state } of commentSuggestions) {
-        if (accept && state === "outdated") continue;
-        try {
-          if (accept) await ops.acceptSuggestion(thread.id, block.text, reply?.id);
-          else await ops.rejectSuggestion(thread.id, reply?.id);
-        } catch {
-          // Another collaborator may have decided it while this batch was running.
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof SuggestionConflictError)) throw error;
-      onToast?.(error.message, "error");
-    } finally {
-      setBulkBusy(false);
-    }
+  const decideAllSuggestions = (accept: boolean) => {
+    const localTargets = suggestions.map((suggestion) => snapshotLocalSuggestionTarget(session, suggestion));
+    const commentTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target));
+    if (localTargets.some((target) => target === null) || commentTargets.some((target) => target === null)) return;
+    const owner = claimCommentBatch(actionCoordinator, {
+      scope: SUGGESTIONS_SCOPE,
+      review: null,
+      authorName: null,
+      action: accept ? "suggestions-accept" : "suggestions-reject",
+      targets: [...(localTargets as LocalSuggestionBatchTarget[]), ...(commentTargets as CommentSuggestionBatchTarget[])],
+    });
+    if (owner) void executeCommentBatch(actionCoordinator, owner, ops, onToast);
   };
 
   return (
@@ -2384,7 +2832,15 @@ export function CommentsPanel({
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="comments-panel">
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Comments</span>
-        <button type="button" className="icon-btn h-8 w-8" onClick={onClose} aria-label="Close comments">
+        <button
+          type="button"
+          className="icon-btn h-8 w-8"
+          onClick={() => {
+            retireCommentRowActions(actionCoordinator);
+            onClose();
+          }}
+          aria-label="Close comments"
+        >
           <X size={16} />
         </button>
       </div>
@@ -2435,7 +2891,7 @@ export function CommentsPanel({
         {tab === "open" && openReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {openReviews.map((r) => (
-              <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
+             <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
             ))}
           </div>
         )}
@@ -2518,7 +2974,7 @@ export function CommentsPanel({
         {tab === "resolved" && resolvedReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {resolvedReviews.map((r) => (
-              <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
+             <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
             ))}
           </div>
         )}
@@ -2557,14 +3013,28 @@ export function CommentsPanel({
                   <button
                     type="button"
                     className="btn btn-sm btn-ghost text-success"
-                    disabled={bulkBusy || suggestions.some((s) => s.outdated) || (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))}
-                    onClick={() => void decideAllSuggestions(true)}
+                    disabled={
+                      suggestionBatchState.owner !== null ||
+                      suggestionBatchState.blocked ||
+                      renderedSuggestionBatchTargets.length !== suggestionCount ||
+                      suggestions.some((s) => s.outdated) ||
+                      (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))
+                    }
+                    aria-busy={suggestionBatchState.owner?.action === "suggestions-accept" || undefined}
+                    onClick={() => decideAllSuggestions(true)}
                     data-testid="accept-all"
                   >
-                    Accept all
+                    {suggestionBatchState.owner?.action === "suggestions-accept" ? "Accepting…" : "Accept all"}
                   </button>
-                  <button type="button" className="btn btn-sm btn-ghost text-danger" disabled={bulkBusy || suggestions.some((s) => s.outdated)} onClick={() => void decideAllSuggestions(false)} data-testid="reject-all">
-                    Reject all
+                  <button
+                   type="button"
+                   className="btn btn-sm btn-ghost text-danger"
+                   disabled={suggestionBatchState.owner !== null || suggestionBatchState.blocked || renderedSuggestionBatchTargets.length !== suggestionCount || suggestions.some((s) => s.outdated)}
+                   aria-busy={suggestionBatchState.owner?.action === "suggestions-reject" || undefined}
+                   onClick={() => decideAllSuggestions(false)}
+                   data-testid="reject-all"
+                  >
+                   {suggestionBatchState.owner?.action === "suggestions-reject" ? "Rejecting…" : "Reject all"}
                   </button>
                 </div>
               )}
