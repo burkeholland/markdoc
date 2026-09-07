@@ -47,7 +47,7 @@ import { GITHUB_NOT_CONFIGURED, SYNC_LABELS } from "./labels";
 import { isIdle } from "@/editor/collab/follow";
 import { saveStateLabel } from "@/editor/collab/offline";
 import type { DocumentDto } from "@/server/dto";
-import { api } from "@/lib/api";
+import { api, apiErrorText } from "@/lib/api";
 import type { Layout } from "@/lib/viewport";
 
 import { cn, shortcut } from "@/lib/utils";
@@ -205,43 +205,154 @@ function TitleEditor({ session, fallback, compact }: { session: CollabSession; f
  * the current state once the open has settled (the editor does not need it to become editable) and
  * stays hidden for anonymous visitors (who cannot star).
  */
-function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) {
-  const [starred, setStarred] = useState<boolean | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    setStarred(null);
+type HeaderStarError = {
+  action: "load" | "star" | "unstar";
+  message: string;
+};
+
+interface HeaderStarState {
+  docId: string;
+  starred: boolean | null;
+  pending: "load" | "toggle" | null;
+  error: HeaderStarError | null;
+}
+
+const emptyHeaderStarState = (docId: string): HeaderStarState => ({
+  docId,
+  starred: null,
+  pending: null,
+  error: null,
+});
+
+export function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) {
+  const [state, setState] = useState<HeaderStarState>(() => emptyHeaderStarState(docId));
+  const requestId = useRef(0);
+
+  const load = useCallback((retry = false) => {
     if (!ready) return;
-    api.documents
-      .starred(docId)
-      .then((r) => !cancelled && setStarred(r.starred))
-      .catch(() => !cancelled && setStarred(null));
-    return () => {
-      cancelled = true;
-    };
+    const request = ++requestId.current;
+    setState((previous) => ({
+      docId,
+      starred: null,
+      pending: "load",
+      error: retry && previous.docId === docId && previous.error?.action === "load" ? previous.error : null,
+    }));
+    void api.documents.starred(docId).then(
+      ({ starred }) => {
+        if (requestId.current !== request) return;
+        setState({ docId, starred, pending: null, error: null });
+      },
+      (error: unknown) => {
+        if (requestId.current !== request) return;
+        setState({
+          docId,
+          starred: null,
+          pending: null,
+          error: { action: "load", message: apiErrorText(error, "Could not load star status") },
+        });
+      },
+    );
   }, [docId, ready]);
-  if (starred === null) return null;
+
+  useEffect(() => {
+    if (!ready) {
+      requestId.current += 1;
+      setState(emptyHeaderStarState(docId));
+      return;
+    }
+    load();
+    return () => {
+      requestId.current += 1;
+    };
+  }, [docId, ready, load]);
+
+  if (!ready) return null;
+  const current = state.docId === docId ? state : emptyHeaderStarState(docId);
+  if (current.starred === null) {
+    if (current.error?.action !== "load") return null;
+    const retrying = current.pending === "load";
+    return (
+      <>
+        <span className="sr-only" role="alert" aria-atomic="true">
+          {current.error.message}. Retry star status.
+        </span>
+        <Tip label={retrying ? "Retrying star status…" : `${current.error.message}. Retry.`}>
+          <button
+            type="button"
+            onClick={() => load(true)}
+            disabled={retrying}
+            className="icon-btn h-8 w-8 shrink-0 text-danger max-md:hidden"
+            aria-label={retrying ? "Retrying star status" : "Retry star status"}
+            aria-busy={retrying || undefined}
+            data-testid="header-star"
+            data-state={retrying ? "retrying" : "error"}
+          >
+            <RefreshCw size={17} className={retrying ? "animate-spin" : undefined} />
+          </button>
+        </Tip>
+      </>
+    );
+  }
+
   const toggle = () => {
-    const next = !starred;
-    setStarred(next);
-    (next ? api.documents.star(docId) : api.documents.unstar(docId)).catch((err: unknown) => {
-      console.error(err);
-      setStarred(!next);
-    });
+    if (current.pending) return;
+    const previous = current.starred;
+    const next = !previous;
+    const action = next ? "star" : "unstar";
+    const request = ++requestId.current;
+    setState({ docId, starred: next, pending: "toggle", error: null });
+    const update: Promise<{ starred: boolean }> = next ? api.documents.star(docId) : api.documents.unstar(docId);
+    void update.then(
+      ({ starred }) => {
+        if (requestId.current !== request) return;
+        setState({ docId, starred, pending: null, error: null });
+      },
+      (error: unknown) => {
+        if (requestId.current !== request) return;
+        setState({
+          docId,
+          starred: previous,
+          pending: null,
+          error: {
+            action,
+            message: apiErrorText(error, next ? "Could not star document" : "Could not unstar document"),
+          },
+        });
+      },
+    );
   };
+
+  const retryAction = current.error?.action === "star" || current.error?.action === "unstar" ? current.error.action : null;
+  const label = current.pending === "toggle"
+    ? current.starred ? "Starring document…" : "Unstarring document…"
+    : retryAction
+      ? retryAction === "star" ? "Retry star document" : "Retry unstar document"
+      : current.starred ? "Unstar document" : "Star document";
+
   return (
-    <Tip label={starred ? "Unstar" : "Star"}>
-      <button
-        type="button"
-        onClick={toggle}
-        className={cn("icon-btn h-8 w-8 shrink-0 max-md:hidden", starred ? "text-amber-500" : "text-ink-4")}
-        aria-pressed={starred}
-        aria-label={starred ? "Unstar document" : "Star document"}
-        data-testid="header-star"
-        data-starred={starred}
-      >
-        <Star size={17} fill={starred ? "currentColor" : "none"} />
-      </button>
-    </Tip>
+    <>
+      {current.error && (
+        <span className="sr-only" role="alert" aria-atomic="true">
+          {current.error.message}. {label}.
+        </span>
+      )}
+      <Tip label={label}>
+        <button
+          type="button"
+          onClick={toggle}
+          disabled={current.pending === "toggle"}
+          className={cn("icon-btn h-8 w-8 shrink-0 max-md:hidden", current.error ? "text-danger" : current.starred ? "text-amber-500" : "text-ink-4")}
+          aria-pressed={current.starred}
+          aria-label={label}
+          aria-busy={current.pending === "toggle" || undefined}
+          data-testid="header-star"
+          data-starred={current.starred}
+          data-state={current.pending ?? (current.error ? "error" : "ready")}
+        >
+          <Star size={17} fill={current.starred ? "currentColor" : "none"} />
+        </button>
+      </Tip>
+    </>
   );
 }
 
