@@ -241,13 +241,22 @@ type CapturedClickEvent = {
   stopPropagation: ReturnType<typeof vi.fn>;
 };
 
-type CapturedClick = (event: CapturedClickEvent) => void;
+type CapturedClick = (event?: unknown) => void;
+type CapturedTemplateClick = (event: CapturedClickEvent) => void;
 
 function captureClick(element: HTMLElement): CapturedClick {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the button");
   const props = (element as unknown as Record<string, { onClick?: CapturedClick } | undefined>)[propsKey];
   if (!props?.onClick) throw new Error("The button did not have an onClick handler");
+  return props.onClick;
+}
+
+function captureTemplateClick(element: HTMLButtonElement): CapturedTemplateClick {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the template button");
+  const props = (element as unknown as Record<string, { onClick?: CapturedTemplateClick } | undefined>)[propsKey];
+  if (!props?.onClick) throw new Error("The template button did not have an onClick handler");
   return props.onClick;
 }
 
@@ -271,13 +280,13 @@ function capturedActivationEvent(button: HTMLButtonElement) {
   };
 }
 
-function invokeCapturedClick(callback: CapturedClick, source: HTMLButtonElement) {
+function invokeCapturedClick(callback: CapturedTemplateClick, source: HTMLButtonElement) {
   const event = capturedActivationEvent(source);
   callback(event);
   return event;
 }
 
-function expectInertCapturedClick(callback: CapturedClick, source: HTMLButtonElement, host: HTMLElement) {
+function expectInertCapturedClick(callback: CapturedTemplateClick, source: HTMLButtonElement, host: HTMLElement) {
   const event = capturedActivationEvent(source);
   const activeElement = document.activeElement;
   const markup = host.innerHTML;
@@ -382,8 +391,8 @@ describe("TemplateGrid publication ownership", () => {
 
       const firstButton = templateButton(host, first.id);
       const secondButton = templateButton(host, second.id);
-      const staleFirstActivation = captureClick(firstButton);
-      const competingActivation = captureClick(secondButton);
+      const staleFirstActivation = captureTemplateClick(firstButton);
+      const competingActivation = captureTemplateClick(secondButton);
       invokeCapturedClick(staleFirstActivation, firstButton);
       invokeCapturedClick(staleFirstActivation, firstButton);
       invokeCapturedClick(competingActivation, secondButton);
@@ -398,7 +407,7 @@ describe("TemplateGrid publication ownership", () => {
       const busyButton = templateButton(host, second.id);
       expect(busyButton).toHaveAttribute("aria-busy", "true");
       expect(busyButton.querySelector("svg")).toHaveClass("animate-spin");
-      const busyActivation = captureClick(busyButton);
+      const busyActivation = captureTemplateClick(busyButton);
       invokeCapturedClick(staleFirstActivation, firstButton);
       invokeCapturedClick(busyActivation, busyButton);
       expect(onPick).toHaveBeenCalledTimes(1);
@@ -407,7 +416,7 @@ describe("TemplateGrid publication ownership", () => {
         root.render(<TemplateGrid compact onPick={onPick} busy={null} />);
       });
       const idleAgainButton = templateButton(host, second.id);
-      const idleAgainActivation = captureClick(idleAgainButton);
+      const idleAgainActivation = captureTemplateClick(idleAgainButton);
       invokeCapturedClick(busyActivation, busyButton);
       invokeCapturedClick(idleAgainActivation, idleAgainButton);
       invokeCapturedClick(idleAgainActivation, idleAgainButton);
@@ -437,7 +446,7 @@ describe("TemplateGrid publication ownership", () => {
         root.render(<TemplateGrid onPick={onPick} busy={null} />);
       });
       const exactButton = templateButton(host, template.id);
-      const exactActivation = captureClick(exactButton);
+      const exactActivation = captureTemplateClick(exactButton);
       const card = exactButton.parentElement;
       if (!(card instanceof HTMLLIElement)) throw new Error("Template button was not rendered in a card");
       focusOwner.focus();
@@ -463,7 +472,7 @@ describe("TemplateGrid publication ownership", () => {
       const invokeWrongSource = (wrongSource: HTMLButtonElement) => {
         expectInertCapturedClick(exactActivation, wrongSource, host);
         if (source === "sibling card") {
-          expectInertCapturedClick(captureClick(wrongSource), exactButton, host);
+          expectInertCapturedClick(captureTemplateClick(wrongSource), exactButton, host);
         }
       };
 
@@ -509,8 +518,8 @@ describe("TemplateGrid publication ownership", () => {
           );
         });
         const button = templateButton(host, template.id);
-        const staleActivation = captureClick(button);
-        let currentActivation!: CapturedClick;
+        const staleActivation = captureTemplateClick(button);
+        let currentActivation!: CapturedTemplateClick;
         focusOwner.focus();
         let boundaryReached!: () => void;
         const atBoundary = new Promise<void>((resolve) => {
@@ -527,7 +536,7 @@ describe("TemplateGrid publication ownership", () => {
               expect(passiveCleanup).not.toHaveBeenCalled();
               const currentButton = templateButton(host, template.id);
               expect(currentButton).toBe(button);
-              currentActivation = captureClick(currentButton);
+              currentActivation = captureTemplateClick(currentButton);
               if (order === "wrong-before-current") {
                 expectInertCapturedClick(staleActivation, currentButton, host);
                 expect(currentPick).not.toHaveBeenCalled();
@@ -574,7 +583,7 @@ describe("TemplateGrid publication ownership", () => {
         root.render(<TemplateGridBoundary onPick={onPick} busy={null} onPassiveCleanup={passiveCleanup} />);
       });
       const button = templateButton(host, template.id);
-      const idleActivation = captureClick(button);
+      const idleActivation = captureTemplateClick(button);
       let busyBoundaryReached!: () => void;
       const atBusyBoundary = new Promise<void>((resolve) => {
         busyBoundaryReached = resolve;
@@ -592,7 +601,7 @@ describe("TemplateGrid publication ownership", () => {
             expect(busyButton).toBe(button);
             expect(busyButton).toBeDisabled();
             invokeCapturedClick(idleActivation, button);
-            invokeCapturedClick(captureClick(busyButton), busyButton);
+            invokeCapturedClick(captureTemplateClick(busyButton), busyButton);
             expect(onPick).not.toHaveBeenCalled();
             busyBoundaryReached();
           }}
@@ -614,7 +623,7 @@ describe("TemplateGrid publication ownership", () => {
           onBoundary={() => {
             expect(passiveCleanup).toHaveBeenCalledTimes(1);
             const currentButton = templateButton(host, template.id);
-            const currentActivation = captureClick(currentButton);
+            const currentActivation = captureTemplateClick(currentButton);
             invokeCapturedClick(idleActivation, button);
             invokeCapturedClick(currentActivation, currentButton);
             expect(onPick).toHaveBeenCalledTimes(1);
@@ -646,7 +655,7 @@ describe("TemplateGrid publication ownership", () => {
       });
       const oldGrid = templateGrid(host);
       const oldButton = templateButton(host, template.id);
-      const staleActivation = captureClick(oldButton);
+      const staleActivation = captureTemplateClick(oldButton);
       let boundaryReached!: () => void;
       const atBoundary = new Promise<void>((resolve) => {
         boundaryReached = resolve;
@@ -665,7 +674,7 @@ describe("TemplateGrid publication ownership", () => {
             expect(templateButton(host, template.id)).toBe(oldButton);
             expect(templateGrid(host)).toHaveClass("grid-cols-2", "sm:grid-cols-3", "lg:grid-cols-4");
             invokeCapturedClick(staleActivation, oldButton);
-            invokeCapturedClick(captureClick(oldButton), oldButton);
+            invokeCapturedClick(captureTemplateClick(oldButton), oldButton);
             expect(onPick).toHaveBeenCalledTimes(1);
             expect(onPick).toHaveBeenLastCalledWith(template);
             boundaryReached();
@@ -704,7 +713,7 @@ describe("TemplateGrid publication ownership", () => {
       });
       const oldCard = templateButton(host, original.id).parentElement;
       const oldButton = templateButton(host, original.id);
-      const staleActivation = captureClick(oldButton);
+      const staleActivation = captureTemplateClick(oldButton);
       PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, originals[1], replacement, ...originals.slice(2));
       let boundaryReached!: () => void;
       const atBoundary = new Promise<void>((resolve) => {
@@ -729,7 +738,7 @@ describe("TemplateGrid publication ownership", () => {
             expect(replacementButton).toHaveTextContent(replacement.description);
             expect(replacementButton.querySelector("svg")).toHaveClass("lucide-scale");
             invokeCapturedClick(staleActivation, oldButton);
-            invokeCapturedClick(captureClick(replacementButton), replacementButton);
+            invokeCapturedClick(captureTemplateClick(replacementButton), replacementButton);
             expect(onPick).toHaveBeenCalledTimes(1);
             expect(onPick).toHaveBeenLastCalledWith(replacement);
             boundaryReached();
@@ -764,9 +773,9 @@ describe("TemplateGrid publication ownership", () => {
         });
         const oldMarkup = host.innerHTML;
         const oldButton = templateButton(host, template.id);
-        const staleActivation = captureClick(oldButton);
+        const staleActivation = captureTemplateClick(oldButton);
         let currentButton!: HTMLButtonElement;
-        let currentActivation!: CapturedClick;
+        let currentActivation!: CapturedTemplateClick;
         focusOwner.focus();
         let boundaryReached!: () => void;
         const atBoundary = new Promise<void>((resolve) => {
@@ -783,7 +792,7 @@ describe("TemplateGrid publication ownership", () => {
             onBoundary={() => {
               expect(passiveCleanup).not.toHaveBeenCalled();
               currentButton = templateButton(host, template.id);
-              currentActivation = captureClick(currentButton);
+              currentActivation = captureTemplateClick(currentButton);
               expect(currentButton).not.toBe(oldButton);
               expect(oldButton.isConnected).toBe(false);
               expect(host.innerHTML).toBe(oldMarkup);
@@ -832,7 +841,7 @@ describe("TemplateGrid publication ownership", () => {
         root.render(<TemplateGridBoundary onPick={onPick} busy={null} onPassiveCleanup={passiveCleanup} />);
       });
       const oldButton = templateButton(host, template.id);
-      const staleActivation = captureClick(oldButton);
+      const staleActivation = captureTemplateClick(oldButton);
       focusOwner.focus();
       let removalBoundaryReached!: () => void;
       const atRemovalBoundary = new Promise<void>((resolve) => {
@@ -880,7 +889,7 @@ describe("TemplateGrid publication ownership", () => {
           onPassiveCleanup={passiveCleanup}
           onBoundary={() => {
             const currentButton = templateButton(host, template.id);
-            const currentActivation = captureClick(currentButton);
+            const currentActivation = captureTemplateClick(currentButton);
             invokeCapturedClick(staleActivation, oldButton);
             invokeCapturedClick(currentActivation, currentButton);
             expect(onPick).toHaveBeenCalledTimes(1);
