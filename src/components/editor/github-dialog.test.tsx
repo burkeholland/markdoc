@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { DocumentDto } from "@/server/dto";
 
 const signIn = vi.fn(() => new Promise<void>(() => {}));
 vi.mock("next-auth/react", () => ({ signIn: (...args: unknown[]) => signIn(...(args as [])) }));
@@ -35,7 +36,7 @@ const repos = vi.fn<() => Promise<{ repos: Repo[] }>>();
 const branches = vi.fn<(owner: string, repo: string) => Promise<{ branches: string[] }>>();
 const files = vi.fn<(owner: string, repo: string, branch: string) => Promise<{ files: RepoFile[] }>>();
 const importDocument = vi.fn<(body: Record<string, unknown>) => Promise<{ document: { id: string; title: string } }>>();
-const linkDocument = vi.fn();
+const linkDocument = vi.fn<(id: string, body: Record<string, unknown>) => Promise<{ document: DocumentDto }>>();
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
@@ -53,7 +54,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       import: (body: Record<string, unknown>) => importDocument(body),
       documents: {
         ...actual.api.documents,
-        link: (...args: unknown[]) => linkDocument(...args),
+        link: (id: string, body: Record<string, unknown>) => linkDocument(id, body),
       },
     },
   };
@@ -102,13 +103,34 @@ function repoFile(path: string): RepoFile {
 
 const currentRepo = repository();
 
+function documentDto(id = "doc-current", title = "Current document"): DocumentDto {
+  return {
+    id,
+    title,
+    storage: "local",
+    linkAccess: "private",
+    ownerId: "owner-current",
+    gistId: null,
+    gistFile: null,
+    repoOwner: null,
+    repoName: null,
+    repoBranch: null,
+    repoPath: null,
+    publishedAt: null,
+    hasUnpublishedChanges: false,
+    githubUrl: null,
+    createdAt: "2026-09-07T12:00:00.000Z",
+    updatedAt: "2026-09-07T12:00:00.000Z",
+  };
+}
+
 beforeEach(() => {
   gists.mockReset().mockResolvedValue({ gists: [gist()] });
   repos.mockReset().mockResolvedValue({ repos: [currentRepo] });
   branches.mockReset().mockResolvedValue({ branches: ["main"] });
   files.mockReset().mockResolvedValue({ files: [repoFile("README.md")] });
   importDocument.mockReset().mockResolvedValue({ document: { id: "imported", title: "Imported" } });
-  linkDocument.mockReset();
+  linkDocument.mockReset().mockResolvedValue({ document: documentDto() });
   signIn.mockClear();
 });
 
@@ -397,5 +419,315 @@ describe("GitHubPicker list recovery", () => {
     expect(screen.queryByTestId("repo-load-error")).toBeNull();
     expect(screen.getByTestId("github-action-error")).toHaveTextContent("Import was rejected");
     expect(importDocument).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GitHubPicker action ownership", () => {
+  it("turns immediate duplicate and mixed gist/repository activation into one physical import", async () => {
+    const request = deferred<{ document: { id: string; title: string } }>();
+    const onImported = vi.fn();
+    importDocument.mockReturnValue(request.promise);
+
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    const gistItem = await screen.findByTestId("gist-item");
+    const repoTab = screen.getByTestId("picker-tab-repo");
+
+    fireEvent.click(gistItem);
+    fireEvent.click(gistItem);
+    fireEvent.click(repoTab);
+
+    expect(importDocument).toHaveBeenCalledTimes(1);
+    expect(importDocument).toHaveBeenCalledWith({ source: "gist", gistId: "gist-current", filename: "current.md" });
+    expect(repos).not.toHaveBeenCalled();
+    expect(repoTab).toBeDisabled();
+    expect(screen.queryByTestId("repo-list")).toBeNull();
+
+    await act(async () => {
+      request.resolve({ document: { id: "imported-once", title: "Imported once" } });
+      await request.promise;
+    });
+
+    expect(onImported).toHaveBeenCalledTimes(1);
+    expect(onImported).toHaveBeenCalledWith("imported-once");
+    expect(repoTab).toBeEnabled();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+  });
+
+  it("releases a current failure for one retry and invokes the success callback once", async () => {
+    const failed = deferred<{ document: { id: string; title: string } }>();
+    const retried = deferred<{ document: { id: string; title: string } }>();
+    const onImported = vi.fn();
+    importDocument.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retried.promise);
+
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    fireEvent.click(await screen.findByTestId("gist-item"));
+    await act(async () => {
+      failed.reject(new Error("Import was rejected"));
+      await Promise.allSettled([failed.promise]);
+    });
+
+    expect(screen.getByTestId("github-action-error")).toHaveTextContent("Import was rejected");
+    expect(screen.getByTestId("gist-item")).toBeEnabled();
+    expect(onImported).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("gist-item"));
+    fireEvent.click(screen.getByTestId("gist-item"));
+    expect(importDocument).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+
+    await act(async () => {
+      retried.resolve({ document: { id: "retry-import", title: "Retry import" } });
+      await retried.promise;
+    });
+
+    expect(onImported).toHaveBeenCalledTimes(1);
+    expect(onImported).toHaveBeenCalledWith("retry-import");
+    expect(screen.getByTestId("gist-item")).toBeEnabled();
+  });
+
+  it("freezes a new-gist destination and locks its fields and alternate destination", async () => {
+    const request = deferred<{ document: DocumentDto }>();
+    const doc = documentDto();
+    const linked = { ...doc, storage: "gist" as const, gistId: "created-gist", gistFile: "claimed.md" };
+    const onLinked = vi.fn();
+    linkDocument.mockReturnValue(request.promise);
+
+    render(<GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured onLinked={onLinked} />);
+    const filename = screen.getByTestId("gist-filename");
+    const visibility = screen.getByRole("checkbox", { name: "Public" });
+    const existing = screen.getByRole("radio", { name: "Use an existing gist" });
+    fireEvent.change(filename, { target: { value: "claimed.md" } });
+    fireEvent.click(visibility);
+    fireEvent.click(screen.getByTestId("gist-create"));
+
+    expect(linkDocument).toHaveBeenCalledTimes(1);
+    expect(linkDocument).toHaveBeenCalledWith(doc.id, {
+      storage: "gist",
+      gistId: undefined,
+      filename: "claimed.md",
+      isPublic: true,
+      description: doc.title,
+    });
+    expect(screen.getByTestId("picker-tab-gist")).toBeDisabled();
+    expect(screen.getByTestId("picker-tab-repo")).toBeDisabled();
+    expect(screen.getByPlaceholderText("Filter gists")).toBeDisabled();
+    expect(filename).toBeDisabled();
+    expect(visibility).toBeDisabled();
+    expect(existing).toBeDisabled();
+    expect(screen.getByTestId("gist-create")).toBeDisabled();
+
+    fireEvent.change(filename, { target: { value: "mutated.md" } });
+    fireEvent.click(visibility);
+    fireEvent.click(existing);
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    expect(filename).toHaveValue("claimed.md");
+    expect(visibility).toBeChecked();
+    expect(screen.queryByTestId("repo-list")).toBeNull();
+    expect(linkDocument).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      request.resolve({ document: linked });
+      await request.promise;
+    });
+    expect(onLinked).toHaveBeenCalledTimes(1);
+    expect(onLinked).toHaveBeenCalledWith(linked);
+  });
+
+  it("freezes a repository destination and locks tab, back, branch, file, filter, path, and submit controls", async () => {
+    const request = deferred<{ document: DocumentDto }>();
+    const doc = documentDto();
+    const linked = {
+      ...doc,
+      storage: "repo" as const,
+      repoOwner: currentRepo.owner,
+      repoName: currentRepo.name,
+      repoBranch: "main",
+      repoPath: "docs/claimed.md",
+    };
+    const onLinked = vi.fn();
+    branches.mockResolvedValue({ branches: ["main", "next"] });
+    files.mockResolvedValue({ files: [repoFile("README.md"), repoFile("docs/other.md")] });
+    linkDocument.mockReturnValue(request.promise);
+
+    render(<GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured onLinked={onLinked} />);
+    await selectRepository();
+    const repoPath = await screen.findByTestId("repo-path");
+    const branchSelect = await screen.findByTestId("branch-select");
+    const fileChoice = (await screen.findAllByTestId("repo-file"))[0];
+    fireEvent.change(repoPath, { target: { value: "docs/claimed.md" } });
+    fireEvent.click(screen.getByTestId("repo-link"));
+
+    expect(linkDocument).toHaveBeenCalledTimes(1);
+    expect(linkDocument).toHaveBeenCalledWith(doc.id, {
+      storage: "repo",
+      owner: currentRepo.owner,
+      repo: currentRepo.name,
+      branch: "main",
+      path: "docs/claimed.md",
+    });
+    expect(screen.getByTestId("picker-tab-gist")).toBeDisabled();
+    expect(screen.getByTestId("picker-tab-repo")).toBeDisabled();
+    expect(screen.getByPlaceholderText("Filter files")).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Repositories/ })).toBeDisabled();
+    expect(branchSelect).toBeDisabled();
+    expect(fileChoice).toBeDisabled();
+    expect(repoPath).toBeDisabled();
+    expect(screen.getByTestId("repo-link")).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Repositories/ }));
+    fireEvent.change(branchSelect, { target: { value: "next" } });
+    fireEvent.change(repoPath, { target: { value: "docs/mutated.md" } });
+    fireEvent.click(fileChoice);
+    fireEvent.click(screen.getByTestId("picker-tab-gist"));
+    expect(branchSelect).toHaveValue("main");
+    expect(repoPath).toHaveValue("docs/claimed.md");
+    expect(screen.getByText(currentRepo.fullName)).toBeInTheDocument();
+    expect(linkDocument).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      request.resolve({ document: linked });
+      await request.promise;
+    });
+    expect(onLinked).toHaveBeenCalledTimes(1);
+    expect(onLinked).toHaveBeenCalledWith(linked);
+  });
+
+  it("invalidates an import when the picker mode is replaced", async () => {
+    const oldRequest = deferred<{ document: { id: string; title: string } }>();
+    const onImported = vi.fn();
+    const onLinked = vi.fn();
+    importDocument.mockReturnValue(oldRequest.promise);
+    const view = render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+
+    fireEvent.click(await screen.findByTestId("gist-item"));
+    expect(importDocument).toHaveBeenCalledTimes(1);
+    view.rerender(<GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured onLinked={onLinked} />);
+    expect(screen.getByTestId("gist-create")).toBeEnabled();
+
+    await act(async () => {
+      oldRequest.resolve({ document: { id: "stale-import", title: "Stale import" } });
+      await oldRequest.promise;
+    });
+
+    expect(onImported).not.toHaveBeenCalled();
+    expect(onLinked).not.toHaveBeenCalled();
+    expect(screen.getByTestId("gist-create")).toBeEnabled();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+  });
+
+  it("ignores a pending action after unmount without affecting a new picker visit", async () => {
+    const oldRequest = deferred<{ document: { id: string; title: string } }>();
+    const oldCallback = vi.fn();
+    const currentCallback = vi.fn();
+    importDocument.mockReturnValue(oldRequest.promise);
+    const oldView = render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={oldCallback} />);
+
+    fireEvent.click(await screen.findByTestId("gist-item"));
+    oldView.unmount();
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={currentCallback} />);
+    expect(await screen.findByTestId("gist-item")).toBeEnabled();
+
+    await act(async () => {
+      oldRequest.reject(new Error("closed picker failure"));
+      await Promise.allSettled([oldRequest.promise]);
+    });
+
+    expect(oldCallback).not.toHaveBeenCalled();
+    expect(currentCallback).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expect(screen.getByTestId("gist-item")).toBeEnabled();
+  });
+
+  it("does not let an old document failure unlock or add feedback to the current action", async () => {
+    const oldRequest = deferred<{ document: DocumentDto }>();
+    const currentRequest = deferred<{ document: DocumentDto }>();
+    const firstDoc = documentDto("doc-first", "First");
+    const currentDoc = documentDto("doc-second", "Second");
+    const onLinked = vi.fn();
+    linkDocument.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+    const view = render(<GitHubPicker mode="link" doc={firstDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+
+    fireEvent.click(screen.getByTestId("gist-create"));
+    view.rerender(<GitHubPicker mode="link" doc={currentDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+    fireEvent.click(screen.getByTestId("gist-create"));
+    expect(linkDocument).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("gist-create")).toBeDisabled();
+
+    await act(async () => {
+      oldRequest.reject(new Error("stale document failure"));
+      await Promise.allSettled([oldRequest.promise]);
+    });
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expect(screen.getByTestId("gist-create")).toBeDisabled();
+
+    await act(async () => {
+      currentRequest.reject(new Error("current document failure"));
+      await Promise.allSettled([currentRequest.promise]);
+    });
+    expect(screen.getByTestId("github-action-error")).toHaveTextContent("current document failure");
+    expect(screen.getByTestId("gist-create")).toBeEnabled();
+    expect(onLinked).not.toHaveBeenCalled();
+  });
+
+  it("keeps current failure feedback through an old success, then retries with one current callback", async () => {
+    const oldRequest = deferred<{ document: DocumentDto }>();
+    const failedCurrent = deferred<{ document: DocumentDto }>();
+    const retriedCurrent = deferred<{ document: DocumentDto }>();
+    const firstDoc = documentDto("doc-first", "First");
+    const currentDoc = documentDto("doc-second", "Second");
+    const linkedCurrent = { ...currentDoc, storage: "gist" as const, gistId: "new-gist", gistFile: "second.md" };
+    const onLinked = vi.fn();
+    linkDocument.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(failedCurrent.promise).mockReturnValueOnce(retriedCurrent.promise);
+    const view = render(<GitHubPicker mode="link" doc={firstDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+
+    fireEvent.click(screen.getByTestId("gist-create"));
+    view.rerender(<GitHubPicker mode="link" doc={currentDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+    fireEvent.click(screen.getByTestId("gist-create"));
+
+    await act(async () => {
+      failedCurrent.reject(new Error("retry this action"));
+      await Promise.allSettled([failedCurrent.promise]);
+    });
+    expect(screen.getByTestId("github-action-error")).toHaveTextContent("retry this action");
+
+    await act(async () => {
+      oldRequest.resolve({ document: { ...firstDoc, storage: "gist", gistId: "old-gist", gistFile: "first.md" } });
+      await oldRequest.promise;
+    });
+    expect(onLinked).not.toHaveBeenCalled();
+    expect(screen.getByTestId("github-action-error")).toHaveTextContent("retry this action");
+    expect(screen.getByTestId("gist-create")).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId("gist-create"));
+    expect(linkDocument).toHaveBeenCalledTimes(3);
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    await act(async () => {
+      retriedCurrent.resolve({ document: linkedCurrent });
+      await retriedCurrent.promise;
+    });
+    expect(onLinked).toHaveBeenCalledTimes(1);
+    expect(onLinked).toHaveBeenCalledWith(linkedCurrent);
+  });
+
+  it("surfaces invalid link context without claiming a busy owner", async () => {
+    const missingDocView = render(<GitHubPicker mode="link" githubAvailable githubConfigured />);
+    fireEvent.click(screen.getByTestId("gist-create"));
+    expect(linkDocument).not.toHaveBeenCalled();
+    expect(screen.getByTestId("github-action-error")).toHaveTextContent("Something went wrong");
+    expect(screen.getByTestId("gist-create")).toBeEnabled();
+    missingDocView.unmount();
+
+    const invalidRepo = repository("missing-branch", "");
+    repos.mockResolvedValue({ repos: [invalidRepo] });
+    render(<GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured />);
+    await selectRepository(invalidRepo.fullName);
+    const repoPath = await screen.findByTestId("repo-path");
+    fireEvent.change(repoPath, { target: { value: "docs/new.md" } });
+    fireEvent.click(screen.getByTestId("repo-link"));
+
+    expect(linkDocument).not.toHaveBeenCalled();
+    expect(screen.getByTestId("github-action-error")).toHaveTextContent("Something went wrong");
+    expect(repoPath).toBeEnabled();
+    expect(screen.getByTestId("repo-link")).toBeEnabled();
   });
 });

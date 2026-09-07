@@ -2,7 +2,7 @@
 import { Dialog, DialogContent, Spinner } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { signIn } from "next-auth/react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
@@ -69,6 +69,34 @@ interface RepoItem {
   htmlUrl: string;
   description: string | null;
 }
+
+interface GitHubPickerProps {
+  mode: "link" | "import";
+  doc?: DocumentDto;
+  onLinked?: (doc: DocumentDto) => void;
+  onImported?: (docId: string) => void;
+  /** The signed-in account has a GitHub token. */
+  githubAvailable: boolean;
+  /** The server has a GitHub OAuth app, so "Sign in with GitHub" can work. */
+  githubConfigured: boolean;
+}
+
+type GitHubPickerAction =
+  | Readonly<{ kind: "gist-import"; payload: Readonly<{ source: "gist"; gistId?: string; filename?: string }> }>
+  | Readonly<{ kind: "gist-link"; payload: Readonly<{ storage: "gist"; gistId?: string; filename: string; isPublic: boolean; description: string }> }>
+  | Readonly<{ kind: "repo-import"; payload: Readonly<{ source: "repo"; owner: string; repo: string; branch: string; path: string }> }>
+  | Readonly<{ kind: "repo-link"; payload: Readonly<{ storage: "repo"; owner: string; repo: string; branch: string; path: string }> }>;
+
+interface GitHubPickerOperation {
+  readonly id: number;
+  readonly visit: number;
+  readonly mode: GitHubPickerProps["mode"];
+  readonly documentId: string | null;
+  readonly action: GitHubPickerAction;
+}
+
+let githubPickerVisitSequence = 0;
+let githubPickerOperationSequence = 0;
 
 interface ListLoadState<T> {
   items: T[] | null;
@@ -162,23 +190,19 @@ function ListLoadError({
 }
 
 /** Connect a document to a gist or repository file, or pick a file to import. */
-export function GitHubPicker({
+export function GitHubPicker(props: GitHubPickerProps) {
+  const documentKey = props.mode === "link" ? (props.doc?.id ?? "missing") : "import";
+  return <GitHubPickerVisit key={`${props.mode}:${documentKey}`} {...props} />;
+}
+
+function GitHubPickerVisit({
   mode,
   doc,
   onLinked,
   onImported,
   githubAvailable,
   githubConfigured,
-}: {
-  mode: "link" | "import";
-  doc?: DocumentDto;
-  onLinked?: (doc: DocumentDto) => void;
-  onImported?: (docId: string) => void;
-  /** The signed-in account has a GitHub token. */
-  githubAvailable: boolean;
-  /** The server has a GitHub OAuth app, so "Sign in with GitHub" can work. */
-  githubConfigured: boolean;
-}) {
+}: GitHubPickerProps) {
   const [tab, setTab] = useState<Tab>("gist");
   const { state: gistList, load: startGistLoad, invalidate: invalidateGistLoad } = useListLoad<GistItem>();
   const { state: repoList, load: startRepoLoad, invalidate: invalidateRepoLoad } = useListLoad<RepoItem>();
@@ -195,6 +219,24 @@ export function GitHubPicker({
   const [repo, setRepo] = useState<RepoItem | null>(null);
   const [branch, setBranch] = useState("");
   const [path, setPath] = useState("");
+  const [visit] = useState(() => ++githubPickerVisitSequence);
+  const mountedRef = useRef(false);
+  const activeOperationRef = useRef<GitHubPickerOperation | null>(null);
+  const onLinkedRef = useRef(onLinked);
+  const onImportedRef = useRef(onImported);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeOperationRef.current = null;
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    onLinkedRef.current = onLinked;
+    onImportedRef.current = onImported;
+  }, [onImported, onLinked]);
 
   const loadGists = useCallback(() => {
     if (tab !== "gist") return;
@@ -257,6 +299,7 @@ export function GitHubPicker({
   }, [fileList.items, filter]);
 
   const selectTab = (nextTab: Tab) => {
+    if (activeOperationRef.current) return;
     if (nextTab === tab) return;
     if (tab === "gist") {
       invalidateGistLoad();
@@ -271,6 +314,7 @@ export function GitHubPicker({
   };
 
   const selectRepo = (nextRepo: RepoItem) => {
+    if (activeOperationRef.current) return;
     resetBranchLoad();
     resetFileLoad();
     setRepo(nextRepo);
@@ -278,6 +322,7 @@ export function GitHubPicker({
   };
 
   const showRepositories = () => {
+    if (activeOperationRef.current) return;
     resetBranchLoad();
     resetFileLoad();
     setRepo(null);
@@ -285,45 +330,106 @@ export function GitHubPicker({
   };
 
   const selectBranch = (nextBranch: string) => {
+    if (activeOperationRef.current) return;
     if (nextBranch === branch) return;
     resetFileLoad();
     setBranch(nextBranch);
   };
 
-  const run = async (fn: () => Promise<void>) => {
+  const run = (action: GitHubPickerAction) => {
+    if (activeOperationRef.current) return;
+    const documentId = mode === "link" ? (doc?.id ?? null) : null;
+    if (mode === "link" && !documentId) {
+      setActionError("Something went wrong");
+      return;
+    }
+
+    const operation = Object.freeze<GitHubPickerOperation>({
+      id: ++githubPickerOperationSequence,
+      visit,
+      mode,
+      documentId,
+      action,
+    });
+    activeOperationRef.current = operation;
     setBusy(true);
     setActionError(null);
-    try {
-      await fn();
-    } catch (e) {
-      setActionError(apiErrorText(e, "Something went wrong"));
-    } finally {
-      setBusy(false);
-    }
+
+    const isCurrent = () =>
+      mountedRef.current &&
+      activeOperationRef.current === operation &&
+      operation.visit === visit &&
+      operation.mode === mode &&
+      operation.documentId === (mode === "link" ? (doc?.id ?? null) : null);
+
+    void (async () => {
+      try {
+        switch (operation.action.kind) {
+          case "gist-import": {
+            const res = await api.import(operation.action.payload);
+            if (isCurrent()) onImportedRef.current?.(res.document.id);
+            break;
+          }
+          case "gist-link": {
+            const res = await api.documents.link(operation.documentId!, operation.action.payload);
+            if (isCurrent()) onLinkedRef.current?.(res.document);
+            break;
+          }
+          case "repo-import": {
+            const res = await api.import(operation.action.payload);
+            if (isCurrent()) onImportedRef.current?.(res.document.id);
+            break;
+          }
+          case "repo-link": {
+            const res = await api.documents.link(operation.documentId!, operation.action.payload);
+            if (isCurrent()) onLinkedRef.current?.(res.document);
+            break;
+          }
+        }
+      } catch (error) {
+        if (isCurrent()) setActionError(apiErrorText(error, "Something went wrong"));
+      } finally {
+        if (!isCurrent()) return;
+        activeOperationRef.current = null;
+        setBusy(false);
+      }
+    })();
   };
 
-  const linkGist = (gistId?: string, filename?: string) =>
-    run(async () => {
-      if (mode === "import") {
-        const res = await api.import({ source: "gist", gistId, filename });
-        onImported?.(res.document.id);
-        return;
-      }
-      const res = await api.documents.link(doc!.id, { storage: "gist", gistId, filename: filename ?? gistName, isPublic: gistPublic, description: doc!.title });
-      onLinked?.(res.document);
-    });
+  const linkGist = (gistId?: string, filename?: string) => {
+    if (activeOperationRef.current) return;
+    if (mode === "import") {
+      const payload = Object.freeze({ source: "gist" as const, gistId, filename });
+      run(Object.freeze({ kind: "gist-import" as const, payload }));
+      return;
+    }
+    if (!doc || (!filename && !gistName.trim())) {
+      setActionError("Something went wrong");
+      return;
+    }
+    const payload = Object.freeze({ storage: "gist" as const, gistId, filename: filename ?? gistName, isPublic: gistPublic, description: doc.title });
+    run(Object.freeze({ kind: "gist-link" as const, payload }));
+  };
 
-  const linkRepo = (filePath: string) =>
-    run(async () => {
-      if (!repo) return;
-      if (mode === "import") {
-        const res = await api.import({ source: "repo", owner: repo.owner, repo: repo.name, branch, path: filePath });
-        onImported?.(res.document.id);
-        return;
-      }
-      const res = await api.documents.link(doc!.id, { storage: "repo", owner: repo.owner, repo: repo.name, branch, path: filePath });
-      onLinked?.(res.document);
-    });
+  const linkRepo = (filePath: string) => {
+    if (activeOperationRef.current) return;
+    if (!repo || !branch || !filePath.trim()) {
+      setActionError("Something went wrong");
+      return;
+    }
+    const destination = repo;
+    if (mode === "import") {
+      const payload = Object.freeze({ source: "repo" as const, owner: destination.owner, repo: destination.name, branch, path: filePath });
+      run(Object.freeze({ kind: "repo-import" as const, payload }));
+      return;
+    }
+    if (!doc) {
+      setActionError("Something went wrong");
+      return;
+    }
+    const payload = Object.freeze({ storage: "repo" as const, owner: destination.owner, repo: destination.name, branch, path: filePath });
+    run(Object.freeze({ kind: "repo-link" as const, payload }));
+  };
 
   if (!githubAvailable) {
     return <GitHubSignInPrompt githubConfigured={githubConfigured} />;
@@ -339,6 +445,7 @@ export function GitHubPicker({
               type="button"
               className={cn("rounded-md px-3 py-1.5 text-sm font-medium", tab === t ? "bg-inverse text-white" : "text-ink-2 hover:bg-surface-3")}
               onClick={() => selectTab(t)}
+              disabled={busy}
               data-testid={`picker-tab-${t}`}
             >
               {t === "gist" ? "Gist" : "Repository"}
@@ -347,7 +454,15 @@ export function GitHubPicker({
         </div>
         <div className="relative flex-1">
           <Search size={15} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
-          <input className="input pl-9" placeholder={tab === "gist" ? "Filter gists" : repo ? "Filter files" : "Filter repositories"} value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <input
+            className="input pl-9"
+            placeholder={tab === "gist" ? "Filter gists" : repo ? "Filter files" : "Filter repositories"}
+            value={filter}
+            disabled={busy}
+            onChange={(e) => {
+              if (!activeOperationRef.current) setFilter(e.target.value);
+            }}
+          />
         </div>
       </div>
       {actionError && (
@@ -361,13 +476,38 @@ export function GitHubPicker({
           {mode === "link" && (
             <div className="rounded-xl border border-line p-3">
               <label className="flex items-center gap-2 text-sm font-medium text-ink">
-                <input type="radio" checked={newGist} onChange={() => setNewGist(true)} /> Create a new gist
+                <input
+                  type="radio"
+                  checked={newGist}
+                  disabled={busy}
+                  onChange={() => {
+                    if (!activeOperationRef.current) setNewGist(true);
+                  }}
+                />{" "}
+                Create a new gist
               </label>
               {newGist && (
                 <div className="mt-3 flex items-center gap-2 pl-6">
-                  <input className="input flex-1" value={gistName} onChange={(e) => setGistName(e.target.value)} placeholder="filename.md" data-testid="gist-filename" />
+                  <input
+                    className="input flex-1"
+                    value={gistName}
+                    disabled={busy}
+                    onChange={(e) => {
+                      if (!activeOperationRef.current) setGistName(e.target.value);
+                    }}
+                    placeholder="filename.md"
+                    data-testid="gist-filename"
+                  />
                   <label className="flex items-center gap-1.5 text-sm text-ink-2">
-                    <input type="checkbox" checked={gistPublic} onChange={(e) => setGistPublic(e.target.checked)} /> Public
+                    <input
+                      type="checkbox"
+                      checked={gistPublic}
+                      disabled={busy}
+                      onChange={(e) => {
+                        if (!activeOperationRef.current) setGistPublic(e.target.checked);
+                      }}
+                    />{" "}
+                    Public
                   </label>
                   <button type="button" className="btn btn-primary" disabled={busy || !gistName.trim()} onClick={() => void linkGist()} data-testid="gist-create">
                     {busy ? <Loader2 size={16} className="animate-spin" /> : "Create & publish"}
@@ -375,7 +515,15 @@ export function GitHubPicker({
                 </div>
               )}
               <label className="mt-3 flex items-center gap-2 text-sm font-medium text-ink">
-                <input type="radio" checked={!newGist} onChange={() => setNewGist(false)} /> Use an existing gist
+                <input
+                  type="radio"
+                  checked={!newGist}
+                  disabled={busy}
+                  onChange={() => {
+                    if (!activeOperationRef.current) setNewGist(false);
+                  }}
+                />{" "}
+                Use an existing gist
               </label>
             </div>
           )}
@@ -439,7 +587,13 @@ export function GitHubPicker({
                 <ul className="divide-y divide-line">
                   {filteredRepos.map((r) => (
                     <li key={r.fullName}>
-                      <button type="button" className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2" onClick={() => selectRepo(r)} data-testid="repo-item">
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
+                        onClick={() => selectRepo(r)}
+                        disabled={busy}
+                        data-testid="repo-item"
+                      >
                         <GitHubIcon size={16} className="shrink-0 text-ink-4" />
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium text-ink">{r.fullName}</div>
@@ -458,7 +612,7 @@ export function GitHubPicker({
           ) : (
             <>
               <div className="flex items-center gap-2 text-sm">
-                <button type="button" className="btn btn-sm btn-ghost" onClick={showRepositories}>
+                <button type="button" className="btn btn-sm btn-ghost" onClick={showRepositories} disabled={busy}>
                   ← Repositories
                 </button>
                 <span className="font-medium text-ink">{repo.fullName}</span>
@@ -471,7 +625,7 @@ export function GitHubPicker({
                   ) : branchList.items.length === 0 ? (
                     <span data-testid="branch-empty">No branches found.</span>
                   ) : (
-                    <select className="select h-8 text-xs" value={branch} onChange={(e) => selectBranch(e.target.value)} data-testid="branch-select">
+                    <select className="select h-8 text-xs" value={branch} onChange={(e) => selectBranch(e.target.value)} disabled={busy} data-testid="branch-select">
                       {branchList.items.map((b) => (
                         <option key={b} value={b}>
                           {b}
@@ -489,7 +643,16 @@ export function GitHubPicker({
                     if (path.trim()) void linkRepo(path.trim());
                   }}
                 >
-                  <input className="input flex-1 font-mono text-[13px]" placeholder="docs/new-file.md (new or existing path)" value={path} onChange={(e) => setPath(e.target.value)} data-testid="repo-path" />
+                  <input
+                    className="input flex-1 font-mono text-[13px]"
+                    placeholder="docs/new-file.md (new or existing path)"
+                    value={path}
+                    disabled={busy}
+                    onChange={(e) => {
+                      if (!activeOperationRef.current) setPath(e.target.value);
+                    }}
+                    data-testid="repo-path"
+                  />
                   <button type="submit" className="btn btn-primary" disabled={busy || !path.trim()} data-testid="repo-link">
                     {busy ? <Loader2 size={16} className="animate-spin" /> : "Connect"}
                   </button>
@@ -512,7 +675,11 @@ export function GitHubPicker({
                           type="button"
                           className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface-2 disabled:opacity-50"
                           disabled={busy}
-                          onClick={() => (mode === "link" ? setPath(f.path) : void linkRepo(f.path))}
+                          onClick={() => {
+                            if (activeOperationRef.current) return;
+                            if (mode === "link") setPath(f.path);
+                            else linkRepo(f.path);
+                          }}
                           data-testid="repo-file"
                         >
                           <FileText size={15} className="shrink-0 text-ink-4" />
