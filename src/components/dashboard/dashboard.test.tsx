@@ -52,6 +52,13 @@ import { Dashboard, TemplateGrid, TrashView } from "./dashboard";
 
 const SEARCH_DEBOUNCE_MS = 250;
 const USER = { id: "owner", name: "Owner", login: "owner", image: null };
+const TEST_EVENT_CURRENT_TARGET_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor(Event.prototype, "currentTarget");
+const TEST_EVENT_CURRENT_TARGET = TEST_EVENT_CURRENT_TARGET_DESCRIPTOR?.get
+  ? (Function.prototype.call.bind(
+      TEST_EVENT_CURRENT_TARGET_DESCRIPTOR.get,
+    ) as (event: Event) => EventTarget | null)
+  : null;
 
 function doc(id: string, title: string, excerpt = ""): DocumentSummaryDto {
   return {
@@ -511,16 +518,15 @@ function shadowTemplateCurrentTarget(
   documentRoot: boolean,
 ) {
   const ownerWindow = ownerDocument.defaultView;
-  const getter = Object.getOwnPropertyDescriptor(
-    ownerWindow?.Event.prototype ?? {},
-    "currentTarget",
-  )?.get;
-  if (!getter) throw new Error("The native currentTarget getter is unavailable");
+  if (!ownerWindow || !TEST_EVENT_CURRENT_TARGET) {
+    throw new Error("The native currentTarget getter is unavailable");
+  }
   let documentReads = 0;
   Object.defineProperty(event, "currentTarget", {
     configurable: true,
     get() {
-      const actual = getter.call(event) as EventTarget | null;
+      const actual = TEST_EVENT_CURRENT_TARGET(event);
+      if (actual instanceof ownerWindow.HTMLButtonElement) return actual;
       if (actual !== ownerDocument) return grid;
       documentReads += 1;
       return documentRoot && documentReads > 1 ? grid : ownerDocument;
@@ -1232,6 +1238,282 @@ describe("TemplateGrid publication ownership", () => {
         await act(async () => root.unmount());
         if (host instanceof ownerWindow.HTMLDivElement) host.remove();
         frame?.remove();
+      }
+    },
+  );
+
+  it.each(["descriptor", "call"] as const)(
+    "uses the module-captured native getter after %s poisoning",
+    async (poisonKind) => {
+      const descriptor = TEST_EVENT_CURRENT_TARGET_DESCRIPTOR;
+      const trustedCurrentTarget = TEST_EVENT_CURRENT_TARGET;
+      if (!descriptor?.get || !trustedCurrentTarget) {
+        throw new Error("The native currentTarget getter is unavailable");
+      }
+      const host = document.createElement("div");
+      document.body.append(host);
+      const onPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      host.innerHTML = renderToString(
+        <StrictMode>
+          <TemplateGrid onPick={onPick} busy={null} />
+        </StrictMode>,
+      );
+      const grid = templateGrid(host);
+      const button = templateButton(host, template.id);
+      const getterCallDescriptor = Object.getOwnPropertyDescriptor(
+        descriptor.get,
+        "call",
+      );
+      const poisonedCurrentTarget = (event: Event) => {
+        const actual = trustedCurrentTarget(event);
+        if (
+          actual === document ||
+          actual instanceof HTMLButtonElement
+        ) {
+          return actual;
+        }
+        return grid;
+      };
+      const restoreDescriptor = () => {
+        Object.defineProperty(
+          Event.prototype,
+          "currentTarget",
+          descriptor,
+        );
+      };
+      const restoreCall = () => {
+        if (getterCallDescriptor) {
+          Object.defineProperty(
+            descriptor.get!,
+            "call",
+            getterCallDescriptor,
+          );
+        } else {
+          Reflect.deleteProperty(descriptor.get!, "call");
+        }
+      };
+      if (poisonKind === "descriptor") {
+        Object.defineProperty(Event.prototype, "currentTarget", {
+          ...descriptor,
+          get(this: Event) {
+            return poisonedCurrentTarget(this);
+          },
+        });
+      }
+      let root: ReturnType<typeof hydrateRoot> | null = null;
+      const attack = (event: MouseEvent) => {
+        captureTemplateActivation(button)(
+          fabricatedTemplateBubble(button, event),
+        );
+        event.stopPropagation();
+      };
+      grid.addEventListener("click", attack);
+
+      try {
+        await act(async () => {
+          root = hydrateRoot(
+            host,
+            <StrictMode>
+              <TemplateGrid onPick={onPick} busy={null} />
+            </StrictMode>,
+          );
+        });
+        restoreDescriptor();
+        if (poisonKind === "call") {
+          Object.defineProperty(descriptor.get, "call", {
+            configurable: true,
+            value: (_event: Event) => poisonedCurrentTarget(_event),
+          });
+        }
+        await act(async () => {
+          button.click();
+        });
+        expect(onPick).not.toHaveBeenCalled();
+
+        restoreCall();
+        grid.removeEventListener("click", attack);
+        await act(async () => {
+          button.click();
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+      } finally {
+        restoreDescriptor();
+        restoreCall();
+        grid.removeEventListener("click", attack);
+        if (root) await act(async () => root?.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["container", "document"] as const)(
+    "rejects React capture relocated onto the grid for a %s root",
+    async (rootKind) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const ownerDocument = frame.contentDocument;
+      const ownerWindow = frame.contentWindow;
+      if (!ownerDocument || !ownerWindow) {
+        throw new Error("The test frame has no document");
+      }
+      const onPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      const tree =
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid onPick={onPick} busy={null} />
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>
+        );
+      const markup = renderToString(tree);
+      ownerDocument.open();
+      ownerDocument.write(
+        rootKind === "document"
+          ? `<!doctype html>${markup}`
+          : "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>",
+      );
+      ownerDocument.close();
+      const container =
+        rootKind === "container"
+          ? ownerDocument.querySelector<HTMLDivElement>("#root")
+          : null;
+      if (rootKind === "container" && !container) {
+        throw new Error("The hydration container was not rendered");
+      }
+      const host = container ?? ownerDocument;
+      if (container) container.innerHTML = markup;
+      const grid = ownerDocument.querySelector<HTMLUListElement>(
+        '[data-testid="template-grid"]',
+      );
+      const button = ownerDocument.querySelector<HTMLButtonElement>(
+        `[data-testid="template-${template.id}"]`,
+      );
+      if (!grid || !button) {
+        throw new Error("The server template grid was not rendered");
+      }
+      const rootTarget: EventTarget = host;
+      const ownAddDescriptor = Object.getOwnPropertyDescriptor(
+        rootTarget,
+        "addEventListener",
+      );
+      const rootAdd = rootTarget.addEventListener.bind(rootTarget);
+      const restoreRootAdd = () => {
+        if (ownAddDescriptor) {
+          Object.defineProperty(
+            rootTarget,
+            "addEventListener",
+            ownAddDescriptor,
+          );
+        } else {
+          Reflect.deleteProperty(rootTarget, "addEventListener");
+        }
+      };
+      Object.defineProperty(rootTarget, "addEventListener", {
+        configurable: true,
+        value: (
+          type: string,
+          listener: EventListenerOrEventListenerObject | null,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          if (!listener) return;
+          const capture =
+            options === true ||
+            (typeof options === "object" && options.capture === true);
+          if (type === "click" && capture) {
+            grid.addEventListener(type, listener, options);
+          } else {
+            rootAdd(type, listener, options);
+          }
+        },
+      });
+      const attack = (event: MouseEvent) => {
+        captureTemplateActivation(button)(
+          fabricatedTemplateBubble(button, event),
+        );
+        event.stopPropagation();
+      };
+      grid.addEventListener("click", attack);
+      let root: ReturnType<typeof hydrateRoot> | null = null;
+
+      try {
+        await act(async () => {
+          root = hydrateRoot(host, tree);
+          restoreRootAdd();
+        });
+        await act(async () => {
+          button.click();
+        });
+        expect(onPick).not.toHaveBeenCalled();
+      } finally {
+        restoreRootAdd();
+        grid.removeEventListener("click", attack);
+        if (root) await act(async () => root?.unmount());
+        frame.remove();
+      }
+
+      const freshFrame = document.createElement("iframe");
+      document.body.append(freshFrame);
+      const freshDocument = freshFrame.contentDocument;
+      const freshWindow = freshFrame.contentWindow;
+      if (!freshDocument || !freshWindow) {
+        throw new Error("The fresh test frame has no document");
+      }
+      freshDocument.open();
+      freshDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      freshDocument.close();
+      const freshHost =
+        rootKind === "document"
+          ? freshDocument
+          : freshDocument.body.appendChild(
+              freshDocument.createElement("div"),
+            );
+      const freshRoot = createRoot(freshHost);
+      try {
+        await act(async () => {
+          freshRoot.render(
+            rootKind === "document" ? (
+              <StrictMode>
+                <html>
+                  {createElement("head")}
+                  <body>
+                    <TemplateGrid onPick={onPick} busy={null} />
+                  </body>
+                </html>
+              </StrictMode>
+            ) : (
+              <StrictMode>
+                <TemplateGrid onPick={onPick} busy={null} />
+              </StrictMode>
+            ),
+          );
+        });
+        const freshButton =
+          freshDocument.querySelector<HTMLButtonElement>(
+            `[data-testid="template-${template.id}"]`,
+          );
+        if (!freshButton) {
+          throw new Error("The fresh template button was not rendered");
+        }
+        await act(async () => {
+          freshButton.click();
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+      } finally {
+        await act(async () => freshRoot.unmount());
+        freshFrame.remove();
       }
     },
   );

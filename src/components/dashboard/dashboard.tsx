@@ -23,6 +23,44 @@ import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-p
 import { buildDashboardCommands } from "@/components/editor/commands";
 import { signOutSafely } from "@/lib/sign-out";
 
+const EVENT_CURRENT_TARGET_GETTER = Object.getOwnPropertyDescriptor(
+  Event.prototype,
+  "currentTarget",
+)?.get;
+const EVENT_DEFAULT_PREVENTED_GETTER = Object.getOwnPropertyDescriptor(
+  Event.prototype,
+  "defaultPrevented",
+)?.get;
+const TRUSTED_EVENT_CURRENT_TARGET = EVENT_CURRENT_TARGET_GETTER
+  ? (Function.prototype.call.bind(
+      EVENT_CURRENT_TARGET_GETTER,
+    ) as (event: Event) => EventTarget | null)
+  : null;
+const TRUSTED_EVENT_DEFAULT_PREVENTED = EVENT_DEFAULT_PREVENTED_GETTER
+  ? (Function.prototype.call.bind(
+      EVENT_DEFAULT_PREVENTED_GETTER,
+    ) as (event: Event) => boolean)
+  : null;
+const TRUSTED_EVENT_COMPOSED_PATH = Function.prototype.call.bind(
+  Event.prototype.composedPath,
+) as (event: Event) => EventTarget[];
+const TRUSTED_ADD_EVENT_LISTENER = Function.prototype.call.bind(
+  EventTarget.prototype.addEventListener,
+) as <E extends Event>(
+  target: EventTarget,
+  type: string,
+  listener: (event: E) => void,
+  options?: boolean | AddEventListenerOptions,
+) => void;
+const TRUSTED_REMOVE_EVENT_LISTENER = Function.prototype.call.bind(
+  EventTarget.prototype.removeEventListener,
+) as <E extends Event>(
+  target: EventTarget,
+  type: string,
+  listener: (event: E) => void,
+  options?: boolean | EventListenerOptions,
+) => void;
+
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
 
@@ -1065,29 +1103,19 @@ function createTemplateGridPublication(
     if (!grid) return null;
     const ownerDocument = grid.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
-    const nativeCurrentTargetGetter = Object.getOwnPropertyDescriptor(
-      ownerWindow?.Event.prototype ?? {},
-      "currentTarget",
-    )?.get;
-    const nativeDefaultPreventedGetter = Object.getOwnPropertyDescriptor(
-      ownerWindow?.Event.prototype ?? {},
-      "defaultPrevented",
-    )?.get;
     const placement = snapshotTemplateGridPlacement(grid);
     if (
       !ownerWindow ||
       !(grid instanceof ownerWindow.HTMLUListElement) ||
-      !nativeCurrentTargetGetter ||
-      !nativeDefaultPreventedGetter ||
+      !TRUSTED_EVENT_CURRENT_TARGET ||
+      !TRUSTED_EVENT_DEFAULT_PREVENTED ||
       !placement ||
       !templateGridElementsAreCurrent(render, gridOwner, entryOwners)
     ) {
       return null;
     }
-    const nativeCurrentTarget = (event: Event) =>
-      nativeCurrentTargetGetter.call(event) as EventTarget | null;
-    const nativeWasPrevented = (event: Event) =>
-      Boolean(nativeDefaultPreventedGetter.call(event));
+    const nativeCurrentTarget = TRUSTED_EVENT_CURRENT_TARGET;
+    const nativeWasPrevented = TRUSTED_EVENT_DEFAULT_PREVENTED;
     const predecessor = cells.active.current ?? cells.successorOf.current;
     const predecessorElements =
       predecessor?.render.mount === render.mount
@@ -1177,10 +1205,7 @@ function createTemplateGridPublication(
     const controlForTarget = (target: Node) =>
       entries.find((entry) => entry.targets.includes(target)) ?? null;
     const eventPath = (event: Event, target: Node) => {
-      if (event.composedPath !== ownerWindow.Event.prototype.composedPath) {
-        return null;
-      }
-      const path = event.composedPath();
+      const path = TRUSTED_EVENT_COMPOSED_PATH(event);
       return templateGridEventPathMatches(ownerDocument, target, path)
         ? Object.freeze([...path])
         : null;
@@ -1195,6 +1220,7 @@ function createTemplateGridPublication(
       return (
         native.eventPhase === phase &&
         currentTarget instanceof ownerWindow.Node &&
+        currentTarget !== grid &&
         (currentTarget === ownerDocument ||
           currentTarget.ownerDocument === ownerDocument) &&
         currentTarget.contains(grid)
@@ -1284,20 +1310,49 @@ function createTemplateGridPublication(
       return Object.freeze({ entry, listener });
     });
     const addNativeListeners = () => {
-      ownerDocument.addEventListener("click", onNativeClickCapture, true);
-      ownerDocument.addEventListener("click", onNativeClickBubble);
+      TRUSTED_ADD_EVENT_LISTENER(
+        ownerDocument,
+        "click",
+        onNativeClickCapture,
+        true,
+      );
+      TRUSTED_ADD_EVENT_LISTENER(
+        ownerDocument,
+        "click",
+        onNativeClickBubble,
+      );
       for (const { entry, listener } of nativeBoundaryListeners) {
-        entry.button.addEventListener("click", listener, true);
+        TRUSTED_ADD_EVENT_LISTENER(
+          entry.button,
+          "click",
+          listener,
+          true,
+        );
       }
     };
     const releaseNativeListeners = () => {
-      ownerDocument.removeEventListener("click", onNativeClickCapture, true);
-      ownerDocument.removeEventListener("click", onNativeClickBubble);
+      TRUSTED_REMOVE_EVENT_LISTENER(
+        ownerDocument,
+        "click",
+        onNativeClickCapture,
+        true,
+      );
+      TRUSTED_REMOVE_EVENT_LISTENER(
+        ownerDocument,
+        "click",
+        onNativeClickBubble,
+      );
       for (const { entry, listener } of nativeBoundaryListeners) {
-        entry.button.removeEventListener("click", listener, true);
+        TRUSTED_REMOVE_EVENT_LISTENER(
+          entry.button,
+          "click",
+          listener,
+          true,
+        );
       }
       if (nativeRootBoundary) {
-        nativeRootBoundary.target.removeEventListener(
+        TRUSTED_REMOVE_EVENT_LISTENER(
+          nativeRootBoundary.target,
           "click",
           nativeRootBoundary.listener,
         );
@@ -1366,13 +1421,15 @@ function createTemplateGridPublication(
       entry: TemplateGridDomPublication,
     ) =>
       Boolean(
-          reactCardClick &&
+        reactCardClick &&
           nativeClick &&
-            reactCardClick.native === nativeClick &&
-            reactCardClick.event === event &&
-            reactCardClick.entry === entry &&
-            reactCardClick.action === entry.action &&
-            event.nativeEvent === nativeClick.event &&
+          reactCardClick.native === nativeClick &&
+          reactCardClick.event === event &&
+          reactCardClick.entry === entry &&
+          reactCardClick.action === entry.action &&
+          event.nativeEvent === nativeClick.event &&
+          nativeCurrentTarget(nativeClick.event) ===
+            reactCardClick.dispatchTarget &&
           nativeReactDispatchIsCurrent(
             nativeClick.event,
             ownerWindow.Event.CAPTURING_PHASE,
@@ -1402,6 +1459,7 @@ function createTemplateGridPublication(
         reactButtonClick.entry === entry &&
         reactButtonClick.action === entry.action &&
         dispatchTarget instanceof ownerWindow.Node &&
+        dispatchTarget === reactButtonClick.dispatchTarget &&
         event.nativeEvent === nativeClick.event &&
         nativeReactDispatchIsCurrent(
           nativeClick.event,
@@ -1603,14 +1661,17 @@ function createTemplateGridPublication(
         ) {
           return;
         }
-        reactGridClick = Object.freeze({ event, native: capturedNative });
         const dispatchTarget = nativeCurrentTarget(capturedNative.event);
-        if (!(dispatchTarget instanceof ownerWindow.Node)) {
-          reactGridClick = null;
+        if (
+          !(dispatchTarget instanceof ownerWindow.Node) ||
+          dispatchTarget === grid
+        ) {
           return;
         }
+        reactGridClick = Object.freeze({ event, native: capturedNative });
         if (nativeRootBoundary) {
-          nativeRootBoundary.target.removeEventListener(
+          TRUSTED_REMOVE_EVENT_LISTENER(
+            nativeRootBoundary.target,
             "click",
             nativeRootBoundary.listener,
           );
@@ -1619,6 +1680,7 @@ function createTemplateGridPublication(
           const proof = reactBubbleClick;
           if (
             proof &&
+            proof.dispatchTarget === dispatchTarget &&
             boundaryEvent instanceof ownerWindow.MouseEvent &&
             boundaryEvent === capturedNative.event &&
             nativeCurrentTarget(boundaryEvent) === dispatchTarget &&
@@ -1630,7 +1692,11 @@ function createTemplateGridPublication(
             deliver(proof, boundaryEvent);
           }
           if (nativeRootBoundary?.listener === listener) {
-            dispatchTarget.removeEventListener("click", listener);
+            TRUSTED_REMOVE_EVENT_LISTENER(
+              dispatchTarget,
+              "click",
+              listener,
+            );
             nativeRootBoundary = null;
           }
         };
@@ -1639,7 +1705,11 @@ function createTemplateGridPublication(
           target: dispatchTarget,
           listener,
         };
-        dispatchTarget.addEventListener("click", listener);
+        TRUSTED_ADD_EVENT_LISTENER(
+          dispatchTarget,
+          "click",
+          listener,
+        );
       },
       captureReactCardClick: (
         entryAuthority: TemplateGridEntryPublication,
