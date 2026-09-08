@@ -7139,6 +7139,16 @@ function moreMenuNativeClickIsAtRadixSelection(
     event,
   );
   const path = nativeEventPath(ownerWindow, event);
+  const bodyIndex = path.indexOf(publication.document.body);
+  const documentIndex = path.indexOf(publication.document);
+  const atReactDelegationBoundary = (
+    currentTarget === publication.document.body
+    || (
+      currentTarget === publication.document
+      && documentIndex === path.length - 2
+      && path[path.length - 1] === ownerWindow
+    )
+  );
   return Boolean(
     nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event) === "click"
     && nativeEventGetter<number>(
@@ -7169,14 +7179,16 @@ function moreMenuNativeClickIsAtRadixSelection(
     && target === admittedTarget
     && target instanceof ownerWindow.Node
     && target.ownerDocument === publication.document
-    && currentTarget === publication.document.body
+    // Direct roots delegate portal clicks from body; a document-hydrated root delegates from document.
+    && atReactDelegationBoundary
     && item.contains(target)
     && path.length === admittedPath.length
     && path.every((entry, index) => entry === admittedPath[index])
     && path[0] === target
     && path.indexOf(item) >= 0
     && path.indexOf(content) > path.indexOf(item)
-    && path.indexOf(publication.document.body) > path.indexOf(content)
+    && bodyIndex > path.indexOf(content)
+    && documentIndex > bodyIndex
   );
 }
 

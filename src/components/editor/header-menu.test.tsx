@@ -325,7 +325,7 @@ describe("editor header More menu authority", () => {
     menuTrigger.focus();
 
     openMenu();
-    fireEvent.click(item(name));
+    await userEvent.click(item(name));
 
     expect(actions[callback]).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
