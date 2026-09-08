@@ -538,6 +538,7 @@ function createNotificationDomGuard(
 
 const NOTIFICATION_GET_DESCRIPTOR =
   Object.getOwnPropertyDescriptor.bind(Object);
+const NOTIFICATION_REFLECT_APPLY = Reflect.apply;
 
 interface NotificationStableGetter<T> {
   readonly prototype: object;
@@ -545,6 +546,18 @@ interface NotificationStableGetter<T> {
   readonly getter: () => T;
   readonly read: (value: object) => T;
   readonly isCurrent: () => boolean;
+}
+
+interface NotificationUnforgeableGetter<T> {
+  readonly owner: object;
+  readonly property: PropertyKey;
+  readonly getter: () => T;
+  readonly setter: undefined | ((value: T) => void);
+  readonly configurable: boolean;
+  readonly enumerable: boolean;
+  readonly isCurrent: () => boolean;
+  readonly matches: (value: object) => boolean;
+  readonly read: (value: object) => T;
 }
 
 interface NotificationStableMethod<T extends (...args: never[]) => unknown> {
@@ -597,8 +610,46 @@ function captureStableMethod<T extends (...args: never[]) => unknown>(
   });
 }
 
+function captureUnforgeableGetter<T>(
+  owner: object | null,
+  property: PropertyKey,
+): NotificationUnforgeableGetter<T> | null {
+  if (!owner) return null;
+  const descriptor = NOTIFICATION_GET_DESCRIPTOR(owner, property);
+  if (!descriptor?.get || "value" in descriptor) return null;
+  const getter = descriptor.get as () => T;
+  const setter = descriptor.set as undefined | ((value: T) => void);
+  const configurable = descriptor.configurable === true;
+  const enumerable = descriptor.enumerable === true;
+  const matches = (value: object) => {
+    const current = NOTIFICATION_GET_DESCRIPTOR(value, property);
+    return (
+      !!current &&
+      !("value" in current) &&
+      current.get === getter &&
+      current.set === setter &&
+      current.configurable === configurable &&
+      current.enumerable === enumerable
+    );
+  };
+  return Object.freeze({
+    owner,
+    property,
+    getter,
+    setter,
+    configurable,
+    enumerable,
+    isCurrent: () => matches(owner),
+    matches,
+    read: (value: object) =>
+      NOTIFICATION_REFLECT_APPLY(getter, value, []) as T,
+  });
+}
+
+const NOTIFICATION_EVENT_CONSTRUCTOR =
+  typeof Event === "undefined" ? null : Event;
 const NOTIFICATION_EVENT_PROTOTYPE =
-  typeof Event === "undefined" ? null : Event.prototype;
+  NOTIFICATION_EVENT_CONSTRUCTOR?.prototype ?? null;
 const NOTIFICATION_UI_EVENT_PROTOTYPE =
   typeof UIEvent === "undefined" ? null : UIEvent.prototype;
 const NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE =
@@ -636,8 +687,18 @@ const NOTIFICATION_EVENT_TARGET = captureStableGetter<EventTarget | null>(
   NOTIFICATION_EVENT_PROTOTYPE,
   "target",
 );
-const NOTIFICATION_EVENT_TRUSTED = captureStableGetter<boolean>(
-  NOTIFICATION_EVENT_PROTOTYPE,
+const NOTIFICATION_EVENT_INSTANCE = (() => {
+  if (!NOTIFICATION_EVENT_CONSTRUCTOR) return null;
+  try {
+    return new NOTIFICATION_EVENT_CONSTRUCTOR(
+      "notification-keyboard-intrinsic",
+    );
+  } catch {
+    return null;
+  }
+})();
+const NOTIFICATION_EVENT_TRUSTED = captureUnforgeableGetter<boolean>(
+  NOTIFICATION_EVENT_INSTANCE,
   "isTrusted",
 );
 const NOTIFICATION_EVENT_COMPOSED_PATH = captureStableMethod<
@@ -694,7 +755,6 @@ const NOTIFICATION_KEYBOARD_GETTERS = Object.freeze([
   NOTIFICATION_EVENT_DEFAULT_PREVENTED,
   NOTIFICATION_EVENT_CANCEL_BUBBLE,
   NOTIFICATION_EVENT_TARGET,
-  NOTIFICATION_EVENT_TRUSTED,
   NOTIFICATION_UI_VIEW,
   NOTIFICATION_KEY,
   NOTIFICATION_CTRL,
@@ -716,6 +776,7 @@ function captureNotificationKeyboardIntrinsics(
   ownerWindow: Window & typeof globalThis,
 ): NotificationKeyboardIntrinsics | null {
   if (
+    NOTIFICATION_EVENT_CONSTRUCTOR !== ownerWindow.Event ||
     NOTIFICATION_EVENT_PROTOTYPE !== ownerWindow.Event.prototype ||
     NOTIFICATION_UI_EVENT_PROTOTYPE !== ownerWindow.UIEvent.prototype ||
     NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE !==
@@ -729,6 +790,8 @@ function captureNotificationKeyboardIntrinsics(
     NOTIFICATION_KEYBOARD_METHODS.some(
       (intrinsic) => !intrinsic || !intrinsic.isCurrent(),
     ) ||
+    !NOTIFICATION_EVENT_TRUSTED ||
+    !NOTIFICATION_EVENT_TRUSTED.isCurrent() ||
     !NOTIFICATION_EVENT_TYPE ||
     !NOTIFICATION_EVENT_PHASE ||
     !NOTIFICATION_EVENT_BUBBLES ||
@@ -736,7 +799,6 @@ function captureNotificationKeyboardIntrinsics(
     !NOTIFICATION_EVENT_DEFAULT_PREVENTED ||
     !NOTIFICATION_EVENT_CANCEL_BUBBLE ||
     !NOTIFICATION_EVENT_TARGET ||
-    !NOTIFICATION_EVENT_TRUSTED ||
     !NOTIFICATION_EVENT_COMPOSED_PATH ||
     !NOTIFICATION_PREVENT_DEFAULT ||
     !NOTIFICATION_UI_VIEW ||
@@ -753,6 +815,7 @@ function captureNotificationKeyboardIntrinsics(
     return null;
   }
   const ownerRealmIsCurrent = () =>
+    NOTIFICATION_EVENT_CONSTRUCTOR === ownerWindow.Event &&
     NOTIFICATION_EVENT_PROTOTYPE === ownerWindow.Event.prototype &&
     NOTIFICATION_UI_EVENT_PROTOTYPE === ownerWindow.UIEvent.prototype &&
     NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ===
@@ -770,13 +833,15 @@ function captureNotificationKeyboardIntrinsics(
       ) &&
       NOTIFICATION_KEYBOARD_METHODS.every(
         (intrinsic) => intrinsic?.isCurrent() === true,
-      );
+      ) &&
+      NOTIFICATION_EVENT_TRUSTED.isCurrent();
     return trustedHistoryIsClean;
   };
   return Object.freeze({
     read: (event: object) => {
       if (!descriptorsAreCurrent()) return null;
       try {
+        if (!NOTIFICATION_EVENT_TRUSTED.matches(event)) return null;
         const isTrusted = NOTIFICATION_EVENT_TRUSTED.read(event);
         const view = NOTIFICATION_UI_VIEW.read(event);
         if (isTrusted !== true || view !== ownerWindow) return null;

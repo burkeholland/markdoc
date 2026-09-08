@@ -850,6 +850,45 @@ describe("notification strip current actions", () => {
 });
 
 describe("notification strip keyboard browsing", () => {
+  it("recognizes isTrusted as an owner-realm Event instance descriptor, not a prototype getter", () => {
+    const probe = new window.Event("notification-keyboard-probe");
+    const synthetic = new window.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowDown",
+    });
+    const probeDescriptor = Object.getOwnPropertyDescriptor(
+      probe,
+      "isTrusted",
+    );
+    const syntheticDescriptor = Object.getOwnPropertyDescriptor(
+      synthetic,
+      "isTrusted",
+    );
+
+    expect(Object.hasOwn(probe, "isTrusted")).toBe(true);
+    expect(
+      Object.getOwnPropertyDescriptor(window.Event.prototype, "isTrusted"),
+    ).toBeUndefined();
+    expect(probeDescriptor?.get).toBeTypeOf("function");
+    expect(syntheticDescriptor).toMatchObject({
+      get: probeDescriptor?.get,
+      set: probeDescriptor?.set,
+      configurable: probeDescriptor?.configurable,
+      enumerable: probeDescriptor?.enumerable,
+    });
+
+    const router = createRouter("trusted-own-descriptor");
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+    controls[0]!.focus();
+    expect(controls[0]!.dispatchEvent(synthetic)).toBe(true);
+    expect(controls[0]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
   it.each([
     "ArrowDown",
     "ArrowUp",
