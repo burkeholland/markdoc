@@ -4,6 +4,7 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import * as ReactDOM from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -119,6 +120,22 @@ type TemplateGridExpectedIconNode = readonly [
   localName: string,
   attributes: TemplateGridExpectedAttributes,
 ];
+interface TemplateGridAttributeSnapshot {
+  readonly name: string;
+  readonly localName: string;
+  readonly prefix: string | null;
+  readonly namespaceURI: string | null;
+  readonly value: string;
+}
+
+const TEMPLATE_GRID_DISCRETE_EVENT_PRIORITY = 2;
+const TEMPLATE_GRID_REACT_DOM_INTERNALS = (
+  ReactDOM as typeof ReactDOM & {
+    readonly __DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE: {
+      readonly p: number;
+    };
+  }
+).__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
 
 const TEMPLATE_ICON_CHILDREN = {
   File: [
@@ -226,7 +243,7 @@ interface TemplateGridRefReplay {
 interface TemplateGridDomSnapshot {
   readonly node: Node;
   readonly nodeValue: string | null;
-  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly attributes: readonly TemplateGridAttributeSnapshot[] | null;
   readonly children: readonly TemplateGridDomSnapshot[];
 }
 
@@ -416,12 +433,30 @@ class TemplateGridElementOwner<T extends Element>
 
 function templateGridAttributes(
   node: Node,
-): readonly (readonly [string, string])[] | null {
+): readonly TemplateGridAttributeSnapshot[] | null {
   if (node.nodeType !== 1) return null;
   return Object.freeze(
     [...(node as Element).attributes]
-      .map(({ name, value }) => Object.freeze([name, value] as const))
-      .sort(([left], [right]) => left.localeCompare(right)),
+      .map(({ name, localName, prefix, namespaceURI, value }) =>
+        Object.freeze({ name, localName, prefix, namespaceURI, value }),
+      )
+      .sort((left, right) =>
+        [
+          left.namespaceURI ?? "",
+          left.prefix ?? "",
+          left.name,
+          left.localName,
+        ]
+          .join("\0")
+          .localeCompare(
+            [
+              right.namespaceURI ?? "",
+              right.prefix ?? "",
+              right.name,
+              right.localName,
+            ].join("\0"),
+          ),
+      ),
   );
 }
 
@@ -444,9 +479,16 @@ function templateGridDomMatches(snapshot: TemplateGridDomSnapshot): boolean {
     if (attributes !== snapshot.attributes) return false;
   } else if (
     attributes.length !== snapshot.attributes.length ||
-    attributes.some(([name, value], index) => {
+    attributes.some((attribute, index) => {
       const expected = snapshot.attributes?.[index];
-      return !expected || name !== expected[0] || value !== expected[1];
+      return (
+        !expected ||
+        attribute.name !== expected.name ||
+        attribute.localName !== expected.localName ||
+        attribute.prefix !== expected.prefix ||
+        attribute.namespaceURI !== expected.namespaceURI ||
+        attribute.value !== expected.value
+      );
     })
   ) {
     return false;
@@ -736,9 +778,19 @@ function templateGridHasExactAttributes(
   element: Element,
   expected: TemplateGridExpectedAttributes,
 ) {
+  const actual = [...element.attributes];
   return (
-    element.attributes.length === expected.length &&
-    expected.every(([name, value]) => element.getAttribute(name) === value)
+    actual.length === expected.length &&
+    expected.every(([name, value]) =>
+      actual.some(
+        (attribute) =>
+          attribute.name === name &&
+          attribute.localName === name &&
+          attribute.prefix === null &&
+          attribute.namespaceURI === null &&
+          attribute.value === value,
+      ),
+    )
   );
 }
 
@@ -1117,6 +1169,8 @@ function createTemplateGridPublication(
     ) => {
       const currentTarget = native.currentTarget;
       return (
+        TEMPLATE_GRID_REACT_DOM_INTERNALS.p ===
+          TEMPLATE_GRID_DISCRETE_EVENT_PRIORITY &&
         native.eventPhase === phase &&
         currentTarget instanceof ownerWindow.Node &&
         (currentTarget === ownerDocument ||

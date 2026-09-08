@@ -472,6 +472,10 @@ function invokePlainTemplateTraversal(
   button: HTMLButtonElement,
   nativeEvent: MouseEvent,
 ) {
+  const card = button.parentElement;
+  if (!(card instanceof button.ownerDocument.defaultView!.HTMLLIElement)) {
+    throw new Error("The template button has no card");
+  }
   const wrapper = {
     type: "click",
     button: nativeEvent.button,
@@ -484,6 +488,8 @@ function invokePlainTemplateTraversal(
     nativeEvent,
   };
   captureTemplateTraversal(grid)(wrapper);
+  wrapper.currentTarget = card;
+  captureTemplateTraversal(card)(wrapper);
   wrapper.currentTarget = button;
   captureTemplateActivation(button)(wrapper);
 }
@@ -799,6 +805,18 @@ describe("TemplateGrid publication ownership", () => {
         button.querySelector("svg > *")?.setAttribute("d", "M0 0");
       },
     },
+    {
+      name: "an identical icon attribute in a forged namespace",
+      tamper: (button: HTMLButtonElement) => {
+        const path = button.querySelector("svg > [d]");
+        const value = path?.getAttribute("d");
+        if (!path || value == null) {
+          throw new Error("The template icon path was not rendered");
+        }
+        path.removeAttribute("d");
+        path.setAttributeNS("urn:forged-template-icon", "d", value);
+      },
+    },
   ])("rejects $name before publication instead of making it canonical", async ({ tamper }) => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -840,7 +858,7 @@ describe("TemplateGrid publication ownership", () => {
     }
   });
 
-  it("rejects a plain grid-to-button wrapper during container-root document capture", async () => {
+  it("rejects a plain full-hop wrapper during container-root document capture", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -885,7 +903,7 @@ describe("TemplateGrid publication ownership", () => {
     }
   });
 
-  it("rejects a plain grid-to-button wrapper before document-root React capture", async () => {
+  it("rejects a plain full-hop wrapper before document-root React capture", async () => {
     const frame = document.createElement("iframe");
     document.body.append(frame);
     const ownerDocument = frame.contentDocument;
