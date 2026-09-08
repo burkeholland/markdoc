@@ -19,15 +19,17 @@ import {
 } from "react";
 import { AlertTriangle, ArrowUpDown, Check, ChevronDown, CircleHelp, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText, MoreHorizontal } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
+import { getGoal } from "@/editor/collab/meta";
 import type { DocumentDto } from "@/server/dto";
 import { lintMarkdown, type LintIssue } from "@/editor/markdown/lint";
+import type { WritingGoal } from "@/editor/stats";
 
 import { cn } from "@/lib/utils";
 import { ThemeToggle, useTheme } from "@/components/ui/theme-toggle";
 import { isThemePreference, THEME_ORDER, themeLabel, type ThemePreference } from "@/lib/theme";
 import { useHydrated } from "@/lib/hooks";
-import { useDebouncedSessionValue } from "./use-session";
-import { StatsPopover, useLocalSelection } from "./stats-popover";
+import { jsonEqual, useDebouncedSessionValue, useSessionValue } from "./use-session";
+import { StatsPopover, useLocalSelection, type SourceSelection } from "./stats-popover";
 import { STATUS_BOX } from "./chrome-classes";
 
 export type { Layout } from "@/lib/viewport";
@@ -87,6 +89,15 @@ interface StatusBarAuthority {
   onSyncScroll: (on: boolean) => void;
   compact: boolean;
   hydrated: boolean;
+  statsSelection: SourceSelection;
+  statsSelectionFrom: number | null;
+  statsSelectionTo: number | null;
+  statsGoal: WritingGoal | null;
+  statsGoalKind: WritingGoal["kind"] | null;
+  statsGoalMode: WritingGoal["mode"] | null;
+  statsGoalValue: number | null;
+  statsGoalSetBy: string | null;
+  statsGoalSetAt: number | null;
   issueSnapshot: readonly LintIssue[];
   issueRows: readonly StatusBarIssuePublication[];
   onIssueSelect: (issue: LintIssue) => void;
@@ -121,6 +132,7 @@ interface StatusBarNativeEventPublication {
   timeStamp: number;
   phase: number;
   key: string | undefined;
+  code: string | undefined;
   button: number | undefined;
   ctrlKey: boolean | undefined;
   altKey: boolean | undefined;
@@ -182,6 +194,17 @@ interface StatusBarOutsidePointerChain {
   pointerDown: StatusBarNativeEventPublication;
   pointerUp: StatusBarNativeEventPublication | null;
   click: StatusBarNativeEventPublication | null;
+  cancelExpiry: () => void;
+}
+
+interface StatusBarStatsMutationLease {
+  expectedOpen: boolean;
+  controlsId: string | null;
+  side: string | null;
+  align: string | null;
+  nativeEvents: readonly StatusBarNativeEventPublication[];
+  reactEvent: StatusBarReactEventPublication | null;
+  cancelExpiry: () => void;
 }
 
 interface StatusBarGeneration {
@@ -196,7 +219,8 @@ interface StatusBarGeneration {
   reactEvents: WeakMap<object, StatusBarReactEventPublication>;
   pendingIntents: Set<StatusBarEventIntent>;
   outsidePointerChain: StatusBarOutsidePointerChain | null;
-  delegatedSubtrees: readonly HTMLElement[];
+  statsTrigger: HTMLButtonElement;
+  statsMutationLease: StatusBarStatsMutationLease | null;
   nodeSeals: StatusBarNodeSeal[];
   relationSeals: StatusBarRelationSeal[];
   observers: StatusBarObserverPublication[];
@@ -230,6 +254,9 @@ type StatusBarReactEvent =
 const DESKTOP_LAYOUTS: readonly Layout[] = Object.freeze(["split", "code", "rich"]);
 const COMPACT_LAYOUTS: readonly Layout[] = Object.freeze(["code", "rich"]);
 const STATUS_BAR_THEMES: readonly ThemePreference[] = Object.freeze([...THEME_ORDER]);
+const OUTSIDE_POINTER_GESTURE_LEASE_MS = 5_000;
+const OUTSIDE_POINTER_CALLBACK_LEASE_MS = 1_000;
+const STATS_MUTATION_LEASE_MS = 1_000;
 const STATUS_BAR_NATIVE_EVENTS = [
   "click",
   "keydown",
@@ -281,6 +308,9 @@ function issuePublicationIsExact(authority: StatusBarAuthority, row: StatusBarIs
 
 function authorityIsExact(authority: StatusBarAuthority) {
   const expectedLayouts = authority.compact ? COMPACT_LAYOUTS : DESKTOP_LAYOUTS;
+  const selection = authority.statsSelection;
+  const goal = authority.statsGoal;
+  const currentGoal = getGoal(authority.session);
   if (
     authority.layoutValues.length !== expectedLayouts.length
     || authority.layoutValues.some((value, index) => value !== expectedLayouts[index])
@@ -288,6 +318,28 @@ function authorityIsExact(authority: StatusBarAuthority) {
     || authority.themeValues.some((value, index) => value !== STATUS_BAR_THEMES[index])
     || !documentPublicationIsExact(authority.document)
     || authority.issueRows.length !== authority.issueSnapshot.length
+    || (selection
+      ? selection.from !== authority.statsSelectionFrom
+        || selection.to !== authority.statsSelectionTo
+      : authority.statsSelectionFrom !== null || authority.statsSelectionTo !== null)
+    || (goal
+      ? goal.kind !== authority.statsGoalKind
+        || goal.mode !== authority.statsGoalMode
+        || goal.value !== authority.statsGoalValue
+        || goal.setBy !== authority.statsGoalSetBy
+        || goal.setAt !== authority.statsGoalSetAt
+      : authority.statsGoalKind !== null
+        || authority.statsGoalMode !== null
+        || authority.statsGoalValue !== null
+        || authority.statsGoalSetBy !== null
+        || authority.statsGoalSetAt !== null)
+    || (currentGoal
+      ? currentGoal.kind !== authority.statsGoalKind
+        || currentGoal.mode !== authority.statsGoalMode
+        || currentGoal.value !== authority.statsGoalValue
+        || currentGoal.setBy !== authority.statsGoalSetBy
+        || currentGoal.setAt !== authority.statsGoalSetAt
+      : authority.statsGoal !== null)
   )
     return false;
   return authority.issueRows.every((row, index) => row.index === index && issuePublicationIsExact(authority, row));
@@ -332,11 +384,9 @@ function sealSubtree(
   root: Node,
   seals: StatusBarNodeSeal[],
   seen: Set<Node>,
-  delegatedSubtrees: ReadonlySet<Node>,
 ) {
   if (seen.has(root)) return;
   seen.add(root);
-  if (delegatedSubtrees.has(root)) return;
   const element = root instanceof Element ? root : null;
   const data = root instanceof CharacterData ? root.data : null;
   seals.push({
@@ -347,7 +397,7 @@ function sealSubtree(
     name: element?.tagName ?? null,
     namespace: element?.namespaceURI ?? null,
   });
-  root.childNodes.forEach((child) => sealSubtree(child, seals, seen, delegatedSubtrees));
+  root.childNodes.forEach((child) => sealSubtree(child, seals, seen));
 }
 
 function sealRelations(
@@ -382,6 +432,33 @@ function controlIsEnabled(control: HTMLElement) {
   );
 }
 
+function nodeSealIsExact(seal: StatusBarNodeSeal, ignoreAttributes = false) {
+  const element = seal.node instanceof Element ? seal.node : null;
+  return (
+    arraysAreIdentical([...seal.node.childNodes], seal.children)
+    && (
+      ignoreAttributes
+      || !seal.attributes
+      || Boolean(element && arraysAreIdentical(
+        stableAttributes(element).map(([name, value]) => `${name}\u0000${value}`),
+        seal.attributes.map(([name, value]) => `${name}\u0000${value}`),
+      ))
+    )
+    && (seal.data === null || seal.node instanceof CharacterData && seal.node.data === seal.data)
+    && (seal.name === null || element?.tagName === seal.name)
+    && (seal.namespace === null || element?.namespaceURI === seal.namespace)
+  );
+}
+
+function refreshStatsNodeSeals(generation: StatusBarGeneration) {
+  generation.nodeSeals = generation.nodeSeals.filter((seal) => (
+    seal.node !== generation.statsTrigger
+    && !generation.statsTrigger.contains(seal.node)
+  ));
+  const seen = new Set(generation.nodeSeals.map((seal) => seal.node));
+  sealSubtree(generation.statsTrigger, generation.nodeSeals, seen);
+}
+
 function validateGeneration(generation: StatusBarGeneration, drain = true): boolean {
   if (generation.retired) return false;
   if (!authorityIsExact(generation.authority)) {
@@ -391,7 +468,7 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
   if (drain) {
     for (const publication of generation.observers) {
       const records = publication.observer.takeRecords();
-      if (records.some((record) => !mutationIsOwned(generation, record))) {
+      if (!mutationsAreOwned(generation, records)) {
         retireGeneration(generation);
         return false;
       }
@@ -408,17 +485,7 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
     return false;
   }
   for (const seal of generation.nodeSeals) {
-    const element = seal.node instanceof Element ? seal.node : null;
-    if (
-      !arraysAreIdentical([...seal.node.childNodes], seal.children)
-      || (seal.attributes && (!element || !arraysAreIdentical(
-        stableAttributes(element).map(([name, value]) => `${name}\u0000${value}`),
-        seal.attributes.map(([name, value]) => `${name}\u0000${value}`),
-      )))
-      || (seal.data !== null && (!(seal.node instanceof CharacterData) || seal.node.data !== seal.data))
-      || (seal.name !== null && element?.tagName !== seal.name)
-      || (seal.namespace !== null && element?.namespaceURI !== seal.namespace)
-    ) {
+    if (!nodeSealIsExact(seal)) {
       retireGeneration(generation);
       return false;
     }
@@ -463,10 +530,167 @@ function mutationIsRadixOwned(record: MutationRecord) {
   return false;
 }
 
-function mutationIsOwned(generation: StatusBarGeneration, record: MutationRecord) {
-  return generation.delegatedSubtrees.some((root) => (
-    record.target === root || root.contains(record.target)
-  )) || mutationIsRadixOwned(record);
+function statsContentIsExact(
+  generation: StatusBarGeneration,
+  controlsId: string,
+) {
+  const content = generation.ownerDocument.getElementById(controlsId);
+  return (
+    content instanceof HTMLElement
+    && content.getAttribute("data-testid") === "stats-popover"
+    && content.getAttribute("role") === "dialog"
+    && content.getAttribute("data-state") === "open"
+    && content.isConnected
+  );
+}
+
+function statsTriggerStateIsExact(generation: StatusBarGeneration, open: boolean) {
+  const trigger = generation.statsTrigger;
+  const controlsId = trigger.getAttribute("aria-controls");
+  const side = trigger.getAttribute("data-radix-popper-side");
+  const align = trigger.getAttribute("data-radix-popper-align");
+  const content = controlsId
+    ? generation.ownerDocument.getElementById(controlsId)
+    : null;
+  return (
+    trigger.ownerDocument === generation.ownerDocument
+    && trigger.parentElement === generation.root
+    && trigger.isConnected
+    && trigger.tagName === "BUTTON"
+    && trigger.type === "button"
+    && trigger.getAttribute("data-testid") === "stats-button"
+    && trigger.getAttribute("aria-haspopup") === "dialog"
+    && trigger.getAttribute("aria-expanded") === String(open)
+    && trigger.getAttribute("data-state") === (open ? "open" : "closed")
+    && (open
+      ? Boolean(
+        controlsId
+        && side
+        && align
+        && statsContentIsExact(generation, controlsId)
+        && content?.getAttribute("data-side") === side
+        && content.getAttribute("data-align") === align,
+      )
+      : controlsId === null && side === null && align === null)
+  );
+}
+
+function clearStatsMutationLease(generation: StatusBarGeneration, claim: boolean) {
+  const lease = generation.statsMutationLease;
+  if (!lease) return;
+  lease.cancelExpiry();
+  generation.statsMutationLease = null;
+  lease.nativeEvents.forEach((event) => {
+    event.extended = false;
+    event.expired = true;
+    if (claim) event.claimed = true;
+  });
+  if (lease.reactEvent) lease.reactEvent.claimed = claim;
+  const chain = generation.outsidePointerChain;
+  if (
+    claim
+    && chain
+    && lease.nativeEvents.some((event) => (
+      event === chain.pointerDown
+      || event === chain.pointerUp
+      || event === chain.click
+    ))
+  ) {
+    chain.cancelExpiry();
+    generation.outsidePointerChain = null;
+  }
+}
+
+function statsMutationIsExact(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  const lease = generation.statsMutationLease;
+  const triggerSeal = generation.nodeSeals.find((seal) => seal.node === generation.statsTrigger);
+  if (
+    !lease
+    || !triggerSeal?.attributes
+    || records.length !== 5
+    || records.some((record) => (
+      record.type !== "attributes"
+      || record.target !== generation.statsTrigger
+      || record.attributeNamespace !== null
+    ))
+    || !arraysAreIdentical(
+      records.map((record) => record.attributeName),
+      [
+        "aria-expanded",
+        "aria-controls",
+        "data-state",
+        "data-radix-popper-side",
+        "data-radix-popper-align",
+      ],
+    )
+    || !lease.nativeEvents.every((event) => (
+      (event.phase === Event.CAPTURING_PHASE || event.phase === Event.AT_TARGET)
+      && nativeEventIsExact(
+        event,
+        event.phase,
+        event.type === "keydown" && event.code === "KeyC",
+      )
+    ))
+    || Boolean(lease.reactEvent && !reactEventIsExact(lease.reactEvent))
+    || generation.nodeSeals.some((seal) => (
+      (seal.node === generation.statsTrigger || generation.statsTrigger.contains(seal.node))
+      && !nodeSealIsExact(seal, seal.node === generation.statsTrigger)
+    ))
+  ) {
+    return false;
+  }
+  const oldOpen = !lease.expectedOpen;
+  const oldValues = [
+    String(oldOpen),
+    oldOpen ? lease.controlsId : null,
+    oldOpen ? "open" : "closed",
+    oldOpen ? lease.side : null,
+    oldOpen ? lease.align : null,
+  ];
+  if (!arraysAreIdentical(records.map((record) => record.oldValue), oldValues))
+    return false;
+  const currentControlsId = generation.statsTrigger.getAttribute("aria-controls");
+  if (
+    !statsTriggerStateIsExact(generation, lease.expectedOpen)
+    || (lease.expectedOpen ? !currentControlsId : currentControlsId !== null)
+  )
+    return false;
+  const expectedAttributes = new Map(triggerSeal.attributes);
+  expectedAttributes.set("aria-expanded", String(lease.expectedOpen));
+  expectedAttributes.set("data-state", lease.expectedOpen ? "open" : "closed");
+  if (lease.expectedOpen && currentControlsId)
+    expectedAttributes.set("aria-controls", currentControlsId);
+  else
+    expectedAttributes.delete("aria-controls");
+  const expected = [...expectedAttributes]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}\u0000${value}`);
+  if (!arraysAreIdentical(
+    stableAttributes(generation.statsTrigger).map(([name, value]) => `${name}\u0000${value}`),
+    expected,
+  ))
+    return false;
+  clearStatsMutationLease(generation, true);
+  refreshStatsNodeSeals(generation);
+  return true;
+}
+
+function mutationsAreOwned(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  if (records.length === 0) return true;
+  const statsRecords = records.filter((record) => (
+    record.target === generation.statsTrigger
+    || generation.statsTrigger.contains(record.target)
+  ));
+  const otherRecords = records.filter((record) => !statsRecords.includes(record));
+  if (otherRecords.some((record) => !mutationIsRadixOwned(record)))
+    return false;
+  return statsRecords.length === 0 || statsMutationIsExact(generation, statsRecords);
 }
 
 function refreshRelationSeals(generation: StatusBarGeneration) {
@@ -494,6 +718,7 @@ function retireGeneration(generation: StatusBarGeneration) {
     intent.pending = null;
   });
   generation.pendingIntents.clear();
+  clearStatsMutationLease(generation, false);
   retireOutsidePointerChain(generation);
   generation.removeEventListeners.forEach((remove) => remove());
   generation.removeEventListeners.length = 0;
@@ -524,7 +749,7 @@ function retireManagerGeneration(
 function observeGeneration(generation: StatusBarGeneration) {
   const observe = (target: Node, options: MutationObserverInit) => {
     const observer = new MutationObserver((records) => {
-      if (records.some((record) => !mutationIsOwned(generation, record))) {
+      if (!mutationsAreOwned(generation, records)) {
         retireGeneration(generation);
       } else if (records.some((record) => record.type === "childList")) {
         refreshRelationSeals(generation);
@@ -543,7 +768,9 @@ function observeGeneration(generation: StatusBarGeneration) {
   }
   [...new Set(subtreeRoots)].forEach((root) => observe(root, {
     attributes: true,
+    attributeOldValue: true,
     characterData: true,
+    characterDataOldValue: true,
     childList: true,
     subtree: true,
   }));
@@ -560,10 +787,27 @@ function observeGeneration(generation: StatusBarGeneration) {
 function retireOutsidePointerChain(generation: StatusBarGeneration) {
   const chain = generation.outsidePointerChain;
   if (!chain) return;
+  chain.cancelExpiry();
   chain.pointerDown.expired = true;
   if (chain.pointerUp) chain.pointerUp.expired = true;
   if (chain.click) chain.click.expired = true;
   generation.outsidePointerChain = null;
+}
+
+function replaceOutsidePointerExpiry(
+  generation: StatusBarGeneration,
+  chain: StatusBarOutsidePointerChain,
+  delay: number,
+) {
+  const ownerWindow = generation.ownerDocument.defaultView;
+  if (!ownerWindow) return false;
+  chain.cancelExpiry();
+  const timer = ownerWindow.setTimeout(() => {
+    if (generation.outsidePointerChain === chain)
+      retireOutsidePointerChain(generation);
+  }, delay);
+  chain.cancelExpiry = () => ownerWindow.clearTimeout(timer);
+  return true;
 }
 
 function pointerChainEventIsExact(
@@ -589,8 +833,151 @@ function pointerChainEventIsExact(
   );
 }
 
+function beginStatsMutationLease(
+  generation: StatusBarGeneration,
+  expectedOpen: boolean,
+  nativeEvents: readonly StatusBarNativeEventPublication[],
+  reactEvent: StatusBarReactEventPublication | null,
+) {
+  const currentOpen = !expectedOpen;
+  const controlsId = generation.statsTrigger.getAttribute("aria-controls");
+  if (
+    !statsTriggerStateIsExact(generation, currentOpen)
+    || nativeEvents.length === 0
+    || nativeEvents.some((event) => (
+      event.claimed
+      || event.expired
+      || (
+        event.phase !== Event.CAPTURING_PHASE
+        && event.phase !== Event.AT_TARGET
+      )
+      || !nativeEventIsExact(event, event.phase)
+    ))
+    || Boolean(reactEvent && (
+      reactEvent.claimed
+      || reactEvent.phase !== Event.CAPTURING_PHASE
+      || !reactEventIsExact(reactEvent)
+    ))
+  )
+    return;
+  clearStatsMutationLease(generation, false);
+  const ownerWindow = generation.ownerDocument.defaultView;
+  if (!ownerWindow) return;
+  const lease: StatusBarStatsMutationLease = {
+    expectedOpen,
+    controlsId,
+    side: generation.statsTrigger.getAttribute("data-radix-popper-side"),
+    align: generation.statsTrigger.getAttribute("data-radix-popper-align"),
+    nativeEvents: Object.freeze([...nativeEvents]),
+    reactEvent,
+    cancelExpiry: () => {},
+  };
+  nativeEvents.forEach((event) => {
+    event.extended = true;
+    event.expired = false;
+  });
+  generation.statsMutationLease = lease;
+  const timer = ownerWindow.setTimeout(() => {
+    if (generation.statsMutationLease === lease)
+      clearStatsMutationLease(generation, false);
+  }, STATS_MUTATION_LEASE_MS);
+  lease.cancelExpiry = () => ownerWindow.clearTimeout(timer);
+}
+
+function armStatsMutationFromReact(
+  generation: StatusBarGeneration,
+  publication: StatusBarReactEventPublication,
+  event: StatusBarReactEvent,
+) {
+  const native = publication.native;
+  if (
+    native.type !== "click"
+    || event.currentTarget !== generation.root
+    || !native.path.includes(generation.statsTrigger)
+    || !(native.target instanceof Node)
+    || !generation.statsTrigger.contains(native.target)
+  )
+    return;
+  const expanded = generation.statsTrigger.getAttribute("aria-expanded");
+  if (expanded !== "true" && expanded !== "false") return;
+  beginStatsMutationLease(generation, expanded === "false", [native], publication);
+}
+
+function armStatsMutationFromNative(
+  generation: StatusBarGeneration,
+  publication: StatusBarNativeEventPublication,
+) {
+  const expanded = generation.statsTrigger.getAttribute("aria-expanded");
+  if (expanded !== "true" && expanded !== "false") return;
+  const open = expanded === "true";
+  if (
+    publication.type === "keydown"
+    && publication.code === "KeyC"
+    && (publication.ctrlKey || publication.metaKey)
+    && publication.shiftKey === true
+    && publication.altKey === false
+  ) {
+    beginStatsMutationLease(generation, !open, [publication], null);
+    return;
+  }
+  const controlsId = generation.statsTrigger.getAttribute("aria-controls");
+  if (!controlsId) return;
+  const content = generation.ownerDocument.getElementById(controlsId);
+  if (
+    !open
+    || !(content instanceof HTMLElement)
+    || !statsContentIsExact(generation, controlsId)
+  )
+    return;
+  if (
+    publication.type === "keydown"
+    && publication.key === "Escape"
+    && publication.path.includes(content)
+  ) {
+    beginStatsMutationLease(generation, false, [publication], null);
+    return;
+  }
+  if (
+    publication.type !== "dismissableLayer.pointerDownOutside"
+    && publication.type !== "dismissableLayer.focusOutside"
+  )
+    return;
+  const outside = publication.event as CustomEvent<{ originalEvent?: Event }>;
+  const original = outside.detail?.originalEvent
+    ? generation.nativeEvents.get(outside.detail.originalEvent)
+    : null;
+  if (
+    !original
+    || original.target !== publication.target
+    || outside.currentTarget !== generation.ownerDocument
+    || !(original.target instanceof Node)
+    || content.contains(original.target)
+    || !nativeEventIsExact(original, original.phase)
+  )
+    return;
+  const nativeEvents = [publication, original];
+  if (publication.type === "dismissableLayer.pointerDownOutside") {
+    const chain = generation.outsidePointerChain;
+    if (
+      original.type !== "pointerdown"
+      || original.button !== 0
+      || chain?.pointerDown !== original
+      || !chain.pointerUp
+      || !chain.click
+      || !nativeEventIsExact(chain.pointerUp, chain.pointerUp.phase)
+      || !nativeEventIsExact(chain.click, chain.click.phase)
+    )
+      return;
+    nativeEvents.push(chain.pointerUp, chain.click);
+  } else if (original.type !== "focusin") {
+    return;
+  }
+  beginStatsMutationLease(generation, false, nativeEvents, null);
+}
+
 function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
   if (!validateGeneration(generation)) return;
+  if (generation.nativeEvents.has(event)) return;
   const path = event.composedPath();
   const publication: StatusBarNativeEventPublication = {
     event,
@@ -604,6 +991,7 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
     timeStamp: event.timeStamp,
     phase: event.eventPhase,
     key: "key" in event && typeof event.key === "string" ? event.key : undefined,
+    code: "code" in event && typeof event.code === "string" ? event.code : undefined,
     button: "button" in event && typeof event.button === "number" ? event.button : undefined,
     ctrlKey: "ctrlKey" in event && typeof event.ctrlKey === "boolean" ? event.ctrlKey : undefined,
     altKey: "altKey" in event && typeof event.altKey === "boolean" ? event.altKey : undefined,
@@ -620,12 +1008,17 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
   let preserveForOutside = false;
   if (publication.type === "pointerdown" && publication.button === 0) {
     retireOutsidePointerChain(generation);
-    generation.outsidePointerChain = {
+    const chain: StatusBarOutsidePointerChain = {
       pointerDown: publication,
       pointerUp: null,
       click: null,
+      cancelExpiry: () => {},
     };
-    preserveForOutside = true;
+    generation.outsidePointerChain = chain;
+    if (replaceOutsidePointerExpiry(generation, chain, OUTSIDE_POINTER_GESTURE_LEASE_MS))
+      preserveForOutside = true;
+    else
+      retireOutsidePointerChain(generation);
   } else if (publication.type === "pointerup") {
     const chain = generation.outsidePointerChain;
     if (
@@ -649,22 +1042,24 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
       && pointerChainEventIsExact(chain.pointerDown, publication)
     ) {
       chain.click = publication;
-      preserveForOutside = true;
-      queueMicrotask(() => {
-        if (generation.outsidePointerChain?.click === publication)
-          retireOutsidePointerChain(generation);
-      });
+      preserveForOutside = replaceOutsidePointerExpiry(
+        generation,
+        chain,
+        OUTSIDE_POINTER_CALLBACK_LEASE_MS,
+      );
+      if (!preserveForOutside) retireOutsidePointerChain(generation);
     } else if (chain) {
       retireOutsidePointerChain(generation);
     }
   }
   if (preserveForOutside) {
     publication.extended = true;
-    return;
+  } else {
+    queueMicrotask(() => {
+      if (!publication.extended) publication.expired = true;
+    });
   }
-  queueMicrotask(() => {
-    publication.expired = true;
-  });
+  armStatsMutationFromNative(generation, publication);
 }
 
 function activateGeneration(
@@ -688,11 +1083,11 @@ function activateGeneration(
   if (
     statsTriggers.length !== 1
     || !statsTrigger
+    || !(statsTrigger instanceof HTMLButtonElement)
     || statsTrigger.tagName !== "BUTTON"
     || statsTrigger.parentElement !== root
   )
     return;
-  const delegatedSubtrees = Object.freeze([statsTrigger]);
   const portalContents = ["menu-content", "issues-content"]
     .map((slot) => controls.get(slot)?.control)
     .filter((control): control is HTMLElement => Boolean(control));
@@ -720,7 +1115,8 @@ function activateGeneration(
     reactEvents: new WeakMap(),
     pendingIntents: new Set(),
     outsidePointerChain: null,
-    delegatedSubtrees,
+    statsTrigger,
+    statsMutationLease: null,
     nodeSeals: [],
     relationSeals: [],
     observers: [],
@@ -728,14 +1124,13 @@ function activateGeneration(
     retired: false,
   };
   const seenNodes = new Set<Node>();
-  const delegatedSubtreeSet = new Set<Node>(delegatedSubtrees);
   const relationNodes = new Set<Node>();
-  sealSubtree(root, generation.nodeSeals, seenNodes, delegatedSubtreeSet);
+  sealSubtree(root, generation.nodeSeals, seenNodes);
   sealRelations(root, ownerDocument, generation.relationSeals, relationNodes);
   portalContents.forEach((content) => {
     let top: Node = content;
     while (top.parentNode && top.parentNode !== ownerDocument.body) top = top.parentNode;
-    sealSubtree(top, generation.nodeSeals, seenNodes, delegatedSubtreeSet);
+    sealSubtree(top, generation.nodeSeals, seenNodes);
     sealRelations(top, ownerDocument, generation.relationSeals, relationNodes);
   });
   manager.active = generation;
@@ -744,6 +1139,12 @@ function activateGeneration(
     ownerDocument.addEventListener(type, listener, true);
     generation.removeEventListeners.push(() => ownerDocument.removeEventListener(type, listener, true));
   });
+  const ownerWindow = ownerDocument.defaultView;
+  if (ownerWindow) {
+    const listener = (event: KeyboardEvent) => recordNativeEvent(generation, event);
+    ownerWindow.addEventListener("keydown", listener, true);
+    generation.removeEventListeners.push(() => ownerWindow.removeEventListener("keydown", listener, true));
+  }
   observeGeneration(generation);
 }
 
@@ -778,7 +1179,11 @@ function registerControl<T extends HTMLElement>(
   return publication;
 }
 
-function nativeEventIsExact(publication: StatusBarNativeEventPublication) {
+function nativeEventIsExact(
+  publication: StatusBarNativeEventPublication,
+  expectedPhase: number = Event.CAPTURING_PHASE,
+  allowDefaultPrevention = false,
+) {
   const event = publication.event;
   const path = event.composedPath();
   return (
@@ -797,10 +1202,16 @@ function nativeEventIsExact(publication: StatusBarNativeEventPublication) {
     && event.bubbles === publication.bubbles
     && event.cancelable === publication.cancelable
     && event.composed === publication.composed
-    && event.defaultPrevented === publication.defaultPrevented
+    && (
+      event.defaultPrevented === publication.defaultPrevented
+      || allowDefaultPrevention
+        && !publication.defaultPrevented
+        && event.defaultPrevented
+    )
     && event.timeStamp === publication.timeStamp
-    && publication.phase === Event.CAPTURING_PHASE
+    && publication.phase === expectedPhase
     && (!("key" in event) || event.key === publication.key)
+    && (!("code" in event) || event.code === publication.code)
     && (!("button" in event) || event.button === publication.button)
     && (!("ctrlKey" in event) || event.ctrlKey === publication.ctrlKey)
     && (!("altKey" in event) || event.altKey === publication.altKey)
@@ -856,6 +1267,7 @@ function rememberReactEvent(
     };
     generation.reactEvents.set(event, publication);
   }
+  armStatsMutationFromReact(generation, publication, event);
   for (const intent of generation.pendingIntents) {
     if (
       intent.nativeEvents[0] === native
@@ -1020,8 +1432,10 @@ function claimIntent(intent: StatusBarEventIntent, action: string) {
   if (
     outsidePointerChain
     && intent.nativeEvents.includes(outsidePointerChain.pointerDown)
-  )
+  ) {
+    outsidePointerChain.cancelExpiry();
     generation.outsidePointerChain = null;
+  }
   return true;
 }
 
@@ -1617,6 +2031,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const hydrated = useHydrated();
   const issues = useMemo(() => (hydrated ? lintMarkdown(source, tree) : []), [hydrated, source, tree]);
   const selection = useLocalSelection(session);
+  const statsGoal = useSessionValue(session, getGoal, jsonEqual);
   const errors = issues.filter((i) => i.severity === "error").length;
 
   const [themePreference, setThemePreference] = useTheme();
@@ -1677,6 +2092,15 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
       onSyncScroll,
       compact,
       hydrated,
+      statsSelection: selection,
+      statsSelectionFrom: selection?.from ?? null,
+      statsSelectionTo: selection?.to ?? null,
+      statsGoal,
+      statsGoalKind: statsGoal?.kind ?? null,
+      statsGoalMode: statsGoal?.mode ?? null,
+      statsGoalValue: statsGoal?.value ?? null,
+      statsGoalSetBy: statsGoal?.setBy ?? null,
+      statsGoalSetAt: statsGoal?.setAt ?? null,
       issueSnapshot: issues,
       issueRows,
       onIssueSelect,
@@ -1706,7 +2130,9 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     onSyncScroll,
     session,
     setThemePreference,
+    selection,
     source,
+    statsGoal,
     syncScroll,
     themePreference,
     tree,

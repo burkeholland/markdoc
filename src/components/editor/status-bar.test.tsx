@@ -668,11 +668,13 @@ describe("status bar nested StatsPopover reconciliation", () => {
     const current = callbacks();
     const props = statusProps(current);
     await renderStatus(props);
+    const beforeSelection = captureClick(screen.getByTestId("storage-indicator"));
 
     act(() => setFakeSelection(props.session, 2, 8));
     expect(screen.getByTestId("selection-count")).toHaveTextContent(
       "1 of 2 selected",
     );
+    const beforeGoal = captureClick(screen.getByTestId("storage-indicator"));
 
     act(() => {
       setGoal(props.session, {
@@ -689,6 +691,9 @@ describe("status bar nested StatsPopover reconciliation", () => {
       "2 / 100 words",
     );
 
+    invokeFabricatedClick(beforeSelection);
+    invokeFabricatedClick(beforeGoal);
+    expect(current.storage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("storage-indicator"));
     expect(current.storage).toHaveBeenCalledOnce();
   });
@@ -717,6 +722,25 @@ describe("status bar permanent retirement", () => {
       const sibling = document.createElement("aside");
       document.body.prepend(sibling);
       sibling.remove();
+    }],
+    ["statistics trigger mutation and restore", () => {
+      const trigger = screen.getByTestId("stats-button");
+      const title = trigger.title;
+      trigger.title = "altered";
+      trigger.title = title;
+    }],
+    ["statistics placement mutation and restore", () => {
+      const trigger = screen.getByTestId("stats-button");
+      trigger.setAttribute("data-radix-popper-side", "top");
+      trigger.removeAttribute("data-radix-popper-side");
+    }],
+    ["statistics descendant replacement and restore", () => {
+      const label = screen.getByTestId("word-count");
+      const text = label.firstChild;
+      if (!text) throw new Error("Statistics label text missing");
+      const replacement = text.cloneNode(true);
+      label.replaceChild(replacement, text);
+      label.replaceChild(text, replacement);
     }],
   ])("retires after %s and lets an equal fresh remount recover", async (_name, mutate) => {
     const current = callbacks();
@@ -920,6 +944,87 @@ describe("status bar event and replacement claims", () => {
       "false",
     );
     expect(current.issue).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Radix fallback lease and expires an incomplete outside gesture", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+
+    openIssues();
+    await nextTask();
+    const stopClick = (event: Event) => event.stopImmediatePropagation();
+    document.addEventListener("click", stopClick);
+    fireEvent.pointerDown(outside, {
+      button: 0,
+      pointerId: 11,
+      pointerType: "mouse",
+      isPrimary: true,
+    });
+    fireEvent.pointerUp(outside, {
+      button: 0,
+      pointerId: 11,
+      pointerType: "mouse",
+      isPrimary: true,
+    });
+    fireEvent.click(outside, { button: 0 });
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await nextTask();
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    document.removeEventListener("click", stopClick);
+
+    openIssues();
+    await nextTask();
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(outside, {
+        button: 0,
+        pointerId: 12,
+        pointerType: "mouse",
+        isPrimary: true,
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      fireEvent.pointerUp(outside, {
+        button: 0,
+        pointerId: 12,
+        pointerType: "mouse",
+        isPrimary: true,
+      });
+      fireEvent.click(outside, { button: 0 });
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+
+      fireEvent.pointerDown(outside, {
+        button: 0,
+        pointerId: 13,
+        pointerType: "mouse",
+        isPrimary: true,
+      });
+      fireEvent.pointerUp(outside, {
+        button: 0,
+        pointerId: 13,
+        pointerType: "mouse",
+        isPrimary: true,
+      });
+      fireEvent.click(outside, { button: 0 });
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retires callback A before the same DOM publishes callback B", async () => {
