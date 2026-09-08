@@ -1561,6 +1561,45 @@ describe("FindBar F3 navigation", () => {
     frame.remove();
   });
 
+  it.each(["cancel", "change authority"] as const)(
+    "does not let a target-capture wrapper consume proof before descendants %s",
+    async (interruption) => {
+      const s = session("owner", `f3-early-wrapper-${interruption}`);
+      const stepFind = vi.spyOn(s, "stepFind");
+      const onReveal = vi.fn();
+      renderStrictBar(s, {
+        onReplaceVisible: vi.fn(),
+        onReveal,
+        onClose: vi.fn(),
+      });
+      await act(async () => {});
+      const bar = screen.getByTestId("find-bar") as HTMLDivElement;
+      const input = screen.getByTestId("find-input") as HTMLInputElement;
+      const handler = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
+      let preventedByEarlyInvocation: boolean | null = null;
+      input.addEventListener("keydown", (nativeEvent) => {
+        handler({ nativeEvent } as ReactKeyboardEvent<HTMLDivElement>);
+        preventedByEarlyInvocation = nativeEvent.defaultPrevented;
+        if (interruption === "cancel") {
+          nativeEvent.preventDefault();
+          nativeEvent.stopPropagation();
+        } else {
+          s.setFind("mat");
+        }
+      }, { capture: true, once: true });
+
+      const interrupted = dispatchFindKey(input);
+
+      expect(preventedByEarlyInvocation).toBe(false);
+      expect(interrupted.defaultPrevented).toBe(interruption === "cancel");
+      expect(stepFind).not.toHaveBeenCalled();
+      expect(onReveal).not.toHaveBeenCalled();
+      if (interruption === "change authority") {
+        await waitFor(() => expect(input).toHaveValue("mat"));
+      }
+    },
+  );
+
   it("fails closed when the owner realm KeyboardEvent binding is replaced after publication", async () => {
     const s = session("owner", "f3-replaced-constructor");
     const stepFind = vi.spyOn(s, "stepFind");
@@ -1759,7 +1798,7 @@ describe("FindBar F3 navigation", () => {
     expect(freshReveal).toHaveBeenCalledOnce();
   });
 
-  it("rejects authority changed between native capture and React delivery, then admits a fresh publication", async () => {
+  it("rejects authority changed between native capture and terminal delivery, then admits a fresh publication", async () => {
     const s = session("owner", "f3-capture-delivery-drift");
     const stepFind = vi.spyOn(s, "stepFind");
     const onReveal = vi.fn();

@@ -119,9 +119,41 @@ test.describe("find & replace", () => {
       Reflect.get(window, "__markdocF3Trust"))).toEqual([false]);
     await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
 
+    await input.evaluate((element) => {
+      const bar = element.closest<HTMLElement>('[data-testid="find-bar"]');
+      const propsKey = bar &&
+        Object.keys(bar).find((key) => key.startsWith("__reactProps$"));
+      const props = bar && propsKey
+        ? Reflect.get(bar, propsKey) as {
+            onKeyDown?: (event: { nativeEvent: KeyboardEvent }) => void;
+          }
+        : null;
+      if (!props?.onKeyDown) throw new Error("Find React key handler is unavailable");
+      const observation = {
+        defaultPreventedBeforeCancel: true,
+        isTrusted: false,
+      };
+      Reflect.set(window, "__markdocF3EarlyDelivery", observation);
+      element.addEventListener("keydown", (event) => {
+        if (!(event instanceof KeyboardEvent) || event.key !== "F3") return;
+        props.onKeyDown?.({ nativeEvent: event });
+        observation.defaultPreventedBeforeCancel = event.defaultPrevented;
+        observation.isTrusted = event.isTrusted;
+        event.preventDefault();
+        event.stopPropagation();
+      }, { capture: true, once: true });
+    });
+    await page.keyboard.press("F3");
+    expect(await page.evaluate(() =>
+      Reflect.get(window, "__markdocF3EarlyDelivery"))).toEqual({
+      defaultPreventedBeforeCancel: false,
+      isTrusted: true,
+    });
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+
     await page.keyboard.press("F3");
     await expect.poll(() => page.evaluate(() =>
-      Reflect.get(window, "__markdocF3Trust"))).toEqual([false, true]);
+      Reflect.get(window, "__markdocF3Trust"))).toEqual([false, true, true]);
     await expect(page.getByTestId("find-count")).toHaveText("2 of 3");
     await expect(input).toBeFocused();
 

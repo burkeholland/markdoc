@@ -520,6 +520,8 @@ export function readFindKeyboardFacts(
 export function sameFindKeyboardDelivery(
   captured: FindNativeKeyboardFacts,
   current: FindNativeKeyboardFacts,
+  captureBoundary: EventTarget,
+  deliveryBoundary: EventTarget,
 ) {
   if (
     current.event !== captured.event ||
@@ -535,11 +537,16 @@ export function sameFindKeyboardDelivery(
     current.shiftKey !== captured.shiftKey ||
     current.bubbles !== captured.bubbles ||
     current.cancelable !== captured.cancelable ||
+    current.defaultPrevented !== captured.defaultPrevented ||
     current.isTrusted !== captured.isTrusted ||
+    captured.eventPhase !== 1 ||
+    current.eventPhase !== 3 ||
     current.timeStamp !== captured.timeStamp ||
     current.view !== captured.view ||
     current.ownerView !== captured.ownerView ||
     current.target !== captured.target ||
+    captured.currentTarget !== captureBoundary ||
+    current.currentTarget !== deliveryBoundary ||
     current.activeElement !== captured.target ||
     current.path.length !== captured.path.length
   ) {
@@ -559,20 +566,6 @@ export function findKeyboardPathIncludes(
     if (facts.path[index] === target) return true;
   }
   return false;
-}
-
-export function syntheticNativeEvent(event: object): object | null {
-  try {
-    const descriptor = GET_OWN_PROPERTY_DESCRIPTOR(event, "nativeEvent");
-    return descriptor &&
-      "value" in descriptor &&
-      descriptor.value &&
-      typeof descriptor.value === "object"
-      ? descriptor.value
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 export function preventFindKeyboardDefault(

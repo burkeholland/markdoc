@@ -25,7 +25,6 @@ import {
   readFindKeyboardFacts,
   sameFindKeyboardDelivery,
   scheduleFindKeyboardRecordExpiry,
-  syntheticNativeEvent,
   trustedFindKeyboardIntrinsics,
   type FindNativeKeyboardFacts,
 } from "./find-keyboard-trust";
@@ -253,10 +252,6 @@ interface FindKeyboardDelivery {
 
 interface FindBarPublicationRuntime {
   readonly publication: FindBarPublication;
-  readonly deliverKeyboard: (
-    event: KeyboardEvent<HTMLDivElement>,
-    nativeEvent: object,
-  ) => void;
   readonly publish: (snapshot: FindBarDomSnapshot, owners: readonly ElementOwnerView[]) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
@@ -893,6 +888,7 @@ function createFindBarPublication({
       if (!keyboardListening) return;
       keyboardListening = false;
       root.removeEventListener("keydown", rememberKeyboard, true);
+      ownerDocument.removeEventListener("keydown", deliverKeyboard);
     };
     const mutationIsRelevant = (record: MutationRecord) => {
       // React temporarily rewrites controlled input names while restoring their state.
@@ -1058,52 +1054,55 @@ function createFindBarPublication({
         entry.detached &&
         entry.reattached &&
         entry.owner.element() === entry.element);
+    function deliverKeyboard(nativeEvent: Event) {
+      const delivery = cells.keyboardDeliveries.get(nativeEvent);
+      const currentFacts = keyboardIntrinsics
+        ? readFindKeyboardFacts(
+            keyboardIntrinsics,
+            nativeEvent,
+            ownerDocument,
+          )
+        : null;
+      if (
+        !ownerWindow ||
+        !keyboardIntrinsics ||
+        !keyboardIntrinsicsAreCurrent() ||
+        !delivery ||
+        delivery.publication !== publication ||
+        !currentFacts ||
+        currentFacts.defaultPrevented ||
+        !sameFindKeyboardDelivery(
+          delivery.facts,
+          currentFacts,
+          publishedRoot,
+          ownerDocument,
+        ) ||
+        !isCurrentKeyboardTarget(delivery.facts.target) ||
+        !factsAreCurrent() ||
+        !ownsAuthority(publication) ||
+        !publishedDomMatches() ||
+        !claim(nativeEvent) ||
+        !factsAreCurrent() ||
+        !ownsAuthority(publication) ||
+        !publishedDomMatches()
+      ) {
+        return;
+      }
+      cells.keyboardDeliveries.delete(nativeEvent);
+      if (!preventFindKeyboardDefault(keyboardIntrinsics, nativeEvent)) return;
+      if (
+        !factsAreCurrent() ||
+        !ownsAuthority(publication) ||
+        !publishedDomMatches()
+      ) {
+        return;
+      }
+      if (!authority.actionsDisabled) {
+        step(publication, delivery.facts.shiftKey ? -1 : 1);
+      }
+    }
     const runtime: FindBarPublicationRuntime = Object.freeze({
       publication,
-      deliverKeyboard: (
-        event: KeyboardEvent<HTMLDivElement>,
-        nativeEvent: object,
-      ) => {
-        const delivery = cells.keyboardDeliveries.get(nativeEvent);
-        const currentFacts = keyboardIntrinsics
-          ? readFindKeyboardFacts(
-              keyboardIntrinsics,
-              nativeEvent,
-              ownerDocument,
-            )
-          : null;
-        if (
-          !keyboardIntrinsics ||
-          !keyboardIntrinsicsAreCurrent() ||
-          !delivery ||
-          delivery.publication !== publication ||
-          !currentFacts ||
-          currentFacts.eventPhase === 0 ||
-          currentFacts.defaultPrevented ||
-          !sameFindKeyboardDelivery(delivery.facts, currentFacts) ||
-          !isCurrentKeyboardTarget(delivery.facts.target) ||
-          !factsAreCurrent() ||
-          !ownsAuthority(publication) ||
-          !publishedDomMatches() ||
-          !claim(event, nativeEvent) ||
-          !factsAreCurrent() ||
-          !ownsAuthority(publication) ||
-          !publishedDomMatches()
-        ) {
-          return;
-        }
-        if (!preventFindKeyboardDefault(keyboardIntrinsics, nativeEvent)) return;
-        if (
-          !factsAreCurrent() ||
-          !ownsAuthority(publication) ||
-          !publishedDomMatches()
-        ) {
-          return;
-        }
-        if (!authority.actionsDisabled) {
-          step(publication, delivery.facts.shiftKey ? -1 : 1);
-        }
-      },
       publish: (
         snapshot: FindBarDomSnapshot,
         owners: readonly ElementOwnerView[],
@@ -1139,6 +1138,7 @@ function createFindBarPublication({
         if (keyboardIntrinsics) {
           keyboardListening = true;
           root.addEventListener("keydown", rememberKeyboard, true);
+          ownerDocument.addEventListener("keydown", deliverKeyboard);
         }
       },
       retireForElement: () => {
@@ -1283,14 +1283,6 @@ function createFindBarPublication({
     const publication = runtime?.publication;
     if (!publication) return;
     const root = bar.element();
-    const nativeEvent = syntheticNativeEvent(event);
-    const delivery = nativeEvent
-      ? cells.keyboardDeliveries.get(nativeEvent)
-      : undefined;
-    if (delivery && nativeEvent) {
-      runtime.deliverKeyboard(event, nativeEvent);
-      return;
-    }
     if (!ownsBar(publication, event.currentTarget)) return;
     const target = event.target;
     if (
