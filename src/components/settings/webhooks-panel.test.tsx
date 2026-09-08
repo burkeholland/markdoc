@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import {
+  useLayoutEffect,
+  type ChangeEvent,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type RefCallback,
+} from "react";
 
 import { WebhooksPanel } from "./webhooks-panel";
 
@@ -38,6 +44,92 @@ function BoundaryHarness({
   return present ? <WebhooksPanel key={cardKey} /> : null;
 }
 
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return value as T;
+}
+
+type ClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type InputChangeHandler = (event: ChangeEvent<HTMLInputElement>) => void;
+type SubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
+
+function mouseEvent(
+  currentTarget: HTMLButtonElement,
+  options: {
+    target?: EventTarget;
+    nativeTarget?: EventTarget;
+    MouseEventType?: typeof window.MouseEvent;
+  } = {},
+) {
+  const target = options.target ?? currentTarget;
+  const nativeTarget = options.nativeTarget ?? target;
+  const MouseEventType = options.MouseEventType ?? window.MouseEvent;
+  const nativeEvent = new MouseEventType("click", { bubbles: true, cancelable: true });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return {
+    type: "click",
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+  } as unknown as ReactMouseEvent<HTMLButtonElement>;
+}
+
+function invokeRejectedMouseProvenance(
+  handler: ClickHandler,
+  currentTarget: HTMLButtonElement,
+) {
+  const foreign = document.createElement("button");
+  const unpublished = document.createElement("span");
+  const iframe = document.createElement("iframe");
+  currentTarget.appendChild(unpublished);
+  document.body.append(foreign, iframe);
+  const foreignWindow = iframe.contentWindow as (Window & typeof globalThis) | null;
+  const foreignMouseEvent = foreignWindow?.MouseEvent;
+  if (!foreignMouseEvent) throw new Error("The foreign document has no MouseEvent constructor");
+
+  act(() => {
+    handler(mouseEvent(currentTarget, { target: foreign }));
+    handler(mouseEvent(currentTarget, { nativeTarget: foreign }));
+    handler(mouseEvent(currentTarget, { target: unpublished }));
+    handler(mouseEvent(currentTarget, { MouseEventType: foreignMouseEvent }));
+  });
+
+  unpublished.remove();
+  foreign.remove();
+  iframe.remove();
+}
+
+function submitEvent(
+  currentTarget: HTMLFormElement,
+  target: EventTarget,
+  nativeTarget: EventTarget,
+  submitter: HTMLElement | null,
+) {
+  const nativeEvent = new window.Event("submit", { bubbles: true, cancelable: true });
+  Object.defineProperties(nativeEvent, {
+    target: { configurable: true, value: nativeTarget },
+    submitter: { configurable: true, value: submitter },
+  });
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  return {
+    event: {
+      type: "submit",
+      currentTarget,
+      target,
+      nativeEvent,
+      defaultPrevented: false,
+      preventDefault,
+    } as unknown as FormEvent<HTMLFormElement>,
+    preventDefault,
+  };
+}
+
 const disabledWebhook = {
   id: "disabled-hook",
   url: "https://receiver.example/disabled",
@@ -71,6 +163,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -763,5 +856,481 @@ describe("Settings → Webhooks: layout retirement", () => {
     expect(screen.queryByTestId("webhook-action-error")).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.filter(([url]) => url === actionUrl)).toHaveLength(1);
+  });
+});
+
+describe("Settings → Webhooks: exact committed controls", () => {
+  it("rejects A handlers through B controls in both orders and ignores late A ref cleanup", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(response({ webhooks: [] })));
+    const view = render(<BoundaryHarness cardKey={1} />);
+    await screen.findByTestId("webhooks-empty");
+
+    const addA = screen.getByTestId("webhook-add") as HTMLButtonElement;
+    const clickA = reactProp<ClickHandler>(addA, "onClick");
+    const refA = reactProp<RefCallback<HTMLButtonElement>>(addA, "ref");
+
+    view.rerender(<BoundaryHarness cardKey={2} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await screen.findByTestId("webhooks-empty");
+    const addB = screen.getByTestId("webhook-add") as HTMLButtonElement;
+    const clickB = reactProp<ClickHandler>(addB, "onClick");
+
+    act(() => {
+      clickA(mouseEvent(addB));
+      clickB(mouseEvent(addA));
+      clickB(mouseEvent(addA));
+      clickA(mouseEvent(addB));
+      refA(null);
+    });
+
+    expect(screen.queryByTestId("webhook-form")).toBeNull();
+    fireEvent.click(addB);
+    expect(screen.getByTestId("webhook-form")).toBeInTheDocument();
+  });
+
+  it("requires exact native mouse provenance for Add, Cancel, and Retry without retiring current controls", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ error: "Try again" }, 503))
+      .mockResolvedValueOnce(response({ webhooks: [] }));
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-list-error");
+
+    const add = screen.getByTestId("webhook-add") as HTMLButtonElement;
+    const clickAdd = reactProp<ClickHandler>(add, "onClick");
+    invokeRejectedMouseProvenance(clickAdd, add);
+    expect(screen.queryByTestId("webhook-form")).toBeNull();
+    act(() => clickAdd(mouseEvent(add)));
+    expect(screen.getByTestId("webhook-form")).toBeInTheDocument();
+
+    const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    const clickCancel = reactProp<ClickHandler>(cancel, "onClick");
+    invokeRejectedMouseProvenance(clickCancel, cancel);
+    expect(screen.getByTestId("webhook-form")).toBeInTheDocument();
+    act(() => clickCancel(mouseEvent(cancel)));
+    expect(screen.queryByTestId("webhook-form")).toBeNull();
+
+    const retry = screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement;
+    const clickRetry = reactProp<ClickHandler>(retry, "onClick");
+    invokeRejectedMouseProvenance(clickRetry, retry);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    act(() => clickRetry(mouseEvent(retry)));
+    expect(await screen.findByTestId("webhooks-empty")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires exact native mouse provenance for Enable and Send test without retiring current row controls", async () => {
+    const enableRequest = deferred<Response>();
+    const testRequest = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, activeWebhook] }))
+      .mockReturnValueOnce(enableRequest.promise)
+      .mockReturnValueOnce(testRequest.promise);
+    render(<WebhooksPanel />);
+    const rows = await screen.findAllByTestId("webhook-row");
+
+    const enable = within(rows[0]).getByTestId("webhook-enable") as HTMLButtonElement;
+    const test = within(rows[1]).getByTestId("webhook-test") as HTMLButtonElement;
+    const clickEnable = reactProp<ClickHandler>(enable, "onClick");
+    const clickTest = reactProp<ClickHandler>(test, "onClick");
+    invokeRejectedMouseProvenance(clickEnable, enable);
+    invokeRejectedMouseProvenance(clickTest, test);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    act(() => clickEnable(mouseEvent(enable)));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const currentTest = screen.getAllByTestId("webhook-test")[1] as HTMLButtonElement;
+    const clickCurrentTest = reactProp<ClickHandler>(currentTest, "onClick");
+    act(() => clickCurrentTest(mouseEvent(currentTest)));
+    expect(fetchMock.mock.calls.map(([requestedUrl]) => requestedUrl)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks/disabled-hook/enable",
+      "/api/webhooks/active-hook/test",
+    ]);
+
+    await act(async () => {
+      enableRequest.resolve(response({ error: "Enable unavailable" }, 503));
+      testRequest.resolve(response({ error: "Test unavailable" }, 503));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("webhook-enable")).toBeEnabled();
+      expect(screen.getAllByTestId("webhook-test")[1]).toBeEnabled();
+    });
+  });
+
+  it("requires exact native mouse provenance for Copy and Delete while accepting published icon targets", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    const navigatorWithClipboard = Object.create(window.navigator) as Navigator;
+    Object.defineProperty(navigatorWithClipboard, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.stubGlobal("navigator", navigatorWithClipboard);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const createdWebhook = {
+      ...activeWebhook,
+      id: "created-hook",
+      url: "https://receiver.example/created",
+    };
+    const deletion = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [activeWebhook] }))
+      .mockResolvedValueOnce(response({ webhook: { ...createdWebhook, secret: "whsec_provenance" } }))
+      .mockResolvedValueOnce(response({ webhooks: [createdWebhook] }))
+      .mockReturnValueOnce(deletion.promise);
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhook-row");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: createdWebhook.url } });
+    fireEvent.click(screen.getByTestId("webhook-create"));
+
+    const createdRoot = await screen.findByTestId("webhook-created");
+    const copyButton = within(createdRoot).getByRole("button", { name: "Copy secret" }) as HTMLButtonElement;
+    const copy = reactProp<ClickHandler>(copyButton, "onClick");
+    invokeRejectedMouseProvenance(copy, copyButton);
+    expect(writeText).not.toHaveBeenCalled();
+    const copyIcon = copyButton.querySelector("svg");
+    if (!copyIcon) throw new Error("The published Copy icon was not rendered");
+    act(() => copy(mouseEvent(copyButton, { target: copyIcon })));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("whsec_provenance");
+
+    const rowUrl = await screen.findByText(createdWebhook.url);
+    const row = rowUrl.closest('[data-testid="webhook-row"]');
+    if (!row) throw new Error("The created webhook row was not rendered");
+    const deleteButton = within(row as HTMLElement).getByTestId("webhook-delete") as HTMLButtonElement;
+    const clickDelete = reactProp<ClickHandler>(deleteButton, "onClick");
+    invokeRejectedMouseProvenance(clickDelete, deleteButton);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const deleteIcon = deleteButton.querySelector("svg");
+    if (!deleteIcon) throw new Error("The published Delete icon was not rendered");
+    act(() => clickDelete(mouseEvent(deleteButton, { target: deleteIcon })));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.map(([requestedUrl]) => requestedUrl)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks",
+      "/api/webhooks",
+      "/api/webhooks/created-hook",
+    ]);
+  });
+
+  it("requires exact input targets and retires equal-looking draft handlers on the reused DOM", async () => {
+    fetchMock.mockResolvedValueOnce(response({ webhooks: [] }));
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+
+    const url = screen.getByTestId("webhook-url") as HTMLInputElement;
+    const docs = screen.getByTestId("webhook-docs") as HTMLInputElement;
+    const staleChange = reactProp<InputChangeHandler>(url, "onChange");
+
+    url.value = "https://receiver.example/wrong-target";
+    act(() => staleChange({ currentTarget: url, target: docs } as ChangeEvent<HTMLInputElement>));
+    url.value = "";
+    docs.value = "https://receiver.example/wrong-current";
+    act(() => staleChange({ currentTarget: docs, target: docs } as ChangeEvent<HTMLInputElement>));
+    docs.value = "";
+    expect(url).toHaveValue("");
+    expect(docs).toHaveValue("");
+
+    fireEvent.change(url, { target: { value: "https://receiver.example/current" } });
+    expect(url).toHaveValue("https://receiver.example/current");
+    const currentChange = reactProp<InputChangeHandler>(url, "onChange");
+    expect(currentChange).not.toBe(staleChange);
+
+    url.value = "https://receiver.example/stale";
+    act(() => staleChange({ currentTarget: url, target: url } as ChangeEvent<HTMLInputElement>));
+    url.value = "https://receiver.example/current";
+    expect(url).toHaveValue("https://receiver.example/current");
+
+    url.value = "https://receiver.example/successor";
+    act(() => currentChange({ currentTarget: url, target: url } as ChangeEvent<HTMLInputElement>));
+    expect(url).toHaveValue("https://receiver.example/successor");
+  });
+
+  it("accepts only an exact native form submit and preserves keyboard submission", async () => {
+    const create = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ webhooks: [] })).mockReturnValueOnce(create.promise);
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: "https://receiver.example/native-submit" } });
+
+    const form = screen.getByTestId("webhook-form") as HTMLFormElement;
+    const createButton = screen.getByTestId("webhook-create") as HTMLButtonElement;
+    const addButton = screen.getByTestId("webhook-add") as HTMLButtonElement;
+    const submit = reactProp<SubmitHandler>(form, "onSubmit");
+    const foreignForm = document.createElement("form");
+    document.body.appendChild(foreignForm);
+
+    const wrongCurrent = submitEvent(foreignForm, form, form, createButton);
+    const wrongTarget = submitEvent(form, createButton, form, createButton);
+    const wrongNativeTarget = submitEvent(form, form, foreignForm, createButton);
+    const wrongSubmitter = submitEvent(form, form, form, addButton);
+    act(() => {
+      submit(wrongCurrent.event);
+      submit(wrongTarget.event);
+      submit(wrongNativeTarget.event);
+      submit(wrongSubmitter.event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(wrongCurrent.preventDefault).not.toHaveBeenCalled();
+    expect(wrongTarget.preventDefault).not.toHaveBeenCalled();
+    expect(wrongNativeTarget.preventDefault).not.toHaveBeenCalled();
+    expect(wrongSubmitter.preventDefault).not.toHaveBeenCalled();
+
+    createButton.disabled = true;
+    const disabled = submitEvent(form, form, form, createButton);
+    act(() => submit(disabled.event));
+    createButton.disabled = false;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const keyboardSubmit = submitEvent(form, form, form, null);
+    act(() => submit(keyboardSubmit.event));
+    expect(keyboardSubmit.preventDefault).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      url: "https://receiver.example/native-submit",
+      events: ["request.created", "mention", "comment.added", "comment.replied"],
+      documentIds: null,
+    });
+    foreignForm.remove();
+  });
+
+  it("rejects sibling, foreign, detached, cross-control, disabled, wrong-row, and reordered row sources", async () => {
+    const pending = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, otherDisabledWebhook] }))
+      .mockReturnValueOnce(pending.promise);
+    render(<WebhooksPanel />);
+    const rows = await screen.findAllByTestId("webhook-row");
+    const firstTest = within(rows[0]).getByTestId("webhook-test") as HTMLButtonElement;
+    const secondTest = within(rows[1]).getByTestId("webhook-test") as HTMLButtonElement;
+    const firstDelete = within(rows[0]).getByTestId("webhook-delete") as HTMLButtonElement;
+    const click = reactProp<ClickHandler>(firstTest, "onClick");
+    const detached = firstTest.cloneNode(true) as HTMLButtonElement;
+    const foreign = document.createElement("button");
+    document.body.appendChild(foreign);
+
+    act(() => {
+      click(mouseEvent(secondTest));
+      click(mouseEvent(firstDelete));
+      click(mouseEvent(detached));
+      click(mouseEvent(foreign));
+    });
+    firstTest.disabled = true;
+    act(() => click(mouseEvent(firstTest)));
+    firstTest.disabled = false;
+
+    const list = rows[0].parentElement!;
+    list.insertBefore(rows[1], rows[0]);
+    act(() => click(mouseEvent(firstTest)));
+    list.insertBefore(rows[0], rows[1]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    act(() => click(mouseEvent(firstTest)));
+    expect(fetchMock.mock.calls.map(([requestedUrl]) => requestedUrl)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks/disabled-hook/test",
+    ]);
+    foreign.remove();
+  });
+
+  it("re-reads every mutable API row primitive before claiming a row action", async () => {
+    interface MutableRow {
+      id: string;
+      url: string;
+      events: string[];
+      documentIds: string[] | null;
+      active: boolean;
+      failures: number;
+      createdAt: string;
+      lastDelivery: { status: number; at: string; attempt: number; event: string } | null;
+    }
+
+    const captured: { row: MutableRow | null } = { row: null };
+    const originalParse = JSON.parse;
+    vi.spyOn(JSON, "parse").mockImplementation((text: string) => {
+      const parsed = originalParse(text) as { webhooks?: MutableRow[] };
+      if (parsed.webhooks?.length === 1) captured.row = parsed.webhooks[0]!;
+      return parsed;
+    });
+    const pending = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ webhooks: [disabledWebhook] })).mockReturnValueOnce(pending.promise);
+    render(<WebhooksPanel />);
+    const testButton = await screen.findByTestId("webhook-test") as HTMLButtonElement;
+    const click = reactProp<ClickHandler>(testButton, "onClick");
+    const liveRow = captured.row;
+    if (!liveRow?.lastDelivery) throw new Error("The parsed webhook row was not captured");
+
+    const originalDelivery = { ...liveRow.lastDelivery };
+    const mutations: Array<() => () => void> = [
+      () => {
+        const old = liveRow!.id;
+        liveRow!.id = "mutated-id";
+        return () => { liveRow!.id = old; };
+      },
+      () => {
+        const old = liveRow!.url;
+        liveRow!.url = "https://receiver.example/mutated";
+        return () => { liveRow!.url = old; };
+      },
+      () => {
+        const old = liveRow!.events[0]!;
+        liveRow!.events[0] = "mutated.event";
+        return () => { liveRow!.events[0] = old; };
+      },
+      () => {
+        liveRow!.documentIds = ["mutated-document"];
+        return () => { liveRow!.documentIds = null; };
+      },
+      () => {
+        liveRow!.active = true;
+        return () => { liveRow!.active = false; };
+      },
+      () => {
+        liveRow!.failures = 19;
+        return () => { liveRow!.failures = 20; };
+      },
+      () => {
+        liveRow!.createdAt = "2026-09-02T12:00:00.000Z";
+        return () => { liveRow!.createdAt = disabledWebhook.createdAt; };
+      },
+      () => {
+        liveRow!.lastDelivery!.status = 201;
+        return () => { liveRow!.lastDelivery!.status = originalDelivery.status; };
+      },
+      () => {
+        liveRow!.lastDelivery!.at = "2026-09-02T12:01:00.000Z";
+        return () => { liveRow!.lastDelivery!.at = originalDelivery.at; };
+      },
+      () => {
+        liveRow!.lastDelivery!.attempt = 5;
+        return () => { liveRow!.lastDelivery!.attempt = originalDelivery.attempt; };
+      },
+      () => {
+        liveRow!.lastDelivery!.event = "mutated.event";
+        return () => { liveRow!.lastDelivery!.event = originalDelivery.event; };
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const restore = mutate();
+      act(() => click(mouseEvent(testButton)));
+      restore();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+
+    act(() => click(mouseEvent(testButton)));
+    expect(fetchMock.mock.calls.map(([requestedUrl]) => requestedUrl)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks/disabled-hook/test",
+    ]);
+  });
+
+  it("allows a later Delete after decline while blocking reentrant confirmation for the same event", async () => {
+    const deletion = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ webhooks: [activeWebhook] })).mockReturnValueOnce(deletion.promise);
+    render(<WebhooksPanel />);
+    const deleteButton = await screen.findByTestId("webhook-delete") as HTMLButtonElement;
+    const click = reactProp<ClickHandler>(deleteButton, "onClick");
+    const declinedEvent = mouseEvent(deleteButton);
+    const confirmMock = vi
+      .fn<(message?: string) => boolean>()
+      .mockImplementationOnce(() => {
+        click(declinedEvent);
+        return false;
+      })
+      .mockReturnValueOnce(true);
+    vi.stubGlobal("confirm", confirmMock);
+
+    act(() => click(declinedEvent));
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    act(() => click(mouseEvent(deleteButton)));
+    expect(confirmMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([requestedUrl]) => requestedUrl)).toEqual([
+      "/api/webhooks",
+      "/api/webhooks/active-hook",
+    ]);
+  });
+
+  it("binds Copy to the exact created secret DOM and ignores later mutation of the API object", async () => {
+    const captured: { created: { id: string; secret: string; url: string } | null } = { created: null };
+    const originalParse = JSON.parse;
+    vi.spyOn(JSON, "parse").mockImplementation((text: string) => {
+      const parsed = originalParse(text) as { webhook?: { id: string; secret?: string; url: string } };
+      if (parsed.webhook?.secret) {
+        captured.created = parsed.webhook as { id: string; secret: string; url: string };
+      }
+      return parsed;
+    });
+    const writeText = vi.fn(() => Promise.resolve());
+    const navigatorWithClipboard = Object.create(window.navigator) as Navigator;
+    Object.defineProperty(navigatorWithClipboard, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.stubGlobal("navigator", navigatorWithClipboard);
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [] }))
+      .mockResolvedValueOnce(response({ webhook: { ...activeWebhook, id: "created-hook", secret: "whsec_exact" } }))
+      .mockResolvedValueOnce(response({ webhooks: [{ ...activeWebhook, id: "created-hook" }] }));
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: activeWebhook.url } });
+    fireEvent.click(screen.getByTestId("webhook-create"));
+
+    const createdRoot = await screen.findByTestId("webhook-created");
+    const code = within(createdRoot).getByTestId("webhook-secret");
+    const copyButton = within(createdRoot).getByRole("button", { name: "Copy secret" }) as HTMLButtonElement;
+    const copy = reactProp<ClickHandler>(copyButton, "onClick");
+    const createdSource = captured.created;
+    if (!createdSource) throw new Error("The parsed created webhook was not captured");
+    createdSource.id = "mutated-created-id";
+    createdSource.url = "https://receiver.example/mutated-created";
+    createdSource.secret = "whsec_mutated";
+
+    const originalText = code.textContent;
+    code.textContent = "whsec_dom_mutated";
+    act(() => copy(mouseEvent(copyButton)));
+    code.textContent = originalText;
+    act(() => copy(mouseEvent(screen.getByTestId("webhook-add") as HTMLButtonElement)));
+    expect(writeText).not.toHaveBeenCalled();
+
+    const exactEvent = mouseEvent(copyButton);
+    act(() => {
+      copy(exactEvent);
+      copy(exactEvent);
+    });
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("whsec_exact");
+  });
+
+  it("retires a publication on control replacement and requires a rendered successor", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(response({ webhooks: [] })));
+    const view = render(<BoundaryHarness cardKey={1} />);
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    const clickCancel = reactProp<ClickHandler>(cancel, "onClick");
+    const cancelRef = reactProp<RefCallback<HTMLButtonElement>>(cancel, "ref");
+    const replacement = cancel.cloneNode(true) as HTMLButtonElement;
+    document.body.appendChild(replacement);
+
+    act(() => {
+      cancelRef(replacement);
+      cancelRef(cancel);
+      clickCancel(mouseEvent(cancel));
+    });
+    expect(screen.getByTestId("webhook-form")).toBeInTheDocument();
+    replacement.remove();
+
+    view.rerender(<BoundaryHarness cardKey={2} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    expect(screen.getByTestId("webhook-form")).toBeInTheDocument();
   });
 });
