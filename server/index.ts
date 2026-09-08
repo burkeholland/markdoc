@@ -1,3 +1,5 @@
+// Application-side imports reach Next request APIs before prepare(), so initialize its Node globals first.
+import "next/dist/server/node-environment.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import type { Duplex } from "node:stream";
