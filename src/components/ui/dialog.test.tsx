@@ -85,6 +85,23 @@ function fabricatedClick(currentTarget: HTMLButtonElement) {
   } as unknown as ReactMouseEvent<HTMLButtonElement>;
 }
 
+function invokeFromCurrentNativePath(handler: CloseClick, currentTarget: HTMLButtonElement) {
+  const listener = (nativeEvent: MouseEvent) => {
+    nativeEvent.stopPropagation();
+    handler({
+      type: "click",
+      button: 0,
+      bubbles: true,
+      defaultPrevented: false,
+      currentTarget,
+      target: currentTarget,
+      nativeEvent,
+    } as unknown as ReactMouseEvent<HTMLButtonElement>);
+  };
+  currentTarget.addEventListener("click", listener, { once: true });
+  fireEvent.click(currentTarget);
+}
+
 function dialog() {
   return screen.getByRole("dialog") as HTMLDivElement;
 }
@@ -337,6 +354,60 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     combobox.setAttribute("aria-expanded", "false");
     fireEvent.keyDown(combobox, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("publishes an initially empty explicit description and closes with exact focus custody", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog description="" onClosed={onClosed} />
+      </StrictMode>,
+    );
+    expect(screen.getByTestId("dialog-input")).toHaveFocus();
+    expect(dialog().querySelector("p")).toHaveClass("mt-1", "text-sm", "text-ink-3");
+    expect(dialog().querySelector("p")).toHaveTextContent("");
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("publishes a nonempty-to-empty description successor for exact Escape close", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const onClosed = vi.fn();
+    function DescriptionHarness() {
+      const [description, setDescription] = useState("Before");
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Description transition" description={description} onClosed={onClosed}>
+            <button type="button" onClick={() => setDescription("")}>Empty description</button>
+            <input data-testid="description-input" autoFocus />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><DescriptionHarness /></StrictMode>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Empty description" }));
+    const input = screen.getByTestId("description-input");
+    act(() => input.focus());
+    expect(dialog().querySelector("p")).toHaveClass("mt-1", "text-sm", "text-ink-3");
+    expect(input).toHaveFocus();
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
     await flushTasks();
 
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -719,6 +790,66 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
+  it.each(["trigger", "close"] as const)(
+    "rejects a stale exported Dialog%s token on the current replacement path",
+    (kind) => {
+      const staleOpenChange = vi.fn();
+      const currentOpenChange = vi.fn();
+      const tree = (visit: "A" | "B") => (
+        <StrictMode>
+          <Dialog open onOpenChange={visit === "A" ? staleOpenChange : currentOpenChange}>
+            <DialogTrigger>Toggle {visit}</DialogTrigger>
+            <DialogContent title={`Owned ${visit}`}>
+              <DialogClose>Body close {visit}</DialogClose>
+            </DialogContent>
+          </Dialog>
+        </StrictMode>
+      );
+      const view = renderDirect(tree("A"));
+      const staleElement = screen.getByText(
+        kind === "trigger" ? /Toggle\s+A/ : /Body close\s+A/,
+      ) as HTMLButtonElement;
+      const staleHandler = captureClick(staleElement);
+
+      act(() => view.root.render(tree("B")));
+      const currentElement = screen.getByText(
+        kind === "trigger" ? /Toggle\s+B/ : /Body close\s+B/,
+      ) as HTMLButtonElement;
+      invokeFromCurrentNativePath(staleHandler, currentElement);
+
+      expect(staleOpenChange).not.toHaveBeenCalled();
+      expect(currentOpenChange).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog", { name: "Owned B" })).toBeInTheDocument();
+
+      fireEvent.click(currentElement);
+      expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    },
+  );
+
+  it("preserves React 19 cleanup returns from exported control refs", () => {
+    const triggerCleanup = vi.fn();
+    const closeCleanup = vi.fn();
+    const triggerRef: RefCallback<HTMLButtonElement> = (element) =>
+      element ? triggerCleanup : undefined;
+    const closeRef: RefCallback<HTMLButtonElement> = (element) =>
+      element ? closeCleanup : undefined;
+    const view = renderDirect(
+      <Dialog open onOpenChange={vi.fn()}>
+        <DialogTrigger ref={triggerRef}>Cleanup trigger</DialogTrigger>
+        <DialogContent title="Cleanup refs">
+          <DialogClose ref={closeRef}>Cleanup close</DialogClose>
+        </DialogContent>
+      </Dialog>,
+    );
+    const triggerBeforeUnmount = triggerCleanup.mock.calls.length;
+    const closeBeforeUnmount = closeCleanup.mock.calls.length;
+
+    act(() => view.root.render(null));
+
+    expect(triggerCleanup).toHaveBeenCalledTimes(triggerBeforeUnmount + 1);
+    expect(closeCleanup).toHaveBeenCalledTimes(closeBeforeUnmount + 1);
+  });
+
   it("owns autofocus and close completion without a modal overlay", async () => {
     const onClosed = vi.fn();
     function NonModalHarness() {
@@ -783,6 +914,44 @@ describe("DialogContent exact Strict Mode publication", () => {
 
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the page opener through a nested non-modal focus visit", async () => {
+    const pageOpener = document.createElement("button");
+    document.body.append(pageOpener);
+    pageOpener.focus();
+    const outerClosed = vi.fn();
+    const innerClosed = vi.fn();
+    function NestedNonModalHarness() {
+      const [outerOpen, setOuterOpen] = useState(true);
+      const [innerOpen, setInnerOpen] = useState(false);
+      return (
+        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+          <DialogContent title="Outer custody" onClosed={outerClosed}>
+            <button type="button" onClick={() => setInnerOpen(true)}>Open nested</button>
+            <Dialog open={innerOpen} onOpenChange={setInnerOpen} modal={false}>
+              <DialogContent title="Inner custody" onClosed={innerClosed}>
+                <input data-testid="inner-custody-input" autoFocus />
+              </DialogContent>
+            </Dialog>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><NestedNonModalHarness /></StrictMode>);
+    const innerOpener = screen.getByRole("button", { name: "Open nested" });
+
+    fireEvent.click(innerOpener);
+    expect(screen.getByTestId("inner-custody-input")).toHaveFocus();
+    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Inner custody" })));
+    await flushTasks();
+    expect(innerOpener).toHaveFocus();
+    expect(innerClosed).toHaveBeenCalledOnce();
+
+    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Outer custody" })));
+    await flushTasks();
+    expect(pageOpener).toHaveFocus();
+    expect(outerClosed).toHaveBeenCalledOnce();
   });
 
   it("restores the exact pre-existing body pointer style", async () => {
@@ -861,6 +1030,46 @@ describe("DialogContent exact Strict Mode publication", () => {
 
     expect(documentObservers.size).toBeGreaterThan(0);
     expect([...documentObservers].every((observer) => disconnected.has(observer))).toBe(true);
+  });
+
+  it("processes bounded mutation batches and disconnects on terminal invalidation", async () => {
+    const documentObservers = new Set<MutationObserver>();
+    const disconnected = new Set<MutationObserver>();
+    const nativeObserve = MutationObserver.prototype.observe;
+    const nativeDisconnect = MutationObserver.prototype.disconnect;
+    vi.spyOn(MutationObserver.prototype, "observe").mockImplementation(function (
+      this: MutationObserver,
+      target,
+      options,
+    ) {
+      if (target === document) documentObservers.add(this);
+      return nativeObserve.call(this, target, options);
+    });
+    vi.spyOn(MutationObserver.prototype, "disconnect").mockImplementation(function (
+      this: MutationObserver,
+    ) {
+      disconnected.add(this);
+      return nativeDisconnect.call(this);
+    });
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog><input data-testid="journal-input" autoFocus /></ControlledDialog>
+      </StrictMode>,
+    );
+    const activeObserver = [...documentObservers].find((observer) => !disconnected.has(observer));
+    expect(activeObserver).toBeDefined();
+    const input = screen.getByTestId("journal-input");
+    for (let batch = 0; batch < 20; batch++) {
+      input.setAttribute("data-batch", String(batch));
+      await act(() => Promise.resolve());
+    }
+    expect(disconnected.has(activeObserver!)).toBe(false);
+
+    closeButton().setAttribute("aria-label", "Invalid");
+    await act(() => Promise.resolve());
+
+    expect(disconnected.has(activeObserver!)).toBe(true);
+    expect(activeObserver!.takeRecords()).toHaveLength(0);
   });
 
   it("renders a closed dialog tree without a browser document", () => {

@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Dialog as RadixDialog } from "radix-ui";
+import { useComposedRefs } from "radix-ui/internal";
 import { X } from "lucide-react";
 import { firstTabbable, focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
@@ -172,6 +173,12 @@ interface ParentDismissBridge {
   readonly publication: DialogPublication;
   readonly root: DialogRootAuthority;
   readonly action: object;
+}
+
+interface OwnedActionBinding {
+  readonly root: DialogRootAuthority;
+  readonly element: HTMLElement;
+  readonly kind: "close" | "trigger";
 }
 
 interface CloseTransition {
@@ -380,6 +387,7 @@ class MutationJournal {
     const MutationObserverConstructor = this.#ownerDocument.defaultView?.MutationObserver;
     if (!MutationObserverConstructor) throw new Error("Cannot publish a dialog without MutationObserver");
     this.#observer = new MutationObserverConstructor((records) => {
+      if (this.#released || this.#invalid) return;
       this.#records.push(...records);
       this.#process();
     });
@@ -645,10 +653,17 @@ class MutationJournal {
           : record.type === "characterData" && this.#isBodyDescendant(record.target);
       if (!allowed) {
         this.#invalid = true;
+        this.#observer.disconnect();
+        this.#records.length = 0;
+        this.#processed = 0;
+        this.#focusGuards.clear();
+        this.#nestedRoots.clear();
         this.#onInvalid();
         return;
       }
     }
+    this.#records.length = 0;
+    this.#processed = 0;
   }
 
   isClean() {
@@ -679,6 +694,9 @@ class MutationJournal {
     if (this.#released) return;
     this.#process();
     this.#observer.disconnect();
+    this.#records.length = 0;
+    this.#focusGuards.clear();
+    this.#nestedRoots.clear();
     this.#released = true;
   }
 }
@@ -833,7 +851,7 @@ function staticTopologyMatches(
   const ownerDocument = content.ownerDocument;
   const view = ownerDocument.defaultView;
   const titleGroup = title.parentElement;
-  const expectedDescriptionClass = authority.description
+  const expectedDescriptionClass = authority.description !== undefined
     ? DESCRIPTION_CLASS_NAME
     : HIDDEN_DESCRIPTION_CLASS_NAME;
   const ariaIsExact = (
@@ -1234,6 +1252,8 @@ class DialogCoordinator {
   #claimedNativeEvents = new WeakSet<object>();
   #knownCloseActions = new WeakMap<object, DialogPublication>();
   #knownAutoFocusActions = new WeakMap<object, DialogPublication>();
+  #ownedActionBindings = new WeakMap<object, OwnedActionBinding>();
+  #currentOwnedActions = new WeakMap<HTMLElement, object>();
   #renderedOpen: boolean | null = null;
   #openingTarget: HTMLElement | null = null;
   #managed = false;
@@ -1380,6 +1400,49 @@ class DialogCoordinator {
     );
   }
 
+  bindOwnedAction(
+    action: object,
+    root: DialogRootAuthority,
+    element: HTMLElement,
+    kind: OwnedActionBinding["kind"],
+  ) {
+    const binding = { root, element, kind };
+    this.#ownedActionBindings.set(action, binding);
+    this.#currentOwnedActions.set(element, action);
+    return () => {
+      if (this.#currentOwnedActions.get(element) === action) {
+        this.#currentOwnedActions.delete(element);
+      }
+      if (this.#ownedActionBindings.get(action) === binding) {
+        this.#ownedActionBindings.delete(action);
+      }
+    };
+  }
+
+  #ownsAction(publication: DialogPublication, action: object, nativeEvent: Event) {
+    if (Object.values(publication.actions).includes(action)) return true;
+    const binding = this.#ownedActionBindings.get(action);
+    const target = nativeEvent.target;
+    if (
+      !binding
+      || binding.root !== publication.authority.root
+      || this.#currentOwnedActions.get(binding.element) !== action
+      || !binding.element.isConnected
+      || binding.element.ownerDocument !== publication.ownerDocument
+      || !isNodeFromDocument(target, publication.ownerDocument)
+      || !binding.element.contains(target)
+    ) {
+      return false;
+    }
+    return binding.kind === "close"
+      ? contentSnapshotContains(
+          publication.contentDom,
+          publication.elements.header,
+          binding.element,
+        )
+      : !publication.elements.content.contains(binding.element);
+  }
+
   custodyFor(authority: DialogAuthority, elements: DialogElements) {
     const replay = this.#replay;
     if (
@@ -1474,6 +1537,7 @@ class DialogCoordinator {
     if (
       !this.isCurrent(publication)
       || publication.authority.root !== this.#root
+      || !this.#ownsAction(publication, action, nativeEvent)
       || !publication.exactOpenDomMatches()
       || !this.#claimEvent(reactEvent, nativeEvent)
     ) {
@@ -1823,9 +1887,9 @@ export const DialogTrigger = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof RadixDialog.Trigger>
 >(function DialogTrigger({ onClick, ...props }, forwardedRef) {
   const inherited = React.useContext(DialogContext);
-  const [action] = React.useState(() => Object.freeze({
+  const action = Object.freeze({
     identity: Symbol("dialog-owned-trigger"),
-  }));
+  });
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
     onClick?.(event);
     if (event.defaultPrevented) return;
@@ -1837,7 +1901,16 @@ export const DialogTrigger = React.forwardRef<
       coordinator.beginDismiss(publication, action, event, nativeEvent);
     }
   };
-  return <RadixDialog.Trigger {...props} ref={forwardedRef} onClick={handleClick} />;
+  const elementRef = React.useRef<HTMLButtonElement | null>(null);
+  const capture = useComposedRefs(elementRef, forwardedRef);
+  React.useLayoutEffect(() => {
+    const coordinator = inherited?.coordinator;
+    const root = inherited?.root;
+    const element = elementRef.current;
+    if (!coordinator || !root || !element) return;
+    return coordinator.bindOwnedAction(action, root, element, "trigger");
+  }, [action, inherited]);
+  return <RadixDialog.Trigger {...props} ref={capture} onClick={handleClick} />;
 });
 
 export const DialogClose = React.forwardRef<
@@ -1845,9 +1918,9 @@ export const DialogClose = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof RadixDialog.Close>
 >(function DialogClose({ onClick, ...props }, forwardedRef) {
   const inherited = React.useContext(DialogContext);
-  const [action] = React.useState(() => Object.freeze({
+  const action = Object.freeze({
     identity: Symbol("dialog-owned-close"),
-  }));
+  });
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
     onClick?.(event);
     if (event.defaultPrevented) return;
@@ -1859,7 +1932,16 @@ export const DialogClose = React.forwardRef<
       coordinator.beginDismiss(publication, action, event, nativeEvent);
     }
   };
-  return <RadixDialog.Close {...props} ref={forwardedRef} onClick={handleClick} />;
+  const elementRef = React.useRef<HTMLButtonElement | null>(null);
+  const capture = useComposedRefs(elementRef, forwardedRef);
+  React.useLayoutEffect(() => {
+    const coordinator = inherited?.coordinator;
+    const root = inherited?.root;
+    const element = elementRef.current;
+    if (!coordinator || !root || !element) return;
+    return coordinator.bindOwnedAction(action, root, element, "close");
+  }, [action, inherited]);
+  return <RadixDialog.Close {...props} ref={capture} onClick={handleClick} />;
 });
 
 interface DialogPresentation {
@@ -2232,6 +2314,15 @@ function createDialogPresentation(
     ) {
       return;
     }
+    const relatedDialog = relatedTarget.closest<HTMLElement>('[role="dialog"]');
+    if (
+      relatedDialog
+      && relatedDialog !== publication.elements.content
+      && relatedDialog.isConnected
+      && relatedDialog.ownerDocument === publication.ownerDocument
+    ) {
+      return;
+    }
     if (!publication.custody.returnTargetClaimed) {
       publication.custody.returnTarget = relatedTarget;
       publication.custody.returnTargetClaimed = true;
@@ -2565,7 +2656,7 @@ export function DialogContent({
             >
               {title}
             </RadixDialog.Title>
-            {description ? (
+            {description !== undefined ? (
               <RadixDialog.Description
                 ref={captureDescription}
                 className={DESCRIPTION_CLASS_NAME}
