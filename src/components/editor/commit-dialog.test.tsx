@@ -59,6 +59,85 @@ class ControlledPointerEvent extends MouseEvent {
   }
 }
 
+const POINTER_DOWN_OUTSIDE = "dismissableLayer.pointerDownOutside";
+const EVENT_SUPPRESSION_METHODS = [
+  "preventDefault",
+  "stopPropagation",
+] as const;
+const EVENT_SUPPRESSION_MUTATIONS = [
+  "replacement",
+  "deletion",
+  "non-function",
+  "throwing",
+  "no-op",
+] as const;
+const EVENT_SUPPRESSION_CASES = EVENT_SUPPRESSION_METHODS.flatMap(
+  (method, methodIndex) =>
+    EVENT_SUPPRESSION_MUTATIONS.map((mutation, mutationIndex) => ({
+      method,
+      mutation,
+      origin:
+        (methodIndex + mutationIndex) % 2 === 0
+          ? ("current" as const)
+          : ("rejected" as const),
+    })),
+);
+
+function controlledPointer(type: string, pointerId: number) {
+  return new ControlledPointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    detail: type === "click" ? 1 : 0,
+    pointerId,
+    pointerType: "touch",
+    isPrimary: true,
+  });
+}
+
+function outsidePointerNomination(
+  originalEvent: Event,
+) {
+  return new CustomEvent(POINTER_DOWN_OUTSIDE, {
+    cancelable: true,
+    detail: { originalEvent },
+  });
+}
+
+function mutateEventSuppressionMethod(
+  method: (typeof EVENT_SUPPRESSION_METHODS)[number],
+  mutation: (typeof EVENT_SUPPRESSION_MUTATIONS)[number],
+) {
+  const prototype = window.Event.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
+  if (!descriptor || typeof descriptor.value !== "function") {
+    throw new Error(`Event.prototype.${method} is not an own method`);
+  }
+  const original = descriptor.value as Event[typeof method];
+  if (mutation === "deletion") {
+    if (!Reflect.deleteProperty(prototype, method)) {
+      throw new Error(`Event.prototype.${method} could not be deleted`);
+    }
+  } else {
+    const value =
+      mutation === "replacement"
+        ? function (this: Event) {
+            Reflect.apply(original, this, []);
+          }
+        : mutation === "non-function"
+          ? null
+          : mutation === "throwing"
+            ? function () {
+                throw new Error(`poisoned Event.prototype.${method}`);
+              }
+            : function () {};
+    Object.defineProperty(prototype, method, { ...descriptor, value });
+  }
+  return () => {
+    Object.defineProperty(prototype, method, descriptor);
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -1316,6 +1395,109 @@ describe("CommitDialog visit authority", () => {
       host.remove();
     }
   });
+
+  it.each(EVENT_SUPPRESSION_CASES)(
+    "uses captured Event.$method through $mutation drift for a linked $origin nomination and a clean successor",
+    async ({ method, mutation, origin }) => {
+      vi.stubGlobal("PointerEvent", ControlledPointerEvent);
+      const current = actions();
+      const doc = repoDocument(
+        `doc-${method}-${mutation}-${origin}`,
+        "docs/suppression.md",
+      );
+      const { host, root } = createHost();
+      let restoreMethod: (() => void) | null = null;
+      let overlayListener: EventListener | null = null;
+
+      try {
+        await render(root, { visit: "current", doc, actions: current });
+        await advance(0);
+        const overlay = document.querySelector(".dialog-overlay");
+        if (!(overlay instanceof HTMLDivElement)) {
+          throw new Error("The commit dialog overlay was not rendered");
+        }
+        const requestOpenChange = reactAncestorProp<(open: boolean) => void>(
+          overlay,
+          "onOpenChange",
+        );
+        const reachedSharedLayer = vi.fn();
+        overlayListener = reachedSharedLayer;
+        overlay.addEventListener(POINTER_DOWN_OUTSIDE, overlayListener);
+        restoreMethod = mutateEventSuppressionMethod(method, mutation);
+
+        const foreignNomination = outsidePointerNomination(
+          controlledPointer("pointerdown", 31),
+        );
+        act(() => {
+          overlay.dispatchEvent(foreignNomination);
+        });
+        expect(foreignNomination.defaultPrevented).toBe(false);
+        expect(reachedSharedLayer).toHaveBeenCalledExactlyOnceWith(
+          foreignNomination,
+        );
+        reachedSharedLayer.mockClear();
+
+        const linkedPointerDown = controlledPointer("pointerdown", 32);
+        act(() => {
+          overlay.dispatchEvent(linkedPointerDown);
+          if (origin === "rejected") {
+            overlay.dispatchEvent(controlledPointer("pointercancel", 32));
+          }
+        });
+        const linkedNomination =
+          outsidePointerNomination(linkedPointerDown);
+        expect(() => {
+          act(() => {
+            overlay.dispatchEvent(linkedNomination);
+          });
+        }).not.toThrow();
+
+        expect(linkedNomination.defaultPrevented).toBe(true);
+        expect(reachedSharedLayer).not.toHaveBeenCalled();
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+
+        restoreMethod();
+        restoreMethod = null;
+        overlay.removeEventListener(POINTER_DOWN_OUTSIDE, overlayListener);
+        overlayListener = null;
+        await flushPublication();
+        await advance(0);
+
+        act(() => requestOpenChange(false));
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+        const successorOverlay = document.querySelector(".dialog-overlay");
+        if (!(successorOverlay instanceof HTMLDivElement)) {
+          throw new Error("The successor commit dialog overlay was not rendered");
+        }
+        act(() => {
+          successorOverlay.dispatchEvent(controlledPointer("click", 32));
+        });
+        await flushPublication();
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+
+        act(() => {
+          successorOverlay.dispatchEvent(controlledPointer("pointerdown", 33));
+          successorOverlay.dispatchEvent(controlledPointer("pointerup", 33));
+        });
+        await Promise.resolve();
+        act(() => {
+          successorOverlay.dispatchEvent(controlledPointer("click", 33));
+        });
+        expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      } finally {
+        restoreMethod?.();
+        const overlay = document.querySelector(".dialog-overlay");
+        if (overlayListener && overlay) {
+          overlay.removeEventListener(
+            POINTER_DOWN_OUTSIDE,
+            overlayListener,
+          );
+        }
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
 
   it("seals the genuine React nomination against later body-listener wrapper forgery", async () => {
     const current = actions();
