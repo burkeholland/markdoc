@@ -767,6 +767,9 @@ describe("Settings → Agents: token rename Escape authority", () => {
       rename.form.insertBefore(guidance, rename.form.children.item(1));
     } else {
       const replacement = rename.input.cloneNode(true);
+      if (!(replacement instanceof HTMLInputElement)) {
+        throw new Error("The cloned rename input is not an HTML input");
+      }
       rename.input.replaceWith(replacement);
       replacement.replaceWith(rename.input);
     }

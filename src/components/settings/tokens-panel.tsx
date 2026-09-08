@@ -3573,6 +3573,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     try {
       const reactEvent = event as ReactKeyboardEvent<HTMLInputElement | HTMLFormElement> & {
         _reactName?: unknown;
+        isComposing?: unknown;
         isDefaultPrevented?: unknown;
         isPropagationStopped?: unknown;
         isPersistent?: unknown;
@@ -3599,7 +3600,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         )
         && event.defaultPrevented === false
         && event.repeat === false
-        && (event.isComposing === false || typeof event.isComposing === "undefined")
+        && (reactEvent.isComposing === false || typeof reactEvent.isComposing === "undefined")
         && event.altKey === false
         && event.ctrlKey === false
         && event.metaKey === false
