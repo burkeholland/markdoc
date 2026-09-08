@@ -510,6 +510,7 @@ class PanelPublicationCoordinator {
       !candidate.keyboardReplay &&
       currentKeyboardPublication &&
       !captured &&
+      !candidate.introducedSlots.has(owner) &&
       element === null &&
       previous === proof.element &&
       previous.isConnected
