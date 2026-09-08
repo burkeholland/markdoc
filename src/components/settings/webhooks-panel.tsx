@@ -220,6 +220,8 @@ interface FormKeyboardRefReplayTarget extends FormKeyboardRefTarget {
 }
 
 interface FormKeyboardRefReplay {
+  readonly publication: PanelPublication;
+  readonly presentation: PanelPresentation;
   readonly generation: MountGeneration;
   readonly targets: readonly FormKeyboardRefReplayTarget[];
   layoutReleased: boolean;
@@ -486,6 +488,8 @@ class PanelPublicationCoordinator {
       const replayedLayout = candidate.keyboardLayoutReplayAvailable;
       candidate.keyboardLayoutReplayAvailable = false;
       const replay: FormKeyboardRefReplay = {
+        publication: candidate,
+        presentation: candidate.presentation,
         generation: candidate.presentation.generation,
         targets: Object.freeze(
           authority.refTargets.map((target) => ({
@@ -883,16 +887,48 @@ class PanelPublicationCoordinator {
 
   #requestReplaySuccessor(candidate: PanelPublication) {
     const keyboardReplay = candidate.keyboardReplay;
+    const keyboardReplayMatchesPublication =
+      candidate.presentation.adding &&
+      keyboardReplay !== null &&
+      keyboardReplay.publication === candidate &&
+      keyboardReplay.presentation === candidate.presentation &&
+      keyboardReplay.generation === candidate.presentation.generation &&
+      keyboardReplay.generation === this.#mount;
     const keyboardOwners = new Set(
-      keyboardReplay?.targets.map((target) => target.owner) ?? [],
+      keyboardReplayMatchesPublication
+        ? keyboardReplay.targets.map((target) => target.owner)
+        : [],
     );
-    const exactKeyboardReplay =
-      !candidate.presentation.adding ||
+    const replayRefsAreExact =
+      candidate.replayRefs.length > 0 &&
+      candidate.replayRefs.every(
+        (entry) =>
+          keyboardOwners.has(entry.owner) ||
+          (
+            entry.detached &&
+            entry.reattached &&
+            entry.owner.element === entry.element &&
+            entry.element.isConnected
+          ),
+      );
+    const dom = candidate.dom;
+    const placement = candidate.placement;
+    const publicationGuard = candidate.guard;
+    const currentPublicationIsExact =
+      candidate.established &&
+      !candidate.consumed &&
+      !candidate.invalidReplay &&
+      candidate.factsAreCurrent?.() === true &&
+      candidate.domIsExact?.() === true &&
+      dom !== null &&
+      placement !== null &&
+      publicationGuard?.isClean() === true &&
+      panelPlacementMatches(dom.node as HTMLElement, placement) &&
+      panelDomMatches(dom);
+    const exactFormKeyboardReplay =
+      keyboardReplayMatchesPublication &&
       (
-        keyboardReplay !== null &&
         !keyboardReplay.expired &&
-        keyboardReplay.generation === candidate.presentation.generation &&
-        keyboardReplay.generation === this.#mount &&
         keyboardReplay.layoutReleased &&
         keyboardReplay.layoutRebound &&
         candidate.keyboard === null &&
@@ -905,32 +941,19 @@ class PanelPublicationCoordinator {
             target.owner.binding === target.binding &&
             target.element.isConnected,
         )
-      );
+      ) &&
+      replayRefsAreExact &&
+      currentPublicationIsExact;
+    const layoutRetired =
+      candidate.layoutRetired || exactFormKeyboardReplay;
+    const exactKeyboardReplay =
+      !candidate.presentation.adding || exactFormKeyboardReplay;
     const exactReplay =
       this.#acceptsSuccessorOf(candidate) &&
-      candidate.layoutRetired &&
-      candidate.established &&
-      !candidate.consumed &&
-      !candidate.invalidReplay &&
-      candidate.replayRefs.length > 0 &&
-      candidate.replayRefs.every(
-        (entry) =>
-          keyboardOwners.has(entry.owner) ||
-          (
-            entry.detached &&
-            entry.reattached &&
-            entry.owner.element === entry.element &&
-            entry.element.isConnected
-          ),
-      ) &&
-      exactKeyboardReplay &&
-      candidate.factsAreCurrent?.() === true &&
-      candidate.domIsExact?.() === true &&
-      candidate.dom !== null &&
-      candidate.placement !== null &&
-      candidate.guard?.isClean() === true &&
-      panelPlacementMatches(candidate.dom.node as HTMLElement, candidate.placement) &&
-      panelDomMatches(candidate.dom);
+      layoutRetired &&
+      currentPublicationIsExact &&
+      replayRefsAreExact &&
+      exactKeyboardReplay;
     if (
       candidate.successorRequested ||
       !exactReplay ||

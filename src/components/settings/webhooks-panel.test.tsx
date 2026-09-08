@@ -2392,7 +2392,10 @@ describe("Settings → Webhooks: exact committed controls", () => {
       expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
     });
 
-    it("rejects a partial Strict replay and lets a complete keyed successor recover", async () => {
+    it.each([
+      "form-only ref replay",
+      "all-ref replay without layout replay",
+    ] as const)("rejects a manual %s and lets a complete keyed successor recover", async (replay) => {
       const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
@@ -2403,13 +2406,24 @@ describe("Settings → Webhooks: exact committed controls", () => {
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
 
+      const card = within(view.host).getByTestId("webhooks-card");
       const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
       const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
       const keyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
-      const formRef = reactProp<RefCallback<HTMLFormElement>>(form, "ref");
+      const bindings = [card, ...card.querySelectorAll<HTMLElement>("*")]
+        .flatMap((element) => {
+          const ref = optionalReactProp<RefCallback<HTMLElement>>(element, "ref");
+          return ref ? [{ element, ref }] : [];
+        });
       act(() => {
-        formRef(null);
-        formRef(form);
+        if (replay === "form-only ref replay") {
+          const formRef = reactProp<RefCallback<HTMLFormElement>>(form, "ref");
+          formRef(null);
+          formRef(form);
+        } else {
+          bindings.forEach(({ ref }) => ref(null));
+          [...bindings].reverse().forEach(({ element, ref }) => ref(element));
+        }
       });
       url.focus();
       act(() => keyDown(keyboardEvent(form, url).event));
