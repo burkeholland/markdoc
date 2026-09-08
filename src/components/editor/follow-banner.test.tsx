@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 
-import { useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -64,6 +69,11 @@ class ControlledSession {
     this.version++;
   }
 
+  drift(target: string | null, users: PresenceUser[]) {
+    this.target = target;
+    this.users = users;
+  }
+
   asCollabSession(): CollabSession {
     return this as unknown as CollabSession;
   }
@@ -77,6 +87,7 @@ interface BoundaryProps {
   passiveKey?: number;
   boundary?: number;
   onBoundary?: () => void;
+  onBoundaryCleanup?: () => void;
   onPassiveCleanup?: () => void;
 }
 
@@ -88,11 +99,15 @@ function Boundary({
   passiveKey = 0,
   boundary = 0,
   onBoundary,
+  onBoundaryCleanup,
   onPassiveCleanup,
 }: BoundaryProps) {
   useLayoutEffect(() => {
     if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
+    return () => {
+      if (boundary > 0) onBoundaryCleanup?.();
+    };
+  }, [boundary, onBoundary, onBoundaryCleanup]);
   useEffect(() => () => onPassiveCleanup?.(), [onPassiveCleanup, passiveKey]);
   return present ? (
     <div key={domKey}>
@@ -146,6 +161,34 @@ function activateStop(handler: StopHandler, currentTarget: HTMLButtonElement) {
     target: currentTarget,
     nativeEvent,
   } as unknown as ReactMouseEvent<HTMLButtonElement>);
+}
+
+function fabricateStop(handler: StopHandler, currentTarget: HTMLButtonElement) {
+  handler({
+    type: "click",
+    currentTarget,
+    target: currentTarget,
+    nativeEvent: {
+      type: "click",
+      button: 0,
+      target: currentTarget,
+    },
+  } as unknown as ReactMouseEvent<HTMLButtonElement>);
+}
+
+function nativeClick(target: Element, event?: MouseEvent) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The click target has no owner window");
+  const nativeEvent =
+    event ??
+    new ownerWindow.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+    });
+  target.dispatchEvent(nativeEvent);
+  return nativeEvent;
 }
 
 interface WorkProbe {
@@ -236,6 +279,219 @@ describe("FollowBanner", () => {
     expect(screen.queryByTestId("follow-banner")).toBeNull();
   });
 
+  describe("Strict Mode Stop", () => {
+    it("publishes one fresh replay authority and accepts only a genuine current native click", () => {
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      const retiredHandlers: StopHandler[] = [];
+      const retiredRefs: ((element: HTMLButtonElement | null) => void)[] = [];
+      const view = directRoot(
+        <StrictMode>
+          <Boundary
+            session={session}
+            boundary={1}
+            onBoundary={() => {
+              const retired = document.querySelector<HTMLButtonElement>(
+                '[data-testid="follow-stop"]',
+              );
+              if (!retired) throw new Error("The replayed layout had no Stop control");
+              retiredHandlers.push(reactHandler<StopHandler>(retired, "onClick"));
+              retiredRefs.push(
+                reactHandler<(element: HTMLButtonElement | null) => void>(
+                  retired,
+                  "ref",
+                ),
+              );
+            }}
+          />
+        </StrictMode>,
+      );
+      const stop = stopButton(view.host);
+      const handler = reactHandler<StopHandler>(stop, "onClick");
+      const currentRef = reactHandler<(element: HTMLButtonElement | null) => void>(
+        stop,
+        "ref",
+      );
+      expect(retiredHandlers).toHaveLength(2);
+      expect(retiredRefs).toHaveLength(2);
+      expect(handler).not.toBe(retiredHandlers[0]);
+      expect(currentRef).not.toBe(retiredRefs[0]);
+      act(() => {
+        retiredRefs[0]?.(stop);
+        retiredRefs[0]?.(null);
+      });
+      const targetReads = session.targetReads.mock.calls.length;
+      const presenceReads = session.presence.mock.calls.length;
+
+      activateStop(retiredHandlers[0]!, stop);
+      fabricateStop(handler, stop);
+      expect(session.targetReads.mock.calls.length).toBe(targetReads);
+      expect(session.presence.mock.calls.length).toBe(presenceReads);
+      expect(action).not.toHaveBeenCalled();
+
+      const icon = stop.querySelector("svg");
+      if (!icon) throw new Error("The Stop control did not publish its icon");
+      nativeClick(icon);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+      expect(action.mock.contexts[0]).toBe(session);
+
+      const readsAfterClaim = session.targetReads.mock.calls.length;
+      const presenceAfterClaim = session.presence.mock.calls.length;
+      nativeClick(stop);
+      expect(session.targetReads.mock.calls.length).toBe(readsAfterClaim);
+      expect(session.presence.mock.calls.length).toBe(presenceAfterClaim);
+      expect(action).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a consumed event without spending B and closes before repeated or reentrant clicks", () => {
+      let reenter = false;
+      let currentStop: HTMLButtonElement | null = null;
+      const action = vi.fn<(userId: string | null) => void>(function () {
+        if (reenter && currentStop) nativeClick(currentStop);
+      });
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      const view = directRoot(
+        <StrictMode>
+          <Boundary session={session} />
+        </StrictMode>,
+      );
+      const firstStop = stopButton(view.host);
+      const consumed = nativeClick(firstStop);
+      expect(action).toHaveBeenCalledTimes(1);
+
+      session.publish(BASE_USER.id, [user({ name: "Grace" })]);
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary session={session} passiveKey={1} />
+          </StrictMode>,
+        );
+      });
+      currentStop = stopButton(view.host);
+      const targetReads = session.targetReads.mock.calls.length;
+      const presenceReads = session.presence.mock.calls.length;
+
+      nativeClick(currentStop, consumed);
+      expect(session.targetReads.mock.calls.length).toBe(targetReads);
+      expect(session.presence.mock.calls.length).toBe(presenceReads);
+      expect(action).toHaveBeenCalledTimes(1);
+
+      reenter = true;
+      nativeClick(currentStop);
+      nativeClick(currentStop);
+      expect(action).toHaveBeenCalledTimes(2);
+      expect(action.mock.contexts).toEqual([session, session]);
+    });
+
+    const replayChanges = [
+      "changed presence",
+      "restored subtree mutation",
+      "same-root detach/reinsert",
+      "partial ref replay",
+    ] as const;
+
+    it.each(replayChanges)("rejects %s between the two layout setups", (change) => {
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      let banner!: HTMLDivElement;
+      let stopRef!: (element: HTMLButtonElement | null) => void;
+      let cleanups = 0;
+      let setups = 0;
+      const view = directRoot(
+        <StrictMode>
+          <Boundary
+            session={session}
+            boundary={1}
+            onBoundary={() => {
+              setups++;
+              if (change === "changed presence" && setups === 2) {
+                session.drift(BASE_USER.id, [user()]);
+              }
+              if (banner) return;
+              const current = document.querySelector<HTMLDivElement>(
+                '[data-testid="follow-banner"]',
+              );
+              if (!current) throw new Error("The first layout did not publish a Follow banner");
+              banner = current;
+              if (change === "partial ref replay") {
+                stopRef = reactHandler<(element: HTMLButtonElement | null) => void>(
+                  stopButton(banner),
+                  "ref",
+                );
+              }
+            }}
+            onBoundaryCleanup={() => {
+              cleanups++;
+              if (change === "changed presence") {
+                session.drift(BASE_USER.id, [user({ name: "Grace" })]);
+              } else if (change === "restored subtree mutation") {
+                const separator = banner.children.item(1);
+                if (!separator) throw new Error("The Follow banner has no separator");
+                separator.textContent = "x";
+                separator.textContent = "·";
+              } else if (change === "same-root detach/reinsert") {
+                const parent = banner.parentNode;
+                if (!parent) throw new Error("The Follow banner has no parent");
+                const next = banner.nextSibling;
+                parent.removeChild(banner);
+                parent.insertBefore(banner, next);
+              } else {
+                stopRef(null);
+              }
+            }}
+          />
+        </StrictMode>,
+      );
+      expect(cleanups).toBe(1);
+      const targetReads = session.targetReads.mock.calls.length;
+      const presenceReads = session.presence.mock.calls.length;
+
+      nativeClick(stopButton(view.host));
+      expect(session.targetReads.mock.calls.length).toBe(targetReads);
+      expect(session.presence.mock.calls.length).toBe(presenceReads);
+      expect(action).not.toHaveBeenCalled();
+    });
+
+    it.each(["stale-before-current", "current-before-stale"] as const)(
+      "keeps the current publication usable across a stale replay cross %s",
+      (order) => {
+        const action = vi.fn<(userId: string | null) => void>();
+        const session = new ControlledSession(BASE_USER.id, [user()], action);
+        const view = directRoot(
+          <StrictMode>
+            <Boundary session={session} />
+          </StrictMode>,
+        );
+        const staleStopElement = stopButton(view.host);
+        const staleStop = reactHandler<StopHandler>(staleStopElement, "onClick");
+
+        session.publish(BASE_USER.id, [user({ name: "Grace" })]);
+        act(() => {
+          view.root.render(
+            <StrictMode>
+              <Boundary session={session} passiveKey={1} />
+            </StrictMode>,
+          );
+        });
+        const currentStopElement = stopButton(view.host);
+        const probe = probeWork(view.host, action, [session]);
+        try {
+          if (order === "stale-before-current") {
+            expectNoWork(() => activateStop(staleStop, staleStopElement), probe);
+          }
+          nativeClick(currentStopElement);
+          if (order === "current-before-stale") {
+            expectNoWork(() => activateStop(staleStop, staleStopElement), probe);
+          }
+          expect(action).toHaveBeenCalledExactlyOnceWith(null);
+          expect(action.mock.contexts[0]).toBe(session);
+        } finally {
+          releaseProbe(probe);
+        }
+      },
+    );
+  });
+
   const replacements = [
     "session",
     "follow-target",
@@ -311,7 +567,7 @@ describe("FollowBanner", () => {
                 if (order === "stale-before-current") {
                   expectNoWork(() => activateStop(staleStop, aStopElement), probe);
                 }
-                activateStop(currentStop, currentStopElement);
+                nativeClick(currentStopElement);
                 expect(current.targetReads.mock.calls.length).toBe(currentReads + 1);
                 expect(current.presence.mock.calls.length).toBe(currentPresenceReads + 1);
                 if (order === "current-before-stale") {
@@ -392,22 +648,20 @@ describe("FollowBanner", () => {
     const session = new ControlledSession(BASE_USER.id, [user()], action);
     const view = directRoot(<Boundary session={session} />);
     const staleStopElement = stopButton(view.host);
-    const staleStop = reactHandler<StopHandler>(staleStopElement, "onClick");
 
     session.publish(BASE_USER.id, [user({ name: "Grace" })]);
-    activateStop(staleStop, staleStopElement);
+    nativeClick(staleStopElement);
     expect(action).not.toHaveBeenCalled();
     const readsAfterRejection = session.targetReads.mock.calls.length;
     const presenceAfterRejection = session.presence.mock.calls.length;
-    activateStop(staleStop, staleStopElement);
+    nativeClick(staleStopElement);
     expect(session.targetReads.mock.calls.length).toBe(readsAfterRejection);
     expect(session.presence.mock.calls.length).toBe(presenceAfterRejection);
 
     act(() => view.root.render(<Boundary session={session} passiveKey={1} />));
     const continuingStopElement = stopButton(view.host);
-    const continuingStop = reactHandler<StopHandler>(continuingStopElement, "onClick");
-    activateStop(continuingStop, continuingStopElement);
-    activateStop(continuingStop, continuingStopElement);
+    nativeClick(continuingStopElement);
+    nativeClick(continuingStopElement);
     expect(action).toHaveBeenCalledTimes(1);
 
     session.publish(null, []);
@@ -417,9 +671,8 @@ describe("FollowBanner", () => {
     session.publish(BASE_USER.id, [user({ name: "Grace" })]);
     act(() => view.root.render(<Boundary session={session} passiveKey={3} />));
     const followAgainStopElement = stopButton(view.host);
-    const followAgainStop = reactHandler<StopHandler>(followAgainStopElement, "onClick");
-    activateStop(followAgainStop, followAgainStopElement);
-    activateStop(followAgainStop, followAgainStopElement);
+    nativeClick(followAgainStopElement);
+    nativeClick(followAgainStopElement);
     expect(action).toHaveBeenCalledTimes(2);
   });
 
@@ -460,7 +713,7 @@ describe("FollowBanner", () => {
         if (order === "wrong-before-current") {
           expectNoWork(() => activateStop(bStop, wrongTarget), probe);
         }
-        activateStop(bStop, bStopElement);
+        nativeClick(bStopElement);
         if (order === "current-before-wrong") {
           expectNoWork(() => activateStop(bStop, wrongTarget), probe);
         }
@@ -480,10 +733,9 @@ describe("FollowBanner", () => {
     const session = new ControlledSession(BASE_USER.id, [user()], originalAction);
     const view = directRoot(<Boundary session={session} />);
     const originalStopElement = stopButton(view.host);
-    const originalStop = reactHandler<StopHandler>(originalStopElement, "onClick");
 
     session.follow = replacementAction;
-    activateStop(originalStop, originalStopElement);
+    nativeClick(originalStopElement);
     expect(originalAction).toHaveBeenCalledExactlyOnceWith(null);
     expect(originalAction.mock.contexts[0]).toBe(session);
     expect(replacementAction).not.toHaveBeenCalled();
@@ -503,8 +755,7 @@ describe("FollowBanner", () => {
 
     act(() => view.root.render(<Boundary session={session} domKey="dom-c" passiveKey={2} />));
     const currentStopElement = stopButton(view.host);
-    const currentStop = reactHandler<StopHandler>(currentStopElement, "onClick");
-    activateStop(currentStop, currentStopElement);
+    nativeClick(currentStopElement);
     expect(originalAction).toHaveBeenCalledTimes(1);
     expect(replacementAction).toHaveBeenCalledExactlyOnceWith(null);
     expect(replacementAction.mock.contexts[0]).toBe(session);

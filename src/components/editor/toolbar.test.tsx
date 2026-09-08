@@ -3,9 +3,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, within } from "@testing-library/react";
 import {
+  StrictMode,
   useEffect,
   useLayoutEffect,
-  type ChangeEventHandler,
   type ComponentProps,
   type ReactNode,
   type Ref,
@@ -21,22 +21,24 @@ vi.mock("@/components/ui/primitives", () => ({
   MenuContent: ({
     children,
     onCloseAutoFocus,
+    ref,
+    ...props
   }: {
     children: ReactNode;
     onCloseAutoFocus?: (event: { preventDefault: () => void }) => void;
+    ref?: Ref<HTMLDivElement>;
+    [key: string]: unknown;
   }) => (
-    <div data-testid="heading-content" onBlur={onCloseAutoFocus}>
+    <div ref={ref} role="menu" data-testid="heading-content" onBlur={onCloseAutoFocus} {...props}>
       {children}
     </div>
   ),
   MenuRadioGroup: ({
     children,
-    onValueChange,
   }: {
     children: ReactNode;
-    onValueChange?: (value: string) => void;
   }) => (
-    <div role="radiogroup" onChange={onValueChange as unknown as ChangeEventHandler<HTMLDivElement>}>
+    <div role="radiogroup">
       {children}
     </div>
   ),
@@ -45,13 +47,38 @@ vi.mock("@/components/ui/primitives", () => ({
     value,
     className,
     ref,
+    disabled,
+    onSelect,
+    ...props
   }: {
     children: ReactNode;
     value: string;
     className?: string;
     ref?: Ref<HTMLDivElement>;
+    disabled?: boolean;
+    onSelect?: (event: Event) => void;
+    [key: string]: unknown;
   }) => (
-    <div ref={ref} role="menuitemradio" aria-checked="false" data-value={value} className={className}>
+    <div
+      ref={ref}
+      role="menuitemradio"
+      aria-checked="false"
+      aria-disabled={disabled ? "true" : undefined}
+      data-value={value}
+      className={className}
+      onClick={(event) => {
+        if (!onSelect) return;
+        const CustomEventConstructor = event.currentTarget.ownerDocument.defaultView?.CustomEvent;
+        if (!CustomEventConstructor) throw new Error("Heading item has no owner-document CustomEvent");
+        const nativeEvent = new CustomEventConstructor("menu.itemSelect", {
+          bubbles: true,
+          cancelable: true,
+        });
+        event.currentTarget.addEventListener("menu.itemSelect", onSelect, { once: true });
+        event.currentTarget.dispatchEvent(nativeEvent);
+      }}
+      {...props}
+    >
       {children}
     </div>
   ),
@@ -60,21 +87,39 @@ vi.mock("@/components/ui/primitives", () => ({
 import { Toolbar } from "./toolbar";
 
 type ToolbarProps = ComponentProps<typeof Toolbar>;
-type ControlEvent = { currentTarget: HTMLButtonElement; preventDefault: () => void };
+type ControlEvent = {
+  type: "click" | "mousedown";
+  button: number;
+  currentTarget: HTMLButtonElement;
+  target: EventTarget;
+  nativeEvent: MouseEvent;
+  defaultPrevented: boolean;
+  preventDefault: () => void;
+};
 type ClickHandler = (event: ControlEvent) => void;
 type MouseDownHandler = (event: ControlEvent) => void;
-type HeadingChangeHandler = (value: string) => void;
-type CloseHandler = (event: { preventDefault: () => void }) => void;
-type FocusHandler = (event: { currentTarget: HTMLDivElement; target: Element }) => void;
+type HeadingClickHandler = (event: { currentTarget: HTMLDivElement }) => void;
+type CloseHandler = (event: Event) => void;
+type FocusHandler = (event: {
+  type: "focus";
+  currentTarget: HTMLDivElement;
+  target: Element;
+  nativeEvent: FocusEvent;
+  defaultPrevented: boolean;
+}) => void;
 type KeyHandler = (event: KeyEvent) => void;
 
 interface KeyEvent {
+  type: "keydown";
   currentTarget: HTMLDivElement;
+  target: EventTarget;
+  nativeEvent: KeyboardEvent;
   key: string;
   altKey: boolean;
   ctrlKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
+  defaultPrevented: boolean;
   preventDefault: () => void;
 }
 
@@ -108,6 +153,19 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   const handler = props?.[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
   return handler as T;
+}
+
+function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  const props = propsKey
+    ? (element as unknown as Record<string, { ref?: unknown }>)[propsKey]
+    : undefined;
+  if (typeof props?.ref === "function") return props.ref as (node: T | null) => void;
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.dataset.testid ?? element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown }>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`React ref was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return fiber.ref as (node: T | null) => void;
 }
 
 function format(overrides: Partial<FormatState> = {}): FormatState {
@@ -258,6 +316,13 @@ function Boundary({
   return present ? <Toolbar key={publicationKey} {...toolbar} /> : null;
 }
 
+function LayoutCapture({ children, capture }: { children: ReactNode; capture: () => void }) {
+  useLayoutEffect(() => {
+    capture();
+  }, [capture]);
+  return children;
+}
+
 function directRender(props: ComponentProps<typeof Boundary>) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -273,6 +338,16 @@ function directRender(props: ComponentProps<typeof Boundary>) {
 
 function capturePublication() {
   const root = screen.getByTestId("toolbar") as HTMLDivElement;
+  const headingControls = Object.fromEntries(
+    Object.entries(HEADINGS_BY_VALUE).map(([value, name]) => {
+      const element = screen.getByRole("menuitemradio", { name });
+      if (!(element instanceof HTMLDivElement)) throw new Error(`Heading ${value} is not a div`);
+      return [value, {
+        element,
+        click: reactHandler<HeadingClickHandler>(element, "onClick"),
+      }];
+    }),
+  );
   const buttons = Object.fromEntries(
     BUTTON_LABELS.flatMap((label) => {
       const element = screen.queryByRole("button", { name: label });
@@ -289,15 +364,38 @@ function capturePublication() {
     click: ClickHandler;
     mouseDown: MouseDownHandler;
   }>>;
+  const headingContent = screen.getByTestId("heading-content") as HTMLDivElement;
+  const nodes = [
+    root,
+    ...Object.values(buttons).map(({ element }) => element),
+    headingContent,
+    ...Object.values(headingControls).map(({ element }) => element),
+  ];
   return {
     root,
     buttons,
-    headingChange: reactHandler<HeadingChangeHandler>(screen.getByRole("radiogroup"), "onChange"),
+    headingChange: (value: string) => {
+      const item = headingControls[value];
+      item?.click({ currentTarget: item.element });
+    },
     headingClose: reactHandler<CloseHandler>(screen.getByTestId("heading-content"), "onBlur"),
+    headingContent,
     focus: reactHandler<FocusHandler>(root, "onFocus"),
     keyDown: reactHandler<KeyHandler>(root, "onKeyDown"),
+    nodes,
+    refs: nodes.map((node) => reactRef(node)),
   };
 }
+
+const HEADINGS_BY_VALUE: Record<string, string> = {
+  "0": "Paragraph",
+  "1": "Heading 1",
+  "2": "Heading 2",
+  "3": "Heading 3",
+  "4": "Heading 4",
+  "5": "Heading 5",
+  "6": "Heading 6",
+};
 
 function button(publication: ReturnType<typeof capturePublication>, label: (typeof BUTTON_LABELS)[number]) {
   const control = publication.buttons[label];
@@ -309,27 +407,105 @@ function activate(
   control: ReturnType<typeof button>,
   currentTarget: HTMLButtonElement = control.element,
 ) {
-  control.click({ currentTarget, preventDefault: vi.fn() });
+  control.click(controlEvent(control, currentTarget));
 }
 
 function controlEvent(
   control: ReturnType<typeof button>,
   currentTarget: HTMLButtonElement = control.element,
+  type: "click" | "mousedown" = "click",
 ): ControlEvent {
-  return { currentTarget, preventDefault: vi.fn() };
+  const target = currentTarget;
+  const MouseEventConstructor = currentTarget.ownerDocument.defaultView?.MouseEvent;
+  if (!MouseEventConstructor) throw new Error("Control has no owner-document MouseEvent");
+  const nativeEvent = new MouseEventConstructor(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+  });
+  setNativeProvenance(nativeEvent, target);
+  return {
+    type,
+    button: 0,
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+  };
 }
 
 function keyEvent(root: HTMLDivElement, key: string, modifiers: Partial<Pick<KeyEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey">> = {}) {
+  const target = root.ownerDocument.activeElement ?? root;
+  const KeyboardEventConstructor = root.ownerDocument.defaultView?.KeyboardEvent;
+  if (!KeyboardEventConstructor) throw new Error("Toolbar has no owner-document KeyboardEvent");
+  const nativeEvent = new KeyboardEventConstructor("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...modifiers,
+  });
+  setNativeProvenance(nativeEvent, target);
   return {
+    type: "keydown" as const,
     currentTarget: root,
+    target,
+    nativeEvent,
     key,
     altKey: false,
     ctrlKey: false,
     metaKey: false,
     shiftKey: false,
+    defaultPrevented: false,
     preventDefault: vi.fn(),
     ...modifiers,
   };
+}
+
+function focusEvent(root: HTMLDivElement, target: Element): Parameters<FocusHandler>[0] {
+  const FocusEventConstructor = root.ownerDocument.defaultView?.FocusEvent;
+  if (!FocusEventConstructor) throw new Error("Toolbar has no owner-document FocusEvent");
+  const nativeEvent = new FocusEventConstructor("focusin", { bubbles: true });
+  setNativeProvenance(nativeEvent, target);
+  return {
+    type: "focus",
+    currentTarget: root,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+  };
+}
+
+function customEvent(
+  source: HTMLElement,
+  type: "menu.itemSelect" | "focusScope.autoFocusOnUnmount",
+) {
+  const CustomEventConstructor = source.ownerDocument.defaultView?.CustomEvent;
+  if (!CustomEventConstructor) throw new Error("Control has no owner-document CustomEvent");
+  const event = new CustomEventConstructor(type, { bubbles: true, cancelable: true });
+  setNativeProvenance(event, source);
+  vi.spyOn(event, "preventDefault");
+  return event;
+}
+
+function setNativeProvenance(event: Event, target: EventTarget) {
+  const nodes: EventTarget[] = [];
+  if (target instanceof Node) {
+    for (let current: Node | null = target; current; current = current.parentNode) nodes.push(current);
+    const ownerDocument = target instanceof Document ? target : target.ownerDocument;
+    if (ownerDocument) {
+      nodes.push(ownerDocument);
+      if (ownerDocument.defaultView) nodes.push(ownerDocument.defaultView);
+    }
+  } else {
+    nodes.push(target);
+  }
+  Object.defineProperties(event, {
+    target: { configurable: true, value: target },
+    currentTarget: { configurable: true, value: target },
+    eventPhase: { configurable: true, value: Event.AT_TARGET },
+    composedPath: { configurable: true, value: () => nodes },
+  });
 }
 
 afterEach(() => {
@@ -342,6 +518,176 @@ afterEach(() => {
 });
 
 describe("Toolbar publication authority", () => {
+  it("keeps seven interaction families exact through direct-root Strict Mode replay", () => {
+    const f = fixture();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push({ root, host });
+    const layouts: ReturnType<typeof capturePublication>[] = [];
+    const captureLayout = () => layouts.push(capturePublication());
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <LayoutCapture capture={captureLayout}>
+            <Toolbar {...f.props} />
+          </LayoutCapture>
+        </StrictMode>,
+      );
+    });
+
+    const stale = layouts[0];
+    if (!stale) throw new Error("Strict Mode did not expose its first layout publication");
+    const current = capturePublication();
+    expect(current.root).toBe(stale.root);
+    expect(button(current, "Bold").click).not.toBe(button(stale, "Bold").click);
+    expect(current.refs[0]).not.toBe(stale.refs[0]);
+
+    act(() => {
+      stale.refs.forEach((ref, index) => ref(current.nodes[index] ?? null));
+      [...stale.refs].reverse().forEach((ref) => ref(null));
+    });
+
+    const mouseDown = controlEvent(button(current, "Bold"), button(current, "Bold").element, "mousedown");
+    button(stale, "Bold").mouseDown(mouseDown);
+    button(current, "Bold").mouseDown(mouseDown);
+    button(current, "Bold").mouseDown(mouseDown);
+    expect(mouseDown.preventDefault).toHaveBeenCalledOnce();
+
+    const bold = controlEvent(button(current, "Bold"));
+    button(stale, "Bold").click(bold);
+    button(current, "Bold").click(bold);
+    button(current, "Bold").click(bold);
+    activate(button(current, "Image"));
+    activate(button(current, "Undo"));
+    activate(button(current, "Redo"));
+    activate(button(current, "Comment"));
+    stale.headingChange("2");
+    current.headingChange("2");
+
+    const italic = button(current, "Italic").element;
+    italic.focus();
+    const right = keyEvent(current.root, "ArrowRight");
+    stale.keyDown(right);
+    current.keyDown(right);
+    current.keyDown(right);
+
+    const close = customEvent(current.headingContent, "focusScope.autoFocusOnUnmount");
+    stale.headingClose(close);
+    current.headingClose(close);
+    current.headingClose(close);
+
+    expect(f.actions.toggleMark.mock.calls).toEqual([["strong"]]);
+    expect(f.onImage).toHaveBeenCalledOnce();
+    expect(f.actions.undo).toHaveBeenCalledOnce();
+    expect(f.actions.redo).toHaveBeenCalledOnce();
+    expect(f.onComment).toHaveBeenCalledOnce();
+    expect(f.actions.setHeading.mock.calls).toEqual([[2]]);
+    expect(button(current, "Strikethrough").element).toHaveFocus();
+    expect(right.preventDefault).toHaveBeenCalledOnce();
+    expect(f.actions.focus).toHaveBeenCalledOnce();
+    expect(close.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "partial replay",
+    "detach and reinsert",
+    "replace and restore",
+    "reorder and restore",
+    "mutate and restore",
+  ] as const)("permanently retires after %s history", (change) => {
+    const f = fixture();
+    directRender({ toolbar: f.props });
+    const stale = capturePublication();
+    const rootRef = reactRef(stale.root);
+    const bold = button(stale, "Bold").element;
+    const italic = button(stale, "Italic").element;
+
+    if (change === "partial replay") {
+      act(() => {
+        rootRef(null);
+        rootRef(stale.root);
+      });
+    } else if (change === "detach and reinsert") {
+      const parent = stale.root.parentNode;
+      const next = stale.root.nextSibling;
+      if (!parent) throw new Error("Toolbar root had no parent");
+      stale.root.remove();
+      parent.insertBefore(stale.root, next);
+    } else if (change === "replace and restore") {
+      const replacement = bold.cloneNode(true) as HTMLButtonElement;
+      bold.replaceWith(replacement);
+      replacement.replaceWith(bold);
+    } else if (change === "reorder and restore") {
+      const parent = bold.parentNode;
+      if (!parent) throw new Error("Bold button had no parent");
+      parent.append(bold);
+      parent.insertBefore(bold, italic);
+    } else {
+      bold.setAttribute("aria-label", "Changed");
+      bold.setAttribute("aria-label", "Bold");
+    }
+
+    const mouseDown = controlEvent(button(stale, "Bold"), bold, "mousedown");
+    activate(button(stale, "Bold"));
+    button(stale, "Bold").mouseDown(mouseDown);
+    stale.headingChange("3");
+    expect(f.actions.toggleMark).not.toHaveBeenCalled();
+    expect(f.actions.setHeading).not.toHaveBeenCalled();
+    expect(mouseDown.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("rejects fabricated native events without consuming the current action", () => {
+    const f = fixture();
+    directRender({ toolbar: f.props });
+    const current = capturePublication();
+    const bold = button(current, "Bold");
+    const exact = controlEvent(bold);
+    const fabricated = {
+      ...exact,
+      nativeEvent: {
+        type: "click",
+        target: bold.element,
+        button: 0,
+      },
+    } as unknown as ControlEvent;
+
+    bold.click(fabricated);
+    bold.click(exact);
+    bold.click(exact);
+    expect(f.actions.toggleMark.mock.calls).toEqual([["strong"]]);
+  });
+
+  it("does not mint a replay successor after the first layout authority consumed work", () => {
+    const f = fixture();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push({ root, host });
+    let first: ReturnType<typeof capturePublication> | null = null;
+    const captureLayout = () => {
+      if (first) return;
+      first = capturePublication();
+      activate(button(first, "Bold"));
+    };
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <LayoutCapture capture={captureLayout}>
+            <Toolbar {...f.props} />
+          </LayoutCapture>
+        </StrictMode>,
+      );
+    });
+
+    const retired = first;
+    if (!retired) throw new Error("Strict Mode did not expose its first layout publication");
+    activate(button(capturePublication(), "Bold"));
+    expect(f.actions.toggleMark.mock.calls).toEqual([["strong"]]);
+  });
+
   it("renders the existing controls and claims every exact command, heading, callback, and event once", () => {
     const f = fixture({
       currentFormat: format({
@@ -381,7 +727,7 @@ describe("Toolbar publication authority", () => {
       [button(publication, "Text style"), foreign],
       [comment, detached],
     ] as const) {
-      const event = controlEvent(control, target);
+      const event = controlEvent(control, target, "mousedown");
       control.mouseDown(event);
       expect(event.preventDefault).not.toHaveBeenCalled();
     }
@@ -413,16 +759,16 @@ describe("Toolbar publication authority", () => {
     expect(f.onComment).toHaveBeenCalledOnce();
     expect(f.actions.setHeading.mock.calls).toEqual([[3], [6]]);
 
-    const close = { preventDefault: vi.fn() };
+    const close = customEvent(publication.headingContent, "focusScope.autoFocusOnUnmount");
     publication.headingClose(close);
     publication.headingClose(close);
-    publication.headingClose({ preventDefault: vi.fn() });
+    publication.headingClose(customEvent(publication.headingContent, "focusScope.autoFocusOnUnmount"));
     expect(close.preventDefault).toHaveBeenCalledOnce();
     expect(f.actions.focus).toHaveBeenCalledOnce();
 
     for (const label of ["Bold", "Text style", "Comment"] as const) {
       const control = button(publication, label);
-      const event = controlEvent(control);
+      const event = controlEvent(control, control.element, "mousedown");
       control.mouseDown(event);
       control.mouseDown(event);
       expect(event.preventDefault).toHaveBeenCalledOnce();
@@ -477,12 +823,12 @@ describe("Toolbar publication authority", () => {
           currentBold.click(controlEvent(currentBold, foreign));
           currentComment.click(controlEvent(currentComment, currentBold.element));
           currentComment.click(controlEvent(currentComment, detached));
-          const currentWrongMouse = controlEvent(currentBold, currentComment.element);
-          const staleExactMouse = controlEvent(staleBoldControl, currentBold.element);
+          const currentWrongMouse = controlEvent(currentBold, currentComment.element, "mousedown");
+          const staleExactMouse = controlEvent(staleBoldControl, currentBold.element, "mousedown");
           currentBold.mouseDown(currentWrongMouse);
           staleBoldControl.mouseDown(staleExactMouse);
           rejectedMouseEvents.push(currentWrongMouse, staleExactMouse);
-          acceptedMouse = controlEvent(currentComment);
+          acceptedMouse = controlEvent(currentComment, currentComment.element, "mousedown");
           currentComment.mouseDown(acceptedMouse);
           currentComment.mouseDown(acceptedMouse);
           if (order === "stale-before-current") {
@@ -506,7 +852,7 @@ describe("Toolbar publication authority", () => {
       expect(acceptedMouse.preventDefault).toHaveBeenCalledOnce();
       activate(button(stale, "Bold"), button(current, "Bold").element);
       activate(button(stale, "Comment"), button(current, "Comment").element);
-      const postCleanupMouse = controlEvent(button(stale, "Bold"), button(current, "Bold").element);
+      const postCleanupMouse = controlEvent(button(stale, "Bold"), button(current, "Bold").element, "mousedown");
       button(stale, "Bold").mouseDown(postCleanupMouse);
       expect(postCleanupMouse.preventDefault).not.toHaveBeenCalled();
       activate(button(current, "Image"));
@@ -555,7 +901,7 @@ describe("Toolbar publication authority", () => {
           expect(button(current, "Bold").element).toBe(staleBold);
           activate(button(stale, "Bold"));
           stale.headingChange("4");
-          const staleClose = { preventDefault: vi.fn() };
+          const staleClose = customEvent(stale.headingContent, "focusScope.autoFocusOnUnmount");
           stale.headingClose(staleClose);
           if (replacement === "callbacks") {
             activate(button(stale, "Image"));
@@ -572,7 +918,7 @@ describe("Toolbar publication authority", () => {
       expect(f.actions.focus).not.toHaveBeenCalled();
       activate(button(current, "Bold"));
       current.headingChange("4");
-      const close = { preventDefault: vi.fn() };
+      const close = customEvent(current.headingContent, "focusScope.autoFocusOnUnmount");
       current.headingClose(close);
       if (replacement === "callbacks") {
         activate(button(current, "Image"));
@@ -636,12 +982,12 @@ describe("Toolbar publication authority", () => {
           currentComment.click(controlEvent(currentComment, staleComment.element));
           currentBold.click(controlEvent(currentBold, foreign));
           currentComment.click(controlEvent(currentComment, detached));
-          const currentWrongMouse = controlEvent(currentBold, staleBold.element);
-          const staleWrongMouse = controlEvent(staleBold, currentBold.element);
+          const currentWrongMouse = controlEvent(currentBold, staleBold.element, "mousedown");
+          const staleWrongMouse = controlEvent(staleBold, currentBold.element, "mousedown");
           currentBold.mouseDown(currentWrongMouse);
           staleBold.mouseDown(staleWrongMouse);
           rejectedMouseEvents.push(currentWrongMouse, staleWrongMouse);
-          acceptedMouse = controlEvent(currentComment);
+          acceptedMouse = controlEvent(currentComment, currentComment.element, "mousedown");
           currentComment.mouseDown(acceptedMouse);
           currentComment.mouseDown(acceptedMouse);
           if (order === "stale-before-current") {
@@ -665,7 +1011,7 @@ describe("Toolbar publication authority", () => {
       expect(acceptedMouse.preventDefault).toHaveBeenCalledOnce();
       activate(button(stale, "Bold"), button(current, "Bold").element);
       activate(button(stale, "Comment"), button(current, "Comment").element);
-      const postCleanupMouse = controlEvent(button(stale, "Bold"), button(current, "Bold").element);
+      const postCleanupMouse = controlEvent(button(stale, "Bold"), button(current, "Bold").element, "mousedown");
       button(stale, "Bold").mouseDown(postCleanupMouse);
       expect(postCleanupMouse.preventDefault).not.toHaveBeenCalled();
       activate(button(current, "Image"));
@@ -686,9 +1032,9 @@ describe("Toolbar publication authority", () => {
     const rendered = directRender({ toolbar: f.props, onPassiveCleanup: passiveCleanup });
     const stale = capturePublication();
     const staleTabs = screen.getAllByRole("button").map((element) => (element as HTMLButtonElement).tabIndex);
-    const staleMouse = controlEvent(button(stale, "Bold"));
+    const staleMouse = controlEvent(button(stale, "Bold"), button(stale, "Bold").element, "mousedown");
     const staleKey = keyEvent(stale.root, "ArrowRight");
-    const staleClose = { preventDefault: vi.fn() };
+    const staleClose = customEvent(stale.headingContent, "focusScope.autoFocusOnUnmount");
 
     rendered.update({
       toolbar: f.props,
@@ -701,7 +1047,7 @@ describe("Toolbar publication authority", () => {
         button(stale, "Bold").mouseDown(staleMouse);
         stale.headingChange("2");
         stale.headingClose(staleClose);
-        stale.focus({ currentTarget: stale.root, target: button(stale, "Italic").element });
+        stale.focus(focusEvent(stale.root, button(stale, "Italic").element));
         stale.keyDown(staleKey);
       },
     });
@@ -732,7 +1078,7 @@ describe("Toolbar publication authority", () => {
       boundary: 1,
       onBoundary: () => {
         for (const label of ["Bold", "Undo", "Redo", "Comment"] as const) activate(button(enabled, label));
-        const mouse = controlEvent(button(enabled, "Bold"));
+        const mouse = controlEvent(button(enabled, "Bold"), button(enabled, "Bold").element, "mousedown");
         button(enabled, "Bold").mouseDown(mouse);
         expect(mouse.preventDefault).not.toHaveBeenCalled();
       },
@@ -795,7 +1141,7 @@ describe("Toolbar publication authority", () => {
     const f = fixture();
     const rendered = directRender({ toolbar: f.props });
     const stale = capturePublication();
-    const staleMouse = controlEvent(button(stale, "Bold"));
+    const staleMouse = controlEvent(button(stale, "Bold"), button(stale, "Bold").element, "mousedown");
     const staleKey = keyEvent(stale.root, "ArrowRight");
 
     f.currentFormat.strong = true;
@@ -828,7 +1174,7 @@ describe("Toolbar publication authority", () => {
     const italic = button(stale, "Italic").element;
     const strike = button(stale, "Strikethrough").element;
     italic.focus();
-    stale.focus({ currentTarget: stale.root, target: italic.firstElementChild ?? italic });
+    stale.focus(focusEvent(stale.root, italic.firstElementChild ?? italic));
     expect(italic.tabIndex).toBe(0);
 
     const focusStrike = vi.spyOn(strike, "focus");
@@ -870,7 +1216,7 @@ describe("Toolbar publication authority", () => {
       boundary: 1,
       onBoundary: () => {
         current = capturePublication();
-        stale.focus({ currentTarget: stale.root, target: italic });
+        stale.focus(focusEvent(stale.root, italic));
         stale.keyDown(staleKey);
       },
     });

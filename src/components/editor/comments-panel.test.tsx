@@ -131,6 +131,25 @@ function reactProperty<T>(element: HTMLElement, property: string): T {
   return value as T;
 }
 
+function interceptReviewClick(
+  element: HTMLButtonElement,
+  invoke: (original: ReviewMouseHandler, event: CapturedReviewMouseEvent) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached while intercepting onClick");
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  const original = props.onClick;
+  if (typeof original !== "function") throw new Error("React did not publish onClick");
+  record[propsKey] = {
+    ...props,
+    onClick: (event: CapturedReviewMouseEvent) => invoke(original as ReviewMouseHandler, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
 function captureReviewControl(element: HTMLElement): CapturedReviewControl {
   if (!(element instanceof HTMLButtonElement)) throw new Error("The review control was not a button");
   return {
@@ -1703,7 +1722,7 @@ describe("CommentsPanel", () => {
       expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
     });
 
-    it("accepts only an exact owner-document review action event and leaves the control usable after every rejected source", async () => {
+    it("accepts only a genuine exact owner-document review action event without consuming fabricated sources", async () => {
       const fixture = makeBatchSession("review-event-provenance");
       const reviews = [
         reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
@@ -1733,9 +1752,6 @@ describe("CommentsPanel", () => {
         invokeReviewControl(accept, foreign, foreignChild);
         invokeReviewControl(accept, otherDocumentButton);
         invokeReviewControl(accept, clone);
-        accept.element.disabled = true;
-        invokeReviewControl(accept);
-        accept.element.disabled = false;
         accept.click(reviewMouseEvent(accept, accept.element, icon, accept.element));
         accept.click(reviewMouseEvent(accept, accept.element, accept.element, accept.element, "pointerdown"));
         accept.click({
@@ -1762,13 +1778,151 @@ describe("CommentsPanel", () => {
       clone.remove();
     });
 
+    it.each(["toggle", "accept", "reject", "resolve", "thread"] as const)(
+      "keeps the %s review control exact and usable after direct-root Strict Mode replay",
+      async (kind) => {
+        Element.prototype.scrollIntoView ??= () => {};
+        const suggestions = kind !== "resolve" && kind !== "thread";
+        const fixture = makeBatchSession(`review-strict-${kind}`, 1, undefined, suggestions);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const active = vi.spyOn(fixture.session, "setActiveComment");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const card = await within(host).findByTestId("review-card");
+          if (kind === "toggle") {
+            act(() => dispatchReviewClick(within(card).getByTestId("review-toggle")));
+            expect(within(card).getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+          } else if (kind === "thread") {
+            act(() => dispatchReviewClick(within(card).getByTestId("review-toggle")));
+            act(() => dispatchReviewClick(within(card).getByTestId("review-thread-link")));
+            expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
+          } else {
+            const testId = kind === "accept" ? "review-accept-all" : kind === "reject" ? "review-reject-all" : "review-resolve-all";
+            act(() => dispatchReviewClick(within(card).getByTestId(testId)));
+            expect(api.documents.comment).toHaveBeenCalledTimes(1);
+            expect(api.documents.comment).toHaveBeenCalledWith(
+              fixture.session.docId,
+              kind === "resolve"
+                ? { action: "resolve", threadId: fixture.threadIds[0], resolved: true }
+                : { action: "suggestion", threadId: fixture.threadIds[0], replyId: undefined, decision: kind },
+            );
+          }
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each(["transient descendant mutation", "transient disabled state", "detach and reinsert"] as const)(
+      "fails closed after %s even when the exact review-card DOM is restored",
+      async (scenario) => {
+        const fixture = makeBatchSession(`review-${scenario.replaceAll(" ", "-")}`);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+        const rendered = render(batchPanel(fixture.session, onToast));
+        const stale = captureReviewControl(await screen.findByTestId("review-accept-all"));
+        const card = reviewCard("r1");
+
+        if (scenario === "transient descendant mutation") {
+          const descendant = stale.element.firstElementChild;
+          if (!descendant) throw new Error("Accept all did not render its committed icon");
+          const replacement = descendant.cloneNode(true) as Element;
+          descendant.replaceWith(replacement);
+          replacement.replaceWith(descendant);
+        } else if (scenario === "transient disabled state") {
+          stale.element.disabled = true;
+          stale.element.disabled = false;
+        } else {
+          const parent = card.parentNode;
+          const next = card.nextSibling;
+          if (!parent) throw new Error("Review card did not have a committed parent");
+          card.remove();
+          parent.insertBefore(card, next);
+        }
+
+        act(() => dispatchReviewClick(stale.element));
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        rendered.rerender(batchPanel(fixture.session, vi.fn()));
+        const current = captureReviewControl(screen.getByTestId("review-accept-all"));
+        expect(current.click).not.toBe(stale.click);
+        act(() => {
+          stale.click(reviewMouseEvent(current));
+          dispatchReviewClick(current.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+      },
+    );
+
+    it("requires complete callback-ref replay and ignores late stale refs after a current successor", async () => {
+      const fixture = makeBatchSession("review-partial-ref-replay");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const rendered = render(batchPanel(fixture.session));
+      const stale = captureReviewControl(await screen.findByTestId("review-reject-all"));
+
+      act(() => {
+        stale.ref(null);
+        stale.ref(stale.element);
+        dispatchReviewClick(stale.element);
+      });
+      expect(api.documents.comment).not.toHaveBeenCalled();
+
+      rendered.rerender(batchPanel(fixture.session));
+      const current = captureReviewControl(screen.getByTestId("review-reject-all"));
+      act(() => {
+        stale.ref(current.element);
+        stale.ref(null);
+        dispatchReviewClick(current.element);
+      });
+      expect(api.documents.comment).toHaveBeenCalledOnce();
+    });
+
+    it("consumes one native event and action before repeated or reentrant thread work", async () => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = makeBatchSession("review-thread-one-use", 1, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const active = vi.spyOn(fixture.session, "setActiveComment");
+      render(batchPanel(fixture.session));
+      const toggle = await screen.findByTestId("review-toggle");
+      act(() => dispatchReviewClick(toggle));
+      const link = captureReviewControl(screen.getByTestId("review-thread-link"));
+      active.mockImplementation(() => {
+        link.element.click();
+      });
+      const restore = interceptReviewClick(link.element, (original, event) => {
+        original(event);
+        original(event);
+      });
+      const repeated = new MouseEvent("click", { bubbles: true, cancelable: true });
+
+      act(() => {
+        dispatchReviewClick(link.element, repeated);
+        dispatchReviewClick(link.element, repeated);
+      });
+      restore();
+      expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
+
+      act(() => dispatchReviewClick(link.element));
+      expect(active).toHaveBeenCalledTimes(2);
+    });
+
     it("binds toggle and ordered thread links to their one exact card publication", async () => {
       Element.prototype.scrollIntoView ??= () => {};
       const fixture = makeBatchSession("review-toggle-links", 2, undefined, false);
       const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
       vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
       const active = vi.spyOn(fixture.session, "setActiveComment");
-      render(batchPanel(fixture.session));
+      const rendered = render(batchPanel(fixture.session));
       const toggleA = captureReviewControl(await screen.findByTestId("review-toggle"));
 
       act(() => dispatchReviewClick(toggleA.element));
@@ -1783,9 +1937,13 @@ describe("CommentsPanel", () => {
       const list = screen.getByTestId("review-threads");
       act(() => invokeReviewControl(links[0], links[1].element));
       expect(active).not.toHaveBeenCalled();
+      act(() => dispatchReviewClick(links[0].element));
+      expect(active).toHaveBeenCalledOnce();
+      expect(active).toHaveBeenCalledWith(fixture.threadIds[0]);
+
       list.append(rows[0]);
-      act(() => invokeReviewControl(links[0]));
-      expect(active).not.toHaveBeenCalled();
+      act(() => dispatchReviewClick(links[0].element));
+      expect(active).toHaveBeenCalledOnce();
       list.insertBefore(rows[0], rows[1]);
       const event = new MouseEvent("click", { bubbles: true, cancelable: true });
       act(() => {
@@ -1793,23 +1951,23 @@ describe("CommentsPanel", () => {
         dispatchReviewClick(links[0].element, event);
       });
       expect(active).toHaveBeenCalledOnce();
-      expect(active).toHaveBeenCalledWith(fixture.threadIds[0]);
-
-      act(() => dispatchReviewClick(links[0].element));
+      rendered.rerender(batchPanel(fixture.session));
+      const currentLink = screen.getAllByTestId("review-thread-link")[0];
+      act(() => dispatchReviewClick(currentLink));
       expect(active).toHaveBeenCalledTimes(2);
       expect(active).toHaveBeenLastCalledWith(fixture.threadIds[0]);
 
-      act(() => dispatchReviewClick(toggleB.element));
+      act(() => dispatchReviewClick(screen.getByTestId("review-toggle")));
       expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
     });
 
-    it("rejects exact-card DOM replacement and reorder until the published hierarchy is restored", async () => {
+    it("permanently rejects a publication after exact-card DOM replacement or reorder", async () => {
       Element.prototype.scrollIntoView ??= () => {};
       const fixture = makeBatchSession("review-dom-replacement", 2, undefined, false);
       const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
       vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
       const active = vi.spyOn(fixture.session, "setActiveComment");
-      render(batchPanel(fixture.session));
+      const rendered = render(batchPanel(fixture.session));
       const toggle = captureReviewControl(await screen.findByTestId("review-toggle"));
       const card = reviewCard("r1");
       const header = within(card).getByTestId("review-header");
@@ -1827,6 +1985,9 @@ describe("CommentsPanel", () => {
       expect(toggle.element).toHaveAttribute("aria-expanded", "false");
       card.insertBefore(header, card.firstChild);
       act(() => dispatchReviewClick(toggle.element));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
+      rendered.rerender(batchPanel(fixture.session));
+      act(() => dispatchReviewClick(screen.getByTestId("review-toggle")));
       expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
 
       const link = captureReviewControl(screen.getAllByTestId("review-thread-link")[0]);
@@ -1840,8 +2001,10 @@ describe("CommentsPanel", () => {
         clone.replaceWith(replaced);
       }
       act(() => dispatchReviewClick(link.element));
-      expect(active).toHaveBeenCalledOnce();
-      expect(active).toHaveBeenCalledWith(fixture.threadIds[0]);
+      expect(active).not.toHaveBeenCalled();
+      rendered.rerender(batchPanel(fixture.session));
+      act(() => dispatchReviewClick(screen.getAllByTestId("review-thread-link")[0]));
+      expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
     });
 
     it("retires text and operation publications while preserving the current same-DOM control", async () => {
@@ -1894,7 +2057,7 @@ describe("CommentsPanel", () => {
           if (mutation === "review") review.summary = "Review r1.";
           if (mutation === "thread") storedThread.set("body", "Finding 1.\n\n```suggestion\nALPHA\n```");
           if (mutation === "permission") (fixture.session as unknown as { role: string }).role = "owner";
-          invokeReviewControl(control);
+          dispatchReviewClick(control.element);
         });
         expect(api.documents.comment).toHaveBeenCalledOnce();
       },
