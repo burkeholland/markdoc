@@ -83,6 +83,30 @@ function Harness({
   );
 }
 
+function SubmitHarness({
+  onOpenChange,
+  onSubmit,
+}: {
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (src: string, alt: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const setDialogOpen = useCallback(
+    (nextOpen: boolean) => {
+      onOpenChange(nextOpen);
+      setOpen(nextOpen);
+    },
+    [onOpenChange],
+  );
+  return (
+    <ImageDialog
+      open={open}
+      onOpenChange={setDialogOpen}
+      onSubmit={onSubmit}
+    />
+  );
+}
+
 function choose(file: File) {
   fireEvent.change(screen.getByTestId("image-file"), { target: { files: [file] } });
 }
@@ -205,6 +229,32 @@ function imageForm() {
     throw new Error("Image form was not rendered");
   }
   return form;
+}
+
+async function submitCleanSuccess(
+  view: DirectView,
+  onOpenChange: (open: boolean) => void,
+  onSubmit: (src: string, alt: string) => void,
+  url: string,
+) {
+  await view.render(
+    <SubmitHarness onOpenChange={onOpenChange} onSubmit={onSubmit} />,
+  );
+  fireEvent.change(screen.getByTestId("image-url"), {
+    target: { value: url },
+  });
+  await act(async () => {});
+  const submit = submitEvent();
+  let dispatched = true;
+  act(() => {
+    dispatched = imageForm().dispatchEvent(submit);
+  });
+  expect(dispatched).toBe(false);
+  expect(submit.defaultPrevented).toBe(true);
+  expect(onOpenChange).toHaveBeenCalledOnce();
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+  expect(onSubmit).toHaveBeenCalledWith(url, "");
 }
 
 beforeEach(() => {
@@ -2074,6 +2124,179 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
   });
+
+  it("suppresses requestSubmit after Insert is rehomed and recovers freshly", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/rehomed.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const insert = screen.getByTestId("image-submit");
+    const parent = insert.parentNode;
+    const next = insert.nextSibling;
+    if (!parent) throw new Error("Insert parent was not rendered");
+    let nativeSubmit: Event | null = null;
+    const observeSubmit = (event: Event) => {
+      nativeSubmit = event;
+    };
+    const later = vi.fn();
+    form.addEventListener("submit", observeSubmit, {
+      capture: true,
+      once: true,
+    });
+    form.addEventListener("submit", later, { once: true });
+    document.body.append(insert);
+    try {
+      act(() => form.requestSubmit());
+    } finally {
+      parent.insertBefore(insert, next);
+    }
+
+    expect(nativeSubmit).not.toBeNull();
+    expect((nativeSubmit as Event | null)?.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/rehomed-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("rejects allowlisted mutation after root submit capture", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/mutated-submit.png" },
+    });
+    const form = imageForm();
+    const content = dialogContent();
+    const mutate = vi.fn(() => {
+      const style = content.getAttribute("style");
+      content.setAttribute(
+        "style",
+        content.style.pointerEvents === "auto"
+          ? ""
+          : "pointer-events: auto;",
+      );
+      if (style === null) content.removeAttribute("style");
+      else content.setAttribute("style", style);
+    });
+    form.addEventListener("submit", mutate, { capture: true, once: true });
+    const submit = submitEvent();
+    let dispatched = true;
+    act(() => {
+      dispatched = form.dispatchEvent(submit);
+    });
+
+    expect(mutate).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/mutation-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(["throwing", "deceptive"] as const)(
+    "rejects a %s own Insert.form getter before application",
+    async (kind) => {
+      const staleClose = vi.fn();
+      const staleSubmit = vi.fn();
+      const currentClose = vi.fn();
+      const currentSubmit = vi.fn();
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={staleSubmit}
+        />,
+      );
+      fireEvent.change(screen.getByTestId("image-url"), {
+        target: { value: "https://example.com/instrumented.png" },
+      });
+      await act(async () => {});
+      const form = imageForm();
+      const insert = screen.getByTestId("image-submit");
+      const readForm = vi.fn(() => {
+        if (kind === "throwing") {
+          throw new Error("Instrumented Insert.form must not run");
+        }
+        return form;
+      });
+      const instrument = vi.fn(() => {
+        Object.defineProperty(insert, "form", {
+          configurable: true,
+          get: readForm,
+        });
+      });
+      const uncaught = vi.fn((event: ErrorEvent) => event.preventDefault());
+      form.addEventListener("submit", instrument, {
+        capture: true,
+        once: true,
+      });
+      window.addEventListener("error", uncaught);
+      const submit = submitEvent();
+      let dispatched = true;
+      try {
+        act(() => {
+          dispatched = form.dispatchEvent(submit);
+        });
+      } finally {
+        window.removeEventListener("error", uncaught);
+        Reflect.deleteProperty(insert, "form");
+      }
+
+      expect(instrument).toHaveBeenCalledOnce();
+      expect(readForm).not.toHaveBeenCalled();
+      expect(dispatched).toBe(false);
+      expect(submit.defaultPrevented).toBe(true);
+      expect(uncaught).not.toHaveBeenCalled();
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+
+      await submitCleanSuccess(
+        view,
+        currentClose,
+        currentSubmit,
+        `https://example.com/${kind}-recovery.png`,
+      );
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+    },
+  );
 
   it("suppresses a genuine submit after staged replay rejection and recovers freshly", async () => {
     const staleClose = vi.fn();
