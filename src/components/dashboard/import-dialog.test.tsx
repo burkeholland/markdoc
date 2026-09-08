@@ -149,6 +149,12 @@ function captureResultRetry(): CapturedResultControl<HTMLButtonElement> {
   return { element, onClick: reactProp<ResultClick<HTMLButtonElement>>(element, "onClick") };
 }
 
+function captureResultRowRetry(index = 0): CapturedResultControl<HTMLButtonElement> {
+  const element = screen.getAllByTestId("import-row-retry")[index] as HTMLButtonElement | undefined;
+  if (!element) throw new Error(`Row Retry control ${index} was not rendered`);
+  return { element, onClick: reactProp<ResultClick<HTMLButtonElement>>(element, "onClick") };
+}
+
 interface CapturedResultControlView {
   element: HTMLElement;
   onClick: ResultClick<HTMLAnchorElement> | ResultClick<HTMLButtonElement>;
@@ -225,7 +231,7 @@ function invokeResultControl<T extends HTMLElement>(
 function resultItems(retry: () => void): ImportItem[] {
   return [
     {
-      name: "first.md",
+      name: "first.md ",
       status: "done",
       id: "doc-first",
       title: "First",
@@ -435,6 +441,96 @@ afterEach(() => {
 });
 
 describe("ImportDialog result publications", () => {
+  it("binds repeated and crossed row retries to one exact current failed row", () => {
+    const firstRetry = vi.fn();
+    const secondRetry = vi.fn();
+    const retryAll = vi.fn();
+    const items: ImportItem[] = [
+      {
+        name: "first.md",
+        status: "error",
+        warnings: [],
+        error: "First failed",
+        retry: firstRetry,
+        retryAll,
+      },
+      {
+        name: "second.md",
+        status: "error",
+        warnings: [],
+        error: "Second failed",
+        retry: secondRetry,
+        retryAll,
+      },
+    ];
+    const view = render(
+      <StrictMode>
+        <ImportDialog open onOpenChange={vi.fn()} items={items} ignored={[]} />
+      </StrictMode>,
+    );
+    const staleFirst = captureResultRowRetry(0);
+    const staleSecond = captureResultRowRetry(1);
+    const staleAll = captureResultRetry();
+
+    invokeResultControl(staleFirst, staleSecond.element);
+    invokeResultControl(staleSecond, staleFirst.element);
+    expect(firstRetry).not.toHaveBeenCalled();
+    expect(secondRetry).not.toHaveBeenCalled();
+
+    invokeResultControl(staleFirst);
+    invokeResultControl(staleFirst);
+    invokeResultControl(staleSecond);
+    invokeResultControl(staleAll);
+    expect(firstRetry).toHaveBeenCalledOnce();
+    expect(secondRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+
+    view.rerender(
+      <StrictMode>
+        <ImportDialog open onOpenChange={vi.fn()} items={items} ignored={[]} />
+      </StrictMode>,
+    );
+    const currentSecond = captureResultRowRetry(1);
+    invokeResultControl(staleSecond, currentSecond.element);
+    expect(secondRetry).not.toHaveBeenCalled();
+    invokeResultControl(currentSecond);
+    expect(secondRetry).toHaveBeenCalledOnce();
+  });
+
+  it("retires a restored row retry before a clean successor publication", () => {
+    const retry = vi.fn();
+    const items: ImportItem[] = [
+      {
+        name: "failed.md",
+        status: "error",
+        warnings: [],
+        error: "Failed",
+        retry,
+      },
+    ];
+    const view = render(
+      <StrictMode>
+        <ImportDialog open onOpenChange={vi.fn()} items={items} ignored={[]} />
+      </StrictMode>,
+    );
+    const stale = captureResultRowRetry();
+    const row = stale.element.parentElement;
+    if (!row) throw new Error("Row Retry had no owner row");
+    stale.element.remove();
+    row.append(stale.element);
+
+    invokeResultControl(stale);
+    expect(retry).not.toHaveBeenCalled();
+
+    view.rerender(
+      <StrictMode>
+        <ImportDialog open onOpenChange={vi.fn()} items={items} ignored={[]} />
+      </StrictMode>,
+    );
+    invokeResultControl(captureResultRowRetry());
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
   it("claims each current Open and Retry action once and gives an equal-looking successor fresh claims", () => {
     const onOpenChange = vi.fn();
     const retry = vi.fn();
@@ -1662,6 +1758,305 @@ describe("useFileImport - initial batch ownership", () => {
 });
 
 describe("useFileImport - retry ownership", () => {
+  it("retries one of three failed rows with the original images and preserves every other row", async () => {
+    const first = new File(["# First"], "first.md", { type: "text/markdown" });
+    const second = new File(["# Second"], "second.md", { type: "text/markdown" });
+    const third = new File(["# Third"], "third.md", { type: "text/markdown" });
+    const image = new File(["image"], "diagram.png", { type: "image/png" });
+    const ignored = new File(["archive"], "notes.pdf", { type: "application/pdf" });
+    const retryUpload = deferred<ImportBatch>();
+    const onDone = vi.fn();
+    uploadImportBatch
+      .mockResolvedValueOnce({
+        documents: [],
+        failed: [
+          { index: 0, name: first.name, error: "First failed" },
+          { index: 1, name: second.name, error: "Second failed" },
+          { index: 2, name: third.name, error: "Third failed" },
+        ],
+      })
+      .mockReturnValueOnce(retryUpload.promise);
+
+    render(
+      <StrictMode>
+        <Harness
+          batches={[[first, second, third, image, ignored]]}
+          onError={vi.fn()}
+          onDone={onDone}
+        />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    expect(await screen.findAllByTestId("import-row-retry")).toHaveLength(3);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry second.md" }));
+
+    expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [second], [image]);
+    expect(screen.getAllByTestId("import-item").map((row) => row.dataset.status)).toEqual([
+      "error",
+      "uploading",
+      "error",
+    ]);
+    for (const retry of [
+      ...screen.getAllByTestId("import-row-retry"),
+      screen.getByRole("button", { name: "Retry failed" }),
+    ]) {
+      expect(retry).toBeDisabled();
+    }
+    expect(screen.getByTestId("import-ignored")).toHaveTextContent("notes.pdf");
+
+    await act(async () => {
+      retryUpload.resolve({
+        documents: [{ id: "doc-second", title: "Second imported", warnings: ["Second warning"] }],
+        failed: [],
+      });
+    });
+
+    const rows = screen.getAllByTestId("import-item");
+    expect(rows.map((row) => row.querySelector("[title]")?.getAttribute("title"))).toEqual([
+      "first.md",
+      "second.md",
+      "third.md",
+    ]);
+    expect(rows.map((row) => row.dataset.status)).toEqual(["error", "done", "error"]);
+    expect(within(rows[1]).getByTestId("import-open")).toHaveAttribute("href", "/d/doc-second");
+    expect(within(rows[1]).getByTestId("import-warning")).toHaveTextContent("Second warning");
+    expect(screen.getAllByTestId("import-row-retry")).toHaveLength(2);
+    expect(onDone).toHaveBeenCalledTimes(2);
+    expect(onDone).toHaveBeenLastCalledWith(
+      [{ id: "doc-second", title: "Second imported", warnings: ["Second warning"] }],
+      [
+        { index: 0, name: "first.md", error: "First failed" },
+        { index: 2, name: "third.md", error: "Third failed" },
+      ],
+    );
+  });
+
+  it("replaces one failed row beside an existing success and leaves one failure retryable", async () => {
+    const first = new File(["# First"], "first.md", { type: "text/markdown" });
+    const second = new File(["# Second"], "second.md", { type: "text/markdown" });
+    const third = new File(["# Third"], "third.md", { type: "text/markdown" });
+    const onDone = vi.fn();
+    uploadImportBatch
+      .mockResolvedValueOnce({
+        documents: [{ id: "doc-first", title: "First imported", warnings: ["First warning"] }],
+        failed: [
+          { index: 1, name: second.name, error: "Second failed" },
+          { index: 2, name: third.name, error: "Third failed" },
+        ],
+      })
+      .mockResolvedValueOnce({
+        documents: [{ id: "doc-second", title: "Second imported", warnings: [] }],
+        failed: [],
+      });
+
+    render(
+      <StrictMode>
+        <Harness batches={[[first, second, third]]} onError={vi.fn()} onDone={onDone} />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    await screen.findByRole("button", { name: "Retry second.md" });
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Retry second.md" }));
+
+    await waitFor(() => expect(screen.getAllByTestId("import-open")).toHaveLength(2));
+    const rows = screen.getAllByTestId("import-item");
+    expect(rows.map((row) => row.dataset.status)).toEqual(["done", "done", "error"]);
+    expect(screen.getByRole("button", { name: "Retry third.md" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Retry second.md" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry failed" })).toBeEnabled();
+    expect(screen.getAllByTestId("import-open").map((link) => link.getAttribute("href"))).toEqual([
+      "/d/doc-first",
+      "/d/doc-second",
+    ]);
+    expect(onDone).toHaveBeenLastCalledWith(
+      [
+        { id: "doc-first", title: "First imported", warnings: ["First warning"] },
+        { id: "doc-second", title: "Second imported", warnings: [] },
+      ],
+      [{ index: 2, name: "third.md", error: "Third failed" }],
+    );
+  });
+
+  it("exposes a fresh individual retry after rejection and keeps global retry scoped to remaining failures", async () => {
+    const first = new File(["# First"], "first.md", { type: "text/markdown" });
+    const second = new File(["# Second"], "second.md", { type: "text/markdown" });
+    const image = new File(["image"], "diagram.png", { type: "image/png" });
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    uploadImportBatch
+      .mockResolvedValueOnce({
+        documents: [],
+        failed: [
+          { index: 0, name: first.name, error: "First failed" },
+          { index: 1, name: second.name, error: "Second failed" },
+        ],
+      })
+      .mockRejectedValueOnce(new Error("Retry unavailable"))
+      .mockResolvedValueOnce({
+        documents: [{ id: "doc-first", title: "First", warnings: [] }],
+        failed: [],
+      })
+      .mockResolvedValueOnce({
+        documents: [{ id: "doc-second", title: "Second", warnings: [] }],
+        failed: [],
+      });
+
+    render(
+      <StrictMode>
+        <Harness batches={[[first, second, image]]} onError={onError} onDone={onDone} />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    await screen.findByRole("button", { name: "Retry first.md" });
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Retry first.md" }));
+
+    expect(await screen.findByText("Retry unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry first.md" })).toBeEnabled();
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Retry unavailable");
+    expect(onDone).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry first.md" }));
+    await waitFor(() => expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-first"));
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [first], [image]);
+    expect(screen.queryByRole("button", { name: "Retry first.md" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry second.md" })).toBeEnabled();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed" }));
+    await waitFor(() => expect(screen.getAllByTestId("import-open")).toHaveLength(2));
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(4, [second], [image]);
+    expect(screen.queryByTestId("import-row-retry")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull();
+    expect(onDone).toHaveBeenCalledTimes(4);
+    expect(onDone).toHaveBeenLastCalledWith(
+      [
+        { id: "doc-first", title: "First", warnings: [] },
+        { id: "doc-second", title: "Second", warnings: [] },
+      ],
+      [],
+    );
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "retires an individual retry on close, ignores its late %s, and admits a fresh batch",
+    async (outcome) => {
+      const oldDocument = new File(["# Old"], "old.md", { type: "text/markdown" });
+      const oldImage = new File(["old image"], "old.png", { type: "image/png" });
+      const freshDocument = new File(["# Fresh"], "fresh.md", { type: "text/markdown" });
+      const freshImage = new File(["fresh image"], "fresh.png", { type: "image/png" });
+      const lateRetry = deferred<ImportBatch>();
+      const onDone = vi.fn();
+      const onError = vi.fn();
+      uploadImportBatch
+        .mockResolvedValueOnce({
+          documents: [],
+          failed: [{ index: 0, name: oldDocument.name, error: "Old failed" }],
+        })
+        .mockReturnValueOnce(lateRetry.promise)
+        .mockResolvedValueOnce({
+          documents: [{ id: "doc-fresh", title: "Fresh", warnings: [] }],
+          failed: [],
+        });
+
+      render(
+        <StrictMode>
+          <Harness
+            batches={[
+              [oldDocument, oldImage],
+              [freshDocument, freshImage],
+            ]}
+            onError={onError}
+            onDone={onDone}
+          />
+        </StrictMode>,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+      await screen.findByRole("button", { name: "Retry old.md" });
+      await act(async () => {});
+      fireEvent.click(screen.getByRole("button", { name: "Retry old.md" }));
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => expect(screen.queryByTestId("import-dialog")).toBeNull());
+
+      fireEvent.click(screen.getByRole("button", { name: "Import batch 2" }));
+      expect(await screen.findByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-fresh");
+      expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [freshDocument], [freshImage]);
+
+      await act(async () => {
+        if (outcome === "resolve") {
+          lateRetry.resolve({
+            documents: [{ id: "doc-old", title: "Old", warnings: [] }],
+            failed: [],
+          });
+        } else {
+          lateRetry.reject(new Error("Late retry failure"));
+        }
+      });
+
+      expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-fresh");
+      expect(screen.queryByText("Old")).toBeNull();
+      expect(onDone).toHaveBeenCalledTimes(2);
+      expect(onDone).toHaveBeenLastCalledWith(
+        [{ id: "doc-fresh", title: "Fresh", warnings: [] }],
+        [],
+      );
+      expect(onError).not.toHaveBeenCalled();
+      expect(unhandledRejections).toEqual([]);
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "retires an individual retry during Strict Mode cleanup before a late %s",
+    async (outcome) => {
+      const file = new File(["# Failed"], "failed.md", { type: "text/markdown" });
+      const image = new File(["image"], "failed.png", { type: "image/png" });
+      const lateRetry = deferred<ImportBatch>();
+      const onDone = vi.fn();
+      const onError = vi.fn();
+      uploadImportBatch
+        .mockResolvedValueOnce({
+          documents: [],
+          failed: [{ index: 0, name: file.name, error: "Failed" }],
+        })
+        .mockReturnValueOnce(lateRetry.promise);
+      const view = render(
+        <StrictMode>
+          <Harness batches={[[file, image]]} onError={onError} onDone={onDone} />
+        </StrictMode>,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+      await screen.findByRole("button", { name: "Retry failed.md" });
+      await act(async () => {});
+      fireEvent.click(screen.getByRole("button", { name: "Retry failed.md" }));
+      onDone.mockClear();
+
+      view.unmount();
+      await act(async () => {
+        if (outcome === "resolve") {
+          lateRetry.resolve({
+            documents: [{ id: "doc-late", title: "Late", warnings: [] }],
+            failed: [],
+          });
+        } else {
+          lateRetry.reject(new Error("Late cleanup failure"));
+        }
+      });
+
+      expect(onDone).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+      expect(unhandledRejections).toEqual([]);
+    },
+  );
+
   it("retries only failures with their image companions and rejects initial work while retry is pending", async () => {
     const first = new File(["# First"], "first.md", { type: "text/markdown" });
     const second = new File(["# Second"], "second.md", { type: "text/markdown" });
@@ -1718,8 +2113,6 @@ describe("useFileImport - retry ownership", () => {
     expect(screen.getAllByTestId("import-item")[1]).toHaveAttribute("data-status", "uploading");
     fireEvent.click(retry);
     fireEvent.click(replacementBatch);
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.getByTestId("import-dialog")).toBeInTheDocument();
     expect(uploadImportBatch).toHaveBeenCalledTimes(2);
     expect(uploadImportBatch).toHaveBeenNthCalledWith(1, [first, second], [image]);
     expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [second], [image]);
