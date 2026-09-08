@@ -1210,6 +1210,117 @@ describe("StatsPopover disclosure visit authority", () => {
     },
   );
 
+  it.each([
+    "source",
+    "statistics",
+    "selection",
+    "goal",
+    "editability",
+    "mode",
+    "callbacks",
+  ] as const)(
+    "suppresses delayed Escape focus when %s changes in the closing batch",
+    async (change) => {
+      vi.useFakeTimers();
+      const session = makeSession(`strict-close-batched-${change}`);
+      const mounted = renderStrictStats(session, () => {});
+      let source = "One two three.";
+      let selection: SourceSelection = null;
+      let mount: "initial" | "replacement" = "initial";
+      const renderCurrent = () =>
+        mounted.root.render(
+          <StrictMode>
+            <StatsBoundary
+              session={session}
+              source={source}
+              selection={selection}
+              mount={mount}
+            />
+          </StrictMode>,
+        );
+
+      try {
+        openPopover();
+        const closingContent = screen.getByTestId(
+          "stats-popover",
+        ) as HTMLDivElement;
+        const closingTrigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        const focusClosingTrigger = vi.spyOn(
+          closingTrigger,
+          "focus",
+        );
+        const escape = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "Escape",
+          key: "Escape",
+        });
+
+        act(() => {
+          closingContent.dispatchEvent(escape);
+          if (change === "source") {
+            source = "One two three!";
+          } else if (change === "statistics") {
+            source = "One two three four.";
+          } else if (change === "selection") {
+            selection = { from: 0, to: 3 };
+          } else if (change === "goal") {
+            setGoal(session, goal("words", "min", 250));
+          } else if (change === "editability") {
+            Object.defineProperty(session, "canEdit", {
+              configurable: true,
+              value: false,
+            });
+          } else if (change === "mode") {
+            session.setMode("suggesting");
+          } else {
+            mount = "replacement";
+          }
+          renderCurrent();
+        });
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+        expect(focusClosingTrigger).not.toHaveBeenCalled();
+
+        await act(() => vi.advanceTimersByTimeAsync(0));
+        expect(focusClosingTrigger).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+        const currentTrigger = screen.getByTestId(
+          "stats-button",
+        );
+        if (change === "callbacks") {
+          expect(currentTrigger).not.toBe(closingTrigger);
+        }
+        fireEvent.click(currentTrigger);
+        expect(screen.getByTestId("stats-popover")).toBeVisible();
+        if (change === "statistics") {
+          expect(screen.getByTestId("word-count")).toHaveTextContent(
+            "4 words",
+          );
+        } else if (change === "selection") {
+          expect(screen.getByTestId("selection-count")).toHaveTextContent(
+            "1 of 3 selected",
+          );
+        } else if (change === "goal") {
+          expect(getGoal(session)).toEqual(
+            goal("words", "min", 250),
+          );
+        } else if (change === "editability") {
+          expect(screen.queryByTestId("goal-set")).toBeNull();
+        } else if (change === "mode") {
+          expect(session.mode).toBe("suggesting");
+        }
+      } finally {
+        act(() => mounted.root.unmount());
+        vi.clearAllTimers();
+        vi.useRealTimers();
+        mounted.host.remove();
+      }
+    },
+  );
+
   it.each(["drifted", "equivalent"] as const)(
     "keeps a fresh close intent after claiming an older %s autofocus callback",
     async (change) => {
@@ -1237,24 +1348,30 @@ describe("StatsPopover disclosure visit authority", () => {
         const focusTrigger = vi.spyOn(trigger, "focus");
         const callbackCount = capturedStatsContentCallbacks.length;
 
-        fireEvent.keyDown(firstContent, {
+        const escape = new KeyboardEvent("keydown", {
           bubbles: true,
           cancelable: true,
           code: "Escape",
           key: "Escape",
         });
+        if (change === "drifted") {
+          act(() => {
+            firstContent.dispatchEvent(escape);
+            source = "One two three!";
+            renderCurrent();
+          });
+        } else {
+          act(() => firstContent.dispatchEvent(escape));
+        }
         const firstCloseAutoFocus =
           capturedStatsContentCallbacks
             .slice(callbackCount)
             .find(({ closeAutoFocus }) => closeAutoFocus)
             ?.closeAutoFocus;
         expect(firstCloseAutoFocus).toBeTypeOf("function");
-        act(() => {
-          if (change === "drifted") {
-            source = "One two three!";
-          }
-          renderCurrent();
-        });
+        if (change === "equivalent") {
+          act(() => renderCurrent());
+        }
         vi.clearAllTimers();
 
         fireEvent.click(trigger);

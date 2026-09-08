@@ -1050,6 +1050,13 @@ class StatsDisclosureCoordinator {
     this.releaseCapture();
     queueMicrotask(() => {
       if (this.#lease !== lease) return;
+      const close = this.#closeFocus;
+      if (close) {
+        this.retireCloseFocus(
+          close,
+          close.expected ?? close.publication,
+        );
+      }
       this.#current?.guard?.release();
       this.#replay?.release();
       this.#poisoned?.guard?.release();
@@ -1062,7 +1069,6 @@ class StatsDisclosureCoordinator {
       this.#poisoned = null;
       this.#openFocus = null;
       this.#closeFocus = null;
-      this.#retiredCloseFocus.clear();
     });
   }
 
@@ -1453,14 +1459,20 @@ class StatsDisclosureCoordinator {
     }
   }
 
-  retireCloseFocus(expected?: StatsCloseFocus) {
+  retireCloseFocus(
+    expected?: StatsCloseFocus,
+    callbackPublication?: StatsDisclosurePublication | null,
+  ) {
     const close = expected ?? this.#closeFocus;
     if (!close || (expected && this.#closeFocus !== expected)) return;
     this.#closeFocus = null;
-    const publication = close.expected;
-    if (!publication || close.claimed) return;
+    const publication =
+      callbackPublication ?? close.expected ?? close.publication;
+    const ownerWindow =
+      close.publication.triggerPlacement?.document.defaultView;
+    if (!publication || !ownerWindow || close.claimed) return;
     this.#retiredCloseFocus.set(publication, close);
-    close.publication.triggerPlacement?.document.defaultView?.setTimeout(
+    ownerWindow.setTimeout(
       () => {
         if (this.#retiredCloseFocus.get(publication) === close) {
           this.#retiredCloseFocus.delete(publication);
@@ -1683,18 +1695,19 @@ class StatsDisclosureCoordinator {
         content.ownerDocument === trigger.ownerDocument &&
         this.ownsElement(publication, "trigger", trigger) &&
         this.ownsElement(publication, "content", content) &&
-        trigger.dataset.testid === "stats-button" &&
-        trigger.title === publication.render.triggerTitle &&
+        !publication.render.open &&
+        publication.render.authority === null &&
+        publication.render.state.visit === publication.render.visit &&
+        publication.render.state.authority === null &&
+        !publication.render.state.open &&
         content.dataset.testid === "stats-popover" &&
         content.dataset.state === "closed" &&
-        content.querySelector('[data-testid="stats-table"]') &&
-        content.querySelector('[data-testid="goal-section"]') &&
+        !trigger.contains(content) &&
         close.publication.triggerPlacement &&
         statsPlacementStructureMatches(
           trigger,
           close.publication.triggerPlacement,
-        ) &&
-        this.factsMatch(publication),
+        ),
     );
   }
 
@@ -1936,7 +1949,6 @@ class StatsDisclosureCoordinator {
     );
     if (
       close &&
-      closesPendingDisclosure &&
       !close.expected &&
       this.closingCallbackMatches(close, publication)
     ) {
