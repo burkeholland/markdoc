@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
+  StrictMode,
   useLayoutEffect,
   type MouseEvent as ReactMouseEvent,
   type RefCallback,
@@ -79,9 +80,53 @@ function captureClick(element: HTMLButtonElement) {
   return reactHandler<RefreshClick>(element, "onClick");
 }
 
-function clickEvent(currentTarget: HTMLButtonElement) {
+function captureRef<T extends HTMLElement>(element: T) {
+  return reactHandler<RefCallback<T>>(element, "ref");
+}
+
+function clickEvent(
+  currentTarget: HTMLButtonElement,
+  {
+    type = "click",
+    button = 0,
+    target = currentTarget,
+    nativeType = "click",
+    nativeButton = button,
+    nativeTarget = target,
+    nativeEvent,
+  }: {
+    type?: string;
+    button?: number;
+    target?: EventTarget | null;
+    nativeType?: string;
+    nativeButton?: number;
+    nativeTarget?: EventTarget | null;
+    nativeEvent?: Event;
+  } = {},
+) {
+  const ownerDocument = currentTarget.ownerDocument;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent;
+  if (!MouseEventConstructor) throw new Error("The owner document has no MouseEvent constructor");
+  const actualNativeEvent =
+    nativeEvent ??
+    new MouseEventConstructor(nativeType, {
+      bubbles: true,
+      cancelable: true,
+      button: nativeButton,
+    });
+  if (nativeEvent === undefined) {
+    Object.defineProperty(actualNativeEvent, "target", {
+      configurable: true,
+      value: nativeTarget,
+    });
+  }
   return {
+    type,
+    button,
     currentTarget,
+    target,
+    nativeEvent: actualNativeEvent,
+    defaultPrevented: false,
     preventDefault: vi.fn(),
     stopPropagation: vi.fn(),
   } as unknown as ReactMouseEvent<HTMLButtonElement>;
@@ -470,6 +515,290 @@ describe("UpdatePill polling", () => {
     }
   });
 
+  it("replaces replayed handlers, refs, and publications before accepting one reentrant Strict Mode click", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const navigation = createNavigationSpies();
+    const NativeMutationObserver = window.MutationObserver;
+    type ReplayCapture = {
+      publication: MutationObserver;
+      pill: HTMLDivElement;
+      button: HTMLButtonElement;
+      pillRef: RefCallback<HTMLDivElement>;
+      buttonRef: RefCallback<HTMLButtonElement>;
+      click: RefreshClick;
+    };
+    const captures: ReplayCapture[] = [];
+
+    class CapturingMutationObserver implements MutationObserver {
+      private readonly observer: MutationObserver;
+
+      constructor(callback: MutationCallback) {
+        this.observer = new NativeMutationObserver(callback);
+        const { pill, button } = controls(host);
+        captures.push({
+          publication: this,
+          pill,
+          button,
+          pillRef: captureRef(pill),
+          buttonRef: captureRef(button),
+          click: captureClick(button),
+        });
+      }
+
+      disconnect() {
+        this.observer.disconnect();
+      }
+
+      observe(target: Node, options?: MutationObserverInit) {
+        this.observer.observe(target, options);
+      }
+
+      takeRecords() {
+        return this.observer.takeRecords();
+      }
+    }
+
+    vi.stubGlobal("MutationObserver", CapturingMutationObserver);
+    fetchMock.mockResolvedValue(response("hash-after"));
+    try {
+      await withNavigation(navigation, async () => {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <UpdatePill docId={DOC_ID} initialHash={INITIAL_HASH} pollMs={POLL_MS} />
+            </StrictMode>,
+          );
+        });
+        await advance(0);
+      });
+
+      expect(captures).toHaveLength(2);
+      const [retired, current] = captures;
+      if (!retired || !current) throw new Error("Strict Mode did not publish both control generations");
+      expect(current.publication).not.toBe(retired.publication);
+      expect(current.click).not.toBe(retired.click);
+      expect(current.pillRef).not.toBe(retired.pillRef);
+      expect(current.buttonRef).not.toBe(retired.buttonRef);
+      expect(current.pill).toBe(retired.pill);
+      expect(current.button).toBe(retired.button);
+
+      act(() => {
+        retired.pillRef(current.pill);
+        retired.buttonRef(current.button);
+        current.pillRef(retired.pill);
+        current.buttonRef(retired.button);
+        retired.buttonRef(null);
+        retired.pillRef(null);
+      });
+
+      const activation = clickEvent(current.button);
+      navigation.reload.mockImplementation(() => {
+        current.click(activation);
+        retired.click(activation);
+      });
+      act(() => {
+        retired.click(activation);
+        current.click(activation);
+        current.click(activation);
+      });
+
+      expect(navigation.reload).toHaveBeenCalledOnce();
+      expect(navigation.assign).not.toHaveBeenCalled();
+      expect(navigation.replace).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("requires a primary owner-document native click with matching exact descendant targets", async () => {
+    const navigation = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+    await withNavigation(navigation, async () => {
+      mount();
+      await advance(0);
+    });
+    const { button } = controls();
+    const refresh = captureClick(button);
+    const icon = button.querySelector("svg");
+    if (!icon) throw new Error("The Refresh icon was not rendered");
+    const detached = button.cloneNode(true) as HTMLButtonElement;
+    const sibling = document.createElement("button");
+    document.body.append(sibling);
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow;
+    if (!foreignWindow) throw new Error("The foreign event window was not created");
+    const foreignGlobal = foreignWindow as Window & typeof globalThis;
+    const foreignEvent = new foreignGlobal.MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+    });
+    Object.defineProperty(foreignEvent, "target", {
+      configurable: true,
+      value: button,
+    });
+
+    try {
+      act(() => {
+        refresh(clickEvent(button, { nativeEvent: new Event("click", { bubbles: true }) }));
+        refresh(clickEvent(button, { type: "pointerdown" }));
+        refresh(clickEvent(button, { button: 1 }));
+        refresh(clickEvent(button, { nativeButton: 1 }));
+        refresh(clickEvent(button, { target: icon, nativeTarget: button }));
+        refresh(clickEvent(button, { nativeEvent: foreignEvent }));
+        refresh(clickEvent(sibling));
+        refresh(clickEvent(detached));
+      });
+      expect(navigation.reload).not.toHaveBeenCalled();
+
+      fireEvent.click(icon);
+      fireEvent.click(icon);
+      expect(navigation.reload).toHaveBeenCalledOnce();
+    } finally {
+      iframe.remove();
+      sibling.remove();
+    }
+  });
+
+  it.each([
+    {
+      name: "transient descendant mutation",
+      alter: ({ button }: ReturnType<typeof controls>) => {
+        const updated = button.firstElementChild;
+        if (!updated) throw new Error("Updated text is missing");
+        updated.setAttribute("data-transient", "true");
+        updated.removeAttribute("data-transient");
+      },
+    },
+    {
+      name: "pill detach and reinsert",
+      alter: ({ pill }: ReturnType<typeof controls>) => {
+        const parent = pill.parentNode;
+        if (!parent) throw new Error("Refresh pill has no parent");
+        const nextSibling = pill.nextSibling;
+        pill.remove();
+        parent.insertBefore(pill, nextSibling);
+      },
+    },
+    {
+      name: "button replace and restore",
+      alter: ({ pill, button }: ReturnType<typeof controls>) => {
+        const replacement = button.cloneNode(true);
+        pill.replaceChildren(replacement);
+        pill.replaceChildren(button);
+      },
+    },
+    {
+      name: "partial callback-ref replay",
+      alter: ({ pill }: ReturnType<typeof controls>) => {
+        const pillRef = captureRef(pill);
+        pillRef(null);
+        pillRef(pill);
+      },
+    },
+    {
+      name: "callback-ref replacement",
+      alter: ({ button }: ReturnType<typeof controls>) => {
+        const buttonRef = captureRef(button);
+        const replacement = button.cloneNode(true) as HTMLButtonElement;
+        document.body.append(replacement);
+        buttonRef(replacement);
+        buttonRef(button);
+        replacement.remove();
+      },
+    },
+  ])("permanently retires A after $name and leaves an equal-looking B usable", async ({ alter }) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const navigation = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+
+    try {
+      await withNavigation(navigation, async () => {
+        await act(async () => root.render(<ReaderBoundary />));
+        await advance(0);
+      });
+      const stale = controls(host);
+      const staleClick = captureClick(stale.button);
+      const stalePillRef = captureRef(stale.pill);
+      const staleButtonRef = captureRef(stale.button);
+      alter(stale);
+      staleClick(clickEvent(stale.button));
+      expect(navigation.reload).not.toHaveBeenCalled();
+
+      await withNavigation(navigation, async () => {
+        await act(async () =>
+          root.render(<ReaderBoundary visit="replacement" />),
+        );
+        await advance(0);
+      });
+      const current = controls(host);
+      const currentClick = captureClick(current.button);
+      expect(current.pill).not.toBe(stale.pill);
+      expect(current.button).not.toBe(stale.button);
+      const activation = clickEvent(current.button);
+
+      act(() => {
+        stalePillRef(current.pill);
+        staleButtonRef(current.button);
+        staleButtonRef(null);
+        stalePillRef(null);
+        staleClick(activation);
+        currentClick(activation);
+        currentClick(activation);
+      });
+      expect(navigation.reload).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("fails closed after exact reload ownership drifts and does not let A clear a remounted B", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const navigation = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+
+    try {
+      await withNavigation(navigation, async () => {
+        await act(async () => root.render(<ReaderBoundary />));
+        await advance(0);
+      });
+      const stale = controls(host);
+      const staleClick = captureClick(stale.button);
+      const reload = navigation.reload;
+      const replacementReload = vi.fn();
+      navigation.reload = replacementReload;
+      staleClick(clickEvent(stale.button));
+      navigation.reload = reload;
+      staleClick(clickEvent(stale.button));
+      expect(reload).not.toHaveBeenCalled();
+      expect(replacementReload).not.toHaveBeenCalled();
+
+      await withNavigation(navigation, async () => {
+        await act(async () =>
+          root.render(<ReaderBoundary visit="replacement" />),
+        );
+        await advance(0);
+      });
+      const current = controls(host);
+      const currentClick = captureClick(current.button);
+      staleClick(clickEvent(current.button));
+      currentClick(clickEvent(current.button));
+      expect(reload).toHaveBeenCalledOnce();
+      expect(replacementReload).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it.each(
     (
       [
@@ -585,7 +914,11 @@ describe("UpdatePill polling", () => {
         invokeWrong();
       }
 
-      expect(navigation.reload).toHaveBeenCalledOnce();
+      const permanentlyAltered = source !== "foreign connected button";
+      const accepted =
+        order === "current-before-wrong" ||
+        (order === "wrong-before-current" && !permanentlyAltered);
+      expect(navigation.reload).toHaveBeenCalledTimes(accepted ? 1 : 0);
       expect(fetchMock).toHaveBeenCalledOnce();
       expect(activeListeners.size).toBe(0);
       expect(focusOwner).toHaveFocus();
