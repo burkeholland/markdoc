@@ -1311,6 +1311,7 @@ interface AgentTabNativeSnapshot {
 
 type AgentTabReactEvent = ReactKeyboardEvent<HTMLButtonElement> & {
   readonly _reactName?: unknown;
+  readonly isPersistent?: unknown;
 };
 
 function emptyAgentTabElements(): AgentTabElements {
@@ -1882,8 +1883,8 @@ class AgentTabCoordinator {
       event.isDefaultPrevented() ||
       typeof event.isPropagationStopped !== "function" ||
       event.isPropagationStopped() ||
-      typeof event.isPersistent !== "function" ||
-      !event.isPersistent() ||
+      typeof proof.isPersistent !== "function" ||
+      !proof.isPersistent() ||
       typeof event.persist !== "function" ||
       typeof event.preventDefault !== "function" ||
       typeof event.stopPropagation !== "function" ||

@@ -93,7 +93,7 @@ function reactRefCleanup(element: HTMLElement): () => void {
   const current = alternate?.memoizedProps?.onKeyDown === props.onKeyDown
     ? alternate
     : fiber;
-  if (typeof current.refCleanup !== "function") {
+  if (!current || typeof current.refCleanup !== "function") {
     throw new Error(`React ref cleanup was not attached to ${element.tagName}`);
   }
   return current.refCleanup as () => void;
@@ -2180,6 +2180,15 @@ describe("AgentConnectCard exact keyboard publication", () => {
     const iframe = document.createElement("iframe");
     view.host.append(iframe);
     const foreignView = iframe.contentWindow;
+    const foreignEvent = iframe.contentDocument?.createEvent("KeyboardEvent");
+    if (!foreignEvent) throw new Error("The iframe has no keyboard event");
+    foreignEvent.initKeyboardEvent(
+      "keydown",
+      true,
+      true,
+      foreignView,
+      "ArrowDown",
+    );
 
     act(() => {
       handler({
@@ -2191,13 +2200,7 @@ describe("AgentConnectCard exact keyboard publication", () => {
         key: "ArrowDown",
         currentTarget: crossed,
         preventDefault: fabricatedPreventDefault,
-        nativeEvent: foreignView?.KeyboardEvent
-          ? new foreignView.KeyboardEvent("keydown", {
-              key: "ArrowDown",
-              bubbles: true,
-              cancelable: true,
-            })
-          : new Event("keydown"),
+        nativeEvent: foreignEvent,
       } as unknown as Parameters<KeyHandler>[0]);
     });
     expect(fabricatedPreventDefault).not.toHaveBeenCalled();
@@ -2398,6 +2401,14 @@ describe("AgentConnectCard exact keyboard publication", () => {
       list.insertBefore(first, list.firstChild);
     } else if (scenario === "tab replacement and restoration") {
       const replacement = source.cloneNode(true);
+      const HTMLButtonElementConstructor =
+        source.ownerDocument.defaultView?.HTMLButtonElement;
+      if (
+        !HTMLButtonElementConstructor ||
+        !(replacement instanceof HTMLButtonElementConstructor)
+      ) {
+        throw new Error("The cloned tab is not an owner-realm button");
+      }
       source.replaceWith(replacement);
       replacement.replaceWith(source);
     } else if (scenario === "tablist detach and restoration") {
