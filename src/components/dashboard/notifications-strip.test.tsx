@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
-import { StrictMode, useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NotificationDto } from "@/lib/api";
 
@@ -48,9 +55,11 @@ interface NotificationSnapshot {
 
 type Router = ReturnType<typeof createRouter>;
 type ClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type KeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 
 interface CapturedActions {
   open: ClickHandler;
+  keyDown: KeyHandler;
   dismiss: ClickHandler;
   readAll: ClickHandler;
   section: HTMLElement;
@@ -69,6 +78,7 @@ interface DirectView {
 type CapturedPart = "section" | "readAllButton" | "list" | "item" | "openButton" | "dismissButton";
 type ReactPropsRecord = Record<string, unknown> & {
   onClick?: ClickHandler;
+  onKeyDown?: KeyHandler;
   ref?: unknown;
 };
 
@@ -102,6 +112,13 @@ const ITEM_TWO: NotificationDto = {
   documentId: "document-two",
   documentTitle: "Release notes",
   refId: "thread-two",
+};
+const ITEM_THREE: NotificationDto = {
+  ...ITEM,
+  id: "notification-three",
+  documentId: "document-three",
+  documentTitle: "Launch checklist",
+  refId: "thread-three",
 };
 const SAME_ID_REPLACEMENT: NotificationDto = {
   id: ITEM.id,
@@ -161,6 +178,14 @@ function reactHandler(element: HTMLElement, name = "onClick"): ClickHandler {
   return handler as ClickHandler;
 }
 
+function reactKeyHandler(element: HTMLElement): KeyHandler {
+  const { props } = reactPropsEntry(element);
+  if (typeof props.onKeyDown !== "function") {
+    throw new Error(`onKeyDown was not attached to ${element.dataset.testid ?? element.tagName}`);
+  }
+  return props.onKeyDown;
+}
+
 function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   const props = propsKey
@@ -191,6 +216,7 @@ function captureActions(rowIndex = 0, container: HTMLElement = document.body): C
     throw new Error("Notification strip hierarchy was incomplete");
   }
   const open = reactHandler(openButton);
+  const keyDown = reactKeyHandler(openButton);
   const dismiss = reactHandler(dismissButton);
   const readAll = reactHandler(readAllButton);
   clickTargets.set(open, openButton);
@@ -198,6 +224,7 @@ function captureActions(rowIndex = 0, container: HTMLElement = document.body): C
   clickTargets.set(readAll, readAllButton);
   return {
     open,
+    keyDown,
     dismiss,
     readAll,
     section,
@@ -245,6 +272,24 @@ function interceptClick(
     onClick: ((event: ReactMouseEvent<HTMLButtonElement>) => {
       invokeHandler(original, event);
     }) as ClickHandler,
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+function interceptKey(
+  element: HTMLButtonElement,
+  invokeHandler: (original: KeyHandler, event: ReactKeyboardEvent<HTMLButtonElement>) => void,
+) {
+  const { propsKey, record, props } = reactPropsEntry(element);
+  const original = props.onKeyDown;
+  if (!original) throw new Error("The button did not have an onKeyDown handler");
+  record[propsKey] = {
+    ...props,
+    onKeyDown: ((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      invokeHandler(original, event);
+    }) as KeyHandler,
   };
   return () => {
     record[propsKey] = props;
@@ -317,6 +362,21 @@ function createDirectView(router: Router, notificationSnapshot: NotificationSnap
   return view;
 }
 
+function createStrictView(router: Router, notificationSnapshot: NotificationSnapshot) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { root: createRoot(host), host };
+  directViews.push(view);
+  currentRouter = router;
+  currentSnapshot = notificationSnapshot;
+  act(() => view.root.render(
+    <StrictMode>
+      <NotificationsStrip />
+    </StrictMode>,
+  ));
+  return view;
+}
+
 function renderDirect(
   view: DirectView,
   router: Router,
@@ -358,6 +418,35 @@ function expectStaleInert(actions: CapturedActions, view: DirectView, routers: R
   expect(view.host.innerHTML).toBe(html);
   expect(document.activeElement).toBe(focusTarget);
   focusTarget.remove();
+}
+
+function openButtons(container: HTMLElement = document.body) {
+  return Array.from(
+    container.querySelectorAll<HTMLButtonElement>('[data-testid="notification-open"]'),
+  );
+}
+
+function dispatchKey(
+  source: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  if (focus) source.focus();
+  const view = source.ownerDocument.defaultView;
+  if (!view) throw new Error("Notification control has no owner window");
+  const ownerWindow = view as Window & typeof globalThis;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...init,
+  });
+  let allowed = true;
+  act(() => {
+    allowed = source.dispatchEvent(event);
+  });
+  return { event, allowed };
 }
 
 beforeEach(() => {
@@ -776,6 +865,343 @@ describe("notification strip current actions", () => {
       expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
     },
   );
+});
+
+describe("notification strip keyboard browsing", () => {
+  it.each([
+    ["ArrowDown", 1, 2],
+    ["ArrowUp", 1, 0],
+    ["Home", 1, 0],
+    ["End", 1, 2],
+  ] as const)("moves %s from a middle row to the exact ordered open control", (key, from, to) => {
+    const router = createRouter(`middle-${key}`);
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const controls = openButtons(view.host);
+
+    const result = dispatchKey(controls[from]!, key);
+
+    expect(result.allowed).toBe(false);
+    expect(controls[to]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("wraps both directions and accepts later navigation events without changing tab order", () => {
+    const router = createRouter("wrap");
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const controls = openButtons(view.host);
+    const tabOrder = Array.from(
+      view.host.querySelectorAll<HTMLButtonElement>("button"),
+    );
+
+    expect(dispatchKey(controls[2]!, "ArrowDown").allowed).toBe(false);
+    expect(controls[0]).toHaveFocus();
+    expect(dispatchKey(controls[0]!, "ArrowUp").allowed).toBe(false);
+    expect(controls[2]).toHaveFocus();
+    expect(tabOrder).toEqual([
+      screen.getByTestId("notifications-strip-read-all"),
+      controls[0],
+      screen.getAllByTestId("notification-dismiss")[0],
+      controls[1],
+      screen.getAllByTestId("notification-dismiss")[1],
+      controls[2],
+      screen.getAllByTestId("notification-dismiss")[2],
+    ]);
+    expect(tabOrder.every((button) => button.tabIndex === 0)).toBe(true);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("claims a one-row no-op once before prevention and owner-realm focus", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("one-row");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const current = captureActions(0, view.host);
+    current.openButton.focus();
+    focus.mockClear();
+    const restore = interceptKey(current.openButton, (original, event) => {
+      original(event);
+      original(event);
+    });
+
+    try {
+      const result = dispatchKey(current.openButton, "Home", {}, false);
+      expect(result.allowed).toBe(false);
+      expect(current.openButton).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      restore();
+      focus.mockRestore();
+    }
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Enter", "{Enter}"],
+    ["Space", " "],
+  ] as const)("keeps native %s activation exact after focus moves", async (_name, activation) => {
+    const user = userEvent.setup();
+    const router = createRouter(`activation-${_name}`);
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+
+    expect(dispatchKey(controls[0]!, "ArrowDown").allowed).toBe(false);
+    expect(controls[1]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    await user.keyboard(activation);
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM_TWO.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM_TWO.documentId}?thread=${ITEM_TWO.refId}`,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Ctrl", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+  ] as const)("rejects %s navigation without consuming a later exact event", (_name, init) => {
+    const router = createRouter(`reject-${_name}`);
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+
+    expect(dispatchKey(controls[0]!, "ArrowDown", init).allowed).toBe(true);
+    expect(controls[0]).toHaveFocus();
+    expect(dispatchKey(controls[0]!, "ArrowDown").allowed).toBe(false);
+    expect(controls[1]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("rejects canceled, stopped, foreign-realm, fabricated, dismiss, read-all, and unfocused events", () => {
+    const router = createRouter("event-provenance");
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const current = captureActions(0, view.host);
+    const controls = openButtons(view.host);
+    const sentinel = connectedButton("Focus sentinel");
+
+    const cancel = (event: KeyboardEvent) => event.preventDefault();
+    current.openButton.addEventListener("keydown", cancel, { capture: true, once: true });
+    expect(dispatchKey(current.openButton, "ArrowDown").allowed).toBe(false);
+    expect(current.openButton).toHaveFocus();
+
+    const stop = (event: KeyboardEvent) => event.stopPropagation();
+    current.openButton.addEventListener("keydown", stop, { capture: true, once: true });
+    expect(dispatchKey(current.openButton, "ArrowDown").allowed).toBe(true);
+    expect(current.openButton).toHaveFocus();
+
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as
+      | (Window & typeof globalThis)
+      | null;
+    if (!foreignWindow) throw new Error("Foreign realm was not created");
+    current.openButton.focus();
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowDown",
+    });
+    expect(current.openButton.dispatchEvent(foreign)).toBe(true);
+    expect(current.openButton).toHaveFocus();
+    iframe.remove();
+
+    sentinel.focus();
+    current.keyDown({
+      type: "keydown",
+      key: "ArrowDown",
+      target: current.openButton,
+      currentTarget: current.openButton,
+      nativeEvent: new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowDown",
+      }),
+      preventDefault: vi.fn(),
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+      persist: vi.fn(),
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    expect(sentinel).toHaveFocus();
+
+    for (const outside of [current.dismissButton, current.readAllButton]) {
+      const { propsKey, record, props } = reactPropsEntry(outside);
+      record[propsKey] = { ...props, onKeyDown: current.keyDown };
+      try {
+        expect(dispatchKey(outside, "ArrowDown").allowed).toBe(true);
+        expect(outside).toHaveFocus();
+      } finally {
+        record[propsKey] = props;
+      }
+    }
+
+    sentinel.focus();
+    expect(dispatchKey(controls[0]!, "ArrowDown", {}, false).allowed).toBe(true);
+    expect(sentinel).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    sentinel.remove();
+  });
+
+  it.each([
+    ["row reorder", (first: CapturedActions, second: CapturedActions) => {
+      first.list.append(first.item);
+      first.list.insertBefore(first.item, second.item);
+    }],
+    ["row removal", (first: CapturedActions) => {
+      first.item.remove();
+      first.list.prepend(first.item);
+    }],
+    ["row replacement", (first: CapturedActions) => {
+      const replacement = first.item.cloneNode(true) as HTMLLIElement;
+      first.item.replaceWith(replacement);
+      replacement.replaceWith(first.item);
+    }],
+    ["mutation restore", (first: CapturedActions) => {
+      const className = first.openButton.className;
+      first.openButton.className = `${className} changed`;
+      first.openButton.className = className;
+    }],
+    ["detach and reinsert", (first: CapturedActions, _second: CapturedActions, view: DirectView) => {
+      first.section.remove();
+      view.host.append(first.section);
+    }],
+  ] as const)("keeps a restored %s history inert and permits a fresh successor", (_name, tamper) => {
+    const router = createRouter(`history-${_name}`);
+    const sharedSnapshot = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createDirectView(router, sharedSnapshot);
+    const first = captureActions(0, view.host);
+    const second = captureActions(1, view.host);
+
+    tamper(first, second, view);
+    first.openButton.focus();
+    expect(dispatchKey(first.openButton, "ArrowDown", {}, false).allowed).toBe(true);
+    expect(first.openButton).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    let current!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      mount: "replacement",
+      boundary: 1,
+      passiveGeneration: `fresh-${_name}`,
+      onPassiveCleanup: vi.fn(),
+      onBoundary: () => {
+        current = captureActions(0, view.host);
+      },
+    });
+    expect(current.openButton).not.toBe(first.openButton);
+    const currentControls = openButtons(view.host);
+    expect(dispatchKey(currentControls[0]!, "ArrowDown").allowed).toBe(false);
+    expect(currentControls[1]).toHaveFocus();
+  });
+
+  it("rejects partial ref replay and repeated handler delivery, then recovers with a complete generation", () => {
+    const router = createRouter("partial-replay");
+    const sharedSnapshot = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createDirectView(router, sharedSnapshot);
+    const stale = captureActions(0, view.host);
+    const staleOpenRef = reactRef(stale.openButton);
+
+    staleOpenRef(null);
+    staleOpenRef(stale.openButton);
+    stale.openButton.focus();
+    expect(dispatchKey(stale.openButton, "ArrowDown", {}, false).allowed).toBe(true);
+    expect(stale.openButton).toHaveFocus();
+
+    let current!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      boundary: 1,
+      passiveGeneration: "complete-replay",
+      onPassiveCleanup: vi.fn(),
+      onBoundary: () => {
+        current = captureActions(0, view.host);
+      },
+    });
+    const currentControls = openButtons(view.host);
+    const restore = interceptKey(current.openButton, (original, event) => {
+      stale.keyDown(event);
+      original(event);
+      original(event);
+    });
+    try {
+      expect(dispatchKey(currentControls[0]!, "ArrowDown").allowed).toBe(false);
+    } finally {
+      restore();
+    }
+    expect(currentControls[1]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("retires cleanup observers and leaves removed publication handlers inert", async () => {
+    const NativeMutationObserver = window.MutationObserver;
+    const active = new Set<MutationObserver>();
+    class TrackingMutationObserver extends NativeMutationObserver {
+      constructor(callback: MutationCallback) {
+        super(callback);
+        active.add(this);
+      }
+
+      override disconnect() {
+        active.delete(this);
+        super.disconnect();
+      }
+    }
+    window.MutationObserver = TrackingMutationObserver;
+    const router = createRouter("cleanup");
+    let view: DirectView | null = null;
+    try {
+      view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+      const stale = captureActions(0, view.host);
+      const removed = stale.section;
+      expect(active.size).toBe(1);
+
+      await act(async () => {
+        view!.root.unmount();
+        await Promise.resolve();
+      });
+      const index = directViews.indexOf(view);
+      if (index >= 0) directViews.splice(index, 1);
+      expect(active.size).toBe(0);
+
+      view.host.append(removed);
+      const sentinel = connectedButton("Cleanup sentinel");
+      sentinel.focus();
+      stale.keyDown({
+        currentTarget: stale.openButton,
+        nativeEvent: new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "ArrowDown",
+        }),
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+      expect(sentinel).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      sentinel.remove();
+    } finally {
+      window.MutationObserver = NativeMutationObserver;
+      view?.host.remove();
+    }
+  });
 });
 
 describe("notification strip snapshot authority", () => {

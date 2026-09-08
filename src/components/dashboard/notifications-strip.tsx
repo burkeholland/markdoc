@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useLayoutEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, X } from "lucide-react";
 import type { NotificationDto } from "@/lib/api";
@@ -11,6 +17,7 @@ import { RelativeTime } from "@/components/ui/relative-time";
 
 type NotificationSnapshot = ReturnType<typeof useNotifications>;
 type NotificationRouter = ReturnType<typeof useRouter>;
+type NotificationNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
 interface NotificationRowAuthority {
   readonly index: number;
@@ -45,6 +52,7 @@ interface NotificationRowPublication {
   readonly authority: NotificationRowAuthority;
   readonly item: HTMLLIElement;
   readonly open: HTMLButtonElement;
+  readonly openPath: readonly EventTarget[];
   readonly dismiss: HTMLButtonElement;
   readonly openAction: NotificationActionPublication;
   readonly dismissAction: NotificationActionPublication;
@@ -57,6 +65,52 @@ interface NotificationDomSnapshot {
   readonly children: readonly NotificationDomSnapshot[];
 }
 
+interface NotificationNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+  readonly exactSiblings: boolean;
+}
+
+interface NotificationPlacement {
+  readonly document: Document;
+  readonly chain: readonly NotificationNodePlacement[];
+}
+
+interface NotificationDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface NotificationKeyboardIntrinsics {
+  readonly eventType: (event: Event) => string;
+  readonly eventPhase: (event: Event) => number;
+  readonly eventBubbles: (event: Event) => boolean;
+  readonly eventCancelable: (event: Event) => boolean;
+  readonly eventDefaultPrevented: (event: Event) => boolean;
+  readonly eventCancelBubble: (event: Event) => boolean;
+  readonly eventTarget: (event: Event) => EventTarget | null;
+  readonly eventComposedPath: (event: Event) => EventTarget[];
+  readonly preventDefault: (event: Event) => void;
+  readonly key: (event: KeyboardEvent) => string;
+  readonly ctrlKey: (event: KeyboardEvent) => boolean;
+  readonly altKey: (event: KeyboardEvent) => boolean;
+  readonly metaKey: (event: KeyboardEvent) => boolean;
+  readonly shiftKey: (event: KeyboardEvent) => boolean;
+  readonly repeat: (event: KeyboardEvent) => boolean;
+  readonly isComposing: (event: KeyboardEvent) => boolean;
+  readonly activeElement: (document: Document) => Element | null;
+  readonly focus: (element: HTMLElement) => void;
+  readonly isKeyboardEvent: (event: object) => event is KeyboardEvent;
+}
+
+interface NotificationFocusCustody {
+  readonly controls: readonly HTMLButtonElement[];
+  readonly activeElement: () => Element | null;
+  readonly focus: (element: HTMLButtonElement) => void;
+}
+
 interface NotificationStripPublication {
   readonly identity: symbol;
   readonly authority: NotificationStripAuthority;
@@ -65,9 +119,14 @@ interface NotificationStripPublication {
   readonly readAll: HTMLButtonElement;
   readonly list: HTMLUListElement;
   readonly rows: readonly NotificationRowPublication[];
+  readonly openControls: readonly HTMLButtonElement[];
   readonly readAllAction: NotificationActionPublication;
   readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
   readonly dom: NotificationDomSnapshot;
+  readonly placement: NotificationPlacement;
+  readonly focusCustody: NotificationFocusCustody;
+  readonly keyboard: NotificationKeyboardIntrinsics;
 }
 
 interface ElementOwnerView {
@@ -84,6 +143,10 @@ interface RefReplay {
 interface NotificationReplay {
   readonly source: NotificationStripPublication;
   readonly dom: NotificationDomSnapshot;
+  readonly placement: NotificationPlacement;
+  readonly openControls: readonly HTMLButtonElement[];
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
 }
 
 interface NotificationPublicationRuntime {
@@ -98,8 +161,10 @@ interface NotificationPublicationRuntime {
   ) => void;
   readonly isRetired: () => boolean;
   readonly publishedDomMatches: () => boolean;
+  readonly historyIsClean: () => boolean;
   readonly isExactElementReplay: () => boolean;
   readonly isExactLayoutReplay: () => boolean;
+  readonly replay: () => NotificationReplay;
 }
 
 interface NotificationStripPublicationSet {
@@ -116,6 +181,10 @@ interface NotificationStripPublicationSet {
   readonly onReadAll: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly onOpen: (row: NotificationRowAuthority, event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly onDismiss: (row: NotificationRowAuthority, event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly onBrowse: (
+    row: NotificationRowAuthority,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
 }
 
 class NotificationStripCoordinator {
@@ -146,14 +215,17 @@ class NotificationStripCoordinator {
     );
   }
 
-  stageReplay(publication: NotificationStripPublication, dom: NotificationDomSnapshot) {
-    if (!this.acceptsSuccessorOf(publication)) return false;
-    this.#replay = Object.freeze({ source: publication, dom });
+  stageReplay(replay: NotificationReplay) {
+    if (!this.acceptsSuccessorOf(replay.source)) return false;
+    this.#replay = replay;
     return true;
   }
 
   abandonReplay(publication: NotificationStripPublication) {
-    if (this.#replay?.source === publication) this.#replay = null;
+    if (this.#replay?.source === publication) {
+      this.#replay.release();
+      this.#replay = null;
+    }
     if (this.#successorOf === publication) this.#successorOf = null;
   }
 
@@ -166,6 +238,7 @@ class NotificationStripCoordinator {
     }
     const previous = this.#active;
     if (previous && previous !== publication) this.retire(previous);
+    this.#replay?.release();
     this.#active = publication;
     this.#successorOf = null;
     this.#replay = null;
@@ -228,6 +301,24 @@ class NotificationStripCoordinator {
     this.#claimedActions.add(action);
     this.#claimedPublications.add(publication);
     if (row) this.#claimedRows.add(row);
+    this.#claimedEvents.add(event);
+    this.#claimedEvents.add(nativeEvent);
+    return true;
+  }
+
+  claimKeyboard(
+    publication: NotificationStripPublication,
+    event: object,
+    nativeEvent: KeyboardEvent,
+  ) {
+    if (
+      !this.isCurrent(publication) ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedEvents.has(event) ||
+      this.#claimedEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
     return true;
@@ -335,6 +426,285 @@ function notificationDomMatches(snapshot: NotificationDomSnapshot, ownerDocument
         node.childNodes.item(index) === child.node &&
         notificationDomMatches(child, ownerDocument),
     )
+  );
+}
+
+function captureNotificationPlacement(node: HTMLElement): NotificationPlacement | null {
+  if (!node.isConnected) return null;
+  const document = node.ownerDocument;
+  const chain: NotificationNodePlacement[] = [];
+  let current: Node = node;
+  while (current !== document) {
+    const parent = current.parentNode;
+    if (!parent) return null;
+    chain.push(Object.freeze({
+      node: current,
+      parent,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+      exactSiblings: current === node,
+    }));
+    current = parent;
+  }
+  return chain.length > 0
+    ? Object.freeze({ document, chain: Object.freeze(chain) })
+    : null;
+}
+
+function notificationPlacementMatches(
+  node: HTMLElement,
+  placement: NotificationPlacement,
+) {
+  return (
+    node.ownerDocument === placement.document &&
+    node.isConnected &&
+    placement.chain[0]?.node === node &&
+    placement.chain.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        (!entry.exactSiblings ||
+          (entry.node.previousSibling === entry.previousSibling &&
+            entry.node.nextSibling === entry.nextSibling)),
+    )
+  );
+}
+
+function notificationPlacementRecordChanged(
+  record: MutationRecord,
+  placement: NotificationNodePlacement,
+) {
+  if (record.type !== "childList" || record.target !== placement.parent) {
+    return false;
+  }
+  if (
+    placement.exactSiblings &&
+    (record.previousSibling === placement.node ||
+      record.nextSibling === placement.node)
+  ) {
+    return true;
+  }
+  return [...record.addedNodes, ...record.removedNodes].some(
+    (node) => node === placement.node || node.contains(placement.node),
+  );
+}
+
+function createNotificationDomGuard(
+  root: HTMLElement,
+  placement: NotificationPlacement,
+): NotificationDomGuard | null {
+  const MutationObserverConstructor =
+    placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  let released = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      return placement.chain.some((entry) =>
+        notificationPlacementRecordChanged(record, entry));
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (const entry of placement.chain) {
+    observer.observe(entry.parent, { childList: true });
+  }
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      if (released) return;
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+      released = true;
+    },
+  });
+}
+
+function capturePrototypeGetter<T>(
+  prototype: object | null,
+  property: PropertyKey,
+): ((value: object) => T) | null {
+  for (let current = prototype; current; current = Object.getPrototypeOf(current)) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor?.get) {
+      return Function.prototype.call.bind(descriptor.get) as (
+        value: object,
+      ) => T;
+    }
+  }
+  return null;
+}
+
+function capturePrototypeMethod<T extends (...args: never[]) => unknown>(
+  prototype: object | null,
+  property: PropertyKey,
+): T | null {
+  for (let current = prototype; current; current = Object.getPrototypeOf(current)) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor && "value" in descriptor && typeof descriptor.value === "function") {
+      return Function.prototype.call.bind(descriptor.value) as unknown as T;
+    }
+  }
+  return null;
+}
+
+function captureNotificationKeyboardIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): NotificationKeyboardIntrinsics | null {
+  const eventType = capturePrototypeGetter<string>(
+    ownerWindow.Event.prototype,
+    "type",
+  );
+  const eventPhase = capturePrototypeGetter<number>(
+    ownerWindow.Event.prototype,
+    "eventPhase",
+  );
+  const eventBubbles = capturePrototypeGetter<boolean>(
+    ownerWindow.Event.prototype,
+    "bubbles",
+  );
+  const eventCancelable = capturePrototypeGetter<boolean>(
+    ownerWindow.Event.prototype,
+    "cancelable",
+  );
+  const eventDefaultPrevented = capturePrototypeGetter<boolean>(
+    ownerWindow.Event.prototype,
+    "defaultPrevented",
+  );
+  const eventCancelBubble = capturePrototypeGetter<boolean>(
+    ownerWindow.Event.prototype,
+    "cancelBubble",
+  );
+  const eventTarget = capturePrototypeGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+  );
+  const eventComposedPath = capturePrototypeMethod<
+    (event: Event) => EventTarget[]
+  >(ownerWindow.Event.prototype, "composedPath");
+  const preventDefault = capturePrototypeMethod<(event: Event) => void>(
+    ownerWindow.Event.prototype,
+    "preventDefault",
+  );
+  const key = capturePrototypeGetter<string>(
+    ownerWindow.KeyboardEvent.prototype,
+    "key",
+  );
+  const ctrlKey = capturePrototypeGetter<boolean>(
+    ownerWindow.KeyboardEvent.prototype,
+    "ctrlKey",
+  );
+  const altKey = capturePrototypeGetter<boolean>(
+    ownerWindow.KeyboardEvent.prototype,
+    "altKey",
+  );
+  const metaKey = capturePrototypeGetter<boolean>(
+    ownerWindow.KeyboardEvent.prototype,
+    "metaKey",
+  );
+  const shiftKey = capturePrototypeGetter<boolean>(
+    ownerWindow.KeyboardEvent.prototype,
+    "shiftKey",
+  );
+  const repeat = capturePrototypeGetter<boolean>(
+    ownerWindow.KeyboardEvent.prototype,
+    "repeat",
+  );
+  const isComposing = capturePrototypeGetter<boolean>(
+    ownerWindow.KeyboardEvent.prototype,
+    "isComposing",
+  );
+  const activeElement = capturePrototypeGetter<Element | null>(
+    ownerWindow.Document.prototype,
+    "activeElement",
+  );
+  const focus = capturePrototypeMethod<(element: HTMLElement) => void>(
+    ownerWindow.HTMLElement.prototype,
+    "focus",
+  );
+  if (
+    !eventType ||
+    !eventPhase ||
+    !eventBubbles ||
+    !eventCancelable ||
+    !eventDefaultPrevented ||
+    !eventCancelBubble ||
+    !eventTarget ||
+    !eventComposedPath ||
+    !preventDefault ||
+    !key ||
+    !ctrlKey ||
+    !altKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !activeElement ||
+    !focus
+  ) {
+    return null;
+  }
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const isPrototypeOf = Function.prototype.call.bind(
+    Object.prototype.isPrototypeOf,
+  ) as (prototype: object, value: object) => boolean;
+  return Object.freeze({
+    eventType,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventTarget,
+    eventComposedPath,
+    preventDefault,
+    key,
+    ctrlKey,
+    altKey,
+    metaKey,
+    shiftKey,
+    repeat,
+    isComposing,
+    activeElement,
+    focus,
+    isKeyboardEvent: (event: object): event is KeyboardEvent =>
+      isPrototypeOf(keyboardPrototype, event),
+  });
+}
+
+function captureNotificationEventPath(
+  node: Node,
+  ownerDocument: Document,
+) {
+  const path: EventTarget[] = [];
+  let current: Node | null = node;
+  while (current) {
+    path.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  if (path[path.length - 1] !== ownerDocument) return null;
+  return Object.freeze(path);
+}
+
+function isNotificationNavigationKey(
+  key: string,
+): key is NotificationNavigationKey {
+  return (
+    key === "ArrowDown" ||
+    key === "ArrowUp" ||
+    key === "Home" ||
+    key === "End"
   );
 }
 
@@ -565,13 +935,14 @@ function createNotificationStripPublication(
   };
 
   const requestReplaySuccessor = (runtime: NotificationPublicationRuntime) => {
+    const replay = runtime.replay();
     if (
       successorRequested ||
       !coordinator.acceptsSuccessorOf(runtime.publication) ||
       !factsAreCurrent() ||
       !exactDomIsCurrent() ||
       !runtime.publishedDomMatches() ||
-      !coordinator.stageReplay(runtime.publication, runtime.publication.dom)
+      !coordinator.stageReplay(replay)
     ) {
       return;
     }
@@ -584,8 +955,18 @@ function createNotificationStripPublication(
     readAll: HTMLButtonElement,
     list: HTMLUListElement,
     dom: NotificationDomSnapshot,
-  ): NotificationPublicationRuntime => {
+  ): NotificationPublicationRuntime | null => {
     type Retirement = "element" | "layout";
+    const ownerDocument = section.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const placement = captureNotificationPlacement(section);
+    if (!ownerWindow || !placement) return null;
+    const keyboard = captureNotificationKeyboardIntrinsics(ownerWindow);
+    const domGuard = createNotificationDomGuard(section, placement);
+    if (!keyboard || !domGuard) {
+      domGuard?.release();
+      return null;
+    }
     const identity = Symbol("notification-strip-publication");
     const action = (
       kind: NotificationActionKind,
@@ -605,17 +986,31 @@ function createNotificationStripPublication(
         if (!item || !open || !dismiss) {
           throw new Error("Cannot publish a notification row without every committed ref");
         }
+        const openPath = captureNotificationEventPath(
+          open,
+          ownerDocument,
+        );
+        if (!openPath) {
+          throw new Error("Cannot publish a notification row without its owner-realm path");
+        }
         return Object.freeze({
           identity: Symbol("notification-strip-row"),
           authority: owned.authority,
           item,
           open,
+          openPath,
           dismiss,
           openAction: action("open", index),
           dismissAction: action("dismiss", index),
         });
       }),
     );
+    const openControls = Object.freeze(publishedRows.map((row) => row.open));
+    const focusCustody: NotificationFocusCustody = Object.freeze({
+      controls: openControls,
+      activeElement: () => keyboard.activeElement(ownerDocument),
+      focus: (element: HTMLButtonElement) => keyboard.focus(element),
+    });
     const publication: NotificationStripPublication = Object.freeze({
       identity,
       authority,
@@ -624,9 +1019,14 @@ function createNotificationStripPublication(
       readAll,
       list,
       rows: publishedRows,
+      openControls,
       readAllAction: action("read-all", null),
-      ownerDocument: section.ownerDocument,
+      ownerDocument,
+      ownerWindow,
       dom,
+      placement,
+      focusCustody,
+      keyboard,
     });
     let retired = false;
     let retirement: Retirement | null = null;
@@ -640,12 +1040,22 @@ function createNotificationStripPublication(
       retirement = reason;
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (coordinator.replay()?.source !== publication) domGuard.release();
+      });
       return true;
     };
     const publishedDomMatches = () =>
       section === dom.node &&
       section.parentNode === publication.sectionParent &&
-      notificationDomMatches(dom, publication.ownerDocument);
+      notificationPlacementMatches(section, placement) &&
+      notificationDomMatches(dom, publication.ownerDocument) &&
+      publication.rows.length === publication.openControls.length &&
+      publication.rows.every(
+        (row, index) =>
+          row.open === publication.openControls[index] &&
+          row.openPath[0] === row.open,
+      );
     const refsHaveNoReplay = () =>
       !invalidReplay &&
       replayRefs.every(
@@ -674,7 +1084,11 @@ function createNotificationStripPublication(
           }
           return { owner, element, detached: false, reattached: false };
         });
-        return coordinator.publish(publication);
+        if (!coordinator.publish(publication)) {
+          domGuard.release();
+          return false;
+        }
+        return true;
       },
       retireForElement: () => {
         retire("element");
@@ -719,19 +1133,31 @@ function createNotificationStripPublication(
       },
       isRetired: () => retired,
       publishedDomMatches,
+      historyIsClean: domGuard.isClean,
       isExactElementReplay: () =>
         retired &&
         retirement === "element" &&
         layoutRetired &&
         established &&
         refsHaveExactReplay() &&
+        domGuard.isClean() &&
         publishedDomMatches(),
       isExactLayoutReplay: () =>
         retired &&
         retirement === "layout" &&
         established &&
         (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        domGuard.isClean() &&
         publishedDomMatches(),
+      replay: () =>
+        Object.freeze({
+          source: publication,
+          dom,
+          placement,
+          openControls,
+          historyIsClean: domGuard.isClean,
+          release: domGuard.release,
+        }),
     });
     return runtime;
   };
@@ -868,6 +1294,126 @@ function createNotificationStripPublication(
     return publication;
   };
 
+  const keyboardFacts = (
+    publication: NotificationStripPublication,
+    row: NotificationRowPublication,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (!event || typeof event !== "object") return null;
+    const source = row.open;
+    const sourceIndex = row.authority.index;
+    const nativeEvent = event.nativeEvent;
+    const reactEvent = event as ReactKeyboardEvent<HTMLButtonElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    const reactEventPrototype = Object.getPrototypeOf(event) as {
+      constructor?: { name?: unknown };
+    } | null;
+    const keyboard = publication.keyboard;
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      !keyboard.isKeyboardEvent(nativeEvent)
+    ) {
+      return null;
+    }
+    const key = keyboard.key(nativeEvent);
+    if (!isNotificationNavigationKey(key)) return null;
+    const ctrlKey = keyboard.ctrlKey(nativeEvent);
+    const altKey = keyboard.altKey(nativeEvent);
+    const metaKey = keyboard.metaKey(nativeEvent);
+    const shiftKey = keyboard.shiftKey(nativeEvent);
+    const repeat = keyboard.repeat(nativeEvent);
+    const isComposing = keyboard.isComposing(nativeEvent);
+    const target = keyboard.eventTarget(nativeEvent);
+    const path = keyboard.eventComposedPath(nativeEvent);
+    const reactIsComposing = (
+      event as unknown as { isComposing?: unknown }
+    ).isComposing;
+    if (
+      keyboard.eventType(nativeEvent) !== "keydown" ||
+      keyboard.eventPhase(nativeEvent) === publication.ownerWindow.Event.NONE ||
+      !keyboard.eventBubbles(nativeEvent) ||
+      !keyboard.eventCancelable(nativeEvent) ||
+      keyboard.eventDefaultPrevented(nativeEvent) ||
+      keyboard.eventCancelBubble(nativeEvent) ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      repeat ||
+      isComposing ||
+      target !== source ||
+      path.length !== row.openPath.length + 1 ||
+      row.openPath.some((entry, index) => entry !== path[index]) ||
+      event.type !== "keydown" ||
+      event.currentTarget !== source ||
+      event.target !== target ||
+      event.key !== key ||
+      event.ctrlKey !== ctrlKey ||
+      event.altKey !== altKey ||
+      event.metaKey !== metaKey ||
+      event.shiftKey !== shiftKey ||
+      event.repeat !== repeat ||
+      (reactIsComposing !== undefined &&
+        reactIsComposing !== isComposing) ||
+      event.defaultPrevented ||
+      reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
+      reactEvent._reactName !== "onKeyDown" ||
+      typeof reactEvent.isDefaultPrevented !== "function" ||
+      reactEvent.isDefaultPrevented() ||
+      typeof reactEvent.isPropagationStopped !== "function" ||
+      reactEvent.isPropagationStopped() ||
+      typeof reactEvent.persist !== "function" ||
+      publication.focusCustody.activeElement() !== source ||
+      publication.openControls[sourceIndex] !== source
+    ) {
+      return null;
+    }
+    let destinationIndex = sourceIndex;
+    if (key === "ArrowDown") {
+      destinationIndex = (sourceIndex + 1) % publication.rows.length;
+    } else if (key === "ArrowUp") {
+      destinationIndex =
+        (sourceIndex - 1 + publication.rows.length) % publication.rows.length;
+    } else if (key === "Home") {
+      destinationIndex = 0;
+    } else if (key === "End") {
+      destinationIndex = publication.rows.length - 1;
+    }
+    const destinationRow = publication.rows[destinationIndex];
+    const destination = publication.openControls[destinationIndex];
+    if (
+      !destinationRow ||
+      !destination ||
+      destinationRow.open !== destination ||
+      destinationRow.authority !== rows[destinationIndex] ||
+      !destination.isConnected ||
+      !isEffectivelyEnabled(destination)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      publicationIdentity: publication.identity,
+      nativeEvent,
+      source,
+      sourceIndex,
+      destination,
+      destinationIndex,
+      key,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+      target,
+      path: Object.freeze([...path]),
+    });
+  };
+
   const establish = () => {
     if (lastRuntime) {
       if (
@@ -885,16 +1431,22 @@ function createNotificationStripPublication(
     const list = listOwner.element();
     if (!section || !readAll || !list) return undefined;
     const replay = coordinator.replay();
-    if (
-      replay &&
-      (
-        !coordinator.acceptsSuccessorOf(replay.source) ||
-        !authoritiesMatch(replay.source.authority, authority) ||
-        replay.dom.node !== section ||
-        !notificationDomMatches(replay.dom, section.ownerDocument)
-      )
-    ) {
+    if (replay) {
+      const replayIsCurrent =
+        replay.historyIsClean() &&
+        coordinator.acceptsSuccessorOf(replay.source) &&
+        authoritiesMatch(replay.source.authority, authority) &&
+        replay.dom.node === section &&
+        replay.placement.document === section.ownerDocument &&
+        notificationPlacementMatches(section, replay.placement) &&
+        notificationDomMatches(replay.dom, section.ownerDocument) &&
+        replay.openControls.length === rowOwners.length &&
+        rowOwners.every(
+          (owned, index) =>
+            owned.openOwner.element() === replay.openControls[index],
+        );
       coordinator.abandonReplay(replay.source);
+      if (!replayIsCurrent) return undefined;
     }
     const runtime = createRuntime(
       section,
@@ -902,6 +1454,7 @@ function createNotificationStripPublication(
       list,
       snapshotNotificationDom(section),
     );
+    if (!runtime) return undefined;
     currentRuntime = runtime;
     lastRuntime = runtime;
     if (!runtime.publish(expectedOwners())) {
@@ -933,6 +1486,57 @@ function createNotificationStripPublication(
     if (!publication) return;
     void publication.authority.markRead(row.notification.id);
   };
+  const onBrowse = (
+    row: NotificationRowAuthority,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const publishedRow =
+      publication && rows[row.index] === row
+        ? publication.rows[row.index]
+        : null;
+    if (
+      !runtime ||
+      !publication ||
+      !publishedRow ||
+      runtime.isRetired() ||
+      publication.authority !== authority ||
+      publishedRow.authority !== row ||
+      !coordinator.isCurrent(publication) ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.historyIsClean() ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    const facts = keyboardFacts(publication, publishedRow, event);
+    if (
+      !facts ||
+      facts.publicationIdentity !== publication.identity ||
+      !coordinator.claimKeyboard(publication, event, facts.nativeEvent)
+    ) {
+      return;
+    }
+    publication.keyboard.preventDefault(facts.nativeEvent);
+    if (
+      !publication.keyboard.eventDefaultPrevented(facts.nativeEvent) ||
+      runtime.isRetired() ||
+      !coordinator.isCurrent(publication) ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.historyIsClean() ||
+      !runtime.publishedDomMatches() ||
+      publication.focusCustody.activeElement() !== facts.source ||
+      publication.focusCustody.controls[facts.sourceIndex] !== facts.source ||
+      publication.focusCustody.controls[facts.destinationIndex] !==
+        facts.destination
+    ) {
+      return;
+    }
+    publication.focusCustody.focus(facts.destination);
+  };
 
   return Object.freeze({
     captureSection: sectionOwner.capture,
@@ -943,6 +1547,7 @@ function createNotificationStripPublication(
     onReadAll,
     onOpen,
     onDismiss,
+    onBrowse,
   });
 }
 
@@ -1001,6 +1606,7 @@ export function NotificationsStrip() {
     onReadAll,
     onOpen,
     onDismiss,
+    onBrowse,
   } = publication;
 
   return (
@@ -1046,6 +1652,7 @@ export function NotificationsStrip() {
                 type="button"
                 className="min-w-0 flex-1 text-left"
                 onClick={(event) => onOpen(row, event)}
+                onKeyDown={(event) => onBrowse(row, event)}
                 data-testid="notification-open"
               >
                 <span className="text-ink-2">
