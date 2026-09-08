@@ -1477,6 +1477,186 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(currentClose).toHaveBeenCalledOnce();
   });
 
+  it("suppresses a genuine submit after staged replay rejection and recovers freshly", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onSubmit = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={onSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    inputRef(null);
+    inputRef(input);
+    await Promise.resolve();
+    const content = dialogContent();
+    const className = content.className;
+    content.className = "invalidated-before-successor";
+    content.className = className;
+    await act(async () => {});
+
+    const submit = submitEvent();
+    act(() => imageForm().dispatchEvent(submit));
+    expect(submit.defaultPrevented).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={onSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("applies one upload outcome that settles during a staged replay gap", async () => {
+    const pending = deferred<UploadResult>();
+    const readUrl = vi.fn(() => "/api/assets/replayed");
+    const readAlt = vi.fn(() => "Replayed Alt");
+    const result = {} as UploadResult;
+    Object.defineProperties(result, {
+      url: { get: readUrl },
+      alt: { get: readAlt },
+    });
+    await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onUpload={() => pending.promise}
+      />,
+    );
+    choose(new File(["replayed"], "replayed.png", { type: "image/png" }));
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    await act(async () => {
+      inputRef(null);
+      inputRef(input);
+      pending.resolve(result);
+      await pending.promise;
+    });
+
+    expect(readUrl).toHaveBeenCalledOnce();
+    expect(readAlt).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/replayed",
+    );
+    expect(screen.getByTestId("image-alt")).toHaveValue("Replayed Alt");
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+  });
+
+  it("makes a released unstaged guard permanently ineligible for delayed replay", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    inputRef(null);
+    await Promise.resolve();
+    const content = dialogContent();
+    const className = content.className;
+    content.className = "mutated-after-release";
+    content.className = className;
+    inputRef(input);
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["url", "throw"],
+    ["url", "retire"],
+    ["alt", "throw"],
+    ["alt", "retire"],
+  ] as const)(
+    "rejects a claimed %s value getter that can %s and keeps a fresh control usable",
+    async (kind, behavior) => {
+      await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          onUpload={vi.fn()}
+        />,
+      );
+      const input = screen.getByTestId(
+        kind === "url" ? "image-url" : "image-alt",
+      ) as HTMLInputElement;
+      const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+      const poisoned =
+        kind === "url"
+          ? "https://example.com/poisoned.png"
+          : "Poisoned Alt";
+      const recovered =
+        kind === "url"
+          ? "https://example.com/recovered.png"
+          : "Recovered Alt";
+      let reads = 0;
+
+      await act(async () => {
+        Object.defineProperty(input, "value", {
+          configurable: true,
+          get() {
+            reads += 1;
+            if (reads === 1) return "react-change-tracker";
+            if (reads === 2) {
+              if (behavior === "throw") throw new Error("Value getter failed");
+              inputRef(null);
+              return poisoned;
+            }
+            return "";
+          },
+          set() {},
+        });
+        input.dispatchEvent(
+          new Event("change", { bubbles: true, cancelable: true }),
+        );
+        delete (input as unknown as { value?: string }).value;
+      });
+
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(input).not.toHaveValue(poisoned);
+      await act(async () => {});
+      fireEvent.change(input, { target: { value: recovered } });
+      expect(input).toHaveValue(recovered);
+    },
+  );
+
   it("keeps preview errors bound to the exact preview publication", async () => {
     const onOpenChangeA = vi.fn();
     const onOpenChangeB = vi.fn();
