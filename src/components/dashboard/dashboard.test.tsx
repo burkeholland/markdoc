@@ -46,7 +46,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-import { ApiError } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { PICKER_TEMPLATES, type Template } from "@/lib/templates";
 import { Dashboard, TemplateGrid, TrashView } from "./dashboard";
 
@@ -518,6 +518,60 @@ function templateButton(host: HTMLElement, id: string): HTMLButtonElement {
   const button = host.querySelector<HTMLButtonElement>(`[data-testid="template-${id}"]`);
   if (!button) throw new Error(`Template button ${id} was not rendered`);
   return button;
+}
+
+type CreateControlTestId = "new-document" | "start-guided-doc";
+
+function directCreateButton(host: HTMLElement, testid: CreateControlTestId): HTMLButtonElement {
+  const button = host.querySelector<HTMLButtonElement>(`[data-testid="${testid}"]`);
+  if (!button) throw new Error(`${testid} was not rendered`);
+  return button;
+}
+
+function createCardRoot(host: HTMLElement): HTMLDivElement {
+  const card = directCreateButton(host, "new-document").parentElement;
+  if (!(card instanceof HTMLDivElement)) throw new Error("The create card was not rendered");
+  return card;
+}
+
+function guidedRootElement(host: HTMLElement): HTMLDivElement {
+  const guided = directCreateButton(host, "start-guided-doc").parentElement;
+  if (!(guided instanceof HTMLDivElement)) throw new Error("The guided block was not rendered");
+  return guided;
+}
+
+function createRootFor(host: HTMLElement, testid: CreateControlTestId): HTMLDivElement {
+  return testid === "new-document" ? createCardRoot(host) : guidedRootElement(host);
+}
+
+function createRefBindings(host: HTMLElement) {
+  const blank = directCreateButton(host, "new-document");
+  const frame = blank.children.item(0);
+  const label = blank.children.item(1);
+  const welcome = directCreateButton(host, "start-guided-doc");
+  const guided = guidedRootElement(host);
+  const elements = [
+    createCardRoot(host),
+    blank,
+    frame,
+    frame?.firstElementChild ?? null,
+    label,
+    label?.children.item(0) ?? null,
+    label?.children.item(1) ?? null,
+    guided,
+    guided.children.item(0),
+    guided.children.item(1),
+    guided.children.item(2),
+    welcome,
+    welcome.children.item(0),
+  ];
+  if (elements.some((element) => !element)) {
+    throw new Error("Create control refs were incomplete");
+  }
+  return (elements as Element[]).map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
 }
 
 function templateGrid(host: HTMLElement): HTMLUListElement {
@@ -4588,6 +4642,906 @@ describe("dashboard create ownership", () => {
     });
     expect(router.push).toHaveBeenCalledTimes(1);
     expect(router.push).toHaveBeenLastCalledWith("/d/current-created");
+  });
+});
+
+describe("dashboard direct create control ownership", () => {
+  const DIRECT_CONTROLS = [
+    {
+      name: "New document",
+      testid: "new-document" as CreateControlTestId,
+      body: {} as Record<string, string>,
+      created: "blank-created",
+    },
+    {
+      name: "Start with a guided doc",
+      testid: "start-guided-doc" as CreateControlTestId,
+      body: { template: "welcome" } as Record<string, string>,
+      created: "welcome-created",
+    },
+  ];
+
+  it.each(DIRECT_CONTROLS)(
+    "issues one exact $name create and navigation through direct-root Strict Mode replay",
+    async ({ testid, body, created }) => {
+      const pending = deferred<CreateResponse>();
+      createDocument.mockReturnValueOnce(pending.promise);
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+      const passiveCleanup = vi.fn();
+      let firstSetupHandler: CapturedReactClick | null = null;
+      let layoutSetups = 0;
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <DashboardBoundary
+                documents={[]}
+                boundary={1}
+                onPassiveCleanup={passiveCleanup}
+                onBoundary={() => {
+                  layoutSetups += 1;
+                  firstSetupHandler ??= captureReactClick(
+                    directCreateButton(host, testid),
+                  );
+                }}
+              />
+            </StrictMode>,
+          );
+        });
+
+        const control = directCreateButton(host, testid);
+        const currentHandler = captureReactClick(control);
+        expect(layoutSetups).toBeGreaterThanOrEqual(2);
+        expect(passiveCleanup).toHaveBeenCalled();
+        expect(currentHandler).not.toBe(firstSetupHandler);
+        expect(control).toBeEnabled();
+        expect(control).not.toHaveAttribute("aria-busy");
+
+        focusOwner.focus();
+        expectInertTemplateCall(
+          firstSetupHandler!,
+          fabricatedTemplateClick(control),
+          host,
+        );
+        expect(createDocument).not.toHaveBeenCalled();
+
+        await act(async () => {
+          control.click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith(body);
+        expect(directCreateButton(host, "new-document")).toBeDisabled();
+        expect(directCreateButton(host, "start-guided-doc")).toBeDisabled();
+        expect(templateButton(host, "meeting-notes")).toBeDisabled();
+        expect(document.activeElement).toBe(focusOwner);
+
+        await act(async () => {
+          control.click();
+          directCreateButton(host, "new-document").click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          pending.resolve({ document: { id: created, title: "Untitled" } });
+          await pending.promise;
+        });
+        expect(router.push).toHaveBeenCalledTimes(1);
+        expect(router.push).toHaveBeenLastCalledWith(`/d/${created}`);
+        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+      } finally {
+        await act(async () => root.unmount());
+        focusOwner.remove();
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["crossed-before-current", "current-before-crossed"] as const)(
+    "rejects a %s sibling activation and keeps the genuine control exact",
+    async (order) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const blank = directCreateButton(host, "new-document");
+        const welcome = directCreateButton(host, "start-guided-doc");
+        const crossed = captureReactClick(welcome);
+        const restore = interceptReactClick(blank, (original, event) => {
+          if (order === "crossed-before-current") {
+            crossed(event);
+            original(event);
+          } else {
+            original(event);
+            crossed(event);
+          }
+        });
+        try {
+          await act(async () => {
+            blank.click();
+          });
+        } finally {
+          restore();
+        }
+
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith({});
+        expect(router.push).toHaveBeenCalledTimes(1);
+        expect(router.push).toHaveBeenLastCalledWith("/d/created");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps stale user and key handlers inert while the current control stays exact", async () => {
+    const stale = deferred<CreateResponse>();
+    const current = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const replacement = { ...USER, id: "create-replacement", login: "create-replacement" };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const staleBlank = directCreateButton(host, "new-document");
+      const staleHandler = captureReactClick(staleBlank);
+      await act(async () => {
+        staleBlank.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={replacement} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentBlank = directCreateButton(host, "new-document");
+      expect(currentBlank).toBe(staleBlank);
+      expect(currentBlank).toBeEnabled();
+      expectInertTemplateCall(
+        staleHandler,
+        fabricatedTemplateClick(currentBlank),
+        host,
+      );
+      expect(createDocument).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(2);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+
+      await act(async () => {
+        stale.resolve({ document: { id: "stale-created", title: "Stale" } });
+        await stale.promise;
+      });
+      expect(router.push).not.toHaveBeenCalled();
+
+      await act(async () => {
+        current.resolve({ document: { id: "current-created", title: "Current" } });
+        await current.promise;
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/current-created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("claims the wrapper and native click before duplicate or reentrant delivery", async () => {
+    const pending = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const welcome = directCreateButton(host, "start-guided-doc");
+      const claimed: { handler: CapturedReactClick | null; wrapper: unknown } = {
+        handler: null,
+        wrapper: null,
+      };
+      const restore = interceptReactClick(welcome, (original, event) => {
+        claimed.handler = original;
+        claimed.wrapper = event;
+        original({ ...(event as Record<string, unknown>) });
+        expect(createDocument).not.toHaveBeenCalled();
+        original(event);
+        original(event);
+      });
+      try {
+        await act(async () => {
+          welcome.click();
+        });
+      } finally {
+        restore();
+      }
+
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+      claimed.handler?.(claimed.wrapper);
+      claimed.handler?.({
+        get nativeEvent() {
+          throw new Error("fabricated native event getter must not run");
+        },
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve({ document: { id: "welcome-created", title: "Welcome" } });
+        await pending.promise;
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/welcome-created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "canceled",
+    "stopped",
+    "non-primary",
+    "fabricated wrapper",
+    "fabricated native click",
+  ] as const)("does no create work for a %s activation and recovers", async (scenario) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const cancel = (event: Event) => {
+      event.preventDefault();
+    };
+    const stop = (event: Event) => {
+      event.stopPropagation();
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+
+      if (scenario === "canceled") {
+        blank.addEventListener("click", cancel, true);
+        await act(async () => {
+          blank.click();
+        });
+        blank.removeEventListener("click", cancel, true);
+      } else if (scenario === "stopped") {
+        document.addEventListener("click", stop, true);
+        await act(async () => {
+          blank.click();
+        });
+        document.removeEventListener("click", stop, true);
+      } else if (scenario === "non-primary") {
+        await act(async () => {
+          blank.dispatchEvent(
+            new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 1,
+              buttons: 0,
+              detail: 1,
+            }),
+          );
+        });
+      } else if (scenario === "fabricated wrapper") {
+        await act(async () => {
+          captureReactClick(blank)(fabricatedTemplateClick(blank));
+        });
+      } else {
+        await act(async () => {
+          const traversal = reactProps(blank).onClickCapture;
+          const wrapper = fabricatedTemplateClick(blank);
+          traversal?.(wrapper);
+          captureReactClick(blank)(wrapper);
+        });
+      }
+
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+      expect(directCreateButton(host, "new-document")).toBeEnabled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("click", stop, true);
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Alt", { altKey: true }],
+    ["Shift", { shiftKey: true }],
+  ] as const)("rejects a %s-modified primary click and recovers", async (_name, modifier) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+      await act(async () => {
+        blank.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            buttons: 0,
+            detail: 1,
+            ...modifier,
+          }),
+        );
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+
+      await act(async () => {
+        blank.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["API callback", "router callback"] as const)(
+    "retires %s identity drift before create and recovers with restored identities",
+    async (identity) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const originalCreate = api.documents.create;
+      const originalPush = router.push;
+      let blank: HTMLButtonElement | null = null;
+      const drift = () => {
+        if (identity === "API callback") {
+          api.documents.create = vi.fn(originalCreate);
+        } else {
+          router.push = vi.fn();
+        }
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const currentBlank = directCreateButton(host, "new-document");
+        blank = currentBlank;
+        currentBlank.addEventListener("click", drift, { capture: true, once: true });
+        await act(async () => {
+          currentBlank.click();
+        });
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+
+        api.documents.create = originalCreate;
+        router.push = originalPush;
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        await act(async () => {
+          directCreateButton(host, "new-document").click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith({});
+        expect(router.push).toHaveBeenCalledTimes(1);
+      } finally {
+        blank?.removeEventListener("click", drift, true);
+        api.documents.create = originalCreate;
+        router.push = originalPush;
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps both handlers from a keyed dashboard replacement inert", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard key="first" user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const staleBlank = directCreateButton(host, "new-document");
+      const staleWelcome = directCreateButton(host, "start-guided-doc");
+      const staleBlankHandler = captureReactClick(staleBlank);
+      const staleWelcomeHandler = captureReactClick(staleWelcome);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard key="second" user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentBlank = directCreateButton(host, "new-document");
+      expect(currentBlank).not.toBe(staleBlank);
+      expectInertTemplateCall(
+        staleBlankHandler,
+        fabricatedTemplateClick(currentBlank),
+        host,
+      );
+      expectInertTemplateCall(
+        staleWelcomeHandler,
+        fabricatedTemplateClick(
+          directCreateButton(host, "start-guided-doc"),
+        ),
+        host,
+      );
+      expect(createDocument).not.toHaveBeenCalled();
+
+      await act(async () => {
+        currentBlank.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("claims one native event permanently and accepts a distinct clean successor event", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const repeated = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      detail: 1,
+    });
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+      await act(async () => {
+        blank.dispatchEvent(repeated);
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        blank.dispatchEvent(repeated);
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(2);
+      expect(router.push).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    { scenario: "restored descendant mutation", testid: "new-document" as CreateControlTestId },
+    { scenario: "restored clone replacement", testid: "new-document" as CreateControlTestId },
+    { scenario: "restored control replacement", testid: "new-document" as CreateControlTestId },
+    { scenario: "restored child reorder", testid: "start-guided-doc" as CreateControlTestId },
+    { scenario: "root detach and reinsert", testid: "start-guided-doc" as CreateControlTestId },
+  ])(
+    "permanently retires a generation after $scenario and lets a distinct clean successor create",
+    async ({ scenario, testid }) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const control = directCreateButton(host, testid);
+        const staleHandler = captureReactClick(control);
+        const controlRoot = createRootFor(host, testid);
+        const icon = control.children.item(0)!;
+
+        if (scenario === "restored descendant mutation") {
+          icon.setAttribute("data-create-attack", "1");
+          icon.removeAttribute("data-create-attack");
+        } else if (scenario === "restored clone replacement") {
+          const clone = icon.cloneNode(true) as Element;
+          icon.replaceWith(clone);
+          clone.replaceWith(icon);
+        } else if (scenario === "restored control replacement") {
+          const clone = control.cloneNode(true) as HTMLButtonElement;
+          control.replaceWith(clone);
+          clone.replaceWith(control);
+        } else if (scenario === "restored child reorder") {
+          const next = control.nextSibling;
+          control.remove();
+          controlRoot.insertBefore(control, next);
+        } else {
+          const parent = controlRoot.parentNode!;
+          const next = controlRoot.nextSibling;
+          controlRoot.remove();
+          parent.insertBefore(controlRoot, next);
+        }
+
+        await act(async () => {
+          directCreateButton(host, testid).click();
+        });
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+        expect(directCreateButton(host, testid)).toBeEnabled();
+
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const successor = directCreateButton(host, testid);
+        expectInertTemplateCall(
+          staleHandler,
+          fabricatedTemplateClick(successor),
+          host,
+        );
+        expect(createDocument).not.toHaveBeenCalled();
+
+        await act(async () => {
+          successor.click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith(
+          testid === "new-document" ? {} : { template: "welcome" },
+        );
+        expect(router.push).toHaveBeenCalledTimes(1);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("mints an exact successor for a complete create ref replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const full = createRefBindings(host);
+      await act(async () => {
+        for (const binding of full) binding.ref(null);
+        for (const binding of full) binding.ref(binding.element);
+      });
+
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("mints an exact successor for a partial create ref replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const partial = createRefBindings(host).slice(-2);
+      await act(async () => {
+        for (const binding of partial) binding.ref(null);
+        for (const binding of partial.toReversed()) binding.ref(binding.element);
+      });
+
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects an incomplete create ref replay and recovers on a fresh render", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const partial = createRefBindings(host).slice(-2);
+      await act(async () => {
+        for (const binding of partial) binding.ref(null);
+      });
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects both controls while one create is busy and restores them on failure", async () => {
+    const failing = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(failing.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      const busyWelcome = directCreateButton(host, "start-guided-doc");
+      expect(busyWelcome).toHaveAttribute("aria-busy", "true");
+      expect(busyWelcome).toBeDisabled();
+      expect(directCreateButton(host, "new-document")).toBeDisabled();
+
+      await act(async () => {
+        fireEvent.click(busyWelcome);
+        fireEvent.click(directCreateButton(host, "new-document"));
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(router.push).not.toHaveBeenCalled();
+
+      await act(async () => {
+        failing.reject(new ApiError(503, "Create service unavailable"));
+        await Promise.allSettled([failing.promise]);
+      });
+      const toast = host.querySelector('[data-testid="toast"]');
+      expect(toast).toHaveAttribute("data-kind", "error");
+      expect(toast).toHaveTextContent("Create service unavailable");
+      expect(directCreateButton(host, "new-document")).toBeEnabled();
+      expect(directCreateButton(host, "start-guided-doc")).toBeEnabled();
+      expect(directCreateButton(host, "start-guided-doc")).not.toHaveAttribute("aria-busy");
+
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(2);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves both captured create handlers inert after layout cleanup", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+      const welcome = directCreateButton(host, "start-guided-doc");
+      const blankHandler = captureReactClick(blank);
+      const welcomeHandler = captureReactClick(welcome);
+
+      await act(async () => root.unmount());
+
+      await act(async () => {
+        blankHandler(fabricatedTemplateClick(blank));
+        welcomeHandler(fabricatedTemplateClick(welcome));
+        blank.click();
+        welcome.click();
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(host.innerHTML).toBe("");
+    } finally {
+      host.remove();
+    }
+  });
+
+  it("preserves the create card, empty state, and templates around a genuine guided create", async () => {
+    const pending = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const card = createCardRoot(host);
+      expect(Array.from(card.children, (child) => child.getAttribute("data-testid"))).toEqual([
+        "new-document",
+        "new-from-template",
+        "open-file",
+      ]);
+      const blank = directCreateButton(host, "new-document");
+      expect(blank).toHaveTextContent("New document");
+      expect(blank).toHaveTextContent("Start with a blank Markdown page.");
+      expect(blank.querySelector("svg")).toHaveClass("lucide-file-plus-corner");
+
+      const guided = guidedRootElement(host);
+      expect(guided).toHaveTextContent("No documents yet");
+      expect(guided).toHaveTextContent(
+        "Start with a short guided document, pick a template, or open a Markdown file from GitHub.",
+      );
+      const welcome = directCreateButton(host, "start-guided-doc");
+      expect(welcome).toHaveTextContent("Start with a guided doc");
+      expect(welcome.querySelector("svg")).toHaveClass("lucide-sparkles");
+      expect(Array.from(templateGrid(host).children, (li) => li.firstElementChild?.getAttribute("data-testid"))).toEqual(
+        PICKER_TEMPLATES.map((template) => `template-${template.id}`),
+      );
+
+      await act(async () => {
+        welcome.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+      expect(
+        directCreateButton(host, "start-guided-doc").querySelector("svg"),
+      ).toHaveClass("lucide-loader-circle", "animate-spin");
+      await act(async () => {
+        pending.resolve({ document: { id: "guided-created", title: "Welcome" } });
+        await pending.promise;
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/guided-created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
 
