@@ -173,6 +173,7 @@ function commentSuggestionTargets(threads: CommentThread[], text: string): Comme
 const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
 const SUGGESTION_ACCEPT_CLASS = "btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap";
 const SUGGESTION_REJECT_CLASS = "btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap";
+const seenSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
 const claimedSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
 const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
   globalThis.Event.prototype,
@@ -181,6 +182,10 @@ const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
 const suggestionEventTargetGetter = Object.getOwnPropertyDescriptor(
   globalThis.Event.prototype,
   "target",
+)?.get;
+const suggestionEventDefaultPreventedGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "defaultPrevented",
 )?.get;
 const suggestionEventComposedPath = globalThis.Event.prototype.composedPath;
 const suggestionAddEventListener = globalThis.EventTarget.prototype.addEventListener;
@@ -206,6 +211,11 @@ function suggestionNativeTarget(event: Event): EventTarget | null {
 
 function suggestionNativeComposedPath(event: Event): EventTarget[] {
   return suggestionReflectApply(suggestionEventComposedPath, event, []) as EventTarget[];
+}
+
+function suggestionNativeDefaultPrevented(event: Event): boolean {
+  return !suggestionEventDefaultPreventedGetter ||
+    suggestionReflectApply(suggestionEventDefaultPreventedGetter, event, []) === true;
 }
 
 function addSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
@@ -238,9 +248,28 @@ interface SuggestionActionAuthority {
   readonly canAccept: boolean;
   readonly canReject: boolean;
   readonly disabled: boolean;
-  readonly onAccept: () => void | Promise<void>;
-  readonly onReject: () => void | Promise<unknown>;
+  readonly onAccept: () => void | Promise<void> | boolean;
+  readonly onReject: () => void | Promise<unknown> | boolean;
   readonly order: readonly SuggestionActionKind[];
+  readonly presentation: SuggestionActionPresentation;
+  readonly batch: SuggestionBatchAuthority | null;
+}
+
+interface SuggestionActionButtonPresentation {
+  readonly className: string;
+  readonly testId: string;
+  readonly label: string;
+  readonly disabled: boolean;
+  readonly busy: boolean;
+  readonly title: string | null;
+  readonly ariaLabel: string | null;
+}
+
+interface SuggestionActionPresentation {
+  readonly rootClassName: string;
+  readonly rootTestId: string;
+  readonly accept: SuggestionActionButtonPresentation | null;
+  readonly reject: SuggestionActionButtonPresentation | null;
 }
 
 interface SuggestionActionElements {
@@ -255,7 +284,7 @@ interface SuggestionActionDefinition {
   readonly renderIdentity: symbol;
   readonly kind: SuggestionActionKind;
   readonly enabled: boolean;
-  readonly callback: () => void | Promise<unknown>;
+  readonly callback: () => void | Promise<unknown> | boolean;
   readonly capture: (element: HTMLButtonElement | null) => void;
   readonly onClickCapture: (event: MouseEvent<HTMLButtonElement>) => void;
   readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -591,6 +620,37 @@ function suggestionActionControlIsEnabled(control: HTMLButtonElement): boolean {
   return true;
 }
 
+function suggestionActionButtonPresentationsMatch(
+  previous: SuggestionActionButtonPresentation | null,
+  current: SuggestionActionButtonPresentation | null,
+): boolean {
+  return (
+    previous === current ||
+    (!!previous &&
+      !!current &&
+      previous.className === current.className &&
+      previous.testId === current.testId &&
+      previous.label === current.label &&
+      previous.disabled === current.disabled &&
+      previous.busy === current.busy &&
+      previous.title === current.title &&
+      previous.ariaLabel === current.ariaLabel)
+  );
+}
+
+function suggestionActionPresentationsMatch(
+  previous: SuggestionActionPresentation,
+  current: SuggestionActionPresentation,
+): boolean {
+  return (
+    previous === current ||
+    (previous.rootClassName === current.rootClassName &&
+      previous.rootTestId === current.rootTestId &&
+      suggestionActionButtonPresentationsMatch(previous.accept, current.accept) &&
+      suggestionActionButtonPresentationsMatch(previous.reject, current.reject))
+  );
+}
+
 function suggestionActionAuthoritiesMatch(previous: SuggestionActionAuthority, current: SuggestionActionAuthority): boolean {
   return (
     previous.mount === current.mount &&
@@ -601,35 +661,36 @@ function suggestionActionAuthoritiesMatch(previous: SuggestionActionAuthority, c
     previous.onAccept === current.onAccept &&
     previous.onReject === current.onReject &&
     previous.order.length === current.order.length &&
-    previous.order.every((kind, index) => kind === current.order[index])
+    previous.order.every((kind, index) => kind === current.order[index]) &&
+    suggestionActionPresentationsMatch(previous.presentation, current.presentation) &&
+    suggestionBatchAuthoritiesMatch(previous.batch, current.batch)
   );
 }
 
 function exactSuggestionActionDomIsCurrent(publication: SuggestionActionPublication): boolean {
   const { authority, elements, ownerDocument } = publication;
   const { root, accept, reject, buttons } = elements;
+  const { presentation } = authority;
   if (
     !root.isConnected ||
     root.ownerDocument !== ownerDocument ||
     root.tagName !== "DIV" ||
-    root.className !== SUGGESTION_ACTIONS_CLASS ||
-    root.dataset.testid !== "suggestion-actions" ||
+    root.className !== presentation.rootClassName ||
+    root.dataset.testid !== presentation.rootTestId ||
     root.children.length !== authority.order.length ||
     buttons.length !== authority.order.length ||
-    (authority.canAccept !== !!accept) ||
-    (authority.canReject !== !!reject)
+    (!!presentation.accept !== !!accept) ||
+    (!!presentation.reject !== !!reject)
   ) {
     return false;
   }
   return authority.order.every((kind, index) => {
     const button = buttons[index];
     const expected = kind === "accept" ? accept : reject;
-    const expectedDisabled = kind === "accept" ? authority.disabled || authority.state === "outdated" : authority.disabled;
-    const expectedClass = kind === "accept" ? SUGGESTION_ACCEPT_CLASS : SUGGESTION_REJECT_CLASS;
-    const expectedTestId = kind === "accept" ? "suggestion-accept-comment" : "suggestion-reject-comment";
-    const expectedText = kind === "accept" ? "Accept suggestion" : "Reject";
+    const expectedPresentation = kind === "accept" ? presentation.accept : presentation.reject;
     return (
       !!button &&
+      !!expectedPresentation &&
       button === expected &&
       root.children.item(index) === button &&
       button.isConnected &&
@@ -637,11 +698,14 @@ function exactSuggestionActionDomIsCurrent(publication: SuggestionActionPublicat
       button.parentElement === root &&
       button.tagName === "BUTTON" &&
       button.type === "button" &&
-      button.disabled === expectedDisabled &&
-      button.className === expectedClass &&
-      button.dataset.testid === expectedTestId &&
-      button.textContent?.trim() === expectedText &&
-      (expectedDisabled || suggestionActionControlIsEnabled(button))
+      button.disabled === expectedPresentation.disabled &&
+      button.className === expectedPresentation.className &&
+      button.dataset.testid === expectedPresentation.testId &&
+      button.textContent?.trim() === expectedPresentation.label &&
+      button.title === (expectedPresentation.title ?? "") &&
+      button.getAttribute("aria-label") === expectedPresentation.ariaLabel &&
+      button.getAttribute("aria-busy") === (expectedPresentation.busy ? "true" : null) &&
+      (expectedPresentation.disabled || suggestionActionControlIsEnabled(button))
     );
   });
 }
@@ -672,7 +736,7 @@ function suggestionNativeSnapshotFieldsMatch(delivery: SuggestionNativeDelivery)
     event.view !== snapshot.view ||
     event.timeStamp !== snapshot.timeStamp ||
     suggestionNativeTarget(event) !== target ||
-    event.defaultPrevented
+    suggestionNativeDefaultPrevented(event)
   ) {
     return false;
   }
@@ -717,6 +781,7 @@ function createSuggestionActionRender(
       cells.replay.current !== null ||
       !acceptsSuccessorOf(publication) ||
       !suggestionActionAuthoritiesMatch(publication.authority, authority) ||
+      !suggestionActionAuthorityFactsAreCurrent(authority) ||
       !exactSuggestionActionDomIsCurrent(publication) ||
       !runtime.publishedDomMatches() ||
       !runtime.stageSuccessorHandoff()
@@ -840,15 +905,7 @@ function createSuggestionActionRender(
         suggestionActionPlacementMatches(publication.elements.root, publication.placement) &&
         suggestionActionDomMatches(publication.dom),
       );
-    const publicationIsCurrent = () =>
-      !renderRetired &&
-      cells.active.current === publication &&
-      !cells.retired.has(publication) &&
-      publication.render === render &&
-      publication.authority === authority &&
-      exactSuggestionActionDomIsCurrent(publication) &&
-      publishedDomMatches();
-    const retireForMutation = () => {
+    const retireAndRequestSuccessor = () => {
       if (
         renderRetired ||
         cells.active.current !== publication ||
@@ -861,17 +918,35 @@ function createSuggestionActionRender(
       successorRequested = true;
       flushSync(requestSuccessor);
     };
+    const publicationIsCurrent = () => {
+      if (
+        renderRetired ||
+        cells.active.current !== publication ||
+        cells.retired.has(publication) ||
+        publication.render !== render ||
+        publication.authority !== authority
+      ) {
+        return false;
+      }
+      if (!suggestionActionAuthorityFactsAreCurrent(authority)) {
+        retireAndRequestSuccessor();
+        return false;
+      }
+      return exactSuggestionActionDomIsCurrent(publication) && publishedDomMatches();
+    };
+    const retireForMutation = () => {
+      retireAndRequestSuccessor();
+    };
 
     function captureNative(event: Event) {
       const ownerWindow = publication.ownerDocument.defaultView;
       if (
-        !publicationIsCurrent() ||
         !ownerWindow ||
         !(event instanceof ownerWindow.MouseEvent) ||
         event.type !== "click" ||
         event.button !== 0 ||
         !event.bubbles ||
-        event.defaultPrevented ||
+        suggestionNativeDefaultPrevented(event) ||
         event.eventPhase === ownerWindow.Event.NONE
       ) {
         return;
@@ -881,6 +956,11 @@ function createSuggestionActionRender(
       if (!(target instanceof NodeConstructor) || target.ownerDocument !== publication.ownerDocument) return;
       const path = suggestionNativeComposedPath(event);
       if (!path.includes(publication.elements.root)) return;
+      if (authority.batch) {
+        if (seenSuggestionNativeEvents.has(event)) return;
+        seenSuggestionNativeEvents.add(event);
+      }
+      if (!publicationIsCurrent()) return;
       const action =
         publication.elements.buttons
           .map((button, index) => ({ button, action: authority.order[index] === "accept" ? render.accept : render.reject }))
@@ -1189,7 +1269,16 @@ function createSuggestionActionRender(
       claimedSuggestionNativeEvents.add(delivery.snapshot.event);
       nativeDeliveries.delete(delivery.snapshot.event);
       event.stopPropagation();
-      void action.callback();
+      const accepted = action.callback();
+      if (accepted === false) {
+        cells.claimedPublications.delete(publication);
+        cells.claimedActions.delete(action);
+        cells.claimedReactEvents.delete(delivery.captureEvent);
+        cells.claimedReactEvents.delete(delivery.bubbleEvent);
+        claimedSuggestionNativeEvents.delete(delivery.snapshot.event);
+        return;
+      }
+      void accepted;
     }
 
     const runtime: SuggestionActionPublicationRuntime = Object.freeze({
@@ -1296,7 +1385,7 @@ function createSuggestionActionRender(
   const action = (
     kind: SuggestionActionKind,
     enabled: boolean,
-    callback: () => void | Promise<unknown>,
+    callback: () => void | Promise<unknown> | boolean,
   ): SuggestionActionDefinition => {
     const owner = new SuggestionActionElementOwner<HTMLButtonElement>(onElementChange);
     buttonOwners.push(owner);
@@ -1315,10 +1404,10 @@ function createSuggestionActionRender(
   };
 
   const accept = authority.canAccept
-    ? action("accept", !authority.disabled && authority.state !== "outdated", authority.onAccept)
+    ? action("accept", !authority.presentation.accept!.disabled, authority.onAccept)
     : null;
   const reject = authority.canReject
-    ? action("reject", !authority.disabled, authority.onReject)
+    ? action("reject", !authority.presentation.reject!.disabled, authority.onReject)
     : null;
 
   const establish = () => {
@@ -1343,7 +1432,7 @@ function createSuggestionActionRender(
       }
       return undefined;
     }
-    if (renderRetired || invalidBeforeEstablish) return undefined;
+    if (renderRetired || invalidBeforeEstablish || !suggestionActionAuthorityFactsAreCurrent(authority)) return undefined;
     const elements = committedElements();
     const placement = elements ? captureSuggestionActionPlacement(elements.root) : null;
     if (!elements || !placement) return undefined;
@@ -1456,13 +1545,17 @@ function PublishedSuggestionActions({
   disabled = false,
   onAccept,
   onReject,
+  presentation: suppliedPresentation,
+  batch = null,
 }: {
   state: CommentSuggestionState;
   canAccept: boolean;
   canReject: boolean;
   disabled?: boolean;
-  onAccept: () => void | Promise<void>;
-  onReject: () => void | Promise<unknown>;
+  onAccept: () => void | Promise<void> | boolean;
+  onReject: () => void | Promise<unknown> | boolean;
+  presentation?: SuggestionActionPresentation;
+  batch?: SuggestionBatchAuthority | null;
 }) {
   const [mount] = useState(() => Symbol("suggestion-actions"));
   const [cells] = useState<SuggestionActionCells>(() => ({
@@ -1494,6 +1587,34 @@ function PublishedSuggestionActions({
   const requestSuccessor = useCallback(() => {
     setPublicationRevision((revision) => revision + 1);
   }, []);
+  const presentation =
+    suppliedPresentation ??
+    Object.freeze({
+      rootClassName: SUGGESTION_ACTIONS_CLASS,
+      rootTestId: "suggestion-actions",
+      accept: canAccept
+        ? Object.freeze({
+            className: SUGGESTION_ACCEPT_CLASS,
+            testId: "suggestion-accept-comment",
+            label: "Accept suggestion",
+            disabled: disabled || state === "outdated",
+            busy: false,
+            title: null,
+            ariaLabel: null,
+          })
+        : null,
+      reject: canReject
+        ? Object.freeze({
+            className: SUGGESTION_REJECT_CLASS,
+            testId: "suggestion-reject-comment",
+            label: "Reject",
+            disabled,
+            busy: false,
+            title: null,
+            ariaLabel: null,
+          })
+        : null,
+    });
   const authority: SuggestionActionAuthority = Object.freeze({
     mount,
     state,
@@ -1506,6 +1627,8 @@ function PublishedSuggestionActions({
       ...(canAccept ? (["accept"] as const) : []),
       ...(canReject ? (["reject"] as const) : []),
     ]),
+    presentation,
+    batch,
   });
   const publication = createSuggestionActionRender(authority, cells, requestSuccessor);
   useLayoutEffect(() => publication.establish(), [publication]);
@@ -1520,33 +1643,41 @@ function PublishedSuggestionActions({
     onRejectCapture,
     onReject: onRejectClick,
   } = publication;
+  const acceptPresentation = presentation.accept;
+  const rejectPresentation = presentation.reject;
 
   return (
-    <div ref={captureRoot} className={SUGGESTION_ACTIONS_CLASS} onClickCapture={onRootClickCapture} onClick={onRootClick} data-testid="suggestion-actions">
+    <div ref={captureRoot} className={presentation.rootClassName} onClickCapture={onRootClickCapture} onClick={onRootClick} data-testid={presentation.rootTestId}>
       {canAccept && (
         <button
           ref={captureAccept}
           type="button"
-          className={SUGGESTION_ACCEPT_CLASS}
-          disabled={disabled || state === "outdated"}
+          className={acceptPresentation!.className}
+          disabled={acceptPresentation!.disabled}
+          aria-busy={acceptPresentation!.busy || undefined}
+          aria-label={acceptPresentation!.ariaLabel ?? undefined}
+          title={acceptPresentation!.title ?? undefined}
           onClickCapture={onAcceptCapture!}
           onClick={onAcceptClick!}
-          data-testid="suggestion-accept-comment"
+          data-testid={acceptPresentation!.testId}
         >
-          <Check size={13} /> Accept suggestion
+          {batch ? acceptPresentation!.label : <><Check size={13} /> {acceptPresentation!.label}</>}
         </button>
       )}
       {canReject && (
         <button
           ref={captureReject}
           type="button"
-          className={SUGGESTION_REJECT_CLASS}
-          disabled={disabled}
+          className={rejectPresentation!.className}
+          disabled={rejectPresentation!.disabled}
+          aria-busy={rejectPresentation!.busy || undefined}
+          aria-label={rejectPresentation!.ariaLabel ?? undefined}
+          title={rejectPresentation!.title ?? undefined}
           onClickCapture={onRejectCapture!}
           onClick={onRejectClick!}
-          data-testid="suggestion-reject-comment"
+          data-testid={rejectPresentation!.testId}
         >
-          <X size={13} /> Reject
+          {batch ? rejectPresentation!.label : <><X size={13} /> {rejectPresentation!.label}</>}
         </button>
       )}
     </div>
@@ -3718,11 +3849,19 @@ function snapshotCommentResolveTarget(session: CollabSession, thread: CommentThr
   });
 }
 
-function snapshotLocalSuggestionTarget(session: CollabSession, suggestion: SuggestionGroup): LocalSuggestionBatchTarget | null {
+function indexLocalSuggestionGroups(groups: readonly SuggestionGroup[]): ReadonlyMap<string, SuggestionGroup> {
+  return new Map(groups.map((group) => [group.id, group]));
+}
+
+function snapshotLocalSuggestionTarget(
+  session: CollabSession,
+  suggestion: SuggestionGroup,
+  currentGroups: ReadonlyMap<string, SuggestionGroup>,
+): LocalSuggestionBatchTarget | null {
   const memberIds = suggestion.members.map((member) => member.id);
   const memberIdentities = memberIds.map((id) => session.suggestions.ymap.get(id));
   if (memberIdentities.some((identity) => !identity)) return null;
-  const current = session.suggestions.groups(session.ytext.toString()).find((group) => group.id === suggestion.id);
+  const current = currentGroups.get(suggestion.id);
   if (!current || current.members.map((member) => member.id).join("\0") !== memberIds.join("\0") || current.before !== suggestion.before || current.after !== suggestion.after) return null;
   return Object.freeze({
     kind: "local-suggestion",
@@ -3735,11 +3874,13 @@ function snapshotLocalSuggestionTarget(session: CollabSession, suggestion: Sugge
   });
 }
 
-function localSuggestionTargetStatus(session: CollabSession, target: LocalSuggestionBatchTarget): "ready" | "outdated" | "missing" {
-  if (target.memberIds.some((id, index) => session.suggestions.ymap.get(id) !== target.memberIdentities[index])) return "missing";
-  const current = session.suggestions.groups(session.ytext.toString()).find((group) => group.id === target.suggestionId);
-  if (!current || current.members.map((member) => member.id).join("\0") !== target.memberIds.join("\0") || current.before !== target.before || current.after !== target.after) return "missing";
-  return current.outdated ? "outdated" : "ready";
+function snapshotLocalSuggestionTargets(
+  session: CollabSession,
+  sources: readonly SuggestionGroup[],
+  currentGroups: readonly SuggestionGroup[],
+): readonly (LocalSuggestionBatchTarget | null)[] {
+  const index = indexLocalSuggestionGroups(currentGroups);
+  return sources.map((source) => snapshotLocalSuggestionTarget(session, source, index));
 }
 
 function commentSuggestionTargetStatus(session: CollabSession, target: CommentSuggestionBatchTarget): "ready" | "outdated" | "missing" {
@@ -3785,6 +3926,7 @@ async function executeCommentBatch(
   owner: CommentBatchOwner,
   ops: Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">,
   onToast?: CommentsPanelProps["onToast"],
+  reviewSuggestion?: CollabSession["reviewSuggestion"],
 ) {
   let done = 0;
   let failed = 0;
@@ -3795,13 +3937,26 @@ async function executeCommentBatch(
 
   if (localTargets.length > 0) {
     if (!currentCommentBatchContext(coordinator, owner)) return;
-    const status = localTargets.map((target) => localSuggestionTargetStatus(owner.session, target));
-    if (status.some((value) => value !== "ready")) {
+    const currentReviewSuggestion = owner.session.reviewSuggestion;
+    const currentLocalGroups = owner.session.suggestions.groups(owner.session.ytext.toString());
+    const currentLocalTargets = snapshotLocalSuggestionTargets(owner.session, currentLocalGroups, currentLocalGroups);
+    const exactLocalBatch =
+      reviewSuggestion !== undefined &&
+      currentReviewSuggestion === reviewSuggestion &&
+      currentLocalGroups.length === localTargets.length &&
+      currentLocalTargets.length === localTargets.length &&
+      currentLocalTargets.every((target, targetIndex) =>
+        sameLocalSuggestionTarget(target, localTargets[targetIndex] ?? null),
+      ) &&
+      currentLocalGroups.every((group) => !group.outdated);
+    if (!exactLocalBatch) {
       skipped += owner.targets.length;
       index = owner.targets.length;
     } else {
       try {
-        const decided = owner.session.reviewSuggestion(accepting ? "acceptAll" : "rejectAll");
+        const decided = suggestionReflectApply(reviewSuggestion, owner.session, [
+          accepting ? "acceptAll" : "rejectAll",
+        ]) as number;
         done += Math.min(decided, localTargets.length);
         skipped += Math.max(0, localTargets.length - decided);
       } catch (error) {
@@ -3873,6 +4028,9 @@ const REVIEW_REJECT_CLASS = "btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-n
 const REVIEW_RESOLVE_CLASS = "btn btn-sm btn-outline gap-1.5 whitespace-nowrap";
 const REVIEW_THREADS_CLASS = "mt-2 flex flex-col gap-1 border-t border-line pt-2";
 const REVIEW_THREAD_LINK_CLASS = "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2";
+const SUGGESTION_BATCH_ACTIONS_CLASS = "flex items-center justify-end gap-2 text-xs";
+const SUGGESTION_BATCH_ACCEPT_CLASS = "btn btn-sm btn-ghost text-success";
+const SUGGESTION_BATCH_REJECT_CLASS = "btn btn-sm btn-ghost text-danger";
 
 interface ReviewPrimitiveSnapshot {
   readonly id: string;
@@ -3915,6 +4073,40 @@ interface ReviewSuggestionPrimitiveSnapshot {
   readonly body: string;
   readonly proposed: string;
   readonly state: CommentSuggestionState;
+}
+
+interface SuggestionBatchClaimCells {
+  readonly authorities: WeakSet<SuggestionBatchAuthority>;
+  readonly targets: WeakSet<object>;
+  readonly owners: WeakSet<CommentBatchOwner>;
+}
+
+interface SuggestionBatchAuthority {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly role: CollabSession["role"];
+  readonly canAct: boolean;
+  readonly text: string;
+  readonly localSources: readonly SuggestionGroup[];
+  readonly localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
+  readonly localOutdated: readonly boolean[];
+  readonly commentSources: readonly CommentSuggestionTarget[];
+  readonly commentTargetSnapshots: readonly (CommentSuggestionBatchTarget | null)[];
+  readonly commentStates: readonly CommentSuggestionState[];
+  readonly targets: readonly CommentBatchTarget[];
+  readonly pendingCount: number;
+  readonly coordinator: CommentRowActionCoordinator;
+  readonly batchOwner: CommentBatchOwner | null;
+  readonly busy: boolean;
+  readonly blocked: boolean;
+  readonly acceptDisabled: boolean;
+  readonly rejectDisabled: boolean;
+  readonly opsSource: ReturnType<typeof useCommentOps>;
+  readonly ops: Readonly<Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">>;
+  readonly reviewSuggestion: CollabSession["reviewSuggestion"];
+  readonly onToast: CommentsPanelProps["onToast"];
+  readonly presentation: SuggestionActionPresentation;
+  readonly claims: SuggestionBatchClaimCells;
 }
 
 type ReviewCardActionKind = "toggle" | "accept" | "reject" | "resolve" | "thread";
@@ -4675,6 +4867,298 @@ function sameReviewTargetSnapshots(left: CommentBatchTarget, right: CommentBatch
     left.memberIdentities.length === right.memberIdentities.length &&
     left.memberIdentities.every((identity, index) => identity === right.memberIdentities[index])
   );
+}
+
+function sameLocalSuggestionTarget(
+  left: LocalSuggestionBatchTarget | null,
+  right: LocalSuggestionBatchTarget | null,
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.key === right.key &&
+    left.suggestionId === right.suggestionId &&
+    left.before === right.before &&
+    left.after === right.after &&
+    left.memberIds.length === right.memberIds.length &&
+    left.memberIds.every((id, index) => id === right.memberIds[index]) &&
+    left.memberIdentities.length === right.memberIdentities.length &&
+    left.memberIdentities.every((identity, index) => identity === right.memberIdentities[index])
+  );
+}
+
+function sameSuggestionBatchTarget(
+  left: CommentBatchTarget | null,
+  right: CommentBatchTarget | null,
+): boolean {
+  if (!left || !right) return left === right;
+  if (left.kind === "local-suggestion" || right.kind === "local-suggestion") {
+    return left.kind === "local-suggestion" && right.kind === "local-suggestion" && sameLocalSuggestionTarget(left, right);
+  }
+  if (left.kind === "comment-suggestion" || right.kind === "comment-suggestion") {
+    return left.kind === "comment-suggestion" && right.kind === "comment-suggestion" && sameSuggestionTarget(left, right);
+  }
+  return sameResolveTarget(left, right);
+}
+
+function suggestionBatchPresentation(
+  acceptDisabled: boolean,
+  rejectDisabled: boolean,
+  batchOwner: CommentBatchOwner | null,
+): SuggestionActionPresentation {
+  const accepting = batchOwner?.action === "suggestions-accept";
+  const rejecting = batchOwner?.action === "suggestions-reject";
+  return Object.freeze({
+    rootClassName: SUGGESTION_BATCH_ACTIONS_CLASS,
+    rootTestId: "suggestion-batch-actions",
+    accept: Object.freeze({
+      className: SUGGESTION_BATCH_ACCEPT_CLASS,
+      testId: "accept-all",
+      label: accepting ? "Accepting…" : "Accept all",
+      disabled: acceptDisabled,
+      busy: accepting,
+      title: null,
+      ariaLabel: null,
+    }),
+    reject: Object.freeze({
+      className: SUGGESTION_BATCH_REJECT_CLASS,
+      testId: "reject-all",
+      label: rejecting ? "Rejecting…" : "Reject all",
+      disabled: rejectDisabled,
+      busy: rejecting,
+      title: null,
+      ariaLabel: null,
+    }),
+  });
+}
+
+function createSuggestionBatchAuthority({
+  session,
+  text,
+  localSources,
+  localTargetSnapshots,
+  commentSources,
+  targets,
+  coordinator,
+  batchOwner,
+  blocked,
+  ops,
+  onToast,
+  claims,
+}: {
+  session: CollabSession;
+  text: string;
+  localSources: readonly SuggestionGroup[];
+  localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
+  commentSources: readonly CommentSuggestionTarget[];
+  targets: readonly CommentBatchTarget[];
+  coordinator: CommentRowActionCoordinator;
+  batchOwner: CommentBatchOwner | null;
+  blocked: boolean;
+  ops: ReturnType<typeof useCommentOps>;
+  onToast: CommentsPanelProps["onToast"];
+  claims: SuggestionBatchClaimCells;
+}): SuggestionBatchAuthority {
+  const commentTargetSnapshots = Object.freeze(commentSources.map((target) => snapshotCommentSuggestionTarget(session, target)));
+  const localOutdated = Object.freeze(localSources.map((target) => target.outdated));
+  const commentStates = Object.freeze(commentSources.map((target) => target.state));
+  const pendingCount = localSources.length + commentSources.length;
+  const busy = batchOwner !== null;
+  const acceptDisabled =
+    busy ||
+    blocked ||
+    targets.length !== pendingCount ||
+    localOutdated.some(Boolean) ||
+    (localSources.length === 0 && commentStates.every((state) => state === "outdated"));
+  const rejectDisabled =
+    busy ||
+    blocked ||
+    targets.length !== pendingCount ||
+    localOutdated.some(Boolean);
+  const presentation = suggestionBatchPresentation(acceptDisabled, rejectDisabled, batchOwner);
+  return Object.freeze({
+    session,
+    documentId: session.docId,
+    role: session.role,
+    canAct: session.role === "owner" || session.role === "editor",
+    text,
+    localSources: Object.freeze([...localSources]),
+    localTargetSnapshots: Object.freeze([...localTargetSnapshots]),
+    localOutdated,
+    commentSources: Object.freeze([...commentSources]),
+    commentTargetSnapshots,
+    commentStates,
+    targets: Object.freeze([...targets]),
+    pendingCount,
+    coordinator,
+    batchOwner,
+    busy,
+    blocked,
+    acceptDisabled,
+    rejectDisabled,
+    opsSource: ops,
+    ops: Object.freeze({
+      acceptSuggestion: ops.acceptSuggestion,
+      rejectSuggestion: ops.rejectSuggestion,
+      resolve: ops.resolve,
+    }),
+    reviewSuggestion: session.reviewSuggestion,
+    onToast,
+    presentation,
+    claims,
+  });
+}
+
+function suggestionBatchAuthoritiesMatch(
+  previous: SuggestionBatchAuthority | null,
+  current: SuggestionBatchAuthority | null,
+): boolean {
+  const sameArray = <T,>(left: readonly T[], right: readonly T[], matches: (a: T, b: T) => boolean) =>
+    left.length === right.length && left.every((value, index) => matches(value, right[index]!));
+  return (
+    previous === current ||
+    (!!previous &&
+      !!current &&
+      previous.session === current.session &&
+      previous.documentId === current.documentId &&
+      previous.role === current.role &&
+      previous.canAct === current.canAct &&
+      previous.text === current.text &&
+      sameArray(previous.localSources, current.localSources, (left, right) => left === right) &&
+      sameArray(previous.localTargetSnapshots, current.localTargetSnapshots, sameLocalSuggestionTarget) &&
+      sameArray(previous.localOutdated, current.localOutdated, (left, right) => left === right) &&
+      sameArray(previous.commentSources, current.commentSources, (left, right) => left === right) &&
+      sameArray(previous.commentTargetSnapshots, current.commentTargetSnapshots, sameSuggestionTarget) &&
+      sameArray(previous.commentStates, current.commentStates, (left, right) => left === right) &&
+      sameArray(previous.targets, current.targets, sameReviewTargetSnapshots) &&
+      previous.pendingCount === current.pendingCount &&
+      previous.coordinator === current.coordinator &&
+      previous.batchOwner === current.batchOwner &&
+      previous.busy === current.busy &&
+      previous.blocked === current.blocked &&
+      previous.acceptDisabled === current.acceptDisabled &&
+      previous.rejectDisabled === current.rejectDisabled &&
+      previous.opsSource === current.opsSource &&
+      previous.ops.acceptSuggestion === current.ops.acceptSuggestion &&
+      previous.ops.rejectSuggestion === current.ops.rejectSuggestion &&
+      previous.ops.resolve === current.ops.resolve &&
+      previous.reviewSuggestion === current.reviewSuggestion &&
+      previous.onToast === current.onToast &&
+      suggestionActionPresentationsMatch(previous.presentation, current.presentation) &&
+      previous.claims === current.claims)
+  );
+}
+
+function suggestionBatchAuthorityFactsAreCurrent(batch: SuggestionBatchAuthority): boolean {
+  const { session, coordinator } = batch;
+  if (
+    session.docId !== batch.documentId ||
+    session.role !== batch.role ||
+    (session.role === "owner" || session.role === "editor") !== batch.canAct ||
+    !batch.canAct ||
+    session.ytext.toString() !== batch.text ||
+    coordinator.session !== session ||
+    coordinator.documentId !== batch.documentId ||
+    !coordinator.mounted ||
+    (coordinator.batchOwners.get(SUGGESTIONS_SCOPE) ?? null) !== batch.batchOwner ||
+    ((coordinator.batchOwners.get(SUGGESTIONS_SCOPE) ?? null) !== null) !== batch.busy ||
+    batch.opsSource.acceptSuggestion !== batch.ops.acceptSuggestion ||
+    batch.opsSource.rejectSuggestion !== batch.ops.rejectSuggestion ||
+    batch.opsSource.resolve !== batch.ops.resolve ||
+    session.reviewSuggestion !== batch.reviewSuggestion
+  ) {
+    return false;
+  }
+
+  const currentLocalSources = session.suggestions.groups(batch.text);
+  const sourceLocalTargets = snapshotLocalSuggestionTargets(session, batch.localSources, currentLocalSources);
+  const sourceCommentTargets = batch.commentSources.map((target) => snapshotCommentSuggestionTarget(session, target));
+  if (
+    sourceLocalTargets.length !== batch.localTargetSnapshots.length ||
+    !sourceLocalTargets.every((target, index) => sameLocalSuggestionTarget(target, batch.localTargetSnapshots[index] ?? null)) ||
+    batch.localSources.some((target, index) => target.outdated !== batch.localOutdated[index]) ||
+    sourceCommentTargets.length !== batch.commentTargetSnapshots.length ||
+    !sourceCommentTargets.every((target, index) => sameSuggestionTarget(target, batch.commentTargetSnapshots[index] ?? null)) ||
+    batch.commentSources.some((target, index) => target.state !== batch.commentStates[index])
+  ) {
+    return false;
+  }
+
+  const currentCommentSources = commentSuggestionTargets(session.comments.list(), batch.text).filter(
+    (target) => target.state === "pending" || target.state === "outdated",
+  );
+  const currentLocalTargets = snapshotLocalSuggestionTargets(session, currentLocalSources, currentLocalSources);
+  const currentCommentTargets = currentCommentSources.map((target) => snapshotCommentSuggestionTarget(session, target));
+  const currentTargets = [...currentLocalTargets, ...currentCommentTargets].filter(
+    (target): target is LocalSuggestionBatchTarget | CommentSuggestionBatchTarget => target !== null,
+  );
+  const pendingCount = currentLocalSources.length + currentCommentSources.length;
+  const blocked = isCommentBatchBlocked(coordinator, currentTargets);
+  const acceptDisabled =
+    batch.busy ||
+    blocked ||
+    currentTargets.length !== pendingCount ||
+    currentLocalSources.some((target) => target.outdated) ||
+    (currentLocalSources.length === 0 && currentCommentSources.every((target) => target.state === "outdated"));
+  const rejectDisabled =
+    batch.busy ||
+    blocked ||
+    currentTargets.length !== pendingCount ||
+    currentLocalSources.some((target) => target.outdated);
+  return (
+    currentLocalTargets.length === batch.localTargetSnapshots.length &&
+    currentLocalTargets.every((target, index) => sameLocalSuggestionTarget(target, batch.localTargetSnapshots[index] ?? null)) &&
+    currentLocalSources.every((target, index) => target.outdated === batch.localOutdated[index]) &&
+    currentCommentTargets.length === batch.commentTargetSnapshots.length &&
+    currentCommentTargets.every((target, index) => sameSuggestionTarget(target, batch.commentTargetSnapshots[index] ?? null)) &&
+    currentCommentSources.every((target, index) => target.state === batch.commentStates[index]) &&
+    pendingCount === batch.pendingCount &&
+    currentTargets.length === batch.targets.length &&
+    currentTargets.every((target, index) => sameSuggestionBatchTarget(target, batch.targets[index] ?? null)) &&
+    blocked === batch.blocked &&
+    acceptDisabled === batch.acceptDisabled &&
+    rejectDisabled === batch.rejectDisabled &&
+    suggestionActionPresentationsMatch(
+      suggestionBatchPresentation(acceptDisabled, rejectDisabled, batch.batchOwner),
+      batch.presentation,
+    )
+  );
+}
+
+function suggestionActionAuthorityFactsAreCurrent(authority: SuggestionActionAuthority): boolean {
+  return authority.batch === null || suggestionBatchAuthorityFactsAreCurrent(authority.batch);
+}
+
+function invokeSuggestionBatch(authority: SuggestionBatchAuthority, accept: boolean): boolean {
+  if (
+    !suggestionBatchAuthorityFactsAreCurrent(authority) ||
+    authority.claims.authorities.has(authority) ||
+    authority.claims.targets.has(authority.targets)
+  ) {
+    return false;
+  }
+  authority.claims.authorities.add(authority);
+  authority.claims.targets.add(authority.targets);
+  const owner = claimCommentBatch(authority.coordinator, {
+    scope: SUGGESTIONS_SCOPE,
+    review: null,
+    authorName: null,
+    action: accept ? "suggestions-accept" : "suggestions-reject",
+    targets: authority.targets,
+  });
+  if (!owner) {
+    authority.claims.authorities.delete(authority);
+    authority.claims.targets.delete(authority.targets);
+    return false;
+  }
+  authority.claims.owners.add(owner);
+  void executeCommentBatch(
+    authority.coordinator,
+    owner,
+    authority.ops,
+    authority.onToast,
+    authority.reviewSuggestion,
+  );
+  return true;
 }
 
 function reviewCardAuthoritiesMatch(previous: ReviewCardAuthority, current: ReviewCardAuthority): boolean {
@@ -5801,6 +6285,63 @@ function useReviews(session: CollabSession): ReviewLoadState & { retry: () => vo
   return { ...visibleState, retry };
 }
 
+function PublishedSuggestionBatchActions({
+  session,
+  text,
+  localSources,
+  localTargetSnapshots,
+  commentSources,
+  targets,
+  coordinator,
+  batchOwner,
+  blocked,
+  ops,
+  onToast,
+}: {
+  session: CollabSession;
+  text: string;
+  localSources: readonly SuggestionGroup[];
+  localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
+  commentSources: readonly CommentSuggestionTarget[];
+  targets: readonly CommentBatchTarget[];
+  coordinator: CommentRowActionCoordinator;
+  batchOwner: CommentBatchOwner | null;
+  blocked: boolean;
+  ops: ReturnType<typeof useCommentOps>;
+  onToast: CommentsPanelProps["onToast"];
+}) {
+  const [claims] = useState<SuggestionBatchClaimCells>(() => ({
+    authorities: new WeakSet<SuggestionBatchAuthority>(),
+    targets: new WeakSet<object>(),
+    owners: new WeakSet<CommentBatchOwner>(),
+  }));
+  const authority = createSuggestionBatchAuthority({
+    session,
+    text,
+    localSources,
+    localTargetSnapshots,
+    commentSources,
+    targets,
+    coordinator,
+    batchOwner,
+    blocked,
+    ops,
+    onToast,
+    claims,
+  });
+  return (
+    <PublishedSuggestionActions
+      state="pending"
+      canAccept
+      canReject
+      onAccept={() => invokeSuggestionBatch(authority, true)}
+      onReject={() => invokeSuggestionBatch(authority, false)}
+      presentation={authority.presentation}
+      batch={authority}
+    />
+  );
+}
+
 export function CommentsPanel({
   session,
   onClose,
@@ -5951,7 +6492,8 @@ export function CommentsPanel({
     }
     return mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open";
   });
-  const renderedLocalSuggestionTargets = suggestions.map((suggestion) => snapshotLocalSuggestionTarget(session, suggestion)).filter((target): target is LocalSuggestionBatchTarget => target !== null);
+  const renderedLocalSuggestionTargetSnapshots = snapshotLocalSuggestionTargets(session, suggestions, suggestions);
+  const renderedLocalSuggestionTargets = renderedLocalSuggestionTargetSnapshots.filter((target): target is LocalSuggestionBatchTarget => target !== null);
   const renderedCommentSuggestionTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
   const renderedSuggestionBatchTargets = [...renderedLocalSuggestionTargets, ...renderedCommentSuggestionTargets];
   // The global controls only exist on this tab. Elsewhere, do not subscribe the panel to every row owner:
@@ -6044,20 +6586,6 @@ export function CommentsPanel({
     event.preventDefault();
     setTab(tabs[next].id);
     items[next]?.focus();
-  };
-
-  const decideAllSuggestions = (accept: boolean) => {
-    const localTargets = suggestions.map((suggestion) => snapshotLocalSuggestionTarget(session, suggestion));
-    const commentTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target));
-    if (localTargets.some((target) => target === null) || commentTargets.some((target) => target === null)) return;
-    const owner = claimCommentBatch(actionCoordinator, {
-      scope: SUGGESTIONS_SCOPE,
-      review: null,
-      authorName: null,
-      action: accept ? "suggestions-accept" : "suggestions-reject",
-      targets: [...(localTargets as LocalSuggestionBatchTarget[]), ...(commentTargets as CommentSuggestionBatchTarget[])],
-    });
-    if (owner) void executeCommentBatch(actionCoordinator, owner, ops, onToast);
   };
 
   return (
@@ -6245,34 +6773,19 @@ export function CommentsPanel({
           ) : (
             <>
               {canAct && (
-                <div className="flex items-center justify-end gap-2 text-xs">
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost text-success"
-                    disabled={
-                      suggestionBatchState.owner !== null ||
-                      suggestionBatchState.blocked ||
-                      renderedSuggestionBatchTargets.length !== suggestionCount ||
-                      suggestions.some((s) => s.outdated) ||
-                      (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))
-                    }
-                    aria-busy={suggestionBatchState.owner?.action === "suggestions-accept" || undefined}
-                    onClick={() => decideAllSuggestions(true)}
-                    data-testid="accept-all"
-                  >
-                    {suggestionBatchState.owner?.action === "suggestions-accept" ? "Accepting…" : "Accept all"}
-                  </button>
-                  <button
-                   type="button"
-                   className="btn btn-sm btn-ghost text-danger"
-                   disabled={suggestionBatchState.owner !== null || suggestionBatchState.blocked || renderedSuggestionBatchTargets.length !== suggestionCount || suggestions.some((s) => s.outdated)}
-                   aria-busy={suggestionBatchState.owner?.action === "suggestions-reject" || undefined}
-                   onClick={() => decideAllSuggestions(false)}
-                   data-testid="reject-all"
-                  >
-                   {suggestionBatchState.owner?.action === "suggestions-reject" ? "Rejecting…" : "Reject all"}
-                  </button>
-                </div>
+                <PublishedSuggestionBatchActions
+                  session={session}
+                  text={text}
+                  localSources={suggestions}
+                  localTargetSnapshots={renderedLocalSuggestionTargetSnapshots}
+                  commentSources={commentSuggestions}
+                  targets={renderedSuggestionBatchTargets}
+                  coordinator={actionCoordinator}
+                  batchOwner={suggestionBatchState.owner}
+                  blocked={suggestionBatchState.blocked}
+                  ops={ops}
+                  onToast={onToast}
+                />
               )}
               {suggestions.map((s) => (
                 <SuggestionCard key={s.id} s={s} session={session} active={s.id === activeSuggestionId} onReveal={onReveal} onToast={onToast} />
