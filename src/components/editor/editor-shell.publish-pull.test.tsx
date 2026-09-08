@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { StrictMode, useEffect, useLayoutEffect, type ComponentProps } from "react";
+import { StrictMode, useEffect, useLayoutEffect, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import * as Y from "yjs";
 
@@ -184,14 +184,39 @@ vi.mock("./sync-dialog", async () => {
 });
 vi.mock("./versions-panel", () => ({
   VersionDiffView: (props: ComponentProps<typeof import("./versions-panel").VersionDiffView>) => {
+    const [active, setActive] = useState(0);
+    const [current, setCurrent] = useState(() => props.session.ytext.toString());
+    useEffect(() => {
+      const update = () => setCurrent(props.session.ytext.toString());
+      props.session.ytext.observe(update);
+      return () => props.session.ytext.unobserve(update);
+    }, [props.session]);
     versionDiffProps = props;
     return (
       <div
         data-testid="version-diff-mock"
         data-document={props.session.docId}
         data-version={props.preview.version.id}
+        data-active={active}
+        className={`diff-active-${active}`}
       >
-        {props.preview.content}
+        <button
+          type="button"
+          disabled={active === 0}
+          onClick={() => setActive(0)}
+        >
+          Previous
+        </button>
+        <span data-testid="diff-counter">{active + 1} of 2</span>
+        <button
+          type="button"
+          disabled={active === 1}
+          onClick={() => setActive(1)}
+        >
+          Next
+        </button>
+        <div data-testid="diff-session-content">{current}</div>
+        <div>{props.preview.content}</div>
       </div>
     );
   },
@@ -1695,6 +1720,66 @@ describe("EditorShell comparison preview ownership", () => {
     expect(versionDiffProps.session).toBe(session);
     expect(versionDiffProps.preview.content).toBe("Strict GitHub preview");
     expect(screen.getByTestId("sync-compare-bar")).toBeInTheDocument();
+  });
+
+  it("keeps Back current through live diff navigation, session replacement, and adjacent loading changes", async () => {
+    vi.mocked(api.documents.sync).mockResolvedValueOnce(
+      syncResponse("Mutation-faithful GitHub preview"),
+    );
+    const view = await mountStrict();
+    await openSync();
+    await act(async () => {
+      await startCompare();
+    });
+    const control = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const back = captureClick(control);
+    const root = screen.getByTestId("sync-compare-bar").parentElement;
+    if (!(root instanceof HTMLDivElement) || !root.parentElement) {
+      throw new Error("The live diff preview root was not rendered");
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByTestId("version-diff-mock")).toHaveAttribute("data-active", "1");
+    expect(screen.getByTestId("version-diff-mock")).toHaveClass("diff-active-1");
+    expect(screen.getByTestId("diff-counter")).toHaveTextContent("2 of 2");
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+    expect(captureClick(control)).toBe(back);
+
+    act(() => {
+      session.ytext.delete(0, session.ytext.length);
+      session.ytext.insert(0, "Session-driven replacement");
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("diff-session-content"))
+        .toHaveTextContent("Session-driven replacement"),
+    );
+    expect(captureClick(control)).toBe(back);
+
+    const loading = document.createElement("div");
+    loading.dataset.testid = "doc-loading";
+    root.parentElement.insertBefore(loading, root);
+    loading.remove();
+    await act(async () => {});
+    expect(view.host.querySelector("[data-testid='sync-compare-close']")).toBe(control);
+    expect(captureClick(control)).toBe(back);
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(screen.getByTestId("version-diff-mock")).toHaveAttribute("data-active", "0");
+    expect(screen.getByTestId("diff-counter")).toHaveTextContent("1 of 2");
+    expect(captureClick(control)).toBe(back);
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner);
+    focusOwner.focus();
+    const event = backMouseEvent(control);
+    act(() => {
+      back(event);
+      back(event);
+    });
+    expectEditingPanes();
+    expect(focusOwner).toHaveFocus();
+    expect(api.documents.sync).toHaveBeenCalledOnce();
+    focusOwner.remove();
   });
 
   it("keeps direct-root Strict Mode Back exact across mutation, successor, repetition, and reentry", async () => {

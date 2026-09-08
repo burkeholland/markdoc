@@ -275,8 +275,6 @@ interface PreviewPublicationCells {
 interface PreviewPlacement {
   readonly document: Document;
   readonly parent: Node;
-  readonly previousSibling: Node | null;
-  readonly nextSibling: Node | null;
 }
 interface PreviewContainerSnapshot extends PreviewPlacement {
   readonly element: HTMLDivElement;
@@ -298,9 +296,7 @@ interface PreviewDomSnapshot extends PreviewPlacement {
   readonly content: HTMLDivElement;
   readonly bar: HTMLDivElement | null;
   readonly back: HTMLButtonElement | null;
-  readonly rootSnapshot: PreviewNodeSnapshot;
   readonly rootAttributes: readonly (readonly [string, string])[];
-  readonly contentAttributes: readonly (readonly [string, string])[];
   readonly rootChildren: readonly Node[];
   readonly barSnapshot: PreviewNodeSnapshot | null;
   readonly backTargets: readonly Node[];
@@ -331,8 +327,10 @@ type PreviewVisitPhase =
 type PreviewPresentationPhase =
   | "mounting"
   | "active"
-  | "layout-retired"
+  | "refs-detaching"
   | "refs-detached"
+  | "refs-attaching"
+  | "layout-retired"
   | "replay-ready"
   | "successor-requested"
   | "dead";
@@ -499,17 +497,13 @@ function capturePreviewPlacement(element: HTMLElement): PreviewPlacement | null 
   return Object.freeze({
     document: element.ownerDocument,
     parent,
-    previousSibling: element.previousSibling,
-    nextSibling: element.nextSibling,
   });
 }
 
 function previewPlacementMatches(element: HTMLElement, placement: PreviewPlacement) {
   return (
     element.ownerDocument === placement.document &&
-    element.parentNode === placement.parent &&
-    element.previousSibling === placement.previousSibling &&
-    element.nextSibling === placement.nextSibling
+    element.parentNode === placement.parent
   );
 }
 
@@ -540,7 +534,15 @@ class PreviewMutationHistory {
   }
 
   private recordRoot(records: readonly MutationRecord[]) {
-    if (records.length > 0) this.dirty = true;
+    const { root, bar } = this.committed;
+    for (const record of records) {
+      if (
+        record.target === root ||
+        (bar && (record.target === bar || bar.contains(record.target)))
+      ) {
+        this.dirty = true;
+      }
+    }
     return this.dirty;
   }
 
@@ -548,8 +550,6 @@ class PreviewMutationHistory {
     const root = this.committed.root;
     for (const record of records) {
       if (
-        record.previousSibling === root ||
-        record.nextSibling === root ||
         [...record.addedNodes, ...record.removedNodes].includes(root)
       ) {
         this.dirty = true;
@@ -959,6 +959,7 @@ function createPreviewPresentation({
     readonly detached: Set<PreviewElementName>;
     readonly attached: Set<PreviewElementName>;
   } | null = null;
+  let replayIncludesLayout = false;
   let expiry = 0;
   const initialRefs = new Set<PreviewElementName>();
 
@@ -1016,7 +1017,47 @@ function createPreviewPresentation({
       initialRefs.add(name);
       return;
     }
-    if (phase === "active" || phase === "replay-ready") {
+    if (phase === "active") {
+      const current = grant;
+      if (
+        !current ||
+        current.retired ||
+        cells.active.current !== current ||
+        previous !== elementOf(current.committed, name) ||
+        element !== null ||
+        !history ||
+        !history.isPristine() ||
+        !liveFactsMatch() ||
+        !exactDomIsCurrent(current.committed, false)
+      ) {
+        invalidate();
+        return;
+      }
+      clearGrant(current);
+      replay = {
+        committed: current.committed,
+        revision: cells.active.revision,
+        detached: new Set<PreviewElementName>([name]),
+        attached: new Set<PreviewElementName>(),
+      };
+      replayIncludesLayout = false;
+      phase = refsComplete(replay.detached) ? "refs-detached" : "refs-detaching";
+      const ticket = ++expiry;
+      queueMicrotask(() => {
+        if (
+          expiry === ticket &&
+          (phase === "refs-detaching" ||
+            phase === "refs-detached" ||
+            phase === "refs-attaching" ||
+            phase === "layout-retired" ||
+            phase === "replay-ready")
+        ) {
+          invalidate();
+        }
+      });
+      return;
+    }
+    if (phase === "replay-ready") {
       invalidate();
       return;
     }
@@ -1029,7 +1070,7 @@ function createPreviewPresentation({
       invalidate();
       return;
     }
-    if (phase === "layout-retired") {
+    if (phase === "refs-detaching") {
       if (
         previous !== expected ||
         element !== null ||
@@ -1044,7 +1085,9 @@ function createPreviewPresentation({
       return;
     }
     if (
-      phase !== "refs-detached" ||
+      (phase !== "refs-detached" &&
+        phase !== "refs-attaching" &&
+        phase !== "layout-retired") ||
       previous !== null ||
       element !== expected ||
       !replay.detached.has(name) ||
@@ -1054,7 +1097,12 @@ function createPreviewPresentation({
       return;
     }
     replay.attached.add(name);
-    if (refsComplete(replay.attached)) phase = "replay-ready";
+    if (!refsComplete(replay.attached)) {
+      phase = "refs-attaching";
+      return;
+    }
+    phase = "replay-ready";
+    if (!replayIncludesLayout) establishReplay();
   };
 
   const rootOwner = new PreviewElementOwner<HTMLDivElement>("root", onElementChange);
@@ -1098,8 +1146,13 @@ function createPreviewPresentation({
     return { root, back };
   };
 
-  const exactDomIsCurrent = (snapshot: PreviewDomSnapshot | null) => {
-    const elements = currentElements();
+  const exactDomIsCurrent = (
+    snapshot: PreviewDomSnapshot | null,
+    requireCapturedRefs = true,
+  ) => {
+    const elements = snapshot
+      ? { root: snapshot.root, back: snapshot.back }
+      : currentElements();
     const container = selection.visit.container();
     if (!elements || !container) return false;
     const { root, back } = elements;
@@ -1116,6 +1169,8 @@ function createPreviewPresentation({
       root.parentElement !== container ||
       root.tagName !== "DIV" ||
       root.getAttribute("class") !== rootClass ||
+      (requireCapturedRefs &&
+        (rootOwner.element() !== root || backOwner.element() !== back)) ||
       !(content instanceof ownerWindow.HTMLDivElement) ||
       content.ownerDocument !== ownerDocument ||
       !content.isConnected ||
@@ -1164,9 +1219,7 @@ function createPreviewPresentation({
       snapshot.content === content &&
       snapshot.bar === bar &&
       snapshot.back === back &&
-      previewNodeMatches(snapshot.rootSnapshot) &&
       attributesMatch(root, snapshot.rootAttributes) &&
-      attributesMatch(content, snapshot.contentAttributes) &&
       root.childNodes.length === snapshot.rootChildren.length &&
       snapshot.rootChildren.every((node, index) =>
         root.childNodes.item(index) === node) &&
@@ -1197,16 +1250,12 @@ function createPreviewPresentation({
     ) {
       return null;
     }
-    const contentAttributes = snapshotAttributes(content);
-    if (!contentAttributes) return null;
     return Object.freeze({
       root,
       content,
       bar: bar as HTMLDivElement | null,
       back,
-      rootSnapshot: snapshotPreviewNode(root),
       rootAttributes,
-      contentAttributes,
       rootChildren: Object.freeze([...root.childNodes]),
       barSnapshot: bar ? snapshotPreviewNode(bar) : null,
       backTargets: back ? descendantsOf(back) : Object.freeze([]),
@@ -1307,7 +1356,7 @@ function createPreviewPresentation({
     activate(committed, currentHistory);
   };
 
-  const establishReplay = () => {
+  function establishReplay() {
     const candidate = replay;
     const previousHistory = history;
     if (
@@ -1355,7 +1404,7 @@ function createPreviewPresentation({
         invalidate();
       }
     });
-  };
+  }
 
   const establish = () => {
     if (phase === "mounting") establishInitial();
@@ -1366,36 +1415,20 @@ function createPreviewPresentation({
   const retireLayout = () => {
     if (phase === "successor-requested") return false;
     if (
-      phase !== "active" ||
-      !grant ||
+      phase !== "refs-detached" ||
+      !replay ||
       !history ||
-      cells.active.current !== grant ||
+      cells.active.current !== null ||
+      cells.active.revision !== replay.revision ||
       !history.isPristine() ||
-      !exactDomIsCurrent(grant.committed)
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(replay.committed, false)
     ) {
       invalidate();
       return false;
     }
-    const retired = grant;
-    clearGrant(retired);
-    replay = {
-      committed: retired.committed,
-      revision: cells.active.revision,
-      detached: new Set<PreviewElementName>(),
-      attached: new Set<PreviewElementName>(),
-    };
+    replayIncludesLayout = true;
     phase = "layout-retired";
-    const ticket = ++expiry;
-    queueMicrotask(() => {
-      if (
-        expiry === ticket &&
-        (phase === "layout-retired" ||
-          phase === "refs-detached" ||
-          phase === "replay-ready")
-      ) {
-        invalidate();
-      }
-    });
     return true;
   };
 
