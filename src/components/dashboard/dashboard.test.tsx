@@ -3200,6 +3200,174 @@ describe("TrashView publication ownership", () => {
       host.remove();
     }
   });
+
+  it.each(["Retry", "Restore", "Delete forever"] as const)(
+    "keeps the current %s authority one-use across committed RelativeTime ticks",
+    (kind) => {
+      vi.setSystemTime(new Date("2026-09-07T13:03:00.000Z"));
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const trashDocument = {
+        ...trashedDoc(`relative-${kind}`, `Relative ${kind}`),
+        deletedAt: "2026-09-07T13:00:00.000Z",
+      };
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const selectedCallback =
+        kind === "Retry" ? onRetry : kind === "Restore" ? onRestore : onPurge;
+
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <TrashView
+                documents={[trashDocument]}
+                busy={null}
+                loading={false}
+                error="Retry this load"
+                onRetry={onRetry}
+                onRestore={onRestore}
+                onPurge={onPurge}
+              />
+            </StrictMode>,
+          );
+        });
+        const time = directTrashCard(host, trashDocument.title).querySelector("time")!;
+        const timeText = time.firstChild;
+        act(() => vi.advanceTimersByTime(60_000));
+        const firstTickText = time.textContent;
+        act(() => vi.advanceTimersByTime(60_000));
+        expect(time.firstChild).toBe(timeText);
+        expect(time.textContent).not.toBe(firstTickText);
+
+        const button =
+          kind === "Retry"
+            ? directRetryButton(host)
+            : directTrashButton(
+                host,
+                trashDocument.title,
+                kind === "Restore" ? "restore-button" : "purge-button",
+              );
+        const restore = interceptReactClick(button, (current, event) => {
+          current(event);
+          current(event);
+        });
+        button.click();
+        restore();
+        button.click();
+
+        expect(selectedCallback).toHaveBeenCalledTimes(2);
+        expect(onRetry).toHaveBeenCalledTimes(kind === "Retry" ? 2 : 0);
+        expect(onRestore).toHaveBeenCalledTimes(kind === "Restore" ? 2 : 0);
+        expect(onPurge).toHaveBeenCalledTimes(kind === "Delete forever" ? 2 : 0);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retires restored non-time character data and leaves that authority inert", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const trashDocument = trashedDoc("static-text", "Static text");
+    const onRestore = vi.fn();
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <TrashView
+              documents={[trashDocument]}
+              busy={null}
+              loading={false}
+              error={null}
+              onRetry={() => {}}
+              onRestore={onRestore}
+              onPurge={() => {}}
+            />
+          </StrictMode>,
+        );
+      });
+      const titleText =
+        directTrashCard(host, trashDocument.title).querySelector("h3")!.firstChild;
+      if (!titleText) throw new Error("Trash title had no text node");
+      titleText.nodeValue = "Hostile text";
+      titleText.nodeValue = trashDocument.title;
+
+      directTrashButton(host, trashDocument.title, "restore-button").click();
+      expect(onRestore).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("isolates stale and current generations while their shared RelativeTime node ticks", () => {
+    vi.setSystemTime(new Date("2026-09-07T13:03:00.000Z"));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const staleDocument = {
+      ...trashedDoc("relative-generation", "Relative generation"),
+      deletedAt: "2026-09-07T13:00:00.000Z",
+    };
+    const currentDocument = { ...staleDocument };
+    const staleRestore = vi.fn();
+    const currentRestore = vi.fn();
+    const view = (
+      document: DocumentSummaryDto,
+      onRestore: (document: DocumentSummaryDto) => void,
+    ) => (
+      <StrictMode>
+        <TrashView
+          documents={[document]}
+          busy={null}
+          loading={false}
+          error={null}
+          onRetry={() => {}}
+          onRestore={onRestore}
+          onPurge={() => {}}
+        />
+      </StrictMode>
+    );
+
+    try {
+      act(() => root.render(view(staleDocument, staleRestore)));
+      const button = directTrashButton(
+        host,
+        staleDocument.title,
+        "restore-button",
+      );
+      const staleClick = captureReactClick(button);
+
+      act(() => root.render(view(currentDocument, currentRestore)));
+      const currentButton = directTrashButton(
+        host,
+        currentDocument.title,
+        "restore-button",
+      );
+      expect(currentButton).toBe(button);
+      act(() => vi.advanceTimersByTime(60_000));
+
+      const restore = interceptReactClick(currentButton, (current, event) => {
+        staleClick(event);
+        current(event);
+        current(event);
+      });
+      currentButton.click();
+      restore();
+
+      expect(staleRestore).not.toHaveBeenCalled();
+      expect(currentRestore).toHaveBeenCalledExactlyOnceWith(currentDocument);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("dashboard trash recovery", () => {

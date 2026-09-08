@@ -1448,6 +1448,7 @@ interface TrashCardPublication {
 interface TrashDomSnapshot {
   readonly node: Node;
   readonly nodeValue: string | null;
+  readonly relativeTimeText: boolean;
   readonly attributes: readonly (readonly [string, string])[] | null;
   readonly children: readonly TrashDomSnapshot[];
 }
@@ -1596,12 +1597,25 @@ function snapshotTrashAttributes(node: Node): readonly (readonly [string, string
   );
 }
 
-function snapshotTrashDom(node: Node): TrashDomSnapshot {
+function snapshotTrashDom(
+  node: Node,
+  withinRelativeTime = false,
+): TrashDomSnapshot {
+  const nextWithinRelativeTime =
+    withinRelativeTime ||
+    (node.nodeType === node.ELEMENT_NODE &&
+      (node as Element).tagName === "TIME");
   return Object.freeze({
     node,
     nodeValue: node.nodeValue,
+    relativeTimeText:
+      nextWithinRelativeTime && node.nodeType === node.TEXT_NODE,
     attributes: snapshotTrashAttributes(node),
-    children: Object.freeze([...node.childNodes].map(snapshotTrashDom)),
+    children: Object.freeze(
+      [...node.childNodes].map((child) =>
+        snapshotTrashDom(child, nextWithinRelativeTime),
+      ),
+    ),
   });
 }
 
@@ -1610,7 +1624,7 @@ function trashDomMatches(snapshot: TrashDomSnapshot, ownerDocument: Document): b
   if (
     !node.isConnected ||
     node.ownerDocument !== ownerDocument ||
-    node.nodeValue !== snapshot.nodeValue
+    (!snapshot.relativeTimeText && node.nodeValue !== snapshot.nodeValue)
   ) {
     return false;
   }
@@ -2168,6 +2182,7 @@ function createTrashPublication(
     let domChanged = false;
     let domObserver: MutationObserver | null = null;
     let domSnapshot: TrashDomSnapshot | null = null;
+    let relativeTimeTextNodes = new WeakSet<Node>();
     let publishedPlacement: TrashPlacement | null = null;
     let replayRefs: TrashRefReplay[] = [];
     let partialReplayOwners = new Set<TrashElementOwnerView>();
@@ -2189,6 +2204,12 @@ function createTrashPublication(
     });
 
     const mutationIsRelevant = (record: MutationRecord) => {
+      if (
+        record.type === "characterData" &&
+        relativeTimeTextNodes.has(record.target)
+      ) {
+        return false;
+      }
       if (record.target === root || root.contains(record.target)) return true;
       if (
         record.type === "attributes" &&
@@ -2297,6 +2318,14 @@ function createTrashPublication(
       ) => {
         established = true;
         domSnapshot = nextDom;
+        relativeTimeTextNodes = new WeakSet<Node>();
+        const rememberRelativeTimeText = (snapshot: TrashDomSnapshot) => {
+          if (snapshot.relativeTimeText) {
+            relativeTimeTextNodes.add(snapshot.node);
+          }
+          snapshot.children.forEach(rememberRelativeTimeText);
+        };
+        rememberRelativeTimeText(nextDom);
         publishedPlacement = nextPlacement;
         replayRefs = owners.map((owner) => {
           const element = owner.element();
