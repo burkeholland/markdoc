@@ -1113,6 +1113,138 @@ describe("ActivityPanel exact action publications", () => {
     },
   );
 
+  it.each(["immediate parent", "higher wrapper"] as const)(
+    "does not revive stale Strict Mode work after detaching and restoring the %s",
+    async (level) => {
+      const intervalCallbacks: Array<() => void> = [];
+      vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+        intervalCallbacks.push(handler as () => void);
+        return (500 + intervalCallbacks.length) as unknown as ReturnType<
+          typeof setInterval
+        >;
+      });
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, "clearInterval")
+        .mockImplementation(() => {});
+      const staleRequest = deferred<ActivityPageDto>();
+      const freshRequest = deferred<ActivityPageDto>();
+      const freshCadenceRequest = deferred<ActivityPageDto>();
+      activity
+        .mockReturnValueOnce(staleRequest.promise)
+        .mockReturnValueOnce(freshRequest.promise)
+        .mockReturnValueOnce(freshCadenceRequest.promise);
+      const staleClose = vi.fn();
+      const freshClose = vi.fn();
+      const wrapper = document.createElement("section");
+      const host = document.createElement("div");
+      wrapper.append(host);
+      document.body.append(wrapper);
+      const root = createRoot(host);
+      directRoots.add(root);
+      let mutateReplay = true;
+      let stalePanel: HTMLElement | null = null;
+      let staleCloseControl: CapturedControl | null = null;
+      const onLayoutCleanup = () => {
+        if (!mutateReplay) return;
+        const panel = screen.getByTestId("activity-panel");
+        stalePanel = panel;
+        staleCloseControl = captureControl(
+          within(panel).getByRole("button", { name: "Close activity" }),
+        );
+        const target =
+          level === "immediate parent"
+            ? panel.parentNode
+            : panel.parentNode?.parentNode;
+        const parent = target?.parentNode;
+        const next = target?.nextSibling ?? null;
+        if (!target || !parent) throw new Error(`Activity ${level} has no parent`);
+        parent.removeChild(target);
+        parent.insertBefore(target, next);
+      };
+
+      act(() => {
+        root.render(
+          <StrictMode>
+            <StrictReplayBoundary onLayoutCleanup={onLayoutCleanup}>
+              <ActivityPanel
+                session={session(`strict-${level}`)}
+                onClose={staleClose}
+              />
+            </StrictReplayBoundary>
+          </StrictMode>,
+        );
+      });
+
+      const retiredPanel = stalePanel;
+      const retiredCloseControl = staleCloseControl;
+      if (!retiredPanel || !retiredCloseControl) {
+        throw new Error(
+          "Strict Mode cleanup did not capture the retired Activity controls",
+        );
+      }
+      expect(activity).toHaveBeenCalledOnce();
+      expect(intervalCallbacks).toHaveLength(1);
+      expect(clearIntervalSpy).toHaveBeenCalledOnce();
+      act(() => {
+        invoke(retiredCloseControl);
+        intervalCallbacks[0]?.();
+      });
+      expect(activity).toHaveBeenCalledOnce();
+      expect(staleClose).not.toHaveBeenCalled();
+
+      mutateReplay = false;
+      const currentSession = session(`fresh-${level}`);
+      act(() => {
+        root.render(
+          <section key="fresh">
+            <ActivityPanel session={currentSession} onClose={freshClose} />
+          </section>,
+        );
+      });
+      const freshPanel = screen.getByTestId("activity-panel");
+      expect(freshPanel).not.toBe(retiredPanel);
+      expect(activity).toHaveBeenCalledTimes(2);
+      expect(intervalCallbacks).toHaveLength(2);
+
+      staleRequest.resolve({
+        items: [row(`stale-${level}`, "Stale ancestor editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.queryByText("Stale ancestor editor")).toBeNull();
+
+      freshRequest.resolve({
+        items: [row(`fresh-${level}`, "Fresh ancestor editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.getByText("Fresh ancestor editor")).toBeInTheDocument();
+
+      act(() => {
+        intervalCallbacks[0]?.();
+        intervalCallbacks[1]?.();
+        intervalCallbacks[1]?.();
+      });
+      expect(activity).toHaveBeenCalledTimes(3);
+      expect(activity).toHaveBeenLastCalledWith(currentSession.docId, { limit: 50 });
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(freshClose).not.toHaveBeenCalled();
+
+      freshCadenceRequest.resolve({
+        items: [row(`fresh-cadence-${level}`, "Fresh cadence editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.getByText("Fresh cadence editor")).toBeInTheDocument();
+      expect(screen.queryByText("Stale ancestor editor")).toBeNull();
+      act(() => {
+        within(freshPanel).getByRole("button", { name: "Close activity" }).click();
+      });
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(freshClose).toHaveBeenCalledOnce();
+    },
+  );
+
   it("rejects foreign, detached, disabled, replaced, wrong-action, and fabricated sources before exact controls claim once", async () => {
     const retryRequest = deferred<ActivityPageDto>();
     const pageRequest = deferred<ActivityPageDto>();

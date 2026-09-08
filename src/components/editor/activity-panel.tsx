@@ -145,9 +145,15 @@ interface ActivityDomSnapshot {
 
 interface ActivityPlacement {
   readonly document: Document;
+  readonly chain: readonly ActivityNodePlacement[];
+}
+
+interface ActivityNodePlacement {
+  readonly node: Node;
   readonly parent: Node;
   readonly previousSibling: Node | null;
   readonly nextSibling: Node | null;
+  readonly exactSiblings: boolean;
 }
 
 interface ActivityDomGuard {
@@ -711,22 +717,61 @@ function activityDomMatches(snapshot: ActivityDomSnapshot): boolean {
 }
 
 function captureActivityPlacement(node: HTMLElement): ActivityPlacement | null {
-  const parent = node.parentNode;
-  if (!parent) return null;
+  if (!node.isConnected) return null;
+  const document = node.ownerDocument;
+  const chain: ActivityNodePlacement[] = [];
+  let current: Node = node;
+  while (current !== document) {
+    const parent = current.parentNode;
+    if (!parent) return null;
+    chain.push(Object.freeze({
+      node: current,
+      parent,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+      exactSiblings: current === node,
+    }));
+    current = parent;
+  }
+  const root = chain[0];
+  if (!root) return null;
   return Object.freeze({
-    document: node.ownerDocument,
-    parent,
-    previousSibling: node.previousSibling,
-    nextSibling: node.nextSibling,
+    document,
+    chain: Object.freeze(chain),
   });
 }
 
 function activityPlacementMatches(node: HTMLElement, placement: ActivityPlacement) {
   return (
     node.ownerDocument === placement.document &&
-    node.parentNode === placement.parent &&
-    node.previousSibling === placement.previousSibling &&
-    node.nextSibling === placement.nextSibling
+    node.isConnected &&
+    placement.chain[0]?.node === node &&
+    placement.chain.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        (!entry.exactSiblings ||
+          (entry.node.previousSibling === entry.previousSibling &&
+            entry.node.nextSibling === entry.nextSibling)),
+    )
+  );
+}
+
+function activityPlacementRecordChanged(
+  record: MutationRecord,
+  placement: ActivityNodePlacement,
+) {
+  if (record.type !== "childList" || record.target !== placement.parent) {
+    return false;
+  }
+  if (
+    placement.exactSiblings &&
+    (record.previousSibling === placement.node ||
+      record.nextSibling === placement.node)
+  ) {
+    return true;
+  }
+  return [...record.addedNodes, ...record.removedNodes].some(
+    (node) => node === placement.node || node.contains(placement.node),
   );
 }
 
@@ -742,19 +787,8 @@ function createActivityDomGuard(
     if (changed) return;
     changed = records.some((record) => {
        if (record.target === root || root.contains(record.target)) return true;
-       if (record.type !== "childList" || record.target !== placement.parent) {
-         return false;
-       }
-       if (
-         record.previousSibling === root ||
-         record.nextSibling === root
-       ) {
-         return true;
-       }
-       return [...record.addedNodes, ...record.removedNodes].some(
-         (node) =>
-           node === root ||
-           (node.nodeType === 1 && (node as Element).contains(root)),
+       return placement.chain.some((entry) =>
+         activityPlacementRecordChanged(record, entry),
        );
     });
   };
@@ -766,7 +800,9 @@ function createActivityDomGuard(
     childList: true,
     subtree: true,
   });
-  observer.observe(placement.parent, { childList: true });
+  for (const entry of placement.chain) {
+    observer.observe(entry.parent, { childList: true });
+  }
   return Object.freeze({
     isClean: () => {
        recordChanges(observer.takeRecords());
