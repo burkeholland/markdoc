@@ -24,6 +24,9 @@ const capturedStatsContentCallbacks = vi.hoisted(
 const publishedPopoverOpenChanges = vi.hoisted(
   () => [] as { callback: PopoverOpenChange; open: boolean }[],
 );
+const deliveredStatsCloseAutoFocusEvents = vi.hoisted(
+  () => [] as Event[],
+);
 
 vi.mock("@/components/ui/primitives", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/ui/primitives")>();
@@ -57,7 +60,19 @@ vi.mock("@/components/ui/primitives", async (importOriginal) => {
         pointerOutside: props.onPointerDownOutside,
         focusOutside: props.onFocusOutside,
       });
-      return <ActualPopoverContent {...props} />;
+      return (
+        <ActualPopoverContent
+          {...props}
+          onCloseAutoFocus={
+            props.onCloseAutoFocus
+              ? (event) => {
+                  deliveredStatsCloseAutoFocusEvents.push(event);
+                  props.onCloseAutoFocus?.(event);
+                }
+              : undefined
+          }
+        />
+      );
     },
   };
 });
@@ -637,6 +652,7 @@ beforeEach(() => {
   capturedPopoverOpenChanges.length = 0;
   capturedStatsContentCallbacks.length = 0;
   publishedPopoverOpenChanges.length = 0;
+  deliveredStatsCloseAutoFocusEvents.length = 0;
   unhandledRejections.length = 0;
   process.on("unhandledRejection", recordUnhandledRejection);
 });
@@ -1321,6 +1337,69 @@ describe("StatsPopover disclosure visit authority", () => {
     },
   );
 
+  it("keeps batched close suppression through Radix passive cleanup ordering", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-08T08:00:00.000Z"));
+    const session = makeSession("strict-close-passive-order");
+    const mounted = renderStrictStats(session, () => {});
+    let advancedLayoutClock = false;
+
+    try {
+      openPopover();
+      const closingContent = screen.getByTestId(
+        "stats-popover",
+      ) as HTMLDivElement;
+      const closingTrigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      const focusClosingTrigger = vi.spyOn(
+        closingTrigger,
+        "focus",
+      );
+      const deliveredCount =
+        deliveredStatsCloseAutoFocusEvents.length;
+      const escape = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "Escape",
+        key: "Escape",
+      });
+
+      act(() => {
+        closingContent.dispatchEvent(escape);
+        mounted.root.render(
+          <StrictMode>
+            <StatsBoundary
+              session={session}
+              source="One two three!"
+              boundary={1}
+              onBoundary={() => {
+                if (advancedLayoutClock) return;
+                advancedLayoutClock = true;
+                vi.setSystemTime(Date.now() + 2);
+              }}
+            />
+          </StrictMode>,
+        );
+      });
+      expect(advancedLayoutClock).toBe(true);
+      expect(focusClosingTrigger).not.toHaveBeenCalled();
+
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      const [closeAutoFocusEvent] =
+        deliveredStatsCloseAutoFocusEvents.slice(deliveredCount);
+      expect(closeAutoFocusEvent).toBeDefined();
+      expect(closeAutoFocusEvent.defaultPrevented).toBe(true);
+      expect(focusClosingTrigger).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+    } finally {
+      act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      mounted.host.remove();
+    }
+  });
+
   it.each(["drifted", "equivalent"] as const)(
     "keeps a fresh close intent after claiming an older %s autofocus callback",
     async (change) => {
@@ -1346,7 +1425,8 @@ describe("StatsPopover disclosure visit authority", () => {
           "stats-button",
         ) as HTMLButtonElement;
         const focusTrigger = vi.spyOn(trigger, "focus");
-        const callbackCount = capturedStatsContentCallbacks.length;
+        const deliveredCount =
+          deliveredStatsCloseAutoFocusEvents.length;
 
         const escape = new KeyboardEvent("keydown", {
           bubbles: true,
@@ -1363,16 +1443,9 @@ describe("StatsPopover disclosure visit authority", () => {
         } else {
           act(() => firstContent.dispatchEvent(escape));
         }
-        const firstCloseAutoFocus =
-          capturedStatsContentCallbacks
-            .slice(callbackCount)
-            .find(({ closeAutoFocus }) => closeAutoFocus)
-            ?.closeAutoFocus;
-        expect(firstCloseAutoFocus).toBeTypeOf("function");
         if (change === "equivalent") {
           act(() => renderCurrent());
         }
-        vi.clearAllTimers();
 
         fireEvent.click(trigger);
         const secondContent = screen.getByTestId(
@@ -1385,24 +1458,17 @@ describe("StatsPopover disclosure visit authority", () => {
           key: "Escape",
         });
         expect(screen.queryByTestId("stats-popover")).toBeNull();
-
-        const firstFocusEvent = new Event(
-          "stats-close-autofocus",
-          {
-            bubbles: false,
-            cancelable: true,
-          },
-        );
-        firstContent.addEventListener(
-          firstFocusEvent.type,
-          (event) => firstCloseAutoFocus?.(event),
-          { once: true },
-        );
-        firstContent.dispatchEvent(firstFocusEvent);
-        expect(firstFocusEvent.defaultPrevented).toBe(true);
         expect(focusTrigger).not.toHaveBeenCalled();
 
         await act(() => vi.advanceTimersByTimeAsync(0));
+        const closeAutoFocusEvents =
+          deliveredStatsCloseAutoFocusEvents.slice(deliveredCount);
+        expect(closeAutoFocusEvents).toHaveLength(2);
+        expect(
+          closeAutoFocusEvents.every(
+            (event) => event.defaultPrevented,
+          ),
+        ).toBe(true);
         expect(focusTrigger).toHaveBeenCalledOnce();
         expect(document.activeElement).toBe(trigger);
       } finally {

@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -1472,14 +1473,28 @@ class StatsDisclosureCoordinator {
       close.publication.triggerPlacement?.document.defaultView;
     if (!publication || !ownerWindow || close.claimed) return;
     this.#retiredCloseFocus.set(publication, close);
-    ownerWindow.setTimeout(
-      () => {
-        if (this.#retiredCloseFocus.get(publication) === close) {
-          this.#retiredCloseFocus.delete(publication);
+  }
+
+  releaseCloseFocusAfterPortal(
+    publication: StatsDisclosurePublication,
+  ) {
+    const ownerWindow =
+      publication.triggerPlacement?.document.defaultView;
+    if (!ownerWindow) return;
+    ownerWindow.setTimeout(() => {
+      ownerWindow.setTimeout(() => {
+        const active = this.#closeFocus;
+        if (active?.publication === publication) {
+          this.clearCloseFocus(active);
         }
-      },
-      1,
-    );
+        for (const [callbackPublication, close] of this
+          .#retiredCloseFocus) {
+          if (close.publication === publication) {
+            this.#retiredCloseFocus.delete(callbackPublication);
+          }
+        }
+      }, 0);
+    }, 0);
   }
 
   retire(
@@ -2774,6 +2789,11 @@ function StatsDisclosurePortalLayout({
     coordinator.establish(publication, "portal");
     return () => coordinator.retireLayout(publication, "portal");
   }, [coordinator, publication]);
+  useEffect(
+    () => () =>
+      coordinator.releaseCloseFocusAfterPortal(publication),
+    [coordinator, publication],
+  );
   return children;
 }
 
