@@ -504,6 +504,30 @@ function fabricatedTemplateBubble(
   };
 }
 
+function shadowTemplateCurrentTarget(
+  event: MouseEvent,
+  grid: HTMLUListElement,
+  ownerDocument: Document,
+  documentRoot: boolean,
+) {
+  const ownerWindow = ownerDocument.defaultView;
+  const getter = Object.getOwnPropertyDescriptor(
+    ownerWindow?.Event.prototype ?? {},
+    "currentTarget",
+  )?.get;
+  if (!getter) throw new Error("The native currentTarget getter is unavailable");
+  let documentReads = 0;
+  Object.defineProperty(event, "currentTarget", {
+    configurable: true,
+    get() {
+      const actual = getter.call(event) as EventTarget | null;
+      if (actual !== ownerDocument) return grid;
+      documentReads += 1;
+      return documentRoot && documentReads > 1 ? grid : ownerDocument;
+    },
+  });
+}
+
 function invokePlainTemplateTraversal(
   grid: HTMLUListElement,
   button: HTMLButtonElement,
@@ -1096,7 +1120,123 @@ describe("TemplateGrid publication ownership", () => {
     }
   });
 
-  it("rechecks native default prevention after a forged bubble wrapper reports false", async () => {
+  it.each(["container", "document"] as const)(
+    "uses the trusted native currentTarget for a shadowed %s-root event",
+    async (rootKind) => {
+      const frame =
+        rootKind === "document" ? document.createElement("iframe") : null;
+      if (frame) document.body.append(frame);
+      const ownerDocument = frame?.contentDocument ?? document;
+      if (!ownerDocument) throw new Error("The test frame has no document");
+      if (frame) {
+        ownerDocument.open();
+        ownerDocument.write(
+          "<!doctype html><html><head></head><body></body></html>",
+        );
+        ownerDocument.close();
+      }
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The test document has no window");
+      const host =
+        rootKind === "container"
+          ? ownerDocument.createElement("div")
+          : ownerDocument;
+      if (host instanceof ownerWindow.HTMLDivElement) {
+        ownerDocument.body.append(host);
+      }
+      const onPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      let grid: HTMLUListElement | null = null;
+      let button: HTMLButtonElement | null = null;
+      const captureAttack = (event: Event) => {
+        if (
+          grid &&
+          button &&
+          event instanceof ownerWindow.MouseEvent
+        ) {
+          invokePlainTemplateTraversal(grid, button, event);
+        }
+      };
+      ownerDocument.addEventListener("click", captureAttack, true);
+      const root = createRoot(host);
+      const attack = (event: Event) => {
+        if (
+          !button ||
+          !(event instanceof ownerWindow.MouseEvent)
+        ) {
+          return;
+        }
+        captureTemplateActivation(button)(
+          fabricatedTemplateBubble(button, event),
+        );
+        event.stopPropagation();
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            rootKind === "document" ? (
+              <StrictMode>
+                <html>
+                  {createElement("head")}
+                  <body>
+                    <TemplateGrid onPick={onPick} busy={null} />
+                  </body>
+                </html>
+              </StrictMode>
+            ) : (
+              <StrictMode>
+                <TemplateGrid onPick={onPick} busy={null} />
+              </StrictMode>
+            ),
+          );
+        });
+        grid = ownerDocument.querySelector<HTMLUListElement>(
+          '[data-testid="template-grid"]',
+        );
+        button = ownerDocument.querySelector<HTMLButtonElement>(
+          `[data-testid="template-${template.id}"]`,
+        )!;
+        if (!grid || !button) {
+          throw new Error("The shadow-currentTarget grid was not rendered");
+        }
+        grid.addEventListener("click", attack);
+        const nativeEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        shadowTemplateCurrentTarget(
+          nativeEvent,
+          grid,
+          ownerDocument,
+          rootKind === "document",
+        );
+        await act(async () => {
+          button!.dispatchEvent(nativeEvent);
+        });
+        expect(onPick).not.toHaveBeenCalled();
+
+        grid.removeEventListener("click", attack);
+        ownerDocument.removeEventListener("click", captureAttack, true);
+        await act(async () => {
+          button!.click();
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+      } finally {
+        ownerDocument.removeEventListener("click", captureAttack, true);
+        grid?.removeEventListener("click", attack);
+        await act(async () => root.unmount());
+        if (host instanceof ownerWindow.HTMLDivElement) host.remove();
+        frame?.remove();
+      }
+    },
+  );
+
+  it("uses the trusted native cancellation flag when an own getter reports false", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -1121,9 +1261,22 @@ describe("TemplateGrid publication ownership", () => {
       const grid = templateGrid(host);
       button = templateButton(host, template.id);
       grid.addEventListener("click", attack);
-      await act(async () => {
-        button.click();
+      const nativeEvent = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 0,
+        detail: 1,
       });
+      Object.defineProperty(nativeEvent, "defaultPrevented", {
+        configurable: true,
+        get: () => false,
+      });
+      let dispatched = true;
+      await act(async () => {
+        dispatched = button.dispatchEvent(nativeEvent);
+      });
+      expect(dispatched).toBe(false);
       expect(onPick).not.toHaveBeenCalled();
 
       grid.removeEventListener("click", attack);

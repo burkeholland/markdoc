@@ -1065,15 +1065,29 @@ function createTemplateGridPublication(
     if (!grid) return null;
     const ownerDocument = grid.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
+    const nativeCurrentTargetGetter = Object.getOwnPropertyDescriptor(
+      ownerWindow?.Event.prototype ?? {},
+      "currentTarget",
+    )?.get;
+    const nativeDefaultPreventedGetter = Object.getOwnPropertyDescriptor(
+      ownerWindow?.Event.prototype ?? {},
+      "defaultPrevented",
+    )?.get;
     const placement = snapshotTemplateGridPlacement(grid);
     if (
       !ownerWindow ||
       !(grid instanceof ownerWindow.HTMLUListElement) ||
+      !nativeCurrentTargetGetter ||
+      !nativeDefaultPreventedGetter ||
       !placement ||
       !templateGridElementsAreCurrent(render, gridOwner, entryOwners)
     ) {
       return null;
     }
+    const nativeCurrentTarget = (event: Event) =>
+      nativeCurrentTargetGetter.call(event) as EventTarget | null;
+    const nativeWasPrevented = (event: Event) =>
+      Boolean(nativeDefaultPreventedGetter.call(event));
     const predecessor = cells.active.current ?? cells.successorOf.current;
     const predecessorElements =
       predecessor?.render.mount === render.mount
@@ -1177,7 +1191,7 @@ function createTemplateGridPublication(
         | typeof ownerWindow.Event.CAPTURING_PHASE
         | typeof ownerWindow.Event.BUBBLING_PHASE,
     ) => {
-      const currentTarget = native.currentTarget;
+      const currentTarget = nativeCurrentTarget(native);
       return (
         native.eventPhase === phase &&
         currentTarget instanceof ownerWindow.Node &&
@@ -1196,9 +1210,9 @@ function createTemplateGridPublication(
         event.buttons !== 0 ||
         event.detail < 0 ||
         event.eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
-        event.currentTarget !== ownerDocument ||
+        nativeCurrentTarget(event) !== ownerDocument ||
         !event.bubbles ||
-        event.defaultPrevented ||
+        nativeWasPrevented(event) ||
         !(target instanceof ownerWindow.Node) ||
         !target.isConnected ||
         target.ownerDocument !== ownerDocument
@@ -1257,7 +1271,7 @@ function createTemplateGridPublication(
           reactButtonClick?.native === nativeClick &&
           reactButtonClick.entry === entry &&
           reactButtonClick.action === entry.action &&
-          event.currentTarget === entry.button &&
+          nativeCurrentTarget(event) === entry.button &&
           (event.eventPhase === ownerWindow.Event.CAPTURING_PHASE ||
             event.eventPhase === ownerWindow.Event.AT_TARGET) &&
           event.target === nativeClick.target &&
@@ -1379,7 +1393,9 @@ function createTemplateGridPublication(
       event: ReactMouseEvent<HTMLButtonElement>,
       entry: TemplateGridDomPublication,
     ): TemplateGridReactEntryClickProof | null => {
-      const dispatchTarget = nativeClick?.event.currentTarget;
+      const dispatchTarget = nativeClick
+        ? nativeCurrentTarget(nativeClick.event)
+        : null;
       return nativeClick &&
         nativeBoundaryClick === nativeClick &&
         reactButtonClick?.native === nativeClick &&
@@ -1398,7 +1414,7 @@ function createTemplateGridPublication(
         event.eventPhase === ownerWindow.Event.BUBBLING_PHASE &&
         event.bubbles &&
         !event.defaultPrevented &&
-        !nativeClick.event.defaultPrevented &&
+        !nativeWasPrevented(nativeClick.event) &&
         event.currentTarget === entry.button &&
         event.target === nativeClick.target &&
         nativeClick.entry === entry &&
@@ -1429,10 +1445,10 @@ function createTemplateGridPublication(
         action.index !== entry.entry.index ||
         !templateGridIsEffectivelyEnabled(grid, entry.button) ||
         proof.native !== nativeClick ||
-        proof.dispatchTarget !== event.currentTarget ||
+        proof.dispatchTarget !== nativeCurrentTarget(event) ||
         proof.native.event !== event ||
-        event.defaultPrevented ||
-        proof.native.event.defaultPrevented ||
+        nativeWasPrevented(event) ||
+        nativeWasPrevented(proof.native.event) ||
         cells.claimedPublications.has(publication) ||
         cells.claimedEntries.has(entry) ||
         cells.claimedActions.has(action) ||
@@ -1562,10 +1578,11 @@ function createTemplateGridPublication(
         reactButtonClick = null;
         reactBubbleClick = null;
         const capturedNative =
-          nativeClick ??
-          (event.nativeEvent instanceof ownerWindow.MouseEvent
-            ? exactNativeClick(event.nativeEvent)
-            : null);
+          nativeClick?.event === event.nativeEvent
+            ? nativeClick
+            : event.nativeEvent instanceof ownerWindow.MouseEvent
+              ? exactNativeClick(event.nativeEvent)
+              : null;
         if (capturedNative) nativeClick = capturedNative;
         if (
           !capturedNative ||
@@ -1587,7 +1604,7 @@ function createTemplateGridPublication(
           return;
         }
         reactGridClick = Object.freeze({ event, native: capturedNative });
-        const dispatchTarget = capturedNative.event.currentTarget;
+        const dispatchTarget = nativeCurrentTarget(capturedNative.event);
         if (!(dispatchTarget instanceof ownerWindow.Node)) {
           reactGridClick = null;
           return;
@@ -1604,11 +1621,11 @@ function createTemplateGridPublication(
             proof &&
             boundaryEvent instanceof ownerWindow.MouseEvent &&
             boundaryEvent === capturedNative.event &&
-            boundaryEvent.currentTarget === dispatchTarget &&
+            nativeCurrentTarget(boundaryEvent) === dispatchTarget &&
             (boundaryEvent.eventPhase === ownerWindow.Event.BUBBLING_PHASE ||
               boundaryEvent.eventPhase === ownerWindow.Event.AT_TARGET) &&
-            !boundaryEvent.defaultPrevented &&
-            !capturedNative.event.defaultPrevented
+            !nativeWasPrevented(boundaryEvent) &&
+            !nativeWasPrevented(capturedNative.event)
           ) {
             deliver(proof, boundaryEvent);
           }
@@ -1631,7 +1648,9 @@ function createTemplateGridPublication(
         reactCardClick = null;
         const entry = publication.entries[entryAuthority.index];
         const gridProof = reactGridClick;
-        const dispatchTarget = gridProof?.native.event.currentTarget;
+        const dispatchTarget = gridProof
+          ? nativeCurrentTarget(gridProof.native.event)
+          : null;
         if (
           !entry ||
           !gridProof ||
