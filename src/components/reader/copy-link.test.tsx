@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
-import { useLayoutEffect } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,6 +16,50 @@ const DOC_ID = "doc-919";
 const NEXT_DOC_ID = "doc-920";
 const readerUrl = (docId = DOC_ID) => `${window.location.origin}/p/${docId}`;
 
+type CopyClick = (event: { currentTarget: HTMLButtonElement }) => void;
+type FallbackFocus = (event: { currentTarget: HTMLInputElement }) => void;
+type CopyPart = "root" | "button" | "fallback";
+
+interface BoundaryProps {
+  docId?: string;
+  present?: boolean;
+  instance?: string;
+  boundary?: number;
+  onLayout?: () => void;
+  onPassiveCleanup?: () => void;
+}
+
+function ReaderMount({
+  docId,
+  onPassiveCleanup,
+}: {
+  docId: string;
+  onPassiveCleanup?: () => void;
+}) {
+  useEffect(() => onPassiveCleanup, [onPassiveCleanup]);
+  return <ReaderCopyLink docId={docId} />;
+}
+
+function ReaderBoundary({
+  docId = DOC_ID,
+  present = true,
+  instance = "reader",
+  boundary = 0,
+  onLayout,
+  onPassiveCleanup,
+}: BoundaryProps) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onLayout?.();
+  }, [boundary, onLayout]);
+  return present ? (
+    <ReaderMount
+      key={instance}
+      docId={docId}
+      onPassiveCleanup={onPassiveCleanup}
+    />
+  ) : null;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -22,27 +70,75 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function ReaderBoundary({
-  docId = DOC_ID,
-  show = true,
-  boundary = 0,
-  onLayout,
-}: {
-  docId?: string;
-  show?: boolean;
-  boundary?: number;
-  onLayout?: () => void;
-}) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onLayout?.();
-  }, [boundary, onLayout]);
-  return show ? <ReaderCopyLink docId={docId} /> : null;
+function reactHandler<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return handler as T;
+}
+
+function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  const props = propsKey
+    ? (element as unknown as Record<string, { ref?: unknown }>)[propsKey]
+    : undefined;
+  if (typeof props?.ref === "function") return props.ref as (node: T | null) => void;
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.dataset.testid ?? element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown }>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`React ref was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return fiber.ref as (node: T | null) => void;
+}
+
+function copyElements(requireFallback = false) {
+  const button = screen.getByTestId("reader-copy-link") as HTMLButtonElement;
+  const root = button.parentElement;
+  if (!(root instanceof HTMLDivElement)) throw new Error("Copy link root was not rendered");
+  const fallback = screen.queryByTestId("reader-copy-link-fallback");
+  if (fallback !== null && !(fallback instanceof HTMLInputElement)) {
+    throw new Error("Copy link fallback was not an input");
+  }
+  if (requireFallback && !fallback) throw new Error("Copy link fallback was not rendered");
+  return { root, button, fallback };
 }
 
 async function enabledCopyButton() {
   const button = screen.getByRole("button", { name: "Copy link" });
   await waitFor(() => expect(button).toBeEnabled());
+  return button as HTMLButtonElement;
+}
+
+function connectedButton(label = "Other") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("aria-label", label);
+  document.body.append(button);
   return button;
+}
+
+const directRoots = new Set<Root>();
+
+function createDirectView(props: BoundaryProps = {}) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  directRoots.add(root);
+  act(() => root.render(<ReaderBoundary {...props} />));
+  return { host, root };
+}
+
+function renderDirect(root: Root, props: BoundaryProps) {
+  act(() => root.render(<ReaderBoundary {...props} />));
+}
+
+async function settle<T>(operation: ReturnType<typeof deferred<T>>, value: T) {
+  await act(async () => {
+    operation.resolve(value);
+    await operation.promise;
+    await Promise.resolve();
+  });
 }
 
 beforeEach(() => {
@@ -51,154 +147,397 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  for (const root of directRoots) act(() => root.unmount());
+  directRoots.clear();
   vi.restoreAllMocks();
+  document.body.replaceChildren();
 });
 
-describe("ReaderCopyLink", () => {
-  it("copies the absolute canonical reader URL and briefly exposes the Copied label", async () => {
-    render(<ReaderCopyLink docId={DOC_ID} />);
+describe("ReaderCopyLink presentation", () => {
+  it("retires the disabled pre-origin handler and preserves the canonical URL, feedback, label, and phone target", async () => {
+    let disabledAtBoundary: boolean | undefined;
+    let preOriginClick: CopyClick | undefined;
+    createDirectView({
+      boundary: 1,
+      onLayout: () => {
+        const button = copyElements().button;
+        disabledAtBoundary = button.disabled;
+        preOriginClick = reactHandler<CopyClick>(button, "onClick");
+      },
+    });
+
     const button = await enabledCopyButton();
+    expect(disabledAtBoundary).toBe(true);
+    expect(preOriginClick).toBeDefined();
+    act(() => preOriginClick?.({ currentTarget: button }));
+    expect(copyText).not.toHaveBeenCalled();
 
-    fireEvent.click(button);
+    const currentClick = reactHandler<CopyClick>(button, "onClick");
+    await act(async () => {
+      currentClick({ currentTarget: button });
+      await Promise.resolve();
+    });
 
-    await waitFor(() => expect(copyText).toHaveBeenCalledWith(readerUrl()));
-    expect(copyText).toHaveBeenCalledTimes(1);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(readerUrl());
     expect(screen.getByRole("button", { name: "Copied" })).toBe(button);
+    expect(button).toHaveClass("h-11", "w-11", "sm:h-8", "sm:w-auto");
+    expect(within(button).getByText("Copied")).toHaveClass("hidden", "sm:inline");
+    expect(button).toHaveAccessibleName("Copied");
   });
 
-  it("shows, focuses, and selects the exact URL when both copy paths fail", async () => {
+  it("publishes fallback value, focus, and selection exactly once through the exact input", async () => {
     copyText.mockResolvedValue(false);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const select = vi.spyOn(HTMLInputElement.prototype, "select");
     render(<ReaderCopyLink docId={DOC_ID} />);
-    const button = await enabledCopyButton();
+    fireEvent.click(await enabledCopyButton());
 
-    fireEvent.click(button);
-
-    const fallback = await screen.findByRole("textbox", { name: "Reader link" });
+    const fallback = await screen.findByRole<HTMLInputElement>("textbox", { name: "Reader link" });
     expect(fallback).toHaveValue(readerUrl());
     expect(fallback).toHaveFocus();
     expect(fallback).toHaveProperty("selectionStart", 0);
     expect(fallback).toHaveProperty("selectionEnd", readerUrl().length);
     expect(copyText).toHaveBeenCalledTimes(1);
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(select).toHaveBeenCalledTimes(1);
+
+    const handler = reactHandler<FallbackFocus>(fallback, "onFocus");
+    const sibling = document.createElement("input");
+    const foreign = document.createElement("input");
+    const detached = document.createElement("input");
+    copyElements().root.before(sibling);
+    document.body.append(foreign);
+    const repeated = { currentTarget: fallback };
+    focus.mockClear();
+    select.mockClear();
+    act(() => {
+      handler({ currentTarget: sibling });
+      handler({ currentTarget: foreign });
+      handler({ currentTarget: detached });
+      handler(repeated);
+      handler(repeated);
+    });
+    expect(focus).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    expect(fallback).toHaveFocus();
   });
 
-  it("removes document A's fallback before document B's parent layout boundary", async () => {
-    copyText.mockResolvedValue(false);
+  it("rejects every wrong button source and accepts one exact repeated event without incidental work", async () => {
+    const attempt = deferred<boolean>();
+    copyText.mockReturnValue(attempt.promise);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const select = vi.spyOn(HTMLInputElement.prototype, "select");
-    const { rerender } = render(<ReaderBoundary />);
-    fireEvent.click(await enabledCopyButton());
-    const oldFallback = await screen.findByRole("textbox", { name: "Reader link" });
-    expect(oldFallback).toHaveValue(readerUrl());
-    expect(oldFallback).toHaveFocus();
-    select.mockClear();
-    let fallbackValueAtBoundary: string | null | undefined;
-    let oldFallbackFocusedAtBoundary: boolean | undefined;
-    let labelAtBoundary: string | null | undefined;
+    render(<ReaderCopyLink docId={DOC_ID} />);
+    const exact = await enabledCopyButton();
+    const root = copyElements().root;
+    const handler = reactHandler<CopyClick>(exact, "onClick");
+    const sibling = connectedButton("Copy link");
+    const foreignRoot = document.createElement("div");
+    const foreign = document.createElement("button");
+    foreign.type = "button";
+    foreign.setAttribute("aria-label", "Copy link");
+    foreignRoot.append(foreign);
+    document.body.append(foreignRoot);
+    const detached = document.createElement("button");
+    detached.type = "button";
+    detached.setAttribute("aria-label", "Copy link");
+    const replacement = exact.cloneNode(true) as HTMLButtonElement;
+    document.body.append(replacement);
+    const markup = root.outerHTML;
 
-    rerender(
-      <ReaderBoundary
-        docId={NEXT_DOC_ID}
-        boundary={1}
-        onLayout={() => {
-          fallbackValueAtBoundary = screen.queryByRole<HTMLInputElement>("textbox", { name: "Reader link" })?.value ?? null;
-          oldFallbackFocusedAtBoundary = document.activeElement === oldFallback;
-          labelAtBoundary = screen.getByTestId("reader-copy-link").getAttribute("aria-label");
-        }}
-      />,
-    );
+    act(() => {
+      handler({ currentTarget: sibling });
+      handler({ currentTarget: foreign });
+      handler({ currentTarget: detached });
+      handler({ currentTarget: replacement });
+      exact.disabled = true;
+      handler({ currentTarget: exact });
+      exact.disabled = false;
+    });
+    expect(copyText).not.toHaveBeenCalled();
+    expect(root.outerHTML).toBe(markup);
+    expect(focus).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
 
-    expect(fallbackValueAtBoundary).toBeNull();
-    expect(oldFallbackFocusedAtBoundary).toBe(false);
-    expect(labelAtBoundary).toBe("Copy link");
-    expect(oldFallback).not.toBeInTheDocument();
-    expect(oldFallback).toHaveValue(readerUrl());
+    const repeated = { currentTarget: sibling };
+    act(() => {
+      handler(repeated);
+      repeated.currentTarget = exact;
+      handler(repeated);
+      handler(repeated);
+      repeated.currentTarget = foreign;
+      handler(repeated);
+    });
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(readerUrl());
+    expect(root.outerHTML).toBe(markup);
+    expect(focus).not.toHaveBeenCalled();
     expect(select).not.toHaveBeenCalled();
   });
 
-  it("retires document A at replacement and lets the same component copy and select document B's URL", async () => {
+  it("retires the idle status handler before copied status and keeps the current control usable", async () => {
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    copyText.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    render(<ReaderCopyLink docId={DOC_ID} />);
+    const button = await enabledCopyButton();
+    const idleClick = reactHandler<CopyClick>(button, "onClick");
+    const firstEvent = { currentTarget: button };
+    act(() => {
+      idleClick(firstEvent);
+      idleClick(firstEvent);
+    });
+    expect(copyText).toHaveBeenCalledTimes(1);
+
+    await settle(first, true);
+    const copiedButton = screen.getByRole("button", { name: "Copied" }) as HTMLButtonElement;
+    const copiedClick = reactHandler<CopyClick>(copiedButton, "onClick");
+    act(() => {
+      idleClick({ currentTarget: copiedButton });
+      copiedClick({ currentTarget: connectedButton("Copied") });
+    });
+    expect(copyText).toHaveBeenCalledTimes(1);
+
+    act(() => copiedClick({ currentTarget: copiedButton }));
+    expect(copyText).toHaveBeenNthCalledWith(2, readerUrl());
+  });
+
+  it("retires document A before the parent layout boundary and ignores its late fallback settlement", async () => {
     const oldAttempt = deferred<boolean>();
     const currentAttempt = deferred<boolean>();
     copyText.mockReturnValueOnce(oldAttempt.promise).mockReturnValueOnce(currentAttempt.promise);
-    const { rerender } = render(<ReaderBoundary />);
-    fireEvent.click(await enabledCopyButton());
-    expect(copyText).toHaveBeenCalledExactlyOnceWith(readerUrl());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const select = vi.spyOn(HTMLInputElement.prototype, "select");
+    const view = render(<ReaderBoundary />);
+    const oldButton = await enabledCopyButton();
+    const oldClick = reactHandler<CopyClick>(oldButton, "onClick");
+    act(() => oldClick({ currentTarget: oldButton }));
     let labelAtBoundary: string | null | undefined;
+    let fallbackAtBoundary: Element | null | undefined;
 
-    rerender(
+    view.rerender(
       <ReaderBoundary
         docId={NEXT_DOC_ID}
         boundary={1}
         onLayout={() => {
-          labelAtBoundary = screen.getByTestId("reader-copy-link").getAttribute("aria-label");
-          oldAttempt.resolve(true);
+          labelAtBoundary = copyElements().button.getAttribute("aria-label");
+          fallbackAtBoundary = screen.queryByTestId("reader-copy-link-fallback");
         }}
       />,
     );
-    await act(async () => {
-      await Promise.resolve();
+    const currentButton = await enabledCopyButton();
+    const currentClick = reactHandler<CopyClick>(currentButton, "onClick");
+    act(() => {
+      oldClick({ currentTarget: currentButton });
+      currentClick({ currentTarget: oldButton });
+      currentClick({ currentTarget: currentButton });
     });
     expect(labelAtBoundary).toBe("Copy link");
-
-    fireEvent.click(await enabledCopyButton());
+    expect(fallbackAtBoundary).toBeNull();
     expect(copyText).toHaveBeenNthCalledWith(2, readerUrl(NEXT_DOC_ID));
-    await act(async () => {
-      currentAttempt.resolve(false);
-      await Promise.resolve();
-    });
 
-    const fallback = await screen.findByRole("textbox", { name: "Reader link" });
+    await settle(oldAttempt, false);
+    expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
+    expect(focus).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+
+    await settle(currentAttempt, false);
+    const fallback = screen.getByRole<HTMLInputElement>("textbox", { name: "Reader link" });
     expect(fallback).toHaveValue(readerUrl(NEXT_DOC_ID));
     expect(fallback).toHaveFocus();
-    expect(fallback).toHaveProperty("selectionStart", 0);
-    expect(fallback).toHaveProperty("selectionEnd", readerUrl(NEXT_DOC_ID).length);
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(select).toHaveBeenCalledTimes(1);
   });
 
-  it("retires a rejected copy on removal and gives a remounted document independent fallback", async () => {
+  it.each(["root", "button", "fallback"] as const)(
+    "retires an exact %s callback-ref replacement without letting late old refs clear the successor",
+    async (part: CopyPart) => {
+      const currentAttempt = deferred<boolean>();
+      copyText.mockResolvedValueOnce(false).mockReturnValueOnce(currentAttempt.promise);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const select = vi.spyOn(HTMLInputElement.prototype, "select");
+      const view = createDirectView();
+      fireEvent.click(await enabledCopyButton());
+      await screen.findByRole("textbox", { name: "Reader link" });
+      const previous = copyElements(true);
+      const previousFallback = previous.fallback!;
+      const element = part === "root"
+        ? previous.root
+        : part === "button"
+          ? previous.button
+          : previousFallback;
+      const staleRef = reactRef(element);
+      const staleClick = reactHandler<CopyClick>(previous.button, "onClick");
+      const replacement = element.cloneNode(true) as typeof element;
+      document.body.append(replacement);
+
+      focus.mockClear();
+      select.mockClear();
+      act(() => {
+        staleRef(replacement);
+        staleClick({ currentTarget: previous.button });
+      });
+      expect(copyText).toHaveBeenCalledTimes(1);
+      expect(focus).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      replacement.remove();
+
+      let fallbackValueAtBoundary: string | undefined;
+      renderDirect(view.root, {
+        boundary: 1,
+        onLayout: () => {
+          fallbackValueAtBoundary = copyElements(true).fallback?.value;
+        },
+      });
+      const current = copyElements(true);
+      const currentElement = part === "root"
+        ? current.root
+        : part === "button"
+          ? current.button
+          : current.fallback!;
+      const currentClick = reactHandler<CopyClick>(current.button, "onClick");
+      expect(fallbackValueAtBoundary).toBe(readerUrl());
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(select).toHaveBeenCalledTimes(1);
+
+      focus.mockClear();
+      select.mockClear();
+      act(() => {
+        staleRef(currentElement);
+        staleRef(null);
+        staleClick({ currentTarget: current.button });
+        currentClick({ currentTarget: previous.button });
+        currentClick({ currentTarget: current.button });
+      });
+      expect(copyText).toHaveBeenCalledTimes(2);
+      expect(focus).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "isolates an equal-looking remount, crossed handlers, and reused DOM in %s order",
+    async (order) => {
+      const attempt = deferred<boolean>();
+      copyText.mockReturnValue(attempt.promise);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const select = vi.spyOn(HTMLInputElement.prototype, "select");
+      const view = createDirectView({ instance: "a" });
+      const a = copyElements();
+      await waitFor(() => expect(a.button).toBeEnabled());
+      const aClick = reactHandler<CopyClick>(a.button, "onClick");
+      const aRootRef = reactRef(a.root);
+      const aButtonRef = reactRef(a.button);
+      let oldConnectedAtBoundary: boolean | undefined;
+
+      renderDirect(view.root, {
+        instance: "b",
+        boundary: 1,
+        onLayout: () => {
+          oldConnectedAtBoundary = a.button.isConnected;
+        },
+      });
+      const b = copyElements();
+      const bClick = reactHandler<CopyClick>(b.button, "onClick");
+      expect(oldConnectedAtBoundary).toBe(false);
+      expect(b.root).not.toBe(a.root);
+      expect(b.button).not.toBe(a.button);
+
+      act(() => {
+        aRootRef(b.root);
+        aButtonRef(b.button);
+        aRootRef(null);
+        aButtonRef(null);
+        aClick({ currentTarget: b.button });
+        bClick({ currentTarget: a.button });
+      });
+      expect(copyText).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+
+      const activation = { currentTarget: b.button };
+      act(() => {
+        if (order === "stale-before-current") aClick(activation);
+        bClick(activation);
+        if (order === "current-before-stale") aClick(activation);
+        bClick(activation);
+      });
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(readerUrl());
+      expect(focus).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retires removal before parent layout and passive cleanup, then leaves a new document usable", async () => {
     const oldAttempt = deferred<boolean>();
-    copyText.mockReturnValueOnce(oldAttempt.promise).mockResolvedValueOnce(false);
+    const currentAttempt = deferred<boolean>();
+    copyText.mockReturnValueOnce(oldAttempt.promise).mockReturnValueOnce(currentAttempt.promise);
+    const passiveCleanup = vi.fn();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const select = vi.spyOn(HTMLInputElement.prototype, "select");
+    const view = createDirectView({ onPassiveCleanup: passiveCleanup });
+    const old = copyElements();
+    await waitFor(() => expect(old.button).toBeEnabled());
+    const oldClick = reactHandler<CopyClick>(old.button, "onClick");
+    const oldRootRef = reactRef(old.root);
+    act(() => oldClick({ currentTarget: old.button }));
+    let passiveCleanedAtBoundary: boolean | undefined;
+    let oldConnectedAtBoundary: boolean | undefined;
+
+    renderDirect(view.root, {
+      present: false,
+      boundary: 1,
+      onLayout: () => {
+        passiveCleanedAtBoundary = passiveCleanup.mock.calls.length > 0;
+        oldConnectedAtBoundary = old.button.isConnected;
+        oldClick({ currentTarget: old.button });
+      },
+    });
+    expect(passiveCleanedAtBoundary).toBe(false);
+    expect(oldConnectedAtBoundary).toBe(false);
+    expect(passiveCleanup).toHaveBeenCalledTimes(1);
+    expect(copyText).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      oldRootRef(old.root);
+      oldRootRef(null);
+      oldClick({ currentTarget: old.button });
+    });
+    await settle(oldAttempt, false);
+    expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
+    expect(focus).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+
+    renderDirect(view.root, {
+      docId: NEXT_DOC_ID,
+      instance: "b",
+      boundary: 2,
+    });
+    const current = copyElements();
+    await waitFor(() => expect(current.button).toBeEnabled());
+    act(() => reactHandler<CopyClick>(current.button, "onClick")({ currentTarget: current.button }));
+    expect(copyText).toHaveBeenNthCalledWith(2, readerUrl(NEXT_DOC_ID));
+  });
+
+  it("handles a rejected removed copy without an unhandled rejection", async () => {
+    const oldAttempt = deferred<boolean>();
+    copyText.mockReturnValue(oldAttempt.promise);
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
-    const { rerender } = render(<ReaderBoundary />);
+    const view = render(<ReaderBoundary />);
 
     try {
       fireEvent.click(await enabledCopyButton());
-      let buttonAtBoundary: HTMLElement | null | undefined;
-      rerender(
-        <ReaderBoundary
-          show={false}
-          boundary={1}
-          onLayout={() => {
-            buttonAtBoundary = screen.queryByTestId("reader-copy-link");
-            oldAttempt.reject(new Error("removed copy failed"));
-          }}
-        />,
-      );
+      view.rerender(<ReaderBoundary present={false} boundary={1} />);
       await act(async () => {
+        oldAttempt.reject(new Error("removed copy failed"));
         await Promise.resolve();
       });
-
-      expect(buttonAtBoundary).toBeNull();
-      expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
       expect(unhandled).toEqual([]);
-
-      rerender(<ReaderBoundary docId={NEXT_DOC_ID} boundary={2} />);
-      fireEvent.click(await enabledCopyButton());
-      expect(copyText).toHaveBeenNthCalledWith(2, readerUrl(NEXT_DOC_ID));
-      const fallback = await screen.findByRole("textbox", { name: "Reader link" });
-      expect(fallback).toHaveValue(readerUrl(NEXT_DOC_ID));
-      expect(fallback).toHaveFocus();
-      expect(fallback).toHaveProperty("selectionEnd", readerUrl(NEXT_DOC_ID).length);
+      expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
-  });
-
-  it("keeps an accessible name and a 44px icon-only phone target", async () => {
-    render(<ReaderCopyLink docId={DOC_ID} />);
-    const button = await enabledCopyButton();
-
-    expect(button).toHaveClass("h-11", "w-11", "sm:h-8", "sm:w-auto");
-    expect(within(button).getByText("Copy link")).toHaveClass("hidden", "sm:inline");
-    expect(button).toHaveAccessibleName("Copy link");
   });
 });
