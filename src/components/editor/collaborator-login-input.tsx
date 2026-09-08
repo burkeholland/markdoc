@@ -1160,6 +1160,10 @@ function createInputPublication(
     const committedRoot: HTMLDivElement = root;
     const committedInput: HTMLInputElement = input;
     const committedPlacement: InputPlacement = placement;
+    const ownerWindow = committedRoot.ownerDocument.defaultView;
+    if (!ownerWindow) return null;
+    const nativeComposedPath = ownerWindow.Event.prototype.composedPath;
+    const nativePreventDefault = ownerWindow.Event.prototype.preventDefault;
 
     const identity = Symbol("collaborator input publication");
     const action = (
@@ -1623,6 +1627,8 @@ function createInputPublication(
       nativeChange,
       nativeFocus,
       nativeKey,
+      nativePath,
+      preventKeyDefault,
       nativeMouse,
       candidateIsCurrent,
       claim,
@@ -1674,6 +1680,11 @@ function createInputPublication(
         publication.ownerDocument.defaultView;
       const nativeEvent = event.nativeEvent;
       const target = event.target;
+      const path =
+        ownerWindow &&
+        nativeEvent instanceof ownerWindow.Event
+          ? nativePath(nativeEvent)
+          : null;
       if (
         !ownerWindow ||
         !(nativeEvent instanceof ownerWindow.Event) ||
@@ -1683,8 +1694,8 @@ function createInputPublication(
         !(target instanceof ownerWindow.Node) ||
         target.ownerDocument !== publication.ownerDocument ||
         !targets.includes(target) ||
-        !nativeEvent.composedPath().includes(currentTarget) ||
-        !nativeEvent.composedPath().includes(committedRoot) ||
+        !path?.includes(currentTarget) ||
+        !path.includes(committedRoot) ||
         event.defaultPrevented ||
         nativeEvent.defaultPrevented
       ) {
@@ -1753,6 +1764,7 @@ function createInputPublication(
 
     function nativeKey(
       event: KeyboardEvent<HTMLInputElement>,
+      requireBoundaryProof = false,
     ) {
       const nativeEvent = nativeEventBase(
         event,
@@ -1771,9 +1783,44 @@ function createInputPublication(
         nativeEvent.altKey === event.altKey &&
         nativeEvent.ctrlKey === event.ctrlKey &&
         nativeEvent.metaKey === event.metaKey &&
-        nativeEvent.shiftKey === event.shiftKey
+        nativeEvent.shiftKey === event.shiftKey &&
+        (!requireBoundaryProof ||
+          (Object.getPrototypeOf(nativeEvent) ===
+            ownerWindow.KeyboardEvent.prototype &&
+            publication.ownerDocument.activeElement ===
+              committedInput &&
+            nativeEvent.target === committedInput &&
+            nativeEvent.bubbles &&
+            event.bubbles === nativeEvent.bubbles &&
+            nativeEvent.cancelable &&
+            event.cancelable === nativeEvent.cancelable &&
+            event.eventPhase === nativeEvent.eventPhase &&
+            !nativeEvent.cancelBubble &&
+            !nativeEvent.repeat &&
+            event.repeat === nativeEvent.repeat &&
+            !nativeEvent.isComposing &&
+            !nativeEvent.altKey &&
+            !nativeEvent.ctrlKey &&
+            !nativeEvent.metaKey &&
+            !nativeEvent.shiftKey))
         ? nativeEvent
         : null;
+    }
+
+    function nativePath(event: Event): readonly EventTarget[] | null {
+      try {
+        return Reflect.apply(
+          nativeComposedPath,
+          event,
+          [],
+        ) as EventTarget[];
+      } catch {
+        return null;
+      }
+    }
+
+    function preventKeyDefault(event: Event) {
+      Reflect.apply(nativePreventDefault, event, []);
     }
 
     function nativeMouse(
@@ -1953,7 +2000,10 @@ function createInputPublication(
     ) => Event | null;
     nativeKey: (
       event: KeyboardEvent<HTMLInputElement>,
+      requireBoundaryProof?: boolean,
     ) => Event | null;
+    nativePath: (event: Event) => readonly EventTarget[] | null;
+    preventKeyDefault: (event: Event) => void;
     nativeMouse: (
       event:
         | MouseEvent<HTMLButtonElement>
@@ -2027,7 +2077,7 @@ function createInputPublication(
       nativeEvent instanceof ownerWindow.Event &&
       nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
       currentTarget === publication.root &&
-      nativeEvent.composedPath().includes(publication.root)
+      runtime.nativePath(nativeEvent)?.includes(publication.root)
     ) {
       const pending = pendingReactDeliveries.get(nativeEvent);
       pendingReactDeliveries.delete(nativeEvent);
@@ -2330,6 +2380,10 @@ function createInputPublication(
     if (!runtime || !publication) return;
     const isArrow =
       event.key === "ArrowDown" || event.key === "ArrowUp";
+    const isBoundary =
+      (event.key === "Home" || event.key === "End") &&
+      presentation.expanded &&
+      presentation.candidates.length > 0;
     const isPick =
       event.key === "Enter" &&
       presentation.expanded &&
@@ -2338,6 +2392,7 @@ function createInputPublication(
       event.key === "Escape" && presentation.expanded;
     if (
       (!isArrow || presentation.candidates.length === 0) &&
+      !isBoundary &&
       !isPick &&
       !isDismiss
     ) {
@@ -2347,7 +2402,7 @@ function createInputPublication(
       ? publication.rows[presentation.activeIndex] ?? null
       : null;
     if (isPick && !row) return;
-    const nativeEvent = runtime.nativeKey(event);
+    const nativeEvent = runtime.nativeKey(event, isBoundary);
     if (!nativeEvent) return;
     const key = event.key;
     stageReactDelivery(event, nativeEvent, () => {
@@ -2359,19 +2414,27 @@ function createInputPublication(
       );
       if (!claim) return;
       try {
-        if (isArrow) {
-          event.preventDefault();
+        if (isArrow || isBoundary) {
+          if (isBoundary) {
+            runtime.preventKeyDefault(nativeEvent);
+          } else {
+            event.preventDefault();
+          }
           const count = presentation.candidates.length;
           runtime.updateState((state) =>
             freezePublished({
               ...state,
               open: true,
               active:
-                key === "ArrowDown"
-                  ? (presentation.activeIndex + 1) % count
-                  : presentation.activeIndex <= 0
+                key === "Home"
+                  ? 0
+                  : key === "End"
                     ? count - 1
-                    : presentation.activeIndex - 1,
+                    : key === "ArrowDown"
+                      ? (presentation.activeIndex + 1) % count
+                      : presentation.activeIndex <= 0
+                        ? count - 1
+                        : presentation.activeIndex - 1,
             }),
           );
         } else if (row) {
@@ -2656,10 +2719,11 @@ function createInputPublication(
 /**
  * The Share dialog's handle box with GitHub-account suggestions: an ARIA combobox over a listbox of
  * up to eight `@login`s that appears once two login characters have settled for 250 ms. ↓/↑ move,
- * Enter picks the active option (with none active it submits the typed handle as before), Escape
- * closes the list (the dialog stays open), a click picks. Picking fills the box and calls `onPick` so
- * the owner lands on the role select and still presses Add. Temporary lookup failures leave exact
- * handles usable and offer one guarded retry instead of looking like a truthful empty result.
+ * Home/End move to the first/last current option, Enter picks the active option (with none active it
+ * submits the typed handle as before), Escape closes the list (the dialog stays open), and a click
+ * picks. Picking fills the box and calls `onPick` so the owner lands on the role select and still
+ * presses Add. Temporary lookup failures leave exact handles usable and offer one guarded retry
+ * instead of looking like a truthful empty result.
  * A session without a GitHub token (`reason: "no-github-token"`) is remembered for the life of the
  * box: it asks no more and stays a plain text field.
  */
