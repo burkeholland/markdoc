@@ -14,6 +14,7 @@ const SUGGESTION_TEXT = "plain suggestion";
 const SELECTION_TEXT = "selection baseline";
 const LINK_TEXT = "linked phrase";
 const SAFE_DESTINATION = "https://example.invalid/final?mode=editor#verified";
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
 const DOCUMENT = [
   "# Pointer routing",
   "",
@@ -314,6 +315,8 @@ async function recordGesture(
   const pageCount = context.pages().length;
   counts.interactions++;
   await action();
+  await page.waitForTimeout(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+  await page.evaluate(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
   const [after, observationAfter] = await Promise.all([editorSnapshot(page), readObservation(page)]);
   const activations = observationAfter.activations.slice(observationBefore.activations.length);
   const opens = observationAfter.opens.slice(observationBefore.opens.length);
@@ -322,13 +325,24 @@ async function recordGesture(
   counts.selectionChanges += Number(after.selection !== before.selection);
   counts.focusChanges += Number(after.focus !== before.focus);
   counts.textChanges += Number(after.text !== before.text);
-  if (expected) {
-    counts.wrongItems += activations.filter((activation) => activation.id !== expected.id).length;
-    counts.wrongKinds += activations.filter((activation) => activation.kind !== expected.kind).length;
-  } else {
-    counts.wrongItems += activations.length;
-    counts.wrongKinds += activations.length;
-  }
+  const wrongItems = expected
+    ? activations.filter((activation) => activation.id !== expected.id).length
+    : activations.length;
+  const wrongKinds = expected
+    ? activations.filter((activation) => activation.kind !== expected.kind).length
+    : activations.length;
+  counts.wrongItems += wrongItems;
+  counts.wrongKinds += wrongKinds;
+  expect(wrongItems, "gesture wrong-item activation count").toBe(0);
+  expect(wrongKinds, "gesture wrong-kind activation count").toBe(0);
+  await page.evaluate(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  const observationLater = await readObservation(page);
+  expect(observationLater.activations, "gesture must not activate again after terminal observation").toEqual(
+    observationAfter.activations,
+  );
+  expect(observationLater.opens, "gesture must not open another link after terminal observation").toEqual(
+    observationAfter.opens,
+  );
   expect(after.text === before.text, "gesture must not edit document text").toBe(true);
   expect(context.pages().length, "window.open must be intercepted").toBe(pageCount);
   return { before, after, activations, opens };
