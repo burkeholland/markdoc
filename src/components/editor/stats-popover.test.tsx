@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect, type ComponentProps, type RefCallback } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type ComponentProps, type RefCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -246,9 +246,9 @@ function reactProp<T>(element: HTMLElement, name: string): T {
 }
 
 type SourceHandler = (event: { currentTarget: EventTarget | null }) => void;
-type GoalChangeHandler<T extends HTMLElement> = (event: { currentTarget: T }) => void;
+type GoalChangeHandler<T extends HTMLElement> = (event: React.ChangeEvent<T>) => void;
 type GoalSubmitHandler = (event: React.FormEvent<HTMLFormElement>) => void;
-type GoalClearHandler = (event: { currentTarget: HTMLButtonElement }) => void;
+type GoalClearHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
 
 interface GoalActions {
   form: HTMLFormElement;
@@ -303,12 +303,14 @@ function directSubmit(
   action: GoalActions,
   {
     currentTarget = action.form,
+    target = action.form,
     nativeTarget = action.form,
     submitter = action.set,
     defaultPrevented = false,
     nativeEvent: suppliedNativeEvent,
   }: {
     currentTarget?: HTMLFormElement;
+    target?: EventTarget | null;
     nativeTarget?: EventTarget | null;
     submitter?: HTMLElement | null;
     defaultPrevented?: boolean;
@@ -319,6 +321,7 @@ function directSubmit(
   const preventDefault = vi.fn(() => nativeEvent.preventDefault());
   action.submit({
     currentTarget,
+    target,
     nativeEvent,
     defaultPrevented,
     preventDefault,
@@ -331,10 +334,73 @@ function makeSubmitEvent(
   submitter: HTMLElement | null,
   defaultPrevented = false,
 ) {
-  const event = new SubmitEvent("submit", { bubbles: true, cancelable: true, submitter });
+  const ownerWindow = target instanceof Node ? target.ownerDocument?.defaultView : window;
+  const event = new (ownerWindow ?? window).SubmitEvent("submit", { bubbles: true, cancelable: true, submitter });
   Object.defineProperty(event, "target", { configurable: true, value: target });
   if (defaultPrevented) event.preventDefault();
   return event;
+}
+
+function makeChangeEvent(target: HTMLElement, type: "change" | "input" = "change") {
+  const ownerWindow = target.ownerDocument.defaultView ?? window;
+  const event = new ownerWindow.Event(type, { bubbles: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function directChange<T extends HTMLSelectElement | HTMLInputElement>(
+  handler: GoalChangeHandler<T>,
+  control: T,
+  {
+    currentTarget = control,
+    target = control,
+    nativeEvent = makeChangeEvent(control, control instanceof HTMLInputElement ? "input" : "change"),
+    defaultPrevented = false,
+  }: {
+    currentTarget?: T;
+    target?: EventTarget | null;
+    nativeEvent?: Event;
+    defaultPrevented?: boolean;
+  } = {},
+) {
+  handler({
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented,
+  } as unknown as React.ChangeEvent<T>);
+  return nativeEvent;
+}
+
+function makeClickEvent(target: Node) {
+  const ownerWindow = target.ownerDocument?.defaultView ?? window;
+  const event = new ownerWindow.MouseEvent("click", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function directClear(
+  action: GoalActions,
+  {
+    currentTarget = action.clear,
+    target = action.clear,
+    nativeEvent = target ? makeClickEvent(target) : null,
+    defaultPrevented = false,
+  }: {
+    currentTarget?: HTMLButtonElement | null;
+    target?: Node | null;
+    nativeEvent?: MouseEvent | null;
+    defaultPrevented?: boolean;
+  } = {},
+) {
+  if (!action.clearGoal || !currentTarget || !target || !nativeEvent) throw new Error("Clear control was not rendered");
+  action.clearGoal({
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented,
+  } as unknown as React.MouseEvent<HTMLButtonElement>);
+  return nativeEvent;
 }
 
 function authorizeTrigger(source: EventTarget | null = screen.getByTestId("stats-button")) {
@@ -346,6 +412,28 @@ function expectDraft(kind: WritingGoal["kind"], mode: WritingGoal["mode"], value
   expect(screen.getByTestId("goal-kind")).toHaveValue(kind);
   expect(screen.getByTestId("goal-mode")).toHaveValue(mode);
   expect(screen.getByTestId("goal-value")).toHaveValue(Number(value) || null);
+}
+
+function mountStrictGoal(session: CollabSession, source = "One two three.") {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  act(() => root.render(<StrictMode>{view(session, source)}</StrictMode>));
+  openPopover();
+  return {
+    host,
+    root,
+    rerender(nextSource: string, replacement = false) {
+      const props = { session, source: nextSource, selection: null, hydrated: true };
+      act(() =>
+        root.render(
+          <StrictMode>
+            {replacement ? <ReplacementStatsPopover {...props} /> : <StatsPopover {...props} />}
+          </StrictMode>,
+        ),
+      );
+    },
+  };
 }
 
 async function updateSharedGoal(session: CollabSession, next: WritingGoal | null) {
@@ -815,7 +903,7 @@ describe("StatsPopover writing goal draft", () => {
     await updateSharedGoal(session, goal("words", "min", 250));
     expectDraft("words", "min", "250");
 
-    fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "999" } });
+    fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "999" } });
     fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
     await updateSharedGoal(session, goal("minutes", "max", 7, "carol"));
     expectDraft("minutes", "max", "7");
@@ -833,7 +921,7 @@ describe("StatsPopover writing goal draft", () => {
     openPopover();
     expectDraft("minutes", "max", "12");
 
-    fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "44" } });
+    fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "44" } });
     rendered.rerender(view(second));
 
     expect(screen.queryByTestId("stats-popover")).toBeNull();
@@ -848,7 +936,7 @@ describe("StatsPopover writing goal draft", () => {
     openPopover();
 
     fireEvent.change(screen.getByTestId("goal-mode"), { target: { value: "max" } });
-    fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "333" } });
+    fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "333" } });
     fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
     await act(async () => {
       session.ytext.insert(0, "An unrelated source update.");
@@ -884,12 +972,12 @@ describe("StatsPopover writing goal draft", () => {
 
     try {
       act(() => {
-        stale.changeMode({ currentTarget: foreignMode });
-        stale.changeMode({ currentTarget: detachedMode });
-        stale.changeValue({ currentTarget: foreignValue });
-        stale.changeValue({ currentTarget: detachedValue });
-        stale.changeKind({ currentTarget: foreignKind });
-        stale.changeKind({ currentTarget: detachedKind });
+        directChange(stale.changeMode, foreignMode);
+        directChange(stale.changeMode, detachedMode);
+        directChange(stale.changeValue, foreignValue);
+        directChange(stale.changeValue, detachedValue);
+        directChange(stale.changeKind, foreignKind);
+        directChange(stale.changeKind, detachedKind);
       });
       expectDraft("words", "min", "100");
 
@@ -898,8 +986,8 @@ describe("StatsPopover writing goal draft", () => {
       stale.value.replaceWith(replacement);
       stale.valueRef(null);
       act(() => {
-        stale.changeValue({ currentTarget: stale.value });
-        stale.changeValue({ currentTarget: replacement });
+        directChange(stale.changeValue, stale.value);
+        directChange(stale.changeValue, replacement);
       });
       expect(screen.getByTestId("goal-value")).toBe(replacement);
       expect(getGoal(session)).toMatchObject({ value: 100 });
@@ -920,18 +1008,18 @@ describe("StatsPopover writing goal draft", () => {
 
       current.mode.value = "max";
       act(() => {
-        stale.changeMode({ currentTarget: current.mode });
-        current.changeMode({ currentTarget: current.mode });
-        current.changeMode({ currentTarget: current.mode });
+        directChange(stale.changeMode, current.mode);
+        directChange(current.changeMode, current.mode);
+        directChange(current.changeMode, current.mode);
       });
       expectDraft("words", "max", "100");
 
       const afterMode = captureGoalActions();
       afterMode.value.value = "321";
-      act(() => afterMode.changeValue({ currentTarget: afterMode.value }));
+      act(() => directChange(afterMode.changeValue, afterMode.value));
       const afterValue = captureGoalActions();
       afterValue.kind.value = "minutes";
-      act(() => afterValue.changeKind({ currentTarget: afterValue.kind }));
+      act(() => directChange(afterValue.changeKind, afterValue.kind));
       expectDraft("minutes", "max", "321");
       expect(getGoal(session)).toMatchObject({ kind: "words", mode: "min", value: 100 });
     } finally {
@@ -941,6 +1029,71 @@ describe("StatsPopover writing goal draft", () => {
       detachedMode.remove();
       detachedValue.remove();
       detachedKind.remove();
+    }
+  });
+
+  it("requires owner-window native draft events and exact wrapper and option facts without poisoning the control", () => {
+    const session = makeSession("draft-native", "owner", goal("words", "min", 100));
+    const rendered = render(view(session));
+    openPopover();
+    const current = captureGoalActions();
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow as typeof window | null;
+    if (!foreignWindow) throw new Error("The foreign document has no window");
+    current.mode.value = "max";
+    const fabricated = {
+      type: "change",
+      target: current.mode,
+      defaultPrevented: false,
+    } as unknown as Event;
+    const wrongType = new Event("click", { bubbles: true });
+    Object.defineProperty(wrongType, "target", { configurable: true, value: current.mode });
+    const foreignEvent = new foreignWindow.Event("change", { bubbles: true });
+    Object.defineProperty(foreignEvent, "target", { configurable: true, value: current.mode });
+    const mismatchedTarget = makeChangeEvent(current.mode);
+    const exactEvent = makeChangeEvent(current.mode);
+    const minOption = current.mode.options.item(0);
+    if (!minOption) throw new Error("The minimum mode option was not rendered");
+
+    try {
+      act(() => {
+        directChange(current.changeMode, current.mode, { nativeEvent: fabricated });
+        directChange(current.changeMode, current.mode, { nativeEvent: wrongType });
+        directChange(current.changeMode, current.mode, { nativeEvent: foreignEvent });
+        directChange(current.changeMode, current.mode, {
+          target: current.value,
+          nativeEvent: mismatchedTarget,
+        });
+        minOption.textContent = "Changed";
+        directChange(current.changeMode, current.mode, { nativeEvent: exactEvent });
+        minOption.textContent = "At least";
+      });
+      rendered.rerender(view(session, "One two three four."));
+      expectDraft("words", "min", "100");
+
+      const usable = captureGoalActions();
+      usable.mode.value = "max";
+      act(() => directChange(usable.changeMode, usable.mode));
+      expectDraft("words", "max", "100");
+
+      const valueAction = captureGoalActions();
+      valueAction.value.value = "222";
+      act(() =>
+        directChange(valueAction.changeValue, valueAction.value, {
+          nativeEvent: makeChangeEvent(valueAction.value, "change"),
+        }),
+      );
+      rendered.rerender(view(session, "One two three four five."));
+      expectDraft("words", "max", "100");
+
+      const usableValue = captureGoalActions();
+      usableValue.value.value = "222";
+      act(() => directChange(usableValue.changeValue, usableValue.value));
+      expectDraft("words", "max", "222");
+      expect(getGoal(session)).toEqual(goal("words", "min", 100));
+    } finally {
+      frame.remove();
     }
   });
 
@@ -980,7 +1133,7 @@ describe("StatsPopover writing goal draft", () => {
       expect(writes).toBe(0);
       expect(getGoal(session)).toBeNull();
 
-      fireEvent.change(disabled.value, { target: { value: "4.6" } });
+      fireEvent.input(disabled.value, { target: { value: "4.6" } });
       fireEvent.change(screen.getByTestId("goal-mode"), { target: { value: "max" } });
       fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
       const current = captureGoalActions();
@@ -1021,6 +1174,61 @@ describe("StatsPopover writing goal draft", () => {
     }
   });
 
+  it("requires the form owner's native SubmitEvent and exact hierarchy without poisoning Set", () => {
+    const session = makeSession("set-native");
+    let writes = 0;
+    session.meta.observe(() => writes++);
+    render(view(session));
+    openPopover();
+    fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "12" } });
+    const current = captureGoalActions();
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow as typeof window | null;
+    if (!foreignWindow) throw new Error("The foreign document has no window");
+    const fabricated = {
+      type: "submit",
+      target: current.form,
+      submitter: current.set,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+    } as unknown as SubmitEvent;
+    const genericEvent = new Event("submit", { bubbles: true, cancelable: true });
+    Object.defineProperty(genericEvent, "target", { configurable: true, value: current.form });
+    const foreignEvent = new foreignWindow.SubmitEvent("submit", {
+      bubbles: true,
+      cancelable: true,
+      submitter: current.set,
+    });
+    Object.defineProperty(foreignEvent, "target", { configurable: true, value: current.form });
+    const mismatchedWrapper = makeSubmitEvent(current.form, current.set);
+    const reordered = makeSubmitEvent(current.form, current.set);
+
+    try {
+      const rejected = [
+        directSubmit(current, { nativeEvent: fabricated }),
+        directSubmit(current, { nativeEvent: genericEvent as SubmitEvent }),
+        directSubmit(current, { nativeEvent: foreignEvent }),
+        directSubmit(current, { target: current.mode, nativeEvent: mismatchedWrapper }),
+      ];
+      current.form.insertBefore(current.kind, current.value);
+      rejected.push(directSubmit(current, { nativeEvent: reordered }));
+      current.form.insertBefore(current.value, current.kind);
+      expect(rejected.map(({ preventDefault }) => preventDefault.mock.calls.length)).toEqual([0, 0, 0, 0, 0]);
+      expect(writes).toBe(0);
+      expect(getGoal(session)).toBeNull();
+
+      const exactEvent = makeSubmitEvent(current.form, current.set);
+      const accepted = directSubmit(current, { nativeEvent: exactEvent });
+      expect(accepted.preventDefault).toHaveBeenCalledOnce();
+      expect(writes).toBe(1);
+      expect(getGoal(session)).toMatchObject({ kind: "words", mode: "min", value: 12 });
+    } finally {
+      frame.remove();
+    }
+  });
+
   it("sets the frozen current draft once after wrong submitters and repeated competing submissions", async () => {
     const session = makeSession("set-once");
     let writes = 0;
@@ -1028,7 +1236,7 @@ describe("StatsPopover writing goal draft", () => {
     render(view(session));
     openPopover();
     fireEvent.change(screen.getByTestId("goal-mode"), { target: { value: "max" } });
-    fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "4.6" } });
+    fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "4.6" } });
     fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
     const current = captureGoalActions();
     const wrong = document.createElement("button");
@@ -1085,11 +1293,11 @@ describe("StatsPopover writing goal draft", () => {
     }
 
     act(() => {
-      if (currentFirst) current.clearGoal!({ currentTarget: current.clear! });
-      stale.clearGoal!({ currentTarget: stale.clear! });
-      stale.clearGoal!({ currentTarget: current.clear! });
-      if (!currentFirst) current.clearGoal!({ currentTarget: current.clear! });
-      current.clearGoal!({ currentTarget: current.clear! });
+      if (currentFirst) directClear(current);
+      directClear(stale);
+      directClear(stale, { currentTarget: current.clear, target: current.clear });
+      if (!currentFirst) directClear(current);
+      directClear(current);
     });
 
     expect(writes).toBe(1);
@@ -1105,11 +1313,12 @@ describe("StatsPopover writing goal draft", () => {
     const stale = captureGoalActions();
     if (!stale.clear || !stale.clearGoal) throw new Error("Clear was not rendered");
     const staleSubmitEvent = makeSubmitEvent(stale.form, stale.set);
+    const staleClearEvent = makeClickEvent(stale.clear);
     const now = vi.spyOn(Date, "now").mockReturnValue(987_654);
 
     setGoal(session, goal("minutes", "max", 8, "carol"));
     const submitAttempt = directSubmit(stale, { nativeEvent: staleSubmitEvent });
-    stale.clearGoal({ currentTarget: stale.clear });
+    directClear(stale, { nativeEvent: staleClearEvent });
 
     expect(writes).toBe(1);
     expect(submitAttempt.preventDefault).not.toHaveBeenCalled();
@@ -1121,7 +1330,7 @@ describe("StatsPopover writing goal draft", () => {
     });
     const current = captureGoalActions();
     if (!current.clear || !current.clearGoal) throw new Error("Current Clear was not rendered");
-    act(() => current.clearGoal!({ currentTarget: current.clear! }));
+    act(() => directClear(current));
     expect(writes).toBe(2);
     expect(getGoal(session)).toBeNull();
   });
@@ -1140,7 +1349,7 @@ describe("StatsPopover writing goal draft", () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId("goal-clear")).toBeNull();
-    act(() => stale.clearGoal!({ currentTarget: stale.clear! }));
+    act(() => directClear(stale));
     expect(writes).toBe(0);
     expect(getGoal(session)).toMatchObject({ value: 50 });
 
@@ -1151,12 +1360,65 @@ describe("StatsPopover writing goal draft", () => {
     const current = captureGoalActions();
     if (!current.clear || !current.clearGoal) throw new Error("Current Clear was not rendered");
     act(() => {
-      stale.clearGoal!({ currentTarget: current.clear! });
-      current.clearGoal!({ currentTarget: current.clear! });
-      current.clearGoal!({ currentTarget: current.clear! });
+      directClear(stale, { currentTarget: current.clear, target: current.clear });
+      directClear(current);
+      directClear(current);
     });
     expect(writes).toBe(1);
     expect(getGoal(session)).toBeNull();
+  });
+
+  it("requires an owner-window click target inside the enabled exact Clear button without poisoning it", () => {
+    const expectedGoal = goal("words", "min", 50);
+    const session = makeSession("clear-native", "owner", expectedGoal);
+    let writes = 0;
+    session.meta.observe(() => writes++);
+    render(view(session));
+    openPopover();
+    const current = captureGoalActions();
+    if (!current.clear) throw new Error("Clear control was not rendered");
+    const frame = document.createElement("iframe");
+    const sibling = document.createElement("span");
+    document.body.append(frame, sibling);
+    const foreignWindow = frame.contentWindow as typeof window | null;
+    if (!foreignWindow) throw new Error("The foreign document has no window");
+    const fabricated = {
+      type: "click",
+      target: current.clear,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+    } as unknown as MouseEvent;
+    const genericEvent = new Event("click", { bubbles: true, cancelable: true }) as MouseEvent;
+    Object.defineProperty(genericEvent, "target", { configurable: true, value: current.clear });
+    const foreignEvent = new foreignWindow.MouseEvent("click", { bubbles: true, cancelable: true });
+    Object.defineProperty(foreignEvent, "target", { configurable: true, value: current.clear });
+
+    try {
+      act(() => {
+        directClear(current, { nativeEvent: fabricated });
+        directClear(current, { nativeEvent: genericEvent });
+        directClear(current, { target: sibling, nativeEvent: makeClickEvent(sibling) });
+        directClear(current, { nativeEvent: foreignEvent });
+        current.clear!.disabled = true;
+        directClear(current);
+        current.clear!.disabled = false;
+        current.clear!.parentElement!.insertBefore(current.clear!, current.set);
+        directClear(current);
+        current.clear!.parentElement!.append(current.clear!);
+      });
+      expect(writes).toBe(0);
+      expect(getGoal(session)).toEqual(expectedGoal);
+
+      const text = current.clear.firstChild;
+      if (!text) throw new Error("Clear button text was not rendered");
+      act(() => directClear(current, { target: text, nativeEvent: makeClickEvent(text) }));
+      expect(writes).toBe(1);
+      expect(getGoal(session)).toBeNull();
+    } finally {
+      frame.remove();
+      sibling.remove();
+    }
   });
 
   it("submits and clears only the current session, preserving rounding and attribution", async () => {
@@ -1173,7 +1435,7 @@ describe("StatsPopover writing goal draft", () => {
     expect(screen.queryByTestId("stats-popover")).toBeNull();
     openPopover();
     fireEvent.change(screen.getByTestId("goal-mode"), { target: { value: "max" } });
-    fireEvent.change(screen.getByTestId("goal-value"), { target: { value: "4.6" } });
+    fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "4.6" } });
     fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
     directSubmit(captureGoalActions());
 
@@ -1189,6 +1451,165 @@ describe("StatsPopover writing goal draft", () => {
     expect(previousWrites).toBe(0);
     expect(currentWrites).toBe(2);
     expectDraft("words", "min", "");
+  });
+
+  it.each([
+    [
+      "mode",
+      (stale: GoalActions, current: GoalActions) => {
+        current.mode.value = "max";
+        const nativeEvent = makeChangeEvent(current.mode);
+        directChange(stale.changeMode, current.mode, { nativeEvent });
+        fireEvent(current.mode, nativeEvent);
+        fireEvent(current.mode, nativeEvent);
+      },
+      ["words", "max", "100"],
+    ],
+    [
+      "value",
+      (stale: GoalActions, current: GoalActions) => {
+        current.value.value = "321";
+        const nativeEvent = makeChangeEvent(current.value, "input");
+        directChange(stale.changeValue, current.value, { nativeEvent });
+        fireEvent(current.value, nativeEvent);
+        fireEvent(current.value, nativeEvent);
+      },
+      ["words", "min", "321"],
+    ],
+    [
+      "kind",
+      (stale: GoalActions, current: GoalActions) => {
+        current.kind.value = "minutes";
+        const nativeEvent = makeChangeEvent(current.kind);
+        directChange(stale.changeKind, current.kind, { nativeEvent });
+        fireEvent(current.kind, nativeEvent);
+        fireEvent(current.kind, nativeEvent);
+      },
+      ["minutes", "min", "100"],
+    ],
+  ] as const)(
+    "keeps the current Strict Mode %s control usable after replay and rejects its stale handler",
+    (_label, interact, expected) => {
+      const session = makeSession(`strict-${_label}`, "owner", goal("words", "min", 100));
+      let writes = 0;
+      session.meta.observe(() => writes++);
+      const mounted = mountStrictGoal(session);
+      try {
+        const stale = captureGoalActions();
+        mounted.rerender("One two three four.");
+        const current = captureGoalActions();
+        expect(current.mode).toBe(stale.mode);
+        expect(current.value).toBe(stale.value);
+        expect(current.kind).toBe(stale.kind);
+
+        act(() => interact(stale, current));
+
+        expectDraft(expected[0], expected[1], expected[2]);
+        expect(writes).toBe(0);
+        expect(getGoal(session)).toEqual(goal("words", "min", 100));
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["button", (action: GoalActions) => action.set],
+    ["keyboard", () => null],
+  ] as const)(
+    "writes once from the current Strict Mode Set by %s after replay and rejects stale authority",
+    async (_label, submitter) => {
+      const session = makeSession(`strict-set-${_label}`);
+      let writes = 0;
+      let reenter: (() => void) | null = null;
+      session.meta.observe(() => {
+        writes++;
+        reenter?.();
+      });
+      const mounted = mountStrictGoal(session);
+      try {
+        fireEvent.change(screen.getByTestId("goal-mode"), { target: { value: "max" } });
+        fireEvent.input(screen.getByTestId("goal-value"), { target: { value: "4.6" } });
+        fireEvent.change(screen.getByTestId("goal-kind"), { target: { value: "minutes" } });
+        const stale = captureGoalActions();
+        mounted.rerender("One two three four five.");
+        const current = captureGoalActions();
+        const nativeEvent = makeSubmitEvent(current.form, submitter(current));
+
+        const rejected = directSubmit(stale, {
+          currentTarget: current.form,
+          target: current.form,
+          nativeEvent,
+        });
+        expect(rejected.preventDefault).not.toHaveBeenCalled();
+        expect(nativeEvent.defaultPrevented).toBe(false);
+        expect(writes).toBe(0);
+
+        act(() => {
+          reenter = () => directSubmit(current, { nativeEvent });
+          fireEvent(current.form, nativeEvent);
+          fireEvent(current.form, nativeEvent);
+          reenter = null;
+        });
+        expect(nativeEvent.defaultPrevented).toBe(true);
+        expect(writes).toBe(1);
+        await waitFor(() => {
+          expect(getGoal(session)).toMatchObject({
+            kind: "minutes",
+            mode: "max",
+            value: 5,
+            setBy: "alice",
+          });
+        });
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    },
+  );
+
+  it("clears once from the current Strict Mode button after replay and rejects the stale handler", () => {
+    const expectedGoal = goal("words", "min", 100);
+    const session = makeSession("strict-clear", "owner", expectedGoal);
+    let writes = 0;
+    let reenter: (() => void) | null = null;
+    session.meta.observe(() => {
+      writes++;
+      reenter?.();
+    });
+    const mounted = mountStrictGoal(session);
+    try {
+      const stale = captureGoalActions();
+      mounted.rerender("One two three four five six.", true);
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      openPopover();
+      const current = captureGoalActions();
+      if (!current.clear) throw new Error("Current Clear control was not rendered");
+      const nativeEvent = makeClickEvent(current.clear);
+
+      act(() => {
+        directClear(stale, {
+          currentTarget: current.clear,
+          target: current.clear,
+          nativeEvent,
+        });
+      });
+      expect(writes).toBe(0);
+      expect(getGoal(session)).toEqual(expectedGoal);
+
+      act(() => {
+        reenter = () => directClear(current, { nativeEvent });
+        fireEvent(current.clear!, nativeEvent);
+        fireEvent(current.clear!, nativeEvent);
+        reenter = null;
+      });
+      expect(writes).toBe(1);
+      expect(getGoal(session)).toBeNull();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+    }
   });
 
   it("keeps shared goal progress and attribution read-only while following remote updates", async () => {

@@ -155,15 +155,37 @@ interface GoalPresentation {
   setDisabled: boolean;
 }
 
+interface GoalElementSlot<T extends HTMLElement> {
+  expected: T | null;
+  connection: { element: T } | null;
+}
+
+interface GoalGeneration {
+  presentation: GoalPresentation;
+  form: GoalElementSlot<HTMLFormElement>;
+  modeSelect: GoalElementSlot<HTMLSelectElement>;
+  valueInput: GoalElementSlot<HTMLInputElement>;
+  kindSelect: GoalElementSlot<HTMLSelectElement>;
+  setButton: GoalElementSlot<HTMLButtonElement>;
+  clearButton: GoalElementSlot<HTMLButtonElement>;
+}
+
 interface GoalPublication {
+  generation: GoalGeneration;
   presentation: GoalPresentation;
   form: HTMLFormElement;
   modeSelect: HTMLSelectElement;
+  modeMinOption: HTMLOptionElement;
+  modeMaxOption: HTMLOptionElement;
   valueInput: HTMLInputElement;
   kindSelect: HTMLSelectElement;
+  kindWordsOption: HTMLOptionElement;
+  kindMinutesOption: HTMLOptionElement;
+  actions: HTMLSpanElement;
   setButton: HTMLButtonElement;
   clearButton: HTMLButtonElement | null;
   claimed: boolean;
+  retired: boolean;
 }
 
 interface StatsDisclosureRender {
@@ -292,7 +314,8 @@ function goalPresentationIsExact(presentation: GoalPresentation): boolean {
     draft.sharedGoal === presentation.sharedGoal.goal &&
     draft.kind === presentation.kind &&
     draft.mode === presentation.mode &&
-    draft.value === presentation.value
+    draft.value === presentation.value &&
+    presentation.setDisabled === !(Number(presentation.value) > 0)
   );
 }
 
@@ -318,6 +341,127 @@ function isGoalMode(value: string): value is GoalMode {
 
 function isGoalKind(value: string): value is GoalKind {
   return value === "words" || value === "minutes";
+}
+
+function goalElementSlot<T extends HTMLElement>(): GoalElementSlot<T> {
+  return { expected: null, connection: null };
+}
+
+const claimedGoalNativeEvents = new WeakSet<Event>();
+
+function goalSelectValueIsExact(
+  select: HTMLSelectElement,
+  value: string,
+  selected: HTMLOptionElement,
+  other: HTMLOptionElement,
+): boolean {
+  return (
+    select.value === value &&
+    select.selectedIndex === selected.index &&
+    select.selectedOptions.length === 1 &&
+    select.selectedOptions.item(0) === selected &&
+    selected.selected &&
+    !other.selected
+  );
+}
+
+function goalPublicationDomIsExact(
+  publication: GoalPublication,
+  mutable: "modeSelect" | "valueInput" | "kindSelect" | null,
+): boolean {
+  const {
+    presentation,
+    form,
+    modeSelect,
+    modeMinOption,
+    modeMaxOption,
+    valueInput,
+    kindSelect,
+    kindWordsOption,
+    kindMinutesOption,
+    actions,
+    setButton,
+    clearButton,
+  } = publication;
+  const document = form.ownerDocument;
+  const ownerWindow = document.defaultView;
+  const nodes = [
+    form,
+    modeSelect,
+    modeMinOption,
+    modeMaxOption,
+    valueInput,
+    kindSelect,
+    kindWordsOption,
+    kindMinutesOption,
+    actions,
+    setButton,
+    ...(clearButton ? [clearButton] : []),
+  ];
+  if (
+    !ownerWindow ||
+    nodes.some((node) => node.ownerDocument !== document || !node.isConnected) ||
+    form.children.length !== 4 ||
+    form.children.item(0) !== modeSelect ||
+    form.children.item(1) !== valueInput ||
+    form.children.item(2) !== kindSelect ||
+    form.children.item(3) !== actions ||
+    modeSelect.form !== form ||
+    valueInput.form !== form ||
+    kindSelect.form !== form ||
+    setButton.form !== form ||
+    modeSelect.children.length !== 2 ||
+    modeSelect.children.item(0) !== modeMinOption ||
+    modeSelect.children.item(1) !== modeMaxOption ||
+    modeSelect.options.length !== 2 ||
+    modeSelect.options.item(0) !== modeMinOption ||
+    modeSelect.options.item(1) !== modeMaxOption ||
+    kindSelect.children.length !== 2 ||
+    kindSelect.children.item(0) !== kindWordsOption ||
+    kindSelect.children.item(1) !== kindMinutesOption ||
+    kindSelect.options.length !== 2 ||
+    kindSelect.options.item(0) !== kindWordsOption ||
+    kindSelect.options.item(1) !== kindMinutesOption ||
+    actions.parentElement !== form ||
+    actions.children.length !== (clearButton ? 2 : 1) ||
+    actions.children.item(0) !== setButton ||
+    (clearButton ? actions.children.item(1) !== clearButton || clearButton.form !== form : actions.children.item(1) !== null) ||
+    modeMinOption.value !== "min" ||
+    modeMinOption.textContent !== "At least" ||
+    modeMinOption.disabled ||
+    modeMaxOption.value !== "max" ||
+    modeMaxOption.textContent !== "At most" ||
+    modeMaxOption.disabled ||
+    kindWordsOption.value !== "words" ||
+    kindWordsOption.textContent !== "words" ||
+    kindWordsOption.disabled ||
+    kindMinutesOption.value !== "minutes" ||
+    kindMinutesOption.textContent !== "min read" ||
+    kindMinutesOption.disabled ||
+    modeSelect.disabled ||
+    valueInput.disabled ||
+    kindSelect.disabled ||
+    valueInput.type !== "number" ||
+    valueInput.min !== "1" ||
+    valueInput.step !== "1" ||
+    valueInput.inputMode !== "numeric" ||
+    valueInput.placeholder !== (presentation.kind === "words" ? "500" : "5") ||
+    setButton.type !== "submit" ||
+    setButton.disabled !== presentation.setDisabled ||
+    (clearButton ? clearButton.type !== "button" || clearButton.disabled : presentation.sharedGoal.goal !== null) ||
+    Boolean(clearButton) !== Boolean(presentation.sharedGoal.goal)
+  ) {
+    return false;
+  }
+  const expectedModeOption = presentation.mode === "min" ? modeMinOption : modeMaxOption;
+  const otherModeOption = presentation.mode === "min" ? modeMaxOption : modeMinOption;
+  const expectedKindOption = presentation.kind === "words" ? kindWordsOption : kindMinutesOption;
+  const otherKindOption = presentation.kind === "words" ? kindMinutesOption : kindWordsOption;
+  return (
+    (mutable === "modeSelect" || goalSelectValueIsExact(modeSelect, presentation.mode, expectedModeOption, otherModeOption)) &&
+    (mutable === "valueInput" || valueInput.value === presentation.value) &&
+    (mutable === "kindSelect" || goalSelectValueIsExact(kindSelect, presentation.kind, expectedKindOption, otherKindOption))
+  );
 }
 
 /**
@@ -642,174 +786,278 @@ function GoalEditor({
   presentation: GoalPresentation;
   setDraft: Dispatch<SetStateAction<GoalDraft>>;
 }) {
+  const generation = useMemo<GoalGeneration>(
+    () => ({
+      presentation,
+      form: goalElementSlot(),
+      modeSelect: goalElementSlot(),
+      valueInput: goalElementSlot(),
+      kindSelect: goalElementSlot(),
+      setButton: goalElementSlot(),
+      clearButton: goalElementSlot(),
+    }),
+    [presentation],
+  );
+  const activeGenerationRef = useRef<GoalGeneration | null>(null);
+  const claimedGenerationRef = useRef<GoalGeneration | null>(null);
   const activePublicationRef = useRef<GoalPublication | null>(null);
-  const formOwnerRef = useRef<ElementOwner<GoalPresentation, HTMLFormElement> | null>(null);
-  const modeOwnerRef = useRef<ElementOwner<GoalPresentation, HTMLSelectElement> | null>(null);
-  const valueOwnerRef = useRef<ElementOwner<GoalPresentation, HTMLInputElement> | null>(null);
-  const kindOwnerRef = useRef<ElementOwner<GoalPresentation, HTMLSelectElement> | null>(null);
-  const setOwnerRef = useRef<ElementOwner<GoalPresentation, HTMLButtonElement> | null>(null);
-  const clearOwnerRef = useRef<ElementOwner<GoalPresentation, HTMLButtonElement> | null>(null);
   const { canEdit, kind, mode, value } = presentation;
   const goal = presentation.sharedGoal.goal;
   const progress = presentation.progress.progress;
 
+  function retirePublication(publication: GoalPublication | null) {
+    if (!publication || publication.retired) return;
+    publication.retired = true;
+    if (activePublicationRef.current === publication) activePublicationRef.current = null;
+  }
+
+  function retireGenerationPublication(exactGeneration: GoalGeneration) {
+    const publication = activePublicationRef.current;
+    if (publication?.generation === exactGeneration) retirePublication(publication);
+  }
+
+  function publicationForGeneration(exactGeneration: GoalGeneration): GoalPublication | null {
+    const form = exactGeneration.form.connection?.element;
+    const modeSelect = exactGeneration.modeSelect.connection?.element;
+    const valueInput = exactGeneration.valueInput.connection?.element;
+    const kindSelect = exactGeneration.kindSelect.connection?.element;
+    const setButton = exactGeneration.setButton.connection?.element;
+    const clearButton = exactGeneration.clearButton.connection?.element ?? null;
+    const ownerWindow = form?.ownerDocument.defaultView;
+    const modeMinOption = modeSelect?.children.item(0);
+    const modeMaxOption = modeSelect?.children.item(1);
+    const kindWordsOption = kindSelect?.children.item(0);
+    const kindMinutesOption = kindSelect?.children.item(1);
+    const actions = setButton?.parentElement;
+    if (
+      !canEdit ||
+      !form ||
+      !modeSelect ||
+      !valueInput ||
+      !kindSelect ||
+      !setButton ||
+      (goal ? !clearButton : clearButton !== null) ||
+      !ownerWindow ||
+      !(modeMinOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(modeMaxOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(kindWordsOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(kindMinutesOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(actions instanceof ownerWindow.HTMLSpanElement)
+    ) {
+      return null;
+    }
+    const publication: GoalPublication = {
+      generation: exactGeneration,
+      presentation,
+      form,
+      modeSelect,
+      modeMinOption,
+      modeMaxOption,
+      valueInput,
+      kindSelect,
+      kindWordsOption,
+      kindMinutesOption,
+      actions,
+      setButton,
+      clearButton,
+      claimed: false,
+      retired: false,
+    };
+    return goalPublicationDomIsExact(publication, null) ? publication : null;
+  }
+
+  function publishGeneration(exactGeneration: GoalGeneration) {
+    if (
+      claimedGenerationRef.current === exactGeneration ||
+      activeGenerationRef.current !== exactGeneration
+    ) {
+      return;
+    }
+    const next = publicationForGeneration(exactGeneration);
+    if (!next) return;
+    const current = activePublicationRef.current;
+    if (
+      current &&
+      !current.retired &&
+      current.generation === exactGeneration &&
+      current.form === next.form &&
+      current.modeSelect === next.modeSelect &&
+      current.valueInput === next.valueInput &&
+      current.kindSelect === next.kindSelect &&
+      current.setButton === next.setButton &&
+      current.clearButton === next.clearButton
+    ) {
+      return;
+    }
+    retirePublication(current);
+    activePublicationRef.current = next;
+  }
+
   function bindElement<T extends HTMLElement>(
-    ownerRef: MutableRefObject<ElementOwner<GoalPresentation, T> | null>,
+    exactGeneration: GoalGeneration,
+    slot: GoalElementSlot<T>,
     element: T | null,
   ) {
     if (!element) {
-      if (ownerRef.current?.render !== presentation) return;
-      ownerRef.current = null;
-      if (activePublicationRef.current?.presentation === presentation) activePublicationRef.current = null;
+      if (!slot.connection) return;
+      slot.connection = null;
+      retireGenerationPublication(exactGeneration);
       return;
     }
-    const owner: ElementOwner<GoalPresentation, T> = { render: presentation, element };
-    ownerRef.current = owner;
+    if (slot.expected && slot.expected !== element) return;
+    slot.expected ??= element;
+    const connection = { element };
+    slot.connection = connection;
+    retireGenerationPublication(exactGeneration);
+    publishGeneration(exactGeneration);
     return () => {
-      if (ownerRef.current !== owner) return;
-      ownerRef.current = null;
-      if (activePublicationRef.current?.presentation === presentation) activePublicationRef.current = null;
+      if (slot.connection !== connection) return;
+      slot.connection = null;
+      retireGenerationPublication(exactGeneration);
     };
   }
 
   useLayoutEffect(() => {
-    const form = formOwnerRef.current?.render === presentation ? formOwnerRef.current.element : null;
-    const modeSelect = modeOwnerRef.current?.render === presentation ? modeOwnerRef.current.element : null;
-    const valueInput = valueOwnerRef.current?.render === presentation ? valueOwnerRef.current.element : null;
-    const kindSelect = kindOwnerRef.current?.render === presentation ? kindOwnerRef.current.element : null;
-    const setButton = setOwnerRef.current?.render === presentation ? setOwnerRef.current.element : null;
-    const clearButton = clearOwnerRef.current?.render === presentation ? clearOwnerRef.current.element : null;
-    if (!canEdit || !form || !modeSelect || !valueInput || !kindSelect || !setButton || (goal && !clearButton)) {
-      activePublicationRef.current = null;
-      return;
-    }
-    const publication: GoalPublication = {
-      presentation,
-      form,
-      modeSelect,
-      valueInput,
-      kindSelect,
-      setButton,
-      clearButton,
-      claimed: false,
-    };
-    activePublicationRef.current = publication;
+    activeGenerationRef.current = generation;
+    publishGeneration(generation);
     return () => {
-      if (activePublicationRef.current === publication) activePublicationRef.current = null;
+      if (activeGenerationRef.current === generation) activeGenerationRef.current = null;
+      retireGenerationPublication(generation);
     };
   });
 
-  function currentPublication() {
+  function currentPublication(mutable: "modeSelect" | "valueInput" | "kindSelect" | null) {
     const publication = activePublicationRef.current;
     if (
       !publication ||
+      publication.retired ||
+      publication.claimed ||
+      publication.generation !== generation ||
       publication.presentation !== presentation ||
+      activeGenerationRef.current !== generation ||
+      claimedGenerationRef.current === generation ||
       !goalPresentationIsExact(presentation) ||
       !canEdit ||
-      formOwnerRef.current?.render !== presentation ||
-      formOwnerRef.current.element !== publication.form ||
-      modeOwnerRef.current?.render !== presentation ||
-      modeOwnerRef.current.element !== publication.modeSelect ||
-      valueOwnerRef.current?.render !== presentation ||
-      valueOwnerRef.current.element !== publication.valueInput ||
-      kindOwnerRef.current?.render !== presentation ||
-      kindOwnerRef.current.element !== publication.kindSelect ||
-      setOwnerRef.current?.render !== presentation ||
-      setOwnerRef.current.element !== publication.setButton ||
+      generation.form.connection?.element !== publication.form ||
+      generation.modeSelect.connection?.element !== publication.modeSelect ||
+      generation.valueInput.connection?.element !== publication.valueInput ||
+      generation.kindSelect.connection?.element !== publication.kindSelect ||
+      generation.setButton.connection?.element !== publication.setButton ||
       (publication.clearButton
-        ? clearOwnerRef.current?.render !== presentation || clearOwnerRef.current.element !== publication.clearButton
-        : clearOwnerRef.current?.render === presentation)
-    ) {
-      return null;
-    }
-    const { form, modeSelect, valueInput, kindSelect, setButton, clearButton } = publication;
-    const actions = setButton.parentElement;
-    if (
-      !form.isConnected ||
-      !modeSelect.isConnected ||
-      !valueInput.isConnected ||
-      !kindSelect.isConnected ||
-      !setButton.isConnected ||
-      (clearButton && !clearButton.isConnected) ||
-      modeSelect.form !== form ||
-      valueInput.form !== form ||
-      kindSelect.form !== form ||
-      setButton.form !== form ||
-      (clearButton && clearButton.form !== form) ||
-      form.children.length !== 4 ||
-      form.children.item(0) !== modeSelect ||
-      form.children.item(1) !== valueInput ||
-      form.children.item(2) !== kindSelect ||
-      !actions ||
-      form.children.item(3) !== actions ||
-      actions.children.item(0) !== setButton ||
-      actions.children.length !== (clearButton ? 2 : 1) ||
-      (clearButton && actions.children.item(1) !== clearButton) ||
-      setButton.type !== "submit" ||
-      setButton.disabled !== presentation.setDisabled ||
-      (goal ? !clearButton || clearButton.type !== "button" : clearButton !== null)
+        ? generation.clearButton.connection?.element !== publication.clearButton
+        : generation.clearButton.connection !== null) ||
+      !goalPublicationDomIsExact(publication, mutable)
     ) {
       return null;
     }
     return publication;
   }
 
-  function claimDraft(
-    source: EventTarget | null,
-    expected: "modeSelect" | "valueInput" | "kindSelect",
-  ) {
-    const publication = currentPublication();
-    if (!publication || publication.claimed || source !== publication[expected]) return null;
+  function claimEvent(publication: GoalPublication, nativeEvent: Event) {
+    if (
+      activePublicationRef.current !== publication ||
+      publication.retired ||
+      publication.claimed ||
+      claimedGenerationRef.current === publication.generation ||
+      claimedGoalNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
     publication.claimed = true;
-    return publication;
+    claimedGenerationRef.current = publication.generation;
+    claimedGoalNativeEvents.add(nativeEvent);
+    return true;
+  }
+
+  function exactChangeEvent<T extends HTMLSelectElement | HTMLInputElement>(
+    event: React.ChangeEvent<T>,
+    control: T,
+    type: "change" | "input",
+  ): Event | null {
+    const nativeEvent = event.nativeEvent;
+    const ownerWindow = control.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      event.currentTarget !== control ||
+      event.target !== control ||
+      event.defaultPrevented ||
+      !(nativeEvent instanceof ownerWindow.Event) ||
+      nativeEvent.type !== type ||
+      nativeEvent.target !== control ||
+      nativeEvent.defaultPrevented
+    ) {
+      return null;
+    }
+    return nativeEvent;
   }
 
   function changeMode(event: React.ChangeEvent<HTMLSelectElement>) {
-    const next = event.currentTarget.value;
-    if (!isGoalMode(next) || !claimDraft(event.currentTarget, "modeSelect")) return;
+    const publication = currentPublication("modeSelect");
+    if (!publication) return;
+    const nativeEvent = exactChangeEvent(event, publication.modeSelect, "change");
+    const next = publication.modeSelect.value;
+    const selected = next === "min" ? publication.modeMinOption : publication.modeMaxOption;
+    const other = next === "min" ? publication.modeMaxOption : publication.modeMinOption;
+    if (
+      !nativeEvent ||
+      !isGoalMode(next) ||
+      !goalSelectValueIsExact(publication.modeSelect, next, selected, other) ||
+      !claimEvent(publication, nativeEvent)
+    ) {
+      return;
+    }
     setDraft({ ...presentation.draft, mode: next });
   }
 
   function changeValue(event: React.ChangeEvent<HTMLInputElement>) {
-    const next = event.currentTarget.value;
-    if (!claimDraft(event.currentTarget, "valueInput")) return;
+    const publication = currentPublication("valueInput");
+    if (!publication) return;
+    const nativeEvent = exactChangeEvent(event, publication.valueInput, "input");
+    if (!nativeEvent || !claimEvent(publication, nativeEvent)) return;
+    const next = publication.valueInput.value;
     setDraft({ ...presentation.draft, value: next });
   }
 
   function changeKind(event: React.ChangeEvent<HTMLSelectElement>) {
-    const next = event.currentTarget.value;
-    if (!isGoalKind(next) || !claimDraft(event.currentTarget, "kindSelect")) return;
+    const publication = currentPublication("kindSelect");
+    if (!publication) return;
+    const nativeEvent = exactChangeEvent(event, publication.kindSelect, "change");
+    const next = publication.kindSelect.value;
+    const selected = next === "words" ? publication.kindWordsOption : publication.kindMinutesOption;
+    const other = next === "words" ? publication.kindMinutesOption : publication.kindWordsOption;
+    if (
+      !nativeEvent ||
+      !isGoalKind(next) ||
+      !goalSelectValueIsExact(publication.kindSelect, next, selected, other) ||
+      !claimEvent(publication, nativeEvent)
+    ) {
+      return;
+    }
     setDraft({ ...presentation.draft, kind: next });
   }
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
+    const publication = currentPublication(null);
+    if (!publication) return;
     const nativeEvent = event.nativeEvent;
-    const formOwner = formOwnerRef.current;
-    const setOwner = setOwnerRef.current;
+    const ownerWindow = publication.form.ownerDocument.defaultView;
     if (
-      formOwner?.render !== presentation ||
-      setOwner?.render !== presentation ||
-      event.currentTarget !== formOwner.element ||
+      !ownerWindow ||
+      event.currentTarget !== publication.form ||
+      event.target !== publication.form ||
       event.defaultPrevented ||
-      !(nativeEvent instanceof SubmitEvent) ||
-      nativeEvent.target !== formOwner.element ||
+      !(nativeEvent instanceof ownerWindow.SubmitEvent) ||
+      nativeEvent.type !== "submit" ||
+      nativeEvent.target !== publication.form ||
       nativeEvent.defaultPrevented ||
-      nativeEvent.submitter !== setOwner.element
-    ) {
-      return;
-    }
-    const publication = currentPublication();
-    if (
-      !publication ||
-      publication.claimed ||
+      !nativeEvent.bubbles ||
+      !nativeEvent.cancelable ||
+      (nativeEvent.submitter !== null && nativeEvent.submitter !== publication.setButton) ||
       publication.setButton.disabled ||
-      publication.modeSelect.value !== presentation.mode ||
-      publication.valueInput.value !== presentation.value ||
-      publication.kindSelect.value !== presentation.kind
+      !claimEvent(publication, nativeEvent)
     ) {
       return;
     }
-    publication.claimed = true;
     const exactSession = presentation.session;
     const exactKind = presentation.kind;
     const exactMode = presentation.mode;
@@ -828,20 +1076,30 @@ function GoalEditor({
   }
 
   function clear(event: React.MouseEvent<HTMLButtonElement>) {
-    const owner = clearOwnerRef.current;
-    if (owner?.render !== presentation || event.currentTarget !== owner.element) return;
-    const publication = currentPublication();
+    const publication = currentPublication(null);
+    const clearButton = publication?.clearButton;
+    if (!publication || !clearButton) return;
+    const nativeEvent = event.nativeEvent;
+    const ownerWindow = clearButton.ownerDocument.defaultView;
+    const target = event.target;
     if (
-      !publication ||
-      publication.claimed ||
       !presentation.sharedGoal.goal ||
-      event.currentTarget !== publication.clearButton ||
-      !publication.clearButton ||
-      publication.clearButton.disabled
+      !ownerWindow ||
+      event.currentTarget !== clearButton ||
+      event.defaultPrevented ||
+      !(target instanceof ownerWindow.Node) ||
+      !clearButton.contains(target) ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.target !== target ||
+      nativeEvent.defaultPrevented ||
+      !nativeEvent.bubbles ||
+      !nativeEvent.cancelable ||
+      clearButton.disabled ||
+      !claimEvent(publication, nativeEvent)
     ) {
       return;
     }
-    publication.claimed = true;
     setGoal(presentation.session, null);
   }
 
@@ -867,9 +1125,9 @@ function GoalEditor({
       {summary}
       {goal?.setBy && <div className="mt-0.5 text-[11px] text-ink-4">Set by @{goal.setBy}; shared with everyone on this document.</div>}
       {canEdit && (
-        <form ref={(element) => bindElement(formOwnerRef, element)} className="mt-2 flex flex-wrap items-center gap-1.5" onSubmit={submit}>
+        <form ref={(element) => bindElement(generation, generation.form, element)} className="mt-2 flex flex-wrap items-center gap-1.5" onSubmit={submit}>
           <select
-            ref={(element) => bindElement(modeOwnerRef, element)}
+            ref={(element) => bindElement(generation, generation.modeSelect, element)}
             className="select h-8 shrink-0 px-1.5 text-[13px]"
             value={mode}
             onChange={changeMode}
@@ -880,7 +1138,7 @@ function GoalEditor({
             <option value="max">At most</option>
           </select>
           <input
-            ref={(element) => bindElement(valueOwnerRef, element)}
+            ref={(element) => bindElement(generation, generation.valueInput, element)}
             className="input h-8 w-18 shrink-0 px-2 text-[13px] tabular-nums"
             type="number"
             min={1}
@@ -893,7 +1151,7 @@ function GoalEditor({
             data-testid="goal-value"
           />
           <select
-            ref={(element) => bindElement(kindOwnerRef, element)}
+            ref={(element) => bindElement(generation, generation.kindSelect, element)}
             className="select h-8 shrink-0 px-1.5 text-[13px]"
             value={kind}
             onChange={changeKind}
@@ -904,11 +1162,11 @@ function GoalEditor({
             <option value="minutes">min read</option>
           </select>
           <span className="ml-auto inline-flex gap-1.5">
-            <button ref={(element) => bindElement(setOwnerRef, element)} type="submit" className="btn btn-primary btn-sm h-8" disabled={presentation.setDisabled} data-testid="goal-set">
+            <button ref={(element) => bindElement(generation, generation.setButton, element)} type="submit" className="btn btn-primary btn-sm h-8" disabled={presentation.setDisabled} data-testid="goal-set">
               Set
             </button>
             {goal && (
-              <button ref={(element) => bindElement(clearOwnerRef, element)} type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
+              <button ref={(element) => bindElement(generation, generation.clearButton, element)} type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
                 Clear
               </button>
             )}
