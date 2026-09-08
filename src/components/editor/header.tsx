@@ -5890,7 +5890,7 @@ interface MoreMenuPublication {
   readonly triggerSnapshot: ModeSwitcherDomSnapshot;
   readonly contentSnapshot: ModeSwitcherDomSnapshot | null;
   readonly placements: readonly ModeSwitcherPlacementSnapshot[];
-  readonly isExact: (diagnosticContext?: string) => boolean;
+  readonly isExact: () => boolean;
   readonly recordElementChange: (
     owner: MoreMenuElementOwnerHandle,
     element: HTMLElement | null,
@@ -5927,61 +5927,6 @@ interface MoreMenuGenericSelectionIntent {
   readonly target: Node;
   readonly item: HTMLElement;
   readonly path: readonly EventTarget[];
-}
-
-interface MoreMenuSelectionDiagnosticChannel {
-  readonly records: unknown[];
-  readonly identities: WeakMap<object, number>;
-  nextIdentity: number;
-}
-
-type MoreMenuDiagnosticPredicate = readonly [name: string, passed: boolean | null];
-
-function recordMoreMenuSelectionDiagnostic(
-  document: Document,
-  boundary: string,
-  result: boolean,
-  predicates: readonly MoreMenuDiagnosticPredicate[],
-  identities: Readonly<Record<string, unknown>>,
-  state: Readonly<Record<string, unknown>> = {},
-) {
-  const ownerWindow = document.defaultView as (
-    | (Window & typeof globalThis & {
-      __moreMenuInternalSelectionTrace?: MoreMenuSelectionDiagnosticChannel;
-    })
-    | null
-  );
-  const channel = ownerWindow?.__moreMenuInternalSelectionTrace;
-  if (!channel) return;
-  const identity = (value: unknown) => {
-    if (
-      (typeof value !== "object" || value === null)
-      && typeof value !== "function"
-    ) {
-      return null;
-    }
-    const object = value as object;
-    const current = channel.identities.get(object);
-    if (current) return current;
-    const next = channel.nextIdentity++;
-    channel.identities.set(object, next);
-    return next;
-  };
-  const predicateRecord = Object.freeze(Object.fromEntries(predicates));
-  const identityRecord = Object.freeze(
-    Object.fromEntries(
-      Object.entries(identities).map(([name, value]) => [name, identity(value)]),
-    ),
-  );
-  channel.records.push(Object.freeze({
-    sequence: channel.records.length,
-    boundary,
-    result,
-    firstFailed: predicates.find(([, passed]) => passed === false)?.[0] ?? null,
-    predicates: predicateRecord,
-    identities: identityRecord,
-    state: Object.freeze({ ...state }),
-  }));
 }
 
 interface MoreMenuFocusIntent {
@@ -6128,7 +6073,7 @@ class MoreMenuPublicationCoordinator {
       const restore = installMoreMenuDispatchObserver(
         publication.document.defaultView,
         item,
-        (target, event) => this.observeDispatchedCustom(publication, target, event, true),
+        (target, event) => this.observeDispatchedCustom(publication, target, event),
       );
       if (!restore) {
         this.#unsafeDispatchTargets.add(item);
@@ -6256,34 +6201,13 @@ class MoreMenuPublicationCoordinator {
     target: Node,
     path: readonly EventTarget[],
   ) {
-    const predicates: readonly MoreMenuDiagnosticPredicate[] = [
-      ["activePublicationIdentity", this.#active === publication],
-      ["nativeEventNotPreviouslyStaged", !this.#stagedNativeEvents.has(nativeEvent)],
-      ["nativeEventNotClaimed", !this.#claimedEvents.has(nativeEvent)],
-      ["publicationNotClaimed", !this.#claimedPublications.has(publication)],
-      ["actionNotClaimed", !this.#claimedActions.has(action)],
-    ];
-    const accepted = predicates.every(([, passed]) => passed === true);
-    recordMoreMenuSelectionDiagnostic(
-      publication.document,
-      "stage-selection",
-      accepted,
-      predicates,
-      {
-        activePublication: this.#active,
-        publication,
-        action,
-        nativeEvent,
-        target,
-      },
-      {
-        nativeEventStagedBefore: this.#stagedNativeEvents.has(nativeEvent),
-        nativeEventClaimedBefore: this.#claimedEvents.has(nativeEvent),
-        publicationClaimedBefore: this.#claimedPublications.has(publication),
-        actionClaimedBefore: this.#claimedActions.has(action),
-      },
-    );
-    if (!accepted) {
+    if (
+      this.#active !== publication
+      || this.#stagedNativeEvents.has(nativeEvent)
+      || this.#claimedEvents.has(nativeEvent)
+      || this.#claimedPublications.has(publication)
+      || this.#claimedActions.has(action)
+    ) {
       return false;
     }
     this.#stagedNativeEvents.add(nativeEvent);
@@ -6311,95 +6235,25 @@ class MoreMenuPublicationCoordinator {
     publication: MoreMenuPublication,
     dispatchTarget: EventTarget,
     customEvent: Event,
-    installedPerItemObserver = false,
   ): MoreMenuDispatchCompletion | null {
-    const activePublicationIdentity = this.#active === publication;
-    const publicationExact = activePublicationIdentity
-      ? publication.isExact("dispatch-observer")
-      : null;
-    if (!activePublicationIdentity || publicationExact !== true) {
-      recordMoreMenuSelectionDiagnostic(
-        publication.document,
-        "dispatch-observer-interception",
-        false,
-        [
-          ["activePublicationIdentity", activePublicationIdentity],
-          ["publicationExact", publicationExact],
-        ],
-        {
-          activePublication: this.#active,
-          publication,
-          customEvent,
-          dispatchTarget,
-        },
-        { installedPerItemObserver },
-      );
-      return null;
-    }
+    if (this.#active !== publication || !publication.isExact()) return null;
     const intent = this.#selectionIntent;
     const item = intent && publication.dom.actions[intent.action.name];
-    const intentPresent = Boolean(intent);
-    const intentPublicationIdentity = intent ? intent.publication === publication : null;
-    const itemPresent = Boolean(item);
-    const dispatchTargetIdentity = item ? dispatchTarget === item : null;
-    const customEventUndispatchedExact = (
-      intentPresent
-      && intentPublicationIdentity
+    if (
+      intent
+      && intent.publication === publication
       && item
-      && dispatchTargetIdentity
-    )
-      ? exactMoreMenuUndispatchedSelect(publication, item, customEvent)
-      : null;
-    const nativeClickAtRadixSelection = (
-      customEventUndispatchedExact
-      && intent
-      && item
-    )
-      ? moreMenuNativeClickIsAtRadixSelection(
+      && dispatchTarget === item
+      && exactMoreMenuUndispatchedSelect(publication, item, customEvent)
+      && moreMenuNativeClickIsAtRadixSelection(
         publication,
         item,
         intent.nativeEvent,
         intent.target,
         intent.path,
       )
-      : null;
-    const selectionPredicates: readonly MoreMenuDiagnosticPredicate[] = [
-      ["activePublicationIdentity", activePublicationIdentity],
-      ["publicationExact", publicationExact],
-      ["selectionIntentPresent", intentPresent],
-      ["intentPublicationIdentity", intentPublicationIdentity],
-      ["itemPresent", itemPresent],
-      ["dispatchTargetIdentity", dispatchTargetIdentity],
-      ["customEventUndispatchedExact", customEventUndispatchedExact],
-      ["nativeClickAtRadixSelection", nativeClickAtRadixSelection],
-    ];
-    const selectionCandidate = selectionPredicates.every(([, passed]) => passed === true);
-    if (selectionCandidate && intent && item) {
+    ) {
       const completeSelection: MoreMenuDispatchCompletion = (reachedTarget) => {
-        recordMoreMenuSelectionDiagnostic(
-          publication.document,
-          "dispatch-observer-completion",
-          reachedTarget,
-          [
-            ["customEventReachedTarget", reachedTarget],
-          ],
-          {
-            publication,
-            intentPublication: intent.publication,
-            action: intent.action,
-            nativeEvent: intent.nativeEvent,
-            customEvent,
-            dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-            dispatchTarget,
-            item,
-          },
-          {
-            installedPerItemObserver,
-            selectionIntentStillCurrent: this.#selectionIntent === intent,
-            dispatchedCustomEventStillCurrent:
-              this.#dispatchedSelectionCustomEvent === customEvent,
-          },
-        );
         if (
           !reachedTarget
           && this.#selectionIntent === intent
@@ -6412,109 +6266,22 @@ class MoreMenuPublicationCoordinator {
       };
       const dispatched = this.#dispatchedSelectionCustomEvent;
       if (dispatched) {
-        if (dispatched === customEvent) {
-          recordMoreMenuSelectionDiagnostic(
-            publication.document,
-            "dispatch-observer-interception",
-            true,
-            [...selectionPredicates, ["priorDispatchCompatible", true]],
-            {
-              publication,
-              intentPublication: intent.publication,
-              action: intent.action,
-              nativeEvent: intent.nativeEvent,
-              customEvent,
-              dispatchedCustomEvent: dispatched,
-              dispatchTarget,
-              item,
-            },
-            {
-              installedPerItemObserver,
-              nativeEventStaged: this.#stagedNativeEvents.has(intent.nativeEvent),
-            },
-          );
-          return completeSelection;
-        }
+        if (dispatched === customEvent) return completeSelection;
         const ownerWindow = publication.document.defaultView;
-        const priorDispatchConflicts = Boolean(
+        if (
           ownerWindow
           && nativeEventGetter<number>(
             ownerWindow.Event.prototype,
             "eventPhase",
             dispatched,
           ) !== ownerWindow.Event.NONE
-        );
-        if (priorDispatchConflicts) {
-          recordMoreMenuSelectionDiagnostic(
-            publication.document,
-            "dispatch-observer-interception",
-            false,
-            [...selectionPredicates, ["priorDispatchCompatible", false]],
-            {
-              publication,
-              intentPublication: intent.publication,
-              action: intent.action,
-              nativeEvent: intent.nativeEvent,
-              customEvent,
-              dispatchedCustomEvent: dispatched,
-              dispatchTarget,
-              item,
-            },
-            {
-              installedPerItemObserver,
-              nativeEventStaged: this.#stagedNativeEvents.has(intent.nativeEvent),
-            },
-          );
+        ) {
           return null;
         }
       }
       this.#dispatchedSelectionCustomEvent = customEvent;
-      recordMoreMenuSelectionDiagnostic(
-        publication.document,
-        "dispatch-observer-interception",
-        true,
-        [...selectionPredicates, ["priorDispatchCompatible", true]],
-        {
-          publication,
-          intentPublication: intent.publication,
-          action: intent.action,
-          nativeEvent: intent.nativeEvent,
-          customEvent,
-          dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-          dispatchTarget,
-          item,
-        },
-        {
-          installedPerItemObserver,
-          nativeEventStaged: this.#stagedNativeEvents.has(intent.nativeEvent),
-        },
-      );
       return completeSelection;
     }
-    recordMoreMenuSelectionDiagnostic(
-      publication.document,
-      "dispatch-observer-interception",
-      false,
-      selectionPredicates,
-      {
-        publication,
-        intentPublication: intent?.publication,
-        action: intent?.action,
-        nativeEvent: intent?.nativeEvent,
-        customEvent,
-        dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-        dispatchTarget,
-        item,
-      },
-      {
-        installedPerItemObserver,
-        dispatchObserverPublicationIdentity:
-          this.#dispatchObserverPublication === publication,
-        nativeEventStaged: intent
-          ? this.#stagedNativeEvents.has(intent.nativeEvent)
-          : false,
-      },
-    );
     const outside = exactMoreMenuUndispatchedOutside(publication, customEvent);
     if (!outside || this.#taintedOutsideNativeEvents.has(outside.originalEvent)) return null;
     const ownerWindow = publication.document.defaultView;
@@ -6575,7 +6342,7 @@ class MoreMenuPublicationCoordinator {
       publication.document.defaultView,
       target,
       (dispatchTarget, event) =>
-        this.observeDispatchedCustom(publication, dispatchTarget, event, false),
+        this.observeDispatchedCustom(publication, dispatchTarget, event),
     );
     if (!restore) {
       this.#unsafeDispatchTargets.add(target);
@@ -6590,139 +6357,38 @@ class MoreMenuPublicationCoordinator {
   bindSelectionCustom(publication: MoreMenuPublication, customEvent: Event) {
     const intent = this.#selectionIntent;
     const item = intent && publication.dom.actions[intent.action.name];
-    const intentPresent = Boolean(intent);
-    const intentPublicationIdentity = intent ? intent.publication === publication : null;
-    const activePublicationIdentity = this.#active === publication;
-    const itemPresent = Boolean(item);
-    const dispatchedCustomEventIdentity = this.#dispatchedSelectionCustomEvent === customEvent;
-    const nativeClickAtRadixSelection = (
-      intentPresent
-      && intentPublicationIdentity
-      && activePublicationIdentity
-      && item
-      && dispatchedCustomEventIdentity
-      && intent
-    )
-      ? moreMenuNativeClickIsAtRadixSelection(
+    if (
+      !intent
+      || intent.publication !== publication
+      || this.#active !== publication
+      || !item
+      || this.#dispatchedSelectionCustomEvent !== customEvent
+      || !moreMenuNativeClickIsAtRadixSelection(
         publication,
         item,
         intent.nativeEvent,
         intent.target,
         intent.path,
       )
-      : null;
-    const customEventExactAtWindow = nativeClickAtRadixSelection && item
-      ? exactMoreMenuCustomSelectAtWindow(publication, item, customEvent)
-      : null;
-    const predicates: MoreMenuDiagnosticPredicate[] = [
-      ["selectionIntentPresent", intentPresent],
-      ["intentPublicationIdentity", intentPublicationIdentity],
-      ["activePublicationIdentity", activePublicationIdentity],
-      ["itemPresent", itemPresent],
-      ["dispatchedCustomEventIdentity", dispatchedCustomEventIdentity],
-      ["nativeClickAtRadixSelection", nativeClickAtRadixSelection],
-      ["customEventExactAtWindow", customEventExactAtWindow],
-    ];
-    if (predicates.some(([, passed]) => passed !== true)) {
-      recordMoreMenuSelectionDiagnostic(
-        publication.document,
-        "bind-selection-custom",
-        false,
-        predicates,
-        {
-          activePublication: this.#active,
-          publication,
-          intentPublication: intent?.publication,
-          action: intent?.action,
-          nativeEvent: intent?.nativeEvent,
-          customEvent,
-          dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-          boundCustomEvent: this.#selectionCustomEvent,
-          item,
-        },
-        {
-          nativeEventStaged: intent
-            ? this.#stagedNativeEvents.has(intent.nativeEvent)
-            : false,
-        },
-      );
+      || !exactMoreMenuCustomSelectAtWindow(publication, item, customEvent)
+    ) {
       return false;
     }
     if (this.#selectionCustomEvent) {
-      if (this.#selectionCustomEvent === customEvent) {
-        recordMoreMenuSelectionDiagnostic(
-          publication.document,
-          "bind-selection-custom",
-          true,
-          [...predicates, ["priorBoundCustomCompatible", true]],
-          {
-            activePublication: this.#active,
-            publication,
-            intentPublication: intent?.publication,
-            action: intent?.action,
-            nativeEvent: intent?.nativeEvent,
-            customEvent,
-            dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-            boundCustomEvent: this.#selectionCustomEvent,
-            item,
-          },
-        );
-        return true;
-      }
+      if (this.#selectionCustomEvent === customEvent) return true;
       const ownerWindow = publication.document.defaultView;
-      const priorBoundCustomCompatible = Boolean(
+      if (
         !ownerWindow
         || nativeEventGetter<number>(
           ownerWindow.Event.prototype,
           "eventPhase",
           this.#selectionCustomEvent,
         ) !== ownerWindow.Event.NONE
-      );
-      predicates.push(["priorBoundCustomCompatible", !priorBoundCustomCompatible]);
-      if (priorBoundCustomCompatible) {
-        recordMoreMenuSelectionDiagnostic(
-          publication.document,
-          "bind-selection-custom",
-          false,
-          predicates,
-          {
-            activePublication: this.#active,
-            publication,
-            intentPublication: intent?.publication,
-            action: intent?.action,
-            nativeEvent: intent?.nativeEvent,
-            customEvent,
-            dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-            boundCustomEvent: this.#selectionCustomEvent,
-            item,
-          },
-        );
+      ) {
         return false;
       }
     }
     this.#selectionCustomEvent = customEvent;
-    recordMoreMenuSelectionDiagnostic(
-      publication.document,
-      "bind-selection-custom",
-      true,
-      [...predicates, ["priorBoundCustomCompatible", true]],
-      {
-        activePublication: this.#active,
-        publication,
-        intentPublication: intent?.publication,
-        action: intent?.action,
-        nativeEvent: intent?.nativeEvent,
-        customEvent,
-        dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-        boundCustomEvent: this.#selectionCustomEvent,
-        item,
-      },
-      {
-        nativeEventStaged: intent
-          ? this.#stagedNativeEvents.has(intent.nativeEvent)
-          : false,
-      },
-    );
     return true;
   }
 
@@ -6732,83 +6398,24 @@ class MoreMenuPublicationCoordinator {
     customEvent: Event,
   ) {
     const intent = this.#selectionIntent;
-    const intentPresent = Boolean(intent);
-    const intentPublicationIdentity = intent ? intent.publication === publication : null;
-    const intentActionIdentity = intent ? intent.action === action : null;
-    const activePublicationIdentity = this.#active === publication;
-    const publicationNotClaimed = !this.#claimedPublications.has(publication);
-    const actionNotClaimed = !this.#claimedActions.has(action);
-    const customEventNotClaimed = !this.#claimedEvents.has(customEvent);
-    const nativeEventNotClaimed = intent
-      ? !this.#claimedEvents.has(intent.nativeEvent)
-      : null;
-    const boundCustomEventIdentity = this.#selectionCustomEvent === customEvent;
-    const earlierPredicatesAccepted = Boolean(
-      intentPresent
-      && intentPublicationIdentity
-      && intentActionIdentity
-      && activePublicationIdentity
-      && publicationNotClaimed
-      && actionNotClaimed
-      && customEventNotClaimed
-      && nativeEventNotClaimed
-      && boundCustomEventIdentity,
-    );
-    const nativeClickAtRadixSelection = earlierPredicatesAccepted && intent
-      ? moreMenuNativeClickIsAtRadixSelection(
+    if (
+      intent?.publication !== publication
+      || intent.action !== action
+      || this.#active !== publication
+      || this.#claimedPublications.has(publication)
+      || this.#claimedActions.has(action)
+      || this.#claimedEvents.has(customEvent)
+      || this.#claimedEvents.has(intent.nativeEvent)
+      || this.#selectionCustomEvent !== customEvent
+      || !moreMenuNativeClickIsAtRadixSelection(
         publication,
         publication.dom.actions[action.name],
         intent.nativeEvent,
         intent.target,
         intent.path,
       )
-      : null;
-    const publicationExact = nativeClickAtRadixSelection
-      ? publication.isExact("consume-selection")
-      : null;
-    const predicates: readonly MoreMenuDiagnosticPredicate[] = [
-      ["selectionIntentPresent", intentPresent],
-      ["intentPublicationIdentity", intentPublicationIdentity],
-      ["intentActionIdentity", intentActionIdentity],
-      ["activePublicationIdentity", activePublicationIdentity],
-      ["publicationNotClaimed", publicationNotClaimed],
-      ["actionNotClaimed", actionNotClaimed],
-      ["customEventNotClaimed", customEventNotClaimed],
-      ["nativeEventNotClaimed", nativeEventNotClaimed],
-      ["boundCustomEventIdentity", boundCustomEventIdentity],
-      ["nativeClickAtRadixSelection", nativeClickAtRadixSelection],
-      ["publicationExact", publicationExact],
-    ];
-    const accepted = predicates.every(([, passed]) => passed === true);
-    recordMoreMenuSelectionDiagnostic(
-      publication.document,
-      "consume-selection",
-      accepted,
-      predicates,
-      {
-        activePublication: this.#active,
-        publication,
-        intentPublication: intent?.publication,
-        action,
-        intentAction: intent?.action,
-        nativeEvent: intent?.nativeEvent,
-        customEvent,
-        dispatchedCustomEvent: this.#dispatchedSelectionCustomEvent,
-        boundCustomEvent: this.#selectionCustomEvent,
-      },
-      {
-        nativeEventStaged: intent
-          ? this.#stagedNativeEvents.has(intent.nativeEvent)
-          : false,
-        publicationClaimedBefore: this.#claimedPublications.has(publication),
-        actionClaimedBefore: this.#claimedActions.has(action),
-        nativeEventClaimedBefore: intent
-          ? this.#claimedEvents.has(intent.nativeEvent)
-          : false,
-        customEventClaimedBefore: this.#claimedEvents.has(customEvent),
-      },
-    );
-    if (!accepted || !intent) {
+      || !publication.isExact()
+    ) {
       return null;
     }
     this.#selectionIntent = null;
@@ -7054,75 +6661,6 @@ function moreMenuFactsAreCurrent(render: MoreMenuRender) {
     && actions.delete.iconClassName === (mutation === "delete" ? "lucide-loader-circle" : "lucide-trash-2")
     && actions.delete.busy === (mutation === "delete")
   );
-}
-
-function moreMenuFactDiagnostics(render: MoreMenuRender) {
-  const {
-    actions,
-    document,
-    props,
-    session,
-  } = render;
-  const currentBindings = moreMenuBindings(props);
-  const linked = document.storage !== "local";
-  const canEdit = session.role === "owner" || session.role === "editor";
-  const mutation = props.documentMutation;
-  return Object.freeze({
-    currentRender: Boolean(
-      render.visit.session === session
-      && props.session === session
-      && session.docId === render.docId
-      && session.role === render.role
-      && session.mode === render.mode
-      && session.setMode === render.setMode
-      && linked === render.linked
-      && canEdit === render.canEdit
-      && props.compact === render.compact
-      && props.isOwner === render.isOwner
-      && props.githubConfigured === render.githubConfigured
-      && props.publishing === render.publishing
-      && mutation === render.documentMutation
-    ),
-    currentDocument: Boolean(
-      render.visit.document === document
-      && props.doc === document
-      && moreMenuDocumentMatches(render)
-    ),
-    currentBindings: Boolean(
-      currentBindings.length === render.bindings.length
-      && currentBindings.every((value, index) => Object.is(value, render.bindings[index]))
-    ),
-    currentActions: Boolean(
-      actions.history.callback === props.onHistory
-      && actions.history.eligible
-      && actions.history.label === "Version history"
-      && actions.history.testId === "menu-history"
-      && actions.history.className === "menu-item"
-      && actions.history.iconClassName === "lucide-rotate-ccw-clock"
-      && !actions.history.busy
-      && actions["name-version"].callback === props.onNameVersion
-      && actions["name-version"].eligible === canEdit
-      && actions["name-version"].label === "Name current version"
-      && actions["name-version"].testId === null
-      && actions["name-version"].className === "menu-item"
-      && actions["name-version"].iconClassName === "lucide-pencil"
-      && !actions["name-version"].busy
-      && actions.duplicate.callback === props.onDuplicate
-      && actions.duplicate.eligible === (mutation === null)
-      && actions.duplicate.label === (mutation === "duplicate" ? "Making a copy…" : "Make a copy")
-      && actions.duplicate.testId === "menu-duplicate"
-      && actions.duplicate.className === "menu-item"
-      && actions.duplicate.iconClassName === (mutation === "duplicate" ? "lucide-loader-circle" : "lucide-files")
-      && actions.duplicate.busy === (mutation === "duplicate")
-      && actions.delete.callback === props.onDelete
-      && actions.delete.eligible === (props.isOwner && mutation === null)
-      && actions.delete.label === (mutation === "delete" ? "Moving to trash…" : "Move to trash")
-      && actions.delete.testId === "menu-delete"
-      && actions.delete.className === "menu-item text-danger"
-      && actions.delete.iconClassName === (mutation === "delete" ? "lucide-loader-circle" : "lucide-trash-2")
-      && actions.delete.busy === (mutation === "delete")
-    ),
-  });
 }
 
 function moreMenuActionElementIsExact(
@@ -8621,68 +8159,16 @@ function createMoreMenuPresentation({
       triggerSnapshot,
       contentSnapshot,
       placements,
-      isExact: (diagnosticContext = "unspecified") => {
-        const mutationHistoryClean = historyIsClean();
-        const factsCurrent = mutationHistoryClean
-          ? moreMenuFactsAreCurrent(render)
-          : null;
-        const current = factsCurrent
-          ? currentMoreMenuDom(render, owners)
-          : null;
-        const currentDomOwnership = current
-          ? moreMenuDomIsSame(current, dom)
-          : null;
-        const placementCurrent = currentDomOwnership
-          ? placements.every(modeSwitcherPlacementMatches)
-          : null;
-        const triggerSnapshotCurrent = placementCurrent
-          ? modeSwitcherDomSnapshotMatches(triggerSnapshot)
-          : null;
-        const contentSnapshotCurrent = triggerSnapshotCurrent
-          ? !contentSnapshot || modeSwitcherDomSnapshotMatches(contentSnapshot)
-          : null;
-        const exact = Boolean(
-          mutationHistoryClean
-          && factsCurrent
-          && current
-          && currentDomOwnership
-          && placementCurrent
-          && triggerSnapshotCurrent
-          && contentSnapshotCurrent
+      isExact: () => {
+        if (!historyIsClean() || !moreMenuFactsAreCurrent(render)) return false;
+        const current = currentMoreMenuDom(render, owners);
+        return Boolean(
+          current
+          && moreMenuDomIsSame(current, dom)
+          && placements.every(modeSwitcherPlacementMatches)
+          && modeSwitcherDomSnapshotMatches(triggerSnapshot)
+          && (!contentSnapshot || modeSwitcherDomSnapshotMatches(contentSnapshot))
         );
-        const factDiagnostics = moreMenuFactDiagnostics(render);
-        recordMoreMenuSelectionDiagnostic(
-          publication.document,
-          "publication-is-exact",
-          exact,
-          [
-            ["mutationHistoryClean", mutationHistoryClean],
-            ["factsCurrent", factsCurrent],
-            ["currentRender", factDiagnostics.currentRender],
-            ["currentDocument", factDiagnostics.currentDocument],
-            ["currentBindings", factDiagnostics.currentBindings],
-            ["currentActions", factDiagnostics.currentActions],
-            ["currentDomOwnership", currentDomOwnership],
-            ["placementCurrent", placementCurrent],
-            ["triggerSnapshotCurrent", triggerSnapshotCurrent],
-            ["contentSnapshotCurrent", contentSnapshotCurrent],
-          ],
-          {
-            publication,
-            render: publication.render,
-            currentTrigger: current?.trigger,
-            publishedTrigger: dom.trigger,
-            currentContent: current?.content,
-            publishedContent: dom.content,
-          },
-          {
-            diagnosticContext,
-            mutationSeen,
-            retired,
-            retirement,
-          },
-        );
-        return exact;
       },
       recordElementChange,
       isExactElementReplay,
@@ -8924,57 +8410,14 @@ function createMoreMenuPresentation({
       const item = dom.actions[action.name];
       if (!item) continue;
       const listener = (event: Event) => {
-        const activePublicationIdentity = coordinator.active() === publication;
-        const renderIdentity = publication.render === render;
-        const actionEligible = action.eligible;
-        if (!activePublicationIdentity || !renderIdentity || !actionEligible) {
-          recordMoreMenuSelectionDiagnostic(
-            publication.document,
-            "native-item-capture",
-            false,
-            [
-              ["activePublicationIdentity", activePublicationIdentity],
-              ["renderIdentity", renderIdentity],
-              ["actionEligible", actionEligible],
-            ],
-            {
-              activePublication: coordinator.active(),
-              publication,
-              publicationRender: publication.render,
-              currentRender: render,
-              action,
-              nativeEvent: event,
-              item,
-            },
-          );
+        if (
+          coordinator.active() !== publication
+          || publication.render !== render
+          || !action.eligible
+        ) {
           return;
         }
         const admission = exactMoreMenuNativeClick(publication, action, item, event);
-        const nativeAdmissionExact = Boolean(admission);
-        const nativeEventRealmExact = Boolean(
-          admission && admission.nativeEvent instanceof MouseEvent,
-        );
-        recordMoreMenuSelectionDiagnostic(
-          publication.document,
-          "native-item-capture",
-          nativeAdmissionExact && nativeEventRealmExact,
-          [
-            ["activePublicationIdentity", activePublicationIdentity],
-            ["renderIdentity", renderIdentity],
-            ["actionEligible", actionEligible],
-            ["nativeAdmissionExact", nativeAdmissionExact],
-            ["nativeEventRealmExact", nativeEventRealmExact],
-          ],
-          {
-            activePublication: coordinator.active(),
-            publication,
-            publicationRender: publication.render,
-            currentRender: render,
-            action,
-            nativeEvent: admission?.nativeEvent ?? event,
-            item,
-          },
-        );
         if (!admission || !(admission.nativeEvent instanceof MouseEvent)) return;
         coordinator.stageSelection(
           publication,
@@ -8990,51 +8433,16 @@ function createMoreMenuPresentation({
     return runtime;
   };
 
-  const currentPublication = (diagnosticContext?: string) => {
+  const currentPublication = () => {
     const runtime = runtimeState.current;
     const publication = runtime?.publication;
-    const runtimePresent = Boolean(runtime);
-    const publicationPresent = Boolean(publication);
-    const activePublicationIdentity = publication
-      ? coordinator.active() === publication
-      : null;
-    const renderIdentity = publication
-      ? publication.render === render
-      : null;
-    const publicationExact = publication && activePublicationIdentity && renderIdentity
-      ? publication.isExact(diagnosticContext ?? "current-publication")
-      : null;
-    const current = (
-      runtime
+    return runtime
       && publication
-      && activePublicationIdentity
-      && renderIdentity
-      && publicationExact
-    )
+      && coordinator.active() === publication
+      && publication.render === render
+      && publication.isExact()
       ? publication
       : null;
-    if (diagnosticContext && publication) {
-      recordMoreMenuSelectionDiagnostic(
-        publication.document,
-        "current-publication",
-        Boolean(current),
-        [
-          ["runtimePresent", runtimePresent],
-          ["publicationPresent", publicationPresent],
-          ["activePublicationIdentity", activePublicationIdentity],
-          ["renderIdentity", renderIdentity],
-          ["publicationExact", publicationExact],
-        ],
-        {
-          activePublication: coordinator.active(),
-          publication,
-          publicationRender: publication.render,
-          currentRender: render,
-        },
-        { diagnosticContext },
-      );
-    }
-    return current;
   };
   function close(
     publication: MoreMenuPublication,
@@ -9042,41 +8450,12 @@ function createMoreMenuPresentation({
     action: MoreMenuActionName | null = null,
     mode: EditMode = publication.render.mode,
   ) {
-    const renderOpen = render.open;
-    const activePublication = coordinator.active();
-    const activePublicationIdentity = activePublication === publication;
-    const publicationExact = renderOpen && activePublicationIdentity
-      ? publication.isExact("close")
-      : null;
-    const retired = renderOpen && activePublicationIdentity && publicationExact
-      ? publication.retire()
-      : null;
-    const predicates: readonly MoreMenuDiagnosticPredicate[] = [
-      ["renderOpen", renderOpen],
-      ["activePublicationIdentity", activePublicationIdentity],
-      ["publicationExact", publicationExact],
-      ["publicationRetired", retired],
-    ];
-    const accepted = predicates.every(([, passed]) => passed === true);
-    recordMoreMenuSelectionDiagnostic(
-      publication.document,
-      "close",
-      accepted,
-      predicates,
-      {
-        publication,
-        activePublication,
-        publicationRender: publication.render,
-        currentRender: render,
-        action: action ? publication.render.actions[action] : null,
-      },
-      {
-        returnFocus,
-        action,
-        mode,
-      },
-    );
-    if (!accepted) {
+    if (
+      !render.open
+      || coordinator.active() !== publication
+      || !publication.isExact()
+      || !publication.retire()
+    ) {
       return false;
     }
     if (returnFocus) {
@@ -9164,52 +8543,16 @@ function createMoreMenuPresentation({
     }
   };
   const select = (action: MoreMenuAction, event: Event) => {
-    const publication = currentPublication("item-select");
+    const publication = currentPublication();
     const item = publication?.dom.actions[action.name];
-    const publicationPresent = Boolean(publication);
-    const itemPresent = Boolean(item);
-    const actionEligible = action.eligible;
-    const customEventExactAtItem = publication && item && actionEligible
-      ? exactMoreMenuCustomSelect(publication, item, event)
-      : null;
-    const selectPredicates: readonly MoreMenuDiagnosticPredicate[] = [
-      ["currentPublicationPresent", publicationPresent],
-      ["itemPresent", itemPresent],
-      ["actionEligible", actionEligible],
-      ["customEventExactAtItem", customEventExactAtItem],
-    ];
-    if (!publication || !item || selectPredicates.some(([, passed]) => passed !== true)) {
-      const diagnosticDocument = publication?.document ?? item?.ownerDocument;
-      if (diagnosticDocument) {
-        recordMoreMenuSelectionDiagnostic(
-          diagnosticDocument,
-          "item-select",
-          false,
-          selectPredicates,
-          {
-            activePublication: coordinator.active(),
-            publication,
-            action,
-            customEvent: event,
-            item,
-          },
-        );
-      }
+    if (
+      !publication
+      || !item
+      || !action.eligible
+      || !exactMoreMenuCustomSelect(publication, item, event)
+    ) {
       return;
     }
-    recordMoreMenuSelectionDiagnostic(
-      publication.document,
-      "item-select",
-      true,
-      selectPredicates,
-      {
-        activePublication: coordinator.active(),
-        publication,
-        action,
-        customEvent: event,
-        item,
-      },
-    );
     const intent = coordinator.consumeSelection(publication, action, event);
     if (
       !intent
