@@ -591,11 +591,11 @@ describe("ShareDialog exact control publications", () => {
     );
     await screen.findByText("@bob");
 
-    fireEvent.click(screen.getByTestId("copy-link"));
-    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
     const role = within(collaboratorRow("bob")).getByRole("combobox");
     fireEvent.change(role, { target: { value: "viewer" } });
     expect(role).toBeDisabled();
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
     await act(async () => {
       permission.resolve({ ok: true });
       await permission.promise;
@@ -687,6 +687,38 @@ describe("ShareDialog exact control publications", () => {
     fireEvent.click(screen.getByTestId("copy-link"));
     await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
     expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+  });
+
+  it("spends a pending copy's handoff after one valid successor", async () => {
+    let settleOld: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settleOld = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const input = screen.getByTestId("share-login");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { value: "successor-b" } });
+    expect(input).toHaveValue("successor-b");
+    fireEvent.change(input, { target: { value: "successor-c" } });
+    expect(input).toHaveValue("successor-c");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${DOC_ID}`);
+
+    act(() => settleOld?.(false));
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied");
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
   });
 
   it("owns each setup expand and collapse transition after direct-root Strict Mode replay", async () => {

@@ -287,6 +287,7 @@ interface ShareCopyAction {
 interface ShareCopyOperation {
   action: Readonly<ShareCopyAction>;
   phase: "invoking" | "attaching" | "pending";
+  handoffConsumed: boolean;
   settled: boolean;
   retired: boolean;
 }
@@ -1610,6 +1611,7 @@ export const ShareDialog = memo(function ShareDialog({
         // Repeated ref/layout cleanup belongs to the same one-hop handoff.
       } else if (
         operation.phase === "pending" &&
+        !operation.handoffConsumed &&
         runtime?.active &&
         !runtime.retired &&
         activePresentationRef.current === candidate &&
@@ -2470,6 +2472,7 @@ export const ShareDialog = memo(function ShareDialog({
     const operation: ShareCopyOperation = {
       action,
       phase: "invoking",
+      handoffConsumed: false,
       settled: false,
       retired: false,
     };
@@ -2621,6 +2624,7 @@ export const ShareDialog = memo(function ShareDialog({
       control: operation.action.control,
     });
     operation.action = action;
+    operation.handoffConsumed = true;
     copyHandoffRef.current = null;
     runtime.claims.add("copy-link");
     claimedControlActionsRef.current.add(action);
