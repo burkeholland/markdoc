@@ -11,10 +11,12 @@ import {
   type ChangeEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
 } from "react";
 import { ArrowLeft, Check, Copy, KeyRound, Loader2, Plus } from "lucide-react";
 import { cn, relativeTime } from "@/lib/utils";
-import { useCopy } from "@/lib/hooks";
+import { useCopy, type CopyStatus } from "@/lib/hooks";
+import { COPY_FALLBACK_HINT } from "@/lib/clipboard";
 import { ApiError, api, apiErrorText, type ApiTokenDto, type CreatedApiTokenDto, type DocumentSummaryDto } from "@/lib/api";
 import { SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { agentMentionSlug } from "@/editor/collab/mentions";
@@ -26,26 +28,6 @@ export function ScopeChip({ scope, className }: { scope: TokenScopeName; classNa
       title={`${TOKEN_SCOPE_LABEL[scope]}: ${TOKEN_SCOPE_SUMMARY[scope]}`} data-testid="token-scope-chip" data-scope={scope}>
       {scope}
     </span>
-  );
-}
-
-function SecretNotice({ created, onDismiss }: { created: CreatedApiTokenDto; onDismiss: () => void }) {
-  const code = useRef<HTMLElement>(null);
-  const { copy, label, copied } = useCopy(created.token, code);
-  return (
-    <div className="min-w-0 rounded-xl border border-green-200 bg-green-50 p-3 dark:border-green-900 dark:bg-green-950/40"
-      role="status" aria-live="polite" aria-atomic="true" data-testid="token-created">
-      <p className="text-sm font-medium text-green-900 dark:text-green-200">Token “{created.name}” created. Copy it now; it will not be shown again.</p>
-      <p className="mt-1 text-xs text-ink-2">Store it now in a safe place. Only a hash is saved by Markdoc; the secret cannot be recovered or edited.</p>
-      <p className="mt-1 text-xs text-ink-2"><ScopeChip scope={created.scope} /> {created.documentIds ? `${created.documentIds.length} document(s)` : "All documents you can access"}</p>
-      <code ref={code} className="mt-2 block select-text break-all rounded-lg border border-line bg-surface px-3 py-2 font-mono text-xs text-ink" data-testid="copy-token">{created.token}</code>
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button type="button" className="btn btn-outline btn-sm h-auto max-w-full gap-1.5 whitespace-normal text-left" onClick={copy} aria-label="Copy token" data-testid="copy-token-button">
-          {copied ? <Check size={14} /> : <Copy size={14} />}{label}
-        </button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onDismiss}>I stored it - hide secret</button>
-      </div>
-    </div>
   );
 }
 
@@ -77,6 +59,8 @@ interface ManagerSession {
 }
 
 interface ManagerControlVisit {
+  readonly identity: symbol;
+  readonly sequence: number;
   session: ManagerSession;
   embedded: boolean | undefined;
   next: string | null | undefined;
@@ -89,8 +73,18 @@ interface TokensButtonControl {
   element: HTMLButtonElement | null;
 }
 
-interface SecretPublication {
-  value: CreatedApiTokenDto;
+type CreatedSecretValue = Readonly<
+  Omit<CreatedApiTokenDto, "documentIds"> & {
+    documentIds: readonly string[] | null;
+  }
+>;
+
+interface CreatedSecretPublication {
+  readonly identity: symbol;
+  readonly sequence: number;
+  readonly session: ManagerSession;
+  readonly value: CreatedSecretValue;
+  retired: boolean;
 }
 
 interface ManagerOperation {
@@ -130,6 +124,1160 @@ interface DocumentListOperation extends MountedOperation {
   request: DocumentListRequest;
 }
 
+type SecretNoticeRole = "notice" | "code" | "copy" | "hide";
+type SecretNoticeActionKind = "copy" | "hide";
+
+interface SecretNoticeRender {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly visit: ManagerControlVisit;
+  readonly visitIdentity: symbol;
+  readonly visitSequence: number;
+  readonly session: ManagerSession;
+  readonly sessionAuthority: symbol;
+  readonly origin: string;
+  readonly userLogin: string;
+  readonly documentId: string | undefined;
+  readonly embedded: boolean | undefined;
+  readonly next: string | null | undefined;
+  readonly onClose: (() => void) | undefined;
+  readonly publication: CreatedSecretPublication;
+  readonly publicationIdentity: symbol;
+  readonly publicationSequence: number;
+  readonly created: CreatedSecretValue;
+  readonly buttonControl: TokensButtonControl;
+  readonly owns: SecretNoticeOwner;
+  readonly dismiss: SecretNoticeDismiss;
+  readonly copySetup: Readonly<{
+    copy: () => void;
+    status: CopyStatus;
+    label: string;
+    copied: boolean;
+  }>;
+  readonly copy: () => void;
+  readonly status: CopyStatus;
+  readonly label: string;
+  readonly copied: boolean;
+  readonly headline: string;
+  readonly access: string;
+}
+
+interface SecretNoticeElements {
+  notice: HTMLDivElement | null;
+  code: HTMLElement | null;
+  copy: HTMLButtonElement | null;
+  hide: HTMLButtonElement | null;
+}
+
+interface SecretNoticeAction {
+  readonly identity: symbol;
+  readonly kind: SecretNoticeActionKind;
+  claimed: boolean;
+}
+
+interface SecretNoticeGeneration {
+  readonly identity: symbol;
+  readonly render: SecretNoticeRender;
+  readonly elements: SecretNoticeElements;
+  readonly bindings: Record<SecretNoticeRole, SecretNoticeBinding | null>;
+  readonly actions: Readonly<Record<SecretNoticeActionKind, SecretNoticeAction>>;
+  authority: SecretNoticeDraft | null;
+  target: RefObject<HTMLElement | null> | null;
+}
+
+interface SecretNoticeDraft {
+  readonly identity: symbol;
+  readonly render: SecretNoticeRender;
+  readonly generation: SecretNoticeGeneration;
+  committed: boolean;
+  retired: boolean;
+}
+
+interface SecretNoticeBinding {
+  readonly identity: symbol;
+  readonly generation: SecretNoticeGeneration;
+  readonly role: SecretNoticeRole;
+  readonly element: HTMLElement;
+  active: boolean;
+}
+
+interface SecretNoticeDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly SecretNoticeDomSnapshot[];
+}
+
+interface SecretNoticePlacement {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface SecretNoticePublication {
+  readonly identity: symbol;
+  readonly render: SecretNoticeRender;
+  readonly draft: SecretNoticeDraft;
+  readonly generation: SecretNoticeGeneration;
+  readonly notice: HTMLDivElement;
+  readonly code: HTMLElement;
+  readonly copy: HTMLButtonElement;
+  readonly hide: HTMLButtonElement;
+  readonly bindings: Readonly<Record<SecretNoticeRole, SecretNoticeBinding>>;
+  readonly actions: Readonly<Record<SecretNoticeActionKind, SecretNoticeAction>>;
+  readonly target: RefObject<HTMLElement | null>;
+  readonly ownerDocument: Document;
+  readonly dom: SecretNoticeDomSnapshot;
+  readonly placement: readonly SecretNoticePlacement[];
+  readonly copyTargets: readonly Node[];
+  readonly hideTargets: readonly Node[];
+  retired: boolean;
+  claimed: boolean;
+  mutated: boolean;
+  observer: MutationObserver | null;
+}
+
+interface SecretNoticeCodeOwner {
+  readonly binding: SecretNoticeBinding;
+  readonly target: RefObject<HTMLElement | null>;
+}
+
+interface SecretNoticeReplay {
+  readonly publication: SecretNoticePublication;
+  readonly generation: SecretNoticeGeneration;
+  readonly expected: Readonly<Record<SecretNoticeRole, SecretNoticeBinding>>;
+  readonly released: Set<SecretNoticeRole>;
+  readonly rebound: Map<SecretNoticeRole, SecretNoticeBinding>;
+  layoutRetired: boolean;
+  invalid: boolean;
+}
+
+type SecretNoticeOwner = (
+  visit: ManagerControlVisit,
+  publication: CreatedSecretPublication,
+  buttonControl: TokensButtonControl,
+) => boolean;
+
+type SecretNoticeDismiss = (
+  visit: ManagerControlVisit,
+  publication: CreatedSecretPublication,
+  buttonControl: TokensButtonControl,
+) => void;
+
+const SECRET_NOTICE_ROLES = ["notice", "code", "copy", "hide"] as const;
+const SECRET_NOTICE_CLASS = "min-w-0 rounded-xl border border-green-200 bg-green-50 p-3 dark:border-green-900 dark:bg-green-950/40";
+const SECRET_CODE_CLASS = "mt-2 block select-text break-all rounded-lg border border-line bg-surface px-3 py-2 font-mono text-xs text-ink";
+const SECRET_COPY_CLASS = "btn btn-outline btn-sm h-auto max-w-full gap-1.5 whitespace-normal text-left";
+const SECRET_HIDE_CLASS = "btn btn-ghost btn-sm";
+const SECRET_COPY_LABEL = "Copy token";
+const SECRET_HIDE_LABEL = "I stored it - hide secret";
+const SECRET_GUIDANCE = "Store it now in a safe place. Only a hash is saved by Markdoc; the secret cannot be recovered or edited.";
+const SecretNoticeMutationObserver =
+  typeof MutationObserver === "function" ? MutationObserver : null;
+
+function snapshotCreatedSecret(value: CreatedApiTokenDto | CreatedSecretValue): CreatedSecretValue {
+  return Object.freeze({
+    id: value.id,
+    name: value.name,
+    token: value.token,
+    prefix: value.prefix,
+    scope: value.scope,
+    documentIds: value.documentIds ? Object.freeze([...value.documentIds]) : null,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+  });
+}
+
+function createdSecretValuesMatch(left: CreatedSecretValue, right: CreatedSecretValue): boolean {
+  return left.id === right.id
+    && left.name === right.name
+    && left.token === right.token
+    && left.prefix === right.prefix
+    && left.scope === right.scope
+    && left.createdAt === right.createdAt
+    && left.expiresAt === right.expiresAt
+    && (left.documentIds === null
+      ? right.documentIds === null
+      : right.documentIds !== null
+        && left.documentIds.length === right.documentIds.length
+        && left.documentIds.every((id, index) => right.documentIds?.[index] === id));
+}
+
+function secretNoticeAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotSecretNoticeDom(node: Node): SecretNoticeDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: secretNoticeAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotSecretNoticeDom)),
+  });
+}
+
+function secretNoticeDomMatches(snapshot: SecretNoticeDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = secretNoticeAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length
+    || attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return node.childNodes.length === snapshot.children.length
+    && snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && secretNoticeDomMatches(child));
+}
+
+function secretNoticeDomContains(snapshot: SecretNoticeDomSnapshot, target: Node): boolean {
+  return snapshot.node === target
+    || snapshot.children.some((child) => secretNoticeDomContains(child, target));
+}
+
+function secretNoticeNodes(element: HTMLElement): readonly Node[] {
+  const nodes: Node[] = [];
+  const visit = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(element);
+  return Object.freeze(nodes);
+}
+
+function snapshotSecretNoticePlacement(root: HTMLElement): readonly SecretNoticePlacement[] | null {
+  const placement: SecretNoticePlacement[] = [];
+  const ownerDocument = root.ownerDocument;
+  let node: Node | null = root;
+  while (node) {
+    placement.push(Object.freeze({
+      node,
+      parent: node.parentNode,
+      previousSibling: node.previousSibling,
+      nextSibling: node.nextSibling,
+    }));
+    if (node === ownerDocument) return Object.freeze(placement);
+    node = node.parentNode;
+  }
+  return null;
+}
+
+function secretNoticePlacementMatches(
+  root: HTMLElement,
+  ownerDocument: Document,
+  placement: readonly SecretNoticePlacement[],
+): boolean {
+  if (
+    placement.length < 2
+    || placement[0]?.node !== root
+    || placement.at(-1)?.node !== ownerDocument
+    || placement.at(-1)?.parent !== null
+    || root.ownerDocument !== ownerDocument
+    || root.getRootNode() !== ownerDocument
+  ) {
+    return false;
+  }
+  return placement.every((entry, index) => (
+    entry.node.isConnected
+    && entry.node.parentNode === entry.parent
+    && entry.node.previousSibling === entry.previousSibling
+    && entry.node.nextSibling === entry.nextSibling
+    && (index === placement.length - 1 || entry.parent === placement[index + 1]?.node)
+  ));
+}
+
+function exactSecretEventPath(
+  nativeEvent: MouseEvent,
+  target: Node,
+  publication: SecretNoticePublication,
+): boolean {
+  const expected: EventTarget[] = [];
+  let node: Node | null = target;
+  while (node) {
+    expected.push(node);
+    if (node === publication.ownerDocument) break;
+    node = node.parentNode;
+  }
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (expected.at(-1) !== publication.ownerDocument || !ownerWindow) return false;
+  const actual = nativeEvent.composedPath();
+  const pathWindow = actual.at(-1);
+  return actual.length === expected.length + 1
+    && expected.every((entry, index) => actual[index] === entry)
+    && typeof pathWindow === "object"
+    && pathWindow !== null
+    && "document" in pathWindow
+    && pathWindow.document === publication.ownerDocument;
+}
+
+function setSecretNoticeElement(
+  generation: SecretNoticeGeneration,
+  role: SecretNoticeRole,
+  element: HTMLElement | null,
+) {
+  if (role === "notice") generation.elements.notice = element as HTMLDivElement | null;
+  else if (role === "code") generation.elements.code = element;
+  else if (role === "copy") generation.elements.copy = element as HTMLButtonElement | null;
+  else generation.elements.hide = element as HTMLButtonElement | null;
+}
+
+class SecretNoticeCoordinator {
+  readonly #mount: symbol;
+  #current: SecretNoticePublication | null = null;
+  #replay: SecretNoticeReplay | null = null;
+  #elementOwners = new WeakMap<HTMLElement, SecretNoticeBinding>();
+  #codeOwner: SecretNoticeCodeOwner | null = null;
+  #publishedGenerations = new WeakSet<SecretNoticeGeneration>();
+  #replayedGenerations = new WeakSet<SecretNoticeGeneration>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedNativeEvents = new WeakSet<Event>();
+
+  constructor(mount: symbol) {
+    this.#mount = mount;
+  }
+
+  createDraft(render: SecretNoticeRender): SecretNoticeDraft {
+    const actions = Object.freeze({
+      copy: { identity: Symbol("token-secret-copy-action"), kind: "copy" as const, claimed: false },
+      hide: { identity: Symbol("token-secret-hide-action"), kind: "hide" as const, claimed: false },
+    });
+    const generation: SecretNoticeGeneration = {
+      identity: Symbol("token-secret-generation"),
+      render,
+      elements: { notice: null, code: null, copy: null, hide: null },
+      bindings: { notice: null, code: null, copy: null, hide: null },
+      actions,
+      authority: null,
+      target: null,
+    };
+    const draft: SecretNoticeDraft = {
+      identity: Symbol("token-secret-draft"),
+      render,
+      generation,
+      committed: false,
+      retired: false,
+    };
+    generation.authority = draft;
+    return draft;
+  }
+
+  bindNotice(draft: SecretNoticeDraft, element: HTMLDivElement | null) {
+    return this.#bind(draft.generation, "notice", element);
+  }
+
+  bindCode(
+    draft: SecretNoticeDraft,
+    target: RefObject<HTMLElement | null>,
+    element: HTMLElement | null,
+  ) {
+    const generation = draft.generation;
+    if (generation.target && generation.target !== target) {
+      this.#retireAuthority(generation);
+      return;
+    }
+    generation.target = target;
+    return this.#bind(generation, "code", element, target);
+  }
+
+  bindCopy(draft: SecretNoticeDraft, element: HTMLButtonElement | null) {
+    return this.#bind(draft.generation, "copy", element);
+  }
+
+  bindHide(draft: SecretNoticeDraft, element: HTMLButtonElement | null) {
+    return this.#bind(draft.generation, "hide", element);
+  }
+
+  establish(initialDraft: SecretNoticeDraft, target: RefObject<HTMLElement | null>) {
+    if (initialDraft.retired) {
+      const successor = this.#replaySuccessor(initialDraft, target);
+      return successor ? () => this.retire(successor) : undefined;
+    }
+    const { generation } = initialDraft;
+    if (
+      generation.authority !== initialDraft
+      || generation.target !== target
+      || this.#publishedGenerations.has(generation)
+    ) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    this.#publishedGenerations.add(generation);
+    if (this.#current && this.#current.generation !== generation) {
+      this.#retirePublication(this.#current, false);
+    }
+    const publication = this.#createPublication(initialDraft, target);
+    if (!publication || !this.#publish(publication)) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    return () => this.retire(publication);
+  }
+
+  retire(publication: SecretNoticePublication) {
+    const existingReplay = this.#replay;
+    if (existingReplay?.publication === publication) {
+      existingReplay.layoutRetired = true;
+      return;
+    }
+    if (publication.retired) return;
+    const replay = this.#beginReplay(publication);
+    if (replay) replay.layoutRetired = true;
+    this.#retirePublication(publication, Boolean(replay));
+  }
+
+  activate(
+    generation: SecretNoticeGeneration,
+    action: SecretNoticeAction,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) {
+    const publication = this.#current;
+    const expectedAction = publication?.actions[action.kind];
+    const control = action.kind === "copy" ? publication?.copy : publication?.hide;
+    const targets = action.kind === "copy" ? publication?.copyTargets : publication?.hideTargets;
+    const nativeEvent = event?.nativeEvent;
+    const target = event?.target;
+    const ownerWindow = publication?.ownerDocument.defaultView;
+    const reactEvent = event as ReactMouseEvent<HTMLButtonElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    if (
+      !publication
+      || publication.generation !== generation
+      || publication.draft !== generation.authority
+      || publication.retired
+      || publication.draft.retired
+      || publication.claimed
+      || expectedAction !== action
+      || generation.actions[action.kind] !== action
+      || action.claimed
+      || !control
+      || !targets
+      || !ownerWindow
+      || !event
+      || typeof event !== "object"
+      || event.type !== "click"
+      || event.button !== 0
+      || !(nativeEvent instanceof ownerWindow.MouseEvent)
+      || nativeEvent.type !== "click"
+      || nativeEvent.button !== 0
+      || nativeEvent.eventPhase === ownerWindow.Event.NONE
+      || !nativeEvent.bubbles
+      || !nativeEvent.cancelable
+      || nativeEvent.defaultPrevented
+      || event.bubbles !== nativeEvent.bubbles
+      || event.cancelable !== nativeEvent.cancelable
+      || event.eventPhase !== nativeEvent.eventPhase
+      || event.defaultPrevented
+      || reactEvent._reactName !== "onClick"
+      || typeof reactEvent.isDefaultPrevented !== "function"
+      || reactEvent.isDefaultPrevented()
+      || typeof reactEvent.isPropagationStopped !== "function"
+      || reactEvent.isPropagationStopped()
+      || typeof reactEvent.persist !== "function"
+      || event.currentTarget !== control
+      || nativeEvent.target !== target
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== publication.ownerDocument
+      || !control.contains(target)
+      || !targets.includes(target)
+      || !secretNoticeDomContains(publication.dom, target)
+      || !exactSecretEventPath(nativeEvent, target, publication)
+      || this.#claimedReactEvents.has(event)
+      || this.#claimedNativeEvents.has(nativeEvent)
+      || !publication.render.owns(
+        publication.render.visit,
+        publication.render.publication,
+        publication.render.buttonControl,
+      )
+      || !this.#publicationIsCurrent(publication)
+    ) {
+      return;
+    }
+
+    publication.claimed = true;
+    action.claimed = true;
+    this.#claimedReactEvents.add(event);
+    this.#claimedNativeEvents.add(nativeEvent);
+    if (action.kind === "copy") {
+      publication.render.copy();
+    } else {
+      publication.render.dismiss(
+        publication.render.visit,
+        publication.render.publication,
+        publication.render.buttonControl,
+      );
+    }
+  }
+
+  #bind(
+    generation: SecretNoticeGeneration,
+    role: SecretNoticeRole,
+    element: HTMLElement | null,
+    target?: RefObject<HTMLElement | null>,
+  ): (() => void) | undefined {
+    const previous = generation.bindings[role];
+    if (element === null) {
+      if (previous) this.#release(previous, "null");
+      return;
+    }
+    if (previous?.active && previous.element === element) return;
+    if (
+      previous?.active
+      && (!element.isConnected || element.ownerDocument !== previous.element.ownerDocument)
+    ) {
+      return;
+    }
+    if (previous) this.#release(previous, "replace");
+    if (this.#replay && this.#replay.generation !== generation) {
+      this.#invalidateReplay(this.#replay);
+    }
+    if (!this.#canBind(generation)) return;
+
+    const replay = this.#replay;
+    if (replay?.generation === generation) {
+      const expected = replay.expected[role];
+      if (
+        replay.invalid
+        || !replay.released.has(role)
+        || replay.rebound.has(role)
+        || expected.element !== element
+      ) {
+        this.#invalidateReplay(replay);
+        return;
+      }
+    }
+
+    const displaced = this.#elementOwners.get(element);
+    if (displaced) {
+      if (
+        displaced.generation !== generation
+        && this.#current?.generation === displaced.generation
+        && generation.authority?.retired
+      ) {
+        return;
+      }
+      this.#release(displaced, "replace");
+      if (!this.#canBind(generation)) return;
+    }
+
+    const binding: SecretNoticeBinding = {
+      identity: Symbol(`token-secret-${role}-binding`),
+      generation,
+      role,
+      element,
+      active: true,
+    };
+    generation.bindings[role] = binding;
+    setSecretNoticeElement(generation, role, element);
+    this.#elementOwners.set(element, binding);
+    if (role === "code" && target) {
+      this.#codeOwner = { binding, target };
+      target.current = element;
+    }
+    if (replay?.generation === generation) replay.rebound.set(role, binding);
+    return () => this.#release(binding, "cleanup");
+  }
+
+  #release(
+    binding: SecretNoticeBinding,
+    source: "cleanup" | "null" | "replace",
+  ) {
+    if (!binding.active) return;
+    const publication = this.#current;
+    const startsReplay =
+      publication?.generation === binding.generation
+      && publication.bindings[binding.role] === binding
+        ? this.#beginReplay(publication)
+        : null;
+    const replay = this.#replay;
+
+    binding.active = false;
+    const { generation, role, element } = binding;
+    if (generation.bindings[role] === binding) {
+      generation.bindings[role] = null;
+      setSecretNoticeElement(generation, role, null);
+    }
+    if (this.#elementOwners.get(element) === binding) this.#elementOwners.delete(element);
+    if (role === "code" && this.#codeOwner?.binding === binding) {
+      const { target } = this.#codeOwner;
+      this.#codeOwner = null;
+      if (target.current === element) target.current = null;
+    }
+
+    if (replay?.generation === generation) {
+      if (
+        source !== "cleanup"
+        || replay.expected[role] !== binding
+        || replay.released.has(role)
+        || replay.rebound.has(role)
+      ) {
+        replay.invalid = true;
+      } else {
+        replay.released.add(role);
+      }
+    }
+
+    if (publication?.generation === generation) {
+      this.#retirePublication(publication, Boolean(startsReplay && !startsReplay.invalid));
+    } else if (!replay && generation.authority && !generation.authority.retired) {
+      this.#retireDraft(generation.authority);
+    }
+    if (replay?.invalid) this.#invalidateReplay(replay);
+  }
+
+  #canBind(generation: SecretNoticeGeneration): boolean {
+    const authority = generation.authority;
+    return Boolean(
+      authority
+      && (
+        !authority.retired
+        || this.#current?.generation === generation
+        || (this.#replay?.generation === generation && !this.#replay.invalid)
+      ),
+    );
+  }
+
+  #beginReplay(publication: SecretNoticePublication): SecretNoticeReplay | null {
+    if (this.#replay?.publication === publication) return this.#replay;
+    if (
+      this.#replay
+      || publication.retired
+      || publication.claimed
+      || this.#current !== publication
+      || this.#replayedGenerations.has(publication.generation)
+      || !this.#publicationIsCurrent(publication)
+    ) {
+      return null;
+    }
+    const replay: SecretNoticeReplay = {
+      publication,
+      generation: publication.generation,
+      expected: publication.bindings,
+      released: new Set(),
+      rebound: new Map(),
+      layoutRetired: false,
+      invalid: false,
+    };
+    this.#replay = replay;
+    queueMicrotask(() => {
+      if (this.#replay === replay) this.#invalidateReplay(replay);
+    });
+    return replay;
+  }
+
+  #replaySuccessor(
+    initialDraft: SecretNoticeDraft,
+    target: RefObject<HTMLElement | null>,
+  ): SecretNoticePublication | null {
+    const replay = this.#replay;
+    const { generation } = initialDraft;
+    if (
+      !replay
+      || replay.publication.draft !== initialDraft
+      || replay.generation !== generation
+      || generation.authority !== initialDraft
+      || generation.target !== target
+      || !initialDraft.committed
+      || !initialDraft.retired
+      || !replay.publication.retired
+      || replay.invalid
+      || !replay.layoutRetired
+      || this.#current
+      || this.#replayedGenerations.has(generation)
+      || replay.released.size !== SECRET_NOTICE_ROLES.length
+      || replay.rebound.size !== SECRET_NOTICE_ROLES.length
+      || SECRET_NOTICE_ROLES.some((role) => {
+        const expected = replay.expected[role];
+        const rebound = replay.rebound.get(role);
+        return (
+          !rebound
+          || rebound.element !== expected.element
+          || generation.bindings[role] !== rebound
+          || !this.#ownsBinding(rebound)
+        );
+      })
+      || !this.#renderIsCurrent(initialDraft.render)
+      || !this.#mutationFree(replay.publication)
+      || !this.#hierarchyIsCurrent(
+        generation,
+        initialDraft.render,
+        target,
+        replay.publication.dom,
+        replay.publication.placement,
+      )
+    ) {
+      if (replay) this.#invalidateReplay(replay);
+      return null;
+    }
+
+    const successor: SecretNoticeDraft = {
+      identity: Symbol("token-secret-successor-draft"),
+      render: initialDraft.render,
+      generation,
+      committed: false,
+      retired: false,
+    };
+    this.#replayedGenerations.add(generation);
+    generation.authority = successor;
+    const publication = this.#createPublication(
+      successor,
+      target,
+      replay.publication.dom,
+      replay.publication.placement,
+    );
+    this.#replay = null;
+    this.#disconnect(replay.publication);
+    if (!publication || !this.#publish(publication)) {
+      this.#retireDraft(successor);
+      return null;
+    }
+    return publication;
+  }
+
+  #createPublication(
+    draft: SecretNoticeDraft,
+    target: RefObject<HTMLElement | null>,
+    expectedDom?: SecretNoticeDomSnapshot,
+    expectedPlacement?: readonly SecretNoticePlacement[],
+  ): SecretNoticePublication | null {
+    const { generation, render } = draft;
+    const { notice, code, copy, hide } = generation.elements;
+    const noticeBinding = generation.bindings.notice;
+    const codeBinding = generation.bindings.code;
+    const copyBinding = generation.bindings.copy;
+    const hideBinding = generation.bindings.hide;
+    if (
+      !notice
+      || !code
+      || !copy
+      || !hide
+      || !noticeBinding
+      || !codeBinding
+      || !copyBinding
+      || !hideBinding
+      || !this.#hierarchyIsCurrent(
+        generation,
+        render,
+        target,
+        expectedDom,
+        expectedPlacement,
+      )
+    ) {
+      return null;
+    }
+    const placement = expectedPlacement ?? snapshotSecretNoticePlacement(notice);
+    if (!placement) return null;
+    return {
+      identity: Symbol("token-secret-publication"),
+      render,
+      draft,
+      generation,
+      notice,
+      code,
+      copy,
+      hide,
+      bindings: Object.freeze({
+        notice: noticeBinding,
+        code: codeBinding,
+        copy: copyBinding,
+        hide: hideBinding,
+      }),
+      actions: generation.actions,
+      target,
+      ownerDocument: notice.ownerDocument,
+      dom: expectedDom ?? snapshotSecretNoticeDom(notice),
+      placement,
+      copyTargets: secretNoticeNodes(copy),
+      hideTargets: secretNoticeNodes(hide),
+      retired: false,
+      claimed: false,
+      mutated: false,
+      observer: null,
+    };
+  }
+
+  #publish(publication: SecretNoticePublication): boolean {
+    if (
+      this.#current
+      || publication.retired
+      || publication.draft.retired
+      || publication.generation.authority !== publication.draft
+    ) {
+      return false;
+    }
+    publication.draft.committed = true;
+    this.#current = publication;
+    if (SecretNoticeMutationObserver) {
+      const observer = new SecretNoticeMutationObserver(() => {
+        publication.mutated = true;
+      });
+      observer.observe(publication.notice, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      const observed = new Set<Node>([publication.notice]);
+      for (const entry of publication.placement) {
+        if (entry.parent && !observed.has(entry.parent)) {
+          observer.observe(entry.parent, { childList: true });
+          observed.add(entry.parent);
+        }
+      }
+      publication.observer = observer;
+    }
+    return true;
+  }
+
+  #retirePublication(publication: SecretNoticePublication, preserveObserver: boolean) {
+    if (!publication.retired) {
+      publication.retired = true;
+      publication.draft.retired = true;
+    }
+    if (this.#current === publication) this.#current = null;
+    if (!preserveObserver) this.#disconnect(publication);
+  }
+
+  #retireDraft(draft: SecretNoticeDraft) {
+    draft.retired = true;
+    if (this.#current?.draft === draft) this.#retirePublication(this.#current, false);
+  }
+
+  #retireAuthority(generation: SecretNoticeGeneration) {
+    const authority = generation.authority;
+    if (authority) this.#retireDraft(authority);
+    if (this.#replay?.generation === generation) this.#invalidateReplay(this.#replay);
+  }
+
+  #invalidateReplay(replay: SecretNoticeReplay) {
+    if (this.#replay === replay) this.#replay = null;
+    replay.invalid = true;
+    this.#disconnect(replay.publication);
+  }
+
+  #disconnect(publication: SecretNoticePublication) {
+    publication.observer?.disconnect();
+    publication.observer = null;
+  }
+
+  #mutationFree(publication: SecretNoticePublication): boolean {
+    if (publication.mutated) return false;
+    if ((publication.observer?.takeRecords().length ?? 0) > 0) {
+      publication.mutated = true;
+      return false;
+    }
+    return true;
+  }
+
+  #ownsBinding(binding: SecretNoticeBinding): boolean {
+    return binding.active
+      && binding.generation.bindings[binding.role] === binding
+      && this.#elementOwners.get(binding.element) === binding;
+  }
+
+  #renderIsCurrent(render: SecretNoticeRender): boolean {
+    const setup = render.copySetup;
+    const { visit, session, publication, created } = render;
+    return (
+      render.mount === this.#mount
+      && render.visitIdentity === visit.identity
+      && render.visitSequence === visit.sequence
+      && render.session === visit.session
+      && render.sessionAuthority === session.authority
+      && session === visit.session
+      && render.origin === session.origin
+      && render.userLogin === session.userLogin
+      && render.documentId === session.documentId
+      && render.embedded === visit.embedded
+      && render.next === visit.next
+      && render.onClose === visit.onClose
+      && render.publicationIdentity === publication.identity
+      && render.publicationSequence === publication.sequence
+      && publication.session === session
+      && publication.value === created
+      && !publication.retired
+      && Object.isFrozen(created)
+      && (created.documentIds === null || Object.isFrozen(created.documentIds))
+      && createdSecretValuesMatch(created, publication.value)
+      && render.buttonControl.visit === visit
+      && setup.copy === render.copy
+      && setup.status === render.status
+      && setup.label === render.label
+      && setup.copied === render.copied
+      && render.copied === (render.status === "copied")
+      && render.label === (
+        render.status === "copied"
+          ? "Copied"
+          : render.status === "fallback"
+            ? COPY_FALLBACK_HINT
+            : "Copy"
+      )
+      && render.headline === `Token “${created.name}” created. Copy it now; it will not be shown again.`
+      && render.access === (
+        created.documentIds
+          ? `${created.documentIds.length} document(s)`
+          : "All documents you can access"
+      )
+    );
+  }
+
+  #hierarchyIsCurrent(
+    generation: SecretNoticeGeneration,
+    render: SecretNoticeRender,
+    target: RefObject<HTMLElement | null>,
+    expectedDom?: SecretNoticeDomSnapshot,
+    expectedPlacement?: readonly SecretNoticePlacement[],
+  ): boolean {
+    const { notice, code, copy, hide } = generation.elements;
+    const noticeBinding = generation.bindings.notice;
+    const codeBinding = generation.bindings.code;
+    const copyBinding = generation.bindings.copy;
+    const hideBinding = generation.bindings.hide;
+    if (
+      !notice
+      || !code
+      || !copy
+      || !hide
+      || !noticeBinding
+      || !codeBinding
+      || !copyBinding
+      || !hideBinding
+      || new Set([notice, code, copy, hide]).size !== 4
+      || noticeBinding.element !== notice
+      || codeBinding.element !== code
+      || copyBinding.element !== copy
+      || hideBinding.element !== hide
+      || !this.#ownsBinding(noticeBinding)
+      || !this.#ownsBinding(codeBinding)
+      || !this.#ownsBinding(copyBinding)
+      || !this.#ownsBinding(hideBinding)
+      || generation.render !== render
+      || generation.target !== target
+      || this.#codeOwner?.binding !== codeBinding
+      || this.#codeOwner.target !== target
+      || target.current !== code
+      || !this.#renderIsCurrent(render)
+    ) {
+      return false;
+    }
+
+    const ownerDocument = notice.ownerDocument;
+    const headline = notice.children.item(0);
+    const guidance = notice.children.item(1);
+    const access = notice.children.item(2);
+    const scope = access?.firstElementChild;
+    const controls = notice.children.item(4);
+    const copyIcon = copy.firstElementChild;
+    if (
+      !notice.isConnected
+      || !code.isConnected
+      || !copy.isConnected
+      || !hide.isConnected
+      || code.ownerDocument !== ownerDocument
+      || copy.ownerDocument !== ownerDocument
+      || hide.ownerDocument !== ownerDocument
+      || notice.className !== SECRET_NOTICE_CLASS
+      || notice.getAttribute("role") !== "status"
+      || notice.getAttribute("aria-live") !== "polite"
+      || notice.getAttribute("aria-atomic") !== "true"
+      || notice.dataset.testid !== "token-created"
+      || notice.children.length !== 5
+      || notice.childNodes.length !== 5
+      || headline?.tagName !== "P"
+      || headline.className !== "text-sm font-medium text-green-900 dark:text-green-200"
+      || headline.children.length !== 0
+      || headline.textContent !== render.headline
+      || guidance?.tagName !== "P"
+      || guidance.className !== "mt-1 text-xs text-ink-2"
+      || guidance.children.length !== 0
+      || guidance.textContent !== SECRET_GUIDANCE
+      || access?.tagName !== "P"
+      || access.className !== "mt-1 text-xs text-ink-2"
+      || access.children.length !== 1
+      || scope?.tagName !== "SPAN"
+      || scope.className !== "inline-flex rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-ink-2"
+      || scope.getAttribute("title") !== `${TOKEN_SCOPE_LABEL[render.created.scope]}: ${TOKEN_SCOPE_SUMMARY[render.created.scope]}`
+      || scope.getAttribute("data-testid") !== "token-scope-chip"
+      || scope.getAttribute("data-scope") !== render.created.scope
+      || scope.textContent !== render.created.scope
+      || access.textContent !== `${render.created.scope} ${render.access}`
+      || notice.children.item(3) !== code
+      || code.parentElement !== notice
+      || code.tagName !== "CODE"
+      || code.className !== SECRET_CODE_CLASS
+      || code.dataset.testid !== "copy-token"
+      || code.children.length !== 0
+      || code.textContent !== render.created.token
+      || controls?.tagName !== "DIV"
+      || controls.className !== "mt-2 flex flex-wrap gap-2"
+      || controls.children.length !== 2
+      || controls.childNodes.length !== 2
+      || controls.firstElementChild !== copy
+      || controls.lastElementChild !== hide
+      || copy.parentElement !== controls
+      || copy.nextElementSibling !== hide
+      || copy.className !== SECRET_COPY_CLASS
+      || copy.dataset.testid !== "copy-token-button"
+      || copy.getAttribute("type") !== "button"
+      || copy.type !== "button"
+      || copy.disabled
+      || copy.matches(":disabled")
+      || copy.getAttribute("aria-label") !== SECRET_COPY_LABEL
+      || copy.textContent !== render.label
+      || copy.children.length !== 1
+      || copy.childNodes.length !== 2
+      || !copyIcon
+      || copyIcon.tagName.toLowerCase() !== "svg"
+      || !copyIcon.classList.contains(render.copied ? "lucide-check" : "lucide-copy")
+      || copyIcon.getAttribute("width") !== "14"
+      || copyIcon.getAttribute("height") !== "14"
+      || copyIcon.getAttribute("aria-hidden") !== "true"
+      || hide.parentElement !== controls
+      || hide.className !== SECRET_HIDE_CLASS
+      || hide.getAttribute("type") !== "button"
+      || hide.type !== "button"
+      || hide.disabled
+      || hide.matches(":disabled")
+      || hide.getAttribute("aria-label") !== null
+      || hide.children.length !== 0
+      || hide.childNodes.length !== 1
+      || hide.textContent !== SECRET_HIDE_LABEL
+      || (expectedDom && (expectedDom.node !== notice || !secretNoticeDomMatches(expectedDom)))
+      || (expectedPlacement && !secretNoticePlacementMatches(notice, ownerDocument, expectedPlacement))
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  #publicationIsCurrent(publication: SecretNoticePublication): boolean {
+    return (
+      this.#current === publication
+      && !publication.retired
+      && !publication.draft.retired
+      && publication.generation.authority === publication.draft
+      && publication.bindings.notice === publication.generation.bindings.notice
+      && publication.bindings.code === publication.generation.bindings.code
+      && publication.bindings.copy === publication.generation.bindings.copy
+      && publication.bindings.hide === publication.generation.bindings.hide
+      && publication.actions === publication.generation.actions
+      && this.#mutationFree(publication)
+      && secretNoticePlacementMatches(
+        publication.notice,
+        publication.ownerDocument,
+        publication.placement,
+      )
+      && this.#hierarchyIsCurrent(
+        publication.generation,
+        publication.render,
+        publication.target,
+        publication.dom,
+        publication.placement,
+      )
+    );
+  }
+}
+
+function SecretNotice({
+  visit,
+  publication,
+  buttonControl,
+  owns,
+  dismiss,
+}: {
+  visit: ManagerControlVisit;
+  publication: CreatedSecretPublication;
+  buttonControl: TokensButtonControl;
+  owns: SecretNoticeOwner;
+  dismiss: SecretNoticeDismiss;
+}) {
+  const created = publication.value;
+  const code = useRef<HTMLElement>(null);
+  const copyResult = useCopy(created.token, code);
+  const copySetup = Object.freeze({
+    copy: copyResult.copy,
+    status: copyResult.status,
+    label: copyResult.label,
+    copied: copyResult.copied,
+  });
+  const { copy, status, label, copied } = copySetup;
+  const [mount] = useState(() => Symbol("token-secret-notice"));
+  const [coordinator] = useState(() => new SecretNoticeCoordinator(mount));
+  const render: SecretNoticeRender = Object.freeze({
+    identity: Symbol("token-secret-render"),
+    mount,
+    visit,
+    visitIdentity: visit.identity,
+    visitSequence: visit.sequence,
+    session: visit.session,
+    sessionAuthority: visit.session.authority,
+    origin: visit.session.origin,
+    userLogin: visit.session.userLogin,
+    documentId: visit.session.documentId,
+    embedded: visit.embedded,
+    next: visit.next,
+    onClose: visit.onClose,
+    publication,
+    publicationIdentity: publication.identity,
+    publicationSequence: publication.sequence,
+    created,
+    buttonControl,
+    owns,
+    dismiss,
+    copySetup,
+    copy,
+    status,
+    label,
+    copied,
+    headline: `Token “${created.name}” created. Copy it now; it will not be shown again.`,
+    access: created.documentIds
+      ? `${created.documentIds.length} document(s)`
+      : "All documents you can access",
+  });
+  const draft = coordinator.createDraft(render);
+
+  useLayoutEffect(() => coordinator.establish(draft, code), [coordinator, draft, code]);
+
+  return (
+    <div ref={(element) => coordinator.bindNotice(draft, element)} className={SECRET_NOTICE_CLASS}
+      role="status" aria-live="polite" aria-atomic="true" data-testid="token-created">
+      <p className="text-sm font-medium text-green-900 dark:text-green-200">{render.headline}</p>
+      <p className="mt-1 text-xs text-ink-2">{SECRET_GUIDANCE}</p>
+      <p className="mt-1 text-xs text-ink-2"><ScopeChip scope={created.scope} /> {render.access}</p>
+      <code ref={(element) => coordinator.bindCode(draft, code, element)}
+        className={SECRET_CODE_CLASS} data-testid="copy-token">{created.token}</code>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button ref={(element) => coordinator.bindCopy(draft, element)}
+          type="button" className={SECRET_COPY_CLASS}
+          onClick={(event) => coordinator.activate(draft.generation, draft.generation.actions.copy, event)}
+          aria-label={SECRET_COPY_LABEL} data-testid="copy-token-button">
+          {copied ? <Check size={14} /> : <Copy size={14} />}{label}
+        </button>
+        <button ref={(element) => coordinator.bindHide(draft, element)}
+          type="button" className={SECRET_HIDE_CLASS}
+          onClick={(event) => coordinator.activate(draft.generation, draft.generation.actions.hide, event)}>
+          {SECRET_HIDE_LABEL}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Closing a host dialog unmounts all transient state, including late creation responses. */
 export function TokensPanel({ open = true, ...props }: TokensPanelProps) {
   const managerKey = JSON.stringify([props.origin, props.userLogin, props.documentId ?? null]);
@@ -154,7 +1302,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const [error, setError] = useState<string | null>(null);
   const [conflictName, setConflictName] = useState<string | null>(null);
   const [switchErrors, setSwitchErrors] = useState<Record<string, string>>({});
-  const [createdPublication, setCreatedPublication] = useState<SecretPublication | null>(null);
+  const [createdPublication, setCreatedPublication] = useState<CreatedSecretPublication | null>(null);
   const created = createdPublication?.value ?? null;
   const liveOrigin = useOrigin(origin);
   const id = useId();
@@ -172,7 +1320,10 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     documentId,
   }).current;
   const activeManagerSession = useRef<ManagerSession | null>(null);
+  const controlVisitSequence = useRef(0);
   const controlVisit = useMemo<ManagerControlVisit>(() => ({
+    identity: Symbol("token-manager-control-visit"),
+    sequence: ++controlVisitSequence.current,
     session: managerSession,
     embedded,
     next,
@@ -188,7 +1339,8 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const createOwner = useRef<CreateOperation | null>(null);
   const tokenOwners = useRef(new Map<string, TokenOperation>());
   const latestTokenOperations = useRef(new Map<string, TokenOperation>());
-  const createdRef = useRef<SecretPublication | null>(null);
+  const createdRef = useRef<CreatedSecretPublication | null>(null);
+  const createdPublicationSequence = useRef(0);
   const loadSeq = useRef(0);
   const pendingFlips = useRef(new Map<string, { value: boolean; owner: TokenOperation }>());
   const updatedRows = useRef(new Map<string, ApiTokenDto>());
@@ -341,7 +1493,11 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
         if (pending.owner.session === managerSession) flips.delete(tokenId);
       }
       rows.clear();
-      createdRef.current = null;
+      const publication = createdRef.current;
+      if (publication?.session === managerSession) {
+        publication.retired = true;
+        createdRef.current = null;
+      }
     };
   }, [managerSession]);
   useLayoutEffect(() => {
@@ -425,28 +1581,47 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       return next;
     });
   };
-  const showCreated = (value: CreatedApiTokenDto) => {
-    const publication = { value };
+  const showCreated = (value: CreatedApiTokenDto | CreatedSecretValue) => {
+    const previous = createdRef.current;
+    if (previous) previous.retired = true;
+    const publication: CreatedSecretPublication = {
+      identity: Symbol("created-token-secret"),
+      sequence: ++createdPublicationSequence.current,
+      session: managerSession,
+      value: snapshotCreatedSecret(value),
+      retired: false,
+    };
+    Object.seal(publication);
     createdRef.current = publication;
     setCreatedPublication(publication);
   };
-  const clearCreated = (publication: SecretPublication) => {
-    if (createdRef.current !== publication) return false;
+  const clearCreated = (publication: CreatedSecretPublication) => {
+    if (createdRef.current !== publication || publication.retired) return false;
+    publication.retired = true;
     createdRef.current = null;
     setCreatedPublication((current) => current === publication ? null : current);
     return true;
   };
+  const ownsSecretNotice = useCallback<SecretNoticeOwner>((visit, publication, buttonControl) => {
+    const button = buttonControl.element;
+    return isControlVisitCurrent(visit)
+      && publication.session === visit.session
+      && createdRef.current === publication
+      && !publication.retired
+      && buttonControl.visit === visit
+      && tokensButtonOwner.current === buttonControl
+      && !!button
+      && button.isConnected
+      && button.ownerDocument.defaultView !== null;
+  }, [isControlVisitCurrent]);
   const dismissCreated = (
     visit: ManagerControlVisit,
-    publication: SecretPublication,
+    publication: CreatedSecretPublication,
     buttonControl: TokensButtonControl,
   ) => {
     const button = buttonControl.element;
-    if (!isControlVisitCurrent(visit)
-      || createdRef.current !== publication
-      || buttonControl.visit !== visit
-      || tokensButtonOwner.current !== buttonControl
-      || !button?.isConnected
+    if (!ownsSecretNotice(visit, publication, buttonControl)
+      || !button
       || !clearCreated(publication)) return;
     if (isControlVisitCurrent(visit)
       && tokensButtonOwner.current === buttonControl
@@ -593,8 +1768,14 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
           : "That name is reserved by an existing token, but it could not be matched to this list. Retry the list or open all your tokens in a signed-in browser session; do not create another until the scope and account are clear."}
         {!matching && <button type="button" className="btn btn-outline btn-sm mt-2" disabled={busy} onClick={() => void load()}>Refresh token list</button>}
       </p>}
-      {createdPublication && <SecretNotice created={createdPublication.value}
-        onDismiss={() => dismissCreated(controlVisit, createdPublication, tokensButtonControl)} />}
+      {createdPublication && <SecretNotice
+        key={`${controlVisit.sequence}:${createdPublication.sequence}`}
+        visit={controlVisit}
+        publication={createdPublication}
+        buttonControl={tokensButtonControl}
+        owns={ownsSecretNotice}
+        dismiss={dismissCreated}
+      />}
       <section className="min-w-0 rounded-xl border border-line bg-surface" aria-label="Your tokens">
         <h2 className="border-b border-line px-3 py-2 text-sm font-semibold text-ink">Your tokens</h2>
         {loadError ? <div className="p-3 text-sm">

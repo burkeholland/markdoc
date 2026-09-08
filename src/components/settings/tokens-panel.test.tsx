@@ -1,8 +1,22 @@
 // @vitest-environment jsdom
-import { StrictMode, useEffect, useLayoutEffect, type ReactNode } from "react";
-import { createRoot } from "react-dom/client";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+
+const copyText = vi.hoisted(() => vi.fn());
+const selectContents = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clipboard", async (original) => ({
+  ...await original<typeof import("@/lib/clipboard")>(),
+  copyText,
+  selectContents,
+}));
 
 vi.mock("@/components/settings/copilot-checklist", () => ({
   CopilotChecklist: () => null,
@@ -24,6 +38,17 @@ const token = {
   lastMcpCallAt: null,
   expiresAt: null,
   collaboratorsMayAsk: false,
+};
+
+const createdSecret = {
+  id: "created-token",
+  name: "Strict agent",
+  token: "mdk_strict_secret",
+  prefix: "mdk_str",
+  scope: "comment" as const,
+  documentIds: ["doc-one", "doc-two"],
+  createdAt: "2026-09-08T00:00:00.000Z",
+  expiresAt: null,
 };
 
 function response(body: unknown, status = 200) {
@@ -83,9 +108,12 @@ const unhandledRejections: unknown[] = [];
 const recordUnhandledRejection = (reason: unknown) => {
   unhandledRejections.push(reason);
 };
+const directSecretViews: Array<{ host: HTMLDivElement; root: Root }> = [];
 
 beforeEach(() => {
   fetchMock.mockReset();
+  copyText.mockReset().mockResolvedValue(true);
+  selectContents.mockReset();
   vi.stubGlobal("fetch", fetchMock);
   unhandledRejections.length = 0;
   process.on("unhandledRejection", recordUnhandledRejection);
@@ -93,11 +121,108 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
+  for (const view of directSecretViews.splice(0)) {
+    await act(async () => view.root.unmount());
+    view.host.remove();
+  }
   await Promise.resolve();
   process.off("unhandledRejection", recordUnhandledRejection);
   vi.unstubAllGlobals();
+  vi.useRealTimers();
   expect(unhandledRejections).toEqual([]);
 });
+
+function renderDirectSecret(node: ReactNode) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { host, root: createRoot(host) };
+  directSecretViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
+
+function reactProp<T>(element: Element, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the secret control");
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`The secret control has no ${name} callback`);
+  return value as T;
+}
+
+function invokeHandlerFromNative(
+  button: HTMLButtonElement,
+  handler: (event: ReactMouseEvent<HTMLButtonElement>) => void,
+) {
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const nativeEvent = event as MouseEvent;
+    handler({
+      type: nativeEvent.type,
+      button: nativeEvent.button,
+      bubbles: nativeEvent.bubbles,
+      cancelable: nativeEvent.cancelable,
+      eventPhase: nativeEvent.eventPhase,
+      currentTarget: button,
+      target: nativeEvent.target,
+      nativeEvent,
+      defaultPrevented: nativeEvent.defaultPrevented,
+    } as ReactMouseEvent<HTMLButtonElement>);
+  }, { once: true });
+  fireEvent.click(button);
+}
+
+function deferredValue<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function queueStrictSecret(created = createdSecret) {
+  const row = {
+    ...token,
+    id: created.id,
+    name: created.name,
+    prefix: created.prefix,
+    scope: created.scope,
+    documentIds: [...created.documentIds],
+    createdAt: created.createdAt,
+    expiresAt: created.expiresAt,
+  };
+  fetchMock
+    .mockResolvedValueOnce(response({ tokens: [] }))
+    .mockResolvedValueOnce(response({ tokens: [] }))
+    .mockResolvedValueOnce(response({ token: created }, 201))
+    .mockResolvedValueOnce(response({ tokens: [row] }));
+  return row;
+}
+
+async function showStrictSecret(created = createdSecret) {
+  const row = queueStrictSecret(created);
+  const view = renderDirectSecret(
+    <StrictMode>
+      <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+    </StrictMode>,
+  );
+  await screen.findByText("No tokens yet.");
+  fireEvent.click(screen.getByTestId("token-add"));
+  fireEvent.change(screen.getByTestId("token-name"), { target: { value: created.name } });
+  fireEvent.click(screen.getByTestId("token-create"));
+  const notice = await screen.findByTestId("token-created");
+  await screen.findByRole("button", { name: `Rename ${row.name}` });
+  return {
+    ...view,
+    row,
+    notice: notice as HTMLDivElement,
+    code: screen.getByTestId("copy-token") as HTMLElement,
+    copy: screen.getByRole("button", { name: "Copy token" }) as HTMLButtonElement,
+    hide: screen.getByRole("button", { name: "I stored it - hide secret" }) as HTMLButtonElement,
+  };
+}
 
 describe("Settings → Agents: account-session authority", () => {
   it.each(["success", "failure"] as const)(
@@ -562,5 +687,243 @@ describe("Settings → Agents: the create form shows the validation reason (#148
     expect(alert).toHaveTextContent("Name is required");
     expect(alert).not.toHaveTextContent("Invalid request");
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+});
+
+describe("Settings → Agents: created-secret publication authority", () => {
+  it("copies once from a direct-root Strict Mode publication and preserves feedback", async () => {
+    const secret = await showStrictSecret();
+    const icon = secret.copy.firstElementChild;
+    if (!icon) throw new Error("The Copy token control has no icon");
+    const ownerWindow = secret.copy.ownerDocument.defaultView!;
+    const click = new ownerWindow.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    copyText.mockImplementationOnce(() => {
+      secret.copy.dispatchEvent(new ownerWindow.MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }));
+      return Promise.resolve(true);
+    });
+
+    act(() => {
+      fireEvent(icon, click);
+      fireEvent(icon, click);
+    });
+
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(createdSecret.token);
+    expect(selectContents).not.toHaveBeenCalled();
+    await waitFor(() => expect(secret.copy).toHaveTextContent("Copied"));
+    expect(secret.copy.firstElementChild).toHaveClass("lucide-check");
+  });
+
+  it("hides once from a direct-root Strict Mode publication and focuses Tokens", async () => {
+    const secret = await showStrictSecret();
+    const tokensButton = screen.getByRole("button", { name: "Tokens" });
+    const focus = vi.spyOn(tokensButton, "focus");
+
+    fireEvent.click(secret.hide);
+    secret.hide.click();
+
+    expect(screen.queryByTestId("token-created")).toBeNull();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(tokensButton).toHaveFocus();
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  it("preserves selection fallback and resets only the feedback it owns", async () => {
+    const secret = await showStrictSecret();
+    vi.useFakeTimers();
+    copyText.mockResolvedValueOnce(false);
+
+    await act(async () => {
+      fireEvent.click(secret.copy);
+      await Promise.resolve();
+    });
+
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(createdSecret.token);
+    expect(selectContents).toHaveBeenCalledExactlyOnceWith(secret.code);
+    expect(screen.getByRole("button", { name: "Copy token" })).toHaveTextContent("Select & press Ctrl+C");
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByRole("button", { name: "Copy token" })).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects fabricated and crossed events without retiring the current controls", async () => {
+    const secret = await showStrictSecret();
+    const copy = reactProp<(event: ReactMouseEvent<HTMLButtonElement>) => void>(secret.copy, "onClick");
+    const hide = reactProp<(event: ReactMouseEvent<HTMLButtonElement>) => void>(secret.hide, "onClick");
+    const nativeEvent = new secret.copy.ownerDocument.defaultView!.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    const fabricated = {
+      type: "click",
+      button: 0,
+      bubbles: true,
+      cancelable: true,
+      eventPhase: 0,
+      currentTarget: secret.copy,
+      target: secret.copy,
+      nativeEvent,
+      defaultPrevented: false,
+    } as unknown as ReactMouseEvent<HTMLButtonElement>;
+
+    act(() => {
+      copy(fabricated);
+      invokeHandlerFromNative(secret.hide, copy);
+      invokeHandlerFromNative(secret.copy, hide);
+    });
+
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(screen.getByTestId("token-created")).toBe(secret.notice);
+
+    fireEvent.click(secret.copy);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(createdSecret.token);
+    await waitFor(() => expect(secret.copy).toHaveTextContent("Copied"));
+    fireEvent.click(secret.hide);
+    expect(screen.queryByTestId("token-created")).toBeNull();
+  });
+
+  it("retires equal-looking controls across a manager visit without letting stale handlers poison the successor", async () => {
+    const secret = await showStrictSecret();
+    const staleCopy = reactProp<(event: ReactMouseEvent<HTMLButtonElement>) => void>(secret.copy, "onClick");
+    const staleHide = reactProp<(event: ReactMouseEvent<HTMLButtonElement>) => void>(secret.hide, "onClick");
+
+    act(() => secret.root.render(
+      <StrictMode>
+        <TokensPanel origin="https://markdoc.test" userLogin="alice" next="/d/current" />
+      </StrictMode>,
+    ));
+
+    const currentNotice = screen.getByTestId("token-created");
+    const currentCopy = screen.getByRole("button", { name: "Copy token" }) as HTMLButtonElement;
+    const currentHide = screen.getByRole("button", { name: "I stored it - hide secret" }) as HTMLButtonElement;
+    expect(currentNotice).not.toBe(secret.notice);
+    expect(currentCopy).not.toBe(secret.copy);
+    expect(currentHide).not.toBe(secret.hide);
+
+    act(() => {
+      invokeHandlerFromNative(currentCopy, staleCopy);
+      invokeHandlerFromNative(currentHide, staleHide);
+    });
+    expect(copyText).not.toHaveBeenCalled();
+    expect(screen.getByTestId("token-created")).toBe(currentNotice);
+
+    fireEvent.click(currentCopy);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(createdSecret.token);
+    await waitFor(() => expect(currentCopy).toHaveTextContent("Copied"));
+    fireEvent.click(currentHide);
+    expect(screen.queryByTestId("token-created")).toBeNull();
+  });
+
+  it.each(["notice", "code", "copy", "hide"] as const)(
+    "does not promote a partial %s ref replay",
+    async (role) => {
+      const secret = await showStrictSecret();
+      const element = secret[role];
+      const ref = reactProp<(value: typeof element | null) => void>(element, "ref");
+
+      act(() => {
+        ref(null);
+        ref(element);
+      });
+      fireEvent.click(secret.copy);
+
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expect(screen.getByTestId("token-created")).toBe(secret.notice);
+    },
+  );
+
+  it.each([
+    "restored notice attribute",
+    "restored secret text",
+    "restored control order",
+    "restored notice ancestor",
+    "restored ancestor sibling",
+  ] as const)("permanently retires a publication after a %s mutation", async (mutation) => {
+    const secret = await showStrictSecret();
+    if (mutation === "restored notice attribute") {
+      secret.notice.setAttribute("data-transient", "true");
+      secret.notice.removeAttribute("data-transient");
+    } else if (mutation === "restored secret text") {
+      secret.code.textContent = "mdk_changed";
+      secret.code.textContent = createdSecret.token;
+    } else if (mutation === "restored control order") {
+      const controls = secret.copy.parentElement!;
+      controls.insertBefore(secret.hide, secret.copy);
+      controls.insertBefore(secret.copy, secret.hide);
+    } else if (mutation === "restored notice ancestor") {
+      const manager = secret.notice.parentElement!;
+      const parent = manager.parentNode!;
+      const next = manager.nextSibling;
+      manager.remove();
+      parent.insertBefore(manager, next);
+    } else {
+      const marker = document.createElement("div");
+      document.body.append(marker);
+      marker.remove();
+    }
+
+    fireEvent.click(secret.copy);
+    fireEvent.click(secret.hide);
+
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(screen.getByTestId("token-created")).toBe(secret.notice);
+  });
+
+  it("isolates late clipboard settlement and copied timers from the exact successor", async () => {
+    const oldClipboard = deferredValue<boolean>();
+    copyText.mockReturnValueOnce(oldClipboard.promise);
+    const secret = await showStrictSecret();
+    fireEvent.click(secret.copy);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(createdSecret.token);
+
+    const renamed = { ...secret.row, name: "Renamed strict agent" };
+    fetchMock.mockResolvedValueOnce(response({ token: renamed }));
+    fireEvent.click(screen.getByRole("button", { name: `Rename ${createdSecret.name}` }));
+    fireEvent.change(screen.getByLabelText("Token name"), { target: { value: renamed.name } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    await screen.findByRole("button", { name: `Rename ${renamed.name}` });
+    expect(screen.getByTestId("token-created")).toHaveTextContent(`Token “${renamed.name}” created.`);
+    const currentCode = screen.getByTestId("copy-token");
+
+    await act(async () => {
+      oldClipboard.reject(new Error("late old clipboard rejection"));
+      await Promise.resolve();
+    });
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Copy token" })).toHaveTextContent("Copy");
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+      await Promise.resolve();
+    });
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(createdSecret.token);
+    expect(screen.getByRole("button", { name: "Copy token" })).toHaveTextContent("Copied");
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => secret.root.render(
+      <StrictMode>
+        <TokensPanel origin="https://markdoc.test" userLogin="alice" next="/d/after-copy" />
+      </StrictMode>,
+    ));
+    expect(screen.getByTestId("copy-token")).not.toBe(currentCode);
+    expect(screen.getByRole("button", { name: "Copy token" })).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByRole("button", { name: "Copy token" })).toHaveTextContent("Copy");
   });
 });
