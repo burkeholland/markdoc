@@ -419,6 +419,9 @@ class MutationJournal {
   #passiveReplayAuthority: object | null = null;
   #registeredFocusGuards: FocusGuardPair | null = null;
   #awaitingControlledDecision = false;
+  #preparingRenderedClose = false;
+  #renderedClosePrepared = false;
+  #renderedCloseStaged = false;
   #closing = false;
   #replaying = false;
   #invalid = false;
@@ -875,7 +878,13 @@ class MutationJournal {
     ) {
       return true;
     }
-    if (this.#awaitingControlledDecision && this.#isOwned(record.target)) return false;
+    if (
+      this.#awaitingControlledDecision
+      && !this.#preparingRenderedClose
+      && this.#isOwned(record.target)
+    ) {
+      return false;
+    }
     if ([...added, ...removed].some(subtreeHasFocusGuardMarker)) return false;
     if (this.#isBodyDescendant(record.target)) return true;
     if (
@@ -1029,6 +1038,9 @@ class MutationJournal {
     this.#acceptingReplayGuardReplacement = false;
     this.#passiveReplayAuthority = null;
     this.#awaitingControlledDecision = false;
+    this.#preparingRenderedClose = false;
+    this.#renderedClosePrepared = false;
+    this.#renderedCloseStaged = false;
     this.#nestedRoots.clear();
     this.#onInvalid();
   }
@@ -1115,10 +1127,25 @@ class MutationJournal {
     return this.#closing && !this.#invalid && !this.#released;
   }
 
+  prepareRenderedClose() {
+    if (!this.#awaitingControlledDecision || this.#released || this.#invalid) return false;
+    this.#process();
+    if (this.#invalid) return false;
+    this.#renderedClosePrepared = true;
+    return true;
+  }
+
   finishControlledCallback() {
     if (!this.#awaitingControlledDecision) return;
     this.#process();
+    if (this.#invalid) return;
     this.#awaitingControlledDecision = false;
+    this.#renderedClosePrepared = false;
+    if (this.#renderedCloseStaged) {
+      this.#renderedCloseStaged = false;
+      this.#observer.disconnect();
+      this.#observer.takeRecords();
+    }
   }
 
   commitClosing() {
@@ -1129,12 +1156,21 @@ class MutationJournal {
 
   commitRenderedClose() {
     if (this.#released || this.#invalid) return false;
-    if (!this.#closing) {
-      this.#closing = true;
-      this.#process();
+    this.#closing = true;
+    if (this.#awaitingControlledDecision) {
+      if (!this.#renderedClosePrepared) return false;
+      this.#preparingRenderedClose = true;
+      try {
+        this.#process();
+      } finally {
+        this.#preparingRenderedClose = false;
+      }
       if (this.#invalid) return false;
+      this.#renderedCloseStaged = true;
+      return true;
     }
-    this.#awaitingControlledDecision = false;
+    this.#process();
+    if (this.#invalid) return false;
     this.#observer.disconnect();
     this.#observer.takeRecords();
     return true;
@@ -1151,6 +1187,9 @@ class MutationJournal {
     this.#acceptingReplayGuardReplacement = false;
     this.#passiveReplayAuthority = null;
     this.#awaitingControlledDecision = false;
+    this.#preparingRenderedClose = false;
+    this.#renderedClosePrepared = false;
+    this.#renderedCloseStaged = false;
     this.#nestedRoots.clear();
     this.#released = true;
   }
@@ -2185,6 +2224,20 @@ class DialogCoordinator {
     transition.source.journal.finishControlledCallback();
   }
 
+  prepareControlledClose(authority: DialogRootAuthority) {
+    const transition = this.#transition;
+    if (
+      !authority.controlled
+      || authority.actualOpen
+      || !transition
+      || transition.claimed
+      || !rootAuthoritiesMatchExceptOpen(transition.source.authority.root, authority)
+    ) {
+      return;
+    }
+    transition.source.journal.prepareRenderedClose();
+  }
+
   stageControlledClose(
     authority: DialogAuthority,
     closeAction: object,
@@ -2372,6 +2425,7 @@ export function Dialog({
     setUncontrolledOpen,
     openingTarget,
   });
+  coordinator.prepareControlledClose(candidate);
   const presentation = cache.resolve(
     candidate,
     actualOpen ? 1 : 0,

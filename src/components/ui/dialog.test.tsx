@@ -11,6 +11,7 @@ import {
   type RefCallback,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { renderToString } from "react-dom/server";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1475,6 +1476,56 @@ describe("DialogContent exact Strict Mode publication", () => {
     await flushTasks();
 
     expect(screen.getByRole("dialog")).toHaveAccessibleName("Detached guard veto");
+    expect(taintedClosed).not.toHaveBeenCalled();
+
+    act(() => view.root.render(tree("clean", false, cleanClosed)));
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cleanClosed).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+  });
+
+  it("rejects callback mutation before a synchronous controlled close commit", async () => {
+    const taintedClosed = vi.fn();
+    const cleanClosed = vi.fn();
+    function SynchronousCloseDialog({ tainted, onClosed }: { tainted: boolean; onClosed: () => void }) {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            if (tainted) {
+              const wrapper = document.createElement("div");
+              const guard = createFocusGuard();
+              wrapper.append(guard);
+              screen.getByTestId("synchronous-close-host").append(wrapper);
+              wrapper.remove();
+              guard.removeAttribute("data-radix-focus-guard");
+              guard.removeAttribute("tabindex");
+              guard.removeAttribute("style");
+            }
+            flushSync(() => setOpen(next));
+          }}
+        >
+          <DialogContent title="Synchronous controlled close" onClosed={onClosed}>
+            <div data-testid="synchronous-close-host" />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
+      <StrictMode>
+        <SynchronousCloseDialog key={rootKey} tainted={tainted} onClosed={onClosed} />
+      </StrictMode>
+    );
+    const view = renderDirect(tree("tainted", true, taintedClosed));
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(taintedClosed).not.toHaveBeenCalled();
 
     act(() => view.root.render(tree("clean", false, cleanClosed)));
