@@ -319,6 +319,7 @@ interface SuggestionNativeSnapshot {
 
 interface SuggestionNativeDelivery {
   readonly snapshot: SuggestionNativeSnapshot;
+  delegationTarget: EventTarget | null;
   crossedRoot: boolean;
   captureInvalid: boolean;
   captureEvent: object | null;
@@ -352,7 +353,7 @@ interface SuggestionActionPublicationRuntime {
   readonly stageCaptureRoot: (event: MouseEvent<HTMLDivElement>) => void;
   readonly stageCaptureAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
   readonly stageBubbleAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
-  readonly invokeFromRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly stageBubbleRoot: (event: MouseEvent<HTMLDivElement>) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly retireForAction: () => void;
@@ -730,10 +731,13 @@ function createSuggestionActionRender(
     let replayRefs: SuggestionActionRefReplay[] = [];
     let domGuard: SuggestionActionDomGuard | null = null;
     const nativeDeliveries = new WeakMap<globalThis.MouseEvent, SuggestionNativeDelivery>();
+    const nativeBubbleTargets = new Set<EventTarget>();
 
     const removeListeners = () => {
       publication.ownerDocument.defaultView?.removeEventListener("click", captureNative, true);
       publication.elements.root.removeEventListener("click", crossNativeRoot);
+      for (const target of nativeBubbleTargets) target.removeEventListener("click", finalizeNative);
+      nativeBubbleTargets.clear();
     };
     const release = () => {
       if (released) return;
@@ -853,6 +857,7 @@ function createSuggestionActionRender(
       });
       const delivery: SuggestionNativeDelivery = {
         snapshot,
+        delegationTarget: null,
         crossedRoot: false,
         captureInvalid: false,
         captureEvent: null,
@@ -950,6 +955,16 @@ function createSuggestionActionRender(
         return;
       }
       delivery.captureEvent = event;
+      const delegationTarget = delivery.snapshot.event.currentTarget;
+      if (!delegationTarget || !delivery.snapshot.path.includes(delegationTarget)) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.delegationTarget = delegationTarget;
+      if (!nativeBubbleTargets.has(delegationTarget)) {
+        delegationTarget.addEventListener("click", finalizeNative);
+        nativeBubbleTargets.add(delegationTarget);
+      }
     };
 
     const stageCaptureAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
@@ -976,6 +991,7 @@ function createSuggestionActionRender(
         delivery.captureActionCount !== 1 ||
         delivery.captureRootCount !== 1 ||
         delivery.captureEvent !== event ||
+        delivery.delegationTarget !== delivery.snapshot.event.currentTarget ||
         (delivery.captureAction && delivery.captureAction !== action) ||
         delivery.snapshot.action !== action ||
         delivery.snapshot.button !== button ||
@@ -990,6 +1006,10 @@ function createSuggestionActionRender(
     const stageBubbleAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
       const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
       const delivery = button ? nativeDelivery(event, button, true) : null;
+      if (delivery && delivery.delegationTarget !== delivery.snapshot.event.currentTarget) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
       if (
         !delivery ||
         delivery.captureInvalid ||
@@ -1035,13 +1055,14 @@ function createSuggestionActionRender(
       });
     };
 
-    const invokeFromRoot = (event: MouseEvent<HTMLDivElement>) => {
+    const stageBubbleRoot = (event: MouseEvent<HTMLDivElement>) => {
       const delivery = nativeDelivery(event, publication.elements.root, true);
       if (!delivery || !publicationIsCurrent()) return;
       delivery.bubbleRootCount += 1;
       if (
         delivery.bubbleRootCount !== 1 ||
         delivery.bubbleInvalid ||
+        delivery.delegationTarget !== delivery.snapshot.event.currentTarget ||
         delivery.bubbleEvent !== event ||
         delivery.captureEvent === event ||
         !delivery.bubbleAction ||
@@ -1050,7 +1071,27 @@ function createSuggestionActionRender(
         delivery.bubbleInvalid = true;
         return;
       }
+    };
+
+    function finalizeNative(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (
+        !ownerWindow ||
+        !(event instanceof ownerWindow.MouseEvent) ||
+        event.currentTarget === null
+      ) {
+        return;
+      }
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        event.currentTarget !== delivery.delegationTarget
+      ) {
+        return;
+      }
       const pending = delivery.bubbleDelivery;
+      if (!pending) return;
       const { action } = pending;
       const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
       if (
@@ -1063,7 +1104,7 @@ function createSuggestionActionRender(
         delivery.captureAction !== action ||
         delivery.bubbleAction !== action ||
         pending.publication !== publication ||
-        pending.event !== event ||
+        pending.event !== delivery.bubbleEvent ||
         pending.native !== delivery ||
         pending.target !== delivery.snapshot.target ||
         pending.type !== delivery.snapshot.type ||
@@ -1071,7 +1112,7 @@ function createSuggestionActionRender(
         pending.buttons !== delivery.snapshot.buttons ||
         pending.bubbles !== delivery.snapshot.bubbles ||
         pending.cancelable !== delivery.snapshot.cancelable ||
-        !suggestionNativeSnapshotFieldsMatch(delivery) ||
+        !suggestionNativeSnapshotMatches(delivery) ||
         delivery.snapshot.action !== action ||
         delivery.snapshot.button !== button ||
         !button ||
@@ -1082,7 +1123,8 @@ function createSuggestionActionRender(
         cells.claimedActions.has(action) ||
         !delivery.captureEvent ||
         cells.claimedReactEvents.has(delivery.captureEvent) ||
-        cells.claimedReactEvents.has(event) ||
+        !delivery.bubbleEvent ||
+        cells.claimedReactEvents.has(delivery.bubbleEvent) ||
         claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
         !publicationIsCurrent()
       ) {
@@ -1091,12 +1133,12 @@ function createSuggestionActionRender(
       cells.claimedPublications.add(publication);
       cells.claimedActions.add(action);
       cells.claimedReactEvents.add(delivery.captureEvent);
-      cells.claimedReactEvents.add(event);
+      cells.claimedReactEvents.add(delivery.bubbleEvent);
       claimedSuggestionNativeEvents.add(delivery.snapshot.event);
       nativeDeliveries.delete(delivery.snapshot.event);
       event.stopPropagation();
       void action.callback();
-    };
+    }
 
     const runtime: SuggestionActionPublicationRuntime = Object.freeze({
       publication,
@@ -1125,7 +1167,7 @@ function createSuggestionActionRender(
       stageCaptureRoot,
       stageCaptureAction,
       stageBubbleAction,
-      invokeFromRoot,
+      stageBubbleRoot,
       retireForElement: () => {
         retire("element");
       },
@@ -1330,7 +1372,7 @@ function createSuggestionActionRender(
   const onRootClick = (event: MouseEvent<HTMLDivElement>) => {
     const runtime = currentRuntime;
     if (!runtime || runtime.isRetired()) return;
-    runtime.invokeFromRoot(event);
+    runtime.stageBubbleRoot(event);
   };
 
   Object.assign(render, {

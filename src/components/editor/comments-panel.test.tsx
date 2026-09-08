@@ -590,6 +590,87 @@ describe("CommentsPanel", () => {
       },
     );
 
+    it.each(["pointer Accept", "keyboard Reject"] as const)(
+      "rejects a post-root %s bubble forgery before document delegation and recovers",
+      async (activation) => {
+        const fixture = reviewSession(`suggestion-document-bubble-forgery-${activation.replace(" ", "-")}`);
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        const ownerDocument = frame.contentDocument;
+        if (!ownerDocument?.defaultView) throw new Error("The hydration frame did not have a document window");
+        const page = (
+          <html>
+            {createElement("head")}
+            <body>
+              <StrictMode>{suggestionPanel(session)}</StrictMode>
+            </body>
+          </html>
+        );
+        ownerDocument.open();
+        ownerDocument.write(`<!doctype html>${renderToString(page)}`);
+        ownerDocument.close();
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const root = await act(async () => hydrateRoot(ownerDocument, page));
+
+        try {
+          const actions = captureSuggestionActions(ownerDocument);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const stopPropagation = vi.fn();
+          const ancestor = actions.root.parentElement;
+          if (!ancestor) throw new Error("The suggestion action root did not have an ancestor");
+          const forgeBubble = (nativeEvent: Event) => {
+            const click = nativeEvent as MouseEvent;
+            const forged = {
+              type: click.type,
+              currentTarget: control.element as EventTarget | null,
+              target: click.target,
+              nativeEvent: click,
+              button: click.button,
+              buttons: click.buttons,
+              bubbles: click.bubbles,
+              cancelable: click.cancelable,
+              defaultPrevented: click.defaultPrevented,
+              stopPropagation,
+            };
+            control.click(forged);
+            forged.currentTarget = actions.root;
+            actions.rootClick(forged);
+            click.stopImmediatePropagation();
+          };
+          ancestor.addEventListener("click", forgeBubble, { once: true });
+          const user = userEvent.setup({ document: ownerDocument });
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(stopPropagation).not.toHaveBeenCalled();
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => root.unmount());
+          errors.mockRestore();
+          frame.remove();
+        }
+      },
+    );
+
     it("keeps the exact presentation while moving from one-button to two-button authority", async () => {
       const fixture = reviewSession("suggestion-conditional-actions");
       session = fixture.session;
