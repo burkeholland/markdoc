@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useLayoutEffect } from "react";
+import { StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -225,15 +225,38 @@ function openPresence() {
   return screen.getByTestId("presence-popover");
 }
 
-type CapturedClick = (event: { currentTarget: HTMLElement }) => void;
+type CapturedClick = (event: unknown) => void;
+
+function reactPropsEntry(element: HTMLElement): {
+  key: string;
+  record: Record<string, { onClick?: CapturedClick; ref?: (node: HTMLElement | null) => void }>;
+  props: { onClick?: CapturedClick; ref?: (node: HTMLElement | null) => void };
+} {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the presence control");
+  const record = element as unknown as Record<string, { onClick?: CapturedClick; ref?: (node: HTMLElement | null) => void }>;
+  return { key: propsKey, record, props: record[propsKey]! };
+}
 
 function captureClick(element: HTMLElement): CapturedClick {
   if (!(element instanceof HTMLButtonElement)) throw new Error("The presence control was not a button");
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error("React props were not attached to the presence control");
-  const props = (element as unknown as Record<string, { onClick?: CapturedClick } | undefined>)[propsKey];
+  const props = reactPropsEntry(element).props;
   if (!props?.onClick) throw new Error("The presence control did not have an onClick handler");
   return props.onClick;
+}
+
+function interceptClick(
+  element: HTMLButtonElement,
+  invoke: (current: CapturedClick, event: unknown) => void,
+): () => void {
+  const { key, record, props } = reactPropsEntry(element);
+  const current = props.onClick;
+  if (!current) throw new Error("The presence control did not have an onClick handler");
+  const intercepted = { ...props, onClick: (event: unknown) => invoke(current, event) };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
 }
 
 function captureRef<T extends HTMLElement>(element: T): (node: T | null) => void {
@@ -520,17 +543,11 @@ describe("PresenceStack", () => {
           cancelA({ currentTarget: foreign });
           cancelA({ currentTarget: detached });
           cancelA({ currentTarget: replacementCancel });
-          a.cancels[0].disabled = true;
-          cancelA({ currentTarget: a.cancels[0] });
-          a.cancels[0].disabled = false;
           cancelB({ currentTarget: a.cancels[0] });
           keepA({ currentTarget: b.keep });
           keepA({ currentTarget: foreign });
           keepA({ currentTarget: detached });
           keepA({ currentTarget: replacementKeep });
-          a.keep.disabled = true;
-          keepA({ currentTarget: a.keep });
-          a.keep.disabled = false;
           keepB({ currentTarget: a.keep });
           cancelA(movingAEvent);
         });
@@ -544,36 +561,23 @@ describe("PresenceStack", () => {
         expect(sessionA.follow).not.toHaveBeenCalled();
         expect(sessionB.follow).not.toHaveBeenCalled();
 
-        const acceptA = () => {
-          movingAEvent.currentTarget = a.cancels[0];
-          cancelA(movingAEvent);
-          cancelA(movingAEvent);
-        };
-        const acceptB = () => {
-          const event = { currentTarget: b.cancels[0] };
-          cancelB(event);
-          cancelB(event);
-        };
         act(() => {
           if (order === "a-before-b") {
-            acceptA();
-            acceptB();
+            a.cancels[0].click();
+            b.cancels[0].click();
           } else {
-            acceptB();
-            acceptA();
+            b.cancels[0].click();
+            a.cancels[0].click();
           }
-          const keepAEvent = { currentTarget: a.keep };
-          keepA(keepAEvent);
-          keepA(keepAEvent);
-          keepA({ currentTarget: a.keep });
-          const keepBEvent = { currentTarget: b.keep };
-          keepB(keepBEvent);
-          keepB(keepBEvent);
+          a.keep.click();
+          a.keep.click();
+          b.keep.click();
+          b.keep.click();
         });
 
         expect(callbacksA.onCancel).toHaveBeenCalledExactlyOnceWith("leaf-request-a");
         expect(callbacksB.onCancel).toHaveBeenCalledExactlyOnceWith("leaf-request-b");
-        expect(callbacksA.onKeep).toHaveBeenCalledTimes(2);
+        expect(callbacksA.onKeep).toHaveBeenCalledOnce();
         expect(callbacksB.onKeep).toHaveBeenCalledOnce();
       } finally {
         act(() => root.unmount());
@@ -683,14 +687,196 @@ describe("PresenceStack", () => {
         expect(callbacksA.onCancel).not.toHaveBeenCalled();
         expect(callbacksA.onKeep).not.toHaveBeenCalled();
         const current = leafElements(screen.getByTestId("presence-leaves"));
-        const currentCancel = captureClick(current.cancels[0]);
-        const currentKeep = captureClick(current.keep);
         act(() => {
-          currentCancel({ currentTarget: current.cancels[0] });
-          currentKeep({ currentTarget: current.keep });
+          current.cancels[0].click();
+          current.keep.click();
         });
         expect(callbacksB.onCancel).toHaveBeenCalledExactlyOnceWith("ref-request");
         expect(callbacksB.onKeep).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each([
+    { control: "Cancel", primary: undefined },
+    { control: "Keep agent outline", primary: false },
+    { control: "Keep agent primary", primary: true },
+  ] as const)(
+    "keeps $control exact through direct Strict Mode replay, corruption, remount, repetition, and reentry",
+    ({ control, primary }) => {
+      const local = person(`strict-${control}`, `Strict ${control}`, { isLocal: true, role: "owner" });
+      const session = new PresenceSession({
+        localId: local.id,
+        localName: local.name,
+        users: [local],
+        role: "owner",
+      });
+      const pending = [
+        request("strict-request-a", local.id, { instruction: "Strict first request" }),
+        request("strict-request-b", "strict-other", { instruction: "Strict second request" }),
+      ];
+      const onCancel = vi.fn<(requestId: string) => void>();
+      const onKeep = vi.fn<() => void>();
+      const handlers = { onCancel, onKeep };
+      const nameOf = (id: string) => `Name ${id}`;
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const isCancel = control === "Cancel";
+      let retired:
+        | {
+            click: CapturedClick;
+            rootRef: (node: HTMLElement | null) => void;
+            actionRef: (node: HTMLButtonElement | null) => void;
+          }
+        | undefined;
+
+      const renderStrictLeaf = (instance: string, boundary: number, onBoundary?: () => void) => (
+        <StrictMode>
+          <PresenceLeafBoundary
+            session={session}
+            pending={pending}
+            callbacks={handlers}
+            nameOf={nameOf}
+            primary={primary}
+            instance={instance}
+            boundary={boundary}
+            onBoundary={onBoundary}
+          />
+        </StrictMode>
+      );
+      const targetOf = (elements: ReturnType<typeof leafElements>) =>
+        isCancel ? elements.cancels[0]! : elements.keep;
+      const rootOf = (elements: ReturnType<typeof leafElements>): HTMLElement =>
+        isCancel ? elements.section : elements.keep;
+
+      try {
+        act(() => {
+          root.render(
+            renderStrictLeaf("strict-a", 1, () => {
+              if (retired) return;
+              const elements = leafElements(screen.getByTestId("presence-leaves"));
+              const target = targetOf(elements);
+              retired = {
+                click: captureClick(target),
+                rootRef: captureRef<HTMLElement>(rootOf(elements)),
+                actionRef: captureRef(target),
+              };
+            }),
+          );
+        });
+        if (!retired) throw new Error("Strict Mode did not expose the retired publication");
+        const retiredPublication = retired;
+        const firstCurrent = leafElements(screen.getByTestId("presence-leaves"));
+        const firstCurrentTarget = targetOf(firstCurrent);
+        const firstCurrentRoot = rootOf(firstCurrent);
+        const firstCurrentClick = captureClick(firstCurrentTarget);
+        const firstCurrentRootRef = captureRef<HTMLElement>(firstCurrentRoot);
+        const firstCurrentActionRef = captureRef(firstCurrentTarget);
+        expect(firstCurrentClick).not.toBe(retiredPublication.click);
+        expect(firstCurrentTarget).toHaveClass(
+          ...(primary ? ["btn-primary"] : isCancel ? ["btn-outline"] : ["btn-outline", "btn-sm"]),
+        );
+
+        if (isCancel) {
+          const originalInstruction = pending[0]!.instruction;
+          pending[0]!.instruction = "Transiently changed request";
+          act(() => firstCurrentTarget.click());
+          pending[0]!.instruction = originalInstruction;
+        } else {
+          const originalClassName = firstCurrentTarget.className;
+          firstCurrentTarget.className = `${originalClassName} changed`;
+          act(() => firstCurrentTarget.click());
+          firstCurrentTarget.className = originalClassName;
+        }
+        expect(onCancel).not.toHaveBeenCalled();
+        expect(onKeep).not.toHaveBeenCalled();
+
+        act(() => {
+          firstCurrentActionRef(null);
+          firstCurrentActionRef(firstCurrentTarget);
+          firstCurrentTarget.click();
+        });
+        expect(onCancel).not.toHaveBeenCalled();
+        expect(onKeep).not.toHaveBeenCalled();
+
+        const label = firstCurrentTarget.lastChild;
+        if (!label || label.nodeType !== document.defaultView!.Node.TEXT_NODE) {
+          throw new Error("The Strict Mode action label was not a text node");
+        }
+        const originalLabel = label.nodeValue;
+        label.nodeValue = `${originalLabel} changed`;
+        label.nodeValue = originalLabel;
+        if (isCancel) {
+          const clone = firstCurrent.rows[0]!.cloneNode(true) as HTMLLIElement;
+          firstCurrent.rows[0]!.replaceWith(clone);
+          clone.replaceWith(firstCurrent.rows[0]!);
+          firstCurrent.list.insertBefore(firstCurrent.rows[1]!, firstCurrent.rows[0]!);
+          firstCurrent.list.insertBefore(firstCurrent.rows[0]!, firstCurrent.rows[1]!);
+        }
+        const parent = firstCurrentRoot.parentNode;
+        if (!parent) throw new Error("The Strict Mode publication did not have a parent");
+        const nextSibling = firstCurrentRoot.nextSibling;
+        firstCurrentRoot.remove();
+        parent.insertBefore(firstCurrentRoot, nextSibling);
+        act(() => firstCurrentTarget.click());
+        expect(onCancel).not.toHaveBeenCalled();
+        expect(onKeep).not.toHaveBeenCalled();
+
+        act(() => root.render(renderStrictLeaf("strict-b", 2)));
+        const current = leafElements(screen.getByTestId("presence-leaves"));
+        const currentTarget = targetOf(current);
+        const currentRoot = rootOf(current);
+        const currentClick = captureClick(currentTarget);
+        expect(currentTarget).not.toBe(firstCurrentTarget);
+        expect(currentClick).not.toBe(firstCurrentClick);
+
+        act(() => {
+          retiredPublication.rootRef(currentRoot);
+          retiredPublication.actionRef(currentTarget);
+          retiredPublication.actionRef(null);
+          retiredPublication.rootRef(null);
+          firstCurrentRootRef(currentRoot);
+          firstCurrentActionRef(currentTarget);
+          firstCurrentActionRef(null);
+          firstCurrentRootRef(null);
+          retiredPublication.click({});
+          firstCurrentClick({});
+          currentClick({});
+        });
+        expect(onCancel).not.toHaveBeenCalled();
+        expect(onKeep).not.toHaveBeenCalled();
+
+        const action = isCancel ? onCancel : onKeep;
+        action.mockImplementationOnce(() => {
+          currentTarget.dispatchEvent(new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }));
+        });
+        const restore = interceptClick(currentTarget, (active, event) => {
+          retiredPublication.click(event);
+          firstCurrentClick(event);
+          active(event);
+          active(event);
+        });
+        act(() => {
+          currentTarget.click();
+          currentTarget.click();
+        });
+        restore();
+
+        if (isCancel) {
+          expect(onCancel).toHaveBeenCalledExactlyOnceWith("strict-request-a");
+          expect(onKeep).not.toHaveBeenCalled();
+        } else {
+          expect(onKeep).toHaveBeenCalledOnce();
+          expect(onCancel).not.toHaveBeenCalled();
+        }
       } finally {
         act(() => root.unmount());
         host.remove();
@@ -839,8 +1025,8 @@ describe("PresenceStack", () => {
       const remountedCancelRef = captureRef(remounted.cancels[0]);
       const remountedKeepRef = captureRef(remounted.keep);
       act(() => {
-        remountedKeep({ currentTarget: remounted.keep });
-        remountedCancel({ currentTarget: remounted.cancels[0] });
+        remounted.keep.click();
+        remounted.cancels[0].click();
       });
       expect(callbacksC.onCancel).toHaveBeenCalledExactlyOnceWith("mount-request");
       expect(callbacksC.onKeep).toHaveBeenCalledOnce();
@@ -886,8 +1072,8 @@ describe("PresenceStack", () => {
       });
       const afterRemoval = leafElements(screen.getByTestId("presence-leaves"));
       act(() => {
-        captureClick(afterRemoval.cancels[0])({ currentTarget: afterRemoval.cancels[0] });
-        captureClick(afterRemoval.keep)({ currentTarget: afterRemoval.keep });
+        afterRemoval.cancels[0].click();
+        afterRemoval.keep.click();
       });
       expect(callbacksD.onCancel).toHaveBeenCalledExactlyOnceWith("mount-request");
       expect(callbacksD.onKeep).toHaveBeenCalledOnce();
@@ -957,11 +1143,7 @@ describe("PresenceStack", () => {
       expect(screen.getByTestId("presence-waiting")).toHaveAttribute("data-state", "waiting");
       expect(within(popoverA).getByTestId("presence-waiting-note")).toHaveTextContent("1 request waiting for an agent");
 
-      act(() => {
-        const event = { currentTarget: oldCancelButton };
-        oldCancel(event);
-        oldCancel(event);
-      });
+      act(() => oldCancelButton.click());
       expect(handlersA.onCancelRequest).toHaveBeenCalledOnce();
       expect(handlersA.onCancelRequest).toHaveBeenCalledWith(sharedRequestId);
       expect(screen.queryByTestId("presence-request")).toBeNull();
@@ -1038,18 +1220,12 @@ describe("PresenceStack", () => {
 
       popoverB = openPresence();
       const currentKeepAgentButton = within(popoverB).getByTestId("keep-agent-here");
-      const currentKeepAgent = captureClick(currentKeepAgentButton);
-      act(() => currentKeepAgent({ currentTarget: currentKeepAgentButton }));
+      act(() => currentKeepAgentButton.click());
       expect(handlersB.onKeepAgent).toHaveBeenCalledOnce();
 
       popoverB = openPresence();
       const currentCancelButton = within(popoverB).getByTestId("presence-request-cancel");
-      const currentCancel = captureClick(currentCancelButton);
-      act(() => {
-        const event = { currentTarget: currentCancelButton };
-        currentCancel(event);
-        currentCancel(event);
-      });
+      act(() => currentCancelButton.click());
       expect(handlersB.onCancelRequest).toHaveBeenCalledOnce();
       expect(handlersB.onCancelRequest).toHaveBeenCalledWith(sharedRequestId);
       expect(screen.queryByTestId("presence-request")).toBeNull();
@@ -1127,7 +1303,7 @@ describe("PresenceStack", () => {
       const oldKeepAgent = captureClick(oldKeepAgentButton);
       const oldInterval = timerCallbacks(setIntervalSpy.mock.calls, 15_000).at(-1);
       if (!oldInterval) throw new Error("The removed freshness interval was not captured");
-      act(() => oldCancel({ currentTarget: oldCancelButton }));
+      act(() => oldCancelButton.click());
       const oldGrace = timerCallbacks(setTimeoutSpy.mock.calls, CANCEL_GRACE_MS).at(-1);
       if (!oldGrace) throw new Error("The removed cancellation grace timer was not captured");
       expect(activeTimerHandles(setTimeoutSpy.mock.calls, setTimeoutSpy.mock.results, clearTimeoutSpy.mock.calls, [CANCEL_GRACE_MS])).toHaveLength(1);
@@ -1194,11 +1370,7 @@ describe("PresenceStack", () => {
       const currentCancelButton = within(popoverB).getByTestId("presence-request-cancel");
       const currentCancel = captureClick(currentCancelButton);
 
-      act(() => {
-        const event = { currentTarget: currentCancelButton };
-        currentCancel(event);
-        currentCancel(event);
-      });
+      act(() => currentCancelButton.click());
       expect(handlersB.onCancelRequest).toHaveBeenCalledOnce();
       expect(activeTimerHandles(setTimeoutSpy.mock.calls, setTimeoutSpy.mock.results, clearTimeoutSpy.mock.calls, [CANCEL_GRACE_MS])).toHaveLength(1);
       expect(activeTimerHandles(setIntervalSpy.mock.calls, setIntervalSpy.mock.results, clearIntervalSpy.mock.calls, [5_000, 15_000])).toHaveLength(1);
@@ -1218,7 +1390,7 @@ describe("PresenceStack", () => {
         currentCancel({ currentTarget: currentCancelButton });
         currentCancel({ currentTarget: reappearedCancelButton });
         reappearedCancel({ currentTarget: currentCancelButton });
-        reappearedCancel({ currentTarget: reappearedCancelButton });
+        reappearedCancelButton.click();
       });
       expect(handlersB.onCancelRequest).toHaveBeenCalledTimes(2);
       expect(screen.queryByTestId("presence-request")).toBeNull();
