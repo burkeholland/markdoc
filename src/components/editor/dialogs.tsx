@@ -3075,6 +3075,11 @@ function createImagePresentation(
       requestSuccessor();
       return;
     }
+    if (!owns(publication, "file")) {
+      publication.retire();
+      requestSuccessor();
+      return;
+    }
     startUpload(publication, authority, chosen, input, fallbackAlt);
   };
   const onPreviewError = (
@@ -3514,13 +3519,27 @@ export const ImageDialog = memo(function ImageDialog({
       ) {
         return;
       }
-      activeUpload.set(null);
+      let resetFailed = false;
+      let resetError: unknown;
       try {
         input.value = "";
       } catch (error) {
-        succeeded = false;
-        message = imageUploadErrorText(error);
+        resetFailed = true;
+        resetError = error;
       }
+      if (!uploadLeaseIsCurrent(lease)) {
+        abandonSettledUpload(lease);
+        return;
+      }
+      if (resetFailed) {
+        succeeded = false;
+        message = imageUploadErrorText(resetError);
+        if (!uploadLeaseIsCurrent(lease)) {
+          abandonSettledUpload(lease);
+          return;
+        }
+      }
+      activeUpload.set(null);
       setDraft((current) => {
         if (
           current.visit !== owner.visit ||
