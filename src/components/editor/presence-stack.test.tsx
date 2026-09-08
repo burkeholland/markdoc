@@ -7,6 +7,7 @@ import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import type { AgentRequestMirror } from "./agent-requests";
 import { TooltipProvider } from "@/components/ui/primitives";
 import { PresenceStack, type PresenceStackProps } from "./header";
+import { KeepAgentHereButton, PresenceRequests } from "./presence-agents";
 
 const CANCEL_GRACE_MS = 8_000;
 
@@ -172,17 +173,110 @@ function PresenceBoundary({
   );
 }
 
+interface PresenceLeafCallbacks {
+  onCancel: (requestId: string) => void;
+  onKeep: () => void;
+}
+
+interface PresenceLeafProps {
+  session: PresenceSession;
+  pending: AgentRequestMirror[];
+  callbacks: PresenceLeafCallbacks;
+  nameOf: (userId: string) => string | null;
+  ownerNameOf?: (login: string) => string | null;
+  primary?: boolean;
+}
+
+function PresenceLeafMount({ session, pending, callbacks: handlers, nameOf, ownerNameOf, primary }: PresenceLeafProps) {
+  return (
+    <div data-testid="presence-leaves">
+      <PresenceRequests
+        session={session.asCollabSession()}
+        pending={pending}
+        nameOf={nameOf}
+        ownerNameOf={ownerNameOf}
+        onCancel={handlers.onCancel}
+      />
+      <KeepAgentHereButton onClick={handlers.onKeep} primary={primary} />
+    </div>
+  );
+}
+
+function PresenceLeafBoundary({
+  present = true,
+  instance = "leaf",
+  boundary = 0,
+  onBoundary,
+  ...props
+}: PresenceLeafProps & {
+  present?: boolean;
+  instance?: string;
+  boundary?: number;
+  onBoundary?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? <PresenceLeafMount key={instance} {...props} /> : null;
+}
+
 function openPresence() {
   fireEvent.click(screen.getByTestId("presence"));
   return screen.getByTestId("presence-popover");
 }
 
-function captureClick(element: HTMLElement): () => void {
+type CapturedClick = (event: { currentTarget: HTMLElement }) => void;
+
+function captureClick(element: HTMLElement): CapturedClick {
+  if (!(element instanceof HTMLButtonElement)) throw new Error("The presence control was not a button");
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the presence control");
-  const props = (element as unknown as Record<string, { onClick?: () => void } | undefined>)[propsKey];
+  const props = (element as unknown as Record<string, { onClick?: CapturedClick } | undefined>)[propsKey];
   if (!props?.onClick) throw new Error("The presence control did not have an onClick handler");
   return props.onClick;
+}
+
+function captureRef<T extends HTMLElement>(element: T): (node: T | null) => void {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  const props = propsKey
+    ? (element as unknown as Record<string, { ref?: unknown }>)[propsKey]
+    : undefined;
+  if (typeof props?.ref === "function") return props.ref as (node: T | null) => void;
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error("React fiber was not attached to the presence control");
+  const fiber = (element as unknown as Record<string, { ref?: unknown }>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error("The presence control did not have a callback ref");
+  return fiber.ref as (node: T | null) => void;
+}
+
+function leafElements(root: HTMLElement) {
+  const scope = within(root);
+  const section = scope.getByTestId("presence-requests");
+  const list = section.children.item(1);
+  const rows = scope.getAllByTestId("presence-request");
+  const cancels = scope.queryAllByTestId("presence-request-cancel");
+  const keep = scope.getByTestId("keep-agent-here");
+  if (!(section instanceof HTMLDivElement) || !(list instanceof HTMLUListElement)) {
+    throw new Error("The request section and list were not rendered");
+  }
+  if (!rows.every((row) => row instanceof HTMLLIElement) || !cancels.every((cancel) => cancel instanceof HTMLButtonElement) || !(keep instanceof HTMLButtonElement)) {
+    throw new Error("The request rows and actions were not rendered");
+  }
+  return {
+    section,
+    list,
+    rows: rows as HTMLLIElement[],
+    cancels: cancels as HTMLButtonElement[],
+    keep,
+  };
+}
+
+function connectedButton(label = "Other action") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("aria-label", label);
+  document.body.append(button);
+  return button;
 }
 
 interface ReactFiber {
@@ -236,6 +330,7 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  document.body.replaceChildren();
 });
 
 describe("PresenceStack", () => {
@@ -336,6 +431,472 @@ describe("PresenceStack", () => {
     expect(screen.queryByTestId("presence-popover")).toBeNull();
   });
 
+  it.each(["a-before-b", "b-before-a"] as const)(
+    "binds request and keep-agent actions to exact sibling controls in %s order",
+    (order) => {
+      const localA = person("leaf-local-a", "Leaf local A", { isLocal: true, role: "owner" });
+      const localB = person("leaf-local-b", "Leaf local B", { isLocal: true, role: "editor" });
+      const sessionA = new PresenceSession({
+        localId: localA.id,
+        localName: localA.name,
+        users: [localA],
+        role: "owner",
+      });
+      const sessionB = new PresenceSession({
+        localId: localB.id,
+        localName: localB.name,
+        users: [localB],
+        role: "editor",
+      });
+      const pendingA = [
+        request("leaf-request-a", localA.id, { instruction: "First owner request" }),
+        request("leaf-request-a-2", "another-user", { instruction: "Second owner request" }),
+      ];
+      const pendingB = [
+        request("leaf-request-b", localB.id, { instruction: "Editor request" }),
+        request("leaf-request-b-2", "foreign-user", { instruction: "Not cancellable" }),
+      ];
+      const callbacksA: PresenceLeafCallbacks = {
+        onCancel: vi.fn(),
+        onKeep: vi.fn(),
+      };
+      const callbacksB: PresenceLeafCallbacks = {
+        onCancel: vi.fn(),
+        onKeep: vi.fn(),
+      };
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      const foreign = connectedButton("Cancel request");
+      const detached = document.createElement("button");
+      focusOwner.textContent = "Leaf focus owner";
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+
+      try {
+        act(() => {
+          root.render(
+            <>
+              <div data-testid="leaf-a">
+                <PresenceLeafMount
+                  session={sessionA}
+                  pending={pendingA}
+                  callbacks={callbacksA}
+                  nameOf={(id) => id}
+                  primary
+                />
+              </div>
+              <div data-testid="leaf-b">
+                <PresenceLeafMount
+                  session={sessionB}
+                  pending={pendingB}
+                  callbacks={callbacksB}
+                  nameOf={(id) => id}
+                />
+              </div>
+            </>,
+          );
+        });
+        const a = leafElements(screen.getByTestId("leaf-a"));
+        const b = leafElements(screen.getByTestId("leaf-b"));
+        expect(a.cancels).toHaveLength(2);
+        expect(b.cancels).toHaveLength(1);
+        expect(a.keep).toHaveClass("btn-primary");
+        expect(b.keep).toHaveClass("btn-outline", "btn-sm");
+        const cancelA = captureClick(a.cancels[0]);
+        const cancelB = captureClick(b.cancels[0]);
+        const keepA = captureClick(a.keep);
+        const keepB = captureClick(b.keep);
+        const replacementCancel = a.cancels[0].cloneNode(true) as HTMLButtonElement;
+        const replacementKeep = a.keep.cloneNode(true) as HTMLButtonElement;
+        document.body.append(replacementCancel, replacementKeep);
+        const markup = host.innerHTML;
+        const movingAEvent = { currentTarget: foreign as HTMLElement };
+        focusOwner.focus();
+
+        act(() => {
+          cancelA({ currentTarget: a.cancels[1] });
+          cancelA({ currentTarget: b.cancels[0] });
+          cancelA({ currentTarget: b.rows[1] });
+          cancelA({ currentTarget: foreign });
+          cancelA({ currentTarget: detached });
+          cancelA({ currentTarget: replacementCancel });
+          a.cancels[0].disabled = true;
+          cancelA({ currentTarget: a.cancels[0] });
+          a.cancels[0].disabled = false;
+          cancelB({ currentTarget: a.cancels[0] });
+          keepA({ currentTarget: b.keep });
+          keepA({ currentTarget: foreign });
+          keepA({ currentTarget: detached });
+          keepA({ currentTarget: replacementKeep });
+          a.keep.disabled = true;
+          keepA({ currentTarget: a.keep });
+          a.keep.disabled = false;
+          keepB({ currentTarget: a.keep });
+          cancelA(movingAEvent);
+        });
+
+        expect(callbacksA.onCancel).not.toHaveBeenCalled();
+        expect(callbacksB.onCancel).not.toHaveBeenCalled();
+        expect(callbacksA.onKeep).not.toHaveBeenCalled();
+        expect(callbacksB.onKeep).not.toHaveBeenCalled();
+        expect(focusOwner).toHaveFocus();
+        expect(host.innerHTML).toBe(markup);
+        expect(sessionA.follow).not.toHaveBeenCalled();
+        expect(sessionB.follow).not.toHaveBeenCalled();
+
+        const acceptA = () => {
+          movingAEvent.currentTarget = a.cancels[0];
+          cancelA(movingAEvent);
+          cancelA(movingAEvent);
+        };
+        const acceptB = () => {
+          const event = { currentTarget: b.cancels[0] };
+          cancelB(event);
+          cancelB(event);
+        };
+        act(() => {
+          if (order === "a-before-b") {
+            acceptA();
+            acceptB();
+          } else {
+            acceptB();
+            acceptA();
+          }
+          const keepAEvent = { currentTarget: a.keep };
+          keepA(keepAEvent);
+          keepA(keepAEvent);
+          keepA({ currentTarget: a.keep });
+          const keepBEvent = { currentTarget: b.keep };
+          keepB(keepBEvent);
+          keepB(keepBEvent);
+        });
+
+        expect(callbacksA.onCancel).toHaveBeenCalledExactlyOnceWith("leaf-request-a");
+        expect(callbacksB.onCancel).toHaveBeenCalledExactlyOnceWith("leaf-request-b");
+        expect(callbacksA.onKeep).toHaveBeenCalledTimes(2);
+        expect(callbacksB.onKeep).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        focusOwner.remove();
+        foreign.remove();
+        detached.remove();
+      }
+    },
+  );
+
+  it.each(["section", "list", "row", "cancel", "keep"] as const)(
+    "retires an exact %s ref replacement without letting late old refs clear same-element successors",
+    (part) => {
+      const local = person("ref-local", "Ref local", { isLocal: true, role: "owner" });
+      const session = new PresenceSession({
+        localId: local.id,
+        localName: local.name,
+        users: [local],
+      });
+      const pending = [request("ref-request", local.id)];
+      const callbacksA: PresenceLeafCallbacks = {
+        onCancel: vi.fn(),
+        onKeep: vi.fn(),
+      };
+      const callbacksB: PresenceLeafCallbacks = {
+        onCancel: vi.fn(),
+        onKeep: vi.fn(),
+      };
+      const nameOf = (id: string) => id;
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        act(() => {
+          root.render(
+            <PresenceLeafBoundary
+              session={session}
+              pending={pending}
+              callbacks={callbacksA}
+              nameOf={nameOf}
+            />,
+          );
+        });
+        const previous = leafElements(screen.getByTestId("presence-leaves"));
+        const previousCancel = captureClick(previous.cancels[0]);
+        const previousKeep = captureClick(previous.keep);
+        const element =
+          part === "section"
+            ? previous.section
+            : part === "list"
+              ? previous.list
+              : part === "row"
+                ? previous.rows[0]
+                : part === "cancel"
+                  ? previous.cancels[0]
+                  : previous.keep;
+        const staleRef = captureRef(element);
+        const replacement = element.cloneNode(true) as typeof element;
+        document.body.append(replacement);
+
+        act(() => {
+          staleRef(replacement);
+          if (part === "keep") {
+            previousKeep({ currentTarget: previous.keep });
+          } else {
+            previousCancel({ currentTarget: previous.cancels[0] });
+          }
+        });
+        expect(callbacksA.onCancel).not.toHaveBeenCalled();
+        expect(callbacksA.onKeep).not.toHaveBeenCalled();
+        replacement.remove();
+
+        let sameElementAtBoundary = false;
+        act(() => {
+          root.render(
+            <PresenceLeafBoundary
+              session={session}
+              pending={pending}
+              callbacks={callbacksB}
+              nameOf={nameOf}
+              boundary={1}
+              onBoundary={() => {
+                const current = leafElements(screen.getByTestId("presence-leaves"));
+                const currentElement =
+                  part === "section"
+                    ? current.section
+                    : part === "list"
+                      ? current.list
+                      : part === "row"
+                        ? current.rows[0]
+                        : part === "cancel"
+                          ? current.cancels[0]
+                          : current.keep;
+                sameElementAtBoundary = currentElement === element;
+                staleRef(currentElement);
+                staleRef(null);
+                previousCancel({ currentTarget: current.cancels[0] });
+                previousKeep({ currentTarget: current.keep });
+              }}
+            />,
+          );
+        });
+
+        expect(sameElementAtBoundary).toBe(true);
+        expect(callbacksA.onCancel).not.toHaveBeenCalled();
+        expect(callbacksA.onKeep).not.toHaveBeenCalled();
+        const current = leafElements(screen.getByTestId("presence-leaves"));
+        const currentCancel = captureClick(current.cancels[0]);
+        const currentKeep = captureClick(current.keep);
+        act(() => {
+          currentCancel({ currentTarget: current.cancels[0] });
+          currentKeep({ currentTarget: current.keep });
+        });
+        expect(callbacksB.onCancel).toHaveBeenCalledExactlyOnceWith("ref-request");
+        expect(callbacksB.onKeep).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retires changed and equal-looking leaf mounts before parent boundaries and removal", () => {
+    const localA = person("mount-local-a", "Mount local A", { isLocal: true, role: "owner" });
+    const localB = person("mount-local-b", "Mount local B", { isLocal: true, role: "owner" });
+    const sessionA = new PresenceSession({
+      localId: localA.id,
+      localName: localA.name,
+      users: [localA],
+      role: "editor",
+    });
+    const sessionB = new PresenceSession({
+      localId: localB.id,
+      localName: localB.name,
+      users: [localB],
+      role: "owner",
+    });
+    const pendingA = [request("mount-request", localA.id, { instruction: "Old request" })];
+    const pendingB = [
+      request("mount-request", "another-user", {
+        status: "claimed",
+        claimedBy: "Agent",
+        claimedByLogin: "agent-owner",
+        instruction: "Current request",
+        mode: "comment",
+      }),
+    ];
+    const callbacksA: PresenceLeafCallbacks = {
+      onCancel: vi.fn(),
+      onKeep: vi.fn(),
+    };
+    const callbacksB: PresenceLeafCallbacks = {
+      onCancel: vi.fn(),
+      onKeep: vi.fn(),
+    };
+    const callbacksC: PresenceLeafCallbacks = {
+      onCancel: vi.fn(),
+      onKeep: vi.fn(),
+    };
+    const callbacksD: PresenceLeafCallbacks = {
+      onCancel: vi.fn(),
+      onKeep: vi.fn(),
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => {
+        root.render(
+          <PresenceLeafBoundary
+            session={sessionA}
+            pending={pendingA}
+            callbacks={callbacksA}
+            nameOf={() => "Old requester"}
+            ownerNameOf={() => "Old owner"}
+          />,
+        );
+      });
+      const old = leafElements(screen.getByTestId("presence-leaves"));
+      const oldCancel = captureClick(old.cancels[0]);
+      const oldKeep = captureClick(old.keep);
+      const oldCancelRef = captureRef(old.cancels[0]);
+      const oldKeepRef = captureRef(old.keep);
+      let changedAtBoundary = false;
+
+      act(() => {
+        root.render(
+          <PresenceLeafBoundary
+            session={sessionB}
+            pending={pendingB}
+            callbacks={callbacksB}
+            nameOf={() => "Current requester"}
+            ownerNameOf={() => "Current owner"}
+            primary
+            boundary={1}
+            onBoundary={() => {
+              const current = leafElements(screen.getByTestId("presence-leaves"));
+              changedAtBoundary =
+                current.cancels[0] === old.cancels[0] &&
+                current.keep === old.keep &&
+                current.rows[0].textContent?.includes("Current requester") === true &&
+                current.rows[0].textContent?.includes("Current owner's Agent") === true &&
+                current.keep.classList.contains("btn-primary");
+              oldCancelRef(current.cancels[0]);
+              oldCancelRef(null);
+              oldKeepRef(current.keep);
+              oldKeepRef(null);
+              oldCancel({ currentTarget: current.cancels[0] });
+              oldKeep({ currentTarget: current.keep });
+            }}
+          />,
+        );
+      });
+
+      expect(changedAtBoundary).toBe(true);
+      expect(callbacksA.onCancel).not.toHaveBeenCalled();
+      expect(callbacksA.onKeep).not.toHaveBeenCalled();
+      const changed = leafElements(screen.getByTestId("presence-leaves"));
+      const changedCancel = captureClick(changed.cancels[0]);
+      const changedKeep = captureClick(changed.keep);
+      const changedCancelRef = captureRef(changed.cancels[0]);
+      const changedKeepRef = captureRef(changed.keep);
+      let remountedAtBoundary = false;
+
+      act(() => {
+        root.render(
+          <PresenceLeafBoundary
+            session={sessionB}
+            pending={pendingB}
+            callbacks={callbacksC}
+            nameOf={() => "Current requester"}
+            ownerNameOf={() => "Current owner"}
+            primary
+            instance="equal-looking-remount"
+            boundary={2}
+            onBoundary={() => {
+              const current = leafElements(screen.getByTestId("presence-leaves"));
+              remountedAtBoundary =
+                current.cancels[0] !== changed.cancels[0] &&
+                current.keep !== changed.keep;
+              changedCancelRef(current.cancels[0]);
+              changedCancelRef(null);
+              changedKeepRef(current.keep);
+              changedKeepRef(null);
+              changedCancel({ currentTarget: changed.cancels[0] });
+              changedCancel({ currentTarget: current.cancels[0] });
+              changedKeep({ currentTarget: changed.keep });
+              changedKeep({ currentTarget: current.keep });
+            }}
+          />,
+        );
+      });
+
+      expect(remountedAtBoundary).toBe(true);
+      expect(callbacksB.onCancel).not.toHaveBeenCalled();
+      expect(callbacksB.onKeep).not.toHaveBeenCalled();
+      const remounted = leafElements(screen.getByTestId("presence-leaves"));
+      const remountedCancel = captureClick(remounted.cancels[0]);
+      const remountedKeep = captureClick(remounted.keep);
+      const remountedCancelRef = captureRef(remounted.cancels[0]);
+      const remountedKeepRef = captureRef(remounted.keep);
+      act(() => {
+        remountedKeep({ currentTarget: remounted.keep });
+        remountedCancel({ currentTarget: remounted.cancels[0] });
+      });
+      expect(callbacksC.onCancel).toHaveBeenCalledExactlyOnceWith("mount-request");
+      expect(callbacksC.onKeep).toHaveBeenCalledOnce();
+
+      act(() => {
+        root.render(
+          <PresenceLeafBoundary
+            session={sessionB}
+            pending={pendingB}
+            callbacks={callbacksC}
+            nameOf={() => "Current requester"}
+            ownerNameOf={() => "Current owner"}
+            primary
+            instance="equal-looking-remount"
+            present={false}
+            boundary={3}
+            onBoundary={() => {
+              remountedCancelRef(null);
+              remountedKeepRef(null);
+              remountedCancel({ currentTarget: remounted.cancels[0] });
+              remountedKeep({ currentTarget: remounted.keep });
+            }}
+          />,
+        );
+      });
+      expect(screen.queryByTestId("presence-leaves")).toBeNull();
+      expect(callbacksC.onCancel).toHaveBeenCalledOnce();
+      expect(callbacksC.onKeep).toHaveBeenCalledOnce();
+
+      act(() => {
+        root.render(
+          <PresenceLeafBoundary
+            session={sessionB}
+            pending={pendingB}
+            callbacks={callbacksD}
+            nameOf={() => "Current requester"}
+            ownerNameOf={() => "Current owner"}
+            primary
+            instance="after-removal"
+            boundary={4}
+          />,
+        );
+      });
+      const afterRemoval = leafElements(screen.getByTestId("presence-leaves"));
+      act(() => {
+        captureClick(afterRemoval.cancels[0])({ currentTarget: afterRemoval.cancels[0] });
+        captureClick(afterRemoval.keep)({ currentTarget: afterRemoval.keep });
+      });
+      expect(callbacksD.onCancel).toHaveBeenCalledExactlyOnceWith("mount-request");
+      expect(callbacksD.onKeep).toHaveBeenCalledOnce();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
   it("retires replacement handlers and timers before the parent layout boundary while B stays independent", async () => {
     vi.useFakeTimers();
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
@@ -383,18 +944,23 @@ describe("PresenceStack", () => {
       expect(vi.getTimerCount()).toBe(1);
       const popoverA = openPresence();
       const oldOpenChange = captureOpenChange(screen.getByTestId("presence"));
-      const oldCancel = captureClick(within(popoverA).getByTestId("presence-request-cancel"));
-      const oldJump = captureClick(within(popoverA).getByTestId("presence-jump"));
-      const oldFollow = captureClick(within(popoverA).getByTestId("presence-follow"));
-      const oldKeepAgent = captureClick(within(popoverA).getByTestId("keep-agent-here"));
+      const oldCancelButton = within(popoverA).getByTestId("presence-request-cancel");
+      const oldJumpButton = within(popoverA).getByTestId("presence-jump");
+      const oldFollowButton = within(popoverA).getByTestId("presence-follow");
+      const oldKeepAgentButton = within(popoverA).getByTestId("keep-agent-here");
+      const oldCancel = captureClick(oldCancelButton);
+      const oldJump = captureClick(oldJumpButton);
+      const oldFollow = captureClick(oldFollowButton);
+      const oldKeepAgent = captureClick(oldKeepAgentButton);
       const oldInterval = timerCallbacks(setIntervalSpy.mock.calls, 5_000).at(-1);
       if (!oldInterval) throw new Error("The old freshness interval was not captured");
       expect(screen.getByTestId("presence-waiting")).toHaveAttribute("data-state", "waiting");
       expect(within(popoverA).getByTestId("presence-waiting-note")).toHaveTextContent("1 request waiting for an agent");
 
       act(() => {
-        oldCancel();
-        oldCancel();
+        const event = { currentTarget: oldCancelButton };
+        oldCancel(event);
+        oldCancel(event);
       });
       expect(handlersA.onCancelRequest).toHaveBeenCalledOnce();
       expect(handlersA.onCancelRequest).toHaveBeenCalledWith(sharedRequestId);
@@ -426,10 +992,10 @@ describe("PresenceStack", () => {
                 [5_000, 15_000],
               ).length;
               focusOwner.focus();
-              oldCancel();
-              oldJump();
-              oldFollow();
-              oldKeepAgent();
+              oldCancel({ currentTarget: oldCancelButton });
+              oldJump({ currentTarget: oldJumpButton });
+              oldFollow({ currentTarget: oldFollowButton });
+              oldKeepAgent({ currentTarget: oldKeepAgentButton });
               oldOpenChange(true);
               oldGrace();
               oldInterval();
@@ -457,27 +1023,32 @@ describe("PresenceStack", () => {
       expect(within(popoverB).getByText("Current request")).toBeInTheDocument();
       expect(screen.getByTestId("presence-waiting")).toHaveAttribute("data-state", "working");
       expect(within(popoverB).queryByTestId("presence-waiting-note")).toBeNull();
-      const currentJump = captureClick(within(popoverB).getByTestId("presence-jump"));
-      act(() => currentJump());
+      const currentJumpButton = within(popoverB).getByTestId("presence-jump");
+      const currentJump = captureClick(currentJumpButton);
+      act(() => currentJump({ currentTarget: currentJumpButton }));
       expect(handlersB.onJump).toHaveBeenCalledOnce();
       expect(handlersB.onJump).toHaveBeenCalledWith(remoteB);
 
       popoverB = openPresence();
-      const currentFollow = captureClick(within(popoverB).getByTestId("presence-follow"));
-      act(() => currentFollow());
+      const currentFollowButton = within(popoverB).getByTestId("presence-follow");
+      const currentFollow = captureClick(currentFollowButton);
+      act(() => currentFollow({ currentTarget: currentFollowButton }));
       expect(sessionB.follow).toHaveBeenCalledOnce();
       expect(sessionB.follow).toHaveBeenCalledWith(sharedUserId);
 
       popoverB = openPresence();
-      const currentKeepAgent = captureClick(within(popoverB).getByTestId("keep-agent-here"));
-      act(() => currentKeepAgent());
+      const currentKeepAgentButton = within(popoverB).getByTestId("keep-agent-here");
+      const currentKeepAgent = captureClick(currentKeepAgentButton);
+      act(() => currentKeepAgent({ currentTarget: currentKeepAgentButton }));
       expect(handlersB.onKeepAgent).toHaveBeenCalledOnce();
 
       popoverB = openPresence();
-      const currentCancel = captureClick(within(popoverB).getByTestId("presence-request-cancel"));
+      const currentCancelButton = within(popoverB).getByTestId("presence-request-cancel");
+      const currentCancel = captureClick(currentCancelButton);
       act(() => {
-        currentCancel();
-        currentCancel();
+        const event = { currentTarget: currentCancelButton };
+        currentCancel(event);
+        currentCancel(event);
       });
       expect(handlersB.onCancelRequest).toHaveBeenCalledOnce();
       expect(handlersB.onCancelRequest).toHaveBeenCalledWith(sharedRequestId);
@@ -546,13 +1117,17 @@ describe("PresenceStack", () => {
       });
       const popoverA = openPresence();
       const oldOpenChange = captureOpenChange(screen.getByTestId("presence"));
-      const oldCancel = captureClick(within(popoverA).getByTestId("presence-request-cancel"));
-      const oldJump = captureClick(within(popoverA).getByTestId("presence-jump"));
-      const oldFollow = captureClick(within(popoverA).getByTestId("presence-follow"));
-      const oldKeepAgent = captureClick(within(popoverA).getByTestId("keep-agent-here"));
+      const oldCancelButton = within(popoverA).getByTestId("presence-request-cancel");
+      const oldJumpButton = within(popoverA).getByTestId("presence-jump");
+      const oldFollowButton = within(popoverA).getByTestId("presence-follow");
+      const oldKeepAgentButton = within(popoverA).getByTestId("keep-agent-here");
+      const oldCancel = captureClick(oldCancelButton);
+      const oldJump = captureClick(oldJumpButton);
+      const oldFollow = captureClick(oldFollowButton);
+      const oldKeepAgent = captureClick(oldKeepAgentButton);
       const oldInterval = timerCallbacks(setIntervalSpy.mock.calls, 15_000).at(-1);
       if (!oldInterval) throw new Error("The removed freshness interval was not captured");
-      act(() => oldCancel());
+      act(() => oldCancel({ currentTarget: oldCancelButton }));
       const oldGrace = timerCallbacks(setTimeoutSpy.mock.calls, CANCEL_GRACE_MS).at(-1);
       if (!oldGrace) throw new Error("The removed cancellation grace timer was not captured");
       expect(activeTimerHandles(setTimeoutSpy.mock.calls, setTimeoutSpy.mock.results, clearTimeoutSpy.mock.calls, [CANCEL_GRACE_MS])).toHaveLength(1);
@@ -581,10 +1156,10 @@ describe("PresenceStack", () => {
                 [5_000, 15_000],
               ).length;
               focusOwner.focus();
-              oldCancel();
-              oldJump();
-              oldFollow();
-              oldKeepAgent();
+              oldCancel({ currentTarget: oldCancelButton });
+              oldJump({ currentTarget: oldJumpButton });
+              oldFollow({ currentTarget: oldFollowButton });
+              oldKeepAgent({ currentTarget: oldKeepAgentButton });
               oldOpenChange(true);
               oldGrace();
               oldInterval();
@@ -616,11 +1191,13 @@ describe("PresenceStack", () => {
       expect(screen.queryByTestId("presence-popover")).toBeNull();
       let popoverB = openPresence();
       expect(within(popoverB).getByText("Remounted request")).toBeInTheDocument();
-      const currentCancel = captureClick(within(popoverB).getByTestId("presence-request-cancel"));
+      const currentCancelButton = within(popoverB).getByTestId("presence-request-cancel");
+      const currentCancel = captureClick(currentCancelButton);
 
       act(() => {
-        currentCancel();
-        currentCancel();
+        const event = { currentTarget: currentCancelButton };
+        currentCancel(event);
+        currentCancel(event);
       });
       expect(handlersB.onCancelRequest).toHaveBeenCalledOnce();
       expect(activeTimerHandles(setTimeoutSpy.mock.calls, setTimeoutSpy.mock.results, clearTimeoutSpy.mock.calls, [CANCEL_GRACE_MS])).toHaveLength(1);
@@ -635,7 +1212,14 @@ describe("PresenceStack", () => {
       expect(activeTimerHandles(setTimeoutSpy.mock.calls, setTimeoutSpy.mock.results, clearTimeoutSpy.mock.calls, [CANCEL_GRACE_MS])).toHaveLength(0);
       expect(activeTimerHandles(setIntervalSpy.mock.calls, setIntervalSpy.mock.results, clearIntervalSpy.mock.calls, [5_000, 15_000])).toHaveLength(1);
 
-      act(() => currentCancel());
+      const reappearedCancelButton = screen.getByTestId("presence-request-cancel");
+      const reappearedCancel = captureClick(reappearedCancelButton);
+      act(() => {
+        currentCancel({ currentTarget: currentCancelButton });
+        currentCancel({ currentTarget: reappearedCancelButton });
+        reappearedCancel({ currentTarget: currentCancelButton });
+        reappearedCancel({ currentTarget: reappearedCancelButton });
+      });
       expect(handlersB.onCancelRequest).toHaveBeenCalledTimes(2);
       expect(screen.queryByTestId("presence-request")).toBeNull();
       expect(activeTimerHandles(setTimeoutSpy.mock.calls, setTimeoutSpy.mock.results, clearTimeoutSpy.mock.calls, [CANCEL_GRACE_MS])).toHaveLength(1);
