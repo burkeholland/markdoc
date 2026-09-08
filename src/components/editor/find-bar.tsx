@@ -836,6 +836,19 @@ function createFindBarPublication({
         findBarDomMatches(domSnapshot)
       );
     };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every((entry) =>
+        !entry.detached &&
+        !entry.reattached &&
+        entry.owner.element() === entry.element);
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every((entry) =>
+        entry.detached &&
+        entry.reattached &&
+        entry.owner.element() === entry.element);
     const runtime: FindBarPublicationRuntime = Object.freeze({
       publication,
       publish: (
@@ -901,17 +914,13 @@ function createFindBarPublication({
         retirement === "element" &&
         layoutRetired &&
         established &&
-        !invalidReplay &&
-        replayRefs.length > 0 &&
-        replayRefs.every((entry) =>
-          entry.detached &&
-          entry.reattached &&
-          entry.owner.element() === entry.element) &&
+        refsHaveExactReplay() &&
         publishedDomMatches(),
       isExactLayoutReplay: () =>
         retired &&
         retirement === "layout" &&
         established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
         publishedDomMatches(),
       snapshot: () => domSnapshot,
     });
