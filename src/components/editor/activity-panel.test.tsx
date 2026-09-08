@@ -822,23 +822,35 @@ describe("ActivityPanel exact action publications", () => {
   it("rejects foreign, detached, disabled, replaced, wrong-action, and fabricated sources before exact controls claim once", async () => {
     const retryRequest = deferred<ActivityPageDto>();
     const pageRequest = deferred<ActivityPageDto>();
-    const retryClose = vi.fn();
-    const pageClose = vi.fn();
+    let retryReentry: CapturedControl | null = null;
+    let pageReentry: CapturedControl | null = null;
+    let retryCloseReentry: CapturedControl | null = null;
+    let pageCloseReentry: CapturedControl | null = null;
+    const retryClose = vi.fn(() => {
+      if (retryCloseReentry) invoke(retryCloseReentry);
+    });
+    const pageClose = vi.fn(() => {
+      if (pageCloseReentry) invoke(pageCloseReentry);
+    });
     let retryCalls = 0;
     let pageCalls = 0;
     activity.mockImplementation((documentId: string) => {
       if (documentId === "exact-retry") {
         retryCalls += 1;
-        return retryCalls === 1 ? Promise.reject("offline") : retryRequest.promise;
+        if (retryCalls === 1) return Promise.reject("offline");
+        if (retryReentry) invoke(retryReentry);
+        return retryRequest.promise;
       }
       if (documentId === "exact-page") {
         pageCalls += 1;
-        return pageCalls === 1
-          ? Promise.resolve({
-              items: [row("page-row", "Page editor")],
-              nextBefore: "page-cursor",
-            })
-          : pageRequest.promise;
+        if (pageCalls === 1) {
+          return Promise.resolve({
+            items: [row("page-row", "Page editor")],
+            nextBefore: "page-cursor",
+          });
+        }
+        if (pageReentry) invoke(pageReentry);
+        return pageRequest.promise;
       }
       throw new Error(`Unexpected document: ${documentId}`);
     });
@@ -862,6 +874,8 @@ describe("ActivityPanel exact action publications", () => {
     const pageCloseControl = captureControl(
       within(pagePanel).getByRole("button", { name: "Close activity" }),
     );
+    retryReentry = retryControl;
+    pageReentry = loadControl;
     const detached = document.createElement("button");
     const sibling = document.createElement("button");
     document.body.append(sibling);
@@ -909,12 +923,30 @@ describe("ActivityPanel exact action publications", () => {
 
     const retryParent = retryControl.element.parentElement;
     if (!retryParent) throw new Error("Retry has no parent");
+    const alert = within(retryPanel).getByRole("alert");
+    const alertParent = alert.parentElement;
+    const alertReplacement = alert.cloneNode(true);
+    if (!alertParent) throw new Error("Alert has no parent");
+    alertParent.replaceChild(alertReplacement, alert);
+    act(() => invoke(retryControl));
+    alertParent.replaceChild(alert, alertReplacement);
+
     retryParent.replaceChild(replacement, retryControl.element);
     act(() => {
       invoke(retryControl);
       invoke(retryControl, replacement);
     });
     retryParent.replaceChild(retryControl.element, replacement);
+
+    const closeParent = retryCloseControl.element.parentElement;
+    const closeReplacement = retryCloseControl.element.cloneNode(true);
+    if (!closeParent) throw new Error("Close has no parent");
+    closeParent.replaceChild(closeReplacement, retryCloseControl.element);
+    act(() => {
+      invoke(retryCloseControl);
+      invoke(retryCloseControl, closeReplacement);
+    });
+    closeParent.replaceChild(retryCloseControl.element, closeReplacement);
 
     expect(activity).toHaveBeenCalledTimes(2);
     expect(retryClose).not.toHaveBeenCalled();
@@ -945,6 +977,8 @@ describe("ActivityPanel exact action publications", () => {
     const currentPageClose = captureControl(
       within(pagePanel).getByRole("button", { name: "Close activity" }),
     );
+    retryCloseReentry = currentRetryClose;
+    pageCloseReentry = currentPageClose;
     act(() => {
       invoke(currentRetryClose);
       invoke(currentRetryClose);
