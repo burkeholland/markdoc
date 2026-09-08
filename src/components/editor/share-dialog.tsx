@@ -193,6 +193,7 @@ interface SharePresentationRuntime {
   observerRetirement: object | null;
   removeCloseCapture: (() => void) | null;
   closeProvenance: ShareCloseProvenance | null;
+  closeProvenanceRetirement: { provenance: ShareCloseProvenance; timer: number } | null;
 }
 
 interface SharePresentationLineage {
@@ -704,6 +705,18 @@ function stopPresentationObservation(runtime: SharePresentationRuntime): boolean
   return clean;
 }
 
+function clearShareCloseProvenance(
+  runtime: SharePresentationRuntime,
+  expected?: ShareCloseProvenance,
+) {
+  if (expected && runtime.closeProvenance !== expected) return;
+  runtime.closeProvenance = null;
+  const retirement = runtime.closeProvenanceRetirement;
+  if (!retirement || (expected && retirement.provenance !== expected)) return;
+  runtime.closeProvenanceRetirement = null;
+  runtime.dialog?.ownerDocument.defaultView?.clearTimeout(retirement.timer);
+}
+
 function captureRuntimeDerivedElements(runtime: SharePresentationRuntime) {
   const ownerWindow = runtime.root?.ownerDocument.defaultView;
   const dialog = runtime.root?.parentElement;
@@ -1165,6 +1178,7 @@ export const ShareDialog = memo(function ShareDialog({
         observerRetirement: null,
         removeCloseCapture: null,
         closeProvenance: null,
+        closeProvenanceRetirement: null,
       };
       runtimes.set(candidate, runtime);
     }
@@ -1208,7 +1222,7 @@ export const ShareDialog = memo(function ShareDialog({
     if (runtime && !runtime.retired) {
       runtime.active = false;
       runtime.retired = true;
-      runtime.closeProvenance = null;
+      clearShareCloseProvenance(runtime);
       runtime.removeCloseCapture?.();
       runtime.removeCloseCapture = null;
       if (runtime.observer) {
@@ -1221,6 +1235,26 @@ export const ShareDialog = memo(function ShareDialog({
     }
     if (activePresentationRef.current === candidate) activePresentationRef.current = null;
   }, []);
+
+  const retirePresentationLineage = useCallback(
+    (candidate: SharePresentation) => {
+      const lineage = presentationLineagesRef.current.get(candidate);
+      const current = lineage?.current;
+      const active = activePresentationRef.current;
+      retirePresentation(candidate);
+      if (current && current !== candidate) retirePresentation(current);
+      if (
+        lineage &&
+        active &&
+        active !== candidate &&
+        active !== current &&
+        presentationLineagesRef.current.get(active) === lineage
+      ) {
+        retirePresentation(active);
+      }
+    },
+    [retirePresentation],
+  );
 
   const schedulePresentationPublication = useCallback(
     (source: SharePresentation, expected: SharePresentation) => {
@@ -1250,6 +1284,7 @@ export const ShareDialog = memo(function ShareDialog({
         | "observerRetirement"
         | "removeCloseCapture"
         | "closeProvenance"
+        | "closeProvenanceRetirement"
       >
     >(
       source: SharePresentation,
@@ -1692,6 +1727,7 @@ export const ShareDialog = memo(function ShareDialog({
     const ownerWindow = dialog?.ownerDocument.defaultView;
     if (!ownerWindow || !dialog || !close) return false;
     const remember = (event: Event) => {
+      clearShareCloseProvenance(runtime);
       if (!runtime.active || runtime.retired || activePresentationRef.current !== candidate) return;
       const target = event.target;
       let provenance: ShareCloseProvenance | null = null;
@@ -1713,15 +1749,27 @@ export const ShareDialog = memo(function ShareDialog({
       }
       if (!provenance) return;
       runtime.closeProvenance = provenance;
-      queueMicrotask(() => {
+      const retirement = { provenance, timer: -1 };
+      runtime.closeProvenanceRetirement = retirement;
+      retirement.timer = ownerWindow.setTimeout(() => {
+        if (runtime.closeProvenanceRetirement !== retirement) return;
+        runtime.closeProvenanceRetirement = null;
         if (runtime.closeProvenance === provenance) runtime.closeProvenance = null;
-      });
+      }, 0);
+    };
+    const forget = (event: Event) => {
+      const provenance = runtime.closeProvenance;
+      if (provenance?.event === event) clearShareCloseProvenance(runtime, provenance);
     };
     ownerWindow.addEventListener("keydown", remember, true);
     ownerWindow.addEventListener("click", remember, true);
+    ownerWindow.addEventListener("keydown", forget);
+    ownerWindow.addEventListener("click", forget);
     runtime.removeCloseCapture = () => {
       ownerWindow.removeEventListener("keydown", remember, true);
       ownerWindow.removeEventListener("click", remember, true);
+      ownerWindow.removeEventListener("keydown", forget);
+      ownerWindow.removeEventListener("click", forget);
     };
     return true;
   }, []);
@@ -1733,7 +1781,7 @@ export const ShareDialog = memo(function ShareDialog({
       const existing = activePresentationRef.current;
       const runtime = presentationRuntimesRef.current.get(candidate);
       if (!runtime || runtime.retired || (runtime.predecessor && existing && existing !== runtime.predecessor)) {
-        if (runtime) retirePresentation(candidate);
+        if (runtime) retirePresentationLineage(candidate);
         return null;
       }
       if (runtime.published && runtime.active && existing === candidate) return candidate;
@@ -1750,24 +1798,28 @@ export const ShareDialog = memo(function ShareDialog({
           !runtimeElementsAreExactReplay(previousRuntime, runtime) ||
           !stopPresentationObservation(previousRuntime)
         ) {
-          retirePresentation(candidate);
+          retirePresentationLineage(candidate);
           return null;
         }
       }
-      if (!presentationFactsAreCurrent(candidate) || !presentationDomIsValid(candidate)) {
-        retirePresentation(candidate);
+      if (!presentationFactsAreCurrent(candidate)) {
+        retirePresentationLineage(candidate);
         return null;
       }
-      if (existing && existing !== candidate) retirePresentation(existing);
+      if (existing && existing !== candidate) retirePresentationLineage(existing);
+      if (!presentationDomIsValid(candidate)) {
+        retirePresentationLineage(candidate);
+        return null;
+      }
       if (!startPresentationObservation(runtime)) {
-        retirePresentation(candidate);
+        retirePresentationLineage(candidate);
         return null;
       }
       runtime.active = true;
       runtime.published = true;
       activePresentationRef.current = candidate;
       if (!startCloseCapture(candidate, runtime)) {
-        retirePresentation(candidate);
+        retirePresentationLineage(candidate);
         return null;
       }
       return candidate;
@@ -1776,7 +1828,7 @@ export const ShareDialog = memo(function ShareDialog({
       currentPresentation,
       presentationDomIsValid,
       presentationFactsAreCurrent,
-      retirePresentation,
+      retirePresentationLineage,
       startCloseCapture,
       startPresentationObservation,
     ],
@@ -1984,7 +2036,7 @@ export const ShareDialog = memo(function ShareDialog({
     ) {
       return null;
     }
-    runtime.closeProvenance = null;
+    clearShareCloseProvenance(runtime, provenance);
     return candidate;
   };
 
@@ -1994,7 +2046,7 @@ export const ShareDialog = memo(function ShareDialog({
   ) => {
     const candidate = currentPresentation(source);
     if (!presentationIsCurrent(source)) return;
-    retirePresentation(candidate);
+    retirePresentationLineage(candidate);
     retireShareRequests(candidate.visit ?? undefined);
     retirePermissionOperations(candidate.permissionContext ?? undefined);
     acceptedOnOpenChange(false);
@@ -2010,11 +2062,9 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   useLayoutEffect(() => {
-    const published = publishPresentation(presentation);
-    return () => {
-      if (published) retirePresentation(published);
-    };
-  }, [presentation, publishPresentation, retirePresentation]);
+    publishPresentation(presentation);
+    return () => retirePresentationLineage(presentation);
+  }, [presentation, publishPresentation, retirePresentationLineage]);
 
   const linkOption = LINK_OPTIONS.find((option) => option.value === presentation.linkAccess);
 

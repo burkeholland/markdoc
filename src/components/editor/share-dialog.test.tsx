@@ -154,6 +154,14 @@ function nativeMouse(target: HTMLElement, type = "click"): MouseEvent {
   return event;
 }
 
+function nativeKeyboard(target: HTMLElement, key = "Escape"): KeyboardEvent {
+  const Constructor = target.ownerDocument.defaultView?.KeyboardEvent;
+  if (!Constructor) throw new Error("Control has no owner-document KeyboardEvent");
+  const event = new Constructor("keydown", { bubbles: true, cancelable: true, key });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
 function nativeChange(target: HTMLSelectElement, type = "change"): Event {
   const Constructor = target.ownerDocument.defaultView?.Event;
   if (!Constructor) throw new Error("Control has no owner-document Event");
@@ -208,6 +216,108 @@ function directInvoke<T extends HTMLElement>(
 
 function fireNativeSubmit(form: HTMLFormElement, submitter: HTMLButtonElement | null = null) {
   fireEvent(form, nativeSubmit(form, submitter));
+}
+
+function eventCapture(options: unknown): boolean {
+  if (typeof options === "boolean") return options;
+  return Boolean((options as AddEventListenerOptions | undefined)?.capture);
+}
+
+function findAddedListener(
+  calls: ReadonlyArray<readonly unknown[]>,
+  type: string,
+  capture: boolean,
+  name?: string,
+) {
+  const call = [...calls].reverse().find(([addedType, listener, options]) =>
+    addedType === type &&
+    typeof listener === "function" &&
+    eventCapture(options) === capture &&
+    (!name || listener.name === name)
+  );
+  const listener = call?.[1];
+  if (typeof listener !== "function") throw new Error(`No ${capture ? "capture" : "bubble"} ${type} listener was added`);
+  return listener as EventListener;
+}
+
+function activeAddedListeners(
+  additions: ReadonlyArray<readonly unknown[]>,
+  removals: ReadonlyArray<readonly unknown[]>,
+  type: string,
+  capture: boolean,
+  name: string,
+) {
+  return additions
+    .filter(([addedType, listener, options]) =>
+      addedType === type &&
+      typeof listener === "function" &&
+      listener.name === name &&
+      eventCapture(options) === capture
+    )
+    .map(([, listener]) => listener as EventListener)
+    .filter((listener) =>
+      !removals.some(([removedType, removedListener, options]) =>
+        removedType === type &&
+        removedListener === listener &&
+        eventCapture(options) === capture
+      )
+    );
+}
+
+function trackPresentationResources() {
+  const NativeMutationObserver = window.MutationObserver;
+  const observers: { disconnected: boolean; targets: Node[] }[] = [];
+  class CapturingMutationObserver implements MutationObserver {
+    private readonly native: MutationObserver;
+    private readonly record: { disconnected: boolean; targets: Node[] };
+
+    constructor(callback: MutationCallback) {
+      this.native = new NativeMutationObserver(callback);
+      this.record = { disconnected: false, targets: [] };
+      observers.push(this.record);
+    }
+
+    disconnect() {
+      this.record.disconnected = true;
+      this.native.disconnect();
+    }
+
+    observe(target: Node, options?: MutationObserverInit) {
+      this.record.targets.push(target);
+      this.native.observe(target, options);
+    }
+
+    takeRecords() {
+      return this.native.takeRecords();
+    }
+  }
+
+  vi.stubGlobal("MutationObserver", CapturingMutationObserver);
+  const additions = vi.spyOn(window, "addEventListener");
+  const removals = vi.spyOn(window, "removeEventListener");
+  return {
+    observers,
+    presentationObservers: () =>
+      observers.filter(({ targets }) =>
+        targets.length === 3 &&
+        targets.some((target) =>
+          target instanceof HTMLElement && target.getAttribute("role") === "dialog"
+        )
+      ),
+    activeCapture: (type: "keydown" | "click") =>
+      activeAddedListeners(
+        additions.mock.calls,
+        removals.mock.calls,
+        type,
+        true,
+        "remember",
+      ),
+    restore: () => {
+      removals.mockRestore();
+      additions.mockRestore();
+      vi.unstubAllGlobals();
+    },
+  };
 }
 
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
@@ -459,6 +569,238 @@ describe("ShareDialog exact control publications", () => {
     fireEvent.click(document.body);
 
     expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it.each(["Escape", "header Close", "outside"] as const)(
+    "keeps exact %s provenance through a trusted-order microtask before Radix dismissal",
+    async (kind) => {
+      const windowAdd = vi.spyOn(window, "addEventListener");
+      const documentAdd = vi.spyOn(document, "addEventListener");
+      const onClose = vi.fn();
+      const view = render(
+        <StrictMode>
+          <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      try {
+        await screen.findByText("@bob");
+        const input = screen.getByTestId("share-login");
+        const close = captureClick(screen.getByRole("button", { name: "Close" }));
+        let event: KeyboardEvent | MouseEvent;
+        let dismiss: EventListener | (() => void);
+        if (kind === "Escape") {
+          event = nativeKeyboard(input);
+          dismiss = findAddedListener(documentAdd.mock.calls, "keydown", true);
+        } else if (kind === "header Close") {
+          event = nativeMouse(close.element);
+          dismiss = () => directInvoke(close, close.element, { nativeEvent: event });
+        } else {
+          fireEvent.pointerDown(document.body);
+          event = nativeMouse(document.body);
+          dismiss = findAddedListener(documentAdd.mock.calls, "click", false);
+        }
+        const remember = findAddedListener(
+          windowAdd.mock.calls,
+          event.type,
+          true,
+          "remember",
+        );
+
+        remember.call(window, event);
+        await Promise.resolve();
+        dismiss.call(kind === "header Close" ? undefined : document, event);
+        dismiss.call(kind === "header Close" ? undefined : document, event);
+
+        expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+      } finally {
+        view.unmount();
+        documentAdd.mockRestore();
+        windowAdd.mockRestore();
+      }
+    },
+  );
+
+  it("expires late, fabricated, and crossed dismissal provenance without poisoning the current Close control", async () => {
+    const windowAdd = vi.spyOn(window, "addEventListener");
+    const onClose = vi.fn();
+    const view = render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    try {
+      await screen.findByText("@bob");
+      const close = captureClick(screen.getByRole("button", { name: "Close" }));
+      const rememberClick = findAddedListener(windowAdd.mock.calls, "click", true, "remember");
+      const rememberKeydown = findAddedListener(windowAdd.mock.calls, "keydown", true, "remember");
+
+      directInvoke(close);
+      expect(onClose).not.toHaveBeenCalled();
+
+      const late = nativeMouse(close.element);
+      rememberClick.call(window, late);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      directInvoke(close, close.element, { nativeEvent: late });
+      expect(onClose).not.toHaveBeenCalled();
+
+      const crossed = nativeMouse(close.element);
+      rememberClick.call(window, crossed);
+      rememberKeydown.call(window, nativeKeyboard(screen.getByTestId("share-login"), "Enter"));
+      directInvoke(close, close.element, { nativeEvent: crossed });
+      expect(onClose).not.toHaveBeenCalled();
+
+      fireEvent.click(close.element);
+      expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      view.unmount();
+      windowAdd.mockRestore();
+    }
+  });
+
+  it("retires every superseded Strict Mode listener and observer without poisoning the replacement", async () => {
+    const resources = trackPresentationResources();
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const view = render(
+      <StrictMode>
+        <ShareDialog key="stale" open onOpenChange={staleClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    try {
+      await screen.findByText("@bob");
+      await act(async () => Promise.resolve());
+      const staleDone = captureClick(screen.getByRole("button", { name: "Done" }));
+      const staleObservers = resources.presentationObservers().filter(({ disconnected }) => !disconnected);
+      expect(staleObservers).toHaveLength(1);
+      expect(resources.activeCapture("keydown")).toHaveLength(1);
+      expect(resources.activeCapture("click")).toHaveLength(1);
+
+      view.rerender(
+        <StrictMode>
+          <ShareDialog key="current" open onOpenChange={currentClose} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await screen.findByText("@bob");
+      await act(async () => Promise.resolve());
+      const currentDone = captureClick(screen.getByRole("button", { name: "Done" }));
+      expect(staleObservers.every(({ disconnected }) => disconnected)).toBe(true);
+      expect(resources.presentationObservers().filter(({ disconnected }) => !disconnected)).toHaveLength(1);
+      expect(resources.activeCapture("keydown")).toHaveLength(1);
+      expect(resources.activeCapture("click")).toHaveLength(1);
+
+      directInvoke(staleDone, currentDone.element);
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).not.toHaveBeenCalled();
+      expect(resources.activeCapture("keydown")).toHaveLength(1);
+      expect(resources.activeCapture("click")).toHaveLength(1);
+
+      directInvoke(currentDone);
+      await act(async () => Promise.resolve());
+      expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
+      expect(resources.presentationObservers().every(({ disconnected }) => disconnected)).toBe(true);
+      expect(resources.activeCapture("keydown")).toHaveLength(0);
+      expect(resources.activeCapture("click")).toHaveLength(0);
+    } finally {
+      view.unmount();
+      resources.restore();
+    }
+  });
+
+  it("releases the active Strict Mode listener and observer lineage on unmount", async () => {
+    const resources = trackPresentationResources();
+    const view = render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    try {
+      await screen.findByText("@bob");
+      await act(async () => Promise.resolve());
+      expect(resources.presentationObservers().filter(({ disconnected }) => !disconnected)).toHaveLength(1);
+      expect(resources.activeCapture("keydown")).toHaveLength(1);
+      expect(resources.activeCapture("click")).toHaveLength(1);
+
+      view.unmount();
+      await act(async () => Promise.resolve());
+      expect(resources.presentationObservers().every(({ disconnected }) => disconnected)).toBe(true);
+      expect(resources.activeCapture("keydown")).toHaveLength(0);
+      expect(resources.activeCapture("click")).toHaveLength(0);
+    } finally {
+      view.unmount();
+      resources.restore();
+    }
+  });
+
+  it("releases the superseded runtime when its replacement fails publication and leaves the next replacement current", async () => {
+    const resources = trackPresentationResources();
+    const onClose = vi.fn();
+    const rejectedList = deferred<CollaboratorResponse>();
+    const disabledDescriptor = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, "disabled");
+    if (!disabledDescriptor?.get) throw new Error("HTMLButtonElement.disabled has no native getter");
+    let rejectDone = false;
+    Object.defineProperty(HTMLButtonElement.prototype, "disabled", {
+      ...disabledDescriptor,
+      get(this: HTMLButtonElement) {
+        if (rejectDone) return true;
+        return disabledDescriptor.get?.call(this);
+      },
+    });
+    const view = render(
+      <StrictMode>
+        <ShareDialog key={0} open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    try {
+      await screen.findByText("@bob");
+      await act(async () => Promise.resolve());
+      const supersededObservers = resources.presentationObservers().filter(({ disconnected }) => !disconnected);
+      expect(supersededObservers).toHaveLength(1);
+
+      collaborators
+        .mockReturnValueOnce(rejectedList.promise)
+        .mockResolvedValueOnce(collaboratorRows("bob"));
+      rejectDone = true;
+      view.rerender(
+        <StrictMode>
+          <ShareDialog key={1} open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await act(async () => Promise.resolve());
+      rejectDone = false;
+      const rejectedDone = captureClick(screen.getByRole("button", { name: "Done" }));
+      expect(supersededObservers.every(({ disconnected }) => disconnected)).toBe(true);
+      expect(resources.presentationObservers().filter(({ disconnected }) => !disconnected)).toHaveLength(0);
+      expect(resources.activeCapture("keydown")).toHaveLength(0);
+      expect(resources.activeCapture("click")).toHaveLength(0);
+      directInvoke(rejectedDone);
+      expect(onClose).not.toHaveBeenCalled();
+
+      view.rerender(
+        <StrictMode>
+          <ShareDialog key={2} open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await waitFor(() => expect(resources.activeCapture("keydown")).toHaveLength(1));
+      rejectedList.resolve(collaboratorRows("stale"));
+      await act(async () => rejectedList.promise);
+      const currentDone = captureClick(screen.getByRole("button", { name: "Done" }));
+      directInvoke(rejectedDone, currentDone.element);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(resources.activeCapture("keydown")).toHaveLength(1);
+      expect(resources.activeCapture("click")).toHaveLength(1);
+
+      directInvoke(currentDone);
+      await act(async () => Promise.resolve());
+      expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+      expect(resources.presentationObservers().every(({ disconnected }) => disconnected)).toBe(true);
+      expect(resources.activeCapture("keydown")).toHaveLength(0);
+      expect(resources.activeCapture("click")).toHaveLength(0);
+    } finally {
+      rejectDone = false;
+      view.unmount();
+      resources.restore();
+      Object.defineProperty(HTMLButtonElement.prototype, "disabled", disabledDescriptor);
+    }
   });
 
   it("retires restored direct-root Strict Mode detach history without poisoning its successor", async () => {
