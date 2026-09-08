@@ -1408,6 +1408,237 @@ describe("notification row keyboard browsing", () => {
     expect(screen.getByTestId("notifications-popover")).toBeVisible();
   }
 
+  it("recognizes the exact unforgeable KeyboardEvent trust descriptor from independent probes", () => {
+    const firstProbe = new window.KeyboardEvent("keydown");
+    const secondProbe = new window.KeyboardEvent("keydown");
+    const plainEvent = new window.Event("plain-event-probe");
+    const first = Object.getOwnPropertyDescriptor(firstProbe, "isTrusted");
+    const second = Object.getOwnPropertyDescriptor(secondProbe, "isTrusted");
+    const plain = Object.getOwnPropertyDescriptor(plainEvent, "isTrusted");
+
+    expect(first).toMatchObject({
+      configurable: false,
+      enumerable: true,
+      get: expect.any(Function),
+      set: undefined,
+    });
+    expect(second).toMatchObject(first!);
+    if (plain?.get !== first?.get) expect(plain?.get).not.toBe(first?.get);
+    expect(
+      Object.getOwnPropertyDescriptor(window.Event.prototype, "isTrusted"),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "KeyboardEvent constructor",
+      () => {
+        const NativeKeyboardEvent = window.KeyboardEvent;
+        class ReplacedKeyboardEvent extends NativeKeyboardEvent {}
+        window.KeyboardEvent = ReplacedKeyboardEvent;
+        return () => {
+          window.KeyboardEvent = NativeKeyboardEvent;
+        };
+      },
+    ],
+    [
+      "KeyboardEvent prototype chain",
+      () => {
+        const parent = Object.getPrototypeOf(KeyboardEvent.prototype);
+        Object.setPrototypeOf(KeyboardEvent.prototype, Event.prototype);
+        return () => Object.setPrototypeOf(KeyboardEvent.prototype, parent);
+      },
+    ],
+    [
+      "KeyboardEvent key descriptor",
+      () => {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          KeyboardEvent.prototype,
+          "key",
+        );
+        if (!descriptor?.get) {
+          throw new Error("KeyboardEvent.key getter is unavailable");
+        }
+        Object.defineProperty(KeyboardEvent.prototype, "key", {
+          ...descriptor,
+          get() {
+            return descriptor.get!.call(this);
+          },
+        });
+        return () =>
+          Object.defineProperty(KeyboardEvent.prototype, "key", descriptor);
+      },
+    ],
+    [
+      "Object descriptor authority",
+      () => {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          Object,
+          "getOwnPropertyDescriptor",
+        );
+        if (!descriptor || typeof descriptor.value !== "function") {
+          throw new Error("Object descriptor authority is unavailable");
+        }
+        const getOwnPropertyDescriptor = descriptor.value;
+        Object.defineProperty(Object, "getOwnPropertyDescriptor", {
+          ...descriptor,
+          value: (...args: Parameters<ObjectConstructor["getOwnPropertyDescriptor"]>) =>
+            getOwnPropertyDescriptor(...args),
+        });
+        return () =>
+          Object.defineProperty(Object, "getOwnPropertyDescriptor", descriptor);
+      },
+    ],
+  ] as const)(
+    "rejects poisoned %s state present before publication without affecting row activation",
+    (_label, poison) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const opened = openStrictKeyboardBell();
+      let restore!: () => void;
+      try {
+        restore = poison();
+        renderStrictBellRoot(opened.root, state, { onOpen: opened.onOpen });
+      } finally {
+        restore?.();
+      }
+      const source = captureActions().rows[0]!.element;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const rejected = nativeKey(source, "ArrowDown");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectNoKeyboardActions(opened.onOpen);
+
+      source.click();
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+      expect(opened.onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    },
+  );
+
+  it("does not revive keyboard authority after descriptor replacement and restoration", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const onOpen = vi.fn();
+    const { root, actions } = openStrictKeyboardBell(state, onOpen);
+    const source = actions.rows[0]!.element;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      KeyboardEvent.prototype,
+      "key",
+    );
+    if (!descriptor?.get) {
+      throw new Error("KeyboardEvent.key getter is unavailable");
+    }
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    Object.defineProperty(KeyboardEvent.prototype, "key", {
+      ...descriptor,
+      get() {
+        return descriptor.get!.call(this);
+      },
+    });
+    try {
+      expect(nativeKey(source, "ArrowDown").defaultPrevented).toBe(false);
+    } finally {
+      Object.defineProperty(KeyboardEvent.prototype, "key", descriptor);
+    }
+
+    expect(nativeKey(source, "ArrowDown").defaultPrevented).toBe(false);
+    expect(source).toHaveFocus();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoKeyboardActions(onOpen);
+
+    renderStrictBellRoot(root, state, { onOpen });
+    const current = captureActions().rows[0]!.element;
+    current.focus();
+    focus.mockClear();
+    expect(nativeKey(current, "ArrowDown").defaultPrevented).toBe(true);
+    expect(captureActions().rows[1]!.element).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks the exact candidate prototype immediately before claiming the key", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const { onOpen, actions } = openStrictKeyboardBell();
+    const source = actions.rows[0]!.element;
+    const replacementPrototype = Object.create(KeyboardEvent.prototype);
+    let changedEvent: KeyboardEvent | null = null;
+    const replacePrototype = (event: Event) => {
+      changedEvent = event as KeyboardEvent;
+      Object.setPrototypeOf(event, replacementPrototype);
+    };
+    source.addEventListener("keydown", replacePrototype, {
+      capture: true,
+      once: true,
+    });
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = nativeKey(source, "ArrowDown");
+    Object.setPrototypeOf(rejected, KeyboardEvent.prototype);
+
+    expect(changedEvent).toBe(rejected);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(source).toHaveFocus();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoKeyboardActions(onOpen);
+
+    expect(nativeKey(source, "ArrowDown").defaultPrevented).toBe(true);
+    expect(actions.rows[1]!.element).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a replaced own trust getter without invoking candidate authority", () => {
+    const add = vi.spyOn(EventTarget.prototype, "addEventListener");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const { onOpen, actions } = openStrictKeyboardBell();
+    const source = actions.rows[0]!.element;
+    const listenerIndex = add.mock.calls.findIndex(
+      ([type], index) =>
+        type === "keydown" && add.mock.contexts[index] === source,
+    );
+    const listener = add.mock.calls[listenerIndex]?.[1];
+    if (typeof listener !== "function") {
+      throw new Error("The exact notification row key listener was not captured");
+    }
+    const canonical = Object.getOwnPropertyDescriptor(
+      new KeyboardEvent("keydown"),
+      "isTrusted",
+    );
+    if (!canonical?.get) {
+      throw new Error("KeyboardEvent trust descriptor is unavailable");
+    }
+    const replacementGetter = vi.fn(() => true);
+    const forged = Object.create(KeyboardEvent.prototype) as KeyboardEvent;
+    Object.defineProperty(forged, "isTrusted", {
+      ...canonical,
+      get: replacementGetter,
+    });
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    listener.call(source, forged);
+
+    expect(replacementGetter).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoKeyboardActions(onOpen);
+  });
+
   it.each([
     ["ArrowDown middle", "ArrowDown", 1, 2],
     ["ArrowDown wrap", "ArrowDown", 2, 0],
