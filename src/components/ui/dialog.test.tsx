@@ -1372,6 +1372,64 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onOpenChange).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a vetoed root tainted when its controlled callback briefly creates a focus guard", async () => {
+    const taintedClosed = vi.fn();
+    const cleanClosed = vi.fn();
+    function GuardVetoDialog({ tainted, onClosed }: { tainted: boolean; onClosed: () => void }) {
+      const [open, setOpen] = useState(true);
+      const attempts = useRef(0);
+      return (
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            attempts.current += 1;
+            if (tainted && attempts.current === 1) {
+              const candidate = screen.getByTestId("veto-guard-candidate");
+              candidate.setAttribute("data-radix-focus-guard", "");
+              candidate.tabIndex = 0;
+              candidate.style.outline = "none";
+              candidate.style.opacity = "0";
+              candidate.style.position = "fixed";
+              candidate.style.pointerEvents = "none";
+              candidate.removeAttribute("data-radix-focus-guard");
+              candidate.removeAttribute("tabindex");
+              candidate.removeAttribute("style");
+              return;
+            }
+            setOpen(next);
+          }}
+        >
+          <DialogContent title="Veto guard mutation" onClosed={onClosed}>
+            <span data-testid="veto-guard-candidate" />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
+      <StrictMode>
+        <GuardVetoDialog key={rootKey} tainted={tainted} onClosed={onClosed} />
+      </StrictMode>
+    );
+    const view = renderDirect(tree("tainted", true, taintedClosed));
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Veto guard mutation");
+    expect(taintedClosed).not.toHaveBeenCalled();
+
+    act(() => view.root.render(tree("clean", false, cleanClosed)));
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cleanClosed).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+  });
+
   it("preserves direct body roots and authenticates exported DialogClose controls", async () => {
     const onClosed = vi.fn();
     function OwnedCloseHarness() {

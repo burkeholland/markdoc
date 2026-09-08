@@ -1034,9 +1034,7 @@ class MutationJournal {
     if (this.#released || this.#invalid) return false;
     this.#closing = true;
     this.#process();
-    if (this.#invalid) return false;
-    this.#observer.disconnect();
-    return true;
+    return !this.#invalid;
   }
 
   startReplay() {
@@ -1108,7 +1106,14 @@ class MutationJournal {
   }
 
   closeHistoryIsValid() {
+    this.#process();
     return this.#closing && !this.#invalid && !this.#released;
+  }
+
+  commitClosing() {
+    if (!this.closeHistoryIsValid()) return false;
+    this.#observer.disconnect();
+    return true;
   }
 
   release() {
@@ -2134,9 +2139,10 @@ class DialogCoordinator {
         ) {
           return;
         }
+        const closeHistoryIsValid = transition.source.journal.closeHistoryIsValid();
         this.#transition = null;
         transition.source.retire();
-        transition.source.requestSuccessor();
+        if (closeHistoryIsValid) transition.source.requestSuccessor();
       });
     }
     return true;
@@ -2155,6 +2161,7 @@ class DialogCoordinator {
       || !sameDialogElements(source.elements, elements)
       || !staticTopologyMatches(authority, elements, "closed")
       || !source.journal.startClosing()
+      || !source.journal.commitClosing()
     ) {
       return false;
     }
@@ -2245,9 +2252,9 @@ class DialogCoordinator {
       || transition.source !== publication
       || transition.source.closed
       || (this.#active !== null && this.#active !== publication)
-      || !transition.source.journal.closeHistoryIsValid()
       || (transition.source.elements.content.isConnected
         && transition.source.elements.content.getAttribute("data-state") !== "closed")
+      || !transition.source.journal.commitClosing()
     ) {
       return "neutralize" as const;
     }
