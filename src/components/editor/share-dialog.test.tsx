@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, type RefCallback } from "react";
 import type { DocumentDto } from "@/server/dto";
 
 const collaborators = vi.fn();
@@ -100,6 +100,120 @@ function collaboratorRow(login: string) {
 /** `a` comes before `b` in document order. */
 const precedes = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
+interface DirectReactEvent<T extends HTMLElement> {
+  type: string;
+  currentTarget: T;
+  target: EventTarget;
+  nativeEvent: unknown;
+  defaultPrevented: boolean;
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+}
+
+type DirectHandler<T extends HTMLElement> = (event: DirectReactEvent<T>) => void;
+
+interface CapturedControl<T extends HTMLElement> {
+  element: T;
+  handler: DirectHandler<T>;
+}
+
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  return value as T;
+}
+
+function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
+  return fiber.ref as RefCallback<T>;
+}
+
+function captureClick(element: HTMLButtonElement): CapturedControl<HTMLButtonElement> {
+  return { element, handler: reactProp<DirectHandler<HTMLButtonElement>>(element, "onClick") };
+}
+
+function captureChange(element: HTMLSelectElement): CapturedControl<HTMLSelectElement> {
+  return { element, handler: reactProp<DirectHandler<HTMLSelectElement>>(element, "onChange") };
+}
+
+function captureSubmit(element: HTMLFormElement): CapturedControl<HTMLFormElement> {
+  return { element, handler: reactProp<DirectHandler<HTMLFormElement>>(element, "onSubmit") };
+}
+
+function nativeMouse(target: HTMLElement, type = "click"): MouseEvent {
+  const Constructor = target.ownerDocument.defaultView?.MouseEvent;
+  if (!Constructor) throw new Error("Control has no owner-document MouseEvent");
+  const event = new Constructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function nativeChange(target: HTMLSelectElement, type = "change"): Event {
+  const Constructor = target.ownerDocument.defaultView?.Event;
+  if (!Constructor) throw new Error("Control has no owner-document Event");
+  const event = new Constructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function nativeSubmit(form: HTMLFormElement, submitter: HTMLButtonElement | null = null): SubmitEvent {
+  const Constructor = form.ownerDocument.defaultView?.SubmitEvent;
+  if (!Constructor) throw new Error("Form has no owner-document SubmitEvent");
+  const event = new Constructor("submit", { bubbles: true, cancelable: true, submitter });
+  Object.defineProperty(event, "target", { configurable: true, value: form });
+  return event;
+}
+
+function directInvoke<T extends HTMLElement>(
+  control: CapturedControl<T>,
+  currentTarget: T = control.element,
+  overrides: Partial<{
+    type: string;
+    target: EventTarget;
+    nativeEvent: unknown;
+  }> = {},
+): DirectReactEvent<T> {
+  const nativeEvent =
+    overrides.nativeEvent ??
+    (currentTarget instanceof HTMLSelectElement
+      ? nativeChange(currentTarget)
+      : currentTarget instanceof HTMLFormElement
+        ? nativeSubmit(currentTarget)
+        : nativeMouse(currentTarget));
+  const event: DirectReactEvent<T> = {
+    type:
+      overrides.type ??
+      (currentTarget instanceof HTMLSelectElement
+        ? "change"
+        : currentTarget instanceof HTMLFormElement
+          ? "submit"
+          : "click"),
+    currentTarget,
+    target: overrides.target ?? currentTarget,
+    nativeEvent,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+  control.handler(event);
+  return event;
+}
+
+function fireNativeSubmit(form: HTMLFormElement, submitter: HTMLButtonElement | null = null) {
+  fireEvent(form, nativeSubmit(form, submitter));
+}
+
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
+}
+
 function renderDialog(props: Partial<{ isOwner: boolean; doc: DocumentDto }> = {}) {
   return render(<ShareDialog open onOpenChange={vi.fn()} doc={props.doc ?? doc} isOwner={props.isOwner ?? true} onDocChange={vi.fn()} />);
 }
@@ -160,6 +274,277 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe("ShareDialog exact control publications", () => {
+  it("accepts one native keyboard SubmitEvent and rejects fabricated or wrong-submitter events without event work", async () => {
+    const pending = deferred<unknown>();
+    addCollaborator.mockReturnValueOnce(pending.promise);
+    await openDialog();
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "  native-user  " } });
+    fireEvent.change(screen.getByTestId("share-role"), { target: { value: "commenter" } });
+    const addButton = screen.getByTestId("share-add") as HTMLButtonElement;
+    const form = addButton.form!;
+    const submit = captureSubmit(form);
+    const wrongSubmitter = document.createElement("button");
+    form.append(wrongSubmitter);
+
+    const rejected = [
+      directInvoke(submit, form, { nativeEvent: { type: "submit", target: form, submitter: null } }),
+      directInvoke(submit, form, { type: "click" }),
+      directInvoke(submit, form, { nativeEvent: nativeSubmit(form, wrongSubmitter) }),
+    ];
+    for (const event of rejected) {
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+    }
+    expect(addCollaborator).not.toHaveBeenCalled();
+
+    wrongSubmitter.remove();
+    const accepted = directInvoke(submit, form, { nativeEvent: nativeSubmit(form) });
+    const repeated = directInvoke(submit, form, { nativeEvent: nativeSubmit(form) });
+    expect(accepted.preventDefault).toHaveBeenCalledOnce();
+    expect(repeated.preventDefault).not.toHaveBeenCalled();
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "native-user", "commenter");
+
+    await act(async () => {
+      pending.resolve({});
+      await pending.promise;
+    });
+  });
+
+  it.each(["stale first", "current first"] as const)(
+    "rebinds same DOM and callback refs before parent layout with %s ordering",
+    async (order) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob"));
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const view = render(<ShareDialogBoundary onOpenChange={staleClose} />);
+      await screen.findByText("@bob");
+      const staleRoot = screen.getByTestId("share-presentation");
+      const staleRootRef = reactRef(staleRoot);
+      const staleDone = captureClick(screen.getByRole("button", { name: "Done" }));
+
+      view.rerender(
+        <ShareDialogBoundary
+          boundary={1}
+          onOpenChange={currentClose}
+          onBoundary={() => {
+            const currentRoot = screen.getByTestId("share-presentation");
+            const currentDone = captureClick(screen.getByRole("button", { name: "Done" }));
+            expect(currentRoot).toBe(staleRoot);
+            expect(currentDone.element).toBe(staleDone.element);
+
+            staleRootRef(currentRoot);
+            staleRootRef(null);
+            if (order === "stale first") {
+              directInvoke(staleDone, currentDone.element);
+              directInvoke(currentDone);
+            } else {
+              directInvoke(currentDone);
+              directInvoke(staleDone, currentDone.element);
+            }
+          }}
+        />,
+      );
+
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
+    },
+  );
+
+  it.each(["stale first", "current first"] as const)(
+    "isolates an equal-looking keyed replacement with %s ordering",
+    async (order) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob"));
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const view = render(<ShareDialogBoundary instance={1} onOpenChange={staleClose} />);
+      await screen.findByText("@bob");
+      const staleDone = captureClick(screen.getByRole("button", { name: "Done" }));
+
+      view.rerender(
+        <ShareDialogBoundary
+          instance={2}
+          boundary={1}
+          onOpenChange={currentClose}
+          onBoundary={() => {
+            directInvoke(staleDone);
+            expect(staleClose).not.toHaveBeenCalled();
+          }}
+        />,
+      );
+
+      await screen.findByText("@bob");
+      const currentDone = captureClick(screen.getByRole("button", { name: "Done" }));
+      expect(currentDone.element).not.toBe(staleDone.element);
+      if (order === "stale first") {
+        directInvoke(staleDone, currentDone.element);
+        directInvoke(currentDone);
+      } else {
+        directInvoke(currentDone);
+        directInvoke(staleDone, currentDone.element);
+      }
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
+    },
+  );
+
+  it("retires removed controls before parent layout and before passive cleanup", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob"));
+    const onClose = vi.fn();
+    let passiveCleanups = 0;
+    const staleDone: { current: CapturedControl<HTMLButtonElement> | null } = { current: null };
+
+    function Boundary({ present, boundary }: { present: boolean; boundary: number }) {
+      useLayoutEffect(() => {
+        if (boundary > 0) {
+          if (!staleDone.current) throw new Error("The stale Done control was not captured");
+          directInvoke(staleDone.current);
+          expect(passiveCleanups).toBe(0);
+        }
+      }, [boundary]);
+      return (
+        <>
+          {present ? <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} /> : null}
+          <PassiveCleanupProbe onCleanup={() => passiveCleanups++} />
+        </>
+      );
+    }
+
+    const view = render(<Boundary present boundary={0} />);
+    await screen.findByText("@bob");
+    staleDone.current = captureClick(screen.getByRole("button", { name: "Done" }));
+    view.rerender(<Boundary present={false} boundary={1} />);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(staleDone.current.element.isConnected).toBe(false);
+  });
+
+  it("rejects wrong-row, cross-action, foreign-realm and fabricated events without poisoning current controls", async () => {
+    const roleRequest = deferred<unknown>();
+    const removeRequest = deferred<unknown>();
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    addCollaborator.mockReset().mockReturnValueOnce(roleRequest.promise);
+    removeCollaborator.mockReset().mockReturnValueOnce(removeRequest.promise);
+    await openDialog();
+
+    const bobRow = collaboratorRow("bob");
+    const charlieRow = collaboratorRow("charlie");
+    const bobRole = captureChange(within(bobRow).getByRole("combobox") as HTMLSelectElement);
+    const charlieRole = captureChange(within(charlieRow).getByRole("combobox") as HTMLSelectElement);
+    const bobRemove = captureClick(within(bobRow).getByRole("button", { name: "Remove bob" }));
+    const done = captureClick(screen.getByRole("button", { name: "Done" }));
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+
+    charlieRole.element.value = "viewer";
+    const wrongRow = directInvoke(bobRole, charlieRole.element);
+    const crossAction = directInvoke(done, bobRemove.element);
+    const fabricated = directInvoke(bobRemove, bobRemove.element, {
+      nativeEvent: { type: "click", target: bobRemove.element },
+    });
+    const ForeignMouseEvent = (iframe.contentWindow as unknown as { MouseEvent: typeof MouseEvent }).MouseEvent;
+    const foreignNative = new ForeignMouseEvent("click", { bubbles: true, cancelable: true });
+    Object.defineProperty(foreignNative, "target", { configurable: true, value: bobRemove.element });
+    const foreignRealm = directInvoke(bobRemove, bobRemove.element, { nativeEvent: foreignNative });
+    for (const event of [wrongRow, crossAction, fabricated, foreignRealm]) {
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+    }
+    expect(addCollaborator).not.toHaveBeenCalled();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+
+    directInvoke(charlieRole);
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "charlie", "viewer");
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    iframe.remove();
+
+    await act(async () => {
+      roleRequest.resolve({});
+      await roleRequest.promise;
+    });
+    const currentBobRemove = captureClick(
+      within(collaboratorRow("bob")).getByRole("button", { name: "Remove bob" }),
+    );
+    directInvoke(currentBobRemove);
+    expect(removeCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob");
+    await act(async () => {
+      removeRequest.resolve({});
+      await removeRequest.promise;
+    });
+  });
+
+  it("rejects detached, replaced, reordered and in-place-mutated destinations with zero callbacks", async () => {
+    const response = collaboratorRows("bob", "charlie");
+    collaborators.mockResolvedValueOnce(response);
+    const onClose = vi.fn();
+    render(<ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />);
+    await screen.findByText("@charlie");
+    const root = screen.getByTestId("share-presentation");
+    const list = root.querySelector("ul")!;
+    const rows = screen.getAllByTestId("collaborator-row");
+    const bobRemove = captureClick(within(rows[0]).getByRole("button", { name: "Remove bob" }));
+    const done = captureClick(screen.getByRole("button", { name: "Done" }));
+    const clone = done.element.cloneNode(true) as HTMLButtonElement;
+    done.element.parentElement!.replaceChild(clone, done.element);
+
+    directInvoke(done, clone);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    clone.parentElement!.replaceChild(done.element, clone);
+
+    list.append(rows[0]);
+    directInvoke(bobRemove);
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    response.collaborators.reverse();
+    directInvoke(done);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+  });
+
+  it("binds Retry and link access to exact native controls and current option values", async () => {
+    collaborators.mockRejectedValueOnce(new ApiError(503, "Try again"));
+    renderDialog();
+    const retryButton = await screen.findByRole("button", { name: "Retry" }) as HTMLButtonElement;
+    const retry = captureClick(retryButton);
+    const wrongTarget = document.createElement("span");
+    document.body.append(wrongTarget);
+    const rejectedRetry = directInvoke(retry, retry.element, {
+      target: wrongTarget,
+      nativeEvent: nativeMouse(wrongTarget),
+    });
+    expect(rejectedRetry.preventDefault).not.toHaveBeenCalled();
+    expect(collaborators).toHaveBeenCalledOnce();
+    directInvoke(retry);
+    directInvoke(retry);
+    expect(collaborators).toHaveBeenCalledTimes(2);
+    wrongTarget.remove();
+
+    cleanup();
+    collaborators.mockReset().mockResolvedValue(collaboratorRows("bob"));
+    const linkRequest = deferred<{ document: DocumentDto }>();
+    patchDocument.mockReturnValueOnce(linkRequest.promise);
+    const onDocChange = vi.fn();
+    render(<ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByText("@bob");
+    const link = captureChange(screen.getByTestId("link-access") as HTMLSelectElement);
+    link.element.value = "view";
+    const malformed = directInvoke(link, link.element, { nativeEvent: { type: "change", target: link.element } });
+    expect(malformed.preventDefault).not.toHaveBeenCalled();
+    expect(patchDocument).not.toHaveBeenCalled();
+    directInvoke(link);
+    directInvoke(link);
+    expect(patchDocument).toHaveBeenCalledExactlyOnceWith(DOC_ID, { linkAccess: "view" });
+
+    await act(async () => {
+      linkRequest.resolve({ document: { ...doc, linkAccess: "view" } });
+      await linkRequest.promise;
+    });
+    expect(onDocChange).toHaveBeenCalledOnce();
+  });
 });
 
 describe("ShareDialog collaborator list recovery", () => {
@@ -817,8 +1202,8 @@ describe("ShareDialog · add a collaborator", () => {
     fireEvent.change(input, { target: { value: "  charlie  " } });
     fireEvent.change(role, { target: { value: "commenter" } });
 
-    fireEvent.submit(form);
-    fireEvent.submit(form);
+    fireNativeSubmit(form);
+    fireNativeSubmit(form);
     expect(addCollaborator).toHaveBeenCalledOnce();
     expect(addCollaborator).toHaveBeenCalledWith(DOC_ID, "charlie", "commenter");
     expect(screen.getByTestId("share-add")).toBeDisabled();
@@ -830,7 +1215,7 @@ describe("ShareDialog · add a collaborator", () => {
     expect(await screen.findByTestId("share-add-error")).toHaveTextContent("Charlie cannot be added");
     expect(input).toHaveValue("  charlie  ");
     expect(screen.getByTestId("share-add")).toBeEnabled();
-    fireEvent.submit(form);
+    fireNativeSubmit(form);
     expect(addCollaborator).toHaveBeenCalledTimes(2);
     expect(addCollaborator).toHaveBeenNthCalledWith(2, DOC_ID, "charlie", "commenter");
     expect(screen.queryByTestId("share-add-error")).toBeNull();
