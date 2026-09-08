@@ -231,6 +231,7 @@ function capturePresentation(
   marker: HTMLSpanElement,
   root: HTMLElement,
   getStyle: typeof getComputedStyle,
+  ownerWindow: Window & typeof globalThis,
 ): VisitPresentation {
   return Object.freeze({
     markerTagName: marker.tagName,
@@ -240,7 +241,7 @@ function capturePresentation(
     markerTabIndex: marker.getAttribute("tabindex"),
     markerChildCount: marker.childNodes.length,
     markerText: marker.textContent ?? "",
-    markerDisplay: getStyle(marker).display,
+    markerDisplay: getStyle.call(ownerWindow, marker).display,
     rootTagName: root.tagName,
     rootAttribute: root.getAttribute("data-reader-overflow-root"),
   });
@@ -270,7 +271,7 @@ function presentationMatches(visit: ContentVisit): boolean {
     marker.getAttribute("tabindex") === presentation.markerTabIndex &&
     marker.childNodes.length === presentation.markerChildCount &&
     (marker.textContent ?? "") === presentation.markerText &&
-    visit.getComputedStyle(marker).display === presentation.markerDisplay &&
+    visit.getComputedStyle.call(visit.ownerWindow, marker).display === presentation.markerDisplay &&
     root.tagName === presentation.rootTagName &&
     root.getAttribute("data-reader-overflow-root") === presentation.rootAttribute &&
     root.matches(ROOT_SELECTOR)
@@ -607,7 +608,7 @@ function captureCandidate(
   }
   const regions = Object.freeze(regionVisits);
   const getStyle = ownerWindow.getComputedStyle;
-  const presentation = capturePresentation(marker, root, getStyle);
+  const presentation = capturePresentation(marker, root, getStyle, ownerWindow);
   if (!presentationIsEligible(presentation)) return null;
   return {
     identity: Symbol("reader-scrollable-regions-visit"),

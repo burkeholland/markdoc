@@ -211,6 +211,120 @@ function writesFor(target: Element) {
   return tabIndexWrites.filter((write) => write.target === target).map((write) => write.value);
 }
 
+async function buildScrollableRegionsBrowserHarness() {
+  const testUint8Array = globalThis.Uint8Array;
+  globalThis.Uint8Array = Object.getPrototypeOf(
+    new TextEncoder().encode(""),
+  ).constructor as typeof Uint8Array;
+  try {
+    const [{ build }, path] = await Promise.all([
+      import("esbuild"),
+      import("node:path"),
+    ]);
+    const root = process.cwd();
+    const result = await build({
+      bundle: true,
+      define: {
+        "process.env.NODE_ENV": '"development"',
+      },
+      format: "iife",
+      platform: "browser",
+      target: "chrome120",
+      write: false,
+      stdin: {
+        contents: `
+          import React from "react";
+          import { createRoot } from "react-dom/client";
+          import { ReaderScrollableRegions } from "./scrollable-regions";
+
+          const observers = [];
+          const fontCallbacks = [];
+          const fonts = {};
+          const createReady = () => ({
+            then(continuation) {
+              fontCallbacks.push(() => continuation(fonts));
+              return Promise.resolve(fonts);
+            },
+          });
+          fonts.ready = createReady();
+
+          class HarnessResizeObserver {
+            constructor(callback) {
+              this.callback = callback;
+              this.connected = true;
+              this.targets = [];
+              observers.push(this);
+            }
+            observe(target) {
+              this.targets.push(target);
+            }
+            unobserve() {}
+            disconnect() {
+              this.connected = false;
+            }
+            publish() {
+              this.callback([], this);
+            }
+          }
+
+          Object.defineProperty(document, "fonts", {
+            configurable: true,
+            value: fonts,
+          });
+          Object.defineProperty(window, "ResizeObserver", {
+            configurable: true,
+            value: HarnessResizeObserver,
+          });
+
+          window.__readerOverflowHarness = {
+            fontCallbacks,
+            observers,
+            replaceReady() {
+              fonts.ready = createReady();
+            },
+            publishFont(index) {
+              fontCallbacks[index]();
+            },
+          };
+
+          createRoot(document.getElementById("mount")).render(
+            <>
+              <div data-reader-overflow-root>
+                <pre
+                  data-region="target"
+                  style={{
+                    boxSizing: "content-box",
+                    margin: 0,
+                    overflow: "auto",
+                    padding: 0,
+                    width: 100,
+                  }}
+                >
+                  <code
+                    data-region-content
+                    style={{ display: "inline-block", width: 100 }}
+                  >
+                    content
+                  </code>
+                </pre>
+              </div>
+              <ReaderScrollableRegions contentKey="browser-content" />
+            </>,
+          );
+        `,
+        loader: "tsx",
+        resolveDir: path.join(root, "src", "components", "reader"),
+        sourcefile: "scrollable-regions-browser-harness.tsx",
+      },
+    });
+    const output = result.outputFiles[0];
+    if (!output) throw new Error("Scrollable regions browser harness did not bundle");
+    return output.text;
+  } finally {
+    globalThis.Uint8Array = testUint8Array;
+  }
+}
+
 beforeEach(() => {
   InstrumentedResizeObserver.instances = [];
   InstrumentedResizeObserver.onDisconnect = null;
@@ -1041,4 +1155,110 @@ describe("ReaderScrollableRegions exact content visits", () => {
     ]);
     expect(observer.disconnect).not.toHaveBeenCalled();
   });
+
+  it.skipIf(process.env.SCROLLABLE_REGIONS_CHROMIUM !== "1")(
+    "mounts in Chromium and resumes exact synchronization on the next font-ready cycle",
+    async () => {
+      const [{ chromium }, harness] = await Promise.all([
+        import("playwright-core"),
+        buildScrollableRegionsBrowserHarness(),
+      ]);
+      const browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.CHROMIUM_PATH || undefined,
+      });
+      try {
+        const page = await browser.newPage();
+        await page.route("http://reader-overflow.test/", (route) =>
+          route.fulfill({
+            body: `<div id="mount"></div><script>${harness}</script>`,
+            contentType: "text/html",
+          }),
+        );
+        await page.goto("http://reader-overflow.test/");
+        const target = page.locator("[data-region='target']");
+        await target.waitFor({ state: "visible" });
+        await expect.poll(() => target.getAttribute("tabindex")).toBeNull();
+        expect(await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                fontCallbacks: Array<() => void>;
+                observers: Array<{ connected: boolean }>;
+              };
+            }
+          ).__readerOverflowHarness;
+          const target = document.querySelector<HTMLElement>("[data-region='target']")!;
+          return {
+            callbacks: harness.fontCallbacks.length,
+            clientWidth: target.clientWidth,
+            connected: harness.observers[0]?.connected,
+            observers: harness.observers.length,
+            scrollWidth: target.scrollWidth,
+          };
+        })).toEqual({
+          callbacks: 1,
+          clientWidth: 100,
+          connected: true,
+          observers: 1,
+          scrollWidth: 100,
+        });
+
+        await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                replaceReady: () => void;
+                observers: Array<{ publish: () => void }>;
+              };
+            }
+          ).__readerOverflowHarness;
+          harness.replaceReady();
+          document.querySelector<HTMLElement>("[data-region-content]")!.style.width = "120px";
+          harness.observers[0]!.publish();
+        });
+        expect(await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                fontCallbacks: Array<() => void>;
+                observers: Array<{ connected: boolean }>;
+              };
+            }
+          ).__readerOverflowHarness;
+          return {
+            callbacks: harness.fontCallbacks.length,
+            connected: harness.observers[0]?.connected,
+          };
+        })).toEqual({ callbacks: 2, connected: true });
+        await expect.poll(() => target.getAttribute("tabindex")).toBeNull();
+
+        await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                publishFont: (index: number) => void;
+              };
+            }
+          ).__readerOverflowHarness;
+          harness.publishFont(0);
+        });
+        await expect.poll(() => target.getAttribute("tabindex")).toBeNull();
+
+        await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                publishFont: (index: number) => void;
+              };
+            }
+          ).__readerOverflowHarness;
+          harness.publishFont(1);
+        });
+        await expect.poll(() => target.getAttribute("tabindex")).toBe("0");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });
